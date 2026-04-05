@@ -347,16 +347,18 @@ func (h *Harness) WaitForVMState(id string, state string, timeout time.Duration)
 
 // CreateNetworkRequest is a request to create a network.
 type CreateNetworkRequest struct {
-	Name   string `json:"name"`
-	CIDR   string `json:"cidr"`
-	Bridge string `json:"bridge,omitempty"`
+	Name       string `json:"name"`
+	BridgeName string `json:"bridge_name"`
+	CIDR       string `json:"cidr"`
+	GatewayIP  string `json:"gateway_ip"`
 }
 
 // CreateNetworkResponse is the response from creating a network.
 type CreateNetworkResponse struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	CIDR string `json:"cidr"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CIDR      string `json:"cidr"`
+	GatewayIP string `json:"gateway_ip"`
 }
 
 // CreateNetwork creates a new network.

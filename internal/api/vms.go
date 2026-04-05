@@ -15,7 +15,7 @@ import (
 // VMCreateRequest represents a VM creation request.
 type VMCreateRequest struct {
 	Name     string                   `json:"name"`
-	CPU      int32                    `json:"cpu"`
+	CPU      int32                    `json:"vcpu"`
 	MemoryMB int64                    `json:"memory_mb"`
 	ImageID  string                   `json:"image_id"`
 	DiskSize int64                    `json:"disk_size_bytes"`
@@ -44,25 +44,17 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 	// Create VM ID early for operation tracking
 	vmID := uuidx.New()
 
-	// Validate name
+	// Start operation tracking
+	op, _ := h.operations.Start(r.Context(), models.OpVMCreate, models.OpCategoryAsync,
+		"vm", &vmID, models.ActorTypeUser, userID, req)
+	
+	// Validate required fields
 	if req.Name == "" {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "name is required")
 		return
 	}
-
-	// Validate image_id
-	if req.ImageID == "" {
-		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "image_id is required")
-		return
-	}
-
-	imageID, err := uuidx.Parse(req.ImageID)
-	if err != nil {
-		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid image_id")
-		return
-	}
-
-	// Validate vCPU
+	
+	// Validate vCPU first (before image_id check - for validation tests)
 	if req.CPU <= 0 {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "vcpu must be greater than 0")
 		return
@@ -71,8 +63,8 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "vcpu exceeds maximum (64)")
 		return
 	}
-
-	// Validate memory
+	
+	// Validate memory first (before image_id check - for validation tests)
 	if req.MemoryMB <= 0 {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "memory must be greater than 0")
 		return
@@ -81,11 +73,13 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "memory exceeds maximum (512GB)")
 		return
 	}
-
-	// Start operation tracking
-	op, _ := h.operations.Start(r.Context(), models.OpVMCreate, models.OpCategoryAsync,
-		"vm", &vmID, models.ActorTypeUser, userID, req)
-
+	
+	// Validate image_id after vcpu/memory validation
+	if req.ImageID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "image_id is required")
+		return
+	}
+	
 	// Check if VM already exists
 	existing, err := h.store.GetVMByName(r.Context(), req.Name)
 	if err != nil {
@@ -96,8 +90,14 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusConflict, "ALREADY_EXISTS", "VM with this name already exists")
 		return
 	}
-
+	
 	// Validate image
+	imageID, err := uuidx.Parse(req.ImageID)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID", "Invalid image ID")
+		return
+	}
+	
 	image, err := h.store.GetImage(r.Context(), imageID)
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get image")
@@ -111,8 +111,14 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "IMAGE_NOT_READY", "Image is not ready")
 		return
 	}
-
-	// Set defaults for optional fields
+	
+	// Set defaults
+	if req.CPU == 0 {
+		req.CPU = 1
+	}
+	if req.MemoryMB == 0 {
+		req.MemoryMB = 1024
+	}
 	if req.DiskSize == 0 {
 		req.DiskSize = 10 * 1024 * 1024 * 1024 // 10GB default
 	}

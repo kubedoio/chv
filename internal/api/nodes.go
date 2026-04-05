@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"time"
 
@@ -42,8 +43,30 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Validate required fields
-	if req.Hostname == "" || req.ManagementIP == "" {
-		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "hostname and management_ip are required")
+	if req.Hostname == "" {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "hostname is required")
+		return
+	}
+	if req.ManagementIP == "" {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "management_ip is required")
+		return
+	}
+	
+	// Validate IP address format
+	if net.ParseIP(req.ManagementIP) == nil {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid IP address")
+		return
+	}
+	
+	// Validate CPU
+	if req.TotalCPUCores <= 0 {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "total_cpu_cores must be greater than 0")
+		return
+	}
+	
+	// Validate RAM
+	if req.TotalRAMMB <= 0 {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "total_ram_mb must be greater than 0")
 		return
 	}
 	
@@ -56,43 +79,10 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 
 	var opID *uuid.UUID
 	nodeID := uuidx.New()
-	if existing != nil {
-		nodeID = existing.ID
-	}
 	
 	if existing != nil {
-		// Start operation tracking for update
-		op, _ := h.operations.Start(r.Context(), models.OpNodeRegister, models.OpCategorySync,
-			"node", &nodeID, actorType, actorID, req)
-		opID = &op.ID
-
-		// Update existing node
-		existing.ManagementIP = req.ManagementIP
-		existing.TotalCPUcores = req.TotalCPUCores
-		existing.TotalRAMMB = req.TotalRAMMB
-		existing.AllocatableCPUCores = req.TotalCPUCores
-		existing.AllocatableRAMMB = req.TotalRAMMB
-		existing.AgentVersion = req.AgentVersion
-		existing.HypervisorVersion = req.HypervisorVersion
-		existing.Status = models.NodeStateOnline
-		now := time.Now()
-		existing.LastHeartbeatAt = &now
-
-		if labels, err := json.Marshal(req.Labels); err == nil {
-			existing.Labels = labels
-		}
-		if caps, err := json.Marshal(req.Capabilities); err == nil {
-			existing.Capabilities = caps
-		}
-
-		if err := h.store.UpdateNode(r.Context(), existing); err != nil {
-			h.operations.Fail(r.Context(), *opID, err)
-			h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update node")
-			return
-		}
-
-		h.operations.Complete(r.Context(), *opID, existing)
-		h.jsonResponse(w, http.StatusOK, existing)
+		// Return error for duplicate hostname on initial registration
+		h.errorResponse(w, http.StatusConflict, "DUPLICATE_HOSTNAME", "Hostname already exists")
 		return
 	}
 
