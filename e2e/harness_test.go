@@ -67,10 +67,34 @@ func (h *Harness) URL(path string) string {
 
 // createTestToken creates a test API token for authentication.
 func (h *Harness) createTestToken() error {
-	// For E2E tests, we try to create a token
-	// In a real scenario, this would need valid credentials
-	// For MVP, we'll skip actual token creation and tests will use empty auth
-	// This is a placeholder for proper auth implementation
+	// Create a token using the public tokens endpoint
+	url := fmt.Sprintf("%s/api/%s/tokens", h.Config.ControllerURL, h.Config.APIVersion)
+	
+	body := map[string]interface{}{
+		"name":       "e2e-test-token",
+		"expires_in": "1h",
+	}
+	
+	data, _ := json.Marshal(body)
+	resp, err := h.HTTPClient.Post(url, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create token: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("token creation failed: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode token response: %w", err)
+	}
+	
+	h.token = result.Token
 	return nil
 }
 
