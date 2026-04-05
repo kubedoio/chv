@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/chv/chv/internal/auth"
+	"github.com/chv/chv/internal/hypervisor"
 	"github.com/chv/chv/internal/operations"
 	"github.com/chv/chv/internal/reconcile"
 	"github.com/chv/chv/internal/scheduler"
@@ -28,17 +29,19 @@ type Handler struct {
 	reconciler         *reconcile.Service
 	imageImportWorker  *worker.ImageImportWorker
 	operations         *operations.Service
+	consoleSessions    *hypervisor.SessionManager
 	corsConfig         CORSConfig
 }
 
 // NewHandler creates a new API handler.
 func NewHandler(store store.Store, auth *auth.Service, scheduler *scheduler.Service, reconciler *reconcile.Service) *Handler {
 	return &Handler{
-		store:      store,
-		auth:       auth,
-		scheduler:  scheduler,
-		reconciler: reconciler,
-		operations: operations.NewService(store),
+		store:           store,
+		auth:            auth,
+		scheduler:       scheduler,
+		reconciler:      reconciler,
+		operations:      operations.NewService(store),
+		consoleSessions: hypervisor.NewSessionManager(),
 	}
 }
 
@@ -116,6 +119,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 			r.Post("/vms/{id}/reboot", h.rebootVM)
 			r.Post("/vms/{id}/resize-disk", h.resizeDisk)
 			r.Delete("/vms/{id}", h.deleteVM)
+
+			// VM Console
+			r.Get("/vms/{id}/console", h.vmConsole)
 
 			// Operations
 			r.Get("/operations", h.listOperations)

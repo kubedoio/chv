@@ -24,6 +24,7 @@ const (
 	OpVMStop       OperationType = "vm_stop"
 	OpVMReboot     OperationType = "vm_reboot"
 	OpVMDelete     OperationType = "vm_delete"
+	OpVMConsole    OperationType = "vm_console"
 	OpImageImport  OperationType = "image_import"
 	OpNodeRegister OperationType = "node_register"
 )
@@ -51,25 +52,25 @@ const (
 
 // Operation represents an operation in the system
 type Operation struct {
-	ID             uuid.UUID         `json:"id" db:"id"`
-	Type           OperationType     `json:"type" db:"type"`
-	Category       OperationCategory `json:"category" db:"category"`
-	Status         OperationStatus   `json:"status" db:"status"`
-	StatusMessage  string            `json:"status_message" db:"status_message"`
-	ResourceType   string            `json:"resource_type" db:"resource_type"`
-	ResourceID     *uuid.UUID        `json:"resource_id" db:"resource_id"`
-	ActorType      ActorType         `json:"actor_type" db:"actor_type"`
-	ActorID        string            `json:"actor_id" db:"actor_id"`
-	NodeID         *uuid.UUID        `json:"node_id" db:"node_id"`
-	RequestPayload json.RawMessage   `json:"request_payload" db:"request_payload"`
-	ResultPayload  json.RawMessage   `json:"result_payload" db:"result_payload"`
-	ErrorDetails   json.RawMessage   `json:"error_details" db:"error_details"`
+	ID              uuid.UUID         `json:"id" db:"id"`
+	Type            OperationType     `json:"type" db:"type"`
+	Category        OperationCategory `json:"category" db:"category"`
+	Status          OperationStatus   `json:"status" db:"status"`
+	StatusMessage   string            `json:"status_message" db:"status_message"`
+	ResourceType    string            `json:"resource_type" db:"resource_type"`
+	ResourceID      *uuid.UUID        `json:"resource_id" db:"resource_id"`
+	ActorType       ActorType         `json:"actor_type" db:"actor_type"`
+	ActorID         string            `json:"actor_id" db:"actor_id"`
+	NodeID          *uuid.UUID        `json:"node_id" db:"node_id"`
+	RequestPayload  json.RawMessage   `json:"request_payload" db:"request_payload"`
+	ResultPayload   json.RawMessage   `json:"result_payload" db:"result_payload"`
+	ErrorDetails    json.RawMessage   `json:"error_details" db:"error_details"`
 	ProgressPercent int               `json:"progress_percent" db:"progress_percent"`
 	ProgressMessage string            `json:"progress_message" db:"progress_message"`
-	StartedAt      *time.Time        `json:"started_at" db:"started_at"`
-	CompletedAt    *time.Time        `json:"completed_at" db:"completed_at"`
-	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
+	StartedAt       *time.Time        `json:"started_at" db:"started_at"`
+	CompletedAt     *time.Time        `json:"completed_at" db:"completed_at"`
+	CreatedAt       time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 // IsTerminal returns true if the operation is in a terminal state
