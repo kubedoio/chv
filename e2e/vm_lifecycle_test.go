@@ -21,8 +21,10 @@ func TestVMLifecycle_Full(t *testing.T) {
 	// Create a network first
 	t.Log("Creating network...")
 	netReq := &CreateNetworkRequest{
-		Name: "test-network",
-		CIDR: "10.100.0.0/24",
+		Name:       "test-network",
+		BridgeName: "br-test",
+		CIDR:       "10.100.0.0/24",
+		GatewayIP:  "10.100.0.1",
 	}
 	netResp, err := h.CreateNetwork(netReq)
 	if err != nil {
@@ -104,8 +106,10 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 	
 	// Create network
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
-		Name: "test-net-startstop",
-		CIDR: "10.101.0.0/24",
+		Name:       "test-net-startstop",
+		BridgeName: "br-test2",
+		CIDR:       "10.101.0.0/24",
+		GatewayIP:  "10.101.0.1",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create network: %v", err)
@@ -255,8 +259,10 @@ func TestConcurrentVMOperations(t *testing.T) {
 	
 	// Create network
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
-		Name: "test-net-concurrent",
-		CIDR: "10.102.0.0/24",
+		Name:       "test-net-concurrent",
+		BridgeName: "br-test3",
+		CIDR:       "10.102.0.0/24",
+		GatewayIP:  "10.102.0.1",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create network: %v", err)

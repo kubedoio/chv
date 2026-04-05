@@ -368,46 +368,4 @@ func revokeAPIToken(ctx context.Context, q querier, id uuid.UUID) error {
 	return err
 }
 
-// Operation operations
-func (s *PostgresStore) CreateOperation(ctx context.Context, op *models.Operation) error {
-	return createOperation(ctx, s.pool, op)
-}
 
-func (s *PostgresStore) GetOperation(ctx context.Context, id uuid.UUID) (*models.Operation, error) {
-	return getOperation(ctx, s.pool, id)
-}
-
-func (s *PostgresStore) UpdateOperation(ctx context.Context, op *models.Operation) error {
-	return updateOperation(ctx, s.pool, op)
-}
-
-func createOperation(ctx context.Context, q querier, op *models.Operation) error {
-	sql := `INSERT INTO operations (id, resource_type, resource_id, operation_type, status,
-		request_payload, result_payload, error_payload, started_at, finished_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
-	_, err := q.Exec(ctx, sql, op.ID, op.ResourceType, op.ResourceID, op.OperationType,
-		op.Status, op.RequestPayload, op.ResultPayload, op.ErrorPayload, op.StartedAt, op.FinishedAt, op.CreatedAt)
-	return err
-}
-
-func getOperation(ctx context.Context, q querier, id uuid.UUID) (*models.Operation, error) {
-	sql := `SELECT id, resource_type, resource_id, operation_type, status,
-		request_payload, result_payload, error_payload, started_at, finished_at, created_at
-		FROM operations WHERE id = $1`
-	o := &models.Operation{}
-	err := q.QueryRow(ctx, sql, id).Scan(&o.ID, &o.ResourceType, &o.ResourceID, &o.OperationType,
-		&o.Status, &o.RequestPayload, &o.ResultPayload, &o.ErrorPayload, &o.StartedAt, &o.FinishedAt, &o.CreatedAt)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	return o, err
-}
-
-func updateOperation(ctx context.Context, q querier, op *models.Operation) error {
-	sql := `UPDATE operations SET resource_type = $2, resource_id = $3, operation_type = $4,
-		status = $5, request_payload = $6, result_payload = $7, error_payload = $8,
-		started_at = $9, finished_at = $10 WHERE id = $1`
-	_, err := q.Exec(ctx, sql, op.ID, op.ResourceType, op.ResourceID, op.OperationType,
-		op.Status, op.RequestPayload, op.ResultPayload, op.ErrorPayload, op.StartedAt, op.FinishedAt)
-	return err
-}

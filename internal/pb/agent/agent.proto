@@ -172,6 +172,66 @@ message ListVMsResponse {
   repeated VMInfo vms = 1;
 }
 
+// Console stream request
+message ConsoleStreamRequest {
+  enum MessageType {
+    UNKNOWN = 0;
+    INPUT = 1;   // Client input to VM
+    RESIZE = 2;  // Terminal resize
+    PING = 3;    // Keepalive ping
+  }
+  
+  string vm_id = 1;           // VM ID (required in first message)
+  MessageType type = 2;       // Message type
+  bytes data = 3;             // Input data or resize dimensions
+  uint32 rows = 4;            // Terminal rows (for resize)
+  uint32 cols = 5;            // Terminal columns (for resize)
+  string token = 6;           // Authentication token (first message only)
+}
+
+// Console stream response
+message ConsoleStreamResponse {
+  enum MessageType {
+    UNKNOWN = 0;
+    OUTPUT = 1;   // VM output
+    ERROR = 2;    // Error message
+    STATUS = 3;   // Status message
+    HISTORY = 4;  // Initial history buffer
+  }
+  
+  MessageType type = 1;
+  bytes data = 2;       // Output data
+  string message = 3;   // Error or status message
+  int64 timestamp = 4;  // Unix timestamp
+}
+
+// Console status request
+message ConsoleStatusRequest {
+  string vm_id = 1;
+}
+
+// Console status response
+message ConsoleStatusResponse {
+  string vm_id = 1;
+  bool active = 2;
+  bool connected = 3;
+  int32 client_count = 4;
+  string log_path = 5;
+  bool tty_enabled = 6;
+}
+
+// Console close request
+message ConsoleCloseRequest {
+  string vm_id = 1;
+  bool force = 2;
+}
+
+// Console close response
+message ConsoleCloseResponse {
+  string vm_id = 1;
+  bool closed = 2;
+}
+
 // Agent service definition
 service AgentService {
   // Health check
@@ -205,4 +265,9 @@ service AgentService {
   
   // Maintenance
   rpc PrepareDrain(DrainRequest) returns (DrainResponse);
+  
+  // Console streaming
+  rpc StreamConsole(stream ConsoleStreamRequest) returns (stream ConsoleStreamResponse);
+  rpc GetConsoleStatus(ConsoleStatusRequest) returns (ConsoleStatusResponse);
+  rpc CloseConsole(ConsoleCloseRequest) returns (ConsoleCloseResponse);
 }

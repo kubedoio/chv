@@ -34,6 +34,19 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 		return
 	}
+
+	// Get user ID from context for audit trail
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	// Create VM ID early for operation tracking
+	vmID := uuidx.New()
+
+	// Start operation tracking
+	op, _ := h.operations.Start(r.Context(), models.OpVMCreate, models.OpCategoryAsync,
+		"vm", &vmID, models.ActorTypeUser, userID, req)
 	
 	// Validate required fields
 	if req.Name == "" || req.ImageID == "" {
@@ -102,7 +115,7 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 	
 	now := time.Now()
 	vm := &models.VirtualMachine{
-		ID:              uuidx.New(),
+		ID:              vmID,
 		Name:            req.Name,
 		DesiredState:    models.VMDesiredStateRunning,
 		ActualState:     models.VMActualStateProvisioning,
@@ -154,13 +167,18 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		
 		return s.UpdateVM(r.Context(), vm)
 	}); err != nil {
+		// Mark operation as failed
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create VM")
 		return
 	}
-	
+
+	// Mark operation as completed
+	h.operations.Complete(r.Context(), op.ID, vm)
+
 	// Trigger scheduling
 	go h.scheduler.ScheduleVM(r.Context(), vm.ID)
-	
+
 	h.jsonResponse(w, http.StatusCreated, vm)
 }
 
@@ -215,31 +233,49 @@ func (h *Handler) startVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID_FORMAT", "Invalid VM ID format")
 		return
 	}
-	
+
+	// Get user ID for audit trail
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	// Start operation tracking
+	op, _ := h.operations.Start(r.Context(), models.OpVMStart, models.OpCategoryAsync,
+		"vm", &vmID, models.ActorTypeUser, userID, map[string]string{"vm_id": id})
+
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
-	
+
 	if !vm.CanStart() {
+		err := errorsx.New(errorsx.ErrVMInvalidState, "VM cannot be started in current state")
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_STATE", "VM cannot be started in current state")
 		return
 	}
-	
+
 	vm.DesiredState = models.VMDesiredStateRunning
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}
-	
+
+	// Mark operation as completed
+	h.operations.Complete(r.Context(), op.ID, vm)
+
 	// Trigger reconciliation
 	go h.reconciler.TriggerVM(vm.ID)
-	
+
 	h.jsonResponse(w, http.StatusOK, vm)
 }
 
@@ -256,30 +292,48 @@ func (h *Handler) stopVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID_FORMAT", "Invalid VM ID format")
 		return
 	}
-	
+
+	// Get user ID for audit trail
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	// Start operation tracking
+	op, _ := h.operations.Start(r.Context(), models.OpVMStop, models.OpCategoryAsync,
+		"vm", &vmID, models.ActorTypeUser, userID, map[string]string{"vm_id": id})
+
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
-	
+
 	if !vm.CanStop() {
+		err := errorsx.New(errorsx.ErrVMInvalidState, "VM cannot be stopped in current state")
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_STATE", "VM cannot be stopped in current state")
 		return
 	}
-	
+
 	vm.DesiredState = models.VMDesiredStateStopped
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}
-	
+
+	// Mark operation as completed
+	h.operations.Complete(r.Context(), op.ID, vm)
+
 	go h.reconciler.TriggerVM(vm.ID)
-	
+
 	h.jsonResponse(w, http.StatusOK, vm)
 }
 
@@ -296,31 +350,49 @@ func (h *Handler) rebootVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID_FORMAT", "Invalid VM ID format")
 		return
 	}
-	
+
+	// Get user ID for audit trail
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	// Start operation tracking
+	op, _ := h.operations.Start(r.Context(), models.OpVMReboot, models.OpCategoryAsync,
+		"vm", &vmID, models.ActorTypeUser, userID, map[string]string{"vm_id": id})
+
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
-	
+
 	if vm.ActualState != models.VMActualStateRunning {
+		err := errorsx.New(errorsx.ErrVMInvalidState, "VM must be running to reboot")
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_STATE", "VM must be running to reboot")
 		return
 	}
-	
+
 	// Reboot is handled as a state transition
 	vm.ActualState = models.VMActualStateStopping
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}
-	
+
+	// Mark operation as completed
+	h.operations.Complete(r.Context(), op.ID, vm)
+
 	go h.reconciler.TriggerVM(vm.ID)
-	
+
 	h.jsonResponse(w, http.StatusOK, vm)
 }
 
@@ -407,26 +479,42 @@ func (h *Handler) deleteVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID_FORMAT", "Invalid VM ID format")
 		return
 	}
-	
+
+	// Get user ID for audit trail
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	// Start operation tracking
+	op, _ := h.operations.Start(r.Context(), models.OpVMDelete, models.OpCategoryAsync,
+		"vm", &vmID, models.ActorTypeUser, userID, map[string]string{"vm_id": id})
+
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
-	
+
 	// Set desired state to deleted
 	vm.DesiredState = models.VMDesiredStateDeleted
 	vm.ActualState = models.VMActualStateDeleting
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}
-	
+
+	// Mark operation as completed
+	h.operations.Complete(r.Context(), op.ID, map[string]string{"vm_id": id, "status": "deleting"})
+
 	go h.reconciler.TriggerVM(vmID)
-	
+
 	w.WriteHeader(http.StatusNoContent)
 }

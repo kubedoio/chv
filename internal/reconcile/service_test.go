@@ -342,6 +342,18 @@ func (m *mockStore) UpdateOperation(ctx context.Context, op *models.Operation) e
 	return nil
 }
 
+func (m *mockStore) ListOperations(ctx context.Context, filters map[string]interface{}) ([]*models.Operation, error) {
+	return nil, nil
+}
+
+func (m *mockStore) CreateOperationLog(ctx context.Context, log *models.OperationLog) error {
+	return nil
+}
+
+func (m *mockStore) GetOperationLogs(ctx context.Context, operationID uuid.UUID) ([]*models.OperationLog, error) {
+	return nil, nil
+}
+
 func (m *mockStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	m.mu.Lock()
 	m.withTxCalled = true

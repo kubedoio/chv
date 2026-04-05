@@ -16,7 +16,7 @@ This guide provides detailed instructions for setting up a CHV development envir
 
 ### Required
 
-- **Go 1.22+**: [Download](https://golang.org/dl/)
+- **Go 1.26+**: [Download](https://golang.org/dl/)
 - **Docker 20.10+**: [Install](https://docs.docker.com/get-docker/)
 - **Docker Compose 2.0+**: Included with Docker Desktop
 

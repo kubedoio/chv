@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/chv/chv/internal/cloudinit"
+	"github.com/chv/chv/internal/agent/cloudinit"
 	"github.com/chv/chv/internal/network"
 	"github.com/chv/chv/pkg/uuidx"
 )
@@ -25,6 +25,7 @@ type Launcher struct {
 	stateManager  *StateManager
 	tapManager    *network.TAPManager
 	isoGenerator  *cloudinit.ISOGenerator
+	dataDir       string // Base data directory for ISO generation
 	
 	// In-memory tracking of running VMs (supplemented by stateManager)
 	instances map[string]*VMInstance
@@ -67,6 +68,9 @@ func NewLauncher(
 	tapManager *network.TAPManager,
 	isoGenerator *cloudinit.ISOGenerator,
 ) *Launcher {
+	// Determine dataDir from stateDir (stateDir is typically <dataDir>/instances)
+	dataDir := filepath.Dir(stateDir)
+
 	return &Launcher{
 		chvBinary:    chvBinary,
 		stateDir:     stateDir,
@@ -75,6 +79,7 @@ func NewLauncher(
 		stateManager: stateManager,
 		tapManager:   tapManager,
 		isoGenerator: isoGenerator,
+		dataDir:      dataDir,
 		instances:    make(map[string]*VMInstance),
 	}
 }
@@ -586,7 +591,7 @@ func (l *Launcher) cleanupOnFailure(vmID string, tapDevice *network.TAPDevice, i
 		l.tapManager.DeleteTAP(tapDevice.Name)
 	}
 	if isoPath != "" {
-		l.isoGenerator.DeleteISO(vmID)
+		l.isoGenerator.DeleteISOByPath(isoPath)
 	}
 }
 
@@ -599,9 +604,9 @@ func (l *Launcher) cleanupAfterStop(vmID string, instance *VMInstance) {
 			l.tapManager.DeleteTAP(instance.TAPDevice.Name)
 		}
 
-		// Delete cloud-init ISO
+		// Delete cloud-init ISO by path (handles both locations)
 		if instance.ISOPath != "" {
-			l.isoGenerator.DeleteISO(vmID)
+			l.isoGenerator.DeleteISOByPath(instance.ISOPath)
 		}
 
 		// Delete API socket

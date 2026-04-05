@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 
@@ -20,7 +20,7 @@ RUN go generate ./...
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /build/chv-agent ./cmd/chv-agent
 
 # Final stage
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates curl iputils bridge-utils qemu-img nfs-utils
 

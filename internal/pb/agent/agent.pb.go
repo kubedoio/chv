@@ -181,6 +181,167 @@ type ListVMsResponse_VMInfo struct {
 	MemoryMb uint64 `protobuf:"varint,5,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
 }
 
+// ConsoleStreamRequest represents a console stream request.
+type ConsoleStreamRequest struct {
+	Type ConsoleStreamRequest_MessageType `protobuf:"varint,1,opt,name=type,proto3,enum=agent.ConsoleStreamRequest_MessageType" json:"type,omitempty"`
+	VmId string                           `protobuf:"bytes,2,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+	Data []byte                           `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	Rows uint32                           `protobuf:"varint,4,opt,name=rows,proto3" json:"rows,omitempty"`
+	Cols uint32                           `protobuf:"varint,5,opt,name=cols,proto3" json:"cols,omitempty"`
+	Token string                          `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`
+}
+
+// ConsoleStreamRequest_MessageType represents message types.
+type ConsoleStreamRequest_MessageType int32
+
+const (
+	ConsoleStreamRequest_UNKNOWN ConsoleStreamRequest_MessageType = 0
+	ConsoleStreamRequest_INPUT   ConsoleStreamRequest_MessageType = 1
+	ConsoleStreamRequest_RESIZE  ConsoleStreamRequest_MessageType = 2
+	ConsoleStreamRequest_PING    ConsoleStreamRequest_MessageType = 3
+)
+
+// GetVmId returns the VM ID.
+func (x *ConsoleStreamRequest) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+// GetType returns the message type.
+func (x *ConsoleStreamRequest) GetType() ConsoleStreamRequest_MessageType {
+	if x != nil {
+		return x.Type
+	}
+	return ConsoleStreamRequest_UNKNOWN
+}
+
+// GetData returns the data.
+func (x *ConsoleStreamRequest) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// ConsoleStreamResponse represents a console stream response.
+type ConsoleStreamResponse struct {
+	Type      ConsoleStreamResponse_MessageType `protobuf:"varint,1,opt,name=type,proto3,enum=agent.ConsoleStreamResponse_MessageType" json:"type,omitempty"`
+	Data      []byte                            `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	Message   string                            `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	Timestamp int64                             `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+}
+
+// ConsoleStreamResponse_MessageType represents message types.
+type ConsoleStreamResponse_MessageType int32
+
+const (
+	ConsoleStreamResponse_UNKNOWN ConsoleStreamResponse_MessageType = 0
+	ConsoleStreamResponse_OUTPUT  ConsoleStreamResponse_MessageType = 1
+	ConsoleStreamResponse_ERROR   ConsoleStreamResponse_MessageType = 2
+	ConsoleStreamResponse_STATUS  ConsoleStreamResponse_MessageType = 3
+	ConsoleStreamResponse_HISTORY ConsoleStreamResponse_MessageType = 4
+)
+
+// GetType returns the message type.
+func (x *ConsoleStreamResponse) GetType() ConsoleStreamResponse_MessageType {
+	if x != nil {
+		return x.Type
+	}
+	return ConsoleStreamResponse_UNKNOWN
+}
+
+// GetData returns the data.
+func (x *ConsoleStreamResponse) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// GetMessage returns the message.
+func (x *ConsoleStreamResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+// ConsoleStatusRequest requests console status.
+type ConsoleStatusRequest struct {
+	VmId string `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+}
+
+// GetVmId returns the VM ID.
+func (x *ConsoleStatusRequest) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+// ConsoleStatusResponse is the console status response.
+type ConsoleStatusResponse struct {
+	VmId        string `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+	Active      bool   `protobuf:"varint,2,opt,name=active,proto3" json:"active,omitempty"`
+	Connected   bool   `protobuf:"varint,3,opt,name=connected,proto3" json:"connected,omitempty"`
+	ClientCount int32  `protobuf:"varint,4,opt,name=client_count,json=clientCount,proto3" json:"client_count,omitempty"`
+	LogPath     string `protobuf:"bytes,5,opt,name=log_path,json=logPath,proto3" json:"log_path,omitempty"`
+	TtyEnabled  bool   `protobuf:"varint,6,opt,name=tty_enabled,json=ttyEnabled,proto3" json:"tty_enabled,omitempty"`
+}
+
+// GetVmId returns the VM ID.
+func (x *ConsoleStatusResponse) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+// ConsoleCloseRequest requests console close.
+type ConsoleCloseRequest struct {
+	VmId  string `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+	Force bool   `protobuf:"varint,2,opt,name=force,proto3" json:"force,omitempty"`
+}
+
+// GetVmId returns the VM ID.
+func (x *ConsoleCloseRequest) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+// ConsoleCloseResponse is the console close response.
+type ConsoleCloseResponse struct {
+	VmId   string `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
+	Closed bool   `protobuf:"varint,2,opt,name=closed,proto3" json:"closed,omitempty"`
+}
+
+// AgentService_StreamConsoleServer is the server interface for streaming.
+type AgentService_StreamConsoleServer interface {
+	grpc.ServerStream
+	Send(*ConsoleStreamResponse) error
+	Recv() (*ConsoleStreamRequest, error)
+}
+
+type agentServiceStreamConsoleServer struct {
+	grpc.ServerStream
+}
+
+func (x *agentServiceStreamConsoleServer) Send(m *ConsoleStreamResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *agentServiceStreamConsoleServer) Recv() (*ConsoleStreamRequest, error) {
+	m := new(ConsoleStreamRequest)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // AgentServiceServer is the server API for AgentService service.
 type AgentServiceServer interface {
 	Ping(context.Context, *Empty) (*PingResponse, error)
@@ -198,6 +359,9 @@ type AgentServiceServer interface {
 	GetVMState(context.Context, *VMStateRequest) (*VMStateResponse, error)
 	ListHostVMs(context.Context, *Empty) (*ListVMsResponse, error)
 	PrepareDrain(context.Context, *DrainRequest) (*DrainResponse, error)
+	StreamConsole(AgentService_StreamConsoleServer) error
+	GetConsoleStatus(context.Context, *ConsoleStatusRequest) (*ConsoleStatusResponse, error)
+	CloseConsole(context.Context, *ConsoleCloseRequest) (*ConsoleCloseResponse, error)
 }
 
 // UnimplementedAgentServiceServer must be embedded to have forward compatible implementations.
@@ -249,6 +413,15 @@ func (UnimplementedAgentServiceServer) ListHostVMs(context.Context, *Empty) (*Li
 func (UnimplementedAgentServiceServer) PrepareDrain(context.Context, *DrainRequest) (*DrainResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PrepareDrain not implemented")
 }
+func (UnimplementedAgentServiceServer) StreamConsole(AgentService_StreamConsoleServer) error {
+	return status.Errorf(codes.Unimplemented, "method StreamConsole not implemented")
+}
+func (UnimplementedAgentServiceServer) GetConsoleStatus(context.Context, *ConsoleStatusRequest) (*ConsoleStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetConsoleStatus not implemented")
+}
+func (UnimplementedAgentServiceServer) CloseConsole(context.Context, *ConsoleCloseRequest) (*ConsoleCloseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CloseConsole not implemented")
+}
 
 // RegisterAgentServiceServer registers the server.
 func RegisterAgentServiceServer(s *grpc.Server, srv AgentServiceServer) {
@@ -275,8 +448,17 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "GetVMState", Handler: nil},
 		{MethodName: "ListHostVMs", Handler: nil},
 		{MethodName: "PrepareDrain", Handler: nil},
+		{MethodName: "GetConsoleStatus", Handler: nil},
+		{MethodName: "CloseConsole", Handler: nil},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamConsole",
+			Handler:       nil,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "agent.proto",
 }
 
@@ -297,6 +479,32 @@ type AgentServiceClient interface {
 	GetVMState(ctx context.Context, in *VMStateRequest, opts ...grpc.CallOption) (*VMStateResponse, error)
 	ListHostVMs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListVMsResponse, error)
 	PrepareDrain(ctx context.Context, in *DrainRequest, opts ...grpc.CallOption) (*DrainResponse, error)
+	StreamConsole(ctx context.Context, opts ...grpc.CallOption) (AgentService_StreamConsoleClient, error)
+	GetConsoleStatus(ctx context.Context, in *ConsoleStatusRequest, opts ...grpc.CallOption) (*ConsoleStatusResponse, error)
+	CloseConsole(ctx context.Context, in *ConsoleCloseRequest, opts ...grpc.CallOption) (*ConsoleCloseResponse, error)
+}
+
+// AgentService_StreamConsoleClient is the client interface for streaming.
+type AgentService_StreamConsoleClient interface {
+	grpc.ClientStream
+	Send(*ConsoleStreamRequest) error
+	Recv() (*ConsoleStreamResponse, error)
+}
+
+type agentServiceStreamConsoleClient struct {
+	grpc.ClientStream
+}
+
+func (x *agentServiceStreamConsoleClient) Send(m *ConsoleStreamRequest) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *agentServiceStreamConsoleClient) Recv() (*ConsoleStreamResponse, error) {
+	m := new(ConsoleStreamResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // NewAgentServiceClient creates a new client.
@@ -437,6 +645,33 @@ func (c *agentServiceClient) ListHostVMs(ctx context.Context, in *Empty, opts ..
 func (c *agentServiceClient) PrepareDrain(ctx context.Context, in *DrainRequest, opts ...grpc.CallOption) (*DrainResponse, error) {
 	out := new(DrainResponse)
 	err := c.cc.Invoke(ctx, "/agent.AgentService/PrepareDrain", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) StreamConsole(ctx context.Context, opts ...grpc.CallOption) (AgentService_StreamConsoleClient, error) {
+	stream, err := c.cc.NewStream(ctx, &AgentService_ServiceDesc.Streams[0], "/agent.AgentService/StreamConsole", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &agentServiceStreamConsoleClient{stream}
+	return x, nil
+}
+
+func (c *agentServiceClient) GetConsoleStatus(ctx context.Context, in *ConsoleStatusRequest, opts ...grpc.CallOption) (*ConsoleStatusResponse, error) {
+	out := new(ConsoleStatusResponse)
+	err := c.cc.Invoke(ctx, "/agent.AgentService/GetConsoleStatus", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) CloseConsole(ctx context.Context, in *ConsoleCloseRequest, opts ...grpc.CallOption) (*ConsoleCloseResponse, error) {
+	out := new(ConsoleCloseResponse)
+	err := c.cc.Invoke(ctx, "/agent.AgentService/CloseConsole", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}

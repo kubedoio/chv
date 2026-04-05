@@ -69,6 +69,9 @@ type Store interface {
 	CreateOperation(ctx context.Context, op *models.Operation) error
 	GetOperation(ctx context.Context, id uuid.UUID) (*models.Operation, error)
 	UpdateOperation(ctx context.Context, op *models.Operation) error
+	ListOperations(ctx context.Context, filters map[string]interface{}) ([]*models.Operation, error)
+	CreateOperationLog(ctx context.Context, log *models.OperationLog) error
+	GetOperationLogs(ctx context.Context, operationID uuid.UUID) ([]*models.OperationLog, error)
 	
 	// Transactions
 	WithTx(ctx context.Context, fn func(Store) error) error
@@ -263,6 +266,18 @@ func (s *txStore) GetOperation(ctx context.Context, id uuid.UUID) (*models.Opera
 
 func (s *txStore) UpdateOperation(ctx context.Context, op *models.Operation) error {
 	return updateOperation(ctx, s.tx, op)
+}
+
+func (s *txStore) ListOperations(ctx context.Context, filters map[string]interface{}) ([]*models.Operation, error) {
+	return listOperations(ctx, s.tx, filters)
+}
+
+func (s *txStore) CreateOperationLog(ctx context.Context, log *models.OperationLog) error {
+	return createOperationLog(ctx, s.tx, log)
+}
+
+func (s *txStore) GetOperationLogs(ctx context.Context, operationID uuid.UUID) ([]*models.OperationLog, error) {
+	return getOperationLogs(ctx, s.tx, operationID)
 }
 
 func (s *txStore) WithTx(ctx context.Context, fn func(Store) error) error {

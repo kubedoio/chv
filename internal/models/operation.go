@@ -7,72 +7,91 @@ import (
 	"github.com/google/uuid"
 )
 
-// OperationStatus represents the operation status.
+// OperationCategory represents the category of operation
+type OperationCategory string
+
+const (
+	OpCategorySync  OperationCategory = "sync"
+	OpCategoryAsync OperationCategory = "async"
+)
+
+// OperationType represents the type of operation
+type OperationType string
+
+const (
+	OpVMCreate     OperationType = "vm_create"
+	OpVMStart      OperationType = "vm_start"
+	OpVMStop       OperationType = "vm_stop"
+	OpVMReboot     OperationType = "vm_reboot"
+	OpVMDelete     OperationType = "vm_delete"
+	OpVMConsole    OperationType = "vm_console"
+	OpImageImport  OperationType = "image_import"
+	OpNodeRegister OperationType = "node_register"
+)
+
+// OperationStatus represents the status of an operation
 type OperationStatus string
 
 const (
-	OperationStatusPending    OperationStatus = "pending"
-	OperationStatusInProgress OperationStatus = "in_progress"
-	OperationStatusSucceeded  OperationStatus = "succeeded"
-	OperationStatusFailed     OperationStatus = "failed"
-	OperationStatusTimedOut   OperationStatus = "timed_out"
-	OperationStatusAborted    OperationStatus = "aborted"
+	OpStatusPending   OperationStatus = "pending"
+	OpStatusRunning   OperationStatus = "running"
+	OpStatusCompleted OperationStatus = "completed"
+	OpStatusFailed    OperationStatus = "failed"
+	OpStatusCancelled OperationStatus = "cancelled"
 )
 
-// Operation represents a tracked operation.
+// ActorType represents the type of actor that initiated the operation
+type ActorType string
+
+const (
+	ActorTypeUser       ActorType = "user"
+	ActorTypeSystem     ActorType = "system"
+	ActorTypeScheduler  ActorType = "scheduler"
+	ActorTypeReconciler ActorType = "reconciler"
+)
+
+// Operation represents an operation in the system
 type Operation struct {
-	ID             uuid.UUID       `json:"id" db:"id"`
-	ResourceType   string          `json:"resource_type" db:"resource_type"`
-	ResourceID     uuid.UUID       `json:"resource_id" db:"resource_id"`
-	OperationType  string          `json:"operation_type" db:"operation_type"`
-	Status         OperationStatus `json:"status" db:"status"`
-	RequestPayload json.RawMessage `json:"request_payload" db:"request_payload"`
-	ResultPayload  json.RawMessage `json:"result_payload,omitempty" db:"result_payload"`
-	ErrorPayload   json.RawMessage `json:"error_payload,omitempty" db:"error_payload"`
-	StartedAt      *time.Time      `json:"started_at" db:"started_at"`
-	FinishedAt     *time.Time      `json:"finished_at" db:"finished_at"`
-	CreatedAt      time.Time       `json:"created_at" db:"created_at"`
+	ID             uuid.UUID         `json:"id" db:"id"`
+	OperationType  OperationType     `json:"operation_type" db:"operation_type"`
+	Category       OperationCategory `json:"category" db:"category"`
+	Status         OperationStatus   `json:"status" db:"status"`
+	StatusMessage  string            `json:"status_message" db:"status_message"`
+	ResourceType   string            `json:"resource_type" db:"resource_type"`
+	ResourceID     *uuid.UUID        `json:"resource_id" db:"resource_id"`
+	ActorType      ActorType         `json:"actor_type" db:"actor_type"`
+	ActorID        string            `json:"actor_id" db:"actor_id"`
+	NodeID         *uuid.UUID        `json:"node_id" db:"node_id"`
+	RequestPayload json.RawMessage   `json:"request_payload" db:"request_payload"`
+	ResultPayload  json.RawMessage   `json:"result_payload" db:"result_payload"`
+	ErrorPayload   json.RawMessage   `json:"error_payload" db:"error_payload"`
+	StartedAt      *time.Time        `json:"started_at" db:"started_at"`
+	FinishedAt     *time.Time        `json:"finished_at" db:"finished_at"`
+	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
 }
 
-// IsComplete returns true if the operation is complete.
-func (o *Operation) IsComplete() bool {
-	return o.Status == OperationStatusSucceeded ||
-		o.Status == OperationStatusFailed ||
-		o.Status == OperationStatusTimedOut ||
-		o.Status == OperationStatusAborted
+// IsTerminal returns true if the operation is in a terminal state
+func (o *Operation) IsTerminal() bool {
+	return o.Status == OpStatusCompleted || o.Status == OpStatusFailed || o.Status == OpStatusCancelled
 }
 
-// IsSuccessful returns true if the operation succeeded.
-func (o *Operation) IsSuccessful() bool {
-	return o.Status == OperationStatusSucceeded
+// IsAsync returns true if the operation is asynchronous
+func (o *Operation) IsAsync() bool {
+	return o.Category == OpCategoryAsync
 }
 
-// SetRequest sets the request payload.
-func (o *Operation) SetRequest(req interface{}) error {
-	data, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	o.RequestPayload = data
-	return nil
+// CanCancel returns true if the operation can be cancelled
+func (o *Operation) CanCancel() bool {
+	return o.Status == OpStatusPending || o.Status == OpStatusRunning
 }
 
-// SetResult sets the result payload.
-func (o *Operation) SetResult(result interface{}) error {
-	data, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-	o.ResultPayload = data
-	return nil
-}
-
-// SetError sets the error payload.
-func (o *Operation) SetError(err interface{}) error {
-	data, e := json.Marshal(err)
-	if e != nil {
-		return e
-	}
-	o.ErrorPayload = data
-	return nil
+// OperationLog represents a log entry for an operation
+type OperationLog struct {
+	ID          uuid.UUID       `json:"id" db:"id"`
+	OperationID uuid.UUID       `json:"operation_id" db:"operation_id"`
+	Level       string          `json:"level" db:"level"`
+	Message     string          `json:"message" db:"message"`
+	Details     json.RawMessage `json:"details" db:"details"`
+	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
 }

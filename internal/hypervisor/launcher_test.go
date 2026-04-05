@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chv/chv/internal/cloudinit"
+	"github.com/chv/chv/internal/agent/cloudinit"
 	"github.com/chv/chv/internal/network"
 )
 
