@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/chv/chv/internal/auth"
+	"github.com/chv/chv/internal/operations"
 	"github.com/chv/chv/internal/reconcile"
 	"github.com/chv/chv/internal/scheduler"
 	"github.com/chv/chv/internal/store"
@@ -13,7 +14,7 @@ import (
 	"github.com/go-chi/cors"
 )
 
-// CORSConfig holds CORS configuration.
+// CORSConfig holds CORS configuration
 type CORSConfig struct {
 	Enabled        bool
 	AllowedOrigins []string
@@ -26,6 +27,7 @@ type Handler struct {
 	scheduler          *scheduler.Service
 	reconciler         *reconcile.Service
 	imageImportWorker  *worker.ImageImportWorker
+	operations         *operations.Service
 	corsConfig         CORSConfig
 }
 
@@ -36,12 +38,8 @@ func NewHandler(store store.Store, auth *auth.Service, scheduler *scheduler.Serv
 		auth:       auth,
 		scheduler:  scheduler,
 		reconciler: reconciler,
+		operations: operations.NewService(store),
 	}
-}
-
-// SetCORSConfig sets the CORS configuration.
-func (h *Handler) SetCORSConfig(config CORSConfig) {
-	h.corsConfig = config
 }
 
 // SetImageImportWorker sets the image import worker.
@@ -49,9 +47,22 @@ func (h *Handler) SetImageImportWorker(w *worker.ImageImportWorker) {
 	h.imageImportWorker = w
 }
 
+// SetCORSConfig sets the CORS configuration.
+func (h *Handler) SetCORSConfig(config CORSConfig) {
+	h.corsConfig = config
+}
+
+// getAllowedOrigins returns allowed origins with defaults.
+func (h *Handler) getAllowedOrigins() []string {
+	if len(h.corsConfig.AllowedOrigins) > 0 {
+		return h.corsConfig.AllowedOrigins
+	}
+	return []string{"http://localhost:3000", "http://localhost:5173"}
+}
+
 // RegisterRoutes registers all API routes.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	// Setup CORS middleware if enabled
+	// Add CORS middleware if enabled
 	if h.corsConfig.Enabled {
 		r.Use(cors.Handler(cors.Options{
 			AllowedOrigins:   h.getAllowedOrigins(),
@@ -105,6 +116,11 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 			r.Post("/vms/{id}/reboot", h.rebootVM)
 			r.Post("/vms/{id}/resize-disk", h.resizeDisk)
 			r.Delete("/vms/{id}", h.deleteVM)
+
+			// Operations
+			r.Get("/operations", h.listOperations)
+			r.Get("/operations/{id}", h.getOperation)
+			r.Get("/operations/{id}/logs", h.getOperationLogs)
 		})
 	})
 }
@@ -123,15 +139,6 @@ func (h *Handler) jsonResponse(w http.ResponseWriter, status int, data interface
 
 func (h *Handler) errorResponse(w http.ResponseWriter, status int, code, message string) {
 	h.jsonResponse(w, status, ErrorResponse{Code: code, Message: message})
-}
-
-// getAllowedOrigins returns the allowed origins with defaults.
-func (h *Handler) getAllowedOrigins() []string {
-	if len(h.corsConfig.AllowedOrigins) > 0 {
-		return h.corsConfig.AllowedOrigins
-	}
-	// Default origins for development
-	return []string{"http://localhost:3000", "http://localhost:5173"}
 }
 
 
