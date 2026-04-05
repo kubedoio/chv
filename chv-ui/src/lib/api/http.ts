@@ -42,6 +42,8 @@ export async function http<T>(
       ...fetchConfig,
       headers,
       signal: controller.signal,
+      credentials: 'include',
+      mode: 'cors',
     });
 
     clearTimeout(timeoutId);
