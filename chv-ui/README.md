@@ -1,99 +1,54 @@
-# CHV Web UI
+# React + TypeScript + Vite
 
-Vue.js 3 frontend for the CHV Cloud Hypervisor Platform.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Features
+Currently, two official plugins are available:
 
-- **VM Management**: Create, start, stop, reboot, and delete VMs
-- **Node Management**: Register and monitor hypervisor nodes
-- **Network Management**: Configure Linux bridge networks
-- **Storage Management**: Manage local and NFS storage pools
-- **Image Management**: Import and manage cloud images
-- **Real-time Dashboard**: Overview of system resources and status
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-## Tech Stack
+## Expanding the ESLint configuration
 
-- Vue 3 with Composition API
-- TypeScript
-- Vite
-- Pinia (state management)
-- PrimeVue (UI components)
-- Tailwind CSS
-- Axios (HTTP client)
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
 
-## Getting Started
-
-### Prerequisites
-
-- Node.js 18+
-- CHV API running (backend)
-
-### Installation
-
-```bash
-cd chv-ui
-npm install
+```js
+export default tseslint.config({
+  extends: [
+    // Remove ...tseslint.configs.recommended and replace with this
+    ...tseslint.configs.recommendedTypeChecked,
+    // Alternatively, use this for stricter rules
+    ...tseslint.configs.strictTypeChecked,
+    // Optionally, add this for stylistic rules
+    ...tseslint.configs.stylisticTypeChecked,
+  ],
+  languageOptions: {
+    // other options...
+    parserOptions: {
+      project: ['./tsconfig.node.json', './tsconfig.app.json'],
+      tsconfigRootDir: import.meta.dirname,
+    },
+  },
+})
 ```
 
-### Development
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
 
-```bash
-npm run dev
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
+
+export default tseslint.config({
+  plugins: {
+    // Add the react-x and react-dom plugins
+    'react-x': reactX,
+    'react-dom': reactDom,
+  },
+  rules: {
+    // other rules...
+    // Enable its recommended typescript rules
+    ...reactX.configs['recommended-typescript'].rules,
+    ...reactDom.configs.recommended.rules,
+  },
+})
 ```
-
-The UI will be available at http://localhost:3000
-
-### Build for Production
-
-```bash
-npm run build
-```
-
-### Docker Build
-
-```bash
-docker build -t chv-ui .
-```
-
-## Configuration
-
-Set the API URL via environment variable:
-
-```bash
-VITE_API_URL=http://localhost:8081 npm run dev
-```
-
-Default: `http://localhost:8081`
-
-## Project Structure
-
-```
-src/
-├── api/           # API client and endpoint modules
-├── components/    # Vue components
-├── router/        # Vue Router configuration
-├── stores/        # Pinia stores
-├── views/         # Page components
-├── types/         # TypeScript type definitions
-└── assets/        # Styles and static assets
-```
-
-## Authentication
-
-The UI uses API tokens for authentication. Tokens are stored in localStorage.
-
-To obtain a token:
-1. Run the backend
-2. Create a token via API: `POST /api/v1/tokens`
-3. Use the token in the login page
-
-## Design System
-
-The UI follows VMware/Proxmox enterprise console design principles:
-- Light theme with industrial/functional aesthetic
-- Data-dense tables with zebra striping
-- Status badges with color-coded indicators
-- Three-pane layout for resource management
-- Monospace font for IDs and technical data
-
-See DESIGN.md in the main project for full design specifications.
