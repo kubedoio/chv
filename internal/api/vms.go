@@ -170,6 +170,7 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 			SizeBytes:       req.DiskSize,
 			AttachmentState: models.VolumeAttachmentStateDetached,
 			ResizeState:     models.VolumeResizeStateIdle,
+			Metadata:        []byte("{}"),
 			CreatedAt:       now,
 		}
 		

@@ -18,6 +18,14 @@ func TestVMLifecycle_Full(t *testing.T) {
 	}
 	t.Log("Controller is ready")
 	
+	// Import Cirros test image first
+	t.Log("Importing test image...")
+	imageID, err := h.ImportCirrosImage()
+	if err != nil {
+		t.Fatalf("Failed to import test image: %v", err)
+	}
+	t.Logf("Imported image: %s", imageID)
+	
 	// Create a network first
 	t.Log("Creating network...")
 	netReq := &CreateNetworkRequest{
@@ -55,7 +63,7 @@ func TestVMLifecycle_Full(t *testing.T) {
 		VCPU:        2,
 		MemoryMB:    2048,
 		DiskGB:      10,
-		ImageID:     "00000000-0000-0000-0000-000000000001",
+		ImageID:     imageID,
 		NetworkIDs:  []string{netResp.ID},
 		UserData: `#cloud-config
 users:
@@ -105,6 +113,13 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 		t.Skipf("Controller not ready: %v", err)
 	}
 	
+	// Import test image
+	imageID, err := h.ImportCirrosImage()
+	if err != nil {
+		t.Fatalf("Failed to import test image: %v", err)
+	}
+	t.Logf("Imported image: %s", imageID)
+	
 	// Create network
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
 		Name:       "test-net-startstop",
@@ -134,7 +149,7 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 		VCPU:       1,
 		MemoryMB:   1024,
 		DiskGB:     5,
-		ImageID:    "00000000-0000-0000-0000-000000000001",
+		ImageID:    imageID,
 		NetworkIDs: []string{netResp.ID},
 	})
 	if err != nil {
@@ -259,6 +274,13 @@ func TestConcurrentVMOperations(t *testing.T) {
 		t.Skipf("Controller not ready: %v", err)
 	}
 	
+	// Import test image
+	imageID, err := h.ImportCirrosImage()
+	if err != nil {
+		t.Fatalf("Failed to import test image: %v", err)
+	}
+	t.Logf("Imported image: %s", imageID)
+	
 	// Create network
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
 		Name:       "test-net-concurrent",
@@ -283,7 +305,7 @@ func TestConcurrentVMOperations(t *testing.T) {
 				VCPU:       1,
 				MemoryMB:   512,
 				DiskGB:     5,
-				ImageID:    "00000000-0000-0000-0000-000000000001",
+				ImageID:    imageID,
 				NetworkIDs: []string{netResp.ID},
 			})
 			if err != nil {
