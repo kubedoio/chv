@@ -128,18 +128,36 @@ CREATE TABLE vm_network_attachments (
     UNIQUE (vm_id, nic_index)
 );
 
--- Operations tracking
+-- Operations tracking for async/sync operations and audit trail
 CREATE TABLE operations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    resource_type VARCHAR(64) NOT NULL,
-    resource_id UUID NOT NULL,
-    operation_type VARCHAR(64) NOT NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'pending',
-    request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    result_payload JSONB,
-    error_payload JSONB,
+    type VARCHAR(50) NOT NULL,           -- 'vm_create', 'vm_start', 'image_import', etc.
+    category VARCHAR(20) NOT NULL,       -- 'sync', 'async'
+    status VARCHAR(20) NOT NULL,         -- 'pending', 'running', 'completed', 'failed', 'cancelled'
+    status_message TEXT,                 -- Human-readable status
+    resource_type VARCHAR(50),           -- 'vm', 'image', 'node', etc.
+    resource_id UUID,                    -- Reference to the resource
+    actor_type VARCHAR(20) NOT NULL,     -- 'user', 'system', 'scheduler', 'reconciler'
+    actor_id VARCHAR(255),               -- User ID, system component name, etc.
+    node_id UUID REFERENCES nodes(id) ON DELETE SET NULL,
+    request_payload JSONB,               -- The API request body
+    result_payload JSONB,                -- Result data on completion
+    error_details JSONB,                 -- Error info on failure
+    progress_percent INT DEFAULT 0 CHECK (progress_percent >= 0 AND progress_percent <= 100),
+    progress_message TEXT,
     started_at TIMESTAMPTZ,
-    finished_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Operation logs for detailed audit trail per operation
+CREATE TABLE operation_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    operation_id UUID NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+    level VARCHAR(10) NOT NULL,          -- 'info', 'warning', 'error', 'debug'
+    message TEXT NOT NULL,
+    details JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -151,8 +169,12 @@ CREATE INDEX idx_vms_desired_state ON virtual_machines(desired_state);
 CREATE INDEX idx_vms_actual_state ON virtual_machines(actual_state);
 CREATE INDEX idx_volumes_vm_id ON volumes(vm_id);
 CREATE INDEX idx_volumes_pool_id ON volumes(pool_id);
-CREATE INDEX idx_ops_resource ON operations(resource_type, resource_id);
-CREATE INDEX idx_ops_status ON operations(status);
+CREATE INDEX idx_operations_resource ON operations(resource_type, resource_id);
+CREATE INDEX idx_operations_status ON operations(status) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_operations_created_at ON operations(created_at DESC);
+CREATE INDEX idx_operations_type ON operations(type);
+CREATE INDEX idx_operations_actor ON operations(actor_type, actor_id);
+CREATE INDEX idx_operation_logs_operation ON operation_logs(operation_id, created_at);
 
 -- Insert default roles
 INSERT INTO roles (name) VALUES 
