@@ -44,16 +44,48 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 	// Create VM ID early for operation tracking
 	vmID := uuidx.New()
 
+	// Validate name
+	if req.Name == "" {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "name is required")
+		return
+	}
+
+	// Validate image_id
+	if req.ImageID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "image_id is required")
+		return
+	}
+
+	imageID, err := uuidx.Parse(req.ImageID)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid image_id")
+		return
+	}
+
+	// Validate vCPU
+	if req.CPU <= 0 {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "vcpu must be greater than 0")
+		return
+	}
+	if req.CPU > 64 {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "vcpu exceeds maximum (64)")
+		return
+	}
+
+	// Validate memory
+	if req.MemoryMB <= 0 {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "memory must be greater than 0")
+		return
+	}
+	if req.MemoryMB > 524288 { // 512 GB
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "memory exceeds maximum (512GB)")
+		return
+	}
+
 	// Start operation tracking
 	op, _ := h.operations.Start(r.Context(), models.OpVMCreate, models.OpCategoryAsync,
 		"vm", &vmID, models.ActorTypeUser, userID, req)
-	
-	// Validate required fields
-	if req.Name == "" || req.ImageID == "" {
-		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "name and image_id are required")
-		return
-	}
-	
+
 	// Check if VM already exists
 	existing, err := h.store.GetVMByName(r.Context(), req.Name)
 	if err != nil {
@@ -64,14 +96,8 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusConflict, "ALREADY_EXISTS", "VM with this name already exists")
 		return
 	}
-	
+
 	// Validate image
-	imageID, err := uuidx.Parse(req.ImageID)
-	if err != nil {
-		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID", "Invalid image ID")
-		return
-	}
-	
 	image, err := h.store.GetImage(r.Context(), imageID)
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get image")
@@ -85,14 +111,8 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "IMAGE_NOT_READY", "Image is not ready")
 		return
 	}
-	
-	// Set defaults
-	if req.CPU == 0 {
-		req.CPU = 1
-	}
-	if req.MemoryMB == 0 {
-		req.MemoryMB = 1024
-	}
+
+	// Set defaults for optional fields
 	if req.DiskSize == 0 {
 		req.DiskSize = 10 * 1024 * 1024 * 1024 // 10GB default
 	}
