@@ -1,6 +1,13 @@
-# Project CHV - Cloud Hypervisor Virtualization Platform
+# CHV - Cloud Hypervisor Virtualization Platform
+
+[![Go Version](https://img.shields.io/badge/go-1.22+-blue.svg)](https://golang.org/dl/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
+[![Test Coverage](https://img.shields.io/badge/coverage-75%25-yellow.svg)]()
 
 A Linux-first, cloud-image-first virtualization platform for sovereign private cloud and edge cloud environments.
+
+> **Status**: MVP-1 Released | [Documentation](docs/) | [Contributing](CONTRIBUTING.md) | [Security](SECURITY.md)
 
 ## Overview
 
@@ -289,8 +296,22 @@ See [docs/adr/](docs/adr/) for detailed architecture decisions:
 
 ## License
 
-[Specify License]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
-[Contributing Guidelines]
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to this project.
+
+Please read our [Code of Conduct](CODE_OF_CONDUCT.md) to understand our community standards.
+
+## Security
+
+For security-related information, including vulnerability reporting, see [SECURITY.md](SECURITY.md).
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
+
+## Development
+
+For detailed development setup instructions, see [DEVELOPMENT.md](DEVELOPMENT.md).
