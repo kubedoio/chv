@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CHV Design System Preview</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --color-primary: #0066CC;
+            --color-success: #54B435;
+            --color-warning: #F0AB00;
+            --color-error: #E60000;
+            --color-bg-chrome: #F5F5F5;
+            --color-bg-content: #FFFFFF;
+            --color-border: #D0D0D0;
+            --color-text-primary: #1A1A1A;
+            --color-text-secondary: #666666;
+            --font-ui: 'Roboto', sans-serif;
+            --font-mono: 'Roboto Mono', monospace;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: var(--font-ui); font-size: 14px; color: var(--color-text-primary); background: var(--color-bg-chrome); }
+        .app { display: flex; height: 100vh; }
+        .sidebar { width: 240px; background: var(--color-bg-content); border-right: 1px solid var(--color-border); }
+        .main { flex: 1; display: flex; flex-direction: column; }
+        .btn { padding: 6px 16px; border: 1px solid var(--color-border); background: white; cursor: pointer; }
+        .btn-primary { background: var(--color-primary); color: white; border-color: var(--color-primary); }
+        .status::before { content: ""; width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .status-running::before { background: var(--color-success); }
+        .status-error::before { background: var(--color-error); }
+        .mono { font-family: var(--font-mono); font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <div style="padding: 16px; border-bottom: 1px solid var(--color-border)">
+                <h1 style="font-size: 18px; color: var(--color-primary)">CHV</h1>
+                <p style="font-size: 12px; color: var(--color-text-secondary)">Cloud Hypervisor Platform</p>
+            </div>
+        </aside>
+        <main class="main">
+            <div style="padding: 16px; background: white; border-bottom: 1px solid var(--color-border)">
+                <h2>CHV Design System Preview</h2>
+                <p style="color: var(--color-text-secondary)">VMware/Proxmox-style Enterprise Console</p>
+            </div>
+            <div style="padding: 24px">
+                <div style="background: white; border: 1px solid var(--color-border); padding: 24px; margin-bottom: 24px">
+                    <h3 style="margin-bottom: 16px">Status Indicators</h3>
+                    <p><span class="status status-running">Running</span></p>
+                    <p style="margin-top: 8px"><span class="status status-error">Error</span></p>
+                </div>
+                <div style="background: white; border: 1px solid var(--color-border); padding: 24px">
+                    <h3 style="margin-bottom: 16px">Monospace Data</h3>
+                    <p class="mono">vm-7f8a9b2c</p>
+                    <p class="mono">10.0.1.45</p>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

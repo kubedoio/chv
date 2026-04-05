@@ -1,0 +1,48 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+chv-controller
+chv-agent
+chv-bootstrap
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+coverage.out
+
+# Go
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Data directories (for local development)
+data/
+volumes/
+images/
+*.iso
+*.raw
+*.qcow2
+*.img
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak

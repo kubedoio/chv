@@ -1,0 +1,19 @@
+# CHV Controller Configuration
+
+# Database connection
+database_url: "postgres://chv:chv@postgres:5432/chv?sslmode=disable"
+
+# HTTP API address
+http_addr: ":8080"
+
+# gRPC address for agent communication
+grpc_addr: ":9090"
+
+# Logging level (debug, info, warn, error)
+log_level: "debug"
+
+# Reconciliation interval
+reconcile_interval: "30s"
+
+# Heartbeat timeout for nodes
+heartbeat_timeout: "2m"

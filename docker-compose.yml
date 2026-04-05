@@ -1,0 +1,92 @@
+services:
+  # PostgreSQL database for control plane
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: chv
+      POSTGRES_PASSWORD: chv
+      POSTGRES_DB: chv
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./configs/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chv -d chv"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # CHV Controller - API and control plane
+  controller:
+    build:
+      context: .
+      dockerfile: deploy/controller.Dockerfile
+    environment:
+      CHV_DATABASE_URL: postgres://chv:chv@postgres:5432/chv?sslmode=disable
+    # Note: PostgreSQL is exposed on host port 5433 to avoid conflicts
+      CHV_HTTP_ADDR: :8080
+      CHV_GRPC_ADDR: :9090
+      CHV_LOG_LEVEL: debug
+    ports:
+      - "8081:8080"
+      - "9092:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./configs/controller.yaml:/etc/chv/controller.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # CHV Agent - For E2E testing (runs in mock mode without KVM)
+  # Note: Real VM operations require privileged mode and /dev/kvm access
+  agent:
+    build:
+      context: .
+      dockerfile: deploy/agent.Dockerfile
+    environment:
+      CHV_NODE_ID: test-agent-01
+      CHV_CONTROLLER_ADDR: controller:9090
+      CHV_LISTEN_ADDR: :9091
+      CHV_DATA_DIR: /var/lib/chv
+      CHV_LOG_LEVEL: debug
+    ports:
+      # Agent gRPC exposed on host port 9093 (container uses 9091)
+      - "9093:9091"
+    depends_on:
+      controller:
+        condition: service_healthy
+    volumes:
+      - agent_data:/var/lib/chv
+    profiles:
+      - with-agent
+    # Uncomment for actual VM testing (requires KVM):
+    # privileged: true
+    # devices:
+    #   - /dev/kvm:/dev/kvm
+
+  # CHV Bootstrap Container - for node installation/upgrade
+  bootstrap:
+    build:
+      context: .
+      dockerfile: deploy/bootstrap.Dockerfile
+    privileged: true
+    environment:
+      CHV_CONTROLLER_ENDPOINT: controller:9090
+      CHV_LOG_LEVEL: debug
+    profiles:
+      - bootstrap
+    volumes:
+      - /var/run:/host/var/run
+      - /etc:/host/etc
+      - /opt:/host/opt
+      - /usr/local/bin:/host/usr/local/bin
+
+volumes:
+  postgres_data:
+  agent_data:

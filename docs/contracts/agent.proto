@@ -1,0 +1,208 @@
+syntax = "proto3";
+
+package chv.agent.v1;
+option go_package = "github.com/chv/chv/internal/pb/agent;agentpb";
+
+// Empty message for methods without request/response
+message Empty {}
+
+// Structured error details
+message ErrorDetail {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  string hint = 4;
+}
+
+// Node capability key-value pair
+message NodeCapability {
+  string key = 1;
+  string value = 2;
+}
+
+// Node status reported by agent
+message NodeStatus {
+  string node_id = 1;
+  string hostname = 2;
+  string state = 3;
+  uint32 total_cpu_cores = 4;
+  uint64 total_ram_mb = 5;
+  uint32 allocatable_cpu_cores = 6;
+  uint64 allocatable_ram_mb = 7;
+  repeated NodeCapability capabilities = 8;
+  string agent_version = 9;
+  string hypervisor_version = 10;
+  int64 last_heartbeat_unix = 11;
+}
+
+// Ping response
+message PingResponse {
+  bool ok = 1;
+  string version = 2;
+}
+
+// Bridge configuration request
+message EnsureBridgeRequest {
+  string bridge_name = 1;
+  uint32 mtu = 2;
+}
+
+// Image import request
+message ImageImportRequest {
+  string image_id = 1;
+  string source_url = 2;
+  string source_format = 3;       // qcow2, raw
+  string normalized_format = 4;   // raw
+  string checksum = 5;
+}
+
+// Volume create request
+message VolumeCreateRequest {
+  string volume_id = 1;
+  string pool_id = 2;
+  string pool_path = 3;
+  string format = 4;              // raw
+  uint64 size_bytes = 5;
+  string backing_image_id = 6;
+  string backing_image_path = 7;
+}
+
+// Volume resize request
+message VolumeResizeRequest {
+  string volume_id = 1;
+  string pool_path = 2;
+  uint64 new_size_bytes = 3;
+}
+
+// Network attachment specification
+message NetworkAttachment {
+  string network_id = 1;
+  string bridge_name = 2;
+  string mac_address = 3;
+  string ip_address = 4;
+  bool dhcp = 5;
+}
+
+// Disk attachment specification
+message DiskAttachment {
+  string volume_id = 1;
+  string path = 2;
+  string bus = 3;                 // virtio-blk, virtio-scsi
+  bool boot = 4;
+  bool readonly = 5;
+}
+
+// Boot specification
+message BootSpec {
+  string mode = 1;                // cloud_image, uefi, direct_kernel
+  string kernel_path = 2;
+  string initrd_path = 3;
+  string cmdline = 4;
+  string firmware_path = 5;
+}
+
+// Cloud-init configuration
+message CloudInitSpec {
+  string user_data = 1;
+  string meta_data = 2;
+  string network_config = 3;
+}
+
+// VM provisioning request
+message ProvisionVMRequest {
+  string vm_id = 1;
+  string vm_name = 2;
+  uint32 vcpu = 3;
+  uint64 memory_mb = 4;
+  BootSpec boot = 5;
+  repeated DiskAttachment disks = 6;
+  repeated NetworkAttachment networks = 7;
+  CloudInitSpec cloud_init = 8;
+}
+
+// VM state request/response
+message VMStateRequest {
+  string vm_id = 1;
+}
+
+message VMStateResponse {
+  string vm_id = 1;
+  string state = 2;
+  string pid = 3;
+  ErrorDetail error = 4;
+}
+
+// VM delete request
+message VMDeleteRequest {
+  string vm_id = 1;
+  bool delete_volumes = 2;
+  bool force = 3;
+}
+
+// Node validation response
+message NodeValidateResponse {
+  bool ok = 1;
+  repeated ErrorDetail errors = 2;
+  NodeCapability kvm = 3;
+  NodeCapability kernel = 4;
+  NodeCapability cloud_hypervisor = 5;
+}
+
+// Drain mode request
+message DrainRequest {
+  bool enable = 1;
+  bool force = 2;
+}
+
+message DrainResponse {
+  bool ok = 1;
+  repeated string active_vms = 2;
+  ErrorDetail error = 3;
+}
+
+// List VMs response
+message ListVMsResponse {
+  message VMInfo {
+    string vm_id = 1;
+    string state = 2;
+    string pid = 3;
+    uint32 vcpu = 4;
+    uint64 memory_mb = 5;
+  }
+  repeated VMInfo vms = 1;
+}
+
+// Agent service definition
+service AgentService {
+  // Health check
+  rpc Ping(Empty) returns (PingResponse);
+  
+  // Node status reporting
+  rpc ReportNodeStatus(Empty) returns (NodeStatus);
+  
+  // Node validation
+  rpc ValidateNode(Empty) returns (NodeValidateResponse);
+  
+  // Bridge management
+  rpc EnsureBridge(EnsureBridgeRequest) returns (NodeValidateResponse);
+  
+  // Image management
+  rpc ImportImage(ImageImportRequest) returns (NodeValidateResponse);
+  
+  // Volume management
+  rpc CreateVolume(VolumeCreateRequest) returns (NodeValidateResponse);
+  rpc ResizeVolume(VolumeResizeRequest) returns (NodeValidateResponse);
+  rpc DeleteVolume(VolumeCreateRequest) returns (NodeValidateResponse);
+  
+  // VM lifecycle
+  rpc ProvisionVM(ProvisionVMRequest) returns (VMStateResponse);
+  rpc StartVM(VMStateRequest) returns (VMStateResponse);
+  rpc StopVM(VMStateRequest) returns (VMStateResponse);
+  rpc RebootVM(VMStateRequest) returns (VMStateResponse);
+  rpc DeleteVM(VMDeleteRequest) returns (VMStateResponse);
+  rpc GetVMState(VMStateRequest) returns (VMStateResponse);
+  rpc ListHostVMs(Empty) returns (ListVMsResponse);
+  
+  // Maintenance
+  rpc PrepareDrain(DrainRequest) returns (DrainResponse);
+}
