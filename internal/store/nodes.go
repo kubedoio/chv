@@ -58,7 +58,7 @@ func createNode(ctx context.Context, q querier, node *models.Node) error {
 
 func getNode(ctx context.Context, q querier, id uuid.UUID) (*models.Node, error) {
 	sql := `
-		SELECT id, hostname, management_ip, status, maintenance_mode,
+		SELECT id, hostname, management_ip::text, status, maintenance_mode,
 			total_cpu_cores, total_ram_mb, allocatable_cpu_cores, allocatable_ram_mb,
 			labels, capabilities, agent_version, hypervisor_version,
 			last_heartbeat_at, created_at, updated_at
@@ -80,7 +80,7 @@ func getNode(ctx context.Context, q querier, id uuid.UUID) (*models.Node, error)
 
 func getNodeByHostname(ctx context.Context, q querier, hostname string) (*models.Node, error) {
 	sql := `
-		SELECT id, hostname, management_ip, status, maintenance_mode,
+		SELECT id, hostname, management_ip::text, status, maintenance_mode,
 			total_cpu_cores, total_ram_mb, allocatable_cpu_cores, allocatable_ram_mb,
 			labels, capabilities, agent_version, hypervisor_version,
 			last_heartbeat_at, created_at, updated_at
@@ -136,7 +136,7 @@ func updateNodeHeartbeat(ctx context.Context, q querier, id uuid.UUID, status mo
 
 func listNodes(ctx context.Context, q querier) ([]*models.Node, error) {
 	sql := `
-		SELECT id, hostname, management_ip, status, maintenance_mode,
+		SELECT id, hostname, management_ip::text, status, maintenance_mode,
 			total_cpu_cores, total_ram_mb, allocatable_cpu_cores, allocatable_ram_mb,
 			labels, capabilities, agent_version, hypervisor_version,
 			last_heartbeat_at, created_at, updated_at
