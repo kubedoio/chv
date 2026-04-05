@@ -55,7 +55,7 @@ func TestVMLifecycle_Full(t *testing.T) {
 		VCPU:        2,
 		MemoryMB:    2048,
 		DiskGB:      10,
-		ImageID:     "test-image-id",
+		ImageID:     "00000000-0000-0000-0000-000000000001",
 		NetworkIDs:  []string{netResp.ID},
 		UserData: `#cloud-config
 users:
@@ -134,7 +134,7 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 		VCPU:       1,
 		MemoryMB:   1024,
 		DiskGB:     5,
-		ImageID:    "test-image-id",
+		ImageID:    "00000000-0000-0000-0000-000000000001",
 		NetworkIDs: []string{netResp.ID},
 	})
 	if err != nil {
@@ -283,7 +283,7 @@ func TestConcurrentVMOperations(t *testing.T) {
 				VCPU:       1,
 				MemoryMB:   512,
 				DiskGB:     5,
-				ImageID:    "test-image-id",
+				ImageID:    "00000000-0000-0000-0000-000000000001",
 				NetworkIDs: []string{netResp.ID},
 			})
 			if err != nil {
