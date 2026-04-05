@@ -1,7 +1,7 @@
 services:
   # PostgreSQL database for control plane
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: chv
       POSTGRES_PASSWORD: chv
@@ -86,6 +86,19 @@ services:
       - /etc:/host/etc
       - /opt:/host/opt
       - /usr/local/bin:/host/usr/local/bin
+
+  # CHV Web UI - Vue.js frontend
+  ui:
+    build:
+      context: ./chv-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      controller:
+        condition: service_healthy
+    profiles:
+      - with-ui
 
 volumes:
   postgres_data:

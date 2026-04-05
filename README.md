@@ -1,6 +1,6 @@
 # CHV - Cloud Hypervisor Virtualization Platform
 
-[![Go Version](https://img.shields.io/badge/go-1.22+-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26+-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Test Coverage](https://img.shields.io/badge/coverage-75%25-yellow.svg)]()
@@ -174,6 +174,58 @@ Authorization: Bearer chv_...
 | POST | /api/v1/vms/{id}/resize-disk | Resize VM disk |
 | DELETE | /api/v1/vms/{id} | Delete VM |
 
+## Web UI
+
+CHV includes a Vue.js 3 web interface with an enterprise virtualization console design inspired by VMware vSphere and Proxmox VE.
+
+### Quick Start (UI)
+
+**Option 1: Development Server**
+```bash
+# Start the UI development server (requires Node.js 20+)
+make ui-dev
+```
+
+Then open http://localhost:5173
+
+**Option 2: Docker (Production Build)**
+```bash
+# Build and run the UI in Docker
+make ui-docker
+```
+
+Then open http://localhost:3000
+
+**Option 3: Full Stack with UI**
+```bash
+# Start controller, postgres, agent, and UI
+make docker-up-all
+```
+
+### UI Features
+
+- **Three-pane layout** (sidebar navigation, main content, details panel)
+- **VM lifecycle management** (create, start, stop, reboot, delete)
+- **Real-time status monitoring** with color-coded indicators
+- **Inventory management** for nodes, networks, storage pools, and images
+- **Responsive design** for desktop and tablet
+- **Enterprise aesthetic** - industrial, data-dense, functional
+
+### UI Architecture
+
+```
+chv-ui/
+├── src/
+│   ├── assets/         # Global styles and design tokens
+│   ├── components/     # Vue components
+│   ├── stores/         # Pinia state management
+│   ├── views/          # Page components
+│   ├── types/          # TypeScript type definitions
+│   └── router/         # Vue Router configuration
+├── public/             # Static assets
+└── package.json        # Dependencies
+```
+
 ## Project Structure
 
 ```
@@ -210,6 +262,10 @@ Authorization: Bearer chv_...
 │   ├── contracts/          # System contracts
 │   ├── adr/                # Architecture decisions
 │   └── architecture/       # Architecture docs
+├── chv-ui/                 # Vue.js 3 Web UI
+│   ├── src/
+│   ├── public/
+│   └── package.json
 ├── docker-compose.yml
 ├── Makefile
 └── README.md

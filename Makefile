@@ -1,7 +1,7 @@
 # CHV - Cloud Hypervisor Virtualization Platform
 # MVP-1 Build System
 
-.PHONY: all build clean test docker-up docker-down proto e2e
+.PHONY: all build clean test docker-up docker-down proto e2e ui-dev ui-build
 
 # Variables
 GO := go
@@ -144,6 +144,23 @@ init-dirs:
 	mkdir -p bin
 	mkdir -p deploy/bootstrap-container
 
+# UI Targets
+ui-dev:
+	@echo "Starting UI development server..."
+	cd chv-ui && npm install && npm run dev
+
+ui-build:
+	@echo "Building UI for production..."
+	cd chv-ui && npm install && npm run build
+
+ui-docker:
+	@echo "Building and running UI in Docker..."
+	$(DOCKER_COMPOSE) --profile with-ui up -d --build ui
+
+# Full stack with UI and agent
+docker-up-all:
+	$(DOCKER_COMPOSE) --profile with-agent --profile with-ui up -d --build
+
 # Full setup for new development environment
 setup: init-dirs deps proto build
 
@@ -182,4 +199,10 @@ help:
 	@echo "  clean            - Clean build artifacts"
 	@echo "  clean-all        - Clean everything including Docker"
 	@echo "  setup            - Full setup for new environment"
+	@echo ""
+	@echo "UI Targets:"
+	@echo "  ui-dev           - Start UI development server (port 5173)"
+	@echo "  ui-build         - Build UI for production"
+	@echo "  ui-docker        - Run UI in Docker (port 3000)"
+	@echo "  docker-up-all    - Start full stack (controller + postgres + agent + ui)"
 	@echo "  help             - Show this help"
