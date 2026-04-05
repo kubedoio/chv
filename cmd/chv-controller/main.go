@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,8 @@ type Config struct {
 	HTTPAddr    string `yaml:"http_addr" env:"CHV_HTTP_ADDR" default:":8080"`
 	GRPCAddr    string `yaml:"grpc_addr" env:"CHV_GRPC_ADDR" default:":9090"`
 	LogLevel    string `yaml:"log_level" env:"CHV_LOG_LEVEL" default:"info"`
+	CORSEnabled bool   `yaml:"cors_enabled" env:"CHV_CORS_ENABLED" default:"true"`
+	CORSOrigins string `yaml:"cors_origins" env:"CHV_CORS_ORIGINS" default:"http://localhost:3000,http://localhost:5173"`
 }
 
 func main() {
@@ -40,6 +43,8 @@ func main() {
 		HTTPAddr:    getEnv("CHV_HTTP_ADDR", ":8080"),
 		GRPCAddr:    getEnv("CHV_GRPC_ADDR", ":9090"),
 		LogLevel:    getEnv("CHV_LOG_LEVEL", "info"),
+		CORSEnabled: getEnv("CHV_CORS_ENABLED", "true") == "true",
+		CORSOrigins: getEnv("CHV_CORS_ORIGINS", "http://localhost:3000,http://localhost:5173"),
 	}
 
 	if *configPath != "" {
@@ -74,6 +79,14 @@ func main() {
 	// Create HTTP router
 	router := chi.NewRouter()
 	apiHandler := api.NewHandler(db, authService, schedulerService, reconciler)
+	
+	// Configure CORS
+	corsConfig := api.CORSConfig{
+		Enabled:        cfg.CORSEnabled,
+		AllowedOrigins: parseOrigins(cfg.CORSOrigins),
+	}
+	apiHandler.SetCORSConfig(corsConfig)
+	
 	apiHandler.RegisterRoutes(router)
 
 	// Create gRPC server
@@ -134,4 +147,18 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func parseOrigins(origins string) []string {
+	if origins == "" {
+		return []string{"http://localhost:3000", "http://localhost:5173"}
+	}
+	result := []string{}
+	for _, o := range strings.Split(origins, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			result = append(result, o)
+		}
+	}
+	return result
 }
