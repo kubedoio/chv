@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -29,10 +28,6 @@ type Config struct {
 	HTTPAddr    string `yaml:"http_addr" env:"CHV_HTTP_ADDR" default:":8080"`
 	GRPCAddr    string `yaml:"grpc_addr" env:"CHV_GRPC_ADDR" default:":9090"`
 	LogLevel    string `yaml:"log_level" env:"CHV_LOG_LEVEL" default:"info"`
-	CORS        struct {
-		Enabled        bool     `yaml:"enabled" env:"CHV_CORS_ENABLED"`
-		AllowedOrigins []string `yaml:"allowed_origins" env:"CHV_CORS_ORIGINS"`
-	} `yaml:"cors"`
 }
 
 func main() {
@@ -46,8 +41,6 @@ func main() {
 		GRPCAddr:    getEnv("CHV_GRPC_ADDR", ":9090"),
 		LogLevel:    getEnv("CHV_LOG_LEVEL", "info"),
 	}
-	cfg.CORS.Enabled = getEnvBool("CHV_CORS_ENABLED", true)
-	cfg.CORS.AllowedOrigins = getEnvStringSlice("CHV_CORS_ORIGINS", nil)
 
 	if *configPath != "" {
 		// Load from file if provided
@@ -81,10 +74,6 @@ func main() {
 	// Create HTTP router
 	router := chi.NewRouter()
 	apiHandler := api.NewHandler(db, authService, schedulerService, reconciler)
-	apiHandler.SetCORSConfig(api.CORSConfig{
-		Enabled:        cfg.CORS.Enabled,
-		AllowedOrigins: cfg.CORS.AllowedOrigins,
-	})
 	apiHandler.RegisterRoutes(router)
 
 	// Create gRPC server
@@ -143,20 +132,6 @@ func main() {
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
-	}
-	return defaultValue
-}
-
-func getEnvBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		return strings.ToLower(value) == "true" || value == "1"
-	}
-	return defaultValue
-}
-
-func getEnvStringSlice(key string, defaultValue []string) []string {
-	if value := os.Getenv(key); value != "" {
-		return strings.Split(value, ",")
 	}
 	return defaultValue
 }

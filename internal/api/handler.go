@@ -12,14 +12,7 @@ import (
 	"github.com/chv/chv/internal/store"
 	"github.com/chv/chv/internal/worker"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/cors"
 )
-
-// CORSConfig holds CORS configuration
-type CORSConfig struct {
-	Enabled        bool
-	AllowedOrigins []string
-}
 
 // Handler holds API handlers.
 type Handler struct {
@@ -30,7 +23,6 @@ type Handler struct {
 	imageImportWorker  *worker.ImageImportWorker
 	operations         *operations.Service
 	consoleSessions    *hypervisor.SessionManager
-	corsConfig         CORSConfig
 }
 
 // NewHandler creates a new API handler.
@@ -50,32 +42,8 @@ func (h *Handler) SetImageImportWorker(w *worker.ImageImportWorker) {
 	h.imageImportWorker = w
 }
 
-// SetCORSConfig sets the CORS configuration.
-func (h *Handler) SetCORSConfig(config CORSConfig) {
-	h.corsConfig = config
-}
-
-// getAllowedOrigins returns allowed origins with defaults.
-func (h *Handler) getAllowedOrigins() []string {
-	if len(h.corsConfig.AllowedOrigins) > 0 {
-		return h.corsConfig.AllowedOrigins
-	}
-	return []string{"http://localhost:3000", "http://localhost:5173"}
-}
-
 // RegisterRoutes registers all API routes.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	// Add CORS middleware if enabled
-	if h.corsConfig.Enabled {
-		r.Use(cors.Handler(cors.Options{
-			AllowedOrigins:   h.getAllowedOrigins(),
-			AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Authorization", "Content-Type"},
-			AllowCredentials: true,
-			MaxAge:           300,
-		}))
-	}
-
 	// Health and metrics (public)
 	r.Get("/health", h.healthCheck)
 	r.Get("/metrics", h.metrics)
