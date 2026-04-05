@@ -19,6 +19,9 @@ FROM nginx:alpine
 # Copy built files from builder
 COPY --from=builder /app/dist /usr/share/nginx/html
 
+# Copy runtime env config
+COPY public/env.js /usr/share/nginx/html/env.js
+
 # Copy nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
