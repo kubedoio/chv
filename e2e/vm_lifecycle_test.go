@@ -26,11 +26,12 @@ func TestVMLifecycle_Full(t *testing.T) {
 	}
 	t.Logf("Imported image: %s", imageID)
 	
-	// Create a network first
+	// Create a network first (use unique name to avoid conflicts)
 	t.Log("Creating network...")
+	netName := fmt.Sprintf("test-net-%d", time.Now().Unix())
 	netReq := &CreateNetworkRequest{
-		Name:       "test-network",
-		BridgeName: "br-test",
+		Name:       netName,
+		BridgeName: fmt.Sprintf("br-test-%d", time.Now().Unix()),
 		CIDR:       "10.100.0.0/24",
 		GatewayIP:  "10.100.0.1",
 	}
@@ -43,7 +44,7 @@ func TestVMLifecycle_Full(t *testing.T) {
 	// Register a mock node (simulating an agent)
 	t.Log("Creating node...")
 	nodeReq := &CreateNodeRequest{
-		Hostname:      "test-node-01",
+		Hostname:      fmt.Sprintf("test-node-%d", time.Now().Unix()),
 		ManagementIP:  "172.20.0.10",
 		TotalCPUCores: 8,
 		TotalRAMMB:    16384,
@@ -120,10 +121,10 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 	}
 	t.Logf("Imported image: %s", imageID)
 	
-	// Create network
+	// Create network (use unique name to avoid conflicts)
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
-		Name:       "test-net-startstop",
-		BridgeName: "br-test2",
+		Name:       fmt.Sprintf("test-net-startstop-%d", time.Now().Unix()),
+		BridgeName: fmt.Sprintf("br-test2-%d", time.Now().Unix()),
 		CIDR:       "10.101.0.0/24",
 		GatewayIP:  "10.101.0.1",
 	})
@@ -133,7 +134,7 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 	
 	// Create node
 	nodeResp, err := h.CreateNode(&CreateNodeRequest{
-		Hostname:      "test-node-startstop",
+		Hostname:      fmt.Sprintf("test-node-startstop-%d", time.Now().Unix()),
 		ManagementIP:  "172.20.0.11",
 		TotalCPUCores: 4,
 		TotalRAMMB:    8192,
@@ -281,10 +282,10 @@ func TestConcurrentVMOperations(t *testing.T) {
 	}
 	t.Logf("Imported image: %s", imageID)
 	
-	// Create network
+	// Create network (use unique name to avoid conflicts)
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
-		Name:       "test-net-concurrent",
-		BridgeName: "br-test3",
+		Name:       fmt.Sprintf("test-net-concurrent-%d", time.Now().Unix()),
+		BridgeName: fmt.Sprintf("br-test3-%d", time.Now().Unix()),
 		CIDR:       "10.102.0.0/24",
 		GatewayIP:  "10.102.0.1",
 	})
