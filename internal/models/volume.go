@@ -38,7 +38,7 @@ const (
 type Volume struct {
 	ID               uuid.UUID             `json:"id" db:"id"`
 	VMID             *uuid.UUID            `json:"vm_id" db:"vm_id"`
-	PoolID           uuid.UUID             `json:"pool_id" db:"pool_id"`
+	PoolID           *uuid.UUID            `json:"pool_id" db:"pool_id"`
 	BackingImageID   *uuid.UUID            `json:"backing_image_id" db:"backing_image_id"`
 	Format           VolumeFormat          `json:"format" db:"format"`
 	SizeBytes        int64                 `json:"size_bytes" db:"size_bytes"`

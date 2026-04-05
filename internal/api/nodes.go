@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/chv/chv/internal/models"
 	"github.com/chv/chv/pkg/uuidx"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // NodeRequest represents a node registration request.
@@ -28,10 +30,43 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 		return
 	}
+
+	// Get actor info for audit trail (node or user)
+	actorID, _ := r.Context().Value("node_id").(string)
+	actorType := models.ActorTypeSystem
+	if actorID == "" {
+		actorID, _ = r.Context().Value("user_id").(string)
+		actorType = models.ActorTypeUser
+		if actorID == "" {
+			actorID = "system"
+		}
+	}
 	
 	// Validate required fields
-	if req.Hostname == "" || req.ManagementIP == "" {
-		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "hostname and management_ip are required")
+	if req.Hostname == "" {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "hostname is required")
+		return
+	}
+	if req.ManagementIP == "" {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "management_ip is required")
+		return
+	}
+	
+	// Validate IP address format
+	if net.ParseIP(req.ManagementIP) == nil {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid IP address")
+		return
+	}
+	
+	// Validate CPU
+	if req.TotalCPUCores <= 0 {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "total_cpu_cores must be greater than 0")
+		return
+	}
+	
+	// Validate RAM
+	if req.TotalRAMMB <= 0 {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "total_ram_mb must be greater than 0")
 		return
 	}
 	
@@ -41,35 +76,20 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to check existing node")
 		return
 	}
+
+	var opID *uuid.UUID
+	nodeID := uuidx.New()
 	
 	if existing != nil {
-		// Update existing node
-		existing.ManagementIP = req.ManagementIP
-		existing.TotalCPUcores = req.TotalCPUCores
-		existing.TotalRAMMB = req.TotalRAMMB
-		existing.AllocatableCPUCores = req.TotalCPUCores
-		existing.AllocatableRAMMB = req.TotalRAMMB
-		existing.AgentVersion = req.AgentVersion
-		existing.HypervisorVersion = req.HypervisorVersion
-		existing.Status = models.NodeStateOnline
-		now := time.Now()
-		existing.LastHeartbeatAt = &now
-		
-		if labels, err := json.Marshal(req.Labels); err == nil {
-			existing.Labels = labels
-		}
-		if caps, err := json.Marshal(req.Capabilities); err == nil {
-			existing.Capabilities = caps
-		}
-		
-		if err := h.store.UpdateNode(r.Context(), existing); err != nil {
-			h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update node")
-			return
-		}
-		
-		h.jsonResponse(w, http.StatusOK, existing)
+		// Return error for duplicate hostname on initial registration
+		h.errorResponse(w, http.StatusConflict, "DUPLICATE_HOSTNAME", "Hostname already exists")
 		return
 	}
+
+	// Start operation tracking for create
+	op, _ := h.operations.Start(r.Context(), models.OpNodeRegister, models.OpCategorySync,
+		"node", &nodeID, actorType, actorID, req)
+	opID = &op.ID
 	
 	// Create new node
 	labelsJSON, _ := json.Marshal(req.Labels)
@@ -77,7 +97,7 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	
 	node := &models.Node{
-		ID:                  uuidx.New(),
+		ID:                  nodeID,
 		Hostname:            req.Hostname,
 		ManagementIP:        req.ManagementIP,
 		Status:              models.NodeStateOnline,
@@ -96,10 +116,12 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err := h.store.CreateNode(r.Context(), node); err != nil {
+		h.operations.Fail(r.Context(), *opID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create node")
 		return
 	}
-	
+
+	h.operations.Complete(r.Context(), *opID, node)
 	h.jsonResponse(w, http.StatusCreated, node)
 }
 
@@ -147,14 +169,25 @@ func (h *Handler) setNodeMaintenance(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID", "Invalid node ID")
 		return
 	}
-	
+
 	var req MaintenanceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 		return
 	}
-	
+
+	// Get user ID for audit trail
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	// Start operation tracking
+	op, _ := h.operations.Start(r.Context(), models.OpNodeRegister, models.OpCategorySync,
+		"node", &nodeID, models.ActorTypeUser, userID, req)
+
 	if err := h.store.SetNodeMaintenance(r.Context(), nodeID, req.Enabled); err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to set maintenance mode")
 		return
 	}
@@ -162,9 +195,11 @@ func (h *Handler) setNodeMaintenance(w http.ResponseWriter, r *http.Request) {
 	// Get updated node
 	node, err := h.store.GetNode(r.Context(), nodeID)
 	if err != nil {
+		h.operations.Fail(r.Context(), op.ID, err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get node")
 		return
 	}
-	
+
+	h.operations.Complete(r.Context(), op.ID, node)
 	h.jsonResponse(w, http.StatusOK, node)
 }

@@ -1,0 +1,1375 @@
+basePath: /
+definitions:
+  api.CreateTokenRequest:
+    properties:
+      expires_in:
+        description: Duration string, e.g., "24h"
+        type: string
+      name:
+        type: string
+      role_id:
+        type: string
+    type: object
+  api.CreateTokenResponse:
+    properties:
+      created_at:
+        type: string
+      expires_at:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      token:
+        type: string
+    type: object
+  api.ErrorResponse:
+    properties:
+      code:
+        type: string
+      message:
+        type: string
+    type: object
+  api.ImageImportRequest:
+    properties:
+      architecture:
+        type: string
+      checksum:
+        type: string
+      cloud_init_supported:
+        type: boolean
+      default_username:
+        type: string
+      name:
+        type: string
+      os_family:
+        type: string
+      source_format:
+        type: string
+      source_url:
+        type: string
+    type: object
+  api.MaintenanceRequest:
+    properties:
+      enabled:
+        type: boolean
+    type: object
+  api.Metrics:
+    properties:
+      images:
+        description: Image Stats
+        properties:
+          failed:
+            type: integer
+          importing:
+            type: integer
+          ready:
+            type: integer
+          total:
+            type: integer
+        type: object
+      nodes:
+        description: Node Stats
+        properties:
+          offline:
+            type: integer
+          online:
+            type: integer
+          total:
+            type: integer
+        type: object
+      system:
+        description: System Stats
+        properties:
+          go_version:
+            type: string
+          goroutines:
+            type: integer
+          memory_mb:
+            type: integer
+          uptime:
+            type: string
+        type: object
+      timestamp:
+        type: string
+      vms:
+        description: VM Stats
+        properties:
+          error:
+            type: integer
+          provisioning:
+            type: integer
+          running:
+            type: integer
+          stopped:
+            type: integer
+          total:
+            type: integer
+        type: object
+    type: object
+  api.NetworkCreateRequest:
+    properties:
+      bridge_name:
+        type: string
+      cidr:
+        type: string
+      dns_servers:
+        items:
+          type: string
+        type: array
+      gateway_ip:
+        type: string
+      mtu:
+        type: integer
+      name:
+        type: string
+    type: object
+  api.NodeRequest:
+    properties:
+      agent_version:
+        type: string
+      capabilities:
+        additionalProperties:
+          type: string
+        type: object
+      hostname:
+        type: string
+      hypervisor_version:
+        type: string
+      labels:
+        additionalProperties:
+          type: string
+        type: object
+      management_ip:
+        type: string
+      total_cpu_cores:
+        type: integer
+      total_ram_mb:
+        type: integer
+    type: object
+  api.ResizeDiskRequest:
+    properties:
+      new_size_bytes:
+        type: integer
+    type: object
+  api.StoragePoolCreateRequest:
+    properties:
+      name:
+        type: string
+      node_id:
+        type: string
+      path_or_export:
+        type: string
+      pool_type:
+        type: string
+      supports_online_resize:
+        type: boolean
+    type: object
+  api.SwagImage:
+    properties:
+      architecture:
+        type: string
+      checksum:
+        type: string
+      cloud_init_supported:
+        type: boolean
+      created_at:
+        type: string
+      default_username:
+        type: string
+      id:
+        type: string
+      imported_at:
+        type: string
+      metadata:
+        additionalProperties: true
+        type: object
+      name:
+        type: string
+      normalized_format:
+        type: string
+      os_family:
+        type: string
+      size_bytes:
+        type: integer
+      source_format:
+        type: string
+      status:
+        type: string
+    type: object
+  api.SwagNetwork:
+    properties:
+      bridge_name:
+        type: string
+      cidr:
+        type: string
+      created_at:
+        type: string
+      dns_servers:
+        items:
+          type: string
+        type: array
+      gateway_ip:
+        type: string
+      id:
+        type: string
+      mode:
+        type: string
+      mtu:
+        type: integer
+      name:
+        type: string
+      status:
+        type: string
+    type: object
+  api.SwagNode:
+    properties:
+      agent_version:
+        type: string
+      allocatable_cpu_cores:
+        type: integer
+      allocatable_ram_mb:
+        type: integer
+      capabilities:
+        additionalProperties:
+          type: string
+        type: object
+      created_at:
+        type: string
+      hostname:
+        type: string
+      hypervisor_version:
+        type: string
+      id:
+        type: string
+      labels:
+        additionalProperties:
+          type: string
+        type: object
+      last_heartbeat_at:
+        type: string
+      maintenance_mode:
+        type: boolean
+      management_ip:
+        type: string
+      status:
+        type: string
+      total_cpu_cores:
+        type: integer
+      total_ram_mb:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  api.SwagOperation:
+    properties:
+      actor_id:
+        type: string
+      actor_type:
+        type: string
+      category:
+        type: string
+      completed_at:
+        type: string
+      error_message:
+        type: string
+      id:
+        type: string
+      input:
+        additionalProperties: true
+        type: object
+      node_id:
+        type: string
+      operation_type:
+        type: string
+      output:
+        additionalProperties: true
+        type: object
+      resource_id:
+        type: string
+      resource_type:
+        type: string
+      started_at:
+        type: string
+      status:
+        type: string
+    type: object
+  api.SwagOperationLog:
+    properties:
+      id:
+        type: string
+      level:
+        type: string
+      message:
+        type: string
+      metadata:
+        additionalProperties: true
+        type: object
+      operation_id:
+        type: string
+      timestamp:
+        type: string
+    type: object
+  api.SwagStoragePool:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      node_id:
+        type: string
+      path_or_export:
+        type: string
+      pool_type:
+        type: string
+      status:
+        type: string
+      supports_clone:
+        type: boolean
+      supports_online_resize:
+        type: boolean
+      supports_snapshot:
+        type: boolean
+    type: object
+  api.SwagVirtualMachine:
+    properties:
+      actual_state:
+        type: string
+      created_at:
+        type: string
+      desired_state:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      node_id:
+        type: string
+      placement_status:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  api.SwagVolume:
+    properties:
+      attachment_state:
+        type: string
+      backing_image_id:
+        type: string
+      created_at:
+        type: string
+      format:
+        type: string
+      id:
+        type: string
+      resize_state:
+        type: string
+      size_bytes:
+        type: integer
+      storage_pool_id:
+        type: string
+      vm_id:
+        type: string
+    type: object
+  api.VMCreateRequest:
+    properties:
+      cloud_init:
+        $ref: '#/definitions/models.CloudInitSpec'
+      cpu:
+        type: integer
+      disk_size_bytes:
+        type: integer
+      image_id:
+        type: string
+      memory_mb:
+        type: integer
+      name:
+        type: string
+      networks:
+        items:
+          $ref: '#/definitions/api.VMNetworkRequest'
+        type: array
+    type: object
+  api.VMNetworkRequest:
+    properties:
+      network_id:
+        type: string
+    type: object
+  models.CloudInitSpec:
+    properties:
+      meta_data:
+        type: string
+      network_config:
+        type: string
+      user_data:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@chv.io
+    name: API Support
+  description: Cloud Hypervisor Virtualization Platform API
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://swagger.io/terms/
+  title: CHV API
+  version: "1.0"
+paths:
+  /api/v1/images:
+    get:
+      description: Returns a list of all VM images
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SwagImage'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List all images
+      tags:
+      - images
+  /api/v1/images/{id}:
+    get:
+      description: Returns details for a specific VM image
+      parameters:
+      - description: Image ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagImage'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get an image by ID
+      tags:
+      - images
+  /api/v1/images/import:
+    post:
+      consumes:
+      - application/json
+      description: Imports a new VM image from a source URL
+      parameters:
+      - description: Image import info
+        in: body
+        name: image
+        required: true
+        schema:
+          $ref: '#/definitions/api.ImageImportRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.SwagImage'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Import an image
+      tags:
+      - images
+  /api/v1/networks:
+    get:
+      description: Returns a list of all virtual networks
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SwagNetwork'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List all networks
+      tags:
+      - networks
+    post:
+      consumes:
+      - application/json
+      description: Creates a new virtual network
+      parameters:
+      - description: Network to create
+        in: body
+        name: network
+        required: true
+        schema:
+          $ref: '#/definitions/api.NetworkCreateRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.SwagNetwork'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a network
+      tags:
+      - networks
+  /api/v1/networks/{id}:
+    get:
+      description: Returns details for a specific virtual network
+      parameters:
+      - description: Network ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagNetwork'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a network by ID
+      tags:
+      - networks
+  /api/v1/nodes:
+    get:
+      description: Returns a list of all compute nodes
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SwagNode'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List all nodes
+      tags:
+      - nodes
+  /api/v1/nodes/{id}:
+    get:
+      description: Returns details for a specific compute node
+      parameters:
+      - description: Node ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagNode'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a node by ID
+      tags:
+      - nodes
+  /api/v1/nodes/{id}/maintenance:
+    post:
+      consumes:
+      - application/json
+      description: Enables or disables maintenance mode for a node
+      parameters:
+      - description: Node ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Maintenance request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.MaintenanceRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagNode'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Set node maintenance mode
+      tags:
+      - nodes
+  /api/v1/nodes/register:
+    post:
+      consumes:
+      - application/json
+      description: Registers a new compute node or updates an existing one
+      parameters:
+      - description: Node registration info
+        in: body
+        name: node
+        required: true
+        schema:
+          $ref: '#/definitions/api.NodeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagNode'
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.SwagNode'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Register a node
+      tags:
+      - nodes
+  /api/v1/operations:
+    get:
+      description: Returns a list of operations with optional filtering
+      parameters:
+      - description: Filter by resource type
+        in: query
+        name: resource_type
+        type: string
+      - description: Filter by status
+        in: query
+        name: status
+        type: string
+      - description: Filter by operation type
+        in: query
+        name: operation_type
+        type: string
+      - description: Filter by resource ID
+        in: query
+        name: resource_id
+        type: string
+      - description: Filter by node ID
+        in: query
+        name: node_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SwagOperation'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List operations
+      tags:
+      - operations
+  /api/v1/operations/{id}:
+    get:
+      description: Returns details for a specific operation
+      parameters:
+      - description: Operation ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagOperation'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get an operation by ID
+      tags:
+      - operations
+  /api/v1/operations/{id}/logs:
+    get:
+      description: Returns logs for a specific operation
+      parameters:
+      - description: Operation ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SwagOperationLog'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get operation logs
+      tags:
+      - operations
+  /api/v1/storage-pools:
+    get:
+      description: Returns a list of all storage pools
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SwagStoragePool'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List all storage pools
+      tags:
+      - storage
+    post:
+      consumes:
+      - application/json
+      description: Creates a new storage pool
+      parameters:
+      - description: Storage pool to create
+        in: body
+        name: pool
+        required: true
+        schema:
+          $ref: '#/definitions/api.StoragePoolCreateRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.SwagStoragePool'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a storage pool
+      tags:
+      - storage
+  /api/v1/storage-pools/{id}:
+    get:
+      description: Returns details for a specific storage pool
+      parameters:
+      - description: Storage Pool ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagStoragePool'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a storage pool by ID
+      tags:
+      - storage
+  /api/v1/tokens:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new API authentication token
+      parameters:
+      - description: Token creation info
+        in: body
+        name: token
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateTokenRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.CreateTokenResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Create an API token
+      tags:
+      - auth
+  /api/v1/vms:
+    get:
+      description: Returns a list of all virtual machines
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SwagVirtualMachine'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List all VMs
+      tags:
+      - vms
+    post:
+      consumes:
+      - application/json
+      description: Creates a VM and schedules it on a node
+      parameters:
+      - description: VM to create
+        in: body
+        name: vm
+        required: true
+        schema:
+          $ref: '#/definitions/api.VMCreateRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.SwagVirtualMachine'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a new VM
+      tags:
+      - vms
+  /api/v1/vms/{id}:
+    delete:
+      description: Deletes a virtual machine
+      parameters:
+      - description: VM ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a VM
+      tags:
+      - vms
+    get:
+      description: Returns details for a specific virtual machine
+      parameters:
+      - description: VM ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagVirtualMachine'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a VM by ID
+      tags:
+      - vms
+  /api/v1/vms/{id}/console:
+    get:
+      description: Establishes a WebSocket connection for VM console access
+      parameters:
+      - description: VM ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Authentication token
+        in: query
+        name: token
+        required: true
+        type: string
+      responses:
+        "101":
+          description: Switching Protocols
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "429":
+          description: Too Many Requests
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: VM console (WebSocket)
+      tags:
+      - vms
+  /api/v1/vms/{id}/reboot:
+    post:
+      description: Reboots a running virtual machine
+      parameters:
+      - description: VM ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagVirtualMachine'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Reboot a VM
+      tags:
+      - vms
+  /api/v1/vms/{id}/resize-disk:
+    post:
+      consumes:
+      - application/json
+      description: Resizes the disk of a virtual machine
+      parameters:
+      - description: VM ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Resize request
+        in: body
+        name: size
+        required: true
+        schema:
+          $ref: '#/definitions/api.ResizeDiskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagVolume'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Resize VM disk
+      tags:
+      - vms
+  /api/v1/vms/{id}/start:
+    post:
+      description: Starts a stopped virtual machine
+      parameters:
+      - description: VM ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagVirtualMachine'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Start a VM
+      tags:
+      - vms
+  /api/v1/vms/{id}/stop:
+    post:
+      description: Stops a running virtual machine
+      parameters:
+      - description: VM ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SwagVirtualMachine'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Stop a VM
+      tags:
+      - vms
+  /health:
+    get:
+      description: Returns the health status of the API
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Health check
+      tags:
+      - system
+  /metrics:
+    get:
+      description: Returns system metrics including VM, node, and image statistics
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Metrics'
+      summary: Get metrics
+      tags:
+      - system
+securityDefinitions:
+  BearerAuth:
+    description: Type "Bearer" followed by a space and the token
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

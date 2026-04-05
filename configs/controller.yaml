@@ -17,3 +17,10 @@ reconcile_interval: "30s"
 
 # Heartbeat timeout for nodes
 heartbeat_timeout: "2m"
+
+# CORS configuration
+cors:
+  enabled: true
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://localhost:5173"

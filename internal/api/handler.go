@@ -5,12 +5,24 @@ import (
 	"net/http"
 
 	"github.com/chv/chv/internal/auth"
+	"github.com/chv/chv/internal/hypervisor"
+	"github.com/chv/chv/internal/operations"
 	"github.com/chv/chv/internal/reconcile"
 	"github.com/chv/chv/internal/scheduler"
 	"github.com/chv/chv/internal/store"
 	"github.com/chv/chv/internal/worker"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/cors"
+	httpSwagger "github.com/swaggo/http-swagger"
+
+	_ "github.com/chv/chv/docs"
 )
+
+// CORSConfig holds CORS configuration
+type CORSConfig struct {
+	Enabled        bool
+	AllowedOrigins []string
+}
 
 // Handler holds API handlers.
 type Handler struct {
@@ -19,15 +31,20 @@ type Handler struct {
 	scheduler          *scheduler.Service
 	reconciler         *reconcile.Service
 	imageImportWorker  *worker.ImageImportWorker
+	operations         *operations.Service
+	consoleSessions    *hypervisor.SessionManager
+	corsConfig         CORSConfig
 }
 
 // NewHandler creates a new API handler.
 func NewHandler(store store.Store, auth *auth.Service, scheduler *scheduler.Service, reconciler *reconcile.Service) *Handler {
 	return &Handler{
-		store:      store,
-		auth:       auth,
-		scheduler:  scheduler,
-		reconciler: reconciler,
+		store:           store,
+		auth:            auth,
+		scheduler:       scheduler,
+		reconciler:      reconciler,
+		operations:      operations.NewService(store),
+		consoleSessions: hypervisor.NewSessionManager(),
 	}
 }
 
@@ -36,8 +53,37 @@ func (h *Handler) SetImageImportWorker(w *worker.ImageImportWorker) {
 	h.imageImportWorker = w
 }
 
+// SetCORSConfig sets the CORS configuration.
+func (h *Handler) SetCORSConfig(config CORSConfig) {
+	h.corsConfig = config
+}
+
+// getAllowedOrigins returns allowed origins with defaults.
+func (h *Handler) getAllowedOrigins() []string {
+	if len(h.corsConfig.AllowedOrigins) > 0 {
+		return h.corsConfig.AllowedOrigins
+	}
+	return []string{"http://localhost:3000", "http://localhost:5173"}
+}
+
 // RegisterRoutes registers all API routes.
 func (h *Handler) RegisterRoutes(r chi.Router) {
+	// Add CORS middleware if enabled
+	if h.corsConfig.Enabled {
+		r.Use(cors.Handler(cors.Options{
+			AllowedOrigins:   h.getAllowedOrigins(),
+			AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+			AllowedHeaders:   []string{"Authorization", "Content-Type"},
+			AllowCredentials: true,
+			MaxAge:           300,
+		}))
+	}
+
+	// Swagger documentation
+	r.Get("/swagger/*", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"),
+	))
+
 	// Health and metrics (public)
 	r.Get("/health", h.healthCheck)
 	r.Get("/metrics", h.metrics)
@@ -81,6 +127,14 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 			r.Post("/vms/{id}/reboot", h.rebootVM)
 			r.Post("/vms/{id}/resize-disk", h.resizeDisk)
 			r.Delete("/vms/{id}", h.deleteVM)
+
+			// VM Console
+			r.Get("/vms/{id}/console", h.vmConsole)
+
+			// Operations
+			r.Get("/operations", h.listOperations)
+			r.Get("/operations/{id}", h.getOperation)
+			r.Get("/operations/{id}/logs", h.getOperationLogs)
 		})
 	})
 }

@@ -18,11 +18,22 @@ func TestVMLifecycle_Full(t *testing.T) {
 	}
 	t.Log("Controller is ready")
 	
-	// Create a network first
+	// Import Cirros test image first
+	t.Log("Importing test image...")
+	imageID, err := h.ImportCirrosImage()
+	if err != nil {
+		t.Fatalf("Failed to import test image: %v", err)
+	}
+	t.Logf("Imported image: %s", imageID)
+	
+	// Create a network first (use unique name to avoid conflicts)
 	t.Log("Creating network...")
+	netName := fmt.Sprintf("test-net-%d", time.Now().Unix())
 	netReq := &CreateNetworkRequest{
-		Name: "test-network",
-		CIDR: "10.100.0.0/24",
+		Name:       netName,
+		BridgeName: fmt.Sprintf("br-test-%d", time.Now().Unix()),
+		CIDR:       "10.100.0.0/24",
+		GatewayIP:  "10.100.0.1",
 	}
 	netResp, err := h.CreateNetwork(netReq)
 	if err != nil {
@@ -33,7 +44,7 @@ func TestVMLifecycle_Full(t *testing.T) {
 	// Register a mock node (simulating an agent)
 	t.Log("Creating node...")
 	nodeReq := &CreateNodeRequest{
-		Hostname:      "test-node-01",
+		Hostname:      fmt.Sprintf("test-node-%d", time.Now().Unix()),
 		ManagementIP:  "172.20.0.10",
 		TotalCPUCores: 8,
 		TotalRAMMB:    16384,
@@ -53,6 +64,7 @@ func TestVMLifecycle_Full(t *testing.T) {
 		VCPU:        2,
 		MemoryMB:    2048,
 		DiskGB:      10,
+		ImageID:     imageID,
 		NetworkIDs:  []string{netResp.ID},
 		UserData: `#cloud-config
 users:
@@ -102,10 +114,19 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 		t.Skipf("Controller not ready: %v", err)
 	}
 	
-	// Create network
+	// Import test image
+	imageID, err := h.ImportCirrosImage()
+	if err != nil {
+		t.Fatalf("Failed to import test image: %v", err)
+	}
+	t.Logf("Imported image: %s", imageID)
+	
+	// Create network (use unique name to avoid conflicts)
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
-		Name: "test-net-startstop",
-		CIDR: "10.101.0.0/24",
+		Name:       fmt.Sprintf("test-net-startstop-%d", time.Now().Unix()),
+		BridgeName: fmt.Sprintf("br-test2-%d", time.Now().Unix()),
+		CIDR:       "10.101.0.0/24",
+		GatewayIP:  "10.101.0.1",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create network: %v", err)
@@ -113,7 +134,7 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 	
 	// Create node
 	nodeResp, err := h.CreateNode(&CreateNodeRequest{
-		Hostname:      "test-node-startstop",
+		Hostname:      fmt.Sprintf("test-node-startstop-%d", time.Now().Unix()),
 		ManagementIP:  "172.20.0.11",
 		TotalCPUCores: 4,
 		TotalRAMMB:    8192,
@@ -129,6 +150,7 @@ func TestVMLifecycle_StartStop(t *testing.T) {
 		VCPU:       1,
 		MemoryMB:   1024,
 		DiskGB:     5,
+		ImageID:    imageID,
 		NetworkIDs: []string{netResp.ID},
 	})
 	if err != nil {
@@ -253,10 +275,19 @@ func TestConcurrentVMOperations(t *testing.T) {
 		t.Skipf("Controller not ready: %v", err)
 	}
 	
-	// Create network
+	// Import test image
+	imageID, err := h.ImportCirrosImage()
+	if err != nil {
+		t.Fatalf("Failed to import test image: %v", err)
+	}
+	t.Logf("Imported image: %s", imageID)
+	
+	// Create network (use unique name to avoid conflicts)
 	netResp, err := h.CreateNetwork(&CreateNetworkRequest{
-		Name: "test-net-concurrent",
-		CIDR: "10.102.0.0/24",
+		Name:       fmt.Sprintf("test-net-concurrent-%d", time.Now().Unix()),
+		BridgeName: fmt.Sprintf("br-test3-%d", time.Now().Unix()),
+		CIDR:       "10.102.0.0/24",
+		GatewayIP:  "10.102.0.1",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create network: %v", err)
@@ -275,6 +306,7 @@ func TestConcurrentVMOperations(t *testing.T) {
 				VCPU:       1,
 				MemoryMB:   512,
 				DiskGB:     5,
+				ImageID:    imageID,
 				NetworkIDs: []string{netResp.ID},
 			})
 			if err != nil {

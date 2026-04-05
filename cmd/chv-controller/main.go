@@ -1,0 +1,169 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/chv/chv/internal/agent"
+	"github.com/chv/chv/internal/api"
+	"github.com/chv/chv/internal/auth"
+	"github.com/chv/chv/internal/reconcile"
+	"github.com/chv/chv/internal/scheduler"
+	"github.com/chv/chv/internal/store"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
+)
+
+// Config holds controller configuration.
+type Config struct {
+	DatabaseURL string `yaml:"database_url" env:"CHV_DATABASE_URL"`
+	HTTPAddr    string `yaml:"http_addr" env:"CHV_HTTP_ADDR" default:":8080"`
+	GRPCAddr    string `yaml:"grpc_addr" env:"CHV_GRPC_ADDR" default:":9090"`
+	LogLevel    string `yaml:"log_level" env:"CHV_LOG_LEVEL" default:"info"`
+	CORSEnabled bool   `yaml:"cors_enabled" env:"CHV_CORS_ENABLED" default:"true"`
+	CORSOrigins string `yaml:"cors_origins" env:"CHV_CORS_ORIGINS" default:"http://localhost:3000,http://localhost:5173"`
+}
+
+func main() {
+	configPath := flag.String("config", "", "Path to config file")
+	flag.Parse()
+
+	// Load config (simplified - in production use proper config loading)
+	cfg := &Config{
+		DatabaseURL: getEnv("CHV_DATABASE_URL", "postgres://chv:chv@localhost:5432/chv?sslmode=disable"),
+		HTTPAddr:    getEnv("CHV_HTTP_ADDR", ":8080"),
+		GRPCAddr:    getEnv("CHV_GRPC_ADDR", ":9090"),
+		LogLevel:    getEnv("CHV_LOG_LEVEL", "info"),
+		CORSEnabled: getEnv("CHV_CORS_ENABLED", "true") == "true",
+		CORSOrigins: getEnv("CHV_CORS_ORIGINS", "http://localhost:3000,http://localhost:5173"),
+	}
+
+	if *configPath != "" {
+		// Load from file if provided
+		log.Printf("Loading config from %s", *configPath)
+	}
+
+	ctx := context.Background()
+
+	// Connect to database
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer pool.Close()
+
+	// Test connection
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
+	}
+	log.Println("Connected to database")
+
+	// Initialize store
+	db := store.NewPostgresStore(pool)
+
+	// Initialize components
+	authService := auth.NewService(db)
+	schedulerService := scheduler.NewService(db)
+	agentClient := agent.NewClient()
+	reconciler := reconcile.NewService(db, schedulerService, agentClient)
+
+	// Create HTTP router
+	router := chi.NewRouter()
+	apiHandler := api.NewHandler(db, authService, schedulerService, reconciler)
+	
+	// Configure CORS
+	corsConfig := api.CORSConfig{
+		Enabled:        cfg.CORSEnabled,
+		AllowedOrigins: parseOrigins(cfg.CORSOrigins),
+	}
+	apiHandler.SetCORSConfig(corsConfig)
+	
+	apiHandler.RegisterRoutes(router)
+
+	// Create gRPC server
+	grpcServer := grpc.NewServer()
+	// Register agent service (to be implemented)
+
+	// Start HTTP server
+	httpServer := &http.Server{
+		Addr:    cfg.HTTPAddr,
+		Handler: router,
+	}
+
+	go func() {
+		log.Printf("Starting HTTP server on %s", cfg.HTTPAddr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	// Start gRPC server
+	go func() {
+		lis, err := net.Listen("tcp", cfg.GRPCAddr)
+		if err != nil {
+			log.Fatalf("Failed to listen on gRPC addr: %v", err)
+		}
+		log.Printf("Starting gRPC server on %s", cfg.GRPCAddr)
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatalf("gRPC server error: %v", err)
+		}
+	}()
+
+	// Start reconciler
+	reconciler.Start(ctx)
+	defer reconciler.Stop()
+
+	// Wait for shutdown signal
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	log.Println("Shutting down...")
+
+	// Graceful shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	grpcServer.GracefulStop()
+
+	log.Println("Shutdown complete")
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func parseOrigins(origins string) []string {
+	if origins == "" {
+		return []string{
+			"http://localhost:3000",
+			"http://localhost:5173",
+			"http://127.0.0.1:3000",
+			"http://127.0.0.1:5173",
+		}
+	}
+	result := []string{}
+	for _, o := range strings.Split(origins, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			result = append(result, o)
+		}
+	}
+	return result
+}
