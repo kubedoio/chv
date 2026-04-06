@@ -1,0 +1,42 @@
+# CHV Controller Configuration for Docker Compose
+# This configuration is used by the controller service in docker-compose.yml
+
+http_addr: ":8080"
+grpc_addr: ":9090"
+
+# Database connection (uses postgres service)
+database_url: "postgres://chv:chv@postgres:5432/chv?sslmode=disable"
+
+# Logging
+log_level: "debug"
+log_format: "json"
+
+# Security
+jwt_secret: "docker-dev-secret-change-in-production"
+token_duration: "24h"
+
+# CORS configuration for WebUI access
+# Includes common development origins
+# The UI service runs on port 3000
+cors:
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"
+    - "http://10.5.199.83"
+    - "http://10.5.199.83:3000"
+  allowed_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "PATCH"
+    - "DELETE"
+    - "OPTIONS"
+  allowed_headers:
+    - "Accept"
+    - "Authorization"
+    - "Content-Type"
+    - "X-Requested-With"
+  exposed_headers:
+    - "Link"
+  allow_credentials: true
+  max_age: 300
