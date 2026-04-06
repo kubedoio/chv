@@ -2,7 +2,7 @@ import axios from 'axios'
 import type { AxiosInstance, AxiosError } from 'axios'
 import type { APIError } from '@/types'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8081'
+const API_BASE_URL = import.meta.env.VITE_API_URL || ''
 
 class APIClient {
   private client: AxiosInstance
@@ -47,7 +47,8 @@ class APIClient {
   }
 
   async healthCheck(): Promise<{ status: string }> {
-    const response = await axios.get(`${API_BASE_URL}/health`)
+    const baseUrl = API_BASE_URL || window.location.origin
+    const response = await axios.get(`${baseUrl}/health`)
     return response.data
   }
 }

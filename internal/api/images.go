@@ -117,3 +117,31 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 	
 	h.jsonResponse(w, http.StatusOK, image)
 }
+
+func (h *Handler) deleteImage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	imageID, err := uuidx.Parse(id)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID", "Invalid image ID")
+		return
+	}
+
+	// Check if image exists
+	image, err := h.store.GetImage(r.Context(), imageID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get image")
+		return
+	}
+	if image == nil {
+		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "Image not found")
+		return
+	}
+
+	// Delete the image
+	if err := h.store.DeleteImage(r.Context(), imageID); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to delete image")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}

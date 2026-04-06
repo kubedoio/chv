@@ -97,3 +97,31 @@ func (h *Handler) getStoragePool(w http.ResponseWriter, r *http.Request) {
 	
 	h.jsonResponse(w, http.StatusOK, pool)
 }
+
+func (h *Handler) deleteStoragePool(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	poolID, err := uuidx.Parse(id)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID", "Invalid storage pool ID")
+		return
+	}
+
+	// Check if storage pool exists
+	pool, err := h.store.GetStoragePool(r.Context(), poolID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get storage pool")
+		return
+	}
+	if pool == nil {
+		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "Storage pool not found")
+		return
+	}
+
+	// Delete the storage pool
+	if err := h.store.DeleteStoragePool(r.Context(), poolID); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to delete storage pool")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}

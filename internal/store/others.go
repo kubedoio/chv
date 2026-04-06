@@ -368,4 +368,34 @@ func revokeAPIToken(ctx context.Context, q querier, id uuid.UUID) error {
 	return err
 }
 
+// Delete operations
+func (s *PostgresStore) DeleteNetwork(ctx context.Context, id uuid.UUID) error {
+	return deleteNetwork(ctx, s.pool, id)
+}
+
+func deleteNetwork(ctx context.Context, q querier, id uuid.UUID) error {
+	sql := `DELETE FROM networks WHERE id = $1`
+	_, err := q.Exec(ctx, sql, id)
+	return err
+}
+
+func (s *PostgresStore) DeleteStoragePool(ctx context.Context, id uuid.UUID) error {
+	return deleteStoragePool(ctx, s.pool, id)
+}
+
+func deleteStoragePool(ctx context.Context, q querier, id uuid.UUID) error {
+	sql := `DELETE FROM storage_pools WHERE id = $1`
+	_, err := q.Exec(ctx, sql, id)
+	return err
+}
+
+func (s *PostgresStore) DeleteImage(ctx context.Context, id uuid.UUID) error {
+	return deleteImage(ctx, s.pool, id)
+}
+
+func deleteImage(ctx context.Context, q querier, id uuid.UUID) error {
+	sql := `DELETE FROM images WHERE id = $1`
+	_, err := q.Exec(ctx, sql, id)
+	return err
+}
 

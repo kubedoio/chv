@@ -26,18 +26,21 @@ type Store interface {
 	CreateNetwork(ctx context.Context, network *models.Network) error
 	GetNetwork(ctx context.Context, id uuid.UUID) (*models.Network, error)
 	ListNetworks(ctx context.Context) ([]*models.Network, error)
+	DeleteNetwork(ctx context.Context, id uuid.UUID) error
 	
 	// Storage Pools
 	CreateStoragePool(ctx context.Context, pool *models.StoragePool) error
 	GetStoragePool(ctx context.Context, id uuid.UUID) (*models.StoragePool, error)
 	ListStoragePools(ctx context.Context) ([]*models.StoragePool, error)
 	ListStoragePoolsByNode(ctx context.Context, nodeID uuid.UUID) ([]*models.StoragePool, error)
+	DeleteStoragePool(ctx context.Context, id uuid.UUID) error
 	
 	// Images
 	CreateImage(ctx context.Context, image *models.Image) error
 	GetImage(ctx context.Context, id uuid.UUID) (*models.Image, error)
 	UpdateImage(ctx context.Context, image *models.Image) error
 	ListImages(ctx context.Context) ([]*models.Image, error)
+	DeleteImage(ctx context.Context, id uuid.UUID) error
 	
 	// VMs
 	CreateVM(ctx context.Context, vm *models.VirtualMachine) error
@@ -152,6 +155,10 @@ func (s *txStore) ListNetworks(ctx context.Context) ([]*models.Network, error) {
 	return listNetworks(ctx, s.tx)
 }
 
+func (s *txStore) DeleteNetwork(ctx context.Context, id uuid.UUID) error {
+	return deleteNetwork(ctx, s.tx, id)
+}
+
 func (s *txStore) CreateStoragePool(ctx context.Context, pool *models.StoragePool) error {
 	return createStoragePool(ctx, s.tx, pool)
 }
@@ -168,6 +175,10 @@ func (s *txStore) ListStoragePoolsByNode(ctx context.Context, nodeID uuid.UUID) 
 	return listStoragePoolsByNode(ctx, s.tx, nodeID)
 }
 
+func (s *txStore) DeleteStoragePool(ctx context.Context, id uuid.UUID) error {
+	return deleteStoragePool(ctx, s.tx, id)
+}
+
 func (s *txStore) CreateImage(ctx context.Context, image *models.Image) error {
 	return createImage(ctx, s.tx, image)
 }
@@ -182,6 +193,10 @@ func (s *txStore) UpdateImage(ctx context.Context, image *models.Image) error {
 
 func (s *txStore) ListImages(ctx context.Context) ([]*models.Image, error) {
 	return listImages(ctx, s.tx)
+}
+
+func (s *txStore) DeleteImage(ctx context.Context, id uuid.UUID) error {
+	return deleteImage(ctx, s.tx, id)
 }
 
 func (s *txStore) CreateVM(ctx context.Context, vm *models.VirtualMachine) error {

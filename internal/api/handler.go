@@ -67,16 +67,19 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 			r.Post("/networks", h.createNetwork)
 			r.Get("/networks", h.listNetworks)
 			r.Get("/networks/{id}", h.getNetwork)
+			r.Delete("/networks/{id}", h.deleteNetwork)
 			
 			// Storage Pools
 			r.Post("/storage-pools", h.createStoragePool)
 			r.Get("/storage-pools", h.listStoragePools)
 			r.Get("/storage-pools/{id}", h.getStoragePool)
+			r.Delete("/storage-pools/{id}", h.deleteStoragePool)
 			
 			// Images
 			r.Post("/images/import", h.importImage)
 			r.Get("/images", h.listImages)
 			r.Get("/images/{id}", h.getImage)
+			r.Delete("/images/{id}", h.deleteImage)
 			
 			// VMs
 			r.Post("/vms", h.createVM)

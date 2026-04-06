@@ -90,3 +90,31 @@ func (h *Handler) getNetwork(w http.ResponseWriter, r *http.Request) {
 	
 	h.jsonResponse(w, http.StatusOK, network)
 }
+
+func (h *Handler) deleteNetwork(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	networkID, err := uuidx.Parse(id)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "INVALID_ID", "Invalid network ID")
+		return
+	}
+
+	// Check if network exists
+	network, err := h.store.GetNetwork(r.Context(), networkID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get network")
+		return
+	}
+	if network == nil {
+		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "Network not found")
+		return
+	}
+
+	// Delete the network
+	if err := h.store.DeleteNetwork(r.Context(), networkID); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to delete network")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
