@@ -1,0 +1,300 @@
+# Bridge Networking VM Configuration
+# ==================================
+# This example demonstrates VM networking using Linux bridge mode,
+# allowing VMs to communicate with each other and the external network.
+#
+# Version: CloudHypervisor v51.1
+#
+# Network Architecture:
+#   ┌─────────────────────────────────────────────────────────┐
+#   │                      Host                                │
+#   │  ┌─────────────┐     ┌──────────┐     ┌─────────────┐  │
+#   │  │   VM 1      │◄───►│  TAP 1   │◄───►│             │  │
+#   │  │ 10.0.0.10   │     └──────────┘     │   Linux     │  │
+#   │  └─────────────┘                      │   Bridge    │◄─┼──► External
+#   │  ┌─────────────┐     ┌──────────┐     │   br0       │  │    Network
+#   │  │   VM 2      │◄───►│  TAP 2   │◄───►│  10.0.0.1   │  │
+#   │  │ 10.0.0.11   │     └──────────┘     └─────────────┘  │
+#   │  └─────────────┘                                       │
+#   └─────────────────────────────────────────────────────────┘
+#
+# Prerequisites:
+#   - Linux bridge utils (bridge-utils or iproute2)
+#   - Host network interface configuration
+#   - Optional: DHCP server on bridge (dnsmasq/dhcpd)
+#
+# Host Network Setup:
+#   # Create bridge interface
+#   ip link add name br0 type bridge
+#   ip addr add 10.0.0.1/24 dev br0
+#   ip link set br0 up
+#   
+#   # Connect host interface to bridge (for external access)
+#   # Replace eth0 with your physical interface
+#   ip link set eth0 master br0
+#   ip link set eth0 up
+#
+#   # Enable IP forwarding and NAT (for internet access)
+#   echo 1 > /proc/sys/net/ipv4/ip_forward
+#   iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+api_version: "v1"
+kind: "VirtualMachine"
+metadata:
+  id: "vm-bridge-001"
+  name: "bridge-vm"
+  labels:
+    network_mode: "bridge"
+    
+spec:
+  cpu:
+    boot_vcpus: 2
+    max_vcpus: 4
+    
+  memory:
+    size: 4096M
+    mergeable: true
+    
+  boot:
+    mode: "cloud_image"
+    
+  disks:
+    - id: "disk-root"
+      path: "/var/lib/chv/volumes/vm-bridge-disk.raw"
+      format: "raw"
+      bus: "virtio-blk"
+      boot: true
+      async_io: true
+      
+  # Bridge Network Configuration
+  # ----------------------------
+  networks:
+    # Primary interface - Bridge networking
+    - id: "net-bridge"
+      # TAP device will be created by chv-agent and attached to bridge
+      tap: "tap-bridge-001"
+      
+      # MAC address (should be unique per VM)
+      mac: "02:00:00:00:10:01"
+      
+      # Bridge name on host
+      bridge: "br0"
+      
+      # IP configuration (optional - can use DHCP)
+      ip_config:
+        # Static IP configuration
+        mode: "static"
+        address: "10.0.0.10/24"
+        gateway: "10.0.0.1"
+        dns:
+          - "8.8.8.8"
+          - "8.8.4.4"
+        
+        # For DHCP, use:
+        # mode: "dhcp"
+        
+      # MTU (default: 1500, jumbo frames: 9000)
+      mtu: 1500
+      
+      # Hardware offloads
+      offloads:
+        # TCP Segmentation Offload
+        tso: true
+        # UDP Fragmentation Offload
+        ufo: true
+        # Generic Segmentation Offload
+        gso: true
+        # Generic Receive Offload
+        gro: true
+        
+      # Rate limiting (optional)
+      # rate_limit:
+      #   bandwidth:
+      #     bytes_per_sec: 104857600  # 100 MB/s
+      #   ops:
+      #     ops_per_sec: 50000
+        
+    # Optional: Secondary interface (e.g., for storage network)
+    # - id: "net-storage"
+    #   tap: "tap-storage-001"
+    #   mac: "02:00:00:00:20:01"
+    #   bridge: "br-storage"
+    #   ip_config:
+    #     mode: "static"
+    #     address: "192.168.200.10/24"
+      
+  console:
+    mode: "off"
+    
+  serial:
+    mode: "tty"
+    
+  api_socket:
+    path: "/var/run/chv/vm-bridge.sock"
+
+---
+# Host Bridge Configuration Script
+# ================================
+# Save as: /etc/chv/setup-bridge.sh
+
+#!/bin/bash
+# setup-bridge.sh - Configure Linux bridge for CHV VMs
+
+BRIDGE_NAME="br0"
+BRIDGE_IP="10.0.0.1/24"
+BRIDGE_CIDR="10.0.0.0/24"
+PHYSICAL_IFACE="eth0"  # Change to your physical interface
+
+# Create bridge if it doesn't exist
+create_bridge() {
+    if ! ip link show "$BRIDGE_NAME" &>/dev/null; then
+        echo "Creating bridge $BRIDGE_NAME..."
+        ip link add name "$BRIDGE_NAME" type bridge
+        ip addr add "$BRIDGE_IP" dev "$BRIDGE_NAME"
+        ip link set "$BRIDGE_NAME" up
+        echo "Bridge $BRIDGE_NAME created with IP $BRIDGE_IP"
+    else
+        echo "Bridge $BRIDGE_NAME already exists"
+    fi
+}
+
+# Add physical interface to bridge (optional, for external connectivity)
+add_to_bridge() {
+    if ip link show "$PHYSICAL_IFACE" &>/dev/null; then
+        echo "Adding $PHYSICAL_IFACE to bridge..."
+        ip link set "$PHYSICAL_IFACE" master "$BRIDGE_NAME"
+        ip link set "$PHYSICAL_IFACE" up
+    fi
+}
+
+# Enable IP forwarding and NAT
+setup_routing() {
+    echo "Enabling IP forwarding..."
+    sysctl -w net.ipv4.ip_forward=1
+    
+    # Add NAT rule if not exists
+    if ! iptables -t nat -C POSTROUTING -o "$PHYSICAL_IFACE" -j MASQUERADE 2>/dev/null; then
+        echo "Adding NAT rule..."
+        iptables -t nat -A POSTROUTING -o "$PHYSICAL_IFACE" -j MASQUERADE
+    fi
+    
+    # Allow forwarding on bridge
+    iptables -A FORWARD -i "$BRIDGE_NAME" -o "$PHYSICAL_IFACE" -j ACCEPT
+    iptables -A FORWARD -i "$PHYSICAL_IFACE" -o "$BRIDGE_NAME" -m state --state RELATED,ESTABLISHED -j ACCEPT
+}
+
+# Setup DHCP with dnsmasq (optional)
+setup_dhcp() {
+    if command -v dnsmasq &>/dev/null; then
+        echo "Configuring dnsmasq for DHCP..."
+        cat > /etc/dnsmasq.d/chv-bridge.conf << EOF
+interface=$BRIDGE_NAME
+dhcp-range=10.0.0.50,10.0.0.200,255.255.255.0,12h
+dhcp-option=3,10.0.0.1
+dhcp-option=6,8.8.8.8,8.8.4.4
+EOF
+        systemctl restart dnsmasq
+    fi
+}
+
+# Main
+case "$1" in
+    create)
+        create_bridge
+        ;;
+    add-iface)
+        add_to_bridge
+        ;;
+    route)
+        setup_routing
+        ;;
+    dhcp)
+        setup_dhcp
+        ;;
+    all)
+        create_bridge
+        add_to_bridge
+        setup_routing
+        setup_dhcp
+        ;;
+    *)
+        echo "Usage: $0 {create|add-iface|route|dhcp|all}"
+        exit 1
+        ;;
+esac
+
+---
+# Persistent Bridge Configuration (Netplan)
+# =========================================
+# /etc/netplan/01-chv-bridge.yaml
+
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: no
+      dhcp6: no
+      
+  bridges:
+    br0:
+      interfaces: [eth0]
+      dhcp4: no
+      dhcp6: no
+      addresses:
+        - 10.0.0.1/24
+      routes:
+        - to: default
+          via: 192.168.1.1  # Your gateway
+      nameservers:
+        addresses:
+          - 8.8.8.8
+          - 8.8.4.4
+      parameters:
+        stp: true
+        forward-delay: 4
+
+---
+# API Request Example (JSON)
+# ==========================
+# POST http://localhost:8080/api/v1/vms
+# Authorization: Bearer YOUR_TOKEN
+
+{
+  "name": "bridge-vm",
+  "cpu": 2,
+  "memory_mb": 4096,
+  "image_id": "ubuntu-22.04-image-id",
+  "disk_size_bytes": 10737418240,
+  "networks": [
+    {
+      "network_id": "bridge-network-id",
+      "dhcp": true
+    }
+  ]
+}
+
+---
+# Network Troubleshooting
+# =======================
+
+# Check bridge status:
+#   ip link show br0
+#   bridge link show
+#   bridge fdb show
+
+# Check TAP device:
+#   ip tuntap show
+#   ip link show tap-bridge-001
+
+# Test connectivity from host:
+#   ping 10.0.0.10
+
+# View VM network inside guest:
+#   ip addr show
+#   ip route show
+#   cat /etc/resolv.conf
+
+# Capture traffic:
+#   tcpdump -i tap-bridge-001 -n
+#   tcpdump -i br0 -n host 10.0.0.10

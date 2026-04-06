@@ -1,0 +1,244 @@
+# Basic CloudHypervisor VM Configuration
+# =======================================
+# This example demonstrates a minimal VM configuration with 2 vCPUs,
+# 4GB RAM, and a single boot disk.
+#
+# Version: CloudHypervisor v51.1
+# API: REST API over Unix socket
+#
+# Required Resources:
+#   - Kernel: /var/lib/chv/vmlinux (cloud-hypervisor custom kernel)
+#   - Disk: /var/lib/chv/disk.raw (raw disk image)
+#
+# Usage:
+#   1. Create disk image:
+#      qemu-img create -f raw /var/lib/chv/disk.raw 10G
+#
+#   2. Start VM via chv-agent API:
+#      curl -X POST http://localhost:8081/vms \
+#        -H "Content-Type: application/json" \
+#        -d @vm-basic.json
+#
+#   3. Monitor VM via CloudHypervisor API:
+#      curl --unix-socket /var/run/chv/vm-basic.sock \
+#        http://localhost/api/v1/vm.info
+
+api_version: "v1"
+kind: "VirtualMachine"
+metadata:
+  # Unique VM identifier (UUID v4)
+  id: "vm-basic-001"
+  name: "basic-vm"
+  
+  # Labels for organization and scheduling
+  labels:
+    environment: "development"
+    workload: "general"
+    
+spec:
+  # CPU Configuration
+  # -----------------
+  # boot_vcpus: Number of vCPUs to boot with
+  # max_vcpus: Maximum vCPUs for hot-plug (must be >= boot_vcpus)
+  cpu:
+    boot_vcpus: 2
+    max_vcpus: 4
+    
+    # Topology configuration (optional)
+    # topology:
+    #   threads_per_core: 2
+    #   cores_per_die: 1
+    #   dies_per_package: 1
+    #   packages: 1
+    
+    # KVM-specific features
+    features:
+      kvm_hyperv: false  # Enable Hyper-V emulation (for Windows guests)
+      
+  # Memory Configuration
+  # --------------------
+  # Size in MB. Use 'M' suffix for megabytes, 'G' for gigabytes
+  memory:
+    size: 4096M
+    
+    # Memory sharing (required for VFIO, migration)
+    shared: false
+    
+    # Enable memory hot-plug
+    hotplug_method: "virtio-mem"  # or "acpi"
+    hotplug_size: 8192M
+    
+    # Huge pages (improves performance for large memory VMs)
+    hugepages: false
+    
+    # Kernel same-page merging (reduces memory usage)
+    mergeable: true
+    
+  # Boot Configuration
+  # ------------------
+  # Three modes supported:
+  #   - cloud_image: Boot from cloud image with embedded kernel
+  #   - direct_kernel: Boot with external kernel/initrd
+  #   - uefi: Boot with UEFI firmware
+  boot:
+    mode: "cloud_image"
+    
+    # For direct_kernel mode:
+    # kernel_path: "/var/lib/chv/vmlinux"
+    # initrd_path: "/var/lib/chv/initrd.img"
+    # cmdline: "console=hvc0 root=/dev/vda1 rw"
+    
+    # For UEFI mode:
+    # firmware_path: "/usr/share/OVMF/OVMF_CODE.fd"
+    
+  # Disk Configuration
+  # ------------------
+  # CloudHypervisor supports virtio-blk and virtio-scsi
+  # For best performance, use virtio-blk with raw images
+  disks:
+    # Primary boot disk
+    - id: "disk-0"
+      path: "/var/lib/chv/disk.raw"
+      
+      # Disk format: raw, qcow2
+      format: "raw"
+      
+      # Bus type: virtio-blk, virtio-scsi
+      bus: "virtio-blk"
+      
+      # Mark as boot disk
+      boot: true
+      
+      # Read-only disk (for sharing base images)
+      readonly: false
+      
+      # Enable async I/O (improves performance)
+      async_io: true
+      
+      # I/O queue size (default: 256)
+      queue_size: 256
+      
+      # Disk IOPS rate limiting (optional)
+      # rate_limit:
+      #   bytes_per_sec: 104857600  # 100 MB/s
+      #   iops: 1000
+      
+    # Optional: Cloud-init ISO
+    # - id: "disk-cidata"
+    #   path: "/var/lib/chv/cidata.iso"
+    #   format: "raw"
+    #   bus: "virtio-blk"
+    #   boot: false
+    #   readonly: true
+      
+  # Network Configuration
+  # ---------------------
+  # TAP device networking with virtio-net
+  networks:
+    - id: "net-0"
+      # TAP device name (created by chv-agent)
+      tap: "tap0"
+      
+      # MAC address (auto-generated if not specified)
+      mac: "02:00:00:00:00:01"
+      
+      # Network interface model
+      model: "virtio-net"
+      
+      # Enable IOMMU for device isolation
+      iommu: false
+      
+      # Enable PCI device hot-plug
+      pci_hotplug: true
+      
+      # NUMA node affinity (optional)
+      # numa_node: 0
+      
+  # Console Configuration
+  # ---------------------
+  # Console output options: off, tty, file
+  console:
+    mode: "off"
+    # file: "/var/log/chv/vm-basic-console.log"
+    
+  # Serial Port Configuration
+  # -------------------------
+  # Serial console for kernel messages and debugging
+  serial:
+    mode: "tty"
+    # file: "/var/log/chv/vm-basic-serial.log"
+    
+  # PCI Device Configuration (optional)
+  # -----------------------------------
+  # devices:
+  #   - device_type: "vfio"
+  #     path: "/sys/bus/pci/devices/0000:01:00.0"
+  #   - device_type: "virtio-gpu"
+  #     width: 1920
+  #     height: 1080
+      
+  # NUMA Configuration (optional, for large VMs)
+  # --------------------------------------------
+  # numa:
+  #   - guest_numa_id: 0
+  #     cpus: [0, 1]
+  #     memory:
+  #       size: 2048M
+  #       host_numa_node: 0
+      
+  # API Socket Configuration
+  # ------------------------
+  # Unix socket for CloudHypervisor REST API
+  api_socket:
+    path: "/var/run/chv/vm-basic.sock"
+    
+  # Rate Limiting (optional)
+  # ------------------------
+  # rate_limits:
+  #   - id: "net-limit"
+  #     bandwidth:
+  #       bytes_per_sec: 125000000  # 1 Gbps
+  #     ops:
+  #       ops_per_sec: 100000
+
+---
+# JSON format for API submission:
+# {
+#   "api_version": "v1",
+#   "kind": "VirtualMachine",
+#   "metadata": {
+#     "id": "vm-basic-001",
+#     "name": "basic-vm"
+#   },
+#   "spec": {
+#     "cpu": {
+#       "boot_vcpus": 2,
+#       "max_vcpus": 4
+#     },
+#     "memory": {
+#       "size": "4096M"
+#     },
+#     "boot": {
+#       "mode": "cloud_image"
+#     },
+#     "disks": [
+#       {
+#         "path": "/var/lib/chv/disk.raw",
+#         "bus": "virtio-blk",
+#         "boot": true
+#       }
+#     ],
+#     "networks": [
+#       {
+#         "tap": "tap0",
+#         "mac": "02:00:00:00:00:01"
+#       }
+#     ],
+#     "serial": {
+#       "mode": "tty"
+#     },
+#     "api_socket": {
+#       "path": "/var/run/chv/vm-basic.sock"
+#     }
+#   }
+# }

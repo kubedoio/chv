@@ -44,6 +44,8 @@ CHV is built on [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hyp
 - Linux host with KVM support (for production deployment)
 - Go 1.22+ (for development)
 
+> **Production Installation**: For detailed installation instructions including Cloud Hypervisor setup, kernel configuration, and production deployment, see [docs/INSTALL.md](docs/INSTALL.md).
+
 ### Development Environment
 
 1. **Clone and setup:**
@@ -367,6 +369,13 @@ For security-related information, including vulnerability reporting, see [SECURI
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
+
+## Installation
+
+For production installation and configuration:
+
+- **[Installation Guide](docs/INSTALL.md)** - Complete setup instructions for Cloud Hypervisor, Agent, and Controller
+- **[Development Setup](DEVELOPMENT.md)** - Development environment configuration
 
 ## Development
 

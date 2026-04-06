@@ -1,0 +1,436 @@
+# CHV Agent Configuration Reference
+# ==================================
+# This file documents all configuration options for the chv-agent.
+# The agent runs on each virtualization host and manages VMs via
+# CloudHypervisor REST API.
+#
+# Version: CloudHypervisor v51.1
+# Agent Version: v0.1.0
+#
+# Configuration Methods (in order of precedence):
+#   1. Command-line flags
+#   2. Environment variables (CHV_AGENT_*)
+#   3. Configuration file (this file)
+#   4. Default values
+#
+# Usage:
+#   chv-agent --config /etc/chv/agent.yaml
+#   chv-agent --controller-addr localhost:9090 --data-dir /var/lib/chv
+
+api_version: "v1"
+kind: "AgentConfig"
+
+# Agent Identity
+# ==============
+agent:
+  # Unique agent ID (auto-generated if not specified)
+  # id: "agent-001"
+  
+  # Agent hostname (defaults to system hostname)
+  # hostname: "node1.example.com"
+  
+  # Agent display name
+  name: "Primary Compute Node"
+  
+  # Agent labels for scheduling
+  labels:
+    zone: "us-east-1a"
+    rack: "rack-01"
+    hardware: "dell-r640"
+    
+  # Agent capabilities/features
+  capabilities:
+    - "kvm"
+    - "cloud-hypervisor"
+    - "bridge-networking"
+    - "cloud-init"
+
+# Controller Connection
+# =====================
+# The agent connects to the controller via gRPC for management.
+
+controller:
+  # Controller gRPC address
+  # Format: "hostname:port" or "ip:port"
+  address: "localhost:9090"
+  
+  # Connection security
+  tls:
+    # Enable TLS (recommended for production)
+    enabled: false
+    
+    # CA certificate path (for verifying controller)
+    # ca_cert: "/etc/chv/certs/ca.crt"
+    
+    # Agent certificate and key (for mutual TLS)
+    # cert: "/etc/chv/certs/agent.crt"
+    # key: "/etc/chv/certs/agent.key"
+    
+    # Skip certificate verification (INSECURE - for testing only)
+    # insecure_skip_verify: false
+    
+  # Authentication token
+  # Can also use env var: CHV_AGENT_TOKEN
+  # token: "chv_agent_token_..."
+  
+  # Reconnection settings
+  reconnect:
+    # Initial retry interval
+    interval: "5s"
+    
+    # Maximum retry interval
+    max_interval: "60s"
+    
+    # Maximum retry attempts (0 = unlimited)
+    max_attempts: 0
+    
+  # Heartbeat interval
+  heartbeat_interval: "30s"
+  
+  # Registration token (for initial registration)
+  # registration_token: "chv_reg_..."
+
+# Data Directories
+# ================
+# All paths support absolute or relative (to working directory) paths.
+
+directories:
+  # Base data directory
+  # Contains: volumes, configs, cloud-init, logs
+  data_dir: "/var/lib/chv"
+  
+  # VM state directory
+  # Contains: runtime state, PID files
+  state_dir: "/var/lib/chv/state"
+  
+  # Volume storage directory
+  # Contains: VM disk images
+  volume_dir: "/var/lib/chv/volumes"
+  
+  # Imported images directory
+  # Contains: base OS images
+  image_dir: "/var/lib/chv/images"
+  
+  # Cloud-init configuration directory
+  # Contains: per-VM cloud-init files and generated ISOs
+  cloudinit_dir: "/var/lib/chv/cloudinit"
+  
+  # Log directory
+  # Contains: VM stdout/stderr logs
+  log_dir: "/var/log/chv"
+  
+  # API socket directory
+  # Contains: CloudHypervisor Unix sockets
+  socket_dir: "/var/run/chv"
+
+# Cloud Hypervisor Settings
+# =========================
+cloud_hypervisor:
+  # Path to cloud-hypervisor binary
+  binary_path: "/usr/bin/cloud-hypervisor"
+  
+  # Default kernel for direct kernel boot
+  # kernel_path: "/var/lib/chv/vmlinux"
+  
+  # Default kernel command line
+  # kernel_cmdline: "console=hvc0 root=/dev/vda1 rw"
+  
+  # API timeout settings
+  api:
+    # Socket creation timeout
+    socket_timeout: "30s"
+    
+    # VM start timeout
+    start_timeout: "60s"
+    
+    # VM stop timeout
+    stop_timeout: "30s"
+    
+    # General API request timeout
+    request_timeout: "10s"
+
+# Networking
+# ==========
+network:
+  # Bridge configuration
+  bridge:
+    # Default bridge name
+    default_bridge: "br0"
+    
+    # List of available bridges
+    available_bridges:
+      - name: "br0"
+        cidr: "192.168.100.0/24"
+        gateway: "192.168.100.1"
+      - name: "br-storage"
+        cidr: "192.168.200.0/24"
+        gateway: "192.168.200.1"
+        
+  # TAP device settings
+  tap:
+    # TAP device prefix
+    prefix: "chv"
+    
+    # MAC address prefix (locally administered)
+    mac_prefix: "02:00:00"
+    
+  # HTTP server settings (for console WebSocket)
+  http:
+    # Listen address for HTTP API
+    # Set to "" to disable HTTP server
+    listen_addr: ":8081"
+    
+    # Enable CORS (for browser console access)
+    cors:
+      enabled: true
+      allowed_origins:
+        - "http://localhost:5173"  # UI dev server
+        - "http://localhost:3000"  # UI production
+
+# Storage
+# =======
+storage:
+  # Volume settings
+  volumes:
+    # Default format for new volumes
+    default_format: "raw"
+    
+    # Supported formats
+    supported_formats:
+      - "raw"
+      - "qcow2"
+      
+    # Default volume size (bytes)
+    default_size: 10737418240  # 10 GB
+    
+    # Maximum volume size (bytes, 0 = unlimited)
+    max_size: 1099511627776  # 1 TB
+    
+  # Image conversion settings
+  conversion:
+    # Convert imported images to raw format
+    auto_convert: true
+    
+    # Temporary directory for conversions
+    temp_dir: "/tmp/chv-convert"
+    
+  # Filesystem settings
+  filesystem:
+    # Shared directory (virtio-fs)
+    # - tag: "shared"
+    #   socket: "/var/run/chv/virtiofs.sock"
+    #   mount_point: "/shared"
+
+# Cloud-Init
+# ==========
+cloud_init:
+  # Enable cloud-init support
+  enabled: true
+  
+  # ISO generation settings
+  iso:
+    # Path to mkisofs/genisoimage binary
+    # binary: "/usr/bin/mkisofs"
+    
+    # ISO volume label (must be 'cidata' for cloud-init)
+    volume_label: "cidata"
+    
+    # ISO filesystem type
+    fs_type: "iso9660"
+    
+  # Default user-data template
+  # default_user_data: |
+  #   #cloud-config
+  #   users:
+  #     - name: admin
+  #       sudo: ALL=(ALL) NOPASSWD:ALL
+
+# Logging
+# =======
+logging:
+  # Log level: debug, info, warn, error
+  level: "info"
+  
+  # Log format: json, text
+  format: "json"
+  
+  # Log output: stdout, stderr, file
+  output: "stdout"
+  
+  # Log file path (if output is "file")
+  # file: "/var/log/chv/agent.log"
+  
+  # Enable VM console logging
+  console_logging: true
+
+# Monitoring
+# ==========
+monitoring:
+  # Enable metrics collection
+  enabled: true
+  
+  # Metrics collection interval
+  interval: "30s"
+  
+  # Prometheus metrics endpoint
+  # prometheus:
+  #   enabled: true
+  #   listen_addr: ":9100"
+  #   path: "/metrics"
+
+# Limits
+# ======
+limits:
+  # Maximum number of VMs per agent
+  max_vms: 100
+  
+  # Maximum vCPUs across all VMs
+  max_vcpus: 256
+  
+  # Maximum memory across all VMs (MB)
+  max_memory_mb: 524288  # 512 GB
+  
+  # Maximum storage per VM (bytes)
+  max_vm_storage: 1099511627776  # 1 TB
+  
+  # Maximum total storage (bytes)
+  max_total_storage: 10995116277760  # 10 TB
+
+# Security
+# =========
+security:
+  # Run VMs as non-root user
+  run_as_user: "chv"
+  run_as_group: "chv"
+  
+  # Enable seccomp filters
+  seccomp: true
+  
+  # Drop capabilities
+  drop_capabilities:
+    - "ALL"
+    
+  # Add required capabilities
+  add_capabilities:
+    - "NET_ADMIN"      # For TAP device management
+    - "SYS_ADMIN"      # For namespace operations
+
+---
+# Environment Variables Reference
+# ================================
+# All configuration options can be set via environment variables.
+# Format: CHV_AGENT_SECTION_KEY (uppercase, underscores)
+
+# Core settings:
+#   CHV_AGENT_CONTROLLER_ADDRESS=localhost:9090
+#   CHV_AGENT_DATA_DIR=/var/lib/chv
+#   CHV_AGENT_LOG_LEVEL=info
+#   CHV_AGENT_TOKEN=chv_agent_token_...
+
+# Directory overrides:
+#   CHV_AGENT_STATE_DIR=/var/lib/chv/state
+#   CHV_AGENT_VOLUME_DIR=/var/lib/chv/volumes
+#   CHV_AGENT_IMAGE_DIR=/var/lib/chv/images
+
+# CHV binary:
+#   CHV_AGENT_CHV_BINARY=/usr/bin/cloud-hypervisor
+
+---
+# Command-Line Flags Reference
+# ============================
+# chv-agent [flags]
+
+# Flags:
+#   --config string              Path to config file
+#   --controller-addr string     Controller gRPC address
+#   --data-dir string            Base data directory
+#   --log-level string           Log level (debug|info|warn|error)
+#   --log-format string          Log format (json|text)
+#   --http-addr string           HTTP listen address
+#   --chv-binary string          Path to cloud-hypervisor binary
+#   --token string               Authentication token
+#   --version                    Print version and exit
+#   --help                       Show help
+
+---
+# Systemd Service File
+# ====================
+# /etc/systemd/system/chv-agent.service
+
+[Unit]
+Description=CHV Agent - CloudHypervisor VM Agent
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=chv
+Group=chv
+
+# Environment
+Environment="CHV_AGENT_CONTROLLER_ADDRESS=localhost:9090"
+Environment="CHV_AGENT_DATA_DIR=/var/lib/chv"
+Environment="CHV_AGENT_LOG_LEVEL=info"
+
+# Binary and config
+ExecStart=/usr/local/bin/chv-agent \
+    --config /etc/chv/agent.yaml
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chv /var/log/chv /var/run/chv
+
+[Install]
+WantedBy=multi-user.target
+
+---
+# Setup Script
+# ============
+#!/bin/bash
+# setup-agent.sh - Initial agent setup
+
+set -e
+
+# Create user and directories
+useradd -r -s /bin/false chv 2>/dev/null || true
+
+mkdir -p /var/lib/chv/{state,volumes,images,cloudinit}
+mkdir -p /var/log/chv
+mkdir -p /var/run/chv
+mkdir -p /etc/chv/certs
+
+# Set permissions
+chown -R chv:chv /var/lib/chv
+chown -R chv:chv /var/log/chv
+chown chv:chv /var/run/chv
+chmod 750 /var/lib/chv
+chmod 755 /var/run/chv
+
+# Create bridge for networking
+ip link add name br0 type bridge 2>/dev/null || true
+ip addr add 192.168.100.1/24 dev br0 2>/dev/null || true
+ip link set br0 up
+
+# Enable IP forwarding
+sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-chv.conf
+
+# Install systemd service
+cp chv-agent.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable chv-agent
+
+echo "CHV Agent setup complete."
+echo "Edit /etc/chv/agent.yaml and start with: systemctl start chv-agent"
