@@ -11,7 +11,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+)
+
+const (
+	// DefaultMaxConnections is the default maximum number of connections.
+	DefaultMaxConnections = 1000
+	// DefaultConnectionTimeout is the default timeout for connection operations.
+	DefaultConnectionTimeout = 30 * time.Second
 )
 
 // Client provides an interface for communicating with agents.
@@ -32,25 +40,51 @@ type Client interface {
 
 // client implements the Client interface.
 type client struct {
-	mu          sync.RWMutex
-	connections map[string]*grpc.ClientConn
-	timeout     time.Duration
+	mu             sync.RWMutex
+	connections    map[string]*grpc.ClientConn
+	timeout        time.Duration
+	maxConns       int
+	tlsCredentials credentials.TransportCredentials
 }
 
-// NewClient creates a new agent client.
-func NewClient() Client {
-	return &client{
-		connections: make(map[string]*grpc.ClientConn),
-		timeout:     30 * time.Second,
+// ClientOption is a functional option for configuring the client.
+type ClientOption func(*client)
+
+// WithMaxConnections sets the maximum number of connections.
+func WithMaxConnections(max int) ClientOption {
+	return func(c *client) {
+		c.maxConns = max
 	}
 }
 
-// SetTimeout sets the default timeout for operations.
-func (c *client) SetTimeout(timeout time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.timeout = timeout
+// WithTimeout sets the default timeout for operations.
+func WithTimeout(timeout time.Duration) ClientOption {
+	return func(c *client) {
+		c.timeout = timeout
+	}
 }
+
+// WithTLS sets the TLS credentials for secure connections.
+func WithTLS(creds credentials.TransportCredentials) ClientOption {
+	return func(c *client) {
+		c.tlsCredentials = creds
+	}
+}
+
+// NewClient creates a new agent client.
+func NewClient(opts ...ClientOption) Client {
+	c := &client{
+		connections: make(map[string]*grpc.ClientConn),
+		timeout:     DefaultConnectionTimeout,
+		maxConns:    DefaultMaxConnections,
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+
 
 // getConnection gets or creates a connection to an agent.
 func (c *client) getConnection(nodeID string) (*grpc.ClientConn, error) {
@@ -70,14 +104,17 @@ func (c *client) getConnection(nodeID string) (*grpc.ClientConn, error) {
 		return conn, nil
 	}
 
+	// Check connection limit
+	if len(c.connections) >= c.maxConns && !exists {
+		return nil, fmt.Errorf("connection limit reached (%d)", c.maxConns)
+	}
+
 	// Close old connection if exists
 	if exists {
 		conn.Close()
 	}
 
 	// Create new connection
-	// In production, would look up node address from database
-	// For now, assume nodeID is the address (host:port)
 	conn, err := c.dial(nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent %s: %w", nodeID, err)
@@ -92,9 +129,15 @@ func (c *client) dial(address string) (*grpc.ClientConn, error) {
 	backoffConfig := backoff.DefaultConfig
 	backoffConfig.MaxDelay = 5 * time.Second
 
+	// Use TLS credentials if provided, otherwise use insecure
+	creds := c.tlsCredentials
+	if creds == nil {
+		creds = insecure.NewCredentials()
+	}
+
 	conn, err := grpc.Dial(
 		address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: backoffConfig,
 		}),
@@ -365,16 +408,33 @@ func (c *client) ImportImage(ctx context.Context, nodeID string, req *agent.Imag
 	return nil
 }
 
-// Close closes all connections.
+// Close closes all connections with timeout.
 func (c *client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	var lastErr error
+	closeTimeout := 5 * time.Second
+
 	for nodeID, conn := range c.connections {
-		if err := conn.Close(); err != nil {
-			lastErr = err
+		// Use timeout context for close
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		
+		// Create a channel to signal close completion
+		done := make(chan error, 1)
+		go func(c *grpc.ClientConn) {
+			done <- c.Close()
+		}(conn)
+
+		select {
+		case err := <-done:
+			if err != nil {
+				lastErr = err
+			}
+		case <-ctx.Done():
+			lastErr = fmt.Errorf("timeout closing connection to %s", nodeID)
 		}
+		cancel()
 		delete(c.connections, nodeID)
 	}
 

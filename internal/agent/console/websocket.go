@@ -71,6 +71,7 @@ type WebSocketConnection struct {
 }
 
 // NewWebSocketServer creates a new WebSocket server.
+// By default, it uses a same-origin policy. Use SetCheckOrigin to configure CORS.
 func NewWebSocketServer(manager *Manager, authFunc AuthFunc) *WebSocketServer {
 	return &WebSocketServer{
 		manager: manager,
@@ -78,13 +79,68 @@ func NewWebSocketServer(manager *Manager, authFunc AuthFunc) *WebSocketServer {
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				// Allow all origins - in production, this should be configurable
-				return true
+				// Same-origin policy by default - reject cross-origin requests
+				// This can be overridden with SetCheckOrigin for specific allowed origins
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					// No origin header (e.g., non-browser clients) - allow
+					return true
+				}
+				// By default, only allow same-origin requests
+				// The caller should use SetCheckOrigin to allow specific origins
+				return false
 			},
 		},
 		authFunc:    authFunc,
 		connections: make(map[string]*WebSocketConnection),
 	}
+}
+
+// NewWebSocketServerWithOrigins creates a WebSocket server with specific allowed origins.
+func NewWebSocketServerWithOrigins(manager *Manager, authFunc AuthFunc, allowedOrigins []string) *WebSocketServer {
+	s := NewWebSocketServer(manager, authFunc)
+	s.SetAllowedOrigins(allowedOrigins)
+	return s
+}
+
+// SetAllowedOrigins sets the allowed origins for CORS.
+func (s *WebSocketServer) SetAllowedOrigins(origins []string) {
+	originSet := make(map[string]bool, len(origins))
+	for _, o := range origins {
+		originSet[o] = true
+	}
+	
+	s.upgrader.CheckOrigin = func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// No origin header (e.g., non-browser clients) - allow
+			return true
+		}
+		// Check exact match
+		if originSet[origin] {
+			return true
+		}
+		// Check wildcard match (e.g., https://*.example.com)
+		for allowed := range originSet {
+			if matchWildcard(origin, allowed) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// matchWildcard checks if origin matches a pattern with wildcards.
+func matchWildcard(origin, pattern string) bool {
+	if pattern == "*" {
+		return true
+	}
+	// Simple wildcard support: *.example.com matches sub.example.com
+	if len(pattern) > 2 && pattern[:2] == "*." {
+		suffix := pattern[1:] // .example.com
+		return len(origin) > len(suffix) && origin[len(origin)-len(suffix):] == suffix
+	}
+	return origin == pattern
 }
 
 // SetCheckOrigin sets the origin check function for the upgrader.

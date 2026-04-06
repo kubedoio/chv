@@ -11,6 +11,7 @@ import (
 	"github.com/chv/chv/internal/agent/cloudinit"
 	"github.com/chv/chv/internal/hypervisor"
 	"github.com/chv/chv/internal/pb/agent"
+	"github.com/chv/chv/internal/validation"
 )
 
 // ProvisionVM provisions a new VM on the agent.
@@ -45,6 +46,18 @@ func (s *Server) ProvisionVM(ctx context.Context, req *agent.ProvisionVMRequest)
 
 	// Create volume from backing image if specified
 	if req.Boot != nil && req.Boot.BackingImageId != "" && volumePath != "" {
+		// Validate backing image ID
+		if err := validation.ValidateID(req.Boot.BackingImageId); err != nil {
+			return &agent.VMStateResponse{
+				VmId:  req.VmId,
+				State: "error",
+				Error: &agent.ErrorDetail{
+					Code:    "INVALID_IMAGE_ID",
+					Message: fmt.Sprintf("Invalid backing image ID: %v", err),
+				},
+			}, nil
+		}
+		
 		imagePath := filepath.Join(s.config.ImageDir, req.Boot.BackingImageId+".raw")
 		if err := s.createVolumeFromImage(volumePath, imagePath); err != nil {
 			log.Printf("Failed to create volume from image: %v", err)

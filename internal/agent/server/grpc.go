@@ -33,6 +33,7 @@ type Config struct {
 	ImageDir          string
 	VolumeDir         string
 	CloudHypervisor   string
+	BridgeName        string // Network bridge name (default: br0)
 	HeartbeatInterval time.Duration
 }
 
@@ -69,7 +70,12 @@ func New(cfg *Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize state manager: %w", err)
 	}
 
-	tapManager := network.NewTAPManager("br0")
+	// Use configured bridge name or default to br0
+	bridgeName := cfg.BridgeName
+	if bridgeName == "" {
+		bridgeName = "br0"
+	}
+	tapManager := network.NewTAPManager(bridgeName)
 	isoGenerator := cloudinit.NewISOGenerator(cfg.DataDir)
 
 	// Initialize validator
