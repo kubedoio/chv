@@ -1,19 +1,58 @@
 # CHV Controller Configuration
+# This is an example configuration file for the CHV Controller service.
+# Copy this to /etc/chv/controller.yaml or use the -config flag.
+
+# Server addresses
+http_addr: ":8080"      # HTTP API listen address
+grpc_addr: ":9090"      # gRPC listen address for agents
 
 # Database connection
-database_url: "postgres://chv:chv@postgres:5432/chv?sslmode=disable"
+# Format: postgres://user:password@host:port/database?sslmode=disable
+database_url: "postgres://chv:chv@localhost:5432/chv?sslmode=disable"
 
-# HTTP API address
-http_addr: ":8080"
+# Logging configuration
+log_level: "info"       # debug, info, warn, error
+log_format: "json"      # json, text
 
-# gRPC address for agent communication
-grpc_addr: ":9090"
+# Security
+jwt_secret: "change-me-in-production"  # JWT signing secret
 
-# Logging level (debug, info, warn, error)
-log_level: "debug"
+token_duration: "24h"   # Token validity duration
 
-# Reconciliation interval
-reconcile_interval: "30s"
-
-# Heartbeat timeout for nodes
-heartbeat_timeout: "2m"
+# CORS configuration for WebUI access
+cors:
+  # List of allowed origins for cross-origin requests
+  # The WebUI at 10.5.199.83 is included by default
+  allowed_origins:
+    - "http://10.5.199.83"
+    - "http://10.5.199.83:3000"
+    - "http://localhost"
+    - "http://localhost:3000"
+    - "http://127.0.0.1"
+    - "http://127.0.0.1:3000"
+  
+  # Allowed HTTP methods
+  allowed_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "PATCH"
+    - "DELETE"
+    - "OPTIONS"
+  
+  # Allowed request headers
+  allowed_headers:
+    - "Accept"
+    - "Authorization"
+    - "Content-Type"
+    - "X-Requested-With"
+  
+  # Headers exposed to the client
+  exposed_headers:
+    - "Link"
+  
+  # Allow credentials (cookies, authorization headers)
+  allow_credentials: true
+  
+  # Preflight cache duration in seconds
+  max_age: 300

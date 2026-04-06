@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/chv/chv/internal/agent"
 	"github.com/chv/chv/internal/api"
 	"github.com/chv/chv/internal/auth"
+	"github.com/chv/chv/internal/config"
 	"github.com/chv/chv/internal/reconcile"
 	"github.com/chv/chv/internal/scheduler"
 	"github.com/chv/chv/internal/store"
@@ -24,30 +24,20 @@ import (
 	"google.golang.org/grpc"
 )
 
-// Config holds controller configuration.
-type Config struct {
-	DatabaseURL string `yaml:"database_url" env:"CHV_DATABASE_URL"`
-	HTTPAddr    string `yaml:"http_addr" env:"CHV_HTTP_ADDR" default:":8080"`
-	GRPCAddr    string `yaml:"grpc_addr" env:"CHV_GRPC_ADDR" default:":9090"`
-	LogLevel    string `yaml:"log_level" env:"CHV_LOG_LEVEL" default:"info"`
-}
-
 func main() {
-	configPath := flag.String("config", "", "Path to config file")
+	configPath := flag.String("config", "", "Path to configuration file (YAML)")
 	flag.Parse()
 
-	// Load config (simplified - in production use proper config loading)
-	cfg := &Config{
-		DatabaseURL: getEnv("CHV_DATABASE_URL", "postgres://chv:chv@localhost:5432/chv?sslmode=disable"),
-		HTTPAddr:    getEnv("CHV_HTTP_ADDR", ":8080"),
-		GRPCAddr:    getEnv("CHV_GRPC_ADDR", ":9090"),
-		LogLevel:    getEnv("CHV_LOG_LEVEL", "info"),
+	// Load configuration from file and environment
+	cfg, err := config.LoadControllerConfig(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	if *configPath != "" {
-		// Load from file if provided
-		log.Printf("Loading config from %s", *configPath)
-	}
+	log.Printf("Starting CHV Controller")
+	log.Printf("HTTP address: %s", cfg.HTTPAddr)
+	log.Printf("gRPC address: %s", cfg.GRPCAddr)
+	log.Printf("Log level: %s", cfg.LogLevel)
 
 	ctx := context.Background()
 
@@ -73,17 +63,17 @@ func main() {
 	agentClient := agent.NewClient()
 	reconciler := reconcile.NewService(db, schedulerService, agentClient)
 
-	// Create HTTP router
+	// Create HTTP router with CORS
 	router := chi.NewRouter()
 	
-	// CORS middleware - allow WebUI access from 10.5.199.83 and localhost
+	// Apply CORS middleware from configuration
 	corsMiddleware := cors.New(cors.Options{
-		AllowedOrigins:   getAllowedOrigins(),
-		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Requested-With"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300, // Maximum value not ignored by any of major browsers
+		AllowedOrigins:   cfg.CORS.AllowedOrigins,
+		AllowedMethods:   cfg.CORS.AllowedMethods,
+		AllowedHeaders:   cfg.CORS.AllowedHeaders,
+		ExposedHeaders:   cfg.CORS.ExposedHeaders,
+		AllowCredentials: cfg.CORS.AllowCredentials,
+		MaxAge:           cfg.CORS.MaxAge,
 	})
 	router.Use(corsMiddleware.Handler)
 	
@@ -141,28 +131,4 @@ func main() {
 	grpcServer.GracefulStop()
 
 	log.Println("Shutdown complete")
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-// getAllowedOrigins returns the list of allowed CORS origins.
-// Defaults to allowing 10.5.199.83 (WebUI) and localhost for development.
-func getAllowedOrigins() []string {
-	if env := os.Getenv("CHV_CORS_ORIGINS"); env != "" {
-		return strings.Split(env, ",")
-	}
-	// Default origins - WebUI at 10.5.199.83 and localhost dev
-	return []string{
-		"http://10.5.199.83",
-		"http://10.5.199.83:3000",
-		"http://localhost",
-		"http://localhost:3000",
-		"http://127.0.0.1",
-		"http://127.0.0.1:3000",
-	}
 }
