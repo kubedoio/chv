@@ -17,6 +17,10 @@ export const useStorageStore = defineStore('storage', () => {
       const result = await storageApi.listStoragePools()
       pools.value = result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to fetch storage pools'
     } finally {
       loading.value = false
@@ -31,6 +35,10 @@ export const useStorageStore = defineStore('storage', () => {
       await fetchStoragePools()
       return result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to create storage pool'
       throw err
     } finally {
@@ -45,6 +53,10 @@ export const useStorageStore = defineStore('storage', () => {
       await storageApi.deleteStoragePool(id)
       await fetchStoragePools()
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to delete storage pool'
       throw err
     } finally {

@@ -33,6 +33,10 @@ export const useAuthStore = defineStore('auth', () => {
       const result = await authApi.createToken({ name, expires_in: expiresIn })
       return result.token
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to create token'
       throw err
     } finally {

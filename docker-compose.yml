@@ -43,8 +43,7 @@ services:
       retries: 10
       start_period: 10s
 
-  # CHV Agent - For E2E testing (runs in mock mode without KVM)
-  # Note: Real VM operations require privileged mode and /dev/kvm access
+  # CHV Agent - For VM operations (requires KVM)
   agent:
     build:
       context: .
@@ -55,6 +54,7 @@ services:
       CHV_LISTEN_ADDR: :9091
       CHV_DATA_DIR: /var/lib/chv
       CHV_LOG_LEVEL: debug
+      CHV_CLOUD_HYPERVISOR: /usr/bin/cloud-hypervisor
     ports:
       # Agent gRPC exposed on host port 9093 (container uses 9091)
       - "9093:9091"
@@ -63,12 +63,12 @@ services:
         condition: service_healthy
     volumes:
       - agent_data:/var/lib/chv
+      - ./bin/cloud-hypervisor:/usr/bin/cloud-hypervisor:ro
     profiles:
       - with-agent
-    # Uncomment for actual VM testing (requires KVM):
-    # privileged: true
-    # devices:
-    #   - /dev/kvm:/dev/kvm
+    privileged: true
+    devices:
+      - /dev/kvm:/dev/kvm
 
   # CHV Bootstrap Container - for node installation/upgrade
   bootstrap:

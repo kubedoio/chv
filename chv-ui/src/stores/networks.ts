@@ -15,6 +15,14 @@ export const useNetworksStore = defineStore('networks', () => {
       const result = await networksApi.listNetworks()
       networks.value = result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to fetch networks'
     } finally {
       loading.value = false
@@ -29,6 +37,10 @@ export const useNetworksStore = defineStore('networks', () => {
       await fetchNetworks()
       return result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to create network'
       throw err
     } finally {

@@ -17,6 +17,10 @@ export const useImagesStore = defineStore('images', () => {
       const result = await imagesApi.listImages()
       images.value = result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to fetch images'
     } finally {
       loading.value = false
@@ -31,6 +35,10 @@ export const useImagesStore = defineStore('images', () => {
       await fetchImages()
       return result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to import image'
       throw err
     } finally {
@@ -45,6 +53,10 @@ export const useImagesStore = defineStore('images', () => {
       await imagesApi.deleteImage(id)
       await fetchImages()
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to delete image'
       throw err
     } finally {

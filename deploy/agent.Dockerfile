@@ -29,5 +29,10 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/chv-agent /usr/local/bin/chv-agent
 
+# Download and install cloud-hypervisor
+RUN curl -L -o /usr/local/bin/cloud-hypervisor \
+    https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download/cloud-hypervisor-static \
+    && chmod +x /usr/local/bin/cloud-hypervisor
+
 # Run as root (required for VM management)
 ENTRYPOINT ["chv-agent"]

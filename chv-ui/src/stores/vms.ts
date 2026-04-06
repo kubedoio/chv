@@ -23,6 +23,10 @@ export const useVMsStore = defineStore('vms', () => {
       const result = await vmsApi.listVMs()
       vms.value = result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to fetch VMs'
     } finally {
       loading.value = false
@@ -37,6 +41,10 @@ export const useVMsStore = defineStore('vms', () => {
       selectedVM.value = result
       return result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to fetch VM'
       throw err
     } finally {
@@ -52,6 +60,10 @@ export const useVMsStore = defineStore('vms', () => {
       await fetchVMs() // Refresh list
       return result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to create VM'
       throw err
     } finally {
@@ -69,6 +81,10 @@ export const useVMsStore = defineStore('vms', () => {
         selectedVM.value = null
       }
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to delete VM'
       throw err
     } finally {
@@ -85,6 +101,10 @@ export const useVMsStore = defineStore('vms', () => {
         await fetchVM(id)
       }
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to start VM'
       throw err
     } finally {
@@ -101,6 +121,10 @@ export const useVMsStore = defineStore('vms', () => {
         await fetchVM(id)
       }
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to stop VM'
       throw err
     } finally {
@@ -117,6 +141,10 @@ export const useVMsStore = defineStore('vms', () => {
         await fetchVM(id)
       }
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to reboot VM'
       throw err
     } finally {

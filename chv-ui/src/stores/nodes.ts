@@ -23,6 +23,10 @@ export const useNodesStore = defineStore('nodes', () => {
       const result = await nodesApi.listNodes()
       nodes.value = result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to fetch nodes'
     } finally {
       loading.value = false
@@ -37,6 +41,10 @@ export const useNodesStore = defineStore('nodes', () => {
       await fetchNodes()
       return result
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to register node'
       throw err
     } finally {
@@ -50,6 +58,10 @@ export const useNodesStore = defineStore('nodes', () => {
       await nodesApi.setMaintenance(id, enabled)
       await fetchNodes()
     } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
       error.value = err.response?.data?.error?.message || 'Failed to set maintenance mode'
       throw err
     } finally {

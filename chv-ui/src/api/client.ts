@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AxiosInstance, AxiosError } from 'axios'
+import type { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios'
 import type { APIError } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || ''
@@ -32,6 +32,10 @@ class APIClient {
     this.client.interceptors.response.use(
       (response) => response,
       (error: AxiosError<APIError>) => {
+        // Don't treat aborted requests as errors
+        if (error.code === 'ERR_CANCELED' || error.message === 'canceled') {
+          return Promise.reject(error)
+        }
         if (error.response?.status === 401) {
           // Token expired or invalid
           localStorage.removeItem('chv_token')
@@ -44,6 +48,16 @@ class APIClient {
 
   get instance(): AxiosInstance {
     return this.client
+  }
+
+  // Create a request with abort controller for cleanup
+  createRequest(config: AxiosRequestConfig) {
+    const controller = new AbortController()
+    const promise = this.client.request({
+      ...config,
+      signal: controller.signal
+    })
+    return { promise, controller }
   }
 
   async healthCheck(): Promise<{ status: string }> {
