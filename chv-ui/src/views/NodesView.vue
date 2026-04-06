@@ -1,12 +1,31 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useNodesStore } from '@/stores/nodes'
+import { useAppToast } from '@/utils/toast'
+import RegisterNodeModal from '@/components/modals/RegisterNodeModal.vue'
 
 const nodesStore = useNodesStore()
+const toast = useAppToast()
+
+const showRegisterModal = ref(false)
 
 onMounted(() => {
   nodesStore.fetchNodes()
 })
+
+function onNodeRegistered() {
+  showRegisterModal.value = false
+  toast.success('Node registered successfully')
+}
+
+async function setMaintenance(id: string, enabled: boolean) {
+  try {
+    await nodesStore.setMaintenance(id, enabled)
+    toast.success(enabled ? 'Node set to maintenance mode' : 'Node brought online')
+  } catch (err: any) {
+    toast.error(err.response?.data?.error?.message || 'Failed to update node status')
+  }
+}
 
 function getStatusClass(state: string) {
   switch (state) {
@@ -26,7 +45,7 @@ function formatState(state: string) {
   <div class="nodes-page">
     <div class="page-header">
       <h1>Nodes</h1>
-      <button class="create-btn">
+      <button class="create-btn" @click="showRegisterModal = true">
         <i class="pi pi-plus"></i>
         Register Node
       </button>
@@ -60,7 +79,7 @@ function formatState(state: string) {
         
         <div class="node-footer">
           <span class="last-seen">Last seen: {{ node.last_heartbeat_at ? new Date(node.last_heartbeat_at).toLocaleString() : 'Never' }}</span>
-          <button v-if="node.state === 'online'" class="action-link" @click="nodesStore.setMaintenance(node.id, true)">
+          <button v-if="node.state === 'online'" class="action-link" @click="setMaintenance(node.id, true)">
             Maintenance
           </button>
         </div>
@@ -71,6 +90,12 @@ function formatState(state: string) {
         <p>No nodes registered</p>
       </div>
     </div>
+
+    <RegisterNodeModal
+      v-model:visible="showRegisterModal"
+      @created="onNodeRegistered"
+      @cancel="showRegisterModal = false"
+    />
   </div>
 </template>
 

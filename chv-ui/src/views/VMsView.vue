@@ -1,23 +1,22 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useVMsStore } from '@/stores/vms'
-import { useToast } from 'primevue/usetoast'
+import { useAppToast } from '@/utils/toast'
 import { useConfirm } from 'primevue/useconfirm'
+import LoadingOverlay from '@/components/LoadingOverlay.vue'
+import CreateVMModal from '@/components/modals/CreateVMModal.vue'
 
 const vmsStore = useVMsStore()
-const toast = useToast()
+const toast = useAppToast()
 const confirm = useConfirm()
 
 const showCreateModal = ref(false)
 const activeTab = ref('summary')
 
-const newVM = ref({
-  name: '',
-  cpu: 1,
-  memory_mb: 1024,
-  image_id: '',
-  disk_size_gb: 10
-})
+async function onVMCreated() {
+  await vmsStore.fetchVMs()
+  toast.success('VM created successfully')
+}
 
 onMounted(() => {
   vmsStore.fetchVMs()
@@ -32,9 +31,9 @@ async function startVM() {
   if (!vmsStore.selectedVM) return
   try {
     await vmsStore.startVM(vmsStore.selectedVM.id)
-    toast.add({ severity: 'success', summary: 'VM Started', detail: `${vmsStore.selectedVM.name} is starting`, life: 3000 })
-  } catch (err) {
-    toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to start VM', life: 3000 })
+    toast.success(`${vmsStore.selectedVM.name} is starting`, 'VM Started')
+  } catch (err: any) {
+    toast.error(err.response?.data?.error?.message || 'Failed to start VM')
   }
 }
 
@@ -42,9 +41,9 @@ async function stopVM() {
   if (!vmsStore.selectedVM) return
   try {
     await vmsStore.stopVM(vmsStore.selectedVM.id)
-    toast.add({ severity: 'success', summary: 'VM Stopped', detail: `${vmsStore.selectedVM.name} is stopping`, life: 3000 })
-  } catch (err) {
-    toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to stop VM', life: 3000 })
+    toast.success(`${vmsStore.selectedVM.name} is stopping`, 'VM Stopped')
+  } catch (err: any) {
+    toast.error(err.response?.data?.error?.message || 'Failed to stop VM')
   }
 }
 
@@ -52,9 +51,9 @@ async function rebootVM() {
   if (!vmsStore.selectedVM) return
   try {
     await vmsStore.rebootVM(vmsStore.selectedVM.id)
-    toast.add({ severity: 'success', summary: 'VM Rebooted', detail: `${vmsStore.selectedVM.name} is rebooting`, life: 3000 })
-  } catch (err) {
-    toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to reboot VM', life: 3000 })
+    toast.success(`${vmsStore.selectedVM.name} is rebooting`, 'VM Rebooted')
+  } catch (err: any) {
+    toast.error(err.response?.data?.error?.message || 'Failed to reboot VM')
   }
 }
 
@@ -68,9 +67,9 @@ function confirmDelete() {
     accept: async () => {
       try {
         await vmsStore.deleteVM(vmsStore.selectedVM!.id)
-        toast.add({ severity: 'success', summary: 'VM Deleted', detail: 'VM has been deleted', life: 3000 })
-      } catch (err) {
-        toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to delete VM', life: 3000 })
+        toast.success('VM has been deleted', 'VM Deleted')
+      } catch (err: any) {
+        toast.error(err.response?.data?.error?.message || 'Failed to delete VM')
       }
     }
   })
@@ -104,7 +103,9 @@ function formatState(state: string) {
         </button>
       </div>
       
-      <div class="vm-list">
+      <LoadingOverlay :loading="vmsStore.loading" message="Loading VMs..." />
+      
+      <div v-if="!vmsStore.loading" class="vm-list">
         <div
           v-for="vm in vmsStore.vms"
           :key="vm.id"
@@ -253,40 +254,10 @@ function formatState(state: string) {
     </div>
 
     <!-- Create VM Modal -->
-    <Dialog v-model:visible="showCreateModal" header="Create Virtual Machine" modal style="width: 500px">
-      <div class="create-form">
-        <div class="form-group">
-          <label>Name</label>
-          <input v-model="newVM.name" type="text" placeholder="vm-name" />
-        </div>
-        
-        <div class="form-row">
-          <div class="form-group">
-            <label>vCPUs</label>
-            <input v-model.number="newVM.cpu" type="number" min="1" max="32" />
-          </div>
-          <div class="form-group">
-            <label>Memory (MB)</label>
-            <input v-model.number="newVM.memory_mb" type="number" min="512" step="512" />
-          </div>
-        </div>
-        
-        <div class="form-group">
-          <label>Disk Size (GB)</label>
-          <input v-model.number="newVM.disk_size_gb" type="number" min="10" />
-        </div>
-        
-        <div class="form-group">
-          <label>Image ID</label>
-          <input v-model="newVM.image_id" type="text" placeholder="Image UUID" />
-        </div>
-      </div>
-      
-      <template #footer>
-        <Button label="Cancel" text @click="showCreateModal = false" />
-        <Button label="Create" @click="showCreateModal = false" />
-      </template>
-    </Dialog>
+    <CreateVMModal
+      v-model:visible="showCreateModal"
+      @vm-created="onVMCreated"
+    />
   </div>
 </template>
 

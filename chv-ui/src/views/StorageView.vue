@@ -1,26 +1,29 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { storageApi } from '@/api/storage'
-import type { StoragePool } from '@/types'
+import { useStorageStore } from '@/stores/storage'
+import { useAppToast } from '@/utils/toast'
+import CreateStorageModal from '@/components/modals/CreateStorageModal.vue'
 
-const pools = ref<StoragePool[]>([])
-const loading = ref(false)
+const storageStore = useStorageStore()
+const toast = useAppToast()
 
-onMounted(async () => {
-  loading.value = true
-  try {
-    pools.value = await storageApi.listStoragePools()
-  } finally {
-    loading.value = false
-  }
+const showCreateModal = ref(false)
+
+onMounted(() => {
+  storageStore.fetchStoragePools()
 })
+
+function onStorageCreated() {
+  showCreateModal.value = false
+  toast.success('Storage pool created successfully')
+}
 
 function formatBytes(bytes: number): string {
   const gb = bytes / (1024 * 1024 * 1024)
   return `${gb.toFixed(1)} GB`
 }
 
-function getUsagePercent(pool: StoragePool): number {
+function getUsagePercent(pool: any): number {
   if (pool.total_bytes === 0) return 0
   return Math.round((pool.used_bytes / pool.total_bytes) * 100)
 }
@@ -30,14 +33,14 @@ function getUsagePercent(pool: StoragePool): number {
   <div class="storage-page">
     <div class="page-header">
       <h1>Storage Pools</h1>
-      <button class="create-btn">
+      <button class="create-btn" @click="showCreateModal = true">
         <i class="pi pi-plus"></i>
         Add Storage
       </button>
     </div>
 
     <div class="pools-grid">
-      <div v-for="pool in pools" :key="pool.id" class="pool-card">
+      <div v-for="pool in storageStore.pools" :key="pool.id" class="pool-card">
         <div class="pool-header">
           <div class="pool-icon">
             <i class="pi pi-database"></i>
@@ -68,11 +71,17 @@ function getUsagePercent(pool: StoragePool): number {
         </div>
       </div>
       
-      <div v-if="pools.length === 0" class="empty-state">
+      <div v-if="storageStore.pools.length === 0" class="empty-state">
         <i class="pi pi-database"></i>
         <p>No storage pools configured</p>
       </div>
     </div>
+
+    <CreateStorageModal
+      v-model:visible="showCreateModal"
+      @created="onStorageCreated"
+      @cancel="showCreateModal = false"
+    />
   </div>
 </template>
 

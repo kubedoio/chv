@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import AppSidebar from './AppSidebar.vue'
 import AppHeader from './AppHeader.vue'
+import Toast from 'primevue/toast'
 import { useAuthStore } from '@/stores/auth'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -18,6 +19,7 @@ onMounted(() => {
 
 <template>
   <div class="app-layout">
+    <Toast />
     <AppSidebar />
     <div class="main-content">
       <AppHeader />

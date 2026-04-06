@@ -1,19 +1,22 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { imagesApi } from '@/api/images'
-import type { Image } from '@/types'
+import { useImagesStore } from '@/stores/images'
+import { useAppToast } from '@/utils/toast'
+import ImportImageModal from '@/components/modals/ImportImageModal.vue'
 
-const images = ref<Image[]>([])
-const loading = ref(false)
+const imagesStore = useImagesStore()
+const toast = useAppToast()
 
-onMounted(async () => {
-  loading.value = true
-  try {
-    images.value = await imagesApi.listImages()
-  } finally {
-    loading.value = false
-  }
+const showImportModal = ref(false)
+
+onMounted(() => {
+  imagesStore.fetchImages()
 })
+
+function onImageImportStarted() {
+  showImportModal.value = false
+  toast.success('Image import started')
+}
 
 function getStatusIcon(status: string): string {
   switch (status) {
@@ -34,7 +37,7 @@ function formatBytes(bytes: number): string {
   <div class="images-page">
     <div class="page-header">
       <h1>Images</h1>
-      <button class="create-btn">
+      <button class="create-btn" @click="showImportModal = true">
         <i class="pi pi-plus"></i>
         Import Image
       </button>
@@ -53,7 +56,7 @@ function formatBytes(bytes: number): string {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="image in images" :key="image.id">
+          <tr v-for="image in imagesStore.images" :key="image.id">
             <td>
               <i :class="['pi', getStatusIcon(image.status), image.status]"></i>
             </td>
@@ -63,12 +66,18 @@ function formatBytes(bytes: number): string {
             <td>{{ formatBytes(image.size_bytes) }}</td>
             <td>{{ new Date(image.created_at).toLocaleDateString() }}</td>
           </tr>
-          <tr v-if="images.length === 0">
+          <tr v-if="imagesStore.images.length === 0">
             <td colspan="6" class="empty-cell">No images found</td>
           </tr>
         </tbody>
       </table>
     </div>
+
+    <ImportImageModal
+      v-model:visible="showImportModal"
+      @created="onImageImportStarted"
+      @cancel="showImportModal = false"
+    />
   </div>
 </template>
 

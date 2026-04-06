@@ -1,19 +1,33 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useNetworksStore } from '@/stores/networks'
+import { useAppToast } from '@/utils/toast'
+import CreateNetworkModal from '@/components/modals/CreateNetworkModal.vue'
 
 const networksStore = useNetworksStore()
+const toast = useAppToast()
+
+const showCreateModal = ref(false)
 
 onMounted(() => {
   networksStore.fetchNetworks()
 })
+
+function onNetworkCreated() {
+  showCreateModal.value = false
+  toast.success('Network created successfully')
+}
+
+function onCreateError(message: string) {
+  toast.error(message || 'Failed to create network')
+}
 </script>
 
 <template>
   <div class="networks-page">
     <div class="page-header">
       <h1>Networks</h1>
-      <button class="create-btn">
+      <button class="create-btn" @click="showCreateModal = true">
         <i class="pi pi-plus"></i>
         Create Network
       </button>
@@ -47,6 +61,12 @@ onMounted(() => {
         </tbody>
       </table>
     </div>
+
+    <CreateNetworkModal
+      v-model:visible="showCreateModal"
+      @created="onNetworkCreated"
+      @cancel="showCreateModal = false"
+    />
   </div>
 </template>
 

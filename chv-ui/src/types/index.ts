@@ -128,3 +128,33 @@ export interface DashboardStats {
   total_storage_pools: number
   total_networks: number
 }
+
+export interface CreateNetworkRequest {
+  name: string
+  bridge_name: string
+  cidr: string
+  gateway_ip: string
+}
+
+export interface CreateStoragePoolRequest {
+  name: string
+  pool_type: 'local' | 'nfs'
+  path_or_export: string
+  supports_online_resize: boolean
+}
+
+export interface RegisterNodeRequest {
+  hostname: string
+  management_ip: string
+  total_cpu_cores: number
+  total_ram_mb: number
+}
+
+export interface ImportImageRequest {
+  name: string
+  os_family: string
+  source_url: string
+  source_format: 'qcow2' | 'raw' | 'vmdk'
+  architecture: string
+  cloud_init_supported: boolean
+}
