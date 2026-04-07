@@ -1,3 +1,4 @@
+import { env } from '$env/dynamic/public';
 import type {
   APIErrorEnvelope,
   Image,
@@ -9,7 +10,7 @@ import type {
   VM
 } from '$lib/api/types';
 
-const DEFAULT_BASE_URL = 'http://localhost:8080/api/v1';
+const DEFAULT_BASE_URL = env.PUBLIC_CHV_API_BASE_URL || 'http://localhost:8080/api/v1';
 const TOKEN_STORAGE_KEY = 'chv-api-token';
 
 export function getStoredToken(): string | null {
@@ -110,4 +111,3 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     }
   };
 }
-

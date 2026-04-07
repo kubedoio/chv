@@ -1,0 +1,6 @@
+function _page($$renderer) {
+  $$renderer.push(`<section class="grid gap-4 lg:grid-cols-3"><a class="table-card block p-5 text-inherit no-underline" href="/install"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Platform</div> <div class="mt-2 text-lg font-semibold">Install and Repair</div> <p class="mt-2 text-sm text-muted">Inspect \`/var/lib/chv\`, \`chvbr0\`, SQLite, and the default \`localdisk\` pool.</p></a> <a class="table-card block p-5 text-inherit no-underline" href="/images"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Templates</div> <div class="mt-2 text-lg font-semibold">QCOW2 Images</div> <p class="mt-2 text-sm text-muted">Track imported cloud images and their cloud-init readiness.</p></a> <a class="table-card block p-5 text-inherit no-underline" href="/vms"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Workloads</div> <div class="mt-2 text-lg font-semibold">Virtual Machines</div> <p class="mt-2 text-sm text-muted">View the desired and actual state for each VM workspace.</p></a></section>`);
+}
+
+export { _page as default };
+//# sourceMappingURL=_page.svelte-Br5mCBoO.js.map
