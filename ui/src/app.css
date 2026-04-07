@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #1a1a1a;
+  background: #ffffff;
+  font-family: 'Roboto', system-ui, sans-serif;
+}
+
+html,
+body,
+#svelte {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    linear-gradient(180deg, rgba(245, 245, 245, 0.8), rgba(255, 255, 255, 0.95)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(208, 208, 208, 0.14) 0,
+      rgba(208, 208, 208, 0.14) 1px,
+      transparent 1px,
+      transparent 96px
+    );
+}
+
+.console-shell {
+  min-height: 100%;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+}
+
+.table-card {
+  border: 1px solid #d0d0d0;
+  background: #ffffff;
+}
+
+.card-header {
+  border-bottom: 1px solid #d0d0d0;
+  background: #f5f5f5;
+}
+
+.mono {
+  font-family: 'Roboto Mono', ui-monospace, monospace;
+}
+
+.button-primary {
+  background: #0066cc;
+  color: #ffffff;
+  border: 1px solid #0066cc;
+}
+
+.button-secondary {
+  background: #ffffff;
+  color: #1a1a1a;
+  border: 1px solid #d0d0d0;
+}
+
+.button-danger {
+  background: #ffffff;
+  color: #e60000;
+  border: 1px solid #e60000;
+}
+

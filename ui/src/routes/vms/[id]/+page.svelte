@@ -1,0 +1,36 @@
+<script lang="ts">
+  import { page } from '$app/stores';
+</script>
+
+<section class="grid gap-4 lg:grid-cols-2">
+  <div class="table-card">
+    <div class="card-header px-4 py-3">
+      <div class="text-[11px] uppercase tracking-[0.16em] text-muted">VM Detail</div>
+      <div class="mt-1 text-lg font-semibold mono">{$page.params.id}</div>
+    </div>
+    <dl class="grid grid-cols-[160px_minmax(0,1fr)] gap-x-4 gap-y-3 p-4 text-sm">
+      <dt class="text-muted">QCOW2 disk</dt>
+      <dd class="mono">/var/lib/chv/vms/&lt;vm-id&gt;/disk.qcow2</dd>
+      <dt class="text-muted">Seed ISO</dt>
+      <dd class="mono">/var/lib/chv/vms/&lt;vm-id&gt;/seed.iso</dd>
+      <dt class="text-muted">Workspace</dt>
+      <dd class="mono">/var/lib/chv/vms/&lt;vm-id&gt;</dd>
+      <dt class="text-muted">Cloud-init</dt>
+      <dd>user-data, meta-data, optional network-config</dd>
+      <dt class="text-muted">Operations</dt>
+      <dd>Activity history will be listed from the controller log.</dd>
+    </dl>
+  </div>
+
+  <div class="table-card">
+    <div class="card-header px-4 py-3">
+      <div class="text-[11px] uppercase tracking-[0.16em] text-muted">State Notes</div>
+      <div class="mt-1 text-lg font-semibold">Seed ISO Boot Gate</div>
+    </div>
+    <div class="space-y-3 p-4 text-sm text-muted">
+      <p>VM boot remains blocked until the image, storage pool, network, workspace, and `seed.iso` are ready.</p>
+      <p>This route is intentionally conservative for MVP-1 and should expose only backend-confirmed state.</p>
+    </div>
+  </div>
+</section>
+

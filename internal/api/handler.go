@@ -1,181 +1,109 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
-	"github.com/chv/chv/internal/agent"
 	"github.com/chv/chv/internal/auth"
-	"github.com/chv/chv/internal/config"
-	"github.com/chv/chv/internal/hypervisor"
-	"github.com/chv/chv/internal/operations"
-	"github.com/chv/chv/internal/quota"
-	"github.com/chv/chv/internal/reconcile"
-	"github.com/chv/chv/internal/scheduler"
-	"github.com/chv/chv/internal/store"
-	"github.com/chv/chv/internal/worker"
+	"github.com/chv/chv/internal/bootstrap"
+	"github.com/chv/chv/internal/db"
 	"github.com/go-chi/chi/v5"
 )
 
-// Handler holds API handlers.
 type Handler struct {
-	store             store.Store
-	auth              *auth.Service
-	scheduler         *scheduler.Service
-	reconciler        *reconcile.Service
-	quota             *quota.Service
-	imageImportWorker *worker.ImageImportWorker
-	operations        *operations.Service
-	consoleSessions   *hypervisor.SessionManager
-	agentClient       agent.Client
-	config            *config.ControllerConfig
+	repo      *db.Repository
+	auth      *auth.Service
+	bootstrap *bootstrap.Service
+	router    chi.Router
 }
 
-// NewHandler creates a new API handler.
-func NewHandler(store store.Store, auth *auth.Service, scheduler *scheduler.Service, reconciler *reconcile.Service, agentClient agent.Client, cfg *config.ControllerConfig) *Handler {
-	if agentClient == nil {
-		agentClient = agent.NewClient()
-	}
-	if cfg == nil {
-		cfg = config.DefaultControllerConfig()
-	}
-	return &Handler{
-		store:           store,
-		auth:            auth,
-		scheduler:       scheduler,
-		reconciler:      reconciler,
-		quota:           quota.NewService(store),
-		operations:      operations.NewService(store),
-		consoleSessions: hypervisor.NewSessionManager(),
-		agentClient:     agentClient,
-		config:          cfg,
-	}
+type errorEnvelope struct {
+	Error apiError `json:"error"`
 }
 
-// SetImageImportWorker sets the image import worker.
-func (h *Handler) SetImageImportWorker(w *worker.ImageImportWorker) {
-	h.imageImportWorker = w
+type apiError struct {
+	Code         string `json:"code"`
+	Message      string `json:"message"`
+	ResourceType string `json:"resource_type,omitempty"`
+	ResourceID   string `json:"resource_id,omitempty"`
+	Retryable    bool   `json:"retryable"`
+	Hint         string `json:"hint,omitempty"`
 }
 
-// RegisterRoutes registers all API routes.
-func (h *Handler) RegisterRoutes(r chi.Router) {
-	// Health and metrics (public)
-	r.Get("/health", h.healthCheck)
-	r.Get("/metrics", h.metrics)
-	r.Get("/metrics/prometheus", h.prometheusMetrics)
-	
-	// API v1 routes
-	r.Route("/api/v1", func(r chi.Router) {
-		// Public routes
-		r.Get("/health", h.handleHealthV1)
+func NewHandler(repo *db.Repository, authService *auth.Service, bootstrapService *bootstrap.Service) *Handler {
+	handler := &Handler{
+		repo:      repo,
+		auth:      authService,
+		bootstrap: bootstrapService,
+		router:    chi.NewRouter(),
+	}
+	handler.registerRoutes()
+	return handler
+}
+
+func (h *Handler) Router() http.Handler {
+	return h.router
+}
+
+func (h *Handler) registerRoutes() {
+	h.router.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		h.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	h.router.Route("/api/v1", func(r chi.Router) {
 		r.Post("/tokens", h.createToken)
-		
-		// VM Console (public - uses query param token for WebSocket)
-		r.Get("/vms/{id}/console", h.vmConsole)
-		
-		// Protected routes
+		r.Get("/install/status", h.installStatus)
+		r.Post("/install/bootstrap", h.installBootstrap)
+		r.Post("/install/repair", h.installRepair)
+
 		r.Group(func(r chi.Router) {
 			r.Use(h.authMiddleware)
-			
-			// Tokens
-			r.Get("/tokens", h.listTokens)
-			
-			// Nodes
-			r.Post("/nodes/register", h.registerNode)
-			r.Get("/nodes", h.listNodes)
-			r.Get("/nodes/{id}", h.getNode)
-			r.Post("/nodes/{id}/maintenance", h.setNodeMaintenance)
-			
-			// Networks
-			r.Post("/networks", h.createNetwork)
+			r.Post("/login/validate", h.loginValidate)
 			r.Get("/networks", h.listNetworks)
-			r.Get("/networks/{id}", h.getNetwork)
-			r.Delete("/networks/{id}", h.deleteNetwork)
-			
-			// Storage Pools
-			r.Post("/storage-pools", h.createStoragePool)
 			r.Get("/storage-pools", h.listStoragePools)
-			r.Get("/storage-pools/{id}", h.getStoragePool)
-			r.Delete("/storage-pools/{id}", h.deleteStoragePool)
-			
-			// Images
-			r.Post("/images/import", h.importImage)
 			r.Get("/images", h.listImages)
-			r.Get("/images/{id}", h.getImage)
-			r.Delete("/images/{id}", h.deleteImage)
-			
-			// VMs
-			r.Post("/vms", h.createVM)
 			r.Get("/vms", h.listVMs)
-			r.Get("/vms/{id}", h.getVM)
-			r.Put("/vms/{id}", h.updateVM)
-			r.Post("/vms/{id}/start", h.startVM)
-			r.Post("/vms/{id}/stop", h.stopVM)
-			r.Post("/vms/{id}/reboot", h.rebootVM)
-			r.Post("/vms/{id}/resize-disk", h.resizeDisk)
-			r.Delete("/vms/{id}", h.deleteVM)
-
-			// VM Snapshots
-			r.Post("/vms/{id}/snapshots", h.createSnapshot)
-			r.Get("/vms/{id}/snapshots", h.listSnapshots)
-			r.Delete("/vms/{id}/snapshots/{snapshot_id}", h.deleteSnapshot)
-
-			// Volume Clone
-			r.Post("/volumes/{id}/clone", h.cloneVolume)
-
-			// Operations
 			r.Get("/operations", h.listOperations)
-			r.Get("/operations/{id}", h.getOperation)
-			r.Get("/operations/{id}/logs", h.getOperationLogs)
-			
-			// Settings and User Info
-			r.Get("/settings", h.getSettings)
-			r.Get("/me", h.getMe)
-
-			// Resource Quotas
-			r.Get("/quota", h.getQuota)
 		})
 	})
 }
 
-// ErrorResponse represents an error response.
-type ErrorResponse struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+func (h *Handler) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := h.auth.ValidateToken(r.Context(), r.Header.Get("Authorization")); err != nil {
+			h.writeError(w, http.StatusUnauthorized, apiError{
+				Code:      "unauthorized",
+				Message:   "A valid bearer token is required.",
+				Retryable: false,
+				Hint:      "Create a token with POST /api/v1/tokens and retry with Authorization: Bearer <token>.",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
-func (h *Handler) jsonResponse(w http.ResponseWriter, status int, data interface{}) {
+func (h *Handler) writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func (h *Handler) errorResponse(w http.ResponseWriter, status int, code, message string) {
-	h.jsonResponse(w, status, ErrorResponse{Code: code, Message: message})
+func (h *Handler) writeError(w http.ResponseWriter, status int, payload apiError) {
+	h.writeJSON(w, status, errorEnvelope{Error: payload})
 }
 
-
-
-// updateVM handles VM updates
-func (h *Handler) updateVM(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement VM update
-	h.errorResponse(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "VM update not yet implemented")
+func decodeJSON[T any](r *http.Request, dst *T) error {
+	if r.Body == nil {
+		return nil
+	}
+	return json.NewDecoder(r.Body).Decode(dst)
 }
 
-// createSnapshot handles snapshot creation
-func (h *Handler) createSnapshot(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement snapshot creation
-	h.errorResponse(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Snapshot creation not yet implemented")
-}
-
-// listSnapshots handles listing snapshots
-func (h *Handler) listSnapshots(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement snapshot listing
-	h.errorResponse(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Snapshot listing not yet implemented")
-}
-
-// deleteSnapshot handles snapshot deletion
-func (h *Handler) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement snapshot deletion
-	h.errorResponse(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Snapshot deletion not yet implemented")
+func requestContext(r *http.Request) context.Context {
+	if r == nil {
+		return context.Background()
+	}
+	return r.Context()
 }
