@@ -1,17 +1,62 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useVMsStore } from '@/stores/vms'
 import { useAppToast } from '@/utils/toast'
 import { useConfirm } from 'primevue/useconfirm'
+import InputNumber from 'primevue/inputnumber'
+import Dropdown from 'primevue/dropdown'
 import LoadingOverlay from '@/components/LoadingOverlay.vue'
 import CreateVMModal from '@/components/modals/CreateVMModal.vue'
+import VMConsole from '@/components/VMConsole.vue'
 
 const vmsStore = useVMsStore()
 const toast = useAppToast()
 const confirm = useConfirm()
 
 const showCreateModal = ref(false)
+const showConsole = ref(false)
 const activeTab = ref('summary')
+
+const settingsForm = ref({
+  cpu: 2,
+  memory_mb: 2048,
+  boot_mode: 'cloud_image'
+})
+
+watch(() => vmsStore.selectedVM, (vm) => {
+  if (vm?.spec) {
+    settingsForm.value = {
+      cpu: vm.spec.cpu || 2,
+      memory_mb: vm.spec.memory_mb || 2048,
+      boot_mode: vm.spec.boot?.mode || 'cloud_image'
+    }
+  }
+}, { immediate: true })
+
+// Reset settings form to current VM values
+const resetSettings = () => {
+  if (vmsStore.selectedVM?.spec) {
+    settingsForm.value = {
+      cpu: vmsStore.selectedVM.spec.cpu || 2,
+      memory_mb: vmsStore.selectedVM.spec.memory_mb || 2048,
+      boot_mode: vmsStore.selectedVM.spec.boot?.mode || 'cloud_image'
+    }
+  }
+}
+
+const saveSettings = async () => {
+  if (!vmsStore.selectedVM) return
+  try {
+    await vmsStore.updateVM(vmsStore.selectedVM.id, {
+      cpu: settingsForm.value.cpu,
+      memory_mb: settingsForm.value.memory_mb,
+      boot: { mode: settingsForm.value.boot_mode }
+    })
+    toast.success('VM settings updated', 'Settings Saved')
+  } catch (err: any) {
+    toast.error(err.response?.data?.error?.message || 'Failed to update settings')
+  }
+}
 
 async function onVMCreated() {
   await vmsStore.fetchVMs()
@@ -86,6 +131,17 @@ function getStatusClass(state: string) {
   }
 }
 
+function getStatusIcon(state: string) {
+  switch (state) {
+    case 'running': return '●'
+    case 'stopped': return '●'
+    case 'error': return '◼'
+    case 'starting':
+    case 'stopping': return '▲'
+    default: return '●'
+  }
+}
+
 function formatState(state: string) {
   return state.charAt(0).toUpperCase() + state.slice(1)
 }
@@ -114,6 +170,7 @@ function formatState(state: string) {
         >
           <div class="vm-status">
             <span :class="['status-badge', getStatusClass(vm.actual_state)]">
+              <span class="status-icon">{{ getStatusIcon(vm.actual_state) }}</span>
               {{ formatState(vm.actual_state) }}
             </span>
           </div>
@@ -205,6 +262,7 @@ function formatState(state: string) {
               <div class="info-item">
                 <label>Status</label>
                 <span :class="['status-badge', getStatusClass(vmsStore.selectedVM.actual_state)]">
+                  <span class="status-icon">{{ getStatusIcon(vmsStore.selectedVM.actual_state) }}</span>
                   {{ formatState(vmsStore.selectedVM.actual_state) }}
                 </span>
               </div>
@@ -228,15 +286,86 @@ function formatState(state: string) {
           </div>
 
           <div v-else-if="activeTab === 'console'" class="console-tab">
-            <div class="console-placeholder">
+            <div v-if="vmsStore.selectedVM?.actual_state === 'running'" class="console-actions">
+              <button class="action-btn primary" @click="showConsole = true">
+                <i class="pi pi-desktop"></i>
+                Open Console
+              </button>
+            </div>
+            <div v-else class="console-placeholder">
               <i class="pi pi-desktop"></i>
-              <p>VM Console</p>
-              <span>Console access coming in v0.2.0</span>
+              <p>VM must be running to access console</p>
+              <button 
+                v-if="vmsStore.selectedVM?.actual_state === 'stopped'"
+                class="action-btn primary"
+                @click="startVM"
+              >
+                <i class="pi pi-play"></i>
+                Start VM
+              </button>
             </div>
           </div>
 
           <div v-else-if="activeTab === 'settings'" class="settings-tab">
-            <p>VM settings will be available in a future release.</p>
+            <div v-if="vmsStore.selectedVM?.actual_state !== 'stopped'" class="warning-banner">
+              <i class="pi pi-exclamation-triangle"></i>
+              <span>VM must be stopped to apply settings changes</span>
+            </div>
+            
+            <div class="settings-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label>CPU Cores</label>
+                  <InputNumber 
+                    v-model="settingsForm.cpu" 
+                    :min="1" 
+                    :max="64"
+                    :disabled="vmsStore.selectedVM?.actual_state !== 'stopped'"
+                  />
+                </div>
+                <div class="form-group">
+                  <label>Memory (MB)</label>
+                  <InputNumber 
+                    v-model="settingsForm.memory_mb" 
+                    :min="512" 
+                    :max="262144"
+                    :step="512"
+                    :disabled="vmsStore.selectedVM?.actual_state !== 'stopped'"
+                  />
+                </div>
+              </div>
+              
+              <div class="form-group">
+                <label>Boot Mode</label>
+                <Dropdown 
+                  v-model="settingsForm.boot_mode"
+                  :options="[
+                    { label: 'Cloud Image', value: 'cloud_image' },
+                    { label: 'Direct Kernel', value: 'direct_kernel' }
+                  ]"
+                  option-label="label"
+                  option-value="value"
+                  :disabled="vmsStore.selectedVM?.actual_state !== 'stopped'"
+                />
+              </div>
+              
+              <div class="form-actions">
+                <button 
+                  class="action-btn primary" 
+                  @click="saveSettings"
+                  :disabled="vmsStore.selectedVM?.actual_state !== 'stopped' || vmsStore.loading"
+                >
+                  <i class="pi pi-save"></i>
+                  Save Changes
+                </button>
+                <button 
+                  class="action-btn" 
+                  @click="resetSettings"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
           </div>
 
           <div v-else-if="activeTab === 'logs'" class="logs-tab">
@@ -257,6 +386,14 @@ function formatState(state: string) {
     <CreateVMModal
       v-model:visible="showCreateModal"
       @vm-created="onVMCreated"
+    />
+
+    <!-- VM Console -->
+    <VMConsole
+      v-if="vmsStore.selectedVM"
+      :vm-id="vmsStore.selectedVM.id"
+      :visible="showConsole"
+      @close="showConsole = false"
     />
   </div>
 </template>
@@ -340,7 +477,7 @@ function formatState(state: string) {
 }
 
 .vm-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--color-text-primary);
   white-space: nowrap;
@@ -405,7 +542,7 @@ function formatState(state: string) {
 }
 
 .details-header h1 {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 600;
   color: var(--color-text-primary);
 }
@@ -542,6 +679,13 @@ function formatState(state: string) {
   font-size: 12px;
 }
 
+.console-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
 .no-selection {
   display: flex;
   flex-direction: column;
@@ -594,5 +738,31 @@ function formatState(state: string) {
 .form-group input:focus {
   outline: none;
   border-color: var(--color-primary);
+}
+
+.warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background-color: rgba(240, 171, 0, 0.1);
+  border: 1px solid var(--color-warning);
+  border-radius: 2px;
+  margin-bottom: 16px;
+  color: #c78b00;
+}
+
+.warning-banner i {
+  color: var(--color-warning);
+}
+
+.settings-form {
+  max-width: 500px;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 24px;
 }
 </style>

@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/chv/chv/internal/agent/cloudinit"
+	"github.com/chv/chv/internal/agent/metadata"
 	"github.com/chv/chv/internal/hypervisor"
 	"github.com/chv/chv/internal/pb/agent"
 	"github.com/chv/chv/internal/validation"
@@ -18,6 +20,17 @@ import (
 // It prepares the disk, creates cloud-init config if provided, and stores the VM configuration.
 func (s *Server) ProvisionVM(ctx context.Context, req *agent.ProvisionVMRequest) (*agent.VMStateResponse, error) {
 	log.Printf("Provisioning VM %s (%s)", req.VmName, req.VmId)
+	
+	// Debug: log cloud-init config
+	if req.CloudInit != nil {
+		log.Printf("CloudInit received - UserData: %v, MetaData: %v, NetworkConfig: %v", 
+			req.CloudInit.UserData != "", req.CloudInit.MetaData != "", req.CloudInit.NetworkConfig != "")
+		if req.CloudInit.NetworkConfig != "" {
+			log.Printf("NetworkConfig content: %s", req.CloudInit.NetworkConfig)
+		}
+	} else {
+		log.Printf("CloudInit is nil")
+	}
 
 	// Check if VM is already provisioned or running
 	instance := s.launcher.GetInstance(req.VmId)
@@ -58,7 +71,22 @@ func (s *Server) ProvisionVM(ctx context.Context, req *agent.ProvisionVMRequest)
 			}, nil
 		}
 		
-		imagePath := filepath.Join(s.config.ImageDir, req.Boot.BackingImageId+".raw")
+		// Use provided image path or construct from image ID
+		imagePath := req.Boot.BackingImagePath
+		if imagePath == "" {
+			// Try .raw first, then .qcow2
+			rawPath := filepath.Join(s.config.ImageDir, req.Boot.BackingImageId+".raw")
+			qcow2Path := filepath.Join(s.config.ImageDir, req.Boot.BackingImageId+".qcow2")
+			
+			if _, err := os.Stat(rawPath); err == nil {
+				imagePath = rawPath
+			} else if _, err := os.Stat(qcow2Path); err == nil {
+				imagePath = qcow2Path
+			} else {
+				// Default to .raw for error message clarity
+				imagePath = rawPath
+			}
+		}
 		if err := s.createVolumeFromImage(volumePath, imagePath); err != nil {
 			log.Printf("Failed to create volume from image: %v", err)
 			return &agent.VMStateResponse{
@@ -72,21 +100,68 @@ func (s *Server) ProvisionVM(ctx context.Context, req *agent.ProvisionVMRequest)
 		}
 	}
 
-	// Create cloud-init ISO if user-data is provided
+	// Create cloud-init ISO (for backwards compatibility) and register with metadata server
 	var isoPath string
-	if req.CloudInit != nil && (req.CloudInit.UserData != "" || req.CloudInit.MetaData != "") {
-		config := &cloudinit.Config{
+	var cloudInitConfig *cloudinit.Config
+
+	if req.CloudInit != nil && (req.CloudInit.UserData != "" || req.CloudInit.MetaData != "" || req.CloudInit.NetworkConfig != "") {
+		// Use provided cloud-init config
+		cloudInitConfig = &cloudinit.Config{
 			UserData:      req.CloudInit.UserData,
 			MetaData:      req.CloudInit.MetaData,
 			NetworkConfig: req.CloudInit.NetworkConfig,
 		}
-
 		var err error
-		isoPath, err = s.isoGenerator.GenerateISO(req.VmId, config)
+		isoPath, err = s.isoGenerator.GenerateISO(req.VmId, cloudInitConfig)
 		if err != nil {
 			log.Printf("Failed to generate cloud-init ISO: %v", err)
-			// Continue without cloud-init - not fatal for provisioning
 		}
+	} else if req.Boot != nil && req.Boot.Mode == "cloud_image" {
+		// Auto-generate cloud-init for cloud_image mode with SSH key
+		sshKey, err := s.getSSHPublicKey()
+		if err == nil && sshKey != "" {
+			userData := fmt.Sprintf(`#cloud-config
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - %s
+    shell: /bin/bash
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+  expire: False
+ssh_pwauth: False
+`, sshKey)
+			metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", req.VmId, req.VmName)
+			cloudInitConfig = &cloudinit.Config{
+				UserData:      userData,
+				MetaData:      metaData,
+				NetworkConfig: req.CloudInit.GetNetworkConfig(),
+			}
+			isoPath, err = s.isoGenerator.GenerateISO(req.VmId, cloudInitConfig)
+			if err != nil {
+				log.Printf("Failed to generate cloud-init ISO: %v", err)
+			} else {
+				log.Printf("Generated cloud-init ISO for VM %s", req.VmId)
+			}
+		}
+	}
+
+	// Register VM with metadata server
+	if s.metadataServer != nil && cloudInitConfig != nil {
+		metaConfig := &metadata.Config{
+			InstanceID:    req.VmId,
+			Hostname:      req.VmName,
+			NetworkConfig: cloudInitConfig.NetworkConfig,
+			UserData:      cloudInitConfig.UserData,
+			MetaData:      cloudInitConfig.MetaData,
+		}
+		if metaConfig.MetaData == "" {
+			metaConfig.MetaData = fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", req.VmId, req.VmName)
+		}
+		s.metadataServer.RegisterVM(req.VmId, metaConfig)
+		log.Printf("Registered VM %s with metadata server", req.VmId)
 	}
 
 	// Create VM config for later start
@@ -145,6 +220,30 @@ func (s *Server) StartVM(ctx context.Context, req *agent.VMStateRequest) (*agent
 				Message: "VM must be provisioned before starting: " + err.Error(),
 			},
 		}, nil
+	}
+
+	// Verify that required files exist
+	if _, err := os.Stat(vmConfig.VolumePath); os.IsNotExist(err) {
+		return &agent.VMStateResponse{
+			VmId:  req.VmId,
+			State: "error",
+			Error: &agent.ErrorDetail{
+				Code:    "VM_NOT_PROVISIONED",
+				Message: "VM disk not found, provision required: " + vmConfig.VolumePath,
+			},
+		}, nil
+	}
+	if vmConfig.CloudInitISO != "" {
+		if _, err := os.Stat(vmConfig.CloudInitISO); os.IsNotExist(err) {
+			return &agent.VMStateResponse{
+				VmId:  req.VmId,
+				State: "error",
+				Error: &agent.ErrorDetail{
+					Code:    "VM_NOT_PROVISIONED",
+					Message: "Cloud-init ISO not found, provision required: " + vmConfig.CloudInitISO,
+				},
+			}, nil
+		}
 	}
 
 	// Start the VM
@@ -206,6 +305,12 @@ func (s *Server) StopVM(ctx context.Context, req *agent.VMStateRequest) (*agent.
 				Message: err.Error(),
 			},
 		}, nil
+	}
+
+	// Unregister VM from metadata server when stopped
+	if s.metadataServer != nil {
+		s.metadataServer.UnregisterVM(req.VmId)
+		log.Printf("Unregistered stopped VM %s from metadata server", req.VmId)
 	}
 
 	return &agent.VMStateResponse{
@@ -270,6 +375,12 @@ func (s *Server) DeleteVM(ctx context.Context, req *agent.VMDeleteRequest) (*age
 		}
 	}
 
+	// Unregister VM from metadata server
+	if s.metadataServer != nil {
+		s.metadataServer.UnregisterVM(req.VmId)
+		log.Printf("Unregistered VM %s from metadata server", req.VmId)
+	}
+
 	// Clean up stored config
 	configPath := filepath.Join(s.config.DataDir, "configs", req.VmId+".json")
 	if err := s.deleteFileIfExists(configPath); err != nil {
@@ -284,37 +395,41 @@ func (s *Server) DeleteVM(ctx context.Context, req *agent.VMDeleteRequest) (*age
 
 // GetVMState returns the current state of a VM.
 func (s *Server) GetVMState(ctx context.Context, req *agent.VMStateRequest) (*agent.VMStateResponse, error) {
-	state, err := s.launcher.GetVMState(req.VmId)
-	if err != nil {
-		// Check if VM exists in config (provisioned but not started)
-		_, configErr := s.loadVMConfig(req.VmId)
-		if configErr == nil {
-			return &agent.VMStateResponse{
-				VmId:  req.VmId,
-				State: "provisioned",
-			}, nil
-		}
-
+	// First check if VM is running (has an active instance)
+	instance := s.launcher.GetInstance(req.VmId)
+	if instance != nil {
 		return &agent.VMStateResponse{
 			VmId:  req.VmId,
-			State: "unknown",
-			Error: &agent.ErrorDetail{
-				Code:    "STATE_ERROR",
-				Message: err.Error(),
-			},
+			State: "running",
+			Pid:   fmt.Sprintf("%d", instance.PID),
 		}, nil
 	}
 
-	instance := s.launcher.GetInstance(req.VmId)
-	pid := ""
-	if instance != nil {
-		pid = fmt.Sprintf("%d", instance.PID)
+	// Check persisted state from state manager
+	state, err := s.launcher.GetVMState(req.VmId)
+	if err == nil && state != "" {
+		return &agent.VMStateResponse{
+			VmId:  req.VmId,
+			State: state,
+		}, nil
 	}
 
+	// VM not found in state - check if it exists in config
+	// If config exists but no state, VM was stopped
+	_, configErr := s.loadVMConfig(req.VmId)
+	if configErr == nil {
+		// Config exists but no running instance or state file
+		// VM was provisioned but is now stopped
+		return &agent.VMStateResponse{
+			VmId:  req.VmId,
+			State: "stopped",
+		}, nil
+	}
+
+	// VM not found anywhere
 	return &agent.VMStateResponse{
 		VmId:  req.VmId,
-		State: state,
-		Pid:   pid,
+		State: "unknown",
 	}, nil
 }
 
@@ -325,4 +440,15 @@ func (s *Server) deleteFileIfExists(path string) error {
 		return nil
 	}
 	return err
+}
+
+// getSSHPublicKey reads the SSH public key for cloud-init.
+// The key is generated at build time and stored in /root/.ssh/
+func (s *Server) getSSHPublicKey() (string, error) {
+	keyPath := "/root/.ssh/chv_id_ed25519.pub"
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read SSH public key: %w", err)
+	}
+	return string(data), nil
 }

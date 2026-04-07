@@ -3,24 +3,31 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/chv/chv/internal/agent/cloudinit"
 	"github.com/chv/chv/internal/agent/console"
+	"github.com/chv/chv/internal/agent/metadata"
 	"github.com/chv/chv/internal/hypervisor"
 	"github.com/chv/chv/internal/network"
 	"github.com/chv/chv/internal/nodevalidate"
 	"github.com/chv/chv/internal/pb/agent"
 	"github.com/chv/chv/internal/storage"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
 
@@ -33,8 +40,24 @@ type Config struct {
 	ImageDir          string
 	VolumeDir         string
 	CloudHypervisor   string
-	BridgeName        string // Network bridge name (default: br0)
+	BridgeName        string // Network bridge name (default: chvbr0)
+	BridgeUplink      string // Uplink interface for bridge (default: ens19)
+	BridgeGatewayIP   string // Gateway IP for bridge (default: 10.0.0.1)
 	HeartbeatInterval time.Duration
+
+	// JWT configuration for HTTP server authentication
+	JWTSecret      string // Shared secret for HMAC token validation
+	JWTPublicKey   string // PEM-encoded public key for RSA/ECDSA token validation
+	JWTIssuer      string // Expected token issuer (e.g., "chv-controller")
+	JWTAudience    string // Expected token audience (e.g., "chv-agent")
+
+	// TLS configuration
+	TLSEnabled  bool   // Enable TLS for gRPC server
+	TLSCert     string // Path to server certificate
+	TLSKey      string // Path to server private key
+	TLSCA       string // Path to CA certificate for client verification (mTLS)
+	TLSClientCert string // Path to client certificate for connecting to controller
+	TLSClientKey  string // Path to client private key for connecting to controller
 }
 
 // Server implements the AgentService gRPC server.
@@ -47,6 +70,7 @@ type Server struct {
 	launcher       *hypervisor.Launcher
 	isoGenerator   *cloudinit.ISOGenerator
 	consoleManager *console.Manager
+	metadataServer *metadata.Server
 	nodeID         string
 	hostname       string
 	grpcServer     *grpc.Server
@@ -70,13 +94,40 @@ func New(cfg *Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize state manager: %w", err)
 	}
 
-	// Use configured bridge name or default to br0
+	// Use configured bridge name or default to chvbr0
 	bridgeName := cfg.BridgeName
 	if bridgeName == "" {
-		bridgeName = "br0"
+		bridgeName = "chvbr0"
 	}
-	tapManager := network.NewTAPManager(bridgeName)
+	bridgeUplink := cfg.BridgeUplink
+	if bridgeUplink == "" {
+		bridgeUplink = "ens19"
+	}
+	bridgeGatewayIP := cfg.BridgeGatewayIP
+	if bridgeGatewayIP == "" {
+		bridgeGatewayIP = "10.0.0.1"
+	}
+	tapManager := network.NewTAPManager(bridgeName, bridgeUplink, bridgeGatewayIP)
+	
+	// Ensure bridge exists on startup
+	if err := tapManager.EnsureBridge(bridgeName); err != nil {
+		log.Printf("Warning: failed to ensure bridge %s: %v", bridgeName, err)
+	}
+	
 	isoGenerator := cloudinit.NewISOGenerator(cfg.DataDir)
+
+	// Initialize metadata server for cloud-init
+	metadataServer := metadata.NewServer()
+	if err := metadataServer.Start(); err != nil {
+		log.Printf("Warning: failed to start metadata server: %v", err)
+		// Don't fail startup if metadata server can't start
+	}
+
+	// Initialize logger
+	logger, err := zap.NewProduction()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize logger: %w", err)
+	}
 
 	// Initialize validator
 	validator := nodevalidate.NewValidator(cfg.CloudHypervisor)
@@ -90,6 +141,7 @@ func New(cfg *Config) (*Server, error) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		logger.Named("launcher"),
 	)
 	if err := launcher.Initialize(); err != nil {
 		return nil, fmt.Errorf("failed to initialize launcher: %w", err)
@@ -107,6 +159,7 @@ func New(cfg *Config) (*Server, error) {
 		launcher:       launcher,
 		isoGenerator:   isoGenerator,
 		consoleManager: console.NewManager(filepath.Join(cfg.DataDir, "logs")),
+		metadataServer: metadataServer,
 		nodeID:         cfg.NodeID,
 		hostname:       hostname,
 	}, nil
@@ -119,7 +172,24 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to listen on %s: %w", s.config.ListenAddr, err)
 	}
 
-	s.grpcServer = grpc.NewServer()
+	// Configure gRPC server options
+	var opts []grpc.ServerOption
+
+	// Configure TLS if enabled
+	if s.config.TLSEnabled {
+		if s.config.TLSCert != "" && s.config.TLSKey != "" {
+			tlsConfig, err := s.setupTLS()
+			if err != nil {
+				return fmt.Errorf("failed to setup TLS: %w", err)
+			}
+			opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+			log.Printf("gRPC server TLS enabled (mTLS: %v)", s.config.TLSCA != "")
+		} else {
+			log.Printf("Warning: TLS enabled but certificate paths not provided, using insecure connection")
+		}
+	}
+
+	s.grpcServer = grpc.NewServer(opts...)
 	agent.RegisterAgentServiceServer(s.grpcServer, s)
 
 	log.Printf("Starting CHV Agent gRPC server on %s", s.config.ListenAddr)
@@ -140,8 +210,28 @@ func (s *Server) Start() error {
 		httpAddr = fmt.Sprintf(":%d", port+1000)
 	}
 
-	s.httpServer = NewHTTPServer(httpAddr, s.consoleManager)
-	if err := s.httpServer.Start(); err != nil {
+	// Configure JWT options if credentials are provided
+	var jwtOption *JWTOption
+	if s.config.JWTSecret != "" || s.config.JWTPublicKey != "" {
+		jwtOption = &JWTOption{
+			Secret:       s.config.JWTSecret,
+			PublicKeyPEM: s.config.JWTPublicKey,
+			Issuer:       s.config.JWTIssuer,
+			Audience:     s.config.JWTAudience,
+		}
+	}
+
+	// Configure HTTP server options
+	var httpOpts []HTTPServerOption
+	if s.config.TLSEnabled && s.config.TLSCert != "" && s.config.TLSKey != "" {
+		httpOpts = append(httpOpts, WithTLS(s.config.TLSCert, s.config.TLSKey))
+	}
+
+	s.httpServer, err = NewHTTPServerWithJWT(httpAddr, s.consoleManager, jwtOption, s.launcher, httpOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP server: %w", err)
+	}
+	if err = s.httpServer.Start(); err != nil {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
 	}
 
@@ -159,6 +249,9 @@ func (s *Server) Stop() {
 	if s.consoleManager != nil {
 		s.consoleManager.Close()
 	}
+	if s.metadataServer != nil {
+		s.metadataServer.Stop()
+	}
 	if s.grpcServer != nil {
 		s.grpcServer.GracefulStop()
 	}
@@ -169,6 +262,49 @@ func (s *Server) ForceStop() {
 	if s.grpcServer != nil {
 		s.grpcServer.Stop()
 	}
+}
+
+// setupTLS configures TLS for the gRPC server.
+// Supports both TLS and mTLS depending on configuration.
+func (s *Server) setupTLS() (*tls.Config, error) {
+	// Load server certificate
+	cert, err := tls.LoadX509KeyPair(s.config.TLSCert, s.config.TLSKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load server certificate: %w", err)
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_128_GCM_SHA256,
+		},
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+		},
+		PreferServerCipherSuites: true,
+	}
+
+	// Configure mTLS if CA certificate is provided
+	if s.config.TLSCA != "" {
+		caCert, err := os.ReadFile(s.config.TLSCA)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+		}
+
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		tlsConfig.ClientCAs = caCertPool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	return tlsConfig, nil
 }
 
 // Ping implements health check.
@@ -240,8 +376,20 @@ func (s *Server) ValidateNode(ctx context.Context, req *agent.Empty) (*agent.Nod
 
 // EnsureBridge ensures a bridge exists.
 func (s *Server) EnsureBridge(ctx context.Context, req *agent.EnsureBridgeRequest) (*agent.NodeValidateResponse, error) {
-	tapManager := network.NewTAPManager(req.BridgeName)
-	if err := tapManager.EnsureBridge(req.BridgeName); err != nil {
+	bridgeName := req.BridgeName
+	if bridgeName == "" {
+		bridgeName = s.config.BridgeName
+	}
+	bridgeUplink := s.config.BridgeUplink
+	if bridgeUplink == "" {
+		bridgeUplink = "ens19"
+	}
+	bridgeGatewayIP := s.config.BridgeGatewayIP
+	if bridgeGatewayIP == "" {
+		bridgeGatewayIP = "10.0.0.1"
+	}
+	tapManager := network.NewTAPManager(bridgeName, bridgeUplink, bridgeGatewayIP)
+	if err := tapManager.EnsureBridge(bridgeName); err != nil {
 		return &agent.NodeValidateResponse{
 			Ok: false,
 			Errors: []*agent.ErrorDetail{
@@ -432,14 +580,25 @@ func (s *Server) createVolumeFromImage(volumePath, imagePath string) error {
 		return fmt.Errorf("backing image not found: %s", imagePath)
 	}
 
-	// Copy image to volume path
-	input, err := os.ReadFile(imagePath)
-	if err != nil {
-		return fmt.Errorf("failed to read image: %w", err)
-	}
+	// Check if image is qcow2 format
+	isQCOW2 := strings.HasSuffix(imagePath, ".qcow2")
+	
+	if isQCOW2 {
+		// Convert qcow2 to raw format using qemu-img
+		cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", imagePath, volumePath)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to convert qcow2 to raw: %v (output: %s)", err, string(output))
+		}
+	} else {
+		// Copy raw image directly
+		input, err := os.ReadFile(imagePath)
+		if err != nil {
+			return fmt.Errorf("failed to read image: %w", err)
+		}
 
-	if err := os.WriteFile(volumePath, input, 0640); err != nil {
-		return fmt.Errorf("failed to write volume: %w", err)
+		if err := os.WriteFile(volumePath, input, 0640); err != nil {
+			return fmt.Errorf("failed to write volume: %w", err)
+		}
 	}
 
 	return nil

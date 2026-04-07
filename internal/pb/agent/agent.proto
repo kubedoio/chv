@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package chv.agent.v1;
-option go_package = "github.com/chv/chv/internal/pb/agent;agentpb";
+option go_package = "github.com/chv/chv/internal/pb/agent;agent";
 
 // Empty message for methods without request/response
 message Empty {}
@@ -99,6 +99,8 @@ message BootSpec {
   string initrd_path = 3;
   string cmdline = 4;
   string firmware_path = 5;
+  string backing_image_id = 6;    // For cloud_image mode
+  string backing_image_path = 7;  // Actual path to the image file
 }
 
 // Cloud-init configuration

@@ -304,7 +304,7 @@ function formatNumber(num: number): string {
 .activity-icon {
   width: 32px;
   height: 32px;
-  border-radius: 50%;
+  border-radius: 2px;
   display: flex;
   align-items: center;
   justify-content: center;

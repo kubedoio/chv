@@ -14,6 +14,7 @@ import (
 	"github.com/chv/chv/internal/hypervisor"
 	"github.com/chv/chv/internal/network"
 	"github.com/chv/chv/internal/storage"
+	"go.uber.org/zap"
 )
 
 const (
@@ -88,7 +89,7 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 		}
 	}
 	env.StorageMgr = storage.NewManager(env.VMDir)
-	env.TAPManager = network.NewTAPManager("")
+	env.TAPManager = network.NewTAPManager("", "", "")
 	env.StateManager = hypervisor.NewStateManager(env.StateDir)
 	env.ISOGenerator = cloudinit.NewISOGenerator(env.CloudInitDir)
 	chBinary := os.Getenv("CH_BINARY")
@@ -104,6 +105,7 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 		env.StateManager,
 		env.TAPManager,
 		env.ISOGenerator,
+		zap.NewNop(),
 	)
 	if err := env.Launcher.Initialize(); err != nil {
 		env.Cleanup()

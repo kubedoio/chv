@@ -11,6 +11,7 @@ import (
 	"github.com/chv/chv/internal/hypervisor"
 	"github.com/chv/chv/internal/network"
 	"github.com/chv/chv/internal/storage"
+	"go.uber.org/zap"
 )
 
 // setupTestManager creates a VM manager for testing.
@@ -38,8 +39,11 @@ func setupTestManager(t *testing.T) (*VMManager, string, func()) {
 	// Create mock/stub dependencies
 	storageMgr := storage.NewManager(vmDataDir)
 	isoGenerator := cloudinit.NewISOGenerator(cloudInitDir)
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	stateManager := hypervisor.NewStateManager(stateDir)
+
+	// Create logger for testing
+	logger := zap.NewNop()
 
 	// Create launcher with mock binary (won't actually run VMs)
 	launcher := hypervisor.NewLauncher(
@@ -50,6 +54,7 @@ func setupTestManager(t *testing.T) (*VMManager, string, func()) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		logger.Named("launcher"),
 	)
 
 	manager := NewVMManager(
@@ -60,6 +65,7 @@ func setupTestManager(t *testing.T) (*VMManager, string, func()) {
 		vmDataDir,
 		imagesDir,
 		"br0",
+		logger.Named("vm_manager"),
 	)
 
 	cleanup := func() {
@@ -444,8 +450,9 @@ func TestVMManagerRecoverState(t *testing.T) {
 
 	storageMgr := storage.NewManager(vmDataDir)
 	isoGenerator := cloudinit.NewISOGenerator(cloudInitDir)
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	stateManager := hypervisor.NewStateManager(stateDir)
+	testLogger := zap.NewNop()
 
 	launcher := hypervisor.NewLauncher(
 		"/usr/bin/cloud-hypervisor",
@@ -455,6 +462,7 @@ func TestVMManagerRecoverState(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		testLogger.Named("launcher"),
 	)
 
 	newManager := NewVMManager(
@@ -465,6 +473,7 @@ func TestVMManagerRecoverState(t *testing.T) {
 		vmDataDir,
 		imagesDir,
 		"br0",
+		testLogger.Named("vm_manager"),
 	)
 
 	// Recover state

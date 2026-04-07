@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,6 +112,72 @@ func (m *Manager) ConvertImage(sourcePath, targetPath, sourceFormat string) erro
 	cmd := exec.Command("qemu-img", "convert", "-f", sourceFormat, "-O", "raw", sourcePath, targetPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to convert image: %w (output: %s)", err, string(out))
+	}
+	
+	return nil
+}
+
+// CloneVolume creates a copy of a volume using qemu-img convert
+func (m *Manager) CloneVolume(sourcePath, destPath string) error {
+	// Ensure source exists
+	if _, err := os.Stat(sourcePath); err != nil {
+		return fmt.Errorf("source volume not found: %w", err)
+	}
+	
+	// Ensure destination directory exists
+	dir := filepath.Dir(destPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+	
+	// Use qemu-img convert for efficient copy
+	cmd := exec.Command("qemu-img", "convert", "-f", "raw", "-O", "raw",
+		sourcePath, destPath)
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to clone volume: %w (output: %s)",
+			err, string(output))
+	}
+	
+	return nil
+}
+
+// CloneVolumeFast creates a copy of a volume using io.Copy (faster for sparse files)
+func (m *Manager) CloneVolumeFast(sourcePath, destPath string) error {
+	// Ensure source exists
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("source volume not found: %w", err)
+	}
+	
+	// Ensure destination directory exists
+	dir := filepath.Dir(destPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+	
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to open source volume: %w", err)
+	}
+	defer source.Close()
+	
+	dest, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create destination volume: %w", err)
+	}
+	defer dest.Close()
+	
+	// Copy data
+	_, err = io.Copy(dest, source)
+	if err != nil {
+		return fmt.Errorf("failed to copy volume data: %w", err)
+	}
+	
+	// Preserve permissions
+	if err := os.Chmod(destPath, sourceInfo.Mode()); err != nil {
+		return fmt.Errorf("failed to set destination permissions: %w", err)
 	}
 	
 	return nil

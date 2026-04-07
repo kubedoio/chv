@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -88,6 +89,7 @@ func (s *Service) CreateToken(ctx context.Context, name string, roleID string, e
 
 // ValidateToken validates a bearer token.
 func (s *Service) ValidateToken(ctx context.Context, token string) (*models.APIToken, error) {
+	log.Printf("ValidateToken called")
 	// Extract token from "Bearer " prefix if present
 	token = strings.TrimPrefix(token, "Bearer ")
 	token = strings.TrimSpace(token)
@@ -100,11 +102,13 @@ func (s *Service) ValidateToken(ctx context.Context, token string) (*models.APIT
 	hash := hashToken(token)
 	
 	// Look up token by hash
+	log.Printf("Looking up token with hash: %s...", hash[:20])
 	tokenModel, err := s.store.GetAPITokenByHash(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup token: %w", err)
 	}
 	
+	log.Printf("Token lookup result: model=%v, err=%v", tokenModel, err)
 	if tokenModel == nil {
 		return nil, fmt.Errorf("invalid token")
 	}

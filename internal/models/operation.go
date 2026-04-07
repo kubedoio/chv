@@ -19,14 +19,16 @@ const (
 type OperationType string
 
 const (
-	OpVMCreate     OperationType = "vm_create"
-	OpVMStart      OperationType = "vm_start"
-	OpVMStop       OperationType = "vm_stop"
-	OpVMReboot     OperationType = "vm_reboot"
-	OpVMDelete     OperationType = "vm_delete"
-	OpVMConsole    OperationType = "vm_console"
-	OpImageImport  OperationType = "image_import"
-	OpNodeRegister OperationType = "node_register"
+	OpVMCreate       OperationType = "vm_create"
+	OpVMStart        OperationType = "vm_start"
+	OpVMStop         OperationType = "vm_stop"
+	OpVMReboot       OperationType = "vm_reboot"
+	OpVMDelete       OperationType = "vm_delete"
+	OpVMConsole      OperationType = "vm_console"
+	OpImageImport    OperationType = "image_import"
+	OpNodeRegister   OperationType = "node_register"
+	OpSnapshotCreate OperationType = "snapshot_create"
+	OpVolumeClone    OperationType = "volume_clone"
 )
 
 // OperationStatus represents the status of an operation

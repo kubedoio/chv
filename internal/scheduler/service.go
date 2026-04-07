@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/chv/chv/internal/metrics"
 	"github.com/chv/chv/internal/models"
 	"github.com/chv/chv/internal/store"
 	"github.com/chv/chv/pkg/errorsx"
@@ -40,11 +42,14 @@ func (s *Service) getStrategy() Strategy {
 
 // ScheduleVM attempts to schedule a VM onto a suitable node.
 func (s *Service) ScheduleVM(ctx context.Context, vmID uuid.UUID) error {
+	start := time.Now()
 	vm, err := s.store.GetVM(ctx, vmID)
 	if err != nil {
+		metrics.SchedulerPlacementFailures.Inc()
 		return fmt.Errorf("failed to get VM: %w", err)
 	}
 	if vm == nil {
+		metrics.SchedulerPlacementFailures.Inc()
 		return errorsx.New(errorsx.ErrNotFound, "VM not found")
 	}
 	
@@ -77,6 +82,7 @@ func (s *Service) ScheduleVM(ctx context.Context, vmID uuid.UUID) error {
 		if err := s.store.UpdateVM(ctx, vm); err != nil {
 			return fmt.Errorf("failed to update VM placement status: %w", err)
 		}
+		metrics.SchedulerPlacementFailures.Inc()
 		return errorsx.New(errorsx.ErrPlacementFailed, "No suitable node found")
 	}
 	
@@ -98,7 +104,10 @@ func (s *Service) ScheduleVM(ctx context.Context, vmID uuid.UUID) error {
 	if err := s.store.UpdateNode(ctx, selected); err != nil {
 		return fmt.Errorf("failed to update node resources: %w", err)
 	}
-	
+
+	// Record successful placement duration
+	metrics.SchedulerPlacementDuration.Observe(time.Since(start).Seconds())
+
 	return nil
 }
 

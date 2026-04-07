@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/chv/chv/internal/storage"
 	"github.com/chv/chv/internal/validation"
 	"github.com/chv/chv/pkg/uuidx"
+	"github.com/gofrs/flock"
+	"go.uber.org/zap"
 )
 
 // VMState represents the state of a VM in the lifecycle state machine.
@@ -88,6 +91,7 @@ type VMManager struct {
 	launcher     *hypervisor.Launcher
 	storageMgr   *storage.Manager
 	isoGenerator *cloudinit.ISOGenerator
+	logger       *zap.Logger
 
 	// Configuration
 	stateDir      string
@@ -109,11 +113,16 @@ func NewVMManager(
 	vmDataDir string,
 	imagesDir string,
 	defaultBridge string,
+	logger *zap.Logger,
 ) *VMManager {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &VMManager{
 		launcher:      launcher,
 		storageMgr:    storageMgr,
 		isoGenerator:  isoGenerator,
+		logger:        logger,
 		stateDir:      stateDir,
 		vmDataDir:     vmDataDir,
 		imagesDir:     imagesDir,
@@ -246,6 +255,7 @@ func (m *VMManager) CreateVM(ctx context.Context, req *CreateVMRequest) (*VMReco
 		VCPU:           req.VCPU,
 		MemoryMB:       req.MemoryMB,
 		VolumePath:     volumePath,
+		VolumeFormat:   "raw", // Runtime disks are always raw per ADR-0005
 		BackingImageID: req.BackingImageID,
 		BridgeName:     bridgeName,
 		CloudInit:      req.CloudInit,
@@ -272,7 +282,10 @@ func (m *VMManager) CreateVM(ctx context.Context, req *CreateVMRequest) (*VMReco
 	record.UpdatedAt = time.Now()
 	if err := m.saveRecord(record); err != nil {
 		// Log but don't fail - VM is running
-		// TODO: Log warning
+		m.logger.Warn("Failed to save VM state after creation",
+			zap.String("vm_id", record.VMID),
+			zap.String("operation", "create_vm"),
+			zap.Error(err))
 	}
 	m.setRecord(record)
 
@@ -361,7 +374,10 @@ func (m *VMManager) finishDeleteVM(vmID string, record *VMRecord) error {
 	if record.VolumePath != "" {
 		if err := m.cleanupVMDisk(record.VolumePath); err != nil {
 			// Log but continue - disk might already be deleted
-			// TODO: Log warning
+			m.logger.Warn("Failed to cleanup VM disk during deletion",
+				zap.String("vm_id", vmID),
+				zap.String("volume_path", record.VolumePath),
+				zap.Error(err))
 		}
 	}
 
@@ -369,14 +385,19 @@ func (m *VMManager) finishDeleteVM(vmID string, record *VMRecord) error {
 	if record.CloudInitISO != "" {
 		if err := m.isoGenerator.DeleteISO(vmID); err != nil {
 			// Log but continue
-			// TODO: Log warning
+			m.logger.Warn("Failed to delete cloud-init ISO during VM deletion",
+				zap.String("vm_id", vmID),
+				zap.String("iso_path", record.CloudInitISO),
+				zap.Error(err))
 		}
 	}
 
 	// Remove state file
 	if err := m.deleteRecord(vmID); err != nil {
 		// Log but don't fail
-		// TODO: Log warning
+		m.logger.Warn("Failed to delete VM state record",
+			zap.String("vm_id", vmID),
+			zap.Error(err))
 	}
 
 	// Remove from memory
@@ -427,7 +448,10 @@ func (m *VMManager) StopVM(ctx context.Context, req *StopVMRequest) error {
 	record.LastOperationID = req.OperationID
 	if err := m.saveRecord(record); err != nil {
 		// Log but don't fail - VM is stopped
-		// TODO: Log warning
+		m.logger.Warn("Failed to save VM state after stop",
+			zap.String("vm_id", record.VMID),
+			zap.String("operation", "stop_vm"),
+			zap.Error(err))
 	}
 
 	return nil
@@ -503,7 +527,10 @@ func (m *VMManager) StartVM(ctx context.Context, req *StartVMRequest) error {
 	record.UpdatedAt = time.Now()
 	record.LastOperationID = req.OperationID
 	if err := m.saveRecord(record); err != nil {
-		// TODO: Log warning
+		m.logger.Warn("Failed to save VM state after start",
+			zap.String("vm_id", record.VMID),
+			zap.String("operation", "start_vm"),
+			zap.Error(err))
 	}
 
 	return nil
@@ -601,21 +628,51 @@ func (m *VMManager) validateCreateRequest(req *CreateVMRequest) error {
 // prepareVMDisk prepares the VM disk.
 // If BackingImageID is provided, it copies/converts the image to the VM disk.
 // Otherwise, it creates a new empty raw volume.
+// This method is idempotent and safe for concurrent calls using advisory file locking.
 func (m *VMManager) prepareVMDisk(req *CreateVMRequest) (string, error) {
 	// Validate VM ID to prevent path traversal
 	if err := validation.ValidateID(req.VMID); err != nil {
 		return "", fmt.Errorf("invalid VM ID: %w", err)
 	}
-	
+
 	// Determine volume path
 	volumePath := filepath.Join(m.vmDataDir, req.VMID+".raw")
+
+	// Create lock file path
+	lockFile := volumePath + ".lock"
+	lock := flock.New(lockFile)
+
+	// Try to acquire lock with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
+	if err != nil {
+		return "", fmt.Errorf("lock acquisition failed: %w", err)
+	}
+	if !locked {
+		return "", fmt.Errorf("could not acquire lock for volume %s within timeout", volumePath)
+	}
+	defer func() {
+		lock.Unlock()
+		// Clean up lock file after unlocking
+		os.Remove(lockFile)
+	}()
+
+	// Idempotency check: if volume exists and is valid, skip creation
+	if valid, _ := m.verifyRawImage(volumePath); valid {
+		return volumePath, nil
+	}
+
+	// Clean up any existing invalid/corrupted volume file
+	os.Remove(volumePath)
 
 	if req.BackingImageID != "" {
 		// Validate backing image ID to prevent path traversal
 		if err := validation.ValidateID(req.BackingImageID); err != nil {
 			return "", fmt.Errorf("invalid backing image ID: %w", err)
 		}
-		
+
 		// Copy from backing image
 		imagePath := filepath.Join(m.imagesDir, req.BackingImageID+".raw")
 
@@ -652,6 +709,49 @@ func (m *VMManager) prepareVMDisk(req *CreateVMRequest) (string, error) {
 	}
 
 	return volumePath, nil
+}
+
+// verifyRawImage checks if a raw image file exists and is valid.
+// It uses qemu-img info to verify the image format.
+func (m *VMManager) verifyRawImage(path string) (bool, error) {
+	// Check if file exists and has content
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if info.Size() == 0 {
+		return false, fmt.Errorf("file is empty")
+	}
+
+	// Use qemu-img info to verify the image is valid
+	cmd := exec.Command("qemu-img", "info", "--output=json", path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("qemu-img info failed: %w (output: %s)", err, string(output))
+	}
+
+	// Check that it's actually a raw image
+	// qemu-img info returns JSON; we can do a simple check for "raw" format
+	if !contains(string(output), `"format": "raw"`) && !contains(string(output), `"format":"raw"`) {
+		return false, fmt.Errorf("image is not in raw format")
+	}
+
+	return true, nil
+}
+
+// contains checks if a string contains a substring.
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (stringContains(s, substr)))
+}
+
+// stringContains is a helper for substring checking.
+func stringContains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // copyFile copies a file from source to destination using buffered I/O.

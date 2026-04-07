@@ -17,7 +17,7 @@ func isRoot() bool {
 }
 
 func TestTAPManager_generateTAPName(t *testing.T) {
-	tm := NewTAPManager("br0")
+	tm := NewTAPManager("br0", "", "")
 
 	tests := []struct {
 		name   string
@@ -56,7 +56,7 @@ func TestTAPManager_generateTAPName(t *testing.T) {
 }
 
 func TestTAPManager_generateMAC(t *testing.T) {
-	tm := NewTAPManager("br0")
+	tm := NewTAPManager("br0", "", "")
 
 	// Test deterministic generation
 	vmID := "550e8400-e29b-41d4-a716-446655440000"
@@ -89,7 +89,7 @@ func TestTAPManager_generateMAC(t *testing.T) {
 }
 
 func TestTAPManager_generateMACValidFormat(t *testing.T) {
-	tm := NewTAPManager("br0")
+	tm := NewTAPManager("br0", "", "")
 	
 	vmID := "test-vm-id"
 	mac := tm.generateMAC(vmID)
@@ -113,7 +113,7 @@ func TestTAPManager_EnsureBridge(t *testing.T) {
 		t.Skip("Skipping: requires root privileges")
 	}
 
-	tm := NewTAPManager("br-test-1")
+	tm := NewTAPManager("br-test-1", "", "")
 	
 	// Clean up any existing bridge
 	exec.Command("ip", "link", "del", "br-test-1").Run()
@@ -143,7 +143,7 @@ func TestTAPManager_CreateAndDeleteTAP(t *testing.T) {
 		t.Skip("Skipping: requires root privileges")
 	}
 
-	tm := NewTAPManager("br-test-2")
+	tm := NewTAPManager("br-test-2", "", "")
 	vmID := "test-vm-550e8400-e29b-41d4-a716-446655440000"
 	
 	// Setup: create bridge
@@ -201,7 +201,7 @@ func TestTAPManager_CreateTAP_Idempotent(t *testing.T) {
 		t.Skip("Skipping: requires root privileges")
 	}
 
-	tm := NewTAPManager("br-test-3")
+	tm := NewTAPManager("br-test-3", "", "")
 	vmID := "test-vm-idempotent-550e8400"
 	
 	// Setup
@@ -238,7 +238,7 @@ func TestTAPManager_DeleteNonExistentTAP(t *testing.T) {
 		t.Skip("Skipping: requires root privileges")
 	}
 
-	tm := NewTAPManager("br0")
+	tm := NewTAPManager("br0", "", "")
 	
 	// Should not error when deleting non-existent TAP (use valid format)
 	err := tm.DeleteTAP("tap550e8400e29b")
@@ -253,7 +253,7 @@ func TestTAPManager_GetTAPDevice(t *testing.T) {
 		t.Skip("Skipping: requires root privileges")
 	}
 
-	tm := NewTAPManager("br-test-4")
+	tm := NewTAPManager("br-test-4", "", "")
 	vmID := "test-vm-get-550e8400"
 	
 	// Setup
@@ -300,7 +300,7 @@ func TestTAPManager_ListTAPs(t *testing.T) {
 		t.Skip("Skipping: requires root privileges")
 	}
 
-	tm := NewTAPManager("br-test-5")
+	tm := NewTAPManager("br-test-5", "", "")
 	
 	// Setup
 	exec.Command("ip", "link", "del", "br-test-5").Run()
@@ -350,7 +350,7 @@ func TestTAPManager_WrongBridge(t *testing.T) {
 		t.Skip("Skipping: requires root privileges")
 	}
 
-	tm := NewTAPManager("br-test-6")
+	tm := NewTAPManager("br-test-6", "", "")
 	vmID := "test-vm-wrong-550e8400"
 	
 	// Setup two bridges

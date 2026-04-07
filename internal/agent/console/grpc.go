@@ -112,16 +112,23 @@ func (s *GRPCServer) StreamConsole(stream agent.AgentService_StreamConsoleServer
 				}
 
 			case agent.ConsoleStreamRequest_RESIZE:
-				// Handle resize - acknowledged but not fully implemented in MVP-1
-				stream.Send(&agent.ConsoleStreamResponse{
-					Type:    agent.ConsoleStreamResponse_STATUS,
-					Message: "Resize acknowledged",
-				})
+				// Handle resize
+				if err := client.handleResize(int(msg.GetCols()), int(msg.GetRows())); err != nil {
+					stream.Send(&agent.ConsoleStreamResponse{
+						Type:    agent.ConsoleStreamResponse_ERROR,
+						Message: fmt.Sprintf("Resize failed: %v", err),
+					})
+				} else {
+					stream.Send(&agent.ConsoleStreamResponse{
+						Type:    agent.ConsoleStreamResponse_STATUS,
+						Message: "Resize successful",
+					})
+				}
 
 			case agent.ConsoleStreamRequest_PING:
 				// Send pong
 				stream.Send(&agent.ConsoleStreamResponse{
-					Type: agent.ConsoleStreamResponse_STATUS,
+					Type:    agent.ConsoleStreamResponse_STATUS,
 					Message: "pong",
 				})
 			}
@@ -149,12 +156,12 @@ func (s *GRPCServer) GetConsoleStatus(ctx context.Context, req *agent.ConsoleSta
 	}
 
 	return &agent.ConsoleStatusResponse{
-		VmId:         vmID,
-		Active:       session.IsActive(),
-		Connected:    session.ClientCount() > 0,
-		ClientCount:  int32(session.ClientCount()),
-		LogPath:      session.LogPath,
-		TtyEnabled:   session.ttyEnabled,
+		VmId:        vmID,
+		Active:      session.IsActive(),
+		Connected:   session.ClientCount() > 0,
+		ClientCount: int32(session.ClientCount()),
+		LogPath:     session.LogPath,
+		TtyEnabled:  session.ttyEnabled,
 	}, nil
 }
 
@@ -168,7 +175,7 @@ func (s *GRPCServer) CloseConsole(ctx context.Context, req *agent.ConsoleCloseRe
 	s.manager.RemoveSession(vmID)
 
 	return &agent.ConsoleCloseResponse{
-		VmId:    vmID,
-		Closed:  true,
+		VmId:   vmID,
+		Closed: true,
 	}, nil
 }

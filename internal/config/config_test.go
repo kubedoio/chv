@@ -32,7 +32,7 @@ func TestLoadControllerConfigFromFile(t *testing.T) {
 	configContent := `
 http_addr: ":9090"
 grpc_addr: ":9091"
-database_url: "postgres://test@testhost/chv"
+database_path: "/test/chv.db"
 log_level: "debug"
 cors:
   allowed_origins:
@@ -52,8 +52,8 @@ cors:
 	if cfg.HTTPAddr != ":9090" {
 		t.Errorf("expected HTTPAddr ':9090', got '%s'", cfg.HTTPAddr)
 	}
-	if cfg.DatabaseURL != "postgres://test@testhost/chv" {
-		t.Errorf("expected custom database URL, got '%s'", cfg.DatabaseURL)
+	if cfg.DatabasePath != "/test/chv.db" {
+		t.Errorf("expected custom database path, got '%s'", cfg.DatabasePath)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("expected LogLevel 'debug', got '%s'", cfg.LogLevel)
@@ -134,27 +134,27 @@ func TestControllerConfigValidate(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: &ControllerConfig{
-				HTTPAddr:    ":8080",
-				GRPCAddr:    ":9090",
-				DatabaseURL: "postgres://localhost/chv",
+				HTTPAddr:     ":8080",
+				GRPCAddr:     ":9090",
+				DatabasePath: "/var/lib/chv/chv.db",
 			},
 			wantErr: false,
 		},
 		{
 			name: "missing HTTP addr",
 			cfg: &ControllerConfig{
-				HTTPAddr:    "",
-				GRPCAddr:    ":9090",
-				DatabaseURL: "postgres://localhost/chv",
+				HTTPAddr:     "",
+				GRPCAddr:     ":9090",
+				DatabasePath: "/var/lib/chv/chv.db",
 			},
 			wantErr: true,
 		},
 		{
-			name: "missing database URL",
+			name: "missing database path",
 			cfg: &ControllerConfig{
-				HTTPAddr:    ":8080",
-				GRPCAddr:    ":9090",
-				DatabaseURL: "",
+				HTTPAddr:     ":8080",
+				GRPCAddr:     ":9090",
+				DatabasePath: "",
 			},
 			wantErr: true,
 		},

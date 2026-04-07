@@ -28,6 +28,7 @@ async function setMaintenance(id: string, enabled: boolean) {
 }
 
 function getStatusClass(state: string) {
+  if (!state) return 'status-stopped'
   switch (state) {
     case 'online': return 'status-running'
     case 'offline': return 'status-error'
@@ -37,6 +38,7 @@ function getStatusClass(state: string) {
 }
 
 function formatState(state: string) {
+  if (!state) return 'Unknown'
   return state.charAt(0).toUpperCase() + state.slice(1)
 }
 </script>
@@ -61,8 +63,8 @@ function formatState(state: string) {
             <h3>{{ node.hostname }}</h3>
             <span class="mono">{{ node.management_ip }}</span>
           </div>
-          <span :class="['status-badge', getStatusClass(node.state)]">
-            {{ formatState(node.state) }}
+          <span :class="['status-badge', getStatusClass(node.status)]">
+            {{ formatState(node.status) }}
           </span>
         </div>
         
@@ -79,7 +81,7 @@ function formatState(state: string) {
         
         <div class="node-footer">
           <span class="last-seen">Last seen: {{ node.last_heartbeat_at ? new Date(node.last_heartbeat_at).toLocaleString() : 'Never' }}</span>
-          <button v-if="node.state === 'online'" class="action-link" @click="setMaintenance(node.id, true)">
+          <button v-if="node.status === 'online'" class="action-link" @click="setMaintenance(node.id, true)">
             Maintenance
           </button>
         </div>

@@ -29,8 +29,21 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/chv-controller /usr/local/bin/chv-controller
 
+# Copy schema file
+COPY --from=builder /build/configs/schema_sqlite.sql /app/configs/schema_sqlite.sql
+
 # Create non-root user
 RUN adduser -D -u 1000 chv
+
+# Create data directory with proper permissions for chv user
+# The directory must be writable for SQLite WAL files
+RUN mkdir -p /var/lib/chv && \
+    chown -R chv:chv /var/lib/chv && \
+    chmod 775 /var/lib/chv
+
+# Also ensure the app configs directory is writable for any runtime files
+RUN chown -R chv:chv /app
+
 USER chv
 
 EXPOSE 8080 9090

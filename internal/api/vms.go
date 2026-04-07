@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -10,17 +11,20 @@ import (
 	"github.com/chv/chv/pkg/errorsx"
 	"github.com/chv/chv/pkg/uuidx"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // VMCreateRequest represents a VM creation request.
 type VMCreateRequest struct {
-	Name     string                   `json:"name"`
-	CPU      int32                    `json:"cpu"`
-	MemoryMB int64                    `json:"memory_mb"`
-	ImageID  string                   `json:"image_id"`
-	DiskSize int64                    `json:"disk_size_bytes"`
-	Networks []VMNetworkRequest       `json:"networks"`
-	CloudInit *models.CloudInitSpec   `json:"cloud_init,omitempty"`
+	Name              string                   `json:"name"`
+	CPU               int32                    `json:"cpu"`
+	MemoryMB          int64                    `json:"memory_mb"`
+	ImageID           string                   `json:"image_id"`
+	DiskSize          int64                    `json:"disk_size_bytes"`
+	Networks          []VMNetworkRequest       `json:"networks"`
+	CloudInit         *models.CloudInitSpec   `json:"cloud_init,omitempty"`
+	SSHAuthorizedKeys []string                `json:"ssh_authorized_keys,omitempty"`
+	Hostname          string                  `json:"hostname,omitempty"`
 }
 
 // VMNetworkRequest represents a VM network attachment request.
@@ -97,12 +101,26 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		req.DiskSize = 10 * 1024 * 1024 * 1024 // 10GB default
 	}
 	
-	// Create VM spec
+	// Create VM spec with cloud-init
+	cloudInit := req.CloudInit
+	if cloudInit == nil {
+		cloudInit = &models.CloudInitSpec{}
+	}
+	
+	// Generate UserData if we have SSH keys but no UserData
+	if cloudInit.UserData == "" && len(req.SSHAuthorizedKeys) > 0 {
+		hostname := req.Hostname
+		if hostname == "" {
+			hostname = req.Name
+		}
+		cloudInit.UserData = generateCloudInitUserData(req.SSHAuthorizedKeys, hostname, "ubuntu")
+	}
+	
 	spec := &models.VMSpec{
 		CPU:       req.CPU,
 		MemoryMB:  req.MemoryMB,
 		Boot:      models.BootSpec{Mode: "cloud_image"},
-		CloudInit: req.CloudInit,
+		CloudInit: cloudInit,
 	}
 	
 	// Add networks
@@ -130,15 +148,20 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Create VM in a transaction
+	fmt.Printf("DEBUG: Starting VM creation transaction\n")
 	if err := h.store.WithTx(r.Context(), func(s store.Store) error {
+		fmt.Printf("DEBUG: Creating VM record\n")
 		if err := s.CreateVM(r.Context(), vm); err != nil {
+			fmt.Printf("DEBUG: Failed to create VM: %v\n", err)
 			return err
 		}
+		fmt.Printf("DEBUG: VM created, creating volume\n")
 		
 		// Create volume
 		volume := &models.Volume{
 			ID:              uuidx.New(),
 			VMID:            &vm.ID,
+			PoolID:          uuid.MustParse("c17a6d1a-653a-440e-9873-6a6c95375437"),
 			BackingImageID:  &imageID,
 			Format:          models.VolumeFormatRaw,
 			SizeBytes:       req.DiskSize,
@@ -147,9 +170,12 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:       now,
 		}
 		
+		fmt.Printf("DEBUG: Creating volume with PoolID=%s, ImageID=%s\n", volume.PoolID, volume.BackingImageID)
 		if err := s.CreateVolume(r.Context(), volume); err != nil {
+			fmt.Printf("DEBUG: Failed to create volume: %v\n", err)
 			return err
 		}
+		fmt.Printf("DEBUG: Volume created successfully\n")
 		
 		// Add volume to spec
 		spec.Disks = []models.DiskAttachment{
@@ -168,13 +194,18 @@ func (h *Handler) createVM(w http.ResponseWriter, r *http.Request) {
 		return s.UpdateVM(r.Context(), vm)
 	}); err != nil {
 		// Mark operation as failed
-		h.operations.Fail(r.Context(), op.ID, err)
-		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create VM")
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
+		fmt.Printf("DEBUG: Transaction failed: %v\n", err)
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to create VM: %v", err))
 		return
 	}
 
 	// Mark operation as completed
-	h.operations.Complete(r.Context(), op.ID, vm)
+	if op != nil {
+		h.operations.Complete(r.Context(), op.ID, vm)
+	}
 
 	// Trigger scheduling
 	go h.scheduler.ScheduleVM(r.Context(), vm.ID)
@@ -246,32 +277,42 @@ func (h *Handler) startVM(w http.ResponseWriter, r *http.Request) {
 
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
 
 	if !vm.CanStart() {
 		err := errorsx.New(errorsx.ErrVMInvalidState, "VM cannot be started in current state")
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_STATE", "VM cannot be started in current state")
 		return
 	}
 
 	vm.DesiredState = models.VMDesiredStateRunning
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}
 
 	// Mark operation as completed
-	h.operations.Complete(r.Context(), op.ID, vm)
+	if op != nil {
+		h.operations.Complete(r.Context(), op.ID, vm)
+	}
 
 	// Trigger reconciliation
 	go h.reconciler.TriggerVM(vm.ID)
@@ -305,32 +346,42 @@ func (h *Handler) stopVM(w http.ResponseWriter, r *http.Request) {
 
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
 
 	if !vm.CanStop() {
 		err := errorsx.New(errorsx.ErrVMInvalidState, "VM cannot be stopped in current state")
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_STATE", "VM cannot be stopped in current state")
 		return
 	}
 
 	vm.DesiredState = models.VMDesiredStateStopped
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}
 
 	// Mark operation as completed
-	h.operations.Complete(r.Context(), op.ID, vm)
+	if op != nil {
+		h.operations.Complete(r.Context(), op.ID, vm)
+	}
 
 	go h.reconciler.TriggerVM(vm.ID)
 
@@ -363,19 +414,25 @@ func (h *Handler) rebootVM(w http.ResponseWriter, r *http.Request) {
 
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
 
 	if vm.ActualState != models.VMActualStateRunning {
 		err := errorsx.New(errorsx.ErrVMInvalidState, "VM must be running to reboot")
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusBadRequest, "INVALID_STATE", "VM must be running to reboot")
 		return
 	}
@@ -383,13 +440,17 @@ func (h *Handler) rebootVM(w http.ResponseWriter, r *http.Request) {
 	// Reboot is handled as a state transition
 	vm.ActualState = models.VMActualStateStopping
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}
 
 	// Mark operation as completed
-	h.operations.Complete(r.Context(), op.ID, vm)
+	if op != nil {
+		h.operations.Complete(r.Context(), op.ID, vm)
+	}
 
 	go h.reconciler.TriggerVM(vm.ID)
 
@@ -492,12 +553,16 @@ func (h *Handler) deleteVM(w http.ResponseWriter, r *http.Request) {
 
 	vm, err := h.store.GetVM(r.Context(), vmID)
 	if err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get VM")
 		return
 	}
 	if vm == nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusNotFound, "NOT_FOUND", "VM not found")
 		return
 	}
@@ -506,7 +571,9 @@ func (h *Handler) deleteVM(w http.ResponseWriter, r *http.Request) {
 	vm.DesiredState = models.VMDesiredStateDeleted
 	vm.ActualState = models.VMActualStateDeleting
 	if err := h.store.UpdateVM(r.Context(), vm); err != nil {
-		h.operations.Fail(r.Context(), op.ID, err)
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update VM")
 		return
 	}

@@ -11,13 +11,17 @@ import (
 
 // TAPManager manages TAP devices for VM networking.
 type TAPManager struct {
-	defaultBridge string
+	defaultBridge   string
+	uplinkInterface string
+	gatewayIP       string
 }
 
 // NewTAPManager creates a new TAP manager.
-func NewTAPManager(defaultBridge string) *TAPManager {
+func NewTAPManager(defaultBridge, uplinkInterface, gatewayIP string) *TAPManager {
 	return &TAPManager{
-		defaultBridge: defaultBridge,
+		defaultBridge:   defaultBridge,
+		uplinkInterface: uplinkInterface,
+		gatewayIP:       gatewayIP,
 	}
 }
 
@@ -196,10 +200,22 @@ func (tm *TAPManager) generateMAC(vmID string) string {
 }
 
 // EnsureBridge checks if a bridge exists and creates it if needed.
+// It also attaches the uplink interface and configures the gateway IP.
 func (tm *TAPManager) EnsureBridge(bridgeName string) error {
+	if bridgeName == "" {
+		bridgeName = tm.defaultBridge
+	}
+
 	cmd := exec.Command("ip", "link", "show", bridgeName)
 	if err := cmd.Run(); err == nil {
-		// Bridge exists
+		// Bridge exists, ensure uplink is attached
+		if err := tm.attachUplink(bridgeName); err != nil {
+			return fmt.Errorf("failed to attach uplink to existing bridge: %w", err)
+		}
+		// Ensure gateway IP is configured
+		if err := tm.configureGateway(bridgeName); err != nil {
+			return fmt.Errorf("failed to configure gateway IP: %w", err)
+		}
 		return nil
 	}
 
@@ -213,6 +229,127 @@ func (tm *TAPManager) EnsureBridge(bridgeName string) error {
 	cmd = exec.Command("ip", "link", "set", bridgeName, "up")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to bring up bridge: %v (output: %s)", err, string(out))
+	}
+
+	// Attach uplink interface
+	if err := tm.attachUplink(bridgeName); err != nil {
+		return fmt.Errorf("failed to attach uplink: %w", err)
+	}
+
+	// Configure gateway IP
+	if err := tm.configureGateway(bridgeName); err != nil {
+		return fmt.Errorf("failed to configure gateway IP: %w", err)
+	}
+
+	// Enable IP forwarding
+	if err := tm.enableIPForwarding(); err != nil {
+		return fmt.Errorf("failed to enable IP forwarding: %w", err)
+	}
+
+	return nil
+}
+
+// attachUplink attaches the uplink interface to the bridge if specified.
+func (tm *TAPManager) attachUplink(bridgeName string) error {
+	if tm.uplinkInterface == "" {
+		return nil
+	}
+
+	// Check if uplink is already attached to this bridge
+	attachedBridge, err := tm.getAttachedBridge(tm.uplinkInterface)
+	if err == nil && attachedBridge == bridgeName {
+		// Already attached to the correct bridge
+		return nil
+	}
+
+	// Check if uplink interface exists
+	cmd := exec.Command("ip", "link", "show", tm.uplinkInterface)
+	if err := cmd.Run(); err != nil {
+		// Uplink interface doesn't exist, skip silently
+		return nil
+	}
+
+	// Bring down uplink before attaching to bridge
+	cmd = exec.Command("ip", "link", "set", tm.uplinkInterface, "down")
+	cmd.Run() // Ignore error, interface might already be down
+
+	// Attach uplink to bridge
+	cmd = exec.Command("ip", "link", "set", tm.uplinkInterface, "master", bridgeName)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to attach %s to bridge %s: %v (output: %s)", tm.uplinkInterface, bridgeName, err, string(out))
+	}
+
+	// Bring up uplink
+	cmd = exec.Command("ip", "link", "set", tm.uplinkInterface, "up")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to bring up uplink %s: %v (output: %s)", tm.uplinkInterface, err, string(out))
+	}
+
+	return nil
+}
+
+// configureGateway configures the gateway IP on the bridge.
+func (tm *TAPManager) configureGateway(bridgeName string) error {
+	if tm.gatewayIP == "" {
+		return nil
+	}
+
+	// Check if IP is already configured
+	cmd := exec.Command("ip", "addr", "show", bridgeName)
+	out, err := cmd.Output()
+	if err == nil && strings.Contains(string(out), tm.gatewayIP) {
+		// IP already configured
+		return nil
+	}
+
+	// Add IP to bridge (assumes /24 subnet)
+	ipWithCidr := tm.gatewayIP + "/24"
+	cmd = exec.Command("ip", "addr", "add", ipWithCidr, "dev", bridgeName)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// Ignore "File exists" error (IP already set)
+		if !strings.Contains(string(out), "File exists") {
+			return fmt.Errorf("failed to add IP %s to bridge %s: %v (output: %s)", tm.gatewayIP, bridgeName, err, string(out))
+		}
+	}
+
+	return nil
+}
+
+// enableIPForwarding enables IP forwarding for NAT/routing.
+func (tm *TAPManager) enableIPForwarding() error {
+	// Enable IP forwarding via sysctl
+	cmd := exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to enable IP forwarding: %v (output: %s)", err, string(out))
+	}
+	return nil
+}
+
+// EnableNAT enables NAT for the bridge network using iptables.
+// This should be called after EnsureBridge if internet access is needed.
+func (tm *TAPManager) EnableNAT() error {
+	if tm.uplinkInterface == "" || tm.gatewayIP == "" {
+		return nil
+	}
+
+	// Determine the subnet from gateway IP (assumes /24)
+	ip := net.ParseIP(tm.gatewayIP)
+	if ip == nil {
+		return fmt.Errorf("invalid gateway IP: %s", tm.gatewayIP)
+	}
+	subnet := fmt.Sprintf("%d.%d.%d.0/24", ip[12], ip[13], ip[14])
+
+	// Check if NAT rule already exists
+	cmd := exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-o", tm.uplinkInterface, "-j", "MASQUERADE")
+	if err := cmd.Run(); err == nil {
+		// Rule already exists
+		return nil
+	}
+
+	// Add NAT rule
+	cmd = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-o", tm.uplinkInterface, "-j", "MASQUERADE")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to add NAT rule: %v (output: %s)", err, string(out))
 	}
 
 	return nil

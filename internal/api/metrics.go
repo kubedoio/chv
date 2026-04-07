@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"runtime"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Metrics represents system metrics.
@@ -139,4 +141,9 @@ func (h *Handler) checkDatabase(ctx context.Context) string {
 		return "unhealthy: " + err.Error()
 	}
 	return "ok"
+}
+
+// prometheusMetrics returns Prometheus-formatted metrics.
+func (h *Handler) prometheusMetrics(w http.ResponseWriter, r *http.Request) {
+	promhttp.Handler().ServeHTTP(w, r)
 }

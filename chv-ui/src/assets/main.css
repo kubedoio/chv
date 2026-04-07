@@ -51,11 +51,9 @@ body {
   font-weight: 500;
 }
 
-.status-badge::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.status-icon {
+  font-size: 10px;
+  line-height: 1;
 }
 
 .status-running {
@@ -63,8 +61,8 @@ body {
   color: #3a8c1a;
 }
 
-.status-running::before {
-  background-color: var(--color-success);
+.status-running .status-icon {
+  color: var(--color-success);
 }
 
 .status-stopped {
@@ -72,8 +70,8 @@ body {
   color: #666;
 }
 
-.status-stopped::before {
-  background-color: #999;
+.status-stopped .status-icon {
+  color: #999;
 }
 
 .status-error {
@@ -81,8 +79,8 @@ body {
   color: #c00;
 }
 
-.status-error::before {
-  background-color: var(--color-error);
+.status-error .status-icon {
+  color: var(--color-error);
 }
 
 .status-warning {
@@ -90,8 +88,8 @@ body {
   color: #c78b00;
 }
 
-.status-warning::before {
-  background-color: var(--color-warning);
+.status-warning .status-icon {
+  color: var(--color-warning);
 }
 
 /* Data table styles */

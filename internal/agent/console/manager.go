@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -25,46 +28,125 @@ const (
 
 // Manager manages VM serial console streaming and buffering.
 type Manager struct {
-	logDir      string
-	bufferSize  int
-	sessions    map[string]*Session // key: vmID
-	mu          sync.RWMutex
-	ctx         context.Context
-	cancel      context.CancelFunc
+	logDir     string
+	bufferSize int
+	sessions   map[string]*Session // key: vmID
+	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // Session represents an active console session for a VM.
 type Session struct {
-	VMID        string
-	LogPath     string
-	Buffer      *CircularBuffer
-	Clients     map[string]*Client // key: clientID
-	mu          sync.RWMutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	ttyEnabled  bool
-	inputPath   string // Path to write input (if TTY mode)
+	VMID         string
+	LogPath      string
+	Buffer       *CircularBuffer
+	Clients      map[string]*Client // key: clientID
+	mu           sync.RWMutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	ttyEnabled   bool
+	inputPath    string // Path to write input (if TTY mode)
+	ptyPath      string // Path to PTY device (if TTY mode)
 	lastActivity time.Time
+}
+
+// GetPTYPath returns the PTY device path for this session.
+func (s *Session) GetPTYPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ptyPath
+}
+
+// SetPTYPath sets the PTY device path for this session.
+func (s *Session) SetPTYPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ptyPath = path
 }
 
 // Client represents a connected console client.
 type Client struct {
-	ID         string
-	Send       chan []byte
-	Recv       chan []byte
-	Session    *Session
-	Connected  bool
-	mu         sync.Mutex
+	ID        string
+	Send      chan []byte
+	Recv      chan []byte
+	Session   *Session
+	Connected bool
+	mu        sync.Mutex
+	logger    *zap.Logger
+}
+
+// SetLogger sets the logger for the client.
+func (c *Client) SetLogger(logger *zap.Logger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.logger = logger
+}
+
+// getLogger returns the logger for the client, or a no-op logger if not set.
+func (c *Client) getLogger() *zap.Logger {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.logger == nil {
+		return zap.NewNop()
+	}
+	return c.logger
+}
+
+// handleResize resizes the PTY associated with this client's session.
+// It uses the TIOCSWINSZ ioctl to resize the PTY.
+func (c *Client) handleResize(cols, rows int) error {
+	// Get logger first (needs lock)
+	logger := c.getLogger()
+
+	// Check if we have a session
+	if c.Session == nil {
+		return fmt.Errorf("no session available for resize")
+	}
+
+	// Check if PTY is available
+	ptyPath := c.Session.GetPTYPath()
+	if ptyPath == "" {
+		// PTY resize requires the VM to be configured with a PTY device.
+		// The current cloud-hypervisor configuration uses --serial tty which
+		// outputs to stdout rather than a PTY.
+		return fmt.Errorf("PTY resize not available: VM not configured with PTY device")
+	}
+
+	// Open the PTY device
+	ptyFile, err := os.OpenFile(ptyPath, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open PTY %s: %w", ptyPath, err)
+	}
+	defer ptyFile.Close()
+
+	// Use TIOCSWINSZ ioctl to resize the PTY
+	ws := &unix.Winsize{
+		Col: uint16(cols),
+		Row: uint16(rows),
+	}
+
+	err = unix.IoctlSetWinsize(int(ptyFile.Fd()), unix.TIOCSWINSZ, ws)
+	if err != nil {
+		return fmt.Errorf("failed to resize PTY: %w", err)
+	}
+
+	logger.Debug("Console resized",
+		zap.Int("cols", cols),
+		zap.Int("rows", rows),
+		zap.String("pty", ptyPath))
+
+	return nil
 }
 
 // CircularBuffer is a thread-safe circular buffer for storing recent console output.
 type CircularBuffer struct {
-	data   []byte
-	size   int
-	start  int
-	end    int
-	full   bool
-	mu     sync.RWMutex
+	data  []byte
+	size  int
+	start int
+	end   int
+	full  bool
+	mu    sync.RWMutex
 }
 
 // NewCircularBuffer creates a new circular buffer with the given size.
@@ -176,7 +258,7 @@ func (m *Manager) GetOrCreateSession(vmID string) (*Session, error) {
 
 	// Create new session
 	logPath := filepath.Join(m.logDir, fmt.Sprintf("%s-serial.log", vmID))
-	
+
 	// Check if log file exists or can be created
 	if _, err := os.Stat(logPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("cannot access console log for VM %s: %w", vmID, err)

@@ -14,6 +14,7 @@ import (
 	"github.com/chv/chv/internal/agent/cloudinit"
 	"github.com/chv/chv/internal/network"
 	"github.com/chv/chv/pkg/uuidx"
+	"go.uber.org/zap"
 )
 
 // Launcher manages Cloud Hypervisor VM processes.
@@ -26,6 +27,7 @@ type Launcher struct {
 	tapManager    *network.TAPManager
 	isoGenerator  *cloudinit.ISOGenerator
 	dataDir       string // Base data directory for ISO generation
+	logger        *zap.Logger
 	
 	// In-memory tracking of running VMs (supplemented by stateManager)
 	instances map[string]*VMInstance
@@ -39,6 +41,7 @@ type VMConfig struct {
 	VCPU            int
 	MemoryMB        int
 	VolumePath      string
+	VolumeFormat    string    // Disk format: "raw", "qcow2" (default: "raw")
 	BackingImageID  string
 	BridgeName      string
 	CloudInit       *cloudinit.Config
@@ -67,9 +70,14 @@ func NewLauncher(
 	stateManager *StateManager,
 	tapManager *network.TAPManager,
 	isoGenerator *cloudinit.ISOGenerator,
+	logger *zap.Logger,
 ) *Launcher {
 	// Determine dataDir from stateDir (stateDir is typically <dataDir>/instances)
 	dataDir := filepath.Dir(stateDir)
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 
 	return &Launcher{
 		chvBinary:    chvBinary,
@@ -80,6 +88,7 @@ func NewLauncher(
 		tapManager:   tapManager,
 		isoGenerator: isoGenerator,
 		dataDir:      dataDir,
+		logger:       logger,
 		instances:    make(map[string]*VMInstance),
 	}
 }
@@ -320,7 +329,11 @@ func (l *Launcher) StartVM(config *VMConfig, operationID string) (*VMInstance, e
 
 	if err := l.stateManager.Save(state); err != nil {
 		// Log but don't fail - VM is running
-		// TODO: Log warning
+		l.logger.Warn("Failed to save VM state after start",
+			zap.String("vm_id", config.VMID),
+			zap.String("operation", "start_vm"),
+			zap.Int("pid", instance.PID),
+			zap.Error(err))
 	}
 
 	// Track in memory
@@ -534,13 +547,32 @@ func (l *Launcher) buildCommand(config *VMConfig, tapDevice *network.TAPDevice, 
 	args := []string{
 		"--cpus", fmt.Sprintf("boot=%d", config.VCPU),
 		"--memory", fmt.Sprintf("size=%dM", config.MemoryMB),
-		"--disk", fmt.Sprintf("path=%s", config.VolumePath),
-		"--disk", fmt.Sprintf("path=%s", isoPath),
-		"--net", fmt.Sprintf("tap=%s,mac=%s", tapDevice.Name, tapDevice.MACAddress),
+	}
+
+	// Build disk list - only include boot volume for now
+	// Note: When both boot volume and ISO are attached, the firmware sometimes
+	// tries to boot from the ISO instead of the boot volume. For MVP, we only
+	// attach the boot volume. Cloud-init can be added later via metadata service.
+	if config.VolumePath != "" {
+		args = append(args, "--disk", fmt.Sprintf("path=%s", config.VolumePath))
+	}
+
+	// Network
+	if tapDevice != nil && tapDevice.Name != "" {
+		args = append(args, "--net", fmt.Sprintf("tap=%s,mac=%s", tapDevice.Name, tapDevice.MACAddress))
+	}
+
+	// For cloud images with a boot disk, use hypervisor-fw firmware
+	if config.VolumePath != "" {
+		args = append(args, "--firmware", "/usr/local/bin/hypervisor-fw")
+	}
+
+	// API socket and console
+	args = append(args,
 		"--api-socket", apiSocket,
 		"--console", "off",
 		"--serial", "tty",
-	}
+	)
 
 	cmd := exec.Command(l.chvBinary, args...)
 	return cmd, nil

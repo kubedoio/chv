@@ -28,13 +28,13 @@ const (
 	maxMessageSize = 4096
 
 	// WebSocket message types
-	MsgTypeOutput = "output"
-	MsgTypeInput  = "input"
-	MsgTypeError  = "error"
-	MsgTypeStatus = "status"
-	MsgTypeResize = "resize"
-	MsgTypePing   = "ping"
-	MsgTypePong   = "pong"
+	MsgTypeOutput  = "output"
+	MsgTypeInput   = "input"
+	MsgTypeError   = "error"
+	MsgTypeStatus  = "status"
+	MsgTypeResize  = "resize"
+	MsgTypePing    = "ping"
+	MsgTypePong    = "pong"
 	MsgTypeHistory = "history"
 )
 
@@ -48,10 +48,10 @@ type WebSocketMessage struct {
 
 // WebSocketServer handles WebSocket connections for console access.
 type WebSocketServer struct {
-	manager    *Manager
-	upgrader   websocket.Upgrader
-	authFunc   AuthFunc
-	mu         sync.RWMutex
+	manager     *Manager
+	upgrader    websocket.Upgrader
+	authFunc    AuthFunc
+	mu          sync.RWMutex
 	connections map[string]*WebSocketConnection // key: connID
 }
 
@@ -60,14 +60,14 @@ type AuthFunc func(token string, vmID string) (userID string, allowed bool, err 
 
 // WebSocketConnection represents an active WebSocket connection.
 type WebSocketConnection struct {
-	ID       string
-	VMID     string
-	UserID   string
-	Conn     *websocket.Conn
-	Client   *Client
-	Server   *WebSocketServer
-	Cancel   context.CancelFunc
-	mu       sync.Mutex
+	ID     string
+	VMID   string
+	UserID string
+	Conn   *websocket.Conn
+	Client *Client
+	Server *WebSocketServer
+	Cancel context.CancelFunc
+	mu     sync.Mutex
 }
 
 // NewWebSocketServer creates a new WebSocket server.
@@ -109,7 +109,7 @@ func (s *WebSocketServer) SetAllowedOrigins(origins []string) {
 	for _, o := range origins {
 		originSet[o] = true
 	}
-	
+
 	s.upgrader.CheckOrigin = func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -278,8 +278,12 @@ func (c *WebSocketConnection) readPump() {
 			}
 
 		case MsgTypeResize:
-			// Handle resize (store for future use)
-			c.sendStatus("Resize acknowledged (not implemented in MVP-1)")
+			// Handle resize
+			if err := c.Client.handleResize(msg.Cols, msg.Rows); err != nil {
+				c.sendError(fmt.Sprintf("Resize failed: %v", err))
+			} else {
+				c.sendStatus("Resize successful")
+			}
 
 		case MsgTypePing:
 			c.sendMessage(&WebSocketMessage{Type: MsgTypePong})
@@ -406,11 +410,11 @@ func (s *WebSocketServer) Close() error {
 
 // ConsoleInfo represents console information for a VM.
 type ConsoleInfo struct {
-	VMID          string    `json:"vm_id"`
-	Active        bool      `json:"active"`
-	ClientCount   int       `json:"client_count"`
-	LastActivity  time.Time `json:"last_activity"`
-	LogPath       string    `json:"log_path"`
+	VMID         string    `json:"vm_id"`
+	Active       bool      `json:"active"`
+	ClientCount  int       `json:"client_count"`
+	LastActivity time.Time `json:"last_activity"`
+	LogPath      string    `json:"log_path"`
 }
 
 // GetConsoleInfo returns console information for all active sessions.

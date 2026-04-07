@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 )
@@ -20,6 +21,16 @@ type CreateTokenResponse struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// TokenResponse represents a token in the list
+type TokenResponse struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	RoleID    *string    `json:"role_id,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
 }
 
 func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +57,7 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 	
 	result, err := h.auth.CreateToken(r.Context(), req.Name, req.RoleID, expiresIn)
 	if err != nil {
+		log.Printf("CreateToken error: %v", err)
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create token")
 		return
 	}
@@ -64,8 +76,42 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 	h.jsonResponse(w, http.StatusCreated, resp)
 }
 
+// listTokens returns all API tokens
+func (h *Handler) listTokens(w http.ResponseWriter, r *http.Request) {
+	tokens, err := h.store.ListAPITokens(r.Context())
+	if err != nil {
+		log.Printf("ListTokens error: %v", err)
+		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list tokens")
+		return
+	}
+
+	// Convert to response format (hide sensitive fields)
+	var resp []TokenResponse
+	for _, t := range tokens {
+		tr := TokenResponse{
+			ID:        t.ID.String(),
+			Name:      t.Name,
+			CreatedAt: t.CreatedAt,
+		}
+		if t.RoleID != nil {
+			roleID := t.RoleID.String()
+			tr.RoleID = &roleID
+		}
+		if t.ExpiresAt != nil {
+			tr.ExpiresAt = t.ExpiresAt
+		}
+		if t.RevokedAt != nil {
+			tr.RevokedAt = t.RevokedAt
+		}
+		resp = append(resp, tr)
+	}
+
+	h.jsonResponse(w, http.StatusOK, resp)
+}
+
 // authMiddleware validates the bearer token.
 func (h *Handler) authMiddleware(next http.Handler) http.Handler {
+	log.Printf("authMiddleware called")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
 		if token == "" {
@@ -75,6 +121,8 @@ func (h *Handler) authMiddleware(next http.Handler) http.Handler {
 		
 		_, err := h.auth.ValidateToken(r.Context(), token)
 		if err != nil {
+			// Log the actual error for debugging
+			log.Printf("Token validation failed: %v", err)
 			h.errorResponse(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or expired token")
 			return
 		}

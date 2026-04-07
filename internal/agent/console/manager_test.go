@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func TestNewCircularBuffer(t *testing.T) {
@@ -83,7 +85,7 @@ func TestCircularBuffer_GetContents(t *testing.T) {
 func TestNewManager(t *testing.T) {
 	tmpDir := t.TempDir()
 	mgr := NewManager(tmpDir)
-	
+
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
 	}
@@ -366,4 +368,74 @@ func TestNewManager_DefaultLogDir(t *testing.T) {
 		t.Errorf("expected default log dir %s, got %s", DefaultLogDir, mgr.logDir)
 	}
 	mgr.Close()
+}
+
+func TestSession_PTYPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := NewManager(tmpDir)
+	defer mgr.Close()
+
+	vmID := "test-vm-pty"
+	logPath := filepath.Join(tmpDir, vmID+"-serial.log")
+	os.WriteFile(logPath, []byte("log\n"), 0644)
+
+	session, _ := mgr.GetOrCreateSession(vmID)
+
+	// Initially PTY path should be empty
+	ptyPath := session.GetPTYPath()
+	if ptyPath != "" {
+		t.Errorf("expected empty PTY path, got %s", ptyPath)
+	}
+
+	// Set PTY path
+	testPath := "/dev/pts/123"
+	session.SetPTYPath(testPath)
+
+	// Get PTY path
+	ptyPath = session.GetPTYPath()
+	if ptyPath != testPath {
+		t.Errorf("expected PTY path %s, got %s", testPath, ptyPath)
+	}
+}
+
+func TestClient_HandleResize_NoPTY(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := NewManager(tmpDir)
+	defer mgr.Close()
+
+	vmID := "test-vm-resize"
+	logPath := filepath.Join(tmpDir, vmID+"-serial.log")
+	os.WriteFile(logPath, []byte("log\n"), 0644)
+
+	session, _ := mgr.GetOrCreateSession(vmID)
+	client := session.AddClient("resize-client")
+
+	// Without PTY path set, resize should return an error
+	err := client.handleResize(80, 24)
+	if err == nil {
+		t.Error("expected error when PTY path is not set")
+	}
+	if err.Error() != "PTY resize not available: VM not configured with PTY device" {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestClient_SetLogger(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := NewManager(tmpDir)
+	defer mgr.Close()
+
+	vmID := "test-vm-logger"
+	logPath := filepath.Join(tmpDir, vmID+"-serial.log")
+	os.WriteFile(logPath, []byte("log\n"), 0644)
+
+	session, _ := mgr.GetOrCreateSession(vmID)
+	client := session.AddClient("logger-client")
+
+	// Set a logger
+	logger := zap.NewNop()
+	client.SetLogger(logger)
+
+	// Verify it doesn't panic
+	_ = client.getLogger()
 }

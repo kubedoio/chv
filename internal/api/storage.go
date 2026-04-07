@@ -44,8 +44,8 @@ func (h *Handler) createStoragePool(w http.ResponseWriter, r *http.Request) {
 		PathOrExport:         req.PathOrExport,
 		Status:               models.StoragePoolStatusActive,
 		SupportsOnlineResize: req.SupportsResize,
-		SupportsClone:        false,
-		SupportsSnapshot:     false,
+		SupportsClone:        true,
+		SupportsSnapshot:     true,
 		CreatedAt:            time.Now(),
 	}
 	

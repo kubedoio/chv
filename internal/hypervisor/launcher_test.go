@@ -11,6 +11,7 @@ import (
 
 	"github.com/chv/chv/internal/agent/cloudinit"
 	"github.com/chv/chv/internal/network"
+	"go.uber.org/zap"
 )
 
 // mockProcessCmd is a helper to create a mock cloud-hypervisor process
@@ -58,7 +59,7 @@ func createMockCHVBinary(t *testing.T, dir string) string {
 func TestLauncher_Initialize(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -69,6 +70,7 @@ func TestLauncher_Initialize(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	if err := launcher.Initialize(); err != nil {
@@ -133,7 +135,7 @@ func TestLauncher_VMConfig_Validation(t *testing.T) {
 func TestLauncher_buildCommand(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -144,6 +146,7 @@ func TestLauncher_buildCommand(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	config := &VMConfig{
@@ -178,12 +181,13 @@ func TestLauncher_buildCommand(t *testing.T) {
 	args := cmd.Args[1:] // Skip program path
 	
 	// Check for key arguments
+	// Note: Both disk and ISO are combined into a single --disk argument
 	expectedArgs := []string{
 		"--cpus", "boot=2",
 		"--memory", "size=1024M",
-		"--disk", "path=/var/lib/chv/volumes/test.raw",
-		"--disk", "path=/var/lib/chv/isos/test-vm-123-cloudinit.iso",
+		"--disk", "path=/var/lib/chv/volumes/test.raw,path=/var/lib/chv/isos/test-vm-123-cloudinit.iso,readonly=on",
 		"--net", "tap=tap550e8400e29b,mac=02:00:00:00:00:01",
+		"--firmware", "/usr/local/bin/hypervisor-fw",
 		"--api-socket", "/var/lib/chv/sockets/test-vm-123.sock",
 		"--console", "off",
 		"--serial", "tty",
@@ -254,7 +258,7 @@ func TestVMInstanceState_Serialization(t *testing.T) {
 func TestLauncher_Recover_EmptyState(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -265,6 +269,7 @@ func TestLauncher_Recover_EmptyState(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	// Recover with empty state directory
@@ -281,7 +286,7 @@ func TestLauncher_Recover_EmptyState(t *testing.T) {
 func TestLauncher_ListInstances(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -292,6 +297,7 @@ func TestLauncher_ListInstances(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	// Initially empty
@@ -304,7 +310,7 @@ func TestLauncher_ListInstances(t *testing.T) {
 func TestLauncher_GetInstance_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -315,6 +321,7 @@ func TestLauncher_GetInstance_NotFound(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	// Get non-existent instance
@@ -327,7 +334,7 @@ func TestLauncher_GetInstance_NotFound(t *testing.T) {
 func TestLauncher_GetVMState_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -338,6 +345,7 @@ func TestLauncher_GetVMState_NotFound(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	// Get state for non-existent VM
@@ -350,7 +358,7 @@ func TestLauncher_GetVMState_NotFound(t *testing.T) {
 func TestLauncher_waitForAPISocket(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -361,6 +369,7 @@ func TestLauncher_waitForAPISocket(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	socketPath := filepath.Join(tmpDir, "test.sock")
@@ -398,7 +407,7 @@ func NewContextWithTimeout(t *testing.T, timeout time.Duration) (context.Context
 func TestLauncher_StartVM_InvalidVMID(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -409,6 +418,7 @@ func TestLauncher_StartVM_InvalidVMID(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	tests := []struct {
@@ -473,7 +483,7 @@ func TestLauncher_StartVM_InvalidVMID(t *testing.T) {
 func TestLauncher_RebootVM_InvalidVMID(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -484,6 +494,7 @@ func TestLauncher_RebootVM_InvalidVMID(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	err := launcher.RebootVM("../../../etc/passwd", "op-123")
@@ -495,7 +506,7 @@ func TestLauncher_RebootVM_InvalidVMID(t *testing.T) {
 func TestLauncher_StopVM_InvalidVMID(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -506,6 +517,7 @@ func TestLauncher_StopVM_InvalidVMID(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	err := launcher.StopVM("../../../etc/passwd", false, "op-123")
@@ -517,7 +529,7 @@ func TestLauncher_StopVM_InvalidVMID(t *testing.T) {
 func TestLauncher_GetVMState_InvalidVMID(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -528,6 +540,7 @@ func TestLauncher_GetVMState_InvalidVMID(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	_, err := launcher.GetVMState("../../../etc/passwd")
@@ -539,7 +552,7 @@ func TestLauncher_GetVMState_InvalidVMID(t *testing.T) {
 func TestLauncher_GetInstance_InvalidVMID(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -550,6 +563,7 @@ func TestLauncher_GetInstance_InvalidVMID(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	instance := launcher.GetInstance("../../../etc/passwd")
@@ -580,7 +594,7 @@ func TestLauncher_StopVM_RaceCondition(t *testing.T) {
 	socketDir := filepath.Join(tmpDir, "sockets")
 
 	stateManager := NewStateManager(stateDir)
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -591,6 +605,7 @@ func TestLauncher_StopVM_RaceCondition(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	// Create a mock instance manually
@@ -654,7 +669,7 @@ func TestLauncher_StopVM_RaceCondition(t *testing.T) {
 func TestLauncher_ConcurrentAccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateManager := NewStateManager(filepath.Join(tmpDir, "state"))
-	tapManager := network.NewTAPManager("br0")
+	tapManager := network.NewTAPManager("br0", "", "")
 	isoGenerator := cloudinit.NewISOGenerator(filepath.Join(tmpDir, "isos"))
 
 	launcher := NewLauncher(
@@ -665,6 +680,7 @@ func TestLauncher_ConcurrentAccess(t *testing.T) {
 		stateManager,
 		tapManager,
 		isoGenerator,
+		zap.NewNop(),
 	)
 
 	// Add some mock instances

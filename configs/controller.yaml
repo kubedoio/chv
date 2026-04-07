@@ -56,3 +56,33 @@ cors:
   
   # Preflight cache duration in seconds
   max_age: 300
+
+# Rate limiting configuration
+rate_limit:
+  # Enable/disable rate limiting globally
+  enabled: true
+
+  # Per-IP rate limiting (for unauthenticated requests)
+  ip_based:
+    enabled: true
+    requests_per_minute: 60    # 60 requests per minute per IP
+    burst: 10                   # Allow burst of 10 requests
+
+  # Per-user rate limiting (for authenticated requests)
+  user_based:
+    enabled: true
+    requests_per_minute: 120   # 120 requests per minute per user
+    burst: 20                   # Allow burst of 20 requests
+
+  # Endpoint-specific rate limits
+  # These define the tiers used by the tiered rate limiter:
+  # - strict: Expensive operations (VM create, delete, image import)
+  # - standard: Normal operations (VM list, get, update)
+  # - relaxed: Health checks and light endpoints
+  endpoints:
+    strict_rpm: 10              # 10 requests per minute (VM create, delete)
+    strict_burst: 5             # Burst of 5 for strict endpoints
+    standard_rpm: 60            # 60 requests per minute (normal operations)
+    standard_burst: 10          # Burst of 10 for standard endpoints
+    relaxed_rpm: 300            # 300 requests per minute (health checks)
+    relaxed_burst: 50           # Burst of 50 for relaxed endpoints

@@ -1,0 +1,72 @@
+# Agent Configuration with TLS
+# Copy this file to /etc/chv/agent.yaml and update the paths
+
+# Agent identification
+node_id: "agent-1"
+
+# Server addresses
+listen_addr: ":9091"
+controller_addr: "controller:9090"
+
+# Directories
+data_dir: "/var/lib/chv-agent"
+image_dir: "/var/lib/chv-agent/images"
+volume_dir: "/var/lib/chv-agent/volumes"
+
+# Cloud Hypervisor binary path
+cloud_hypervisor: "/usr/bin/cloud-hypervisor"
+
+# Network configuration
+bridge_name: "chvbr0"
+bridge_uplink: "ens19"
+bridge_gateway_ip: "10.0.0.1"
+
+# Logging
+log_level: "info"
+log_format: "json"
+
+# Heartbeat interval
+heartbeat_interval: "30s"
+
+# TLS Configuration
+tls:
+  # Enable TLS/mTLS for all connections
+  enabled: true
+  
+  # Server certificate and key for agent's gRPC server
+  # These are used when controller connects to the agent
+  cert: "/etc/chv/certs/agent-server.crt"
+  key: "/etc/chv/certs/agent-server.key"
+  
+  # CA certificate for verifying controller's certificate
+  ca: "/etc/chv/certs/ca.crt"
+  
+  # Client certificate and key for mTLS when connecting to controller
+  # These are used when agent connects to controller (e.g., for heartbeats)
+  client_cert: "/etc/chv/certs/agent-client.crt"
+  client_key: "/etc/chv/certs/agent-client.key"
+  
+  # Expected server name for controller certificate verification
+  server_name: "chv-controller"
+  
+  # Enable automatic certificate generation (for development/testing only)
+  auto_generate: false
+  
+  # Directory for auto-generated certificates
+  cert_dir: "/etc/chv/certs"
+  
+  # DANGEROUS: Skip server certificate verification (development only!)
+  # Never use this in production!
+  insecure_skip_verify: false
+
+# CORS for console WebSocket
+cors:
+  allowed_origins:
+    - "http://localhost:3000"
+    - "https://localhost:3000"
+  allow_credentials: true
+
+# JWT configuration for HTTP console authentication
+jwt_secret: "${CHV_AGENT_JWT_SECRET}"
+jwt_issuer: "chv-controller"
+jwt_audience: "chv-agent"

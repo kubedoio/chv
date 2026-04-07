@@ -3,7 +3,10 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +22,8 @@ const (
 	// DefaultMaxConnections is the default maximum number of connections.
 	DefaultMaxConnections = 1000
 	// DefaultConnectionTimeout is the default timeout for connection operations.
-	DefaultConnectionTimeout = 30 * time.Second
+	// Increased to 120s to accommodate VM boot operations with qcow2 images and hypervisor-fw.
+	DefaultConnectionTimeout = 120 * time.Second
 )
 
 // Client provides an interface for communicating with agents.
@@ -35,6 +39,7 @@ type Client interface {
 	ResizeVolume(ctx context.Context, nodeID string, req *agent.VolumeResizeRequest) error
 	EnsureBridge(ctx context.Context, nodeID string, req *agent.EnsureBridgeRequest) error
 	ImportImage(ctx context.Context, nodeID string, req *agent.ImageImportRequest) error
+	StreamConsole(ctx context.Context, nodeID string) (agent.AgentService_StreamConsoleClient, error)
 	Close() error
 }
 
@@ -45,6 +50,7 @@ type client struct {
 	timeout        time.Duration
 	maxConns       int
 	tlsCredentials credentials.TransportCredentials
+	serverName     string
 }
 
 // ClientOption is a functional option for configuring the client.
@@ -64,10 +70,22 @@ func WithTimeout(timeout time.Duration) ClientOption {
 	}
 }
 
+// SetTimeout sets the timeout for the client (used for testing).
+func (c *client) SetTimeout(timeout time.Duration) {
+	c.timeout = timeout
+}
+
 // WithTLS sets the TLS credentials for secure connections.
 func WithTLS(creds credentials.TransportCredentials) ClientOption {
 	return func(c *client) {
 		c.tlsCredentials = creds
+	}
+}
+
+// WithServerName sets the server name for TLS verification.
+func WithServerName(serverName string) ClientOption {
+	return func(c *client) {
+		c.serverName = serverName
 	}
 }
 
@@ -92,7 +110,8 @@ func (c *client) getConnection(nodeID string) (*grpc.ClientConn, error) {
 	conn, exists := c.connections[nodeID]
 	c.mu.RUnlock()
 
-	if exists && conn.GetState() != connectivity.Shutdown {
+	// Only reuse connection if it's in a ready state
+	if exists && conn.GetState() == connectivity.Ready {
 		return conn, nil
 	}
 
@@ -100,7 +119,7 @@ func (c *client) getConnection(nodeID string) (*grpc.ClientConn, error) {
 	defer c.mu.Unlock()
 
 	// Double-check after acquiring write lock
-	if conn, exists := c.connections[nodeID]; exists && conn.GetState() != connectivity.Shutdown {
+	if conn, exists := c.connections[nodeID]; exists && conn.GetState() == connectivity.Ready {
 		return conn, nil
 	}
 
@@ -124,8 +143,33 @@ func (c *client) getConnection(nodeID string) (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
+// parseNodeAddress parses a node address which may be in CIDR notation or plain IP/hostname.
+// It returns the address with the agent gRPC port appended.
+func parseNodeAddress(addr string) string {
+	// Remove CIDR suffix if present (e.g., "192.168.1.1/24" -> "192.168.1.1")
+	if strings.Contains(addr, "/") {
+		ip, _, err := net.ParseCIDR(addr)
+		if err == nil {
+			addr = ip.String()
+		} else {
+			// Not a valid CIDR, just strip after /
+			addr = strings.SplitN(addr, "/", 2)[0]
+		}
+	}
+	
+	// Add port if not present
+	if !strings.Contains(addr, ":") {
+		addr = net.JoinHostPort(addr, "9091")
+	}
+	
+	return addr
+}
+
 // dial creates a new gRPC connection with retry configuration.
 func (c *client) dial(address string) (*grpc.ClientConn, error) {
+	// Parse the address to handle CIDR notation and add port
+	parsedAddr := parseNodeAddress(address)
+	
 	backoffConfig := backoff.DefaultConfig
 	backoffConfig.MaxDelay = 5 * time.Second
 
@@ -136,7 +180,7 @@ func (c *client) dial(address string) (*grpc.ClientConn, error) {
 	}
 
 	conn, err := grpc.Dial(
-		address,
+		parsedAddr,
 		grpc.WithTransportCredentials(creds),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: backoffConfig,
@@ -147,6 +191,19 @@ func (c *client) dial(address string) (*grpc.ClientConn, error) {
 	}
 
 	return conn, nil
+}
+
+// NewClientWithTLS creates a new agent client with TLS configuration.
+// This is a convenience function for creating a client with TLS/mTLS.
+func NewClientWithTLS(tlsConfig *tls.Config, opts ...ClientOption) (Client, error) {
+	if tlsConfig == nil {
+		return nil, fmt.Errorf("TLS config is required")
+	}
+
+	creds := credentials.NewTLS(tlsConfig)
+	opts = append([]ClientOption{WithTLS(creds)}, opts...)
+	
+	return NewClient(opts...), nil
 }
 
 // Ping checks if an agent is reachable.
@@ -406,6 +463,22 @@ func (c *client) ImportImage(ctx context.Context, nodeID string, req *agent.Imag
 	}
 
 	return nil
+}
+
+// StreamConsole establishes a bidirectional streaming connection for console access.
+func (c *client) StreamConsole(ctx context.Context, nodeID string) (agent.AgentService_StreamConsoleClient, error) {
+	conn, err := c.getConnection(nodeID)
+	if err != nil {
+		return nil, err
+	}
+
+	client := agent.NewAgentServiceClient(conn)
+	stream, err := client.StreamConsole(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start console stream: %w", err)
+	}
+
+	return stream, nil
 }
 
 // Close closes all connections with timeout.

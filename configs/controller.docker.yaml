@@ -40,3 +40,22 @@ cors:
     - "Link"
   allow_credentials: true
   max_age: 300
+
+# Rate limiting configuration
+rate_limit:
+  enabled: true
+  ip_based:
+    enabled: true
+    requests_per_minute: 60
+    burst: 10
+  user_based:
+    enabled: true
+    requests_per_minute: 120
+    burst: 20
+  endpoints:
+    strict_rpm: 10
+    strict_burst: 5
+    standard_rpm: 60
+    standard_burst: 10
+    relaxed_rpm: 300
+    relaxed_burst: 50

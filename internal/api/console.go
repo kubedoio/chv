@@ -11,6 +11,7 @@ import (
 
 	"github.com/chv/chv/internal/hypervisor"
 	"github.com/chv/chv/internal/models"
+	agentpb "github.com/chv/chv/internal/pb/agent"
 	"github.com/chv/chv/pkg/uuidx"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -27,10 +28,12 @@ var upgrader = websocket.Upgrader{
 }
 
 // ConsoleMessage represents a console message
-// Types: "input", "output", "error", "status"
+// Types: "input", "output", "error", "status", "resize"
 type ConsoleMessage struct {
 	Type string `json:"type"`
-	Data string `json:"data"` // base64-encoded for binary data
+	Data string `json:"data"`           // base64-encoded for binary data
+	Rows int    `json:"rows,omitempty"` // for resize
+	Cols int    `json:"cols,omitempty"` // for resize
 }
 
 // vmConsole handles WebSocket connections for VM console access
@@ -107,7 +110,9 @@ func (h *Handler) vmConsole(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.consoleSessions.ReleaseSession(vmID.String(), userID)
-		h.operations.Fail(r.Context(), op.ID, fmt.Errorf("websocket upgrade failed: %w", err))
+		if op != nil {
+			h.operations.Fail(r.Context(), op.ID, fmt.Errorf("websocket upgrade failed: %w", err))
+		}
 		return
 	}
 
@@ -121,7 +126,11 @@ func (h *Handler) vmConsole(w http.ResponseWriter, r *http.Request) {
 	h.consoleSessions.RegisterSession(session)
 
 	// Handle the WebSocket connection
-	h.handleConsoleConnection(r.Context(), conn, vmID.String(), userID, op.ID)
+	var opID uuid.UUID
+	if op != nil {
+		opID = op.ID
+	}
+	h.handleConsoleConnection(r.Context(), conn, vmID.String(), userID, opID)
 }
 
 // handleConsoleConnection handles the bidirectional WebSocket console connection
@@ -131,10 +140,10 @@ func (h *Handler) handleConsoleConnection(ctx context.Context, conn *websocket.C
 		h.consoleSessions.ReleaseSession(vmID, userID)
 		// Complete the operation
 		h.operations.Complete(ctx, opID, map[string]string{
-			"vm_id":     vmID,
-			"user_id":   userID,
-			"status":    "disconnected",
-			"ended_at":  time.Now().Format(time.RFC3339),
+			"vm_id":    vmID,
+			"user_id":  userID,
+			"status":   "disconnected",
+			"ended_at": time.Now().Format(time.RFC3339),
 		})
 	}()
 
@@ -167,60 +176,82 @@ func (h *Handler) handleConsoleConnection(ctx context.Context, conn *websocket.C
 		}
 	}()
 
-	// Create a proxy to the cloud-hypervisor serial console
-	// The socket path is typically /var/lib/chv/sockets/{vm-id}.sock
-	apiSocketPath := fmt.Sprintf("/var/lib/chv/sockets/%s.sock", vmID)
-	proxy := hypervisor.NewConsoleProxy(apiSocketPath)
-
-	// Check if console is available
-	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
-	if !proxy.IsAvailable(ctxTimeout) {
-		cancel()
-		sendConsoleError(conn, "Console not available - VM API socket not accessible")
+	// Get VM to find its node
+	vmUUID, _ := uuidx.Parse(vmID)
+	vm, err := h.store.GetVM(ctx, vmUUID)
+	if err != nil || vm == nil {
+		sendConsoleError(conn, "VM not found")
 		return
 	}
-	cancel()
 
-	// Create pipes for bidirectional communication
-	// We need to convert between WebSocket messages and raw bytes
-	consoleInputReader, consoleInputWriter := io.Pipe()
-	consoleOutputReader, consoleOutputWriter := io.Pipe()
+	// Get node for this VM
+	node, err := h.store.GetNode(ctx, *vm.NodeID)
+	if err != nil || node == nil {
+		sendConsoleError(conn, "Node not found for VM")
+		return
+	}
 
-	// Start streaming in background
-	streamErr := make(chan error, 1)
+	// Establish gRPC stream to agent
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+
+	stream, err := h.agentClient.StreamConsole(streamCtx, node.ManagementIP)
+	if err != nil {
+		sendConsoleError(conn, fmt.Sprintf("Failed to connect to agent: %v", err))
+		return
+	}
+
+	// Send initial message with VM ID
+	if err := stream.Send(&agentpb.ConsoleStreamRequest{
+		VmId: vmID,
+	}); err != nil {
+		sendConsoleError(conn, fmt.Sprintf("Failed to initialize console stream: %v", err))
+		return
+	}
+
+	// Channel for goroutine errors
+	errChan := make(chan error, 2)
+
+	// Goroutine to read from gRPC stream and write to WebSocket
 	go func() {
-		streamCtx, streamCancel := context.WithCancel(ctx)
-		defer streamCancel()
-		streamErr <- proxy.StreamConsole(streamCtx, consoleOutputWriter, consoleInputReader)
-	}()
-
-	// Handle console output (read from VM, write to WebSocket)
-	go func() {
-		buf := make([]byte, 4096)
 		for {
-			n, err := consoleOutputReader.Read(buf)
+			resp, err := stream.Recv()
 			if err != nil {
-				if err != io.EOF {
-					sendConsoleError(conn, fmt.Sprintf("Console read error: %v", err))
-				}
+				errChan <- err
 				return
 			}
-			if n > 0 {
+
+			switch resp.Type {
+			case agentpb.ConsoleStreamResponse_OUTPUT:
 				msg := ConsoleMessage{
 					Type: "output",
-					Data: base64.StdEncoding.EncodeToString(buf[:n]),
+					Data: base64.StdEncoding.EncodeToString(resp.Data),
 				}
 				if err := conn.WriteJSON(msg); err != nil {
+					errChan <- err
+					return
+				}
+			case agentpb.ConsoleStreamResponse_ERROR:
+				sendConsoleError(conn, string(resp.Data))
+			case agentpb.ConsoleStreamResponse_STATUS:
+				sendConsoleStatus(conn, string(resp.Data))
+			case agentpb.ConsoleStreamResponse_HISTORY:
+				msg := ConsoleMessage{
+					Type: "history",
+					Data: string(resp.Data),
+				}
+				if err := conn.WriteJSON(msg); err != nil {
+					errChan <- err
 					return
 				}
 			}
 		}
 	}()
 
-	// Handle WebSocket messages (read from client, write to VM)
+	// Handle WebSocket messages (read from client, write to gRPC stream)
 	for {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		
+
 		var msg ConsoleMessage
 		if err := conn.ReadJSON(&msg); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -231,21 +262,30 @@ func (h *Handler) handleConsoleConnection(ctx context.Context, conn *websocket.C
 
 		switch msg.Type {
 		case "input":
-			// Decode base64 data and write to console input
+			// Decode base64 data and send to agent
 			data, err := base64.StdEncoding.DecodeString(msg.Data)
 			if err != nil {
 				sendConsoleError(conn, fmt.Sprintf("Invalid input data: %v", err))
 				continue
 			}
-			if _, err := consoleInputWriter.Write(data); err != nil {
+			if err := stream.Send(&agentpb.ConsoleStreamRequest{
+				Type: agentpb.ConsoleStreamRequest_INPUT,
+				Data: data,
+			}); err != nil {
 				sendConsoleError(conn, fmt.Sprintf("Console write error: %v", err))
 				return
 			}
 
 		case "resize":
-			// Resize is not supported in MVP-1
-			// Send status message
-			sendConsoleStatus(conn, "Resize not supported in MVP-1")
+			// Forward resize to agent via gRPC
+			if err := stream.Send(&agentpb.ConsoleStreamRequest{
+				Type: agentpb.ConsoleStreamRequest_RESIZE,
+				Rows: uint32(msg.Rows),
+				Cols: uint32(msg.Cols),
+			}); err != nil {
+				sendConsoleError(conn, fmt.Sprintf("Console resize error: %v", err))
+				return
+			}
 
 		case "ping":
 			// Client ping, send pong

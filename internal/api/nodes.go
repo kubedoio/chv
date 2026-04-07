@@ -99,7 +99,9 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 	// Start operation tracking for create
 	op, _ := h.operations.Start(r.Context(), models.OpNodeRegister, models.OpCategorySync,
 		"node", &nodeID, actorType, actorID, req)
-	opID = &op.ID
+	if op != nil {
+		opID = &op.ID
+	}
 	
 	// Create new node
 	labelsJSON, _ := json.Marshal(req.Labels)
@@ -126,12 +128,16 @@ func (h *Handler) registerNode(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err := h.store.CreateNode(r.Context(), node); err != nil {
-		h.operations.Fail(r.Context(), *opID, err)
+		if opID != nil {
+			h.operations.Fail(r.Context(), *opID, err)
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create node")
 		return
 	}
 
-	h.operations.Complete(r.Context(), *opID, node)
+	if opID != nil {
+		h.operations.Complete(r.Context(), *opID, node)
+	}
 	h.jsonResponse(w, http.StatusCreated, node)
 }
 

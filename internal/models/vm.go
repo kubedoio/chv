@@ -7,6 +7,40 @@ import (
 	"github.com/google/uuid"
 )
 
+// ResourceQuota defines per-user resource limits.
+type ResourceQuota struct {
+	UserID      uuid.UUID `json:"user_id" db:"user_id"`
+	MaxCPUs     int       `json:"max_cpus" db:"max_cpus"`
+	MaxMemoryMB int64     `json:"max_memory_mb" db:"max_memory_mb"`
+	MaxVMCount  int       `json:"max_vm_count" db:"max_vm_count"`
+	MaxDiskGB   int64     `json:"max_disk_gb" db:"max_disk_gb"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// ResourceUsage tracks actual resource usage per user.
+type ResourceUsage struct {
+	UserID       uuid.UUID `json:"user_id" db:"user_id"`
+	CPUsUsed     int       `json:"cpus_used" db:"cpus_used"`
+	MemoryMBUsed int64     `json:"memory_mb_used" db:"memory_mb_used"`
+	VMCount      int       `json:"vm_count" db:"vm_count"`
+	DiskGBUsed   int64     `json:"disk_gb_used" db:"disk_gb_used"`
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// DefaultQuota returns the default quota for new users.
+func DefaultQuota(userID uuid.UUID) *ResourceQuota {
+	return &ResourceQuota{
+		UserID:      userID,
+		MaxCPUs:     8,     // 8 vCPUs
+		MaxMemoryMB: 16384, // 16 GB
+		MaxVMCount:  5,     // 5 VMs
+		MaxDiskGB:   100,   // 100 GB
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+}
+
 // VMDesiredState represents the desired state of a VM.
 type VMDesiredState string
 
@@ -87,6 +121,7 @@ type VirtualMachine struct {
 	ID              uuid.UUID       `json:"id" db:"id"`
 	Name            string          `json:"name" db:"name"`
 	NodeID          *uuid.UUID      `json:"node_id" db:"node_id"`
+	CreatedBy       string          `json:"created_by" db:"created_by"`
 	DesiredState    VMDesiredState  `json:"desired_state" db:"desired_state"`
 	ActualState     VMActualState   `json:"actual_state" db:"actual_state"`
 	PlacementStatus PlacementStatus `json:"placement_status" db:"placement_status"`

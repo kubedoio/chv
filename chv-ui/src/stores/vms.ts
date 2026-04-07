@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { vmsApi } from '@/api/vms'
-import type { VM, VMCreateRequest } from '@/types'
+import type { VM, VMCreateRequest, VMUpdateRequest } from '@/types'
 
 export const useVMsStore = defineStore('vms', () => {
   // State
@@ -152,6 +152,30 @@ export const useVMsStore = defineStore('vms', () => {
     }
   }
 
+  async function updateVM(id: string, spec: VMUpdateRequest['spec']) {
+    loading.value = true
+    error.value = null
+    try {
+      const updated = await vmsApi.updateVM(id, { spec })
+      // Update selectedVM if it's the one being updated
+      if (selectedVM.value?.id === id) {
+        selectedVM.value = updated
+      }
+      // Refresh the VM list
+      await fetchVMs()
+      return updated
+    } catch (err: any) {
+      // Ignore aborted requests (component unmounted or navigation)
+      if (err.code === 'ERR_CANCELED' || err.message === 'canceled') {
+        return
+      }
+      error.value = err.response?.data?.error?.message || 'Failed to update VM'
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
   function selectVM(vm: VM | null) {
     selectedVM.value = vm
   }
@@ -171,6 +195,7 @@ export const useVMsStore = defineStore('vms', () => {
     startVM,
     stopVM,
     rebootVM,
+    updateVM,
     selectVM
   }
 })

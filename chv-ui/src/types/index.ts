@@ -111,6 +111,16 @@ export interface VMCreateRequest {
   cloud_init?: CloudInitSpec
 }
 
+export interface VMUpdateRequest {
+  spec: {
+    cpu: number
+    memory_mb: number
+    boot: {
+      mode: 'cloud_image' | 'direct_kernel'
+    }
+  }
+}
+
 export interface APIError {
   error: {
     code: string

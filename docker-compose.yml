@@ -1,47 +1,28 @@
 services:
-  # PostgreSQL database for control plane
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: chv
-      POSTGRES_PASSWORD: chv
-      POSTGRES_DB: chv
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./configs/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    ports:
-      - "5434:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chv -d chv"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   # CHV Controller - API and control plane
   controller:
     build:
       context: .
       dockerfile: deploy/controller.Dockerfile
     environment:
-      CHV_DATABASE_URL: postgres://chv:chv@postgres:5432/chv?sslmode=disable
-    # Note: PostgreSQL is exposed on host port 5434 to avoid conflicts
+      CHV_DATABASE_PATH: /var/lib/chv/chv.db
       CHV_HTTP_ADDR: :8080
       CHV_GRPC_ADDR: :9090
       CHV_LOG_LEVEL: debug
     ports:
-      - "8082:8080"
-      - "9094:9090"
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - "8082:8080"  # HTTP API
+      - "9094:9090"  # gRPC
     volumes:
       - ./configs/controller.yaml:/etc/chv/controller.yaml:ro
+      - chv_data:/var/lib/chv
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
+    networks:
+      - chv
 
   # CHV Agent - For VM operations (requires KVM)
   agent:
@@ -49,26 +30,44 @@ services:
       context: .
       dockerfile: deploy/agent.Dockerfile
     environment:
-      CHV_NODE_ID: test-agent-01
+      CHV_NODE_ID: docker-host
       CHV_CONTROLLER_ADDR: controller:9090
       CHV_LISTEN_ADDR: :9091
       CHV_DATA_DIR: /var/lib/chv
       CHV_LOG_LEVEL: debug
-      CHV_CLOUD_HYPERVISOR: /usr/bin/cloud-hypervisor
+      CHV_CLOUD_HYPERVISOR: /usr/local/bin/cloud-hypervisor
+      CHV_BRIDGE_NAME: chvbr0
+      CHV_BRIDGE_UPLINK: ens19
+      CHV_BRIDGE_GATEWAY_IP: 10.0.0.1
     ports:
-      # Agent gRPC exposed on host port 9093 (container uses 9091)
       - "9093:9091"
     depends_on:
       controller:
         condition: service_healthy
     volumes:
-      - agent_data:/var/lib/chv
-      - ./bin/cloud-hypervisor:/usr/bin/cloud-hypervisor:ro
-    profiles:
-      - with-agent
+      - chv_data:/var/lib/chv
+      - /usr/local/bin/cloud-hypervisor:/usr/local/bin/cloud-hypervisor:ro
     privileged: true
     devices:
       - /dev/kvm:/dev/kvm
+    networks:
+      - chv
+
+  # CHV Web UI - Vue.js frontend with API proxy
+  ui:
+    build:
+      context: ./chv-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3001:80"
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      # UI configuration for API connection
+      - NGINX_PROXY_PASS=http://controller:8080
+    networks:
+      - chv
 
   # CHV Bootstrap Container - for node installation/upgrade
   bootstrap:
@@ -86,20 +85,13 @@ services:
       - /etc:/host/etc
       - /opt:/host/opt
       - /usr/local/bin:/host/usr/local/bin
-
-  # CHV Web UI - Vue.js frontend
-  ui:
-    build:
-      context: ./chv-ui
-      dockerfile: Dockerfile
-    ports:
-      - "3001:80"
-    depends_on:
-      controller:
-        condition: service_healthy
-    profiles:
-      - with-ui
+    networks:
+      - chv
 
 volumes:
-  postgres_data:
-  agent_data:
+  chv_data:
+    driver: local
+
+networks:
+  chv:
+    driver: bridge

@@ -20,7 +20,7 @@ type ControllerConfig struct {
 	GRPCAddr string `yaml:"grpc_addr" env:"CHV_GRPC_ADDR"`
 
 	// Database configuration
-	DatabaseURL string `yaml:"database_url" env:"CHV_DATABASE_URL"`
+	DatabasePath string `yaml:"database_path" env:"CHV_DATABASE_PATH"`
 
 	// Logging
 	LogLevel  string `yaml:"log_level" env:"CHV_LOG_LEVEL"`
@@ -32,6 +32,12 @@ type ControllerConfig struct {
 	// Security
 	JWTSecret     string        `yaml:"jwt_secret" env:"CHV_JWT_SECRET"`
 	TokenDuration time.Duration `yaml:"token_duration" env:"CHV_TOKEN_DURATION"`
+
+	// TLS configuration
+	TLS TLSConfig `yaml:"tls"`
+
+	// Rate limiting
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
 }
 
 // AgentConfig holds the agent service configuration.
@@ -50,7 +56,9 @@ type AgentConfig struct {
 	CloudHypervisor string `yaml:"cloud_hypervisor" env:"CHV_CLOUD_HYPERVISOR"`
 
 	// Network
-	BridgeName string `yaml:"bridge_name" env:"CHV_BRIDGE_NAME"`
+	BridgeName     string `yaml:"bridge_name" env:"CHV_BRIDGE_NAME"`
+	BridgeUplink   string `yaml:"bridge_uplink" env:"CHV_BRIDGE_UPLINK"`
+	BridgeGatewayIP string `yaml:"bridge_gateway_ip" env:"CHV_BRIDGE_GATEWAY_IP"`
 
 	// Logging
 	LogLevel  string `yaml:"log_level" env:"CHV_LOG_LEVEL"`
@@ -64,6 +72,33 @@ type AgentConfig struct {
 
 	// CORS for console WebSocket
 	CORS CORSConfig `yaml:"cors"`
+
+	// TLS configuration
+	TLS TLSConfig `yaml:"tls"`
+}
+
+// TLSConfig holds TLS/mTLS configuration.
+type TLSConfig struct {
+	// Enabled enables TLS/mTLS for all connections
+	Enabled bool `yaml:"enabled" env:"CHV_TLS_ENABLED"`
+	// Cert is the path to the server certificate (PEM encoded)
+	Cert string `yaml:"cert" env:"CHV_TLS_CERT"`
+	// Key is the path to the server private key (PEM encoded)
+	Key string `yaml:"key" env:"CHV_TLS_KEY"`
+	// CA is the path to the CA certificate for client verification (mTLS)
+	CA string `yaml:"ca" env:"CHV_TLS_CA"`
+	// ClientCert is the path to the client certificate for mTLS (agent only)
+	ClientCert string `yaml:"client_cert" env:"CHV_TLS_CLIENT_CERT"`
+	// ClientKey is the path to the client private key for mTLS (agent only)
+	ClientKey string `yaml:"client_key" env:"CHV_TLS_CLIENT_KEY"`
+	// ServerName is the expected server hostname for certificate verification
+	ServerName string `yaml:"server_name" env:"CHV_TLS_SERVER_NAME"`
+	// InsecureSkipVerify skips server certificate verification (dev only, dangerous!)
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify" env:"CHV_TLS_INSECURE_SKIP_VERIFY"`
+	// AutoGenerate enables automatic certificate generation (dev/testing only)
+	AutoGenerate bool `yaml:"auto_generate" env:"CHV_TLS_AUTO_GENERATE"`
+	// CertDir is the directory to store auto-generated certificates
+	CertDir string `yaml:"cert_dir" env:"CHV_TLS_CERT_DIR"`
 }
 
 // CORSConfig holds CORS configuration.
@@ -94,16 +129,68 @@ type CORSConfig struct {
 	MaxAge int `yaml:"max_age"`
 }
 
+// RateLimitConfig holds rate limiting configuration.
+type RateLimitConfig struct {
+	// Enabled enables or disables rate limiting
+	Enabled bool `yaml:"enabled" env:"CHV_RATE_LIMIT_ENABLED"`
+
+	// IPBased configures per-IP rate limiting
+	IPBased IPRateLimitConfig `yaml:"ip_based"`
+
+	// UserBased configures per-user rate limiting for authenticated requests
+	UserBased UserRateLimitConfig `yaml:"user_based"`
+
+	// Endpoints configures endpoint-specific rate limits
+	Endpoints EndpointRateLimitConfig `yaml:"endpoints"`
+}
+
+// IPRateLimitConfig holds per-IP rate limiting configuration.
+type IPRateLimitConfig struct {
+	// Enabled enables per-IP rate limiting
+	Enabled bool `yaml:"enabled" env:"CHV_RATE_LIMIT_IP_ENABLED"`
+	// RequestsPerMinute is the number of requests allowed per minute
+	RequestsPerMinute int `yaml:"requests_per_minute" env:"CHV_RATE_LIMIT_IP_RPM"`
+	// Burst is the maximum burst size
+	Burst int `yaml:"burst" env:"CHV_RATE_LIMIT_IP_BURST"`
+}
+
+// UserRateLimitConfig holds per-user rate limiting configuration.
+type UserRateLimitConfig struct {
+	// Enabled enables per-user rate limiting
+	Enabled bool `yaml:"enabled" env:"CHV_RATE_LIMIT_USER_ENABLED"`
+	// RequestsPerMinute is the number of requests allowed per minute
+	RequestsPerMinute int `yaml:"requests_per_minute" env:"CHV_RATE_LIMIT_USER_RPM"`
+	// Burst is the maximum burst size
+	Burst int `yaml:"burst" env:"CHV_RATE_LIMIT_USER_BURST"`
+}
+
+// EndpointRateLimitConfig holds endpoint-specific rate limit configuration.
+type EndpointRateLimitConfig struct {
+	// StrictRPM is the rate limit for expensive operations (VM create, delete, etc.)
+	StrictRPM int `yaml:"strict_rpm" env:"CHV_RATE_LIMIT_STRICT_RPM"`
+	// StrictBurst is the burst size for expensive operations
+	StrictBurst int `yaml:"strict_burst" env:"CHV_RATE_LIMIT_STRICT_BURST"`
+	// StandardRPM is the rate limit for normal operations
+	StandardRPM int `yaml:"standard_rpm" env:"CHV_RATE_LIMIT_STANDARD_RPM"`
+	// StandardBurst is the burst size for normal operations
+	StandardBurst int `yaml:"standard_burst" env:"CHV_RATE_LIMIT_STANDARD_BURST"`
+	// RelaxedRPM is the rate limit for health checks
+	RelaxedRPM int `yaml:"relaxed_rpm" env:"CHV_RATE_LIMIT_RELAXED_RPM"`
+	// RelaxedBurst is the burst size for health checks
+	RelaxedBurst int `yaml:"relaxed_burst" env:"CHV_RATE_LIMIT_RELAXED_BURST"`
+}
+
 // DefaultControllerConfig returns default controller configuration.
 func DefaultControllerConfig() *ControllerConfig {
 	return &ControllerConfig{
 		HTTPAddr:          ":8080",
 		GRPCAddr:          ":9090",
-		DatabaseURL:       "postgres://chv:chv@localhost:5432/chv?sslmode=disable",
+		DatabasePath:      "/var/lib/chv/chv.db",
 		LogLevel:          "info",
 		LogFormat:         "json",
 		TokenDuration:     24 * time.Hour,
 		CORS:              DefaultCORSConfig(),
+		RateLimit:         DefaultRateLimitConfig(),
 	}
 }
 
@@ -117,7 +204,9 @@ func DefaultAgentConfig() *AgentConfig {
 		ImageDir:          "/var/lib/chv-agent/images",
 		VolumeDir:         "/var/lib/chv-agent/volumes",
 		CloudHypervisor:   "/usr/bin/cloud-hypervisor",
-		BridgeName:        "br0",
+		BridgeName:        "chvbr0",
+		BridgeUplink:      "ens19",
+		BridgeGatewayIP:   "10.0.0.1",
 		LogLevel:          "info",
 		LogFormat:         "json",
 		HeartbeatInterval: 30 * time.Second,
@@ -142,6 +231,31 @@ func DefaultCORSConfig() CORSConfig {
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
+	}
+}
+
+// DefaultRateLimitConfig returns default rate limiting configuration.
+func DefaultRateLimitConfig() RateLimitConfig {
+	return RateLimitConfig{
+		Enabled: true,
+		IPBased: IPRateLimitConfig{
+			Enabled:           true,
+			RequestsPerMinute: 60,
+			Burst:             10,
+		},
+		UserBased: UserRateLimitConfig{
+			Enabled:           true,
+			RequestsPerMinute: 120,
+			Burst:             20,
+		},
+		Endpoints: EndpointRateLimitConfig{
+			StrictRPM:     10,
+			StrictBurst:   5,
+			StandardRPM:   60,
+			StandardBurst: 10,
+			RelaxedRPM:    300,
+			RelaxedBurst:  50,
+		},
 	}
 }
 
@@ -211,8 +325,8 @@ func (c *ControllerConfig) Validate() error {
 	if c.GRPCAddr == "" {
 		return fmt.Errorf("gRPC address is required")
 	}
-	if c.DatabaseURL == "" {
-		return fmt.Errorf("database URL is required")
+	if c.DatabasePath == "" {
+		return fmt.Errorf("database path is required")
 	}
 	return nil
 }
@@ -242,8 +356,8 @@ func applyEnvOverrides(cfg *ControllerConfig) {
 	if v := os.Getenv("CHV_GRPC_ADDR"); v != "" {
 		cfg.GRPCAddr = v
 	}
-	if v := os.Getenv("CHV_DATABASE_URL"); v != "" {
-		cfg.DatabaseURL = v
+	if v := os.Getenv("CHV_DATABASE_PATH"); v != "" {
+		cfg.DatabasePath = v
 	}
 	if v := os.Getenv("CHV_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
@@ -261,6 +375,25 @@ func applyEnvOverrides(cfg *ControllerConfig) {
 	}
 	if v := os.Getenv("CHV_CORS_ORIGINS"); v != "" {
 		cfg.CORS.AllowedOrigins = parseOrigins(v)
+	}
+	// TLS environment overrides
+	if v := os.Getenv("CHV_TLS_ENABLED"); v != "" {
+		cfg.TLS.Enabled = parseBool(v)
+	}
+	if v := os.Getenv("CHV_TLS_CERT"); v != "" {
+		cfg.TLS.Cert = v
+	}
+	if v := os.Getenv("CHV_TLS_KEY"); v != "" {
+		cfg.TLS.Key = v
+	}
+	if v := os.Getenv("CHV_TLS_CA"); v != "" {
+		cfg.TLS.CA = v
+	}
+	if v := os.Getenv("CHV_TLS_AUTO_GENERATE"); v != "" {
+		cfg.TLS.AutoGenerate = parseBool(v)
+	}
+	if v := os.Getenv("CHV_TLS_CERT_DIR"); v != "" {
+		cfg.TLS.CertDir = v
 	}
 }
 
@@ -290,6 +423,12 @@ func applyAgentEnvOverrides(cfg *AgentConfig) {
 	if v := os.Getenv("CHV_BRIDGE_NAME"); v != "" {
 		cfg.BridgeName = v
 	}
+	if v := os.Getenv("CHV_BRIDGE_UPLINK"); v != "" {
+		cfg.BridgeUplink = v
+	}
+	if v := os.Getenv("CHV_BRIDGE_GATEWAY_IP"); v != "" {
+		cfg.BridgeGatewayIP = v
+	}
 	if v := os.Getenv("CHV_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
 	}
@@ -309,6 +448,37 @@ func applyAgentEnvOverrides(cfg *AgentConfig) {
 	if v := os.Getenv("CHV_CORS_ORIGINS"); v != "" {
 		cfg.CORS.AllowedOrigins = parseOrigins(v)
 	}
+	// TLS environment overrides
+	if v := os.Getenv("CHV_TLS_ENABLED"); v != "" {
+		cfg.TLS.Enabled = parseBool(v)
+	}
+	if v := os.Getenv("CHV_TLS_CLIENT_CERT"); v != "" {
+		cfg.TLS.ClientCert = v
+	}
+	if v := os.Getenv("CHV_TLS_CLIENT_KEY"); v != "" {
+		cfg.TLS.ClientKey = v
+	}
+	if v := os.Getenv("CHV_TLS_CA"); v != "" {
+		cfg.TLS.CA = v
+	}
+	if v := os.Getenv("CHV_TLS_SERVER_NAME"); v != "" {
+		cfg.TLS.ServerName = v
+	}
+	if v := os.Getenv("CHV_TLS_INSECURE_SKIP_VERIFY"); v != "" {
+		cfg.TLS.InsecureSkipVerify = parseBool(v)
+	}
+	if v := os.Getenv("CHV_TLS_CERT"); v != "" {
+		cfg.TLS.Cert = v
+	}
+	if v := os.Getenv("CHV_TLS_KEY"); v != "" {
+		cfg.TLS.Key = v
+	}
+	if v := os.Getenv("CHV_TLS_AUTO_GENERATE"); v != "" {
+		cfg.TLS.AutoGenerate = parseBool(v)
+	}
+	if v := os.Getenv("CHV_TLS_CERT_DIR"); v != "" {
+		cfg.TLS.CertDir = v
+	}
 }
 
 // parseOrigins parses a comma-separated list of origins.
@@ -321,6 +491,12 @@ func parseOrigins(s string) []string {
 		}
 	}
 	return origins
+}
+
+// parseBool parses a string as a boolean value.
+func parseBool(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return s == "true" || s == "1" || s == "yes" || s == "on"
 }
 
 // getHostname returns the system hostname or "unknown".

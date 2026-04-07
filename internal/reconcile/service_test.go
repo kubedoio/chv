@@ -135,6 +135,10 @@ func (m *mockStore) ListNetworks(ctx context.Context) ([]*models.Network, error)
 	return nil, nil
 }
 
+func (m *mockStore) DeleteNetwork(ctx context.Context, id uuid.UUID) error {
+	return nil
+}
+
 func (m *mockStore) CreateStoragePool(ctx context.Context, pool *models.StoragePool) error {
 	return nil
 }
@@ -165,6 +169,10 @@ func (m *mockStore) UpdateImage(ctx context.Context, image *models.Image) error 
 
 func (m *mockStore) ListImages(ctx context.Context) ([]*models.Image, error) {
 	return nil, nil
+}
+
+func (m *mockStore) DeleteImage(ctx context.Context, id uuid.UUID) error {
+	return nil
 }
 
 func (m *mockStore) CreateVM(ctx context.Context, vm *models.VirtualMachine) error {
@@ -364,6 +372,54 @@ func (m *mockStore) WithTx(ctx context.Context, fn func(store.Store) error) erro
 	return fn(m)
 }
 
+func (m *mockStore) DeleteStoragePool(ctx context.Context, id uuid.UUID) error {
+	return nil
+}
+
+func (m *mockStore) ListAPITokens(ctx context.Context) ([]*models.APIToken, error) {
+	return nil, nil
+}
+
+func (m *mockStore) CreateSnapshot(ctx context.Context, snapshot *models.Snapshot) error {
+	return nil
+}
+
+func (m *mockStore) GetSnapshot(ctx context.Context, id uuid.UUID) (*models.Snapshot, error) {
+	return nil, nil
+}
+
+func (m *mockStore) UpdateSnapshot(ctx context.Context, snapshot *models.Snapshot) error {
+	return nil
+}
+
+func (m *mockStore) ListSnapshotsByVM(ctx context.Context, vmID uuid.UUID) ([]*models.Snapshot, error) {
+	return nil, nil
+}
+
+func (m *mockStore) DeleteSnapshot(ctx context.Context, id uuid.UUID) error {
+	return nil
+}
+
+func (m *mockStore) GetQuota(ctx context.Context, userID string) (*models.ResourceQuota, error) {
+	return nil, nil
+}
+
+func (m *mockStore) SetQuota(ctx context.Context, quota *models.ResourceQuota) error {
+	return nil
+}
+
+func (m *mockStore) GetUsage(ctx context.Context, userID string) (*models.ResourceUsage, error) {
+	return nil, nil
+}
+
+func (m *mockStore) UpdateUsage(ctx context.Context, userID string, delta models.ResourceUsage) error {
+	return nil
+}
+
+func (m *mockStore) EnsureQuota(ctx context.Context, userID string) error {
+	return nil
+}
+
 // Test helper methods for accessing tracking fields safely
 func (m *mockStore) wasGetVMCalled() bool {
 	m.mu.RLock()
@@ -439,6 +495,10 @@ func (m *mockAgentClient) EnsureBridge(ctx context.Context, nodeID string, req *
 
 func (m *mockAgentClient) ImportImage(ctx context.Context, nodeID string, req *pb.ImageImportRequest) error {
 	return nil
+}
+
+func (m *mockAgentClient) StreamConsole(ctx context.Context, nodeID string) (pb.AgentService_StreamConsoleClient, error) {
+	return nil, nil
 }
 
 func (m *mockAgentClient) Close() error {

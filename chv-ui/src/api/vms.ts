@@ -1,5 +1,5 @@
 import api from './client'
-import type { VM, VMCreateRequest, VMSpec } from '@/types'
+import type { VM, VMCreateRequest, VMSpec, VMUpdateRequest } from '@/types'
 
 export const vmsApi = {
   async listVMs(): Promise<VM[]> {
@@ -35,5 +35,10 @@ export const vmsApi = {
 
   async resizeDisk(id: string, newSizeBytes: number): Promise<void> {
     await api.post(`/vms/${id}/resize-disk`, { new_size_bytes: newSizeBytes })
+  },
+
+  async updateVM(id: string, request: VMUpdateRequest): Promise<VM> {
+    const response = await api.put(`/vms/${id}`, request)
+    return response.data
   }
 }

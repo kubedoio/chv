@@ -11,6 +11,7 @@ import (
 
 	"github.com/chv/chv/internal/agent/manager"
 	"github.com/chv/chv/internal/hypervisor"
+	"go.uber.org/zap"
 )
 
 func TestVMLifecycleCreateBootShutdown(t *testing.T) {
@@ -169,6 +170,7 @@ func TestVMManagerIntegration(t *testing.T) {
 		env.VMDir,
 		env.ImagesDir,
 		"",
+		zap.NewNop(),
 	)
 	if err := vmManager.Initialize(); err != nil {
 		t.Fatalf("Failed to initialize VM manager: %v", err)
@@ -342,6 +344,7 @@ func TestVMStatePersistence(t *testing.T) {
 		env.StateManager,
 		env.TAPManager,
 		env.ISOGenerator,
+		zap.NewNop(),
 	)
 	if err := newLauncher.Recover(); err != nil {
 		t.Errorf("Failed to recover state: %v", err)

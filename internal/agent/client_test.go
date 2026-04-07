@@ -222,8 +222,8 @@ func TestNewClient(t *testing.T) {
 		t.Fatal("Expected *client type")
 	}
 
-	if c.timeout != 30*time.Second {
-		t.Errorf("Expected default timeout of 30s, got %v", c.timeout)
+	if c.timeout != 120*time.Second {
+		t.Errorf("Expected default timeout of 120s, got %v", c.timeout)
 	}
 
 	if c.connections == nil {
