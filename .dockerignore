@@ -1,0 +1,13 @@
+.git
+.gitignore
+ui/node_modules
+ui/.svelte-kit
+ui/build
+node_modules
+bin
+*.test
+coverage.out
+coverage.html
+tmp
+temp
+

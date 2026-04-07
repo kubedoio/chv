@@ -1,0 +1,36 @@
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+
+RUN apk add --no-cache build-base
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY configs ./configs
+COPY internal ./internal
+COPY pkg ./pkg
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/chv-controller ./cmd/chv-controller
+
+FROM alpine:3.22 AS runtime
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates iproute2
+
+COPY --from=build /out/chv-controller /usr/local/bin/chv-controller
+COPY --from=build /src/configs/schema_sqlite.sql /app/configs/schema_sqlite.sql
+
+ENV CHV_HTTP_ADDR=:8080
+ENV CHV_DATA_ROOT=/var/lib/chv
+ENV CHV_DATABASE_PATH=/var/lib/chv/chv.db
+ENV CHV_BRIDGE_NAME=chvbr0
+ENV CHV_BRIDGE_CIDR=10.0.0.1/24
+ENV CHV_LOCALDISK_PATH=/var/lib/chv/storage/localdisk
+
+EXPOSE 8080
+
+CMD ["chv-controller"]
+

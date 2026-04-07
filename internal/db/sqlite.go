@@ -63,7 +63,19 @@ func (r *Repository) initialize() error {
 
 func schemaPath() string {
 	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "..", "..", "configs", "schema_sqlite.sql")
+	candidates := []string{
+		filepath.Join(filepath.Dir(file), "..", "..", "configs", "schema_sqlite.sql"),
+		"/app/configs/schema_sqlite.sql",
+		"./configs/schema_sqlite.sql",
+	}
+
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	return candidates[0]
 }
 
 func nowUTC() string {
