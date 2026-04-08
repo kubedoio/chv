@@ -11,6 +11,7 @@ import (
 
 	"github.com/chv/chv/internal/auth"
 	"github.com/chv/chv/internal/bootstrap"
+	"github.com/chv/chv/internal/config"
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/network"
 )
@@ -84,7 +85,8 @@ func TestInstallStatusEndpointReturnsStructuredStatus(t *testing.T) {
 		t.Fatalf("NewService() error = %v", err)
 	}
 
-	handler := NewHandler(repo, auth.NewService(repo), service)
+	cfg := config.ControllerConfig{DataRoot: root}
+	handler := NewHandler(repo, auth.NewService(repo), service, cfg, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/install/status", nil)
 	rr := httptest.NewRecorder()
 	handler.Router().ServeHTTP(rr, req)
@@ -132,7 +134,8 @@ func TestLoginValidateRequiresToken(t *testing.T) {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
 
-	handler := NewHandler(repo, authService, service)
+	cfg := config.ControllerConfig{DataRoot: root}
+	handler := NewHandler(repo, authService, service, cfg, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/login/validate", nil)
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	rr := httptest.NewRecorder()

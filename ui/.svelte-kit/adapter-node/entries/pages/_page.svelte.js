@@ -1,6 +1,23 @@
-import "clsx";
-function _page($$renderer) {
-  $$renderer.push(`<section class="grid gap-4 lg:grid-cols-3"><a class="table-card block p-5 text-inherit no-underline" href="/install"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Platform</div> <div class="mt-2 text-lg font-semibold">Install and Repair</div> <p class="mt-2 text-sm text-muted">Inspect \`/var/lib/chv\`, \`chvbr0\`, SQLite, and the default \`localdisk\` pool.</p></a> <a class="table-card block p-5 text-inherit no-underline" href="/images"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Templates</div> <div class="mt-2 text-lg font-semibold">QCOW2 Images</div> <p class="mt-2 text-sm text-muted">Track imported cloud images and their cloud-init readiness.</p></a> <a class="table-card block p-5 text-inherit no-underline" href="/vms"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Workloads</div> <div class="mt-2 text-lg font-semibold">Virtual Machines</div> <p class="mt-2 text-sm text-muted">View the desired and actual state for each VM workspace.</p></a></section>`);
+import { k as head } from "../../chunks/renderer.js";
+import { o as onDestroy } from "../../chunks/index-server.js";
+import { c as createAPIClient, g as getStoredToken } from "../../chunks/client2.js";
+import "../../chunks/toast.js";
+function _page($$renderer, $$props) {
+  $$renderer.component(($$renderer2) => {
+    createAPIClient({ token: getStoredToken() ?? void 0 });
+    onDestroy(() => {
+    });
+    head("1uha8ag", $$renderer2, ($$renderer3) => {
+      $$renderer3.title(($$renderer4) => {
+        $$renderer4.push(`<title>Dashboard | chv</title>`);
+      });
+    });
+    {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<div class="flex items-center justify-center h-64"><div class="text-muted">Loading...</div></div>`);
+    }
+    $$renderer2.push(`<!--]-->`);
+  });
 }
 export {
   _page as default

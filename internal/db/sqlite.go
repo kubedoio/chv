@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -57,8 +58,16 @@ func (r *Repository) initialize() error {
 	if err != nil {
 		return err
 	}
-	_, err = r.db.Exec(string(schema))
-	return err
+	if _, err = r.db.Exec(string(schema)); err != nil {
+		return err
+	}
+
+	// Run migrations for existing databases
+	if err := r.migrateAddImageFormat(); err != nil {
+		return fmt.Errorf("failed to migrate images table: %w", err)
+	}
+
+	return nil
 }
 
 func schemaPath() string {
@@ -125,6 +134,96 @@ func (r *Repository) GetAPITokenByHash(ctx context.Context, hash string) (*model
 	}
 
 	return &token, nil
+}
+
+// User methods
+
+func (r *Repository) CreateUser(ctx context.Context, user *models.User) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO users (id, username, password_hash, email, role, is_active, last_login_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		user.ID,
+		user.Username,
+		user.PasswordHash,
+		nullable(user.Email),
+		user.Role,
+		boolInt(user.IsActive),
+		nullablePtr(user.LastLoginAt),
+		user.CreatedAt,
+		user.UpdatedAt,
+	)
+	return err
+}
+
+func (r *Repository) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, username, password_hash, email, role, is_active, last_login_at, created_at, updated_at
+		 FROM users WHERE username = ?`, username)
+
+	var user models.User
+	var email sql.NullString
+	var lastLoginAt sql.NullString
+	var isActive int
+
+	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &email, &user.Role, &isActive, &lastLoginAt, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	user.IsActive = isActive == 1
+	if email.Valid {
+		user.Email = email.String
+	}
+	if lastLoginAt.Valid {
+		user.LastLoginAt = &lastLoginAt.String
+	}
+
+	return &user, nil
+}
+
+func (r *Repository) GetUserByID(ctx context.Context, id string) (*models.User, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, username, password_hash, email, role, is_active, last_login_at, created_at, updated_at
+		 FROM users WHERE id = ?`, id)
+
+	var user models.User
+	var email sql.NullString
+	var lastLoginAt sql.NullString
+	var isActive int
+
+	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &email, &user.Role, &isActive, &lastLoginAt, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	user.IsActive = isActive == 1
+	if email.Valid {
+		user.Email = email.String
+	}
+	if lastLoginAt.Valid {
+		user.LastLoginAt = &lastLoginAt.String
+	}
+
+	return &user, nil
+}
+
+func (r *Repository) UpdateUserLastLogin(ctx context.Context, userID string, loginTime string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?`,
+		loginTime, nowUTC(), userID)
+	return err
+}
+
+func nullablePtr(s *string) any {
+	if s == nil {
+		return nil
+	}
+	return *s
 }
 
 func (r *Repository) UpsertInstallStatus(ctx context.Context, status *models.InstallStatus) error {
@@ -264,6 +363,52 @@ func (r *Repository) EnsureDefaultStoragePool(ctx context.Context, path string) 
 	return err
 }
 
+func (r *Repository) GetNetworkByName(ctx context.Context, name string) (*models.Network, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, name, mode, bridge_name, cidr, gateway_ip, is_system_managed, status, created_at FROM networks WHERE name = ?`, name)
+	var item models.Network
+	var isSystemManaged int
+	if err := row.Scan(&item.ID, &item.Name, &item.Mode, &item.BridgeName, &item.CIDR, &item.GatewayIP, &isSystemManaged, &item.Status, &item.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	item.IsSystemManaged = isSystemManaged == 1
+	return &item, nil
+}
+
+func (r *Repository) GetNetworkByID(ctx context.Context, id string) (*models.Network, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, name, mode, bridge_name, cidr, gateway_ip, is_system_managed, status, created_at FROM networks WHERE id = ?`, id)
+	var item models.Network
+	var isSystemManaged int
+	if err := row.Scan(&item.ID, &item.Name, &item.Mode, &item.BridgeName, &item.CIDR, &item.GatewayIP, &isSystemManaged, &item.Status, &item.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	item.IsSystemManaged = isSystemManaged == 1
+	return &item, nil
+}
+
+func (r *Repository) CreateNetwork(ctx context.Context, network *models.Network) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO networks (id, name, mode, bridge_name, cidr, gateway_ip, is_system_managed, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		network.ID,
+		network.Name,
+		network.Mode,
+		network.BridgeName,
+		network.CIDR,
+		network.GatewayIP,
+		boolInt(network.IsSystemManaged),
+		network.Status,
+		network.CreatedAt,
+	)
+	return err
+}
+
 func (r *Repository) ListNetworks(ctx context.Context) ([]models.Network, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id, name, mode, bridge_name, cidr, gateway_ip, is_system_managed, status, created_at FROM networks ORDER BY created_at ASC`)
 	if err != nil {
@@ -282,6 +427,52 @@ func (r *Repository) ListNetworks(ctx context.Context) ([]models.Network, error)
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (r *Repository) GetStoragePoolByName(ctx context.Context, name string) (*models.StoragePool, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, name, pool_type, path, is_default, status, COALESCE(capacity_bytes, 0), COALESCE(allocatable_bytes, 0), created_at FROM storage_pools WHERE name = ?`, name)
+	var item models.StoragePool
+	var isDefault int
+	if err := row.Scan(&item.ID, &item.Name, &item.PoolType, &item.Path, &isDefault, &item.Status, &item.CapacityBytes, &item.AllocatableBytes, &item.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	item.IsDefault = isDefault == 1
+	return &item, nil
+}
+
+func (r *Repository) GetStoragePoolByID(ctx context.Context, id string) (*models.StoragePool, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, name, pool_type, path, is_default, status, COALESCE(capacity_bytes, 0), COALESCE(allocatable_bytes, 0), created_at FROM storage_pools WHERE id = ?`, id)
+	var item models.StoragePool
+	var isDefault int
+	if err := row.Scan(&item.ID, &item.Name, &item.PoolType, &item.Path, &isDefault, &item.Status, &item.CapacityBytes, &item.AllocatableBytes, &item.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	item.IsDefault = isDefault == 1
+	return &item, nil
+}
+
+func (r *Repository) CreateStoragePool(ctx context.Context, pool *models.StoragePool) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO storage_pools (id, name, pool_type, path, is_default, status, capacity_bytes, allocatable_bytes, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pool.ID,
+		pool.Name,
+		pool.PoolType,
+		pool.Path,
+		boolInt(pool.IsDefault),
+		pool.Status,
+		pool.CapacityBytes,
+		pool.AllocatableBytes,
+		pool.CreatedAt,
+	)
+	return err
 }
 
 func (r *Repository) ListStoragePools(ctx context.Context) ([]models.StoragePool, error) {
@@ -305,7 +496,7 @@ func (r *Repository) ListStoragePools(ctx context.Context) ([]models.StoragePool
 }
 
 func (r *Repository) ListImages(ctx context.Context) ([]models.Image, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, name, os_family, architecture, format, source_url, COALESCE(checksum, ''), local_path, cloud_init_supported, status, created_at FROM images ORDER BY created_at ASC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, name, os_family, architecture, format, source_format, normalized_format, COALESCE(source_url, ''), COALESCE(checksum, ''), COALESCE(local_path, ''), cloud_init_supported, status, created_at FROM images ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -315,13 +506,75 @@ func (r *Repository) ListImages(ctx context.Context) ([]models.Image, error) {
 	for rows.Next() {
 		var item models.Image
 		var cloudInitSupported int
-		if err := rows.Scan(&item.ID, &item.Name, &item.OSFamily, &item.Architecture, &item.Format, &item.SourceURL, &item.Checksum, &item.LocalPath, &cloudInitSupported, &item.Status, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.OSFamily, &item.Architecture, &item.Format, &item.SourceFormat, &item.NormalizedFormat, &item.SourceURL, &item.Checksum, &item.LocalPath, &cloudInitSupported, &item.Status, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		item.CloudInitSupported = cloudInitSupported == 1
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (r *Repository) CreateImage(ctx context.Context, image *models.Image) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO images (id, name, os_family, architecture, format, source_format, normalized_format, source_url, checksum, local_path, cloud_init_supported, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		image.ID,
+		image.Name,
+		image.OSFamily,
+		image.Architecture,
+		image.Format,
+		image.SourceFormat,
+		image.NormalizedFormat,
+		image.SourceURL,
+		nullable(image.Checksum),
+		image.LocalPath,
+		boolInt(image.CloudInitSupported),
+		image.Status,
+		image.CreatedAt,
+	)
+	return err
+}
+
+func (r *Repository) GetImageByID(ctx context.Context, id string) (*models.Image, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, name, os_family, architecture, format, source_format, normalized_format, COALESCE(source_url, ''), COALESCE(checksum, ''), COALESCE(local_path, ''), cloud_init_supported, status, created_at
+		 FROM images WHERE id = ?`, id)
+
+	var image models.Image
+	var cloudInitSupported int
+	if err := row.Scan(&image.ID, &image.Name, &image.OSFamily, &image.Architecture, &image.Format, &image.SourceFormat, &image.NormalizedFormat,
+		&image.SourceURL, &image.Checksum, &image.LocalPath, &cloudInitSupported, &image.Status, &image.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	image.CloudInitSupported = cloudInitSupported == 1
+	return &image, nil
+}
+
+func (r *Repository) UpdateImage(ctx context.Context, image *models.Image) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`UPDATE images SET name = ?, os_family = ?, architecture = ?, format = ?, source_format = ?, normalized_format = ?, source_url = ?,
+		 checksum = ?, local_path = ?, cloud_init_supported = ?, status = ?
+		 WHERE id = ?`,
+		image.Name,
+		image.OSFamily,
+		image.Architecture,
+		image.Format,
+		image.SourceFormat,
+		image.NormalizedFormat,
+		image.SourceURL,
+		nullable(image.Checksum),
+		image.LocalPath,
+		boolInt(image.CloudInitSupported),
+		image.Status,
+		image.ID,
+	)
+	return err
 }
 
 func (r *Repository) ListVMs(ctx context.Context) ([]models.VirtualMachine, error) {
@@ -342,6 +595,56 @@ func (r *Repository) ListVMs(ctx context.Context) ([]models.VirtualMachine, erro
 	return out, rows.Err()
 }
 
+func (r *Repository) GetVMByID(ctx context.Context, id string) (*models.VirtualMachine, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb,
+		        disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0),
+		        COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(last_error, ''), created_at, updated_at
+		 FROM virtual_machines WHERE id = ?`, id)
+
+	var v models.VirtualMachine
+	if err := row.Scan(&v.ID, &v.Name, &v.ImageID, &v.StoragePoolID, &v.NetworkID,
+		&v.DesiredState, &v.ActualState, &v.VCPU, &v.MemoryMB, &v.DiskPath, &v.SeedISOPath,
+		&v.WorkspacePath, &v.CloudHypervisorPID, &v.IPAddress, &v.MACAddress, &v.LastError, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (r *Repository) CreateVM(ctx context.Context, vm *models.VirtualMachine) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO virtual_machines (
+			id, name, image_id, storage_pool_id, network_id, desired_state, actual_state,
+			vcpu, memory_mb, disk_path, seed_iso_path, workspace_path, last_error, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		vm.ID, vm.Name, vm.ImageID, vm.StoragePoolID, vm.NetworkID,
+		vm.DesiredState, vm.ActualState, vm.VCPU, vm.MemoryMB,
+		vm.DiskPath, nullable(vm.SeedISOPath), vm.WorkspacePath,
+		nullable(vm.LastError), vm.CreatedAt, vm.UpdatedAt,
+	)
+	return err
+}
+
+func (r *Repository) UpdateVM(ctx context.Context, vm *models.VirtualMachine) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`UPDATE virtual_machines SET
+			desired_state = ?, actual_state = ?, last_error = ?, updated_at = ?
+		 WHERE id = ?`,
+		vm.DesiredState, vm.ActualState, nullable(vm.LastError), vm.UpdatedAt, vm.ID,
+	)
+	return err
+}
+
+func (r *Repository) DeleteVM(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM virtual_machines WHERE id = ?`, id)
+	return err
+}
+
 func (r *Repository) ListOperations(ctx context.Context) ([]models.Operation, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id, resource_type, resource_id, operation_type, state, COALESCE(request_payload, ''), COALESCE(result_payload, ''), COALESCE(error_payload, ''), COALESCE(started_at, ''), COALESCE(finished_at, ''), created_at FROM operations ORDER BY created_at DESC`)
 	if err != nil {
@@ -358,6 +661,67 @@ func (r *Repository) ListOperations(ctx context.Context) ([]models.Operation, er
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (r *Repository) CreateOperation(ctx context.Context, op *models.Operation) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO operations (id, resource_type, resource_id, operation_type, state, request_payload, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		op.ID,
+		op.ResourceType,
+		op.ResourceID,
+		op.OperationType,
+		op.State,
+		op.RequestPayload,
+		op.CreatedAt,
+	)
+	return err
+}
+
+func (r *Repository) UpdateOperation(ctx context.Context, op *models.Operation) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`UPDATE operations SET state = ?, result_payload = ?, error_payload = ?, started_at = ?, finished_at = ?
+		 WHERE id = ?`,
+		op.State,
+		nullable(op.ResultPayload),
+		nullable(op.ErrorPayload),
+		nullable(op.StartedAt),
+		op.FinishedAt,
+		op.ID,
+	)
+	return err
+}
+
+// migrateAddImageFormat adds missing columns to images table
+func (r *Repository) migrateAddImageFormat() error {
+	columns := []struct {
+		name string
+		def  string
+	}{
+		{"format", "TEXT DEFAULT 'qcow2'"},
+		{"source_url", "TEXT"},
+		{"local_path", "TEXT"},
+	}
+
+	for _, col := range columns {
+		var count int
+		err := r.db.QueryRow(`
+			SELECT COUNT(*) FROM pragma_table_info('images') WHERE name = ?
+		`, col.name).Scan(&count)
+		if err != nil {
+			return err
+		}
+
+		if count == 0 {
+			_, err = r.db.Exec(fmt.Sprintf(`ALTER TABLE images ADD COLUMN %s %s`, col.name, col.def))
+			if err != nil {
+				return fmt.Errorf("failed to add %s column: %w", col.name, err)
+			}
+		}
+	}
+	return nil
 }
 
 func nullable(value string) any {

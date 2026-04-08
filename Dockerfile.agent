@@ -1,0 +1,22 @@
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates iproute2 qemu-img
+
+WORKDIR /app
+
+# Copy pre-built binary
+COPY chv-agent .
+
+# Create data directories
+RUN mkdir -p /var/lib/chv /var/log/chv
+
+EXPOSE 9090
+
+ENV CHV_AGENT_ADDR=:9090
+ENV CHV_DATA_ROOT=/var/lib/chv
+ENV CHV_LOG_LEVEL=info
+
+# Run as root for TAP device management
+USER root
+
+ENTRYPOINT ["./chv-agent"]

@@ -5,7 +5,7 @@ import "../../../chunks/utils.js";
 import "@sveltejs/kit/internal/server";
 import "../../../chunks/root.js";
 import "../../../chunks/state.svelte.js";
-import { c as createAPIClient } from "../../../chunks/client.js";
+import { c as createAPIClient } from "../../../chunks/client2.js";
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let token = "";

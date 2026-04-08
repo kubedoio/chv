@@ -12,6 +12,7 @@ module.exports = {
         line: '#D0D0D0',
         ink: '#1A1A1A',
         muted: '#666666',
+        light: '#999999',
         primary: '#0066CC',
         success: '#54B435',
         warning: '#F0AB00',

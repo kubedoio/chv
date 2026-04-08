@@ -1,5 +1,6 @@
 {
 	"/": [],
+	"/events": [],
 	"/images": [],
 	"/install": [],
 	"/login": [],
@@ -7,6 +8,11 @@
 	"/operations": [],
 	"/settings": [],
 	"/storage": [],
+	"/test/confirm-dialog": [],
+	"/test/forms": [],
+	"/test/modal": [],
+	"/test/skeletons": [],
+	"/test/stats-card": [],
 	"/vms": [],
 	"/vms/[id]": []
 }

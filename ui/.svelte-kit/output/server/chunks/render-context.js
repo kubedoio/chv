@@ -16,6 +16,13 @@ https://svelte.dev/e/await_invalid`);
   error.name = "Svelte error";
   throw error;
 }
+function dynamic_element_invalid_tag(tag) {
+  const error = new Error(`dynamic_element_invalid_tag
+\`<svelte:element this="${tag}">\` is not a valid element name — the element will not be rendered
+https://svelte.dev/e/dynamic_element_invalid_tag`);
+  error.name = "Svelte error";
+  throw error;
+}
 function hydratable_serialization_failed(key, stack) {
   const error = new Error(`hydratable_serialization_failed
 Failed to serialize \`hydratable\` data for key \`${key}\`.
@@ -53,6 +60,7 @@ let als = null;
 export {
   BROWSER as B,
   await_invalid as a,
+  dynamic_element_invalid_tag as d,
   experimental_async_required as e,
   get_render_context as g,
   hydratable_serialization_failed as h,

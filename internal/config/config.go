@@ -20,10 +20,15 @@ type ControllerConfig struct {
 	HTTPAddr            string
 	DataRoot            string
 	DatabasePath        string
+	LogDir              string
+	AgentURL            string
 	BridgeName          string
 	BridgeCIDR          string
+	BridgeGateway       string
+	NetworkCIDR         string
 	LocaldiskPath       string
 	CloudHypervisorPath string
+	DefaultPoolType     string
 }
 
 type AgentConfig struct {
@@ -40,10 +45,15 @@ func LoadController() ControllerConfig {
 		HTTPAddr:            getenv("CHV_HTTP_ADDR", ":8080"),
 		DataRoot:            dataRoot,
 		DatabasePath:        getenv("CHV_DATABASE_PATH", filepath.Join(dataRoot, "chv.db")),
+		LogDir:              getenv("CHV_LOG_DIR", filepath.Join(dataRoot, "logs")),
+		AgentURL:            getenv("CHV_AGENT_URL", ""),
 		BridgeName:          getenv("CHV_BRIDGE_NAME", DefaultBridgeName),
 		BridgeCIDR:          getenv("CHV_BRIDGE_CIDR", DefaultBridgeCIDR),
+		BridgeGateway:       getenv("CHV_BRIDGE_GATEWAY", DefaultBridgeGateway),
+		NetworkCIDR:         getenv("CHV_NETWORK_CIDR", DefaultNetworkCIDR),
 		LocaldiskPath:       getenv("CHV_LOCALDISK_PATH", filepath.Join(dataRoot, "storage", "localdisk")),
 		CloudHypervisorPath: getenv("CHV_CLOUD_HYPERVISOR", DefaultCloudHypervisor),
+		DefaultPoolType:     getenv("CHV_DEFAULT_POOL_TYPE", "localdisk"),
 	}
 }
 

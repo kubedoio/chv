@@ -1,24 +1,58 @@
 package main
 
 import (
-	"log"
+	"context"
+	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/chv/chv/internal/agentclient"
 	"github.com/chv/chv/internal/api"
 	"github.com/chv/chv/internal/auth"
 	"github.com/chv/chv/internal/bootstrap"
 	"github.com/chv/chv/internal/config"
 	"github.com/chv/chv/internal/db"
+	"github.com/chv/chv/internal/images"
+	"github.com/chv/chv/internal/logger"
+	"github.com/chv/chv/internal/operations"
+	"github.com/chv/chv/internal/vm"
 )
 
 func main() {
 	cfg := config.LoadController()
 
+	// Initialize structured logger
+	logCfg := logger.Config{
+		Level:      getenv("CHV_LOG_LEVEL", "info"),
+		Component:  "controller",
+		Structured: true,
+		LogDir:     cfg.LogDir,
+	}
+	if err := logger.InitDefault(logCfg); err != nil {
+		// Fallback to basic logging
+		fmt.Printf("Failed to initialize logger: %v\n", err)
+	}
+	log := logger.L()
+
+	log.Info("Starting CHV controller", logger.F("addr", cfg.HTTPAddr))
+
 	repo, err := db.Open(cfg.DatabasePath)
 	if err != nil {
-		log.Fatalf("open sqlite repository: %v", err)
+		log.Fatal("Failed to open database", logger.ErrorField(err))
 	}
 	defer repo.Close()
+	log.Info("Database opened", logger.F("path", cfg.DatabasePath))
+
+	// Create agent client (optional, falls back to direct if not configured)
+	var agentClient *agentclient.Client
+	if agentURL := os.Getenv("CHV_AGENT_URL"); agentURL != "" {
+		agentClient = agentclient.NewClient(agentURL)
+		log.Info("Agent client configured", logger.F("url", agentURL))
+	} else {
+		log.Warn("No agent URL configured, some features will be limited")
+	}
 
 	bootstrapService, err := bootstrap.NewService(bootstrap.Config{
 		DataRoot:      cfg.DataRoot,
@@ -27,14 +61,57 @@ func main() {
 		BridgeCIDR:    cfg.BridgeCIDR,
 		LocaldiskPath: cfg.LocaldiskPath,
 		Repository:    repo,
+		AgentClient:   agentClient,
 	})
 	if err != nil {
-		log.Fatalf("bootstrap service: %v", err)
+		log.Fatal("Failed to create bootstrap service", logger.ErrorField(err))
 	}
 
-	handler := api.NewHandler(repo, auth.NewService(repo), bootstrapService)
-	log.Printf("CHV controller listening on %s", cfg.HTTPAddr)
-	if err := http.ListenAndServe(cfg.HTTPAddr, handler.Router()); err != nil {
-		log.Fatal(err)
+	// Create and start image import worker
+	var imageWorker *images.Worker
+	if agentURL := os.Getenv("CHV_AGENT_URL"); agentURL != "" {
+		opService := operations.NewService(repo)
+		imageWorker = images.NewWorker(repo, opService, agentURL)
+		imageWorker.Start(context.Background())
+		defer imageWorker.Stop()
+		log.Info("Image import worker started")
 	}
+
+	// Create VM service (singleton)
+	vmService := vm.NewService(repo, cfg.DataRoot)
+	if agentURL := os.Getenv("CHV_AGENT_URL"); agentURL != "" {
+		vmService.SetAgentClient(agentURL)
+		log.Info("VM service configured with agent")
+	}
+
+	// Create auth service and ensure admin user exists
+	authService := auth.NewService(repo)
+	if err := authService.EnsureAdminUser(context.Background()); err != nil {
+		log.Error("Failed to ensure admin user", logger.ErrorField(err))
+	} else {
+		log.Info("Admin user ensured")
+	}
+
+	handler := api.NewHandler(repo, authService, bootstrapService, cfg, imageWorker, vmService)
+
+	// Handle graceful shutdown
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		log.Info("CHV controller listening", logger.F("addr", cfg.HTTPAddr))
+		if err := http.ListenAndServe(cfg.HTTPAddr, handler.Router()); err != nil {
+			log.Fatal("Server failed", logger.ErrorField(err))
+		}
+	}()
+
+	<-stop
+	log.Info("Shutting down gracefully...")
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

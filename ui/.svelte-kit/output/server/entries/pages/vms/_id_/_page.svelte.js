@@ -1,10 +1,98 @@
-import { c as escape_html, s as store_get, u as unsubscribe_stores } from "../../../../chunks/renderer.js";
-import { p as page } from "../../../../chunks/stores.js";
+import "clsx";
+import { o as onDestroy } from "../../../../chunks/index-server.js";
+import { g as goto } from "../../../../chunks/client.js";
+import { c as createAPIClient, g as getStoredToken } from "../../../../chunks/client2.js";
+import { d as bind_props, c as escape_html } from "../../../../chunks/renderer.js";
+import { M as Modal } from "../../../../chunks/Modal.js";
+import "../../../../chunks/toast.js";
+import { T as Triangle_alert } from "../../../../chunks/triangle-alert.js";
+function DeleteVMModal($$renderer, $$props) {
+  $$renderer.component(($$renderer2) => {
+    let { open = false, vm = null, onSuccess } = $$props;
+    createAPIClient({ token: getStoredToken() ?? void 0 });
+    let $$settled = true;
+    let $$inner_renderer;
+    function $$render_inner($$renderer3) {
+      {
+        let children = function($$renderer4) {
+          $$renderer4.push(`<div>`);
+          {
+            $$renderer4.push("<!--[0-->");
+            $$renderer4.push(`<div class="flex items-start gap-3 text-amber-700">`);
+            Triangle_alert($$renderer4, { size: 24 });
+            $$renderer4.push(`<!----> <div><p class="font-medium">Are you sure you want to delete <strong>${escape_html(vm?.name)}</strong>?</p> <p class="text-sm text-muted mt-1">This action cannot be undone. The VM and all its data will be permanently removed.</p></div></div>`);
+          }
+          $$renderer4.push(`<!--]--></div>`);
+        }, footer = function($$renderer4) {
+          $$renderer4.push(`<button class="button-secondary svelte-vpf3gr">Cancel</button> `);
+          {
+            $$renderer4.push("<!--[0-->");
+            $$renderer4.push(`<button class="button-danger svelte-vpf3gr">Delete VM</button>`);
+          }
+          $$renderer4.push(`<!--]-->`);
+        };
+        Modal($$renderer3, {
+          title: "Delete VM",
+          get open() {
+            return open;
+          },
+          set open($$value) {
+            open = $$value;
+            $$settled = false;
+          },
+          children,
+          footer,
+          $$slots: { default: true, footer: true }
+        });
+      }
+    }
+    do {
+      $$settled = true;
+      $$inner_renderer = $$renderer2.copy();
+      $$render_inner($$inner_renderer);
+    } while (!$$settled);
+    $$renderer2.subsume($$inner_renderer);
+    bind_props($$props, { open });
+  });
+}
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
-    var $$store_subs;
-    $$renderer2.push(`<section class="grid gap-4 lg:grid-cols-2"><div class="table-card"><div class="card-header px-4 py-3"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">VM Detail</div> <div class="mt-1 text-lg font-semibold mono">${escape_html(store_get($$store_subs ??= {}, "$page", page).params.id)}</div></div> <dl class="grid grid-cols-[160px_minmax(0,1fr)] gap-x-4 gap-y-3 p-4 text-sm"><dt class="text-muted">QCOW2 disk</dt> <dd class="mono">/var/lib/chv/vms/&lt;vm-id>/disk.qcow2</dd> <dt class="text-muted">Seed ISO</dt> <dd class="mono">/var/lib/chv/vms/&lt;vm-id>/seed.iso</dd> <dt class="text-muted">Workspace</dt> <dd class="mono">/var/lib/chv/vms/&lt;vm-id></dd> <dt class="text-muted">Cloud-init</dt> <dd>user-data, meta-data, optional network-config</dd> <dt class="text-muted">Operations</dt> <dd>Activity history will be listed from the controller log.</dd></dl></div> <div class="table-card"><div class="card-header px-4 py-3"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">State Notes</div> <div class="mt-1 text-lg font-semibold">Seed ISO Boot Gate</div></div> <div class="space-y-3 p-4 text-sm text-muted"><p>VM boot remains blocked until the image, storage pool, network, workspace, and \`seed.iso\` are ready.</p> <p>This route is intentionally conservative for MVP-1 and should expose only backend-confirmed state.</p></div></div></section>`);
-    if ($$store_subs) unsubscribe_stores($$store_subs);
+    createAPIClient({ token: getStoredToken() ?? void 0 });
+    let vm = null;
+    let deleteModalOpen = false;
+    onDestroy(() => {
+    });
+    let $$settled = true;
+    let $$inner_renderer;
+    function $$render_inner($$renderer3) {
+      {
+        $$renderer3.push("<!--[0-->");
+        $$renderer3.push(`<div class="flex items-center justify-center h-64"><div class="text-muted">Loading...</div></div>`);
+      }
+      $$renderer3.push(`<!--]--> `);
+      {
+        $$renderer3.push("<!--[-1-->");
+      }
+      $$renderer3.push(`<!--]--> `);
+      DeleteVMModal($$renderer3, {
+        vm,
+        onSuccess: () => goto(),
+        get open() {
+          return deleteModalOpen;
+        },
+        set open($$value) {
+          deleteModalOpen = $$value;
+          $$settled = false;
+        }
+      });
+      $$renderer3.push(`<!---->`);
+    }
+    do {
+      $$settled = true;
+      $$inner_renderer = $$renderer2.copy();
+      $$render_inner($$inner_renderer);
+    } while (!$$settled);
+    $$renderer2.subsume($$inner_renderer);
   });
 }
 export {

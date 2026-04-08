@@ -1,97 +1,44 @@
-import { p as public_env } from "./shared-server.js";
-const DEFAULT_BASE_URL = public_env.PUBLIC_CHV_API_BASE_URL || "http://localhost:8080/api/v1";
-const TOKEN_STORAGE_KEY = "chv-api-token";
-function getStoredToken() {
-  if (typeof localStorage === "undefined") {
-    return null;
+import "clsx";
+import "@sveltejs/kit/internal";
+import "./exports.js";
+import "./utils.js";
+import { w as writable } from "./index.js";
+import "@sveltejs/kit/internal/server";
+import "./root.js";
+import { q as noop } from "./renderer.js";
+function create_updated_store() {
+  const { set, subscribe } = writable(false);
+  {
+    return {
+      subscribe,
+      // eslint-disable-next-line @typescript-eslint/require-await
+      check: async () => false
+    };
   }
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
 }
-function storeToken(token) {
-  if (typeof localStorage !== "undefined") {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  }
+const is_legacy = noop.toString().includes("$$") || /function \w+\(\) \{\}/.test(noop.toString());
+const placeholder_url = "a:";
+if (is_legacy) {
+  ({
+    data: {},
+    form: null,
+    error: null,
+    params: {},
+    route: { id: null },
+    state: {},
+    status: -1,
+    url: new URL(placeholder_url)
+  });
 }
-function clearToken() {
-  if (typeof localStorage !== "undefined") {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
+const stores = {
+  updated: /* @__PURE__ */ create_updated_store()
+};
+function goto(url, opts = {}) {
+  {
+    throw new Error("Cannot call goto(...) on the server");
   }
-}
-function createAPIClient(options) {
-  const baseUrl = options?.baseUrl ?? DEFAULT_BASE_URL;
-  let token = options?.token ?? getStoredToken() ?? "";
-  async function request(path, init) {
-    const headers = new Headers(init?.headers ?? {});
-    headers.set("Content-Type", "application/json");
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`);
-    }
-    const response = await fetch(`${baseUrl}${path}`, {
-      ...init,
-      headers
-    });
-    if (!response.ok) {
-      let payload;
-      try {
-        payload = await response.json();
-      } catch {
-        payload = void 0;
-      }
-      throw new Error(payload?.error.message ?? `Request failed with status ${response.status}`);
-    }
-    return await response.json();
-  }
-  return {
-    setToken(next) {
-      token = next;
-      storeToken(next);
-    },
-    clearToken() {
-      token = "";
-      clearToken();
-    },
-    createToken(name) {
-      return request("/tokens", {
-        method: "POST",
-        body: JSON.stringify({ name })
-      });
-    },
-    validateLogin() {
-      return request("/login/validate", { method: "POST" });
-    },
-    getInstallStatus() {
-      return request("/install/status");
-    },
-    bootstrapInstall() {
-      return request("/install/bootstrap", {
-        method: "POST",
-        body: JSON.stringify({})
-      });
-    },
-    repairInstall(body) {
-      return request("/install/repair", {
-        method: "POST",
-        body: JSON.stringify(body)
-      });
-    },
-    listNetworks() {
-      return request("/networks");
-    },
-    listStoragePools() {
-      return request("/storage-pools");
-    },
-    listImages() {
-      return request("/images");
-    },
-    listVMs() {
-      return request("/vms");
-    },
-    listOperations() {
-      return request("/operations");
-    }
-  };
 }
 export {
-  createAPIClient as c,
-  getStoredToken as g
+  goto as g,
+  stores as s
 };

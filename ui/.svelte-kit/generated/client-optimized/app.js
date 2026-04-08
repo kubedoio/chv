@@ -12,22 +12,34 @@ export const nodes = [
 	() => import('./nodes/8'),
 	() => import('./nodes/9'),
 	() => import('./nodes/10'),
-	() => import('./nodes/11')
+	() => import('./nodes/11'),
+	() => import('./nodes/12'),
+	() => import('./nodes/13'),
+	() => import('./nodes/14'),
+	() => import('./nodes/15'),
+	() => import('./nodes/16'),
+	() => import('./nodes/17')
 ];
 
 export const server_loads = [];
 
 export const dictionary = {
 		"/": [2],
-		"/images": [3],
-		"/install": [4],
-		"/login": [5],
-		"/networks": [6],
-		"/operations": [7],
-		"/settings": [8],
-		"/storage": [9],
-		"/vms": [10],
-		"/vms/[id]": [11]
+		"/events": [3],
+		"/images": [4],
+		"/install": [5],
+		"/login": [6],
+		"/networks": [7],
+		"/operations": [8],
+		"/settings": [9],
+		"/storage": [10],
+		"/test/confirm-dialog": [11],
+		"/test/forms": [12],
+		"/test/modal": [13],
+		"/test/skeletons": [14],
+		"/test/stats-card": [15],
+		"/vms": [16],
+		"/vms/[id]": [17]
 	};
 
 export const hooks = {

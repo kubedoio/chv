@@ -1,19 +1,21 @@
-import { e as ensure_array_like, c as escape_html } from "../../../chunks/renderer.js";
-import { c as createAPIClient, g as getStoredToken } from "../../../chunks/client.js";
-import { S as StateBadge } from "../../../chunks/StateBadge.js";
+import { e as ensure_array_like } from "../../../chunks/renderer.js";
+import { c as createAPIClient, g as getStoredToken } from "../../../chunks/client2.js";
+import { S as SkeletonRow } from "../../../chunks/SkeletonRow.js";
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     createAPIClient({ token: getStoredToken() ?? void 0 });
-    let items = [];
-    $$renderer2.push(`<section class="table-card"><div class="card-header px-4 py-3"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Operations</div> <div class="mt-1 text-lg font-semibold">Auditable Change Log</div></div> <table class="w-full border-collapse text-sm"><thead class="bg-chrome text-left uppercase tracking-[0.08em] text-muted"><tr><th class="border-b border-line px-4 py-3">Resource</th><th class="border-b border-line px-4 py-3">Operation</th><th class="border-b border-line px-4 py-3">State</th><th class="border-b border-line px-4 py-3">Created</th></tr></thead><tbody><!--[-->`);
-    const each_array = ensure_array_like(items);
-    for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
-      let item = each_array[$$index];
-      $$renderer2.push(`<tr class="odd:bg-white even:bg-[#f8f8f8]"><td class="border-b border-line px-4 py-3">${escape_html(item.resource_type)}:${escape_html(item.resource_id)}</td><td class="border-b border-line px-4 py-3">${escape_html(item.operation_type)}</td><td class="border-b border-line px-4 py-3">`);
-      StateBadge($$renderer2, { label: item.state });
-      $$renderer2.push(`<!----></td><td class="border-b border-line px-4 py-3 mono">${escape_html(item.created_at)}</td></tr>`);
+    $$renderer2.push(`<section class="table-card"><div class="card-header px-4 py-3"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">Operations</div> <div class="mt-1 text-lg font-semibold">Auditable Change Log</div></div> `);
+    {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<table class="w-full border-collapse text-sm"><thead class="bg-chrome text-left uppercase tracking-[0.08em] text-muted"><tr><th class="border-b border-line px-4 py-3">Resource</th><th class="border-b border-line px-4 py-3">Operation</th><th class="border-b border-line px-4 py-3">State</th><th class="border-b border-line px-4 py-3">Created</th></tr></thead><tbody><!--[-->`);
+      const each_array = ensure_array_like(Array(5));
+      for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
+        each_array[$$index];
+        SkeletonRow($$renderer2, { columns: 4 });
+      }
+      $$renderer2.push(`<!--]--></tbody></table>`);
     }
-    $$renderer2.push(`<!--]--></tbody></table></section>`);
+    $$renderer2.push(`<!--]--></section>`);
   });
 }
 export {

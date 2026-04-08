@@ -1,30 +1,28 @@
-import { b as attr, c as escape_html } from "../../../chunks/renderer.js";
+import { b as attr } from "../../../chunks/renderer.js";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
 import "../../../chunks/utils.js";
 import "@sveltejs/kit/internal/server";
 import "../../../chunks/root.js";
-import "../../../chunks/state.svelte.js";
-import { c as createAPIClient } from "../../../chunks/client.js";
+import "../../../chunks/client.js";
+import { c as createAPIClient } from "../../../chunks/client2.js";
+import "../../../chunks/toast.js";
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
-    let token = "";
-    let tokenName = "admin";
+    let username = "";
+    let password = "";
+    let loading = false;
     createAPIClient();
-    $$renderer2.push(`<div class="flex min-h-screen items-center justify-center bg-chrome p-6"><div class="w-full max-w-lg table-card"><div class="card-header px-6 py-4"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">CHV Login</div> <div class="mt-1 text-xl font-semibold">Bearer Token Access</div></div> <div class="space-y-5 p-6"><label class="block"><span class="mb-2 block text-sm text-muted">Token name</span> <input${attr("value", tokenName)} class="w-full border border-line px-3 py-2 text-sm"/></label> <label class="block"><span class="mb-2 block text-sm text-muted">Existing token</span> <textarea rows="5" class="mono w-full border border-line px-3 py-2 text-sm">`);
-    const $$body = escape_html(token);
-    if ($$body) {
-      $$renderer2.push(`${$$body}`);
-    }
-    $$renderer2.push(`</textarea></label> `);
+    $$renderer2.push(`<div class="flex min-h-screen items-center justify-center bg-chrome p-6"><div class="w-full max-w-md table-card"><div class="card-header px-6 py-4"><div class="text-[11px] uppercase tracking-[0.16em] text-muted">CHV</div> <div class="mt-1 text-xl font-semibold">Sign In</div></div> <div class="space-y-5 p-6"><div class="text-sm text-muted">Default credentials: admin / admin</div> <label class="block"><span class="mb-2 block text-sm text-muted">Username</span> <input${attr("value", username)} class="w-full border border-line px-3 py-2 text-sm" placeholder="Enter username" autocomplete="username"/></label> <label class="block"><span class="mb-2 block text-sm text-muted">Password</span> <input${attr("value", password)} type="password" class="w-full border border-line px-3 py-2 text-sm" placeholder="Enter password" autocomplete="current-password"/></label> `);
     {
       $$renderer2.push("<!--[-1-->");
     }
-    $$renderer2.push(`<!--]--> `);
+    $$renderer2.push(`<!--]--> <button class="button-primary w-full px-4 py-2 text-sm font-medium"${attr("disabled", loading, true)}>`);
     {
       $$renderer2.push("<!--[-1-->");
+      $$renderer2.push(`Sign In`);
     }
-    $$renderer2.push(`<!--]--> <div class="flex flex-wrap gap-3"><button class="button-primary px-4 py-2 text-sm font-medium">Use Token</button> <button class="button-secondary px-4 py-2 text-sm font-medium">Create Token</button></div></div></div></div>`);
+    $$renderer2.push(`<!--]--></button> <div class="border-t border-line pt-4"><div class="text-xs text-muted"><p class="mb-1"><strong>First time?</strong> Use the default credentials above.</p> <p>You can also <a href="/" class="text-primary hover:underline">create an API token</a> directly.</p></div></div></div></div></div>`);
   });
 }
 export {

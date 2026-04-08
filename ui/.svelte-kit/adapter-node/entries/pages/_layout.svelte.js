@@ -1,5 +1,33 @@
-import { f as fallback, e as ensure_array_like, a as attr_class, b as attr, c as escape_html, d as bind_props, s as store_get, g as slot, u as unsubscribe_stores } from "../../chunks/renderer.js";
-import { p as page } from "../../chunks/stores.js";
+import { g as getContext, f as fallback, e as ensure_array_like, a as attr_class, b as attr, c as escape_html, d as bind_props, s as stringify, h as derived, i as store_get, u as unsubscribe_stores, j as slot } from "../../chunks/renderer.js";
+import "clsx";
+import "@sveltejs/kit/internal";
+import "../../chunks/exports.js";
+import "../../chunks/utils.js";
+import "@sveltejs/kit/internal/server";
+import "../../chunks/root.js";
+import "../../chunks/state.svelte.js";
+import { t as toast } from "../../chunks/toast.js";
+const getStores = () => {
+  const stores$1 = getContext("__svelte__");
+  return {
+    /** @type {typeof page} */
+    page: {
+      subscribe: stores$1.page.subscribe
+    },
+    /** @type {typeof navigating} */
+    navigating: {
+      subscribe: stores$1.navigating.subscribe
+    },
+    /** @type {typeof updated} */
+    updated: stores$1.updated
+  };
+};
+const page = {
+  subscribe(fn) {
+    const store = getStores().page;
+    return store.subscribe(fn);
+  }
+};
 function Sidebar($$renderer, $$props) {
   let currentPath = fallback($$props["currentPath"], "/");
   const items = [
@@ -21,9 +49,69 @@ function Sidebar($$renderer, $$props) {
   $$renderer.push(`<!--]--></nav></aside>`);
   bind_props($$props, { currentPath });
 }
+function Toast($$renderer, $$props) {
+  $$renderer.component(($$renderer2) => {
+    let { type, message } = $$props;
+    const styles = {
+      success: {
+        bg: "bg-[#F0F9F0]",
+        border: "border-l-[#54B435]",
+        iconColor: "text-[#54B435]"
+      },
+      error: {
+        bg: "bg-[#FFF0F0]",
+        border: "border-l-[#E60000]",
+        iconColor: "text-[#E60000]"
+      },
+      info: {
+        bg: "bg-[#E8F4FC]",
+        border: "border-l-[#0066CC]",
+        iconColor: "text-[#0066CC]"
+      }
+    };
+    let style = derived(() => styles[type]);
+    $$renderer2.push(`<div${attr_class(`w-[320px] rounded shadow-[0_4px_12px_rgba(0,0,0,0.15)] border-l-4 flex items-start gap-3 p-4 ${stringify(style().bg)} ${stringify(style().border)}`)} role="alert" aria-live="polite"><div${attr_class(`flex-shrink-0 ${stringify(style().iconColor)}`)}>`);
+    if (type === "success") {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>`);
+    } else if (type === "error") {
+      $$renderer2.push("<!--[1-->");
+      $$renderer2.push(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16h.01"></path><path d="M12 8v4"></path><path d="M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z"></path></svg>`);
+    } else {
+      $$renderer2.push("<!--[-1-->");
+      $$renderer2.push(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>`);
+    }
+    $$renderer2.push(`<!--]--></div> <div class="flex-1 text-sm text-ink leading-5">${escape_html(message)}</div> <button class="flex-shrink-0 p-1 rounded hover:bg-black/5 transition-colors" aria-label="Dismiss notification" type="button"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-muted" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button></div>`);
+  });
+}
+function ToastContainer($$renderer, $$props) {
+  $$renderer.component(($$renderer2) => {
+    var $$store_subs;
+    if (store_get($$store_subs ??= {}, "$toast", toast).toasts.length > 0) {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<div class="fixed top-4 right-4 z-50 flex flex-col gap-2" role="region" aria-label="Notifications"><!--[-->`);
+      const each_array = ensure_array_like(store_get($$store_subs ??= {}, "$toast", toast).toasts);
+      for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
+        let toastItem = each_array[$$index];
+        Toast($$renderer2, {
+          id: toastItem.id,
+          type: toastItem.type,
+          message: toastItem.message
+        });
+      }
+      $$renderer2.push(`<!--]--></div>`);
+    } else {
+      $$renderer2.push("<!--[-1-->");
+    }
+    $$renderer2.push(`<!--]-->`);
+    if ($$store_subs) unsubscribe_stores($$store_subs);
+  });
+}
 function _layout($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     var $$store_subs;
+    ToastContainer($$renderer2);
+    $$renderer2.push(`<!----> `);
     if (store_get($$store_subs ??= {}, "$page", page).url.pathname === "/login") {
       $$renderer2.push("<!--[0-->");
       $$renderer2.push(`<!--[-->`);

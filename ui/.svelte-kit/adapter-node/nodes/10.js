@@ -2,7 +2,7 @@
 
 export const index = 10;
 let component_cache;
-export const component = async () => component_cache ??= (await import('../entries/pages/vms/_page.svelte.js')).default;
-export const imports = ["_app/immutable/nodes/10.CM44nSIz.js","_app/immutable/chunks/CBxsaHUx.js","_app/immutable/chunks/DcgFWB6C.js","_app/immutable/chunks/BsA2bOmn.js","_app/immutable/chunks/DhZmg6On.js","_app/immutable/chunks/CZBekB2q.js","_app/immutable/chunks/BYz6gyqJ.js","_app/immutable/chunks/t0c5EbPw.js","_app/immutable/chunks/Dwa3ccd3.js","_app/immutable/chunks/BoDwWjKs.js","_app/immutable/chunks/BuwRA2FN.js","_app/immutable/chunks/C13_1nH9.js","_app/immutable/chunks/DaHUxVSo.js","_app/immutable/chunks/CkBC4Ss-.js"];
-export const stylesheets = [];
+export const component = async () => component_cache ??= (await import('../entries/pages/storage/_page.svelte.js')).default;
+export const imports = ["_app/immutable/nodes/10.CXM1T80n.js","_app/immutable/chunks/CQqhHVc7.js","_app/immutable/chunks/CBaX9ZqV.js","_app/immutable/chunks/DpC-IFUp.js","_app/immutable/chunks/E4J3y038.js","_app/immutable/chunks/C5ie3Zti.js","_app/immutable/chunks/BMPybxSV.js","_app/immutable/chunks/6dcQ22-a.js","_app/immutable/chunks/CL6m4gJJ.js","_app/immutable/chunks/CWwGE1q4.js","_app/immutable/chunks/DJoUIf8v.js","_app/immutable/chunks/DSQs70nW.js","_app/immutable/chunks/CvKzU9HV.js","_app/immutable/chunks/DvUhlWcK.js","_app/immutable/chunks/BsjqlCM2.js","_app/immutable/chunks/Cih3Q1On.js","_app/immutable/chunks/CF2qwKUC.js","_app/immutable/chunks/DRVOFBHJ.js","_app/immutable/chunks/_FeNeKK7.js","_app/immutable/chunks/DCrhM0MW.js","_app/immutable/chunks/Buk-NnWL.js","_app/immutable/chunks/CrIr0FoE.js","_app/immutable/chunks/DJL9rfJ8.js","_app/immutable/chunks/I7SgzkyD.js","_app/immutable/chunks/XByFebeL.js","_app/immutable/chunks/DgkRfXUB.js","_app/immutable/chunks/C9B2p6YH.js","_app/immutable/chunks/DT99S6Iy.js","_app/immutable/chunks/BJZvG_3n.js","_app/immutable/chunks/BlUv0RrY.js"];
+export const stylesheets = ["_app/immutable/assets/SkeletonRow.TjwYfMqy.css"];
 export const fonts = [];

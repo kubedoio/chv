@@ -1,12 +1,15 @@
 import "clsx";
-import { c as createAPIClient, g as getStoredToken } from "../../../chunks/client.js";
-import { f as fallback, c as escape_html, d as bind_props } from "../../../chunks/renderer.js";
+import { c as createAPIClient, g as getStoredToken } from "../../../chunks/client2.js";
+import { f as fallback, c as escape_html, e as ensure_array_like, b as attr, d as bind_props } from "../../../chunks/renderer.js";
 import { S as StateBadge } from "../../../chunks/StateBadge.js";
+import { t as toast } from "../../../chunks/toast.js";
 function InstallStatusPanel($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let status = fallback($$props["status"], null);
     let loading = fallback($$props["loading"], false);
+    let actionLoading = fallback($$props["actionLoading"], false);
     let error = fallback($$props["error"], "");
+    let lastActionResult = fallback($$props["lastActionResult"], null);
     let handleBootstrap = fallback($$props["handleBootstrap"], () => {
     });
     let handleRefresh = fallback($$props["handleRefresh"], () => {
@@ -49,7 +52,55 @@ function InstallStatusPanel($$renderer, $$props) {
       StateBadge($$renderer2, {
         label: status.localdisk.ready ? "ready" : "bootstrap_required"
       });
-      $$renderer2.push(`<!----></dd></dl></div> <div class="flex flex-wrap gap-3"><button class="button-primary px-4 py-2 text-sm font-medium">Bootstrap</button> <button class="button-secondary px-4 py-2 text-sm font-medium">Re-run Checks</button> <button class="button-secondary px-4 py-2 text-sm font-medium">Repair Bridge</button> <button class="button-secondary px-4 py-2 text-sm font-medium">Repair Directories</button> <button class="button-secondary px-4 py-2 text-sm font-medium">Repair Localdisk</button></div>`);
+      $$renderer2.push(`<!----></dd></dl></div> `);
+      if (lastActionResult) {
+        $$renderer2.push("<!--[0-->");
+        $$renderer2.push(`<div class="table-card"><div class="card-header px-4 py-2 text-sm font-medium">Last Action Result</div> <div class="space-y-3 p-4 text-sm"><div class="flex items-center gap-3"><span class="text-muted">State:</span> `);
+        StateBadge($$renderer2, { label: lastActionResult.overall_state });
+        $$renderer2.push(`<!----></div> `);
+        if (lastActionResult.actions_taken.length > 0) {
+          $$renderer2.push("<!--[0-->");
+          $$renderer2.push(`<div><span class="text-muted">Actions taken:</span> <ul class="mt-1 list-disc pl-5"><!--[-->`);
+          const each_array = ensure_array_like(lastActionResult.actions_taken);
+          for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
+            let action = each_array[$$index];
+            $$renderer2.push(`<li>${escape_html(action)}</li>`);
+          }
+          $$renderer2.push(`<!--]--></ul></div>`);
+        } else {
+          $$renderer2.push("<!--[-1-->");
+        }
+        $$renderer2.push(`<!--]--> `);
+        if (lastActionResult.warnings.length > 0) {
+          $$renderer2.push("<!--[0-->");
+          $$renderer2.push(`<div class="rounded border border-warning bg-yellow-50 px-3 py-2"><span class="text-warning font-medium">Warnings:</span> <ul class="mt-1 list-disc pl-5 text-warning"><!--[-->`);
+          const each_array_1 = ensure_array_like(lastActionResult.warnings);
+          for (let $$index_1 = 0, $$length = each_array_1.length; $$index_1 < $$length; $$index_1++) {
+            let warning = each_array_1[$$index_1];
+            $$renderer2.push(`<li>${escape_html(warning)}</li>`);
+          }
+          $$renderer2.push(`<!--]--></ul></div>`);
+        } else {
+          $$renderer2.push("<!--[-1-->");
+        }
+        $$renderer2.push(`<!--]--> `);
+        if (lastActionResult.errors.length > 0) {
+          $$renderer2.push("<!--[0-->");
+          $$renderer2.push(`<div class="rounded border border-danger bg-red-50 px-3 py-2"><span class="text-danger font-medium">Errors:</span> <ul class="mt-1 list-disc pl-5 text-danger"><!--[-->`);
+          const each_array_2 = ensure_array_like(lastActionResult.errors);
+          for (let $$index_2 = 0, $$length = each_array_2.length; $$index_2 < $$length; $$index_2++) {
+            let err = each_array_2[$$index_2];
+            $$renderer2.push(`<li>${escape_html(err)}</li>`);
+          }
+          $$renderer2.push(`<!--]--></ul></div>`);
+        } else {
+          $$renderer2.push("<!--[-1-->");
+        }
+        $$renderer2.push(`<!--]--></div></div>`);
+      } else {
+        $$renderer2.push("<!--[-1-->");
+      }
+      $$renderer2.push(`<!--]--> <div class="flex flex-wrap gap-3"><button class="button-primary px-4 py-2 text-sm font-medium"${attr("disabled", actionLoading, true)}>${escape_html(actionLoading ? "Running…" : "Bootstrap")}</button> <button class="button-secondary px-4 py-2 text-sm font-medium"${attr("disabled", actionLoading, true)}>Re-run Checks</button> <button class="button-secondary px-4 py-2 text-sm font-medium"${attr("disabled", actionLoading, true)}>Repair Bridge</button> <button class="button-secondary px-4 py-2 text-sm font-medium"${attr("disabled", actionLoading, true)}>Repair Directories</button> <button class="button-secondary px-4 py-2 text-sm font-medium"${attr("disabled", actionLoading, true)}>Repair Localdisk</button></div>`);
     } else {
       $$renderer2.push("<!--[-1-->");
       $$renderer2.push(`<div class="border border-line bg-chrome px-4 py-6 text-sm text-muted">No install status available yet.</div>`);
@@ -58,7 +109,9 @@ function InstallStatusPanel($$renderer, $$props) {
     bind_props($$props, {
       status,
       loading,
+      actionLoading,
       error,
+      lastActionResult,
       handleBootstrap,
       handleRefresh,
       handleRepairBridge,
@@ -72,7 +125,9 @@ function _page($$renderer, $$props) {
     const client = createAPIClient({ token: getStoredToken() ?? void 0 });
     let status = null;
     let loading = true;
+    let actionLoading = false;
     let error = "";
+    let lastActionResult = null;
     async function loadStatus() {
       loading = true;
       error = "";
@@ -80,42 +135,89 @@ function _page($$renderer, $$props) {
         status = await client.getInstallStatus();
       } catch (err) {
         error = err instanceof Error ? err.message : "Could not load install status.";
+        toast.error(error);
       } finally {
         loading = false;
       }
     }
     async function bootstrapInstall() {
-      await client.bootstrapInstall();
-      await loadStatus();
+      actionLoading = true;
+      lastActionResult = null;
+      try {
+        const result = await client.bootstrapInstall();
+        lastActionResult = result;
+        if (result.errors.length > 0) {
+          toast.error(`Bootstrap completed with ${result.errors.length} error(s)`);
+        } else if (result.warnings.length > 0) {
+          toast.success(`Bootstrap completed with ${result.warnings.length} warning(s)`);
+        } else {
+          toast.success(`Bootstrap completed successfully: ${result.actions_taken.join(", ")}`);
+        }
+        await loadStatus();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Bootstrap failed";
+        toast.error(`Bootstrap failed: ${message}`);
+      } finally {
+        actionLoading = false;
+      }
     }
     async function repairBridge() {
-      await client.repairInstall({
-        repair_bridge: true,
-        repair_directories: false,
-        repair_localdisk: false
-      });
-      await loadStatus();
+      await runRepair(
+        {
+          repair_bridge: true,
+          repair_directories: false,
+          repair_localdisk: false
+        },
+        "Bridge"
+      );
     }
     async function repairDirectories() {
-      await client.repairInstall({
-        repair_bridge: false,
-        repair_directories: true,
-        repair_localdisk: false
-      });
-      await loadStatus();
+      await runRepair(
+        {
+          repair_bridge: false,
+          repair_directories: true,
+          repair_localdisk: false
+        },
+        "Directories"
+      );
     }
     async function repairLocaldisk() {
-      await client.repairInstall({
-        repair_bridge: false,
-        repair_directories: false,
-        repair_localdisk: true
-      });
-      await loadStatus();
+      await runRepair(
+        {
+          repair_bridge: false,
+          repair_directories: false,
+          repair_localdisk: true
+        },
+        "Localdisk"
+      );
+    }
+    async function runRepair(body, name) {
+      actionLoading = true;
+      lastActionResult = null;
+      try {
+        const result = await client.repairInstall(body);
+        lastActionResult = result;
+        if (result.errors.length > 0) {
+          toast.error(`${name} repair completed with ${result.errors.length} error(s)`);
+        } else if (result.warnings.length > 0) {
+          toast.success(`${name} repair completed with ${result.warnings.length} warning(s)`);
+        } else {
+          toast.success(`${name} repair completed: ${result.actions_taken.join(", ")}`);
+        }
+        await loadStatus();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Repair failed";
+        toast.error(`${name} repair failed: ${message}`);
+      } finally {
+        actionLoading = false;
+      }
     }
     InstallStatusPanel($$renderer2, {
       status,
       loading,
+      actionLoading,
       error,
+      lastActionResult,
       handleBootstrap: bootstrapInstall,
       handleRefresh: loadStatus,
       handleRepairBridge: repairBridge,

@@ -1,8 +1,27 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import Sidebar from '$lib/components/Sidebar.svelte';
+  import ToastContainer from '$lib/components/ToastContainer.svelte';
+  import { getStoredToken } from '$lib/api/client';
   import '../app.css';
+
+  // Public paths that don't require auth
+  const publicPaths = ['/login', '/install'];
+
+  onMount(() => {
+    const currentPath = $page.url.pathname;
+    const isPublicPath = publicPaths.some(path => currentPath.startsWith(path));
+    
+    if (!isPublicPath && !getStoredToken()) {
+      goto('/login');
+    }
+  });
 </script>
+
+<!-- Global Toast Container -->
+<ToastContainer />
 
 {#if $page.url.pathname === '/login'}
   <slot />
@@ -22,4 +41,3 @@
     </main>
   </div>
 {/if}
-

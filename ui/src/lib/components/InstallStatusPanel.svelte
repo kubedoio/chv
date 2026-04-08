@@ -1,10 +1,12 @@
 <script lang="ts">
   import StateBadge from '$lib/components/StateBadge.svelte';
-  import type { InstallStatusResponse } from '$lib/api/types';
+  import type { InstallStatusResponse, InstallActionResponse } from '$lib/api/types';
 
   export let status: InstallStatusResponse | null = null;
   export let loading = false;
+  export let actionLoading = false;
   export let error = '';
+  export let lastActionResult: InstallActionResponse | null = null;
   export let handleBootstrap: () => Promise<void> | void = () => {};
   export let handleRefresh: () => Promise<void> | void = () => {};
   export let handleRepairBridge: () => Promise<void> | void = () => {};
@@ -76,16 +78,87 @@
         </dl>
       </div>
 
+      {#if lastActionResult}
+        <div class="table-card">
+          <div class="card-header px-4 py-2 text-sm font-medium">Last Action Result</div>
+          <div class="space-y-3 p-4 text-sm">
+            <div class="flex items-center gap-3">
+              <span class="text-muted">State:</span>
+              <StateBadge label={lastActionResult.overall_state} />
+            </div>
+            {#if lastActionResult.actions_taken.length > 0}
+              <div>
+                <span class="text-muted">Actions taken:</span>
+                <ul class="mt-1 list-disc pl-5">
+                  {#each lastActionResult.actions_taken as action}
+                    <li>{action}</li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+            {#if lastActionResult.warnings.length > 0}
+              <div class="rounded border border-warning bg-yellow-50 px-3 py-2">
+                <span class="text-warning font-medium">Warnings:</span>
+                <ul class="mt-1 list-disc pl-5 text-warning">
+                  {#each lastActionResult.warnings as warning}
+                    <li>{warning}</li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+            {#if lastActionResult.errors.length > 0}
+              <div class="rounded border border-danger bg-red-50 px-3 py-2">
+                <span class="text-danger font-medium">Errors:</span>
+                <ul class="mt-1 list-disc pl-5 text-danger">
+                  {#each lastActionResult.errors as err}
+                    <li>{err}</li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       <div class="flex flex-wrap gap-3">
-        <button class="button-primary px-4 py-2 text-sm font-medium" on:click={handleBootstrap}>Bootstrap</button>
-        <button class="button-secondary px-4 py-2 text-sm font-medium" on:click={handleRefresh}>Re-run Checks</button>
-        <button class="button-secondary px-4 py-2 text-sm font-medium" on:click={handleRepairBridge}>Repair Bridge</button>
-        <button class="button-secondary px-4 py-2 text-sm font-medium" on:click={handleRepairDirectories}>Repair Directories</button>
-        <button class="button-secondary px-4 py-2 text-sm font-medium" on:click={handleRepairLocaldisk}>Repair Localdisk</button>
+        <button 
+          class="button-primary px-4 py-2 text-sm font-medium" 
+          on:click={handleBootstrap}
+          disabled={actionLoading}
+        >
+          {actionLoading ? 'Running…' : 'Bootstrap'}
+        </button>
+        <button 
+          class="button-secondary px-4 py-2 text-sm font-medium" 
+          on:click={handleRefresh}
+          disabled={actionLoading}
+        >
+          Re-run Checks
+        </button>
+        <button 
+          class="button-secondary px-4 py-2 text-sm font-medium" 
+          on:click={handleRepairBridge}
+          disabled={actionLoading}
+        >
+          Repair Bridge
+        </button>
+        <button 
+          class="button-secondary px-4 py-2 text-sm font-medium" 
+          on:click={handleRepairDirectories}
+          disabled={actionLoading}
+        >
+          Repair Directories
+        </button>
+        <button 
+          class="button-secondary px-4 py-2 text-sm font-medium" 
+          on:click={handleRepairLocaldisk}
+          disabled={actionLoading}
+        >
+          Repair Localdisk
+        </button>
       </div>
     {:else}
       <div class="border border-line bg-chrome px-4 py-6 text-sm text-muted">No install status available yet.</div>
     {/if}
   </div>
 </section>
-

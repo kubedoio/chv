@@ -1,4 +1,4 @@
-import { l as lifecycle_outside_component, B as BROWSER, i as invalid_csp, a as await_invalid, g as get_render_context } from "./render-context.js";
+import { l as lifecycle_outside_component, B as BROWSER, d as dynamic_element_invalid_tag, i as invalid_csp, a as await_invalid, g as get_render_context } from "./render-context.js";
 import { clsx as clsx$1 } from "clsx";
 import * as devalue from "devalue";
 var ssr_context = null;
@@ -131,6 +131,7 @@ function unresolved_hydratable(key, stack) {
 }
 const BLOCK_OPEN = `<!--${HYDRATION_START}-->`;
 const BLOCK_CLOSE = `<!--${HYDRATION_END}-->`;
+const EMPTY_COMMENT = `<!---->`;
 const ATTR_REGEX = /[&"<]/g;
 const CONTENT_REGEX = /[&<]/g;
 function escape_html(value, is_attr) {
@@ -2180,6 +2181,27 @@ function subscribe_to_store(store, run, invalidate) {
   );
   return unsub.unsubscribe ? () => unsub.unsubscribe() : unsub;
 }
+const VOID_ELEMENT_NAMES = [
+  "area",
+  "base",
+  "br",
+  "col",
+  "command",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "keygen",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr"
+];
+function is_void(name) {
+  return VOID_ELEMENT_NAMES.includes(name) || name.toLowerCase() === "!doctype";
+}
 const DOM_BOOLEAN_ATTRIBUTES = [
   "allowfullscreen",
   "async",
@@ -2217,7 +2239,37 @@ const PASSIVE_EVENTS = ["touchstart", "touchmove"];
 function is_passive_event(name) {
   return PASSIVE_EVENTS.includes(name);
 }
+const RAW_TEXT_ELEMENTS = (
+  /** @type {const} */
+  ["textarea", "script", "style", "title"]
+);
+function is_raw_text_element(name) {
+  return RAW_TEXT_ELEMENTS.includes(
+    /** @type {typeof RAW_TEXT_ELEMENTS[number]} */
+    name
+  );
+}
+const REGEX_VALID_TAG_NAME = /^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9.\-_\u00B7\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u037D\u037F-\u1FFF\u200C-\u200D\u203F-\u2040\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u{10000}-\u{EFFFF}]+)*$/u;
 const INVALID_ATTR_NAME_CHAR_REGEX = /[\s'">/=\u{FDD0}-\u{FDEF}\u{FFFE}\u{FFFF}\u{1FFFE}\u{1FFFF}\u{2FFFE}\u{2FFFF}\u{3FFFE}\u{3FFFF}\u{4FFFE}\u{4FFFF}\u{5FFFE}\u{5FFFF}\u{6FFFE}\u{6FFFF}\u{7FFFE}\u{7FFFF}\u{8FFFE}\u{8FFFF}\u{9FFFE}\u{9FFFF}\u{AFFFE}\u{AFFFF}\u{BFFFE}\u{BFFFF}\u{CFFFE}\u{CFFFF}\u{DFFFE}\u{DFFFF}\u{EFFFE}\u{EFFFF}\u{FFFFE}\u{FFFFF}\u{10FFFE}\u{10FFFF}]/u;
+function element(renderer, tag, attributes_fn = noop, children_fn = noop) {
+  renderer.push("<!---->");
+  if (tag) {
+    if (!REGEX_VALID_TAG_NAME.test(tag)) {
+      dynamic_element_invalid_tag(tag);
+    }
+    renderer.push(`<${tag}`);
+    attributes_fn();
+    renderer.push(`>`);
+    if (!is_void(tag)) {
+      children_fn();
+      if (!is_raw_text_element(tag)) {
+        renderer.push(EMPTY_COMMENT);
+      }
+      renderer.push(`</${tag}>`);
+    }
+  }
+  renderer.push("<!---->");
+}
 function render(component, options = {}) {
   if (options.csp?.hash && options.csp.nonce) {
     invalid_csp();
@@ -2227,6 +2279,13 @@ function render(component, options = {}) {
     component,
     options
   );
+}
+function head(hash, renderer, fn) {
+  renderer.head((renderer2) => {
+    renderer2.push(`<!--${hash}-->`);
+    renderer2.child(fn);
+    renderer2.push(EMPTY_COMMENT);
+  });
 }
 function attributes(attrs, css_hash, classes, styles, flags = 0) {
   if (styles) {
@@ -2261,9 +2320,33 @@ function attributes(attrs, css_hash, classes, styles, flags = 0) {
   }
   return attr_str;
 }
+function spread_props(props) {
+  const merged_props = {};
+  let key;
+  for (let i = 0; i < props.length; i++) {
+    const obj = props[i];
+    if (obj == null) continue;
+    for (key of Object.keys(obj)) {
+      const desc = Object.getOwnPropertyDescriptor(obj, key);
+      if (desc) {
+        Object.defineProperty(merged_props, key, desc);
+      } else {
+        merged_props[key] = obj[key];
+      }
+    }
+  }
+  return merged_props;
+}
+function stringify(value) {
+  return typeof value === "string" ? value : value == null ? "" : value + "";
+}
 function attr_class(value, hash, directives) {
   var result = to_class(value, hash, directives);
   return result ? ` class="${escape_html(result, true)}"` : "";
+}
+function attr_style(value, directives) {
+  var result = to_style(value, directives);
+  return result ? ` style="${escape_html(result, true)}"` : "";
 }
 function store_get(store_values, store_name, store) {
   if (store_name in store_values && store_values[store_name][0] === store) {
@@ -2292,6 +2375,20 @@ function slot(renderer, $$props, name, slot_props, fallback_fn) {
   if (slot_fn !== void 0) {
     slot_fn(renderer, slot_props);
   }
+}
+function rest_props(props, rest) {
+  const rest_props2 = {};
+  let key;
+  for (key of Object.keys(props)) {
+    if (!rest.includes(key)) {
+      rest_props2[key] = props[key];
+    }
+  }
+  return rest_props2;
+}
+function sanitize_props(props) {
+  const { children, $$slots, ...sanitized } = props;
+  return sanitized;
 }
 function bind_props(props_parent, props_now) {
   for (const key of Object.keys(props_now)) {
@@ -2423,10 +2520,10 @@ class Renderer {
    * @param {(renderer: Renderer) => void} fn
    */
   head(fn) {
-    const head = new Renderer(this.global, this);
-    head.type = "head";
-    this.#out.push(head);
-    head.child(fn);
+    const head2 = new Renderer(this.global, this);
+    head2.type = "head";
+    this.#out.push(head2);
+    head2.child(fn);
   }
   /**
    * @param {Array<Promise<void>>} blockers
@@ -2621,7 +2718,7 @@ class Renderer {
    */
   option(attrs, body, css_hash, classes, styles, flags, is_rich) {
     this.#out.push(`<option${attributes(attrs, css_hash, classes, styles, flags)}`);
-    const close = (renderer, value, { head, body: body2 }) => {
+    const close = (renderer, value, { head: head2, body: body2 }) => {
       if (has_own_property.call(attrs, "value")) {
         value = attrs.value;
       }
@@ -2629,8 +2726,8 @@ class Renderer {
         renderer.#out.push(' selected=""');
       }
       renderer.#out.push(`>${body2}${is_rich ? "<!>" : ""}</option>`);
-      if (head) {
-        renderer.head((child) => child.push(head));
+      if (head2) {
+        renderer.head((child) => child.push(head2));
       }
     };
     if (typeof body === "function") {
@@ -2655,8 +2752,8 @@ class Renderer {
    */
   title(fn) {
     const path = this.get_path();
-    const close = (head) => {
-      this.global.set_title(head, path);
+    const close = (head2) => {
+      this.global.set_title(head2, path);
     };
     this.child((renderer) => {
       const r = new Renderer(renderer.global, renderer);
@@ -2984,13 +3081,13 @@ class Renderer {
     for (const cleanup of renderer.#collect_on_destroy()) {
       cleanup();
     }
-    let head = content.head + renderer.global.get_title();
+    let head2 = content.head + renderer.global.get_title();
     let body = content.body;
     for (const { hash, code } of renderer.global.css) {
-      head += `<style id="${hash}">${code}</style>`;
+      head2 += `<style id="${hash}">${code}</style>`;
     }
     return {
-      head,
+      head: head2,
       body,
       hashes: {
         script: renderer.global.csp.script_hashes
@@ -3094,69 +3191,79 @@ class SSRState {
   }
 }
 export {
-  component_root as $,
-  create_text as A,
-  BOUNDARY_EFFECT as B,
+  EFFECT_TRANSPARENT as $,
+  source as A,
+  untrack as B,
   COMMENT_NODE as C,
-  pause_effect as D,
-  current_batch as E,
-  move_effect as F,
-  defer_effect as G,
+  increment as D,
+  queue_micro_task as E,
+  active_effect as F,
+  BOUNDARY_EFFECT as G,
   HYDRATION_ERROR as H,
-  set_active_effect as I,
-  set_active_reaction as J,
-  set_component_context as K,
-  Batch as L,
-  handle_error as M,
-  active_reaction as N,
-  component_context as O,
-  internal_set as P,
-  destroy_effect as Q,
-  invoke_error_boundary as R,
-  svelte_boundary_reset_onerror as S,
-  HYDRATION_START_FAILED as T,
-  EFFECT_TRANSPARENT as U,
-  EFFECT_PRESERVED as V,
-  define_property as W,
-  init_operations as X,
-  get_first_child as Y,
-  hydration_failed as Z,
-  clear_text_content as _,
+  block as I,
+  branch as J,
+  create_text as K,
+  pause_effect as L,
+  current_batch as M,
+  move_effect as N,
+  defer_effect as O,
+  set_active_effect as P,
+  set_active_reaction as Q,
+  set_component_context as R,
+  Batch as S,
+  handle_error as T,
+  active_reaction as U,
+  component_context as V,
+  internal_set as W,
+  destroy_effect as X,
+  invoke_error_boundary as Y,
+  svelte_boundary_reset_onerror as Z,
+  HYDRATION_START_FAILED as _,
   attr_class as a,
-  array_from as a0,
-  is_passive_event as a1,
-  push as a2,
-  pop as a3,
-  set as a4,
-  LEGACY_PROPS as a5,
-  flushSync as a6,
-  mutable_source as a7,
-  render as a8,
-  setContext as a9,
-  derived as aa,
+  EFFECT_PRESERVED as a0,
+  define_property as a1,
+  init_operations as a2,
+  get_first_child as a3,
+  hydration_failed as a4,
+  clear_text_content as a5,
+  component_root as a6,
+  array_from as a7,
+  is_passive_event as a8,
+  push as a9,
+  pop as aa,
+  set as ab,
+  LEGACY_PROPS as ac,
+  flushSync as ad,
+  mutable_source as ae,
+  render as af,
+  setContext as ag,
+  safe_not_equal as ah,
+  rest_props as ai,
+  clsx as aj,
+  element as ak,
   attr as b,
   escape_html as c,
   bind_props as d,
   ensure_array_like as e,
   fallback as f,
-  slot as g,
-  getContext as h,
-  safe_not_equal as i,
-  HYDRATION_END as j,
-  HYDRATION_START as k,
-  HYDRATION_START_ELSE as l,
-  get_next_sibling as m,
-  noop as n,
-  effect_tracking as o,
-  get as p,
-  source as q,
-  render_effect as r,
-  store_get as s,
-  untrack as t,
+  getContext as g,
+  derived as h,
+  store_get as i,
+  slot as j,
+  head as k,
+  sanitize_props as l,
+  spread_props as m,
+  attr_style as n,
+  attributes as o,
+  ssr_context as p,
+  noop as q,
+  HYDRATION_END as r,
+  stringify as s,
+  HYDRATION_START as t,
   unsubscribe_stores as u,
-  increment as v,
-  queue_micro_task as w,
-  active_effect as x,
-  block as y,
-  branch as z
+  HYDRATION_START_ELSE as v,
+  get_next_sibling as w,
+  effect_tracking as x,
+  get as y,
+  render_effect as z
 };

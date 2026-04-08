@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/chv/chv/internal/agentapi"
+	"github.com/chv/chv/internal/agentclient"
 	"github.com/chv/chv/internal/config"
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/installstatus"
@@ -34,6 +36,7 @@ type Config struct {
 	BridgeManager    BridgeManager
 	PrereqChecker    PrereqChecker
 	SkipDBConnection bool
+	AgentClient      *agentclient.Client // NEW: optional agent client for delegation
 }
 
 type RepairRequest struct {
@@ -72,6 +75,48 @@ func NewService(cfg Config) (*Service, error) {
 }
 
 func (s *Service) Check(ctx context.Context) (*models.InstallStatus, error) {
+	// Try agent first if available
+	if s.cfg.AgentClient != nil && s.cfg.AgentClient.IsAgentAvailable(ctx) {
+		return s.checkViaAgent(ctx)
+	}
+
+	// Fallback to direct check
+	return s.checkDirect(ctx)
+}
+
+func (s *Service) checkViaAgent(ctx context.Context) (*models.InstallStatus, error) {
+	agentResp, err := s.cfg.AgentClient.CheckInstall(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert agent response to model
+	status := &models.InstallStatus{
+		ID:                   "singleton",
+		DataRoot:             agentResp.DataRoot,
+		DatabasePath:         agentResp.DatabasePath,
+		BridgeName:           agentResp.BridgeName,
+		BridgeExists:         agentResp.BridgeExists,
+		BridgeIPExpected:     agentResp.BridgeIPExpected,
+		BridgeIPActual:       agentResp.BridgeIPActual,
+		BridgeUp:             agentResp.BridgeUp,
+		LocaldiskPath:        agentResp.LocaldiskPath,
+		LocaldiskReady:       agentResp.LocaldiskReady,
+		CloudHypervisorPath:  agentResp.CloudHypervisorPath,
+		CloudHypervisorFound: agentResp.CloudHypervisorFound,
+		CloudInitSupported:   agentResp.CloudInitSupported,
+		OverallState:         models.InstallState(agentResp.OverallState),
+		LastCheckedAt:        time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if s.cfg.Repository != nil {
+		_ = s.cfg.Repository.UpsertInstallStatus(ctx, status)
+	}
+
+	return status, nil
+}
+
+func (s *Service) checkDirect(ctx context.Context) (*models.InstallStatus, error) {
 	status := &models.InstallStatus{
 		ID:               "singleton",
 		DataRoot:         s.cfg.DataRoot,
@@ -114,6 +159,52 @@ func (s *Service) Check(ctx context.Context) (*models.InstallStatus, error) {
 }
 
 func (s *Service) Bootstrap(ctx context.Context) (*models.InstallActionResult, error) {
+	// Try agent first if available
+	if s.cfg.AgentClient != nil && s.cfg.AgentClient.IsAgentAvailable(ctx) {
+		return s.bootstrapViaAgent(ctx)
+	}
+
+	// Fallback to direct bootstrap
+	return s.bootstrapDirect(ctx)
+}
+
+func (s *Service) bootstrapViaAgent(ctx context.Context) (*models.InstallActionResult, error) {
+	req := &agentapi.BootstrapRequest{
+		DataRoot:      s.cfg.DataRoot,
+		BridgeName:    s.cfg.BridgeName,
+		BridgeCIDR:    s.cfg.BridgeCIDR,
+		LocaldiskPath: s.cfg.LocaldiskPath,
+	}
+
+	resp, err := s.cfg.AgentClient.Bootstrap(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check status after bootstrap
+	status, err := s.Check(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	status.LastBootstrappedAt = time.Now().UTC().Format(time.RFC3339)
+	status.OverallState = models.InstallStateReady
+	if s.cfg.Repository != nil {
+		if err := s.cfg.Repository.UpsertInstallStatus(ctx, status); err != nil {
+			return nil, err
+		}
+	}
+
+	return &models.InstallActionResult{
+		Status:       status,
+		OverallState: status.OverallState,
+		ActionsTaken: resp.ActionsTaken,
+		Warnings:     resp.Warnings,
+		Errors:       resp.Errors,
+	}, nil
+}
+
+func (s *Service) bootstrapDirect(ctx context.Context) (*models.InstallActionResult, error) {
 	actions, err := s.ensureDirectories()
 	if err != nil {
 		return nil, err
@@ -160,6 +251,56 @@ func (s *Service) Bootstrap(ctx context.Context) (*models.InstallActionResult, e
 }
 
 func (s *Service) Repair(ctx context.Context, req RepairRequest) (*models.InstallActionResult, error) {
+	// Try agent first if available
+	if s.cfg.AgentClient != nil && s.cfg.AgentClient.IsAgentAvailable(ctx) {
+		return s.repairViaAgent(ctx, req)
+	}
+
+	// Fallback to direct repair
+	return s.repairDirect(ctx, req)
+}
+
+func (s *Service) repairViaAgent(ctx context.Context, req RepairRequest) (*models.InstallActionResult, error) {
+	agentReq := &agentapi.RepairRequest{
+		DataRoot:      s.cfg.DataRoot,
+		BridgeName:    s.cfg.BridgeName,
+		BridgeCIDR:    s.cfg.BridgeCIDR,
+		LocaldiskPath: s.cfg.LocaldiskPath,
+		RepairBridge:  req.RepairBridge,
+		RepairDirs:    req.RepairDirectories,
+	}
+
+	resp, err := s.cfg.AgentClient.Repair(ctx, agentReq)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check status after repair
+	status, err := s.Check(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.ActionsTaken) > 0 {
+		status.LastBootstrappedAt = time.Now().UTC().Format(time.RFC3339)
+		status.OverallState = models.InstallStateReady
+		if s.cfg.Repository != nil {
+			if err := s.cfg.Repository.UpsertInstallStatus(ctx, status); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return &models.InstallActionResult{
+		Status:       status,
+		OverallState: status.OverallState,
+		ActionsTaken: resp.ActionsTaken,
+		Warnings:     resp.Warnings,
+		Errors:       resp.Errors,
+	}, nil
+}
+
+func (s *Service) repairDirect(ctx context.Context, req RepairRequest) (*models.InstallActionResult, error) {
 	var actions []string
 	if req.RepairDirectories {
 		dirActions, err := s.ensureDirectories()

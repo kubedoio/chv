@@ -29,12 +29,13 @@ declare module "$app/types" {
 	type MatcherParam<M> = M extends (param : string) => param is (infer U extends string) ? U : string;
 
 	export interface AppTypes {
-		RouteId(): "/" | "/images" | "/install" | "/login" | "/networks" | "/operations" | "/settings" | "/storage" | "/vms" | "/vms/[id]";
+		RouteId(): "/" | "/events" | "/images" | "/install" | "/login" | "/networks" | "/operations" | "/settings" | "/storage" | "/test" | "/test/confirm-dialog" | "/test/forms" | "/test/modal" | "/test/skeletons" | "/test/stats-card" | "/vms" | "/vms/[id]";
 		RouteParams(): {
 			"/vms/[id]": { id: string }
 		};
 		LayoutParams(): {
 			"/": { id?: string };
+			"/events": Record<string, never>;
 			"/images": Record<string, never>;
 			"/install": Record<string, never>;
 			"/login": Record<string, never>;
@@ -42,10 +43,16 @@ declare module "$app/types" {
 			"/operations": Record<string, never>;
 			"/settings": Record<string, never>;
 			"/storage": Record<string, never>;
+			"/test": Record<string, never>;
+			"/test/confirm-dialog": Record<string, never>;
+			"/test/forms": Record<string, never>;
+			"/test/modal": Record<string, never>;
+			"/test/skeletons": Record<string, never>;
+			"/test/stats-card": Record<string, never>;
 			"/vms": { id?: string };
 			"/vms/[id]": { id: string }
 		};
-		Pathname(): "/" | "/images" | "/install" | "/login" | "/networks" | "/operations" | "/settings" | "/storage" | "/vms" | `/vms/${string}` & {};
+		Pathname(): "/" | "/events" | "/images" | "/install" | "/login" | "/networks" | "/operations" | "/settings" | "/storage" | "/test/confirm-dialog" | "/test/forms" | "/test/modal" | "/test/skeletons" | "/test/stats-card" | "/vms" | `/vms/${string}` & {};
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
 		Asset(): string & {};
 	}

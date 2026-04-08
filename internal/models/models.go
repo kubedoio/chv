@@ -69,6 +69,8 @@ type Image struct {
 	OSFamily           string `json:"os_family"`
 	Architecture       string `json:"architecture"`
 	Format             string `json:"format"`
+	SourceFormat       string `json:"source_format"`
+	NormalizedFormat   string `json:"normalized_format"`
 	SourceURL          string `json:"source_url"`
 	Checksum           string `json:"checksum,omitempty"`
 	LocalPath          string `json:"local_path"`
@@ -96,6 +98,18 @@ type VirtualMachine struct {
 	LastError          string `json:"last_error,omitempty"`
 	CreatedAt          string `json:"created_at,omitempty"`
 	UpdatedAt          string `json:"updated_at,omitempty"`
+}
+
+type User struct {
+	ID           string  `json:"id"`
+	Username     string  `json:"username"`
+	PasswordHash string  `json:"-"`
+	Email        string  `json:"email,omitempty"`
+	Role         string  `json:"role"`
+	IsActive     bool    `json:"is_active"`
+	LastLoginAt  *string `json:"last_login_at,omitempty"`
+	CreatedAt    string  `json:"created_at,omitempty"`
+	UpdatedAt    string  `json:"updated_at,omitempty"`
 }
 
 type APIToken struct {
