@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, $effect } from 'svelte';
+  import { onMount } from 'svelte';
   
   interface DataPoint {
     label: string;

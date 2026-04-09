@@ -64,6 +64,7 @@ type ImageImportRequest struct {
 	ImageID      string `json:"image_id"`
 	SourceURL    string `json:"source_url"`
 	DestPath     string `json:"dest_path"`
+	Checksum     string `json:"checksum,omitempty"`
 	ExpectedSize int64  `json:"expected_size,omitempty"`
 }
 

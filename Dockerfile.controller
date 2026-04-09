@@ -1,14 +1,32 @@
-FROM alpine:latest
+# Stage 1: Build UI
+FROM node:20-alpine AS ui-builder
+WORKDIR /app/ui
+COPY ui/package*.json ./
+RUN npm install --include=optional
+COPY ui/ .
+RUN npm run build
 
+# Stage 2: Build Controller
+FROM golang:1.26.1-alpine AS controller-builder
+WORKDIR /app
+RUN apk add --no-cache git
+COPY . .
+RUN go build -o bin/chv-controller ./cmd/chv-controller
+
+# Stage 3: Runtime
+FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 
 WORKDIR /app
 
-# Copy pre-built binary
-COPY chv-controller .
+# Copy binaries
+COPY --from=controller-builder /app/bin/chv-controller .
 
 # Copy UI build
-COPY ui/build ./ui/build
+COPY --from=ui-builder /app/ui/build ./ui/build
+
+# Copy configuration and schema
+COPY configs/ ./configs/
 
 # Create data directories
 RUN mkdir -p /var/lib/chv /var/log/chv

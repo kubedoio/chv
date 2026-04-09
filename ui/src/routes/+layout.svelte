@@ -1,3 +1,4 @@
+<script>
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';

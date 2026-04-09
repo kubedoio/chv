@@ -24,7 +24,6 @@
 	<a 
 		{href}
 		class="rounded border border-line bg-chrome p-4 block no-underline text-inherit hover:shadow-md transition-shadow"
-		role="region"
 		aria-label={title}
 	>
 		<div class="flex items-start justify-between">

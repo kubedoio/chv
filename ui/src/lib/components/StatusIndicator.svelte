@@ -75,8 +75,7 @@
 <div class="flex items-center gap-2">
   <div class="relative">
     <div class="{sizeClasses[size]} rounded-full {config.bg} flex items-center justify-center">
-      <svelte:component 
-        this={config.icon} 
+      <config.icon 
         class="{sizeClasses[size]} {config.color} {config.pulse ? 'animate-spin' : ''}" 
       />
     </div>
