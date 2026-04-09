@@ -282,15 +282,30 @@ func (h *Handler) getVMConsole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return WebSocket URL for console
-	// The actual WebSocket connection goes directly to agent
-	agentURL := h.config.AgentURL
-	if agentURL == "" {
-		agentURL = "ws://localhost:9090"
+	// Return WebSocket URL for console (via controller proxy)
+	// Derive WebSocket URL from request
+	scheme := "ws"
+	if r.TLS != nil {
+		scheme = "wss"
+	}
+	host := r.Host
+	if host == "" {
+		host = r.Header.Get("Host")
 	}
 
-	// Convert http to ws
-	wsURL := agentURL + "/v1/vms/console?vm_id=" + vmID + "&api_socket=" + vm.WorkspacePath + "/api.sock"
+	// Extract token from Authorization header to pass in WebSocket URL
+	// (browsers can't send custom headers when opening WebSocket connections)
+	authHeader := r.Header.Get("Authorization")
+	token := ""
+	if len(authHeader) > 7 && strings.ToLower(authHeader[:7]) == "bearer " {
+		token = authHeader[7:]
+	}
+
+	// Build WebSocket URL pointing to controller's proxy endpoint
+	wsURL := scheme + "://" + host + "/api/v1/vms/console/ws?vm_id=" + vmID + "&api_socket=" + vm.WorkspacePath + "/api.sock"
+	if token != "" {
+		wsURL += "&token=" + token
+	}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"ws_url":  wsURL,

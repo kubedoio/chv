@@ -130,109 +130,109 @@ function createAPIClient(options) {
       clearToken();
     },
     createToken(name) {
-      return request("/tokens", {
+      return request("/api/v1/tokens", {
         method: "POST",
         body: JSON.stringify({ name })
       });
     },
     validateLogin() {
-      return request("/login/validate", { method: "POST" });
+      return request("/api/v1/login/validate", { method: "POST" });
     },
     getInstallStatus() {
-      return request("/install/status");
+      return request("/api/v1/install/status");
     },
     bootstrapInstall() {
-      return request("/install/bootstrap", {
+      return request("/api/v1/install/bootstrap", {
         method: "POST",
         body: JSON.stringify({})
       });
     },
     repairInstall(body) {
-      return request("/install/repair", {
+      return request("/api/v1/install/repair", {
         method: "POST",
         body: JSON.stringify(body)
       });
     },
     listNetworks() {
-      return request("/networks");
+      return request("/api/v1/networks");
     },
     createNetwork(data) {
-      return request("/networks", {
+      return request("/api/v1/networks", {
         method: "POST",
         body: JSON.stringify(data)
       });
     },
     listStoragePools() {
-      return request("/storage-pools");
+      return request("/api/v1/storage-pools");
     },
     createStoragePool(data) {
-      return request("/storage-pools", {
+      return request("/api/v1/storage-pools", {
         method: "POST",
         body: JSON.stringify(data)
       });
     },
     listImages() {
-      return request("/images");
+      return request("/api/v1/images");
     },
     importImage(data) {
-      return request("/images/import", {
+      return request("/api/v1/images/import", {
         method: "POST",
         body: JSON.stringify(data)
       });
     },
     listVMs() {
-      return request("/vms");
+      return request("/api/v1/vms");
     },
     createVM(data) {
-      return request("/vms", {
+      return request("/api/v1/vms", {
         method: "POST",
         body: JSON.stringify(data)
       });
     },
     listOperations() {
-      return request("/operations");
+      return request("/api/v1/operations");
     },
     getVM(id) {
-      return request(`/vms/${id}`);
+      return request(`/api/v1/vms/${id}`);
     },
     startVM(id) {
-      return request(`/vms/${id}/start`, { method: "POST" });
+      return request(`/api/v1/vms/${id}/start`, { method: "POST" });
     },
     stopVM(id) {
-      return request(`/vms/${id}/stop`, { method: "POST" });
+      return request(`/api/v1/vms/${id}/stop`, { method: "POST" });
     },
     restartVM(id) {
-      return request(`/vms/${id}/restart`, { method: "POST" });
+      return request(`/api/v1/vms/${id}/restart`, { method: "POST" });
     },
     deleteVM(id) {
-      return request(`/vms/${id}`, { method: "DELETE" });
+      return request(`/api/v1/vms/${id}`, { method: "DELETE" });
     },
     listEvents(query = "") {
-      return request(`/events${query}`);
+      return request(`/api/v1/events${query}`);
     },
     getVMMetrics(id) {
-      return request(`/vms/${id}/metrics`);
+      return request(`/api/v1/vms/${id}/metrics`);
     },
     getVMConsoleURL(id) {
-      return request(`/vms/${id}/console`);
+      return request(`/api/v1/vms/${id}/console`);
     },
     getVMStatus(id) {
-      return request(`/vms/${id}/status`);
+      return request(`/api/v1/vms/${id}/status`);
     },
     getImageProgress(id) {
-      return request(`/images/${id}/progress`);
+      return request(`/api/v1/images/${id}/progress`);
     },
     login(username, password) {
-      return request("/auth/login", {
+      return request("/api/v1/auth/login", {
         method: "POST",
         body: JSON.stringify({ username, password })
       });
     },
     logout() {
-      return request("/auth/logout", { method: "POST" });
+      return request("/api/v1/auth/logout", { method: "POST" });
     },
     getCurrentUser() {
-      return request("/auth/me");
+      return request("/api/v1/auth/me");
     }
   };
 }

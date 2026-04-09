@@ -61,9 +61,11 @@
     output = [...output, `[${type}] ${text}`];
     // Scroll to bottom
     if (terminal) {
-      setTimeout(() => {
-        terminal.scrollTop = terminal.scrollHeight;
-      }, 0);
+      requestAnimationFrame(() => {
+        if (terminal && terminal.isConnected) {
+          terminal.scrollTop = terminal.scrollHeight;
+        }
+      });
     }
   }
   

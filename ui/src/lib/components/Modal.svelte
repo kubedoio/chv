@@ -90,14 +90,20 @@
 	$effect(() => {
 		if (open) {
 			previouslyFocusedElement = document.activeElement as HTMLElement;
-			requestAnimationFrame(() => {
+			// Use setTimeout instead of requestAnimationFrame to avoid race conditions
+			const focusTimeout = setTimeout(() => {
 				isVisible = true;
-				closeButtonRef?.focus();
-			});
+				if (closeButtonRef && document.contains(closeButtonRef)) {
+					closeButtonRef.focus();
+				}
+			}, 10);
 			document.body.style.overflow = 'hidden';
+			return () => {
+				clearTimeout(focusTimeout);
+			};
 		} else {
 			document.body.style.overflow = '';
-			if (previouslyFocusedElement && !isClosing) {
+			if (previouslyFocusedElement && !isClosing && document.contains(previouslyFocusedElement)) {
 				previouslyFocusedElement.focus();
 			}
 		}

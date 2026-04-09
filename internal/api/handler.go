@@ -111,6 +111,7 @@ func (h *Handler) registerRoutes() {
 			r.Post("/images/import", h.createImage)
 			r.Get("/images/{id}/progress", h.getImageProgress)
 			r.Get("/events", h.listEvents)
+			r.Get("/vms/console/ws", h.vmConsoleWebSocket)
 			r.Route("/vms", func(r chi.Router) {
 				r.Get("/", h.listVMs)
 				r.Post("/", h.createVM)

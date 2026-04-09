@@ -206,49 +206,49 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       clearToken();
     },
     createToken(name: string) {
-      return request<{ id: string; token: string; message: string }>('/tokens', {
+      return request<{ id: string; token: string; message: string }>('/api/v1/tokens', {
         method: 'POST',
         body: JSON.stringify({ name })
       });
     },
     validateLogin() {
-      return request<{ ok: boolean }>('/login/validate', { method: 'POST' });
+      return request<{ ok: boolean }>('/api/v1/login/validate', { method: 'POST' });
     },
     getInstallStatus() {
-      return request<InstallStatusResponse>('/install/status');
+      return request<InstallStatusResponse>('/api/v1/install/status');
     },
     bootstrapInstall() {
-      return request<InstallActionResponse>('/install/bootstrap', {
+      return request<InstallActionResponse>('/api/v1/install/bootstrap', {
         method: 'POST',
         body: JSON.stringify({})
       });
     },
     repairInstall(body: Record<string, boolean>) {
-      return request<InstallActionResponse>('/install/repair', {
+      return request<InstallActionResponse>('/api/v1/install/repair', {
         method: 'POST',
         body: JSON.stringify(body)
       });
     },
     listNetworks() {
-      return request<Network[]>('/networks');
+      return request<Network[]>('/api/v1/networks');
     },
     createNetwork(data: CreateNetworkInput) {
-      return request<Network>('/networks', {
+      return request<Network>('/api/v1/networks', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     listStoragePools() {
-      return request<StoragePool[]>('/storage-pools');
+      return request<StoragePool[]>('/api/v1/storage-pools');
     },
     createStoragePool(data: CreateStoragePoolInput) {
-      return request<StoragePool>('/storage-pools', {
+      return request<StoragePool>('/api/v1/storage-pools', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     listImages() {
-      return request<Image[]>('/images');
+      return request<Image[]>('/api/v1/images');
     },
     importImage(data: {
       name: string;
@@ -258,46 +258,46 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       architecture?: string;
       format?: string;
     }) {
-      return request<Image>('/images/import', {
+      return request<Image>('/api/v1/images/import', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     listVMs() {
-      return request<VM[]>('/vms');
+      return request<VM[]>('/api/v1/vms');
     },
     createVM(data: CreateVMInput) {
-      return request<VM>('/vms', {
+      return request<VM>('/api/v1/vms', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     listOperations() {
-      return request<Operation[]>('/operations');
+      return request<Operation[]>('/api/v1/operations');
     },
     getVM(id: string) {
-      return request<VM>(`/vms/${id}`);
+      return request<VM>(`/api/v1/vms/${id}`);
     },
     startVM(id: string) {
-      return request<VM>(`/vms/${id}/start`, { method: 'POST' });
+      return request<VM>(`/api/v1/vms/${id}/start`, { method: 'POST' });
     },
     stopVM(id: string) {
-      return request<VM>(`/vms/${id}/stop`, { method: 'POST' });
+      return request<VM>(`/api/v1/vms/${id}/stop`, { method: 'POST' });
     },
     restartVM(id: string) {
-      return request<{ message: string }>(`/vms/${id}/restart`, { method: 'POST' });
+      return request<{ message: string }>(`/api/v1/vms/${id}/restart`, { method: 'POST' });
     },
     deleteVM(id: string) {
-      return request<void>(`/vms/${id}`, { method: 'DELETE' });
+      return request<void>(`/api/v1/vms/${id}`, { method: 'DELETE' });
     },
     listEvents(query = '') {
-      return request<Event[]>(`/events${query}`);
+      return request<Event[]>(`/api/v1/events${query}`);
     },
     getVMMetrics(id: string) {
-      return request<VMMetrics>(`/vms/${id}/metrics`);
+      return request<VMMetrics>(`/api/v1/vms/${id}/metrics`);
     },
     getVMConsoleURL(id: string) {
-      return request<{ ws_url: string; message: string }>(`/vms/${id}/console`);
+      return request<{ ws_url: string; message: string }>(`/api/v1/vms/${id}/console`);
     },
     getVMStatus(id: string) {
       return request<{
@@ -308,22 +308,22 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         uptime: number;
         last_error: string;
         updated_at: string;
-      }>(`/vms/${id}/status`);
+      }>(`/api/v1/vms/${id}/status`);
     },
     getImageProgress(id: string) {
-      return request<ImportProgress>(`/images/${id}/progress`);
+      return request<ImportProgress>(`/api/v1/images/${id}/progress`);
     },
     login(username: string, password: string) {
-      return request<LoginResponse>('/auth/login', {
+      return request<LoginResponse>('/api/v1/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, password })
       });
     },
     logout() {
-      return request<void>('/auth/logout', { method: 'POST' });
+      return request<void>('/api/v1/auth/logout', { method: 'POST' });
     },
     getCurrentUser() {
-      return request<UserInfo>('/auth/me');
+      return request<UserInfo>('/api/v1/auth/me');
     }
   };
 }

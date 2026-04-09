@@ -99,23 +99,16 @@
     }
   }
   
-  // Restart polling when state changes
-  $effect(() => {
-    if (pollInterval) {
-      stopPolling();
-      startPolling();
-    }
-  });
-  
-  // Start/stop metrics polling based on active tab and VM state
-  $effect(() => {
-    if (activeTab === 'metrics' && vmState === 'running') {
+  // Handle tab switching - start/stop metrics polling
+  function handleTabChange(tab: 'overview' | 'metrics' | 'console') {
+    activeTab = tab;
+    if (tab === 'metrics' && vmState === 'running') {
       loadMetrics();
       startMetricsPolling();
     } else {
       stopMetricsPolling();
     }
-  });
+  }
   
   async function loadVM() {
     loading = true;
@@ -307,7 +300,7 @@
           <ImageIcon size={16} />
           <span class="text-xs uppercase tracking-wider">Image</span>
         </div>
-        <div class="text-lg font-semibold truncate">{imageName()}</div>
+        <div class="text-lg font-semibold truncate">{imageName}</div>
         <div class="text-sm text-muted">{vm.image_id?.slice(0, 8)}...</div>
       </div>
       
@@ -316,7 +309,7 @@
           <HardDrive size={16} />
           <span class="text-xs uppercase tracking-wider">Storage</span>
         </div>
-        <div class="text-lg font-semibold">{poolName()}</div>
+        <div class="text-lg font-semibold">{poolName}</div>
         <div class="text-sm text-muted">{vm.storage_pool_id?.slice(0, 8)}...</div>
       </div>
       
@@ -325,7 +318,7 @@
           <Network size={16} />
           <span class="text-xs uppercase tracking-wider">Network</span>
         </div>
-        <div class="text-lg font-semibold">{networkName()}</div>
+        <div class="text-lg font-semibold">{networkName}</div>
         <div class="text-sm text-muted">{vm.ip_address || 'No IP'}</div>
       </div>
     </div>
@@ -342,13 +335,13 @@
     <div class="border-b border-line mb-6">
       <div class="flex gap-1">
         <button 
-          onclick={() => activeTab = 'overview'}
+          onclick={() => handleTabChange('overview')}
           class="px-4 py-2 text-sm font-medium {activeTab === 'overview' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
         >
           Overview
         </button>
         <button 
-          onclick={() => { activeTab = 'metrics'; loadMetrics(); }}
+          onclick={() => handleTabChange('metrics')}
           class="px-4 py-2 text-sm font-medium {activeTab === 'metrics' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
         >
           <BarChart3 size={16} class="inline mr-1" />

@@ -14,7 +14,10 @@ function Modal($$renderer, $$props) {
     } = $$props;
     const widthClasses = { default: "w-[480px]", wide: "w-[640px]" };
     let isVisible = false;
-    if (open) {
+    if (
+      // Use setTimeout instead of requestAnimationFrame to avoid race conditions
+      open
+    ) {
       $$renderer2.push("<!--[0-->");
       $$renderer2.push(`<div${attr_class("fixed inset-0 z-50 flex items-center justify-center bg-black/50 transition-opacity duration-200 ease-out", void 0, {
         "opacity-0": !isVisible,
