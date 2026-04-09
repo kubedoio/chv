@@ -357,6 +357,7 @@ func (h *Handler) getVMStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// getVMMetrics retrieves VM metrics and historical data
 func (h *Handler) getVMMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx := requestContext(r)
 	vmID := chi.URLParam(r, "id")
@@ -364,52 +365,102 @@ func (h *Handler) getVMMetrics(w http.ResponseWriter, r *http.Request) {
 	vm, err := h.repo.GetVMByID(ctx, vmID)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, apiError{
-			Code:      "vm_get_failed",
-			Message:   err.Error(),
-			Retryable: true,
+			Code: "vm_get_failed", Message: err.Error(), Retryable: true,
 		})
 		return
 	}
-
 	if vm == nil {
-		h.writeError(w, http.StatusNotFound, apiError{
-			Code:      "not_found",
-			Message:   "VM not found",
-			Retryable: false,
-		})
+		h.writeError(w, http.StatusNotFound, apiError{Code: "not_found", Message: "VM not found"})
 		return
 	}
 
-	// Check if VM is running
-	if vm.ActualState != "running" {
-		h.writeError(w, http.StatusPreconditionFailed, apiError{
-			Code:      "vm_not_running",
-			Message:   "VM must be running to retrieve metrics",
-			Retryable: false,
-		})
+	var metrics *agentapi.VMMetricsResponse
+	if vm.ActualState == "running" && vm.CloudHypervisorPID > 0 && h.vmService != nil {
+		metrics, _ = h.vmService.GetVMMetrics(ctx, vm.ID, vm.CloudHypervisorPID, vm.WorkspacePath)
+	}
+
+	history := []agentapi.VMMetricsResponse{}
+	if h.vmService != nil {
+		history = h.vmService.GetVMMetricsHistory(vmID)
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"id":      vmID,
+		"current": metrics,
+		"history": history,
+	})
+}
+
+type bulkVMRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type bulkVMResponse struct {
+	Results map[string]string `json:"results"` // ID -> Message or "OK"
+}
+
+// bulkStartVMs starts multiple VMs
+func (h *Handler) bulkStartVMs(w http.ResponseWriter, r *http.Request) {
+	var req bulkVMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, apiError{Code: "invalid_request", Message: err.Error()})
 		return
 	}
 
-	// Check if VM service is available
-	if h.vmService == nil {
-		h.writeError(w, http.StatusServiceUnavailable, apiError{
-			Code:      "service_unavailable",
-			Message:   "VM service not available",
-			Retryable: true,
-		})
+	ctx := requestContext(r)
+	results := make(map[string]string)
+
+	for _, id := range req.IDs {
+		if err := h.vmService.StartVM(ctx, id); err != nil {
+			results[id] = err.Error()
+		} else {
+			results[id] = "OK"
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, bulkVMResponse{Results: results})
+}
+
+// bulkStopVMs stops multiple VMs
+func (h *Handler) bulkStopVMs(w http.ResponseWriter, r *http.Request) {
+	var req bulkVMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, apiError{Code: "invalid_request", Message: err.Error()})
 		return
 	}
 
-	// Get metrics from agent via vm service
-	metrics, err := h.vmService.GetVMMetrics(ctx, vmID, vm.CloudHypervisorPID, vm.WorkspacePath)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, apiError{
-			Code:      "metrics_failed",
-			Message:   err.Error(),
-			Retryable: true,
-		})
+	ctx := requestContext(r)
+	results := make(map[string]string)
+
+	for _, id := range req.IDs {
+		if err := h.vmService.StopVM(ctx, id); err != nil {
+			results[id] = err.Error()
+		} else {
+			results[id] = "OK"
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, bulkVMResponse{Results: results})
+}
+
+// bulkDeleteVMs deletes multiple VMs
+func (h *Handler) bulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
+	var req bulkVMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, apiError{Code: "invalid_request", Message: err.Error()})
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, metrics)
+	ctx := requestContext(r)
+	results := make(map[string]string)
+
+	for _, id := range req.IDs {
+		if err := h.vmService.DeleteVM(ctx, id); err != nil {
+			results[id] = err.Error()
+		} else {
+			results[id] = "OK"
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, bulkVMResponse{Results: results})
 }

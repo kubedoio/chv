@@ -1,67 +1,134 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  color: #1a1a1a;
-  background: #ffffff;
-  font-family: 'Roboto', system-ui, sans-serif;
-}
-
-html,
-body,
-#svelte {
-  height: 100%;
+  /* Color Palette - Industry Standard Indigo/Slate */
+  --color-primary: 243 75% 59%;    /* #4f46e5 - Indigo 600 */
+  --color-primary-dark: 243 75% 45%;
+  --color-primary-light: 243 75% 96%;
+  
+  --color-slate-50: 210 40% 98%;
+  --color-slate-100: 210 40% 96%;
+  --color-slate-200: 214 32% 91%;
+  --color-slate-600: 215 25% 40%;
+  --color-slate-800: 217 33% 17%;
+  --color-slate-900: 222 47% 11%;
+  
+  --color-ink: var(--color-slate-900);
+  --color-muted: var(--color-slate-600);
+  --color-line: var(--color-slate-200);
+  --color-chrome: 210 40% 99%;
+  
+  --color-success: 142 71% 45%;
+  --color-warning: 38 92% 50%;
+  --color-danger: 0 84% 60%;
+  
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  
+  --radius: 0.75rem;
 }
 
 body {
   margin: 0;
-  background:
-    linear-gradient(180deg, rgba(245, 245, 245, 0.8), rgba(255, 255, 255, 0.95)),
-    repeating-linear-gradient(
-      90deg,
-      rgba(208, 208, 208, 0.14) 0,
-      rgba(208, 208, 208, 0.14) 1px,
-      transparent 1px,
-      transparent 96px
-    );
+  font-family: 'Inter', system-ui, sans-serif;
+  color: hsl(var(--color-ink));
+  background-color: hsl(var(--color-slate-50));
+  -webkit-font-smoothing: antialiased;
+  background-image: 
+    radial-gradient(at 0% 0%, hsla(var(--color-primary), 0.02) 0, transparent 50%),
+    radial-gradient(at 100% 0%, hsla(var(--color-primary), 0.02) 0, transparent 50%);
+}
+
+h1, h2, h3, h4 {
+  font-family: 'Outfit', sans-serif;
+  letter-spacing: -0.02em;
 }
 
 .console-shell {
-  min-height: 100%;
+  min-height: 100vh;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
+  background: white;
 }
 
-.table-card {
-  border: 1px solid #d0d0d0;
-  background: #ffffff;
+.card {
+  background: white;
+  border: 1px solid hsl(var(--color-line));
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
-.card-header {
-  border-bottom: 1px solid #d0d0d0;
-  background: #f5f5f5;
+.card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: hsla(var(--color-primary), 0.2);
 }
 
-.mono {
-  font-family: 'Roboto Mono', ui-monospace, monospace;
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 .button-primary {
-  background: #0066cc;
-  color: #ffffff;
-  border: 1px solid #0066cc;
+  background: hsl(var(--color-primary));
+  color: white;
+  font-weight: 600;
+  padding: 0.625rem 1.25rem;
+  border-radius: var(--radius);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 4px 12px hsla(var(--color-primary), 0.25);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: hsl(var(--color-primary-dark));
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px hsla(var(--color-primary), 0.3);
+}
+
+.button-primary:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .button-secondary {
-  background: #ffffff;
-  color: #1a1a1a;
-  border: 1px solid #d0d0d0;
+  background: white;
+  color: hsl(var(--color-ink));
+  border: 1px solid hsl(var(--color-line));
+  font-weight: 500;
+  padding: 0.625rem 1.25rem;
+  border-radius: var(--radius);
+  transition: all 0.2s;
 }
 
-.button-danger {
-  background: #ffffff;
-  color: #e60000;
-  border: 1px solid #e60000;
+.button-secondary:hover:not(:disabled) {
+  background: hsl(var(--color-slate-100));
+  border-color: hsl(var(--color-slate-600));
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+}
+
+.input-field {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid hsl(var(--color-line));
+  border-radius: var(--radius);
+  transition: all 0.2s;
+  background: hsl(var(--color-chrome));
+}
+
+.input-field:focus {
+  outline: none;
+  border-color: hsl(var(--color-primary));
+  box-shadow: 0 0 0 4px hsla(var(--color-primary), 0.1);
+  background: white;
 }
 

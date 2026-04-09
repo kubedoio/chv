@@ -1,77 +1,40 @@
 #!/bin/bash
 
-# CHV Startup Script
+# CHV (Cloud Hypervisor Virtualization) Startup Utility
+# Orchestrates systemd services and provides console feedback
 
 set -e
 
-CHV_DIR="/srv/data02/projects/chv"
-DATA_ROOT="/var/lib/chv"
-LOG_DIR="$DATA_ROOT/logs"
+# ANSI Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-# Create necessary directories
-mkdir -p $DATA_ROOT/{images,vms,seed,storage/localdisk,logs}
+echo -e "${BLUE}==========================================${NC}"
+echo -e "${GREEN}CHV Service Manager${NC}"
+echo -e "${BLUE}==========================================${NC}"
 
-# Stop any existing services
-echo "Stopping any existing CHV services..."
-pkill -f chv-controller 2>/dev/null || true
-pkill -f chv-agent 2>/dev/null || true
-sleep 2
-
-# Start Agent
-echo "Starting CHV Agent..."
-CHV_AGENT_ADDR=:9090 \
-CHV_DATA_ROOT=$DATA_ROOT \
-CHV_LOG_LEVEL=info \
-CHV_BRIDGE_NAME=chvbr0 \
-$CHV_DIR/chv-agent > $LOG_DIR/agent.log 2>&1 &
-
-AGENT_PID=$!
-echo "Agent started with PID: $AGENT_PID"
-
-# Wait for agent to be ready
-sleep 2
-if curl -s http://localhost:9090/health > /dev/null; then
-    echo "Agent is healthy"
-else
-    echo "Agent failed to start. Check logs at $LOG_DIR/agent.log"
+if [ "$EUID" -ne 0 ]; then 
+    echo -e "${RED}Error: Please run as root (use sudo)${NC}"
     exit 1
 fi
 
-# Start Controller
-echo "Starting CHV Controller..."
-CHV_HTTP_ADDR=:8888 \
-CHV_DATA_ROOT=$DATA_ROOT \
-CHV_AGENT_URL=http://localhost:9090 \
-CHV_LOG_LEVEL=info \
-CHV_LOG_DIR=$LOG_DIR \
-$CHV_DIR/chv-controller > $LOG_DIR/controller.log 2>&1 &
+echo "Restarting CHV services..."
+systemctl restart chv-agent.service
+systemctl restart chv-controller.service
 
-CONTROLLER_PID=$!
-echo "Controller started with PID: $CONTROLLER_PID"
-
-# Wait for controller to be ready
+echo -n "Waiting for services to stabilize..."
 sleep 2
-if curl -s http://localhost:8888/health > /dev/null; then
-    echo "Controller is healthy"
-else
-    echo "Controller failed to start. Check logs at $LOG_DIR/controller.log"
-    exit 1
-fi
+echo " OK."
 
 echo ""
-echo "=========================================="
-echo "CHV is now running!"
-echo "=========================================="
+echo -e "Service Status:"
+systemctl is-active chv-agent.service | xargs echo -e "  - Agent:      "
+systemctl is-active chv-controller.service | xargs echo -e "  - Controller: "
+
 echo ""
-echo "WebUI:        http://localhost:8888"
-echo "Agent API:    http://localhost:9090"
-echo "Controller:   http://localhost:8888"
+echo -e "WebUI is active at: ${GREEN}http://localhost:8888${NC}"
+echo "Agent API is at:    http://localhost:9090"
 echo ""
-echo "Logs:"
-echo "  Agent:      $LOG_DIR/agent.log"
-echo "  Controller: $LOG_DIR/controller.log"
-echo ""
-echo "Data:         $DATA_ROOT"
-echo ""
-echo "To stop:      pkill -f chv-controller; pkill -f chv-agent"
-echo "=========================================="
+echo -e "${BLUE}==========================================${NC}"

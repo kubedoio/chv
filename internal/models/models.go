@@ -100,6 +100,14 @@ type VirtualMachine struct {
 	UpdatedAt          string `json:"updated_at,omitempty"`
 }
 
+type VMSnapshot struct {
+	ID        string `json:"id"`
+	VMID      string `json:"vm_id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+	Status    string `json:"status"`
+}
+
 type User struct {
 	ID           string  `json:"id"`
 	Username     string  `json:"username"`

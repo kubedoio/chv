@@ -17,7 +17,10 @@ import type {
   StoragePool,
   UserInfo,
   VM,
-  VMMetrics
+  VMMetrics,
+  VMMetricsResponse,
+  BulkVMResponse,
+  VMSnapshot,
 } from '$lib/api/types';
 
 const DEFAULT_BASE_URL = env.PUBLIC_CHV_API_BASE_URL || ''; // Empty string means same origin
@@ -196,6 +199,38 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     return (await response.json()) as T;
   }
 
+  async function upload<T>(path: string, formData: FormData): Promise<T> {
+    if (token) {
+      // Note: Don't set Content-Type header manually for FormData,
+      // the browser will do it automatically and include the boundary.
+    }
+
+    const headers = new Headers();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers,
+        body: formData
+      });
+    } catch (fetchError) {
+      const message = getUserFriendlyMessage(fetchError);
+      toast.error(message);
+      throw new Error(message);
+    }
+
+    if (!response.ok) {
+      // Same error handling as request function... (simplified for now)
+      throw new Error(`Upload failed with status ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+  }
+
   return {
     setToken(next: string) {
       token = next;
@@ -263,6 +298,9 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(data)
       });
     },
+    uploadImage(formData: FormData) {
+      return upload<Image>('/api/v1/images/upload', formData);
+    },
     listVMs() {
       return request<VM[]>('/api/v1/vms');
     },
@@ -294,7 +332,25 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       return request<Event[]>(`/api/v1/events${query}`);
     },
     getVMMetrics(id: string) {
-      return request<VMMetrics>(`/api/v1/vms/${id}/metrics`);
+      return request<VMMetricsResponse>(`/api/v1/vms/${id}/metrics`);
+    },
+    bulkStartVMs(ids: string[]) {
+      return request<BulkVMResponse>('/api/v1/vms/bulk/start', {
+        method: 'POST',
+        body: JSON.stringify({ ids })
+      });
+    },
+    bulkStopVMs(ids: string[]) {
+      return request<BulkVMResponse>('/api/v1/vms/bulk/stop', {
+        method: 'POST',
+        body: JSON.stringify({ ids })
+      });
+    },
+    bulkDeleteVMs(ids: string[]) {
+      return request<BulkVMResponse>('/api/v1/vms/bulk/delete', {
+        method: 'POST',
+        body: JSON.stringify({ ids })
+      });
     },
     getVMConsoleURL(id: string) {
       return request<{ ws_url: string; message: string }>(`/api/v1/vms/${id}/console`);
@@ -324,6 +380,18 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     },
     getCurrentUser() {
       return request<UserInfo>('/api/v1/auth/me');
+    },
+    listVMSnapshots(id: string) {
+      return request<VMSnapshot[]>(`/api/v1/vms/${id}/snapshots`);
+    },
+    createVMSnapshot(id: string) {
+      return request<VMSnapshot>(`/api/v1/vms/${id}/snapshots`, { method: 'POST' });
+    },
+    restoreVMSnapshot(vmId: string, snapId: string) {
+      return request<{ success: boolean }>(`/api/v1/vms/${vmId}/snapshots/${snapId}/restore`, { method: 'POST' });
+    },
+    deleteVMSnapshot(vmId: string, snapId: string) {
+      return request<{ success: boolean }>(`/api/v1/vms/${vmId}/snapshots/${snapId}`, { method: 'DELETE' });
     }
   };
 }

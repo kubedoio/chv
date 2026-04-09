@@ -181,6 +181,20 @@ export interface APIErrorEnvelope {
   };
 }
 
+export interface VMMetricsResponse {
+  id: string;
+  current: VMMetrics | null;
+  history: VMMetrics[];
+}
+
+export interface BulkVMRequest {
+  ids: string[];
+}
+
+export interface BulkVMResponse {
+  results: Record<string, string>;
+}
+
 export interface VMMetrics {
   cpu: {
     usage_percent: number;
@@ -205,5 +219,13 @@ export interface VMMetrics {
     tx_packets: number;
   };
   uptime: string;
+}
+
+export interface VMSnapshot {
+  id: string;
+  vm_id: string;
+  name: string;
+  created_at: string;
+  status: string;
 }
 

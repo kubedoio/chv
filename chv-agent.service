@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/srv/data02/projects/chv/chv-agent
-Restart=always
+ExecStart=/usr/local/bin/chv-agent
+Restart=on-failure
 RestartSec=5
 User=root
 Environment="CHV_AGENT_ADDR=:9090"

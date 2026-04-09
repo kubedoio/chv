@@ -109,12 +109,16 @@ func (h *Handler) registerRoutes() {
 			r.Post("/storage-pools", h.createStoragePool)
 			r.Get("/images", h.listImages)
 			r.Post("/images/import", h.createImage)
+			r.Post("/images/upload", h.uploadImage)
 			r.Get("/images/{id}/progress", h.getImageProgress)
 			r.Get("/events", h.listEvents)
 			r.Get("/vms/console/ws", h.vmConsoleWebSocket)
 			r.Route("/vms", func(r chi.Router) {
 				r.Get("/", h.listVMs)
 				r.Post("/", h.createVM)
+				r.Post("/bulk/start", h.bulkStartVMs)
+				r.Post("/bulk/stop", h.bulkStopVMs)
+				r.Post("/bulk/delete", h.bulkDeleteVMs)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.getVM)
 					r.Get("/status", h.getVMStatus)
@@ -124,6 +128,12 @@ func (h *Handler) registerRoutes() {
 					r.Post("/restart", h.restartVM)
 					r.Delete("/", h.deleteVM)
 					r.Get("/console", h.getVMConsole)
+					r.Route("/snapshots", func(r chi.Router) {
+						r.Get("/", h.listVMSnapshots)
+						r.Post("/", h.createVMSnapshot)
+						r.Post("/{snapId}/restore", h.restoreVMSnapshot)
+						r.Delete("/{snapId}", h.deleteVMSnapshot)
+					})
 				})
 			})
 			r.Get("/operations", h.listOperations)
@@ -248,4 +258,46 @@ func spaFileServer(r chi.Router, path string, root http.FileSystem) {
 		// Serve the file
 		http.ServeContent(w, r, stat.Name(), stat.ModTime(), f.(io.ReadSeeker))
 	})
+}
+
+func (h *Handler) listVMSnapshots(w http.ResponseWriter, r *http.Request) {
+	vmID := chi.URLParam(r, "id")
+	snaps, err := h.vmService.ListSnapshots(r.Context(), vmID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "list_failed", Message: err.Error()})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, snaps)
+}
+
+func (h *Handler) createVMSnapshot(w http.ResponseWriter, r *http.Request) {
+	vmID := chi.URLParam(r, "id")
+	snap, err := h.vmService.CreateSnapshot(r.Context(), vmID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "create_failed", Message: err.Error()})
+		return
+	}
+	h.writeJSON(w, http.StatusCreated, snap)
+}
+
+func (h *Handler) restoreVMSnapshot(w http.ResponseWriter, r *http.Request) {
+	vmID := chi.URLParam(r, "id")
+	snapID := chi.URLParam(r, "snapId")
+	err := h.vmService.RestoreSnapshot(r.Context(), vmID, snapID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "restore_failed", Message: err.Error()})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+func (h *Handler) deleteVMSnapshot(w http.ResponseWriter, r *http.Request) {
+	vmID := chi.URLParam(r, "id")
+	snapID := chi.URLParam(r, "snapId")
+	err := h.vmService.DeleteSnapshot(r.Context(), vmID, snapID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "delete_failed", Message: err.Error()})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }

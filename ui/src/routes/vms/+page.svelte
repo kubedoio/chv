@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { Server, Play, Square, AlertCircle, Plus } from 'lucide-svelte';
+  import { Server, Play, Square, AlertCircle, Plus, Trash2, CheckSquare, MinusSquare } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import StateBadge from '$lib/components/StateBadge.svelte';
@@ -21,6 +21,7 @@
   let images = $state<Image[]>([]);
   let pools = $state<StoragePool[]>([]);
   let networks = $state<Network[]>([]);
+  let selectedIds = $state<string[]>([]);
 
   // Computed stats
   const total = $derived(items.length);
@@ -65,6 +66,44 @@
     loadVMs();
     loadDependencies();
   });
+
+  function toggleSelect(id: string) {
+    if (selectedIds.includes(id)) {
+      selectedIds = selectedIds.filter(i => i !== id);
+    } else {
+      selectedIds = [...selectedIds, id];
+    }
+  }
+
+  function toggleSelectAll() {
+    if (selectedIds.length === items.length) {
+      selectedIds = [];
+    } else {
+      selectedIds = items.map(vm => vm.id);
+    }
+  }
+
+  async function handleBulkAction(action: 'start' | 'stop' | 'delete') {
+    if (selectedIds.length === 0) return;
+    
+    const count = selectedIds.length;
+    const confirmMsg = `Are you sure you want to ${action} ${count} VM${count > 1 ? 's' : ''}?`;
+    
+    if (!confirm(confirmMsg)) return;
+
+    try {
+      let result;
+      if (action === 'start') result = await client.bulkStartVMs(selectedIds);
+      else if (action === 'stop') result = await client.bulkStopVMs(selectedIds);
+      else if (action === 'delete') result = await client.bulkDeleteVMs(selectedIds);
+
+      toast.success(`Bulk ${action} operation completed`);
+      selectedIds = [];
+      loadVMs();
+    } catch (err) {
+      toast.error(`Bulk ${action} failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  }
 </script>
 
 <!-- Header with stats cards and create button -->
@@ -77,7 +116,7 @@
   </div>
   <button 
     onclick={() => createModalOpen = true} 
-    class="ml-4 px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors flex items-center gap-2"
+    class="ml-4 button-primary flex items-center gap-2"
   >
     <Plus size={16} />
     Create VM
@@ -101,7 +140,18 @@
     <table class="w-full border-collapse text-sm">
       <thead class="bg-chrome text-left uppercase tracking-[0.08em] text-muted">
         <tr>
-          <th class="border-b border-line px-4 py-3">Name</th>
+          <th class="border-b border-line px-4 py-3 w-10">
+            <button onclick={toggleSelectAll} class="flex items-center text-muted hover:text-ink">
+              {#if selectedIds.length === items.length && items.length > 0}
+                <CheckSquare size={16} />
+              {:else if selectedIds.length > 0}
+                <MinusSquare size={16} />
+              {:else}
+                <Square size={16} />
+              {/if}
+            </button>
+          </th>
+          <th class="border-b border-line px-4 py-3 text-ink">Name</th>
           <th class="border-b border-line px-4 py-3">State</th>
           <th class="border-b border-line px-4 py-3">Image</th>
           <th class="border-b border-line px-4 py-3">Pool</th>
@@ -151,7 +201,18 @@
     <table class="w-full border-collapse text-sm">
       <thead class="bg-chrome text-left uppercase tracking-[0.08em] text-muted">
         <tr>
-          <th class="border-b border-line px-4 py-3">Name</th>
+          <th class="border-b border-line px-4 py-3 w-10">
+            <button onclick={toggleSelectAll} class="flex items-center text-muted hover:text-ink">
+              {#if selectedIds.length === items.length && items.length > 0}
+                <CheckSquare size={16} />
+              {:else if selectedIds.length > 0}
+                <MinusSquare size={16} />
+              {:else}
+                <Square size={16} />
+              {/if}
+            </button>
+          </th>
+          <th class="border-b border-line px-4 py-3 text-ink">Name</th>
           <th class="border-b border-line px-4 py-3">State</th>
           <th class="border-b border-line px-4 py-3">Image</th>
           <th class="border-b border-line px-4 py-3">Pool</th>
@@ -164,11 +225,20 @@
       </thead>
       <tbody>
         {#each items as item}
-          <tr class="odd:bg-white even:bg-[#f8f8f8]">
-            <td class="border-b border-line px-4 py-3">
-              <a class="text-primary no-underline hover:underline" href={`/vms/${item.id}`}>{item.name}</a>
+          <tr class={`transition-all duration-200 ${selectedIds.includes(item.id) ? 'bg-indigo-50/50' : 'hover:bg-slate-50/50'}`}>
+            <td class="border-b border-line px-6 py-4">
+              <button onclick={() => toggleSelect(item.id)} class="flex items-center text-slate-400 hover:text-indigo-600 transition-colors">
+                {#if selectedIds.includes(item.id)}
+                  <CheckSquare size={16} class="text-indigo-600" />
+                {:else}
+                  <Square size={16} />
+                {/if}
+              </button>
             </td>
-            <td class="border-b border-line px-4 py-3">
+            <td class="border-b border-line px-6 py-4 font-semibold text-slate-900">
+              <a class="hover:text-indigo-600 no-underline transition-colors" href={`/vms/${item.id}`}>{item.name}</a>
+            </td>
+            <td class="border-b border-line px-6 py-4">
               {#if item.desired_state === item.actual_state}
                 <StateBadge label={item.actual_state} />
               {:else}
@@ -192,6 +262,48 @@
       </tbody>
     </table>
   </section>
+{/if}
+
+{#if selectedIds.length > 0}
+  <div class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-ink text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300">
+    <div class="flex items-center gap-2 border-r border-white/20 pr-6">
+      <span class="bg-primary text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">{selectedIds.length}</span>
+      <span class="text-sm font-medium">Selected</span>
+    </div>
+    
+    <div class="flex items-center gap-4">
+      <button 
+        onclick={() => handleBulkAction('start')}
+        class="flex items-center gap-2 text-sm hover:text-primary transition-colors font-medium"
+      >
+        <Play size={14} fill="currentColor" />
+        Start
+      </button>
+      
+      <button 
+        onclick={() => handleBulkAction('stop')}
+        class="flex items-center gap-2 text-sm hover:text-primary transition-colors font-medium"
+      >
+        <Square size={14} fill="currentColor" />
+        Stop
+      </button>
+      
+      <button 
+        onclick={() => handleBulkAction('delete')}
+        class="flex items-center gap-2 text-sm text-danger hover:text-red-400 transition-colors font-medium"
+      >
+        <Trash2 size={14} />
+        Delete
+      </button>
+    </div>
+    
+    <button 
+      onclick={() => selectedIds = []}
+      class="ml-2 text-white/50 hover:text-white transition-colors"
+    >
+      Cancel
+    </button>
+  </div>
 {/if}
 
 <CreateVMModal 

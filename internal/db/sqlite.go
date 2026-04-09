@@ -724,6 +724,48 @@ func (r *Repository) migrateAddImageFormat() error {
 	return nil
 }
 
+func (r *Repository) CreateVMSnapshot(ctx context.Context, s *models.VMSnapshot) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO vm_snapshots (id, vm_id, name, created_at, status) VALUES (?, ?, ?, ?, ?)`,
+		s.ID, s.VMID, s.Name, s.CreatedAt, s.Status)
+	return err
+}
+
+func (r *Repository) GetVMSnapshot(ctx context.Context, id string) (*models.VMSnapshot, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, vm_id, name, created_at, status FROM vm_snapshots WHERE id = ?`, id)
+	var s models.VMSnapshot
+	if err := row.Scan(&s.ID, &s.VMID, &s.Name, &s.CreatedAt, &s.Status); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (r *Repository) ListVMSnapshots(ctx context.Context, vmID string) ([]models.VMSnapshot, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, vm_id, name, created_at, status FROM vm_snapshots WHERE vm_id = ? ORDER BY created_at DESC`, vmID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []models.VMSnapshot
+	for rows.Next() {
+		var s models.VMSnapshot
+		if err := rows.Scan(&s.ID, &s.VMID, &s.Name, &s.CreatedAt, &s.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) DeleteVMSnapshot(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM vm_snapshots WHERE id = ?`, id)
+	return err
+}
+
 func nullable(value string) any {
 	if value == "" {
 		return nil

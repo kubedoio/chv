@@ -111,4 +111,13 @@ CREATE TABLE IF NOT EXISTS operations (
     finished_at TEXT NULL,
     created_at TEXT NOT NULL
 );
+ 
+CREATE TABLE IF NOT EXISTS vm_snapshots (
+    id TEXT PRIMARY KEY,
+    vm_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    FOREIGN KEY(vm_id) REFERENCES virtual_machines(id) ON DELETE CASCADE
+);
 

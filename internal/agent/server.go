@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/chv/chv/internal/agent/handlers"
 	"github.com/chv/chv/internal/agent/services"
+	"github.com/chv/chv/internal/cloudinit"
 	"github.com/chv/chv/internal/config"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -64,6 +67,12 @@ func (s *Server) routes() {
 	bootstrapService := services.NewBootstrapService()
 	bootstrapHandler := handlers.NewBootstrapHandler(bootstrapService)
 
+	// Firewall service (Stage 2 Security)
+	fwService := services.NewFirewallService(s.cfg.DataRoot, s.cfg.BridgeName)
+	if err := fwService.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize firewall: %v\n", err)
+	}
+
 	// Image download service
 	imageDownloadService := services.NewImageDownloadService()
 	imageHandler := handlers.NewImageHandler(imageDownloadService)
@@ -73,7 +82,8 @@ func (s *Server) routes() {
 	cloudInitHandler := handlers.NewCloudInitHandler(seedISOService)
 
 	// VM management service
-	vmService := services.NewVMManagementService()
+	cloudInitRenderer := cloudinit.NewRenderer(s.cfg.DataRoot)
+	vmService := services.NewVMManagementService(s.cfg.DataRoot, s.cfg.BridgeName, fwService, seedISOService, cloudInitRenderer)
 	vmHealthService := services.NewVMHealthService()
 	vmConsoleService := services.NewVMConsoleService()
 	vmHandler := handlers.NewVMHandler(vmService, vmHealthService, vmConsoleService)
@@ -86,11 +96,17 @@ func (s *Server) routes() {
 		r.Post("/cloud-init/seed-iso", cloudInitHandler.GenerateSeedISO)
 		r.Post("/vms/start", vmHandler.StartVM)
 		r.Post("/vms/stop", vmHandler.StopVM)
+		r.Post("/vms/destroy", vmHandler.DestroyVM)
+		r.Post("/vms/provision", vmHandler.ProvisionVM)
 		r.Post("/vms/status", vmHandler.GetVMStatus)
 		r.Get("/vms/running", vmHandler.ListRunningVMs)
 		r.Post("/vms/metrics", vmHandler.GetVMMetrics)
 		r.Post("/vms/health", vmHandler.HealthCheck)
 		r.Get("/vms/console", vmHandler.Console)
+		r.Post("/vms/snapshots", vmHandler.CreateSnapshot)
+		r.Post("/vms/snapshots/list", vmHandler.ListSnapshots)
+		r.Post("/vms/snapshots/restore", vmHandler.RestoreSnapshot)
+		r.Post("/vms/snapshots/delete", vmHandler.DeleteSnapshot)
 	})
 }
 

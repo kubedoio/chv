@@ -10,8 +10,8 @@
   import MetricsChart from '$lib/components/MetricsChart.svelte';
   import Terminal from '$lib/components/Terminal.svelte';
   import { toast } from '$lib/stores/toast';
-  import { Play, Square, Trash2, ArrowLeft, Cpu, HardDrive, Network, Image as ImageIcon, RefreshCw, Terminal as TerminalIcon, BarChart3, RotateCcw } from 'lucide-svelte';
-  import type { VM, Image, StoragePool, Network as NetworkType, VMMetrics } from '$lib/api/types';
+  import { Play, Square, Trash2, ArrowLeft, Cpu, HardDrive, Network, Image as ImageIcon, RefreshCw, Terminal as TerminalIcon, BarChart3, RotateCcw, Camera } from 'lucide-svelte';
+  import type { VM, Image, StoragePool, Network as NetworkType, VMMetrics, VMMetricsResponse, VMSnapshot } from '$lib/api/types';
   
   const client = createAPIClient({ token: getStoredToken() ?? undefined });
   const id = $derived($page.params.id);
@@ -20,16 +20,20 @@
   let images = $state<Image[]>([]);
   let pools = $state<StoragePool[]>([]);
   let networks = $state<NetworkType[]>([]);
-  let metrics = $state<VMMetrics | null>(null);
+  let metricsData = $state<VMMetricsResponse | null>(null);
+  let metrics = $derived(metricsData?.current);
+  let metricsHistory = $derived(metricsData?.history || []);
   let loading = $state(true);
   let actionLoading = $state(false);
   let deleteModalOpen = $state(false);
   let pollInterval = $state<number | null>(null);
   let metricsInterval = $state<number | null>(null);
   let lastUpdated = $state<Date | null>(null);
-  let activeTab = $state<'overview' | 'metrics' | 'console'>('overview');
+  let activeTab = $state<'overview' | 'metrics' | 'snapshots' | 'console'>('overview');
+  let snapshots = $state<VMSnapshot[]>([]);
   let consoleWsUrl = $state<string>('');
   let showTerminal = $state(false);
+  let snapshotLoading = $state(false);
   
   // Derived values for display
   const imageName = $derived(
@@ -98,15 +102,95 @@
       metricsInterval = null;
     }
   }
+
+  // Helper for metrics charts
+  function getMetricHistory(key: 'cpu' | 'memory' | 'disk_read' | 'disk_write') {
+    return metricsHistory.map(m => {
+      if (key === 'cpu') return m.cpu.usage_percent;
+      if (key === 'memory') return m.memory.usage_percent;
+      if (key === 'disk_read') return m.disk.read_bytes / 1024 / 1024;
+      if (key === 'disk_write') return m.disk.write_bytes / 1024 / 1024;
+      return 0;
+    });
+  }
   
   // Handle tab switching - start/stop metrics polling
-  function handleTabChange(tab: 'overview' | 'metrics' | 'console') {
+  function handleTabChange(tab: 'overview' | 'metrics' | 'snapshots' | 'console') {
     activeTab = tab;
     if (tab === 'metrics' && vmState === 'running') {
       loadMetrics();
       startMetricsPolling();
     } else {
       stopMetricsPolling();
+    }
+
+    if (tab === 'snapshots') {
+      loadSnapshots();
+    }
+  }
+
+  async function loadSnapshots() {
+    try {
+      snapshots = await client.listVMSnapshots(id);
+    } catch (e: any) {
+      console.error('Failed to load snapshots:', e);
+    }
+  }
+
+  async function createSnapshot() {
+    if (vmState !== 'stopped' && vmState !== 'prepared') {
+      toast.error('VM must be stopped to create a snapshot');
+      return;
+    }
+
+    snapshotLoading = true;
+    try {
+      await client.createVMSnapshot(id);
+      toast.success('Snapshot created');
+      await loadSnapshots();
+    } catch (e: any) {
+      toast.error(e.message || 'Failed to create snapshot');
+    } finally {
+      snapshotLoading = false;
+    }
+  }
+
+  async function restoreSnapshot(snapID: string) {
+    if (vmState !== 'stopped' && vmState !== 'prepared') {
+      toast.error('VM must be stopped to restore a snapshot');
+      return;
+    }
+
+    if (!confirm('Are you sure you want to restore this snapshot? Current disk state will be lost.')) {
+      return;
+    }
+
+    snapshotLoading = true;
+    try {
+      await client.restoreSnapshot(id, snapID);
+      toast.success('Snapshot restored');
+      await refreshVM();
+    } catch (e: any) {
+      toast.error(e.message || 'Failed to restore snapshot');
+    } finally {
+      snapshotLoading = false;
+    }
+  }
+
+  async function deleteSnapshot(snapID: string) {
+    if (!confirm('Are you sure you want to delete this snapshot?')) {
+      return;
+    }
+
+    snapshotLoading = true;
+    try {
+      await client.deleteVMSnapshot(id, snapID);
+      toast.success('Snapshot deleted');
+      await loadSnapshots();
+    } catch (e: any) {
+      toast.error(e.message || 'Failed to delete snapshot');
+    } finally {
+      snapshotLoading = false;
     }
   }
   
@@ -166,8 +250,7 @@
       return;
     }
     try {
-      const data = await client.getVMMetrics(id);
-      metrics = data;
+      metricsData = await client.getVMMetrics(id);
     } catch (e) {
       console.error('Failed to load metrics:', e);
     }
@@ -347,6 +430,13 @@
           <BarChart3 size={16} class="inline mr-1" />
           Metrics
         </button>
+        <button 
+          onclick={() => handleTabChange('snapshots')}
+          class="px-4 py-2 text-sm font-medium {activeTab === 'snapshots' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+        >
+          <Camera size={16} class="inline mr-1" />
+          Snapshots
+        </button>
         {#if vmState === 'running'}
           <button 
             onclick={() => openConsole()}
@@ -376,15 +466,15 @@
             <MetricsChart 
               title="CPU & Memory"
               data={[
-                { label: 'CPU Usage', value: metrics.cpu.usage_percent, max: 100, color: '#3b82f6' },
-                { label: 'Memory Usage', value: metrics.memory.usage_percent, max: 100, color: '#10b981' }
+                { label: 'CPU Usage', value: metrics.cpu.usage_percent, max: 100, color: '#3b82f6', history: getMetricHistory('cpu') },
+                { label: 'Memory Usage', value: metrics.memory.usage_percent, max: 100, color: '#10b981', history: getMetricHistory('memory') }
               ]}
             />
             <MetricsChart 
               title="Disk I/O"
               data={[
-                { label: 'Read', value: metrics.disk.read_bytes / 1024 / 1024, max: 1000, color: '#f59e0b' },
-                { label: 'Write', value: metrics.disk.write_bytes / 1024 / 1024, max: 1000, color: '#ef4444' }
+                { label: 'Read (MB)', value: metrics.disk.read_bytes / 1024 / 1024, max: 100, color: '#f59e0b', history: getMetricHistory('disk_read') },
+                { label: 'Write (MB)', value: metrics.disk.write_bytes / 1024 / 1024, max: 100, color: '#ef4444', history: getMetricHistory('disk_write') }
               ]}
             />
           </div>
@@ -408,6 +498,77 @@
         {:else}
           <div class="text-center py-8 text-muted">
             {vmState === 'running' ? 'Loading metrics...' : 'VM must be running to view metrics'}
+          </div>
+        {/if}
+      </div>
+    {:else if activeTab === 'snapshots'}
+      <div class="space-y-4">
+        <div class="flex justify-between items-center bg-white border border-line p-4 rounded">
+          <div>
+            <h3 class="font-semibold text-gray-800">Local Disk Snapshots</h3>
+            <p class="text-xs text-muted">Internal snapshots stored within the qcow2 disk header.</p>
+          </div>
+          <button 
+            onclick={createSnapshot} 
+            disabled={snapshotLoading || (vmState !== 'stopped' && vmState !== 'prepared')} 
+            class="button-primary flex items-center gap-2"
+          >
+            <Camera size={16} />
+            {snapshotLoading ? 'Creating...' : 'Take Snapshot'}
+          </button>
+        </div>
+
+        {#if snapshots.length === 0}
+          <div class="card p-12 text-center text-muted border-dashed border-2">
+            <Camera size={48} class="mx-auto mb-4 opacity-20" />
+            <p>No snapshots found for this VM.</p>
+            <p class="text-xs mt-1">Snapshots allow you to save the disk state and revert back to it later.</p>
+          </div>
+        {:else}
+          <div class="card overflow-hidden">
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="bg-gray-50 text-xs uppercase tracking-wider text-muted border-b border-line">
+                  <th class="px-4 py-3 font-semibold">Name</th>
+                  <th class="px-4 py-3 font-semibold">Created</th>
+                  <th class="px-4 py-3 font-semibold">Status</th>
+                  <th class="px-4 py-3 font-semibold text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-line text-sm bg-white">
+                {#each snapshots as snap}
+                  <tr class="hover:bg-gray-50 transition-colors">
+                    <td class="px-4 py-3 font-medium text-gray-800">{snap.name}</td>
+                    <td class="px-4 py-3 text-muted">{new Date(snap.created_at).toLocaleString()}</td>
+                    <td class="px-4 py-3">
+                      <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        {snap.status}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3 text-right">
+                      <div class="flex justify-end gap-1">
+                        <button 
+                          onclick={() => restoreSnapshot(snap.id)} 
+                          disabled={snapshotLoading || (vmState !== 'stopped' && vmState !== 'prepared')}
+                          class="p-2 hover:bg-emerald-50 rounded text-emerald-600 border border-transparent hover:border-emerald-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                          title="Restore Snapshot"
+                        >
+                          <RotateCcw size={16} />
+                        </button>
+                        <button 
+                          onclick={() => deleteSnapshot(snap.id)} 
+                          disabled={snapshotLoading}
+                          class="p-2 hover:bg-rose-50 rounded text-rose-600 border border-transparent hover:border-rose-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                          title="Delete Snapshot"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
         {/if}
       </div>

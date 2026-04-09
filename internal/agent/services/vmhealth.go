@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/chv/chv/internal/agentapi"
@@ -14,6 +15,13 @@ import (
 // VMHealthService monitors VM health via Cloud Hypervisor API
 type VMHealthService struct {
 	httpClient *http.Client
+	mu         sync.Mutex
+	lastStats  map[string]lastCPUState // VMID -> state
+}
+
+type lastCPUState struct {
+	cpuSeconds float64
+	timestamp  time.Time
 }
 
 // NewVMHealthService creates a new VM health service
@@ -27,6 +35,7 @@ func NewVMHealthService() *VMHealthService {
 				}).DialContext,
 			},
 		},
+		lastStats: make(map[string]lastCPUState),
 	}
 }
 
@@ -73,7 +82,7 @@ func (s *VMHealthService) GetMetrics(ctx context.Context, req *agentapi.VMMetric
 
 	return &agentapi.VMMetricsResponse{
 		CPU: agentapi.CPUMetrics{
-			UsagePercent: calculateCPUUsage(counters),
+			UsagePercent: s.calculateCPUUsage(req.VMID, counters, info.CPUs),
 			VCPUs:        info.CPUs,
 		},
 		Memory: agentapi.MemoryMetrics{
@@ -195,12 +204,37 @@ func (s *VMHealthService) queryVMInfo(ctx context.Context, client *http.Client) 
 }
 
 // calculateCPUUsage calculates CPU usage percentage from counters
-func calculateCPUUsage(counters chCounters) float64 {
-	// This is simplified; real implementation would track over time
-	if counters.VmmMetrics.CPUSeconds == 0 {
+func (s *VMHealthService) calculateCPUUsage(vmID string, counters chCounters, vcpus int) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	newSeconds := counters.VmmMetrics.CPUSeconds
+	newTime := time.Now()
+
+	last, exists := s.lastStats[vmID]
+	s.lastStats[vmID] = lastCPUState{
+		cpuSeconds: newSeconds,
+		timestamp:  newTime,
+	}
+
+	if !exists || vcpus == 0 {
 		return 0
 	}
-	return counters.VmmMetrics.CPUSeconds
+
+	deltaSeconds := newSeconds - last.cpuSeconds
+	deltaTime := newTime.Sub(last.timestamp).Seconds()
+
+	if deltaTime <= 0 {
+		return 0
+	}
+
+	// Usage % = (delta CPU seconds / delta wall seconds) * 100 / vcpus
+	usage := (deltaSeconds / deltaTime) * 100
+	if usage > float64(vcpus*100) {
+		usage = float64(vcpus * 100)
+	}
+
+	return usage
 }
 
 // HealthStatus represents VM health status

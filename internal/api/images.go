@@ -1,12 +1,18 @@
 package api
 
 import (
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/chv/chv/internal/images"
+	"github.com/chv/chv/internal/models"
 	"github.com/chv/chv/internal/operations"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 type createImageRequest struct {
@@ -124,4 +130,75 @@ func (h *Handler) getImageProgress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, progress)
+}
+
+// uploadImage handles multipart/form-data image uploads
+func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+
+	// Max 2GB upload for now
+	if err := r.ParseMultipartForm(2 << 30); err != nil {
+		h.writeError(w, http.StatusBadRequest, apiError{Code: "invalid_request", Message: "Failed to parse multipart form: " + err.Error()})
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, apiError{Code: "invalid_request", Message: "No file provided in 'file' field"})
+		return
+	}
+	defer file.Close()
+
+	name := r.FormValue("name")
+	if name == "" {
+		name = header.Filename
+	}
+
+	imageID := uuid.NewString()
+	destPath := filepath.Join(h.config.DataRoot, "images", imageID+".qcow2")
+
+	// Create directory if not exists
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "fs_error", Message: "Failed to create images directory: " + err.Error()})
+		return
+	}
+
+	// Create destination file
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "fs_error", Message: "Failed to create destination file: " + err.Error()})
+		return
+	}
+	defer destFile.Close()
+
+	// Copy content
+	if _, err := io.Copy(destFile, file); err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "fs_error", Message: "Failed to save file: " + err.Error()})
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	img := &models.Image{
+		ID:                 imageID,
+		Name:               name,
+		OSFamily:           r.FormValue("os_family"),
+		Architecture:       r.FormValue("architecture"),
+		Format:             "qcow2", // Always normalize to qcow2 for now
+		SourceFormat:       "qcow2",
+		NormalizedFormat:   "qcow2",
+		SourceURL:          "local://upload",
+		LocalPath:          destPath,
+		CloudInitSupported: r.FormValue("cloud_init_supported") == "true",
+		Status:             images.StatusReady,
+		CreatedAt:          now,
+	}
+
+	if err := h.repo.CreateImage(ctx, img); err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{Code: "db_error", Message: "Failed to create image record: " + err.Error()})
+		// Cleanup file
+		os.Remove(destPath)
+		return
+	}
+
+	h.writeJSON(w, http.StatusCreated, img)
 }

@@ -68,6 +68,29 @@ func (h *VMHandler) StopVM(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, resp)
 }
 
+func (h *VMHandler) DestroyVM(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var req agentapi.VMDestroyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
+		return
+	}
+
+	if req.VMID == "" || req.WorkspacePath == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id and workspace_path are required", false)
+		return
+	}
+
+	resp, err := h.vmService.DestroyVM(ctx, &req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "vm_destroy_failed", err.Error(), false)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, resp)
+}
+
 func (h *VMHandler) GetVMStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -154,4 +177,110 @@ func (h *VMHandler) Console(w http.ResponseWriter, r *http.Request) {
 		// Error already handled by upgrade or sent to client
 		return
 	}
+}
+
+func (h *VMHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req agentapi.VMSnapshotCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		return
+	}
+
+	if req.VMID == "" || req.DiskPath == "" || req.Name == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id, disk_path, and name are required", false)
+		return
+	}
+
+	resp, err := h.vmService.CreateSnapshot(ctx, &req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "snapshot_create_failed", err.Error(), false)
+		return
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+func (h *VMHandler) ListSnapshots(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req agentapi.VMSnapshotListRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		return
+	}
+
+	if req.VMID == "" || req.DiskPath == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id and disk_path are required", false)
+		return
+	}
+
+	snapshots, err := h.vmService.ListSnapshots(ctx, &req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "snapshot_list_failed", err.Error(), false)
+		return
+	}
+	respondJSON(w, http.StatusOK, snapshots)
+}
+
+func (h *VMHandler) RestoreSnapshot(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req agentapi.VMSnapshotRestoreRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		return
+	}
+
+	if req.VMID == "" || req.DiskPath == "" || req.Name == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id, disk_path, and name are required", false)
+		return
+	}
+
+	resp, err := h.vmService.RestoreSnapshot(ctx, &req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "snapshot_restore_failed", err.Error(), false)
+		return
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+func (h *VMHandler) DeleteSnapshot(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req agentapi.VMSnapshotDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		return
+	}
+
+	if req.VMID == "" || req.DiskPath == "" || req.Name == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id, disk_path, and name are required", false)
+		return
+	}
+
+	resp, err := h.vmService.DeleteSnapshot(ctx, &req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "snapshot_delete_failed", err.Error(), false)
+		return
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+func (h *VMHandler) ProvisionVM(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req agentapi.VMProvisionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		return
+	}
+
+	if req.VMID == "" || req.WorkspacePath == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id and workspace_path are required", false)
+		return
+	}
+
+	err := h.vmService.ProvisionVM(ctx, &req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "vm_provision_failed", err.Error(), false)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, agentapi.VMProvisionResponse{Success: true})
 }

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"sync"
+
 	"github.com/chv/chv/internal/agent/services"
 	"github.com/chv/chv/internal/agentapi"
 	"github.com/chv/chv/internal/agentclient"
@@ -38,16 +40,26 @@ type Service struct {
 	seedSvc      *services.SeedISOService
 	agentClient  *agentclient.Client
 	agentURL     string
+
+	// Metrics history
+	metricsMu sync.RWMutex
+	history   map[string][]agentapi.VMMetricsResponse
 }
 
 // NewService creates a new VM service
 func NewService(repo *db.Repository, dataRoot string) *Service {
-	return &Service{
+	s := &Service{
 		repo:         repo,
 		dataRoot:     dataRoot,
 		cloudinitRdr: cloudinit.NewRenderer(dataRoot),
 		seedSvc:      services.NewSeedISOService(),
+		history:      make(map[string][]agentapi.VMMetricsResponse),
 	}
+
+	// Start background poller
+	go s.startMetricsPoller()
+
+	return s
 }
 
 // SetAgentClient sets the agent client for VM lifecycle operations
@@ -154,59 +166,28 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 
 // provisionVM creates workspace, cloud-init files, clones disk, writes config
 func (s *Service) provisionVM(ctx context.Context, vm *models.VirtualMachine, image *models.Image, input CreateVMInput) error {
-	// Create workspace
-	if err := os.MkdirAll(vm.WorkspacePath, 0755); err != nil {
-		return fmt.Errorf("failed to create workspace: %w", err)
+	if s.agentClient == nil {
+		return fmt.Errorf("agent client not available")
 	}
 
-	// Create cloud-init files
-	cloudinitCfg := cloudinit.Config{
+	// Delegate provisioning to the agent (Phase 4.1 Distributed Infrastructure)
+	provisionReq := &agentapi.VMProvisionRequest{
 		VMID:              vm.ID,
-		VMName:            vm.Name,
-		Hostname:          vm.Name,
+		ImagePath:         image.LocalPath,
+		DiskPath:          vm.DiskPath,
+		WorkspacePath:     vm.WorkspacePath,
 		Username:          input.Username,
 		Password:          input.Password,
 		SSHAuthorizedKeys: input.SSHAuthorizedKeys,
 		UserData:          input.UserData,
 	}
 
-	renderResult, err := s.cloudinitRdr.Render(ctx, vm.ID, cloudinitCfg)
-	if err != nil {
-		return fmt.Errorf("failed to render cloud-init: %w", err)
+	if _, err := s.agentClient.ProvisionVM(ctx, provisionReq); err != nil {
+		return fmt.Errorf("agent failed to provision VM: %w", err)
 	}
 
-	// Generate seed ISO
-	seedResult, err := s.seedSvc.Generate(ctx, services.GenerateRequest{
-		VMID:         vm.ID,
-		CloudinitDir: renderResult.CloudinitDir,
-		OutputDir:    vm.WorkspacePath,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to generate seed ISO: %w", err)
-	}
-
-	// Store seed ISO path
-	vm.SeedISOPath = seedResult.ISOPath
-
-	// Clone disk from image (via agent in future, copy for MVP)
-	if err := s.cloneDisk(image.LocalPath, vm.DiskPath); err != nil {
-		return fmt.Errorf("failed to clone disk: %w", err)
-	}
-
-	// Write config.json
-	config := VMConfig{
-		ID:       vm.ID,
-		Name:     vm.Name,
-		VCPU:     vm.VCPU,
-		MemoryMB: vm.MemoryMB,
-		DiskPath: vm.DiskPath,
-		SeedISO:  vm.SeedISOPath,
-	}
-
-	configPath := filepath.Join(vm.WorkspacePath, "config.json")
-	if err := s.writeConfig(configPath, config); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
-	}
+	// Update seed ISO path (Agent generates it in workspace root)
+	vm.SeedISOPath = filepath.Join(vm.WorkspacePath, "seed.iso")
 
 	return nil
 }
@@ -457,6 +438,64 @@ func (s *Service) GetVMMetrics(ctx context.Context, vmID string, pid int, worksp
 	return s.agentClient.GetVMMetrics(ctx, req)
 }
 
+// GetVMMetricsHistory returns the historical metrics for a VM
+func (s *Service) GetVMMetricsHistory(vmID string) []agentapi.VMMetricsResponse {
+	s.metricsMu.RLock()
+	defer s.metricsMu.RUnlock()
+
+	res := s.history[vmID]
+	if res == nil {
+		return []agentapi.VMMetricsResponse{}
+	}
+
+	// Return a copy to avoid race conditions
+	copied := make([]agentapi.VMMetricsResponse, len(res))
+	copy(copied, res)
+	return copied
+}
+
+func (s *Service) startMetricsPoller() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		s.pollAllVMs()
+	}
+}
+
+func (s *Service) pollAllVMs() {
+	ctx := context.Background()
+	vms, err := s.repo.ListVMs(ctx)
+	if err != nil {
+		return
+	}
+
+	for _, vm := range vms {
+		if vm.ActualState == StatusRunning && vm.CloudHypervisorPID > 0 {
+			metrics, err := s.GetVMMetrics(ctx, vm.ID, vm.CloudHypervisorPID, vm.WorkspacePath)
+			if err == nil && metrics != nil {
+				s.recordMetrics(vm.ID, *metrics)
+			}
+		}
+	}
+}
+
+func (s *Service) recordMetrics(vmID string, m agentapi.VMMetricsResponse) {
+	s.metricsMu.Lock()
+	defer s.metricsMu.Unlock()
+
+	history := s.history[vmID]
+	history = append(history, m)
+
+	// Keep last 60 points (30 minutes if polling every 30s)
+	if len(history) > 60 {
+		history = history[1:]
+	}
+
+	s.history[vmID] = history
+}
+
 // DeleteVM deletes a VM and cleans up resources
 func (s *Service) DeleteVM(ctx context.Context, vmID string) error {
 	vm, err := s.repo.GetVMByID(ctx, vmID)
@@ -496,4 +535,133 @@ func (s *Service) DeleteVM(ctx context.Context, vmID string) error {
 	}
 
 	return nil
+}
+
+// CreateSnapshot creates a new internal snapshot for a VM
+func (s *Service) CreateSnapshot(ctx context.Context, vmID string) (*models.VMSnapshot, error) {
+	vm, err := s.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	if vm == nil {
+		return nil, fmt.Errorf("VM not found")
+	}
+
+	// Enforce non-live (Stage 3 restriction)
+	if vm.ActualState != StatusStopped && vm.ActualState != StatusPrepared {
+		return nil, fmt.Errorf("VM must be stopped to create a snapshot (current state: %s)", vm.ActualState)
+	}
+
+	if s.agentClient == nil {
+		return nil, fmt.Errorf("agent client not available")
+	}
+
+	snapName := fmt.Sprintf("snap-%s", time.Now().UTC().Format("20060102150405"))
+	req := &agentapi.VMSnapshotCreateRequest{
+		VMID:     vmID,
+		DiskPath: vm.DiskPath,
+		Name:     snapName,
+	}
+
+	if _, err := s.agentClient.CreateSnapshot(ctx, req); err != nil {
+		return nil, fmt.Errorf("agent failed to create snapshot: %w", err)
+	}
+
+	snapshot := &models.VMSnapshot{
+		ID:        uuid.NewString(),
+		VMID:      vmID,
+		Name:      snapName,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Status:    "ready",
+	}
+
+	if err := s.repo.CreateVMSnapshot(ctx, snapshot); err != nil {
+		return nil, fmt.Errorf("failed to save snapshot metadata: %w", err)
+	}
+
+	return snapshot, nil
+}
+
+// ListSnapshots returns all snapshots for a VM from the local database
+func (s *Service) ListSnapshots(ctx context.Context, vmID string) ([]models.VMSnapshot, error) {
+	return s.repo.ListVMSnapshots(ctx, vmID)
+}
+
+// RestoreSnapshot reverts a VM to a specific internal snapshot
+func (s *Service) RestoreSnapshot(ctx context.Context, vmID, snapID string) error {
+	vm, err := s.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		return err
+	}
+	if vm == nil {
+		return fmt.Errorf("VM not found")
+	}
+
+	// Enforce non-live (Stage 3 restriction)
+	if vm.ActualState != StatusStopped && vm.ActualState != StatusPrepared {
+		return fmt.Errorf("VM must be stopped to restore a snapshot (current state: %s)", vm.ActualState)
+	}
+
+	snapshot, err := s.repo.GetVMSnapshot(ctx, snapID)
+	if err != nil {
+		return err
+	}
+	if snapshot == nil {
+		return fmt.Errorf("snapshot not found")
+	}
+
+	if s.agentClient == nil {
+		return fmt.Errorf("agent client not available")
+	}
+
+	req := &agentapi.VMSnapshotRestoreRequest{
+		VMID:     vmID,
+		DiskPath: vm.DiskPath,
+		Name:     snapshot.Name,
+	}
+
+	if _, err := s.agentClient.RestoreSnapshot(ctx, req); err != nil {
+		return fmt.Errorf("agent failed to restore snapshot: %w", err)
+	}
+
+	// Update VM updated_at timestamp to flag changes
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	_ = s.repo.UpdateVM(ctx, vm)
+
+	return nil
+}
+
+// DeleteSnapshot deletes a snapshot from both the hypervisor and the database
+func (s *Service) DeleteSnapshot(ctx context.Context, vmID, snapID string) error {
+	vm, err := s.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		return err
+	}
+	if vm == nil {
+		return fmt.Errorf("VM not found")
+	}
+
+	snapshot, err := s.repo.GetVMSnapshot(ctx, snapID)
+	if err != nil {
+		return err
+	}
+	if snapshot == nil {
+		return fmt.Errorf("snapshot not found")
+	}
+
+	if s.agentClient == nil {
+		return fmt.Errorf("agent client not available")
+	}
+
+	req := &agentapi.VMSnapshotDeleteRequest{
+		VMID:     vmID,
+		DiskPath: vm.DiskPath,
+		Name:     snapshot.Name,
+	}
+
+	if _, err := s.agentClient.DeleteSnapshot(ctx, req); err != nil {
+		return fmt.Errorf("agent failed to delete snapshot: %w", err)
+	}
+
+	return s.repo.DeleteVMSnapshot(ctx, snapID)
 }

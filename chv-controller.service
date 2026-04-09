@@ -5,8 +5,8 @@ Requires=chv-agent.service
 
 [Service]
 Type=simple
-ExecStart=/srv/data02/projects/chv/chv-controller
-Restart=always
+ExecStart=/usr/local/bin/chv-controller
+Restart=on-failure
 RestartSec=5
 User=root
 Environment="CHV_HTTP_ADDR=:8888"

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -178,33 +179,55 @@ func (s *VMConsoleService) isVMRunning(apiSocket string) bool {
 }
 
 // getSerialConsole reads the PTY path from the workspace and returns it
-// The PTY path is written by VMManagementService when starting the VM
+// It first attempts to read from serial.ptty file, then falls back to CH API
 func (s *VMConsoleService) getSerialConsole(apiSocket string) (string, error) {
-	// Derive workspace path from apiSocket path
-	// apiSocket is at: <workspace>/api.sock
-	workspaceDir := filepath.Dir(apiSocket)
-	ptyFile := filepath.Join(workspaceDir, "serial.ptty")
+	// Option 1: Try PTY path from file (created by VMManagementService during start)
+	workspace := filepath.Dir(apiSocket)
+	ptyFile := filepath.Join(workspace, "serial.ptty")
 
 	// Read PTY path from file
-	data, err := os.ReadFile(ptyFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("serial console not available: VM may not be running or PTY not yet created")
+	if data, err := os.ReadFile(ptyFile); err == nil {
+		ptyPath := strings.TrimSpace(string(data))
+		if ptyPath != "" {
+			// Verify it exists
+			if _, err := os.Stat(ptyPath); err == nil {
+				return ptyPath, nil
+			}
 		}
-		return "", fmt.Errorf("failed to read PTY path: %w", err)
 	}
 
-	ptyPath := strings.TrimSpace(string(data))
-	if ptyPath == "" {
-		return "", fmt.Errorf("PTY path is empty")
+	// Option 2: Fallback - Try to get PTY path from CH API if file is missing or invalid
+	conn, err := net.Dial("unix", apiSocket)
+	if err != nil {
+		return "", fmt.Errorf("console not available: cannot connect to VM API: %w", err)
+	}
+	defer conn.Close()
+
+	// Try CH API console endpoint
+	req, _ := http.NewRequest("GET", "http://localhost/api/v1/vm.console", nil)
+	if err := req.Write(conn); err != nil {
+		return "", fmt.Errorf("failed to query console via API: %w", err)
 	}
 
-	// Verify the PTY device exists
-	if _, err := os.Stat(ptyPath); err != nil {
-		return "", fmt.Errorf("PTY device does not exist: %s", ptyPath)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		return "", fmt.Errorf("failed to read API response: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		var result struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Path != "" {
+			// Verify it exists
+			if _, err := os.Stat(result.Path); err == nil {
+				return result.Path, nil
+			}
+		}
 	}
 
-	return ptyPath, nil
+	return "", fmt.Errorf("console not available: VM may not have serial enabled or PTY not yet created")
 }
 
 // GetActiveSessions returns list of active console sessions
