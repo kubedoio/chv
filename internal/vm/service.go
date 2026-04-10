@@ -65,9 +65,14 @@ func NewService(repo *db.Repository, dataRoot string) *Service {
 
 // SetAgentClient sets the agent client for VM lifecycle operations
 func (s *Service) SetAgentClient(agentURL string) {
+	s.SetAgentClientWithAuth(agentURL, "")
+}
+
+// SetAgentClientWithAuth sets the agent client with authentication token
+func (s *Service) SetAgentClientWithAuth(agentURL, authToken string) {
 	s.agentURL = agentURL
 	if agentURL != "" {
-		s.agentClient = agentclient.NewClient(agentURL)
+		s.agentClient = agentclient.NewClientWithAuth(agentURL, authToken)
 	}
 }
 

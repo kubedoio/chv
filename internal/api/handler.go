@@ -86,13 +86,43 @@ func (h *Handler) Router() http.Handler {
 }
 
 // corsMiddleware handles CORS headers and preflight requests
+// Only allows configured origins; defaults to same-origin (no external CORS)
 func corsMiddleware(next http.Handler) http.Handler {
+	// Parse allowed origins from env var (comma-separated)
+	// e.g., CHV_CORS_ORIGINS=https://chv.example.com,https://admin.chv.example.com
+	var allowedOrigins []string
+	if env := os.Getenv("CHV_CORS_ORIGINS"); env != "" {
+		for _, o := range strings.Split(env, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				allowedOrigins = append(allowedOrigins, o)
+			}
+		}
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Max-Age", "86400")
+		origin := r.Header.Get("Origin")
+
+		// Check if origin is allowed
+		originAllowed := false
+		if origin == "" {
+			// Same-origin request (no Origin header)
+			originAllowed = true
+		} else {
+			for _, allowed := range allowedOrigins {
+				if origin == allowed {
+					originAllowed = true
+					break
+				}
+			}
+		}
+
+		if originAllowed && origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+		}
 
 		// Handle preflight OPTIONS requests
 		if r.Method == "OPTIONS" {

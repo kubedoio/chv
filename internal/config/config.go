@@ -22,6 +22,7 @@ type ControllerConfig struct {
 	DatabasePath        string
 	LogDir              string
 	AgentURL            string
+	AgentToken          string // Token for authenticating with agent
 	BridgeName          string
 	BridgeCIDR          string
 	BridgeGateway       string
@@ -37,6 +38,7 @@ type AgentConfig struct {
 	BridgeCIDR          string
 	LocaldiskPath       string
 	CloudHypervisorPath string
+	AuthToken           string // Bearer token for controller authentication
 }
 
 func LoadController() ControllerConfig {
@@ -47,6 +49,7 @@ func LoadController() ControllerConfig {
 		DatabasePath:        getenv("CHV_DATABASE_PATH", filepath.Join(dataRoot, "chv.db")),
 		LogDir:              getenv("CHV_LOG_DIR", filepath.Join(dataRoot, "logs")),
 		AgentURL:            getenv("CHV_AGENT_URL", ""),
+		AgentToken:          os.Getenv("CHV_AGENT_TOKEN"),
 		BridgeName:          getenv("CHV_BRIDGE_NAME", DefaultBridgeName),
 		BridgeCIDR:          getenv("CHV_BRIDGE_CIDR", DefaultBridgeCIDR),
 		BridgeGateway:       getenv("CHV_BRIDGE_GATEWAY", DefaultBridgeGateway),
@@ -65,6 +68,7 @@ func LoadAgent() AgentConfig {
 		BridgeCIDR:          getenv("CHV_BRIDGE_CIDR", DefaultBridgeCIDR),
 		LocaldiskPath:       getenv("CHV_LOCALDISK_PATH", filepath.Join(dataRoot, "storage", "localdisk")),
 		CloudHypervisorPath: getenv("CHV_CLOUD_HYPERVISOR", DefaultCloudHypervisor),
+		AuthToken:           os.Getenv("CHV_AGENT_TOKEN"),
 	}
 }
 

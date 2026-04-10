@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -42,6 +43,9 @@ func NewServer(addr string, cfg config.AgentConfig) *Server {
 		cfg:    cfg,
 		router: r,
 	}
+
+	// Auth middleware needs s to be initialized first
+	r.Use(s.authMiddleware)
 
 	s.routes()
 
@@ -131,6 +135,45 @@ func (s *Server) Start() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.server.Shutdown(ctx)
+}
+
+// authMiddleware validates the Authorization header for controller requests
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health check is always public
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// If no auth token is configured, allow all requests (development mode)
+		if s.cfg.AuthToken == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Validate Bearer token
+		authHeader := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(authHeader) < len(prefix) || authHeader[:len(prefix)] != prefix {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		token := authHeader[len(prefix):]
+		// Constant-time comparison to prevent timing attacks
+		if !constantTimeEqual(token, s.cfg.AuthToken) {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// constantTimeEqual compares two strings in constant time to prevent timing attacks
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // Middleware

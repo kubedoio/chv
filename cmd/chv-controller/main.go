@@ -52,8 +52,14 @@ func main() {
 	// Create agent client (optional, falls back to direct if not configured)
 	var agentClient *agentclient.Client
 	if agentURL := os.Getenv("CHV_AGENT_URL"); agentURL != "" {
-		agentClient = agentclient.NewClient(agentURL)
-		log.Info("Agent client configured", logger.F("url", agentURL))
+		agentToken := os.Getenv("CHV_AGENT_TOKEN")
+		if agentToken != "" {
+			agentClient = agentclient.NewClientWithAuth(agentURL, agentToken)
+			log.Info("Agent client configured with auth", logger.F("url", agentURL))
+		} else {
+			agentClient = agentclient.NewClient(agentURL)
+			log.Warn("Agent client configured without auth token — configure CHV_AGENT_TOKEN for security")
+		}
 	} else {
 		log.Warn("No agent URL configured, some features will be limited")
 	}
@@ -75,17 +81,29 @@ func main() {
 	var imageWorker *images.Worker
 	if agentURL := os.Getenv("CHV_AGENT_URL"); agentURL != "" {
 		opService := operations.NewService(repo)
-		imageWorker = images.NewWorker(repo, opService, agentURL)
+		agentToken := os.Getenv("CHV_AGENT_TOKEN")
+		if agentToken != "" {
+			imageWorker = images.NewWorkerWithAuth(repo, opService, agentURL, agentToken)
+			log.Info("Image import worker started with auth")
+		} else {
+			imageWorker = images.NewWorker(repo, opService, agentURL)
+			log.Info("Image import worker started (no auth)")
+		}
 		imageWorker.Start(context.Background())
 		defer imageWorker.Stop()
-		log.Info("Image import worker started")
 	}
 
 	// Create VM service (singleton)
 	vmService := vm.NewService(repo, cfg.DataRoot)
 	if agentURL := os.Getenv("CHV_AGENT_URL"); agentURL != "" {
-		vmService.SetAgentClient(agentURL)
-		log.Info("VM service configured with agent")
+		agentToken := os.Getenv("CHV_AGENT_TOKEN")
+		if agentToken != "" {
+			vmService.SetAgentClientWithAuth(agentURL, agentToken)
+			log.Info("VM service configured with agent and auth")
+		} else {
+			vmService.SetAgentClient(agentURL)
+			log.Info("VM service configured with agent (no auth)")
+		}
 	}
 
 	// Create auth service and ensure admin user exists

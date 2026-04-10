@@ -18,6 +18,7 @@ const (
 
 type Client struct {
 	baseURL    string
+	authToken  string
 	httpClient *http.Client
 }
 
@@ -34,6 +35,20 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+// NewClientWithAuth creates an agent client with authentication token
+func NewClientWithAuth(baseURL, authToken string) *Client {
+	c := NewClient(baseURL)
+	c.authToken = authToken
+	return c
+}
+
+// setAuthHeader adds the Authorization header if a token is configured
+func (c *Client) setAuthHeader(req *http.Request) {
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
+}
+
 func (c *Client) CheckInstall(ctx context.Context) (*agentapi.InstallCheckResponse, error) {
 	url := c.baseURL + "/v1/install/check"
 
@@ -41,6 +56,8 @@ func (c *Client) CheckInstall(ctx context.Context) (*agentapi.InstallCheckRespon
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+
+	c.setAuthHeader(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -73,6 +90,8 @@ func (c *Client) Bootstrap(ctx context.Context, req *agentapi.BootstrapRequest) 
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -127,6 +146,8 @@ func (c *Client) IsAgentAvailable(ctx context.Context) bool {
 		return false
 	}
 
+	c.setAuthHeader(req)
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return false
@@ -150,6 +171,8 @@ func (c *Client) StartVM(ctx context.Context, req *agentapi.VMStartRequest) (*ag
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -184,6 +207,8 @@ func (c *Client) StopVM(ctx context.Context, req *agentapi.VMStopRequest) (*agen
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent: %w", err)
@@ -216,6 +241,8 @@ func (c *Client) GetVMStatus(ctx context.Context, req *agentapi.VMStatusRequest)
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -250,6 +277,8 @@ func (c *Client) GetVMMetrics(ctx context.Context, req *agentapi.VMMetricsReques
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent: %w", err)
@@ -283,6 +312,8 @@ func (c *Client) DownloadImage(ctx context.Context, req *agentapi.ImageImportReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent: %w", err)
@@ -314,6 +345,8 @@ func (c *Client) CreateSnapshot(ctx context.Context, req *agentapi.VMSnapshotCre
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -347,6 +380,8 @@ func (c *Client) ListSnapshots(ctx context.Context, req *agentapi.VMSnapshotList
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent: %w", err)
@@ -378,6 +413,8 @@ func (c *Client) RestoreSnapshot(ctx context.Context, req *agentapi.VMSnapshotRe
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -411,6 +448,8 @@ func (c *Client) DeleteSnapshot(ctx context.Context, req *agentapi.VMSnapshotDel
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent: %w", err)
@@ -442,6 +481,8 @@ func (c *Client) ProvisionVM(ctx context.Context, req *agentapi.VMProvisionReque
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -475,6 +516,8 @@ func (c *Client) ShutdownVM(ctx context.Context, req *agentapi.VMShutdownRequest
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent: %w", err)
@@ -506,6 +549,8 @@ func (c *Client) ForceStopVM(ctx context.Context, req *agentapi.VMForceStopReque
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -539,6 +584,8 @@ func (c *Client) ResetVM(ctx context.Context, req *agentapi.VMResetRequest) (*ag
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to agent: %w", err)
@@ -570,6 +617,8 @@ func (c *Client) GetBootLogs(ctx context.Context, req *agentapi.VMBootLogRequest
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

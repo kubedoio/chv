@@ -79,8 +79,14 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 	slog.Info("WebSocket: client connected", "vm_id", vmID)
 
-	// Connect to agent WebSocket
-	agentConn, _, err := websocket.DefaultDialer.Dial(targetURL, nil)
+	// Connect to agent WebSocket with auth token
+	var wsHeaders http.Header
+	if h.config.AgentToken != "" {
+		wsHeaders = http.Header{
+			"Authorization": []string{"Bearer " + h.config.AgentToken},
+		}
+	}
+	agentConn, _, err := websocket.DefaultDialer.Dial(targetURL, wsHeaders)
 	if err != nil {
 		slog.Error("WebSocket: failed to connect to agent", "target", targetURL, "error", err)
 		clientConn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to agent: "+err.Error()))

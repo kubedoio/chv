@@ -286,12 +286,22 @@ export function setSearchQuery(query: string) {
   searchQuery = query;
 }
 
+// Escape HTML entities to prevent XSS
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Highlight matches in text
 export function highlightMatches(text: string, matches: readonly FuseResultMatch[] | undefined, key: string): string {
-  if (!matches) return text;
+  if (!matches) return escapeHtml(text);
   
   const match = matches.find(m => m.key === key);
-  if (!match) return text;
+  if (!match) return escapeHtml(text);
   
   let result = '';
   let lastIndex = 0;
@@ -300,11 +310,11 @@ export function highlightMatches(text: string, matches: readonly FuseResultMatch
   const indices = [...match.indices].sort((a, b) => a[0] - b[0]);
   
   for (const [start, end] of indices) {
-    result += text.slice(lastIndex, start);
-    result += `<mark class="search-highlight">${text.slice(start, end + 1)}</mark>`;
+    result += escapeHtml(text.slice(lastIndex, start));
+    result += `<mark class="search-highlight">${escapeHtml(text.slice(start, end + 1))}</mark>`;
     lastIndex = end + 1;
   }
   
-  result += text.slice(lastIndex);
+  result += escapeHtml(text.slice(lastIndex));
   return result;
 }
