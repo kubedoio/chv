@@ -1,36 +1,11 @@
 services:
-  agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-    container_name: chv-agent
-    privileged: true
-    network_mode: host
-    volumes:
-      - chv-data:/var/lib/chv
-      - /dev:/dev
-      - /run:/run
-    environment:
-      - CHV_AGENT_ADDR=:9090
-      - CHV_DATA_ROOT=/var/lib/chv
-      - CHV_LOG_LEVEL=info
-      - CHV_BRIDGE_NAME=chvbr0
-      - CHV_BRIDGE_CIDR=10.0.0.1/24
-    command: ["-addr", ":9090"]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:9090/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
   controller:
     build:
       context: .
       dockerfile: Dockerfile.controller
     container_name: chv-controller
     ports:
-      - "8080:8080"
+      - "8088:8080"
     volumes:
       - chv-data:/var/lib/chv
     environment:
@@ -39,9 +14,6 @@ services:
       - CHV_AGENT_URL=http://localhost:9090
       - CHV_LOG_LEVEL=info
       - CHV_LOG_DIR=/var/lib/chv/logs
-    depends_on:
-      agent:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
