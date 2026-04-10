@@ -4,10 +4,12 @@
   import { Network, Plus } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
+  import DataTable from '$lib/components/DataTable.svelte';
+  import Pagination from '$lib/components/Pagination.svelte';
+  import FilterBar from '$lib/components/FilterBar.svelte';
   import StateBadge from '$lib/components/StateBadge.svelte';
-  import SkeletonRow from '$lib/components/SkeletonRow.svelte';
-  import EmptyState from '$lib/components/EmptyState.svelte';
   import CreateNetworkModal from '$lib/components/CreateNetworkModal.svelte';
+  import { useTable } from '$lib/utils/table.svelte';
   import type { Network as NetworkType } from '$lib/api/types';
 
   const token = getStoredToken();
@@ -15,6 +17,77 @@
   let items: NetworkType[] = $state([]);
   let loading = $state(true);
   let createModalOpen = $state(false);
+
+  // Table state management - reactive to items
+  let table = $derived(useTable<NetworkType>({
+    data: items,
+    pageSize: 10
+  }));
+
+  // Filter options
+  const filterOptions = [
+    {
+      key: 'mode',
+      label: 'Mode',
+      type: 'select' as const,
+      options: [
+        { value: 'bridge', label: 'Bridge' },
+        { value: 'nat', label: 'NAT' },
+        { value: 'macvtap', label: 'MacVTap' }
+      ]
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      type: 'select' as const,
+      options: [
+        { value: 'active', label: 'Active' },
+        { value: 'inactive', label: 'Inactive' },
+        { value: 'error', label: 'Error' }
+      ]
+    }
+  ];
+
+  // Table columns definition
+  const columns = [
+    {
+      key: 'name',
+      title: 'Name',
+      sortable: true
+    },
+    {
+      key: 'mode',
+      title: 'Mode',
+      sortable: true,
+      align: 'center' as const,
+      width: '100px',
+      render: (net: NetworkType) => net.mode || 'bridge'
+    },
+    {
+      key: 'bridge_name',
+      title: 'Bridge',
+      width: '140px',
+      render: (net: NetworkType) => net.bridge_name
+    },
+    {
+      key: 'cidr',
+      title: 'CIDR',
+      width: '140px',
+      render: (net: NetworkType) => net.cidr || '—'
+    },
+    {
+      key: 'gateway_ip',
+      title: 'Gateway',
+      width: '130px',
+      render: (net: NetworkType) => net.gateway_ip || '—'
+    },
+    {
+      key: 'is_system_managed',
+      title: 'Managed By',
+      width: '120px',
+      render: (net: NetworkType) => net.is_system_managed ? 'System' : 'User'
+    }
+  ];
 
   async function loadNetworks() {
     loading = true;
@@ -35,6 +108,14 @@
     }
     loadNetworks();
   });
+
+  function handleSort(column: string, direction: 'asc' | 'desc' | null) {
+    if (direction) {
+      table.setSort(column, direction);
+    } else {
+      table.clearSort();
+    }
+  }
 </script>
 
 <section class="table-card">
@@ -47,71 +128,46 @@
       onclick={() => createModalOpen = true}
       class="px-4 py-2 rounded bg-primary text-white font-medium text-sm hover:bg-primary/90 transition-colors flex items-center gap-2"
     >
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M5 12h14"/>
-        <path d="M12 5v14"/>
-      </svg>
-      Create
+      <Plus size={16} />
+      Create Network
     </button>
   </div>
 
-  {#if loading}
-    <table class="w-full border-collapse text-sm">
-      <thead class="bg-chrome text-left uppercase tracking-[0.08em] text-muted">
-        <tr>
-          <th class="border-b border-line px-4 py-3">Name</th>
-          <th class="border-b border-line px-4 py-3">Bridge</th>
-          <th class="border-b border-line px-4 py-3">CIDR</th>
-          <th class="border-b border-line px-4 py-3">Gateway</th>
-          <th class="border-b border-line px-4 py-3">Managed</th>
-          <th class="border-b border-line px-4 py-3">Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each Array(5) as _}
-          <SkeletonRow columns={6} />
-        {/each}
-      </tbody>
-    </table>
-  {:else if items.length === 0}
-    <EmptyState
-      icon={Network}
-      title="No networks yet"
-      description="Create a network to connect your VMs"
-    >
-      <button
-        onclick={() => createModalOpen = true}
-        class="px-4 py-2 rounded bg-primary text-white font-medium text-sm hover:bg-primary/90 transition-colors flex items-center gap-2"
-      >
-        <Plus size={16} />
-        Create Network
-      </button>
-    </EmptyState>
-  {:else}
-    <table class="w-full border-collapse text-sm">
-      <thead class="bg-chrome text-left uppercase tracking-[0.08em] text-muted">
-        <tr>
-          <th class="border-b border-line px-4 py-3">Name</th>
-          <th class="border-b border-line px-4 py-3">Bridge</th>
-          <th class="border-b border-line px-4 py-3">CIDR</th>
-          <th class="border-b border-line px-4 py-3">Gateway</th>
-          <th class="border-b border-line px-4 py-3">Managed</th>
-          <th class="border-b border-line px-4 py-3">Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each items as item}
-          <tr class="odd:bg-white even:bg-[#f8f8f8] hover:bg-hover transition-colors">
-            <td class="border-b border-line px-4 py-3 font-medium">{item.name}</td>
-            <td class="border-b border-line px-4 py-3 mono">{item.bridge_name}</td>
-            <td class="border-b border-line px-4 py-3 mono">{item.cidr}</td>
-            <td class="border-b border-line px-4 py-3 mono">{item.gateway_ip}</td>
-            <td class="border-b border-line px-4 py-3">{item.is_system_managed ? 'system' : 'manual'}</td>
-            <td class="border-b border-line px-4 py-3"><StateBadge label={item.status} /></td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+  <!-- Filter bar -->
+  <FilterBar
+    filters={filterOptions}
+    activeFilters={table.filters}
+    onFilterChange={table.setFilter}
+    onClearAll={table.clearAllFilters}
+  />
+
+  <!-- Data table -->
+  <DataTable
+    data={table.paginatedData}
+    {columns}
+    {loading}
+    sortColumn={table.sortColumn ?? undefined}
+    sortDirection={table.sortDirection}
+    emptyIcon={Network as unknown as typeof import('svelte').SvelteComponent}
+    emptyTitle="No networks yet"
+    emptyDescription="Create a network to connect your VMs"
+    onSort={handleSort}
+    rowId={(net: NetworkType) => net.id}
+  >
+    {#snippet children(net: NetworkType)}
+      <StateBadge label={net.status} />
+    {/snippet}
+  </DataTable>
+
+  <!-- Pagination -->
+  {#if !loading && table.totalItems > 0}
+    <Pagination
+      page={table.page}
+      pageSize={table.pageSize}
+      totalItems={table.totalItems}
+      onPageChange={table.setPage}
+      onPageSizeChange={table.setPageSize}
+    />
   {/if}
 </section>
 

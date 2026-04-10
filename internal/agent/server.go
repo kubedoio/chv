@@ -84,6 +84,14 @@ func (s *Server) routes() {
 	// VM management service
 	cloudInitRenderer := cloudinit.NewRenderer(s.cfg.DataRoot)
 	vmService := services.NewVMManagementService(s.cfg.DataRoot, s.cfg.BridgeName, fwService, seedISOService, cloudInitRenderer)
+
+	// Recover orphan VMs on startup
+	if recovered, err := vmService.ScanAndRecoverOrphans(s.cfg.DataRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to scan for orphan VMs: %v\n", err)
+	} else if len(recovered) > 0 {
+		fmt.Fprintf(os.Stderr, "Recovered %d orphan VM(s) on startup: %v\n", len(recovered), recovered)
+	}
+
 	vmHealthService := services.NewVMHealthService()
 	vmConsoleService := services.NewVMConsoleService()
 	vmHandler := handlers.NewVMHandler(vmService, vmHealthService, vmConsoleService)
@@ -128,6 +136,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Middleware
 func jsonContentType(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip for WebSocket upgrade requests
+		if r.Header.Get("Upgrade") == "websocket" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		next.ServeHTTP(w, r)
 	})

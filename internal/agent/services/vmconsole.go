@@ -196,17 +196,17 @@ func (s *VMConsoleService) getSerialConsole(apiSocket string) (string, error) {
 		}
 	}
 
-	// Option 2: Fallback - Try to get PTY path from CH API if file is missing or invalid
+	// Option 2: Query CH API vm.info endpoint for PTY path
 	conn, err := net.Dial("unix", apiSocket)
 	if err != nil {
 		return "", fmt.Errorf("console not available: cannot connect to VM API: %w", err)
 	}
 	defer conn.Close()
 
-	// Try CH API console endpoint
-	req, _ := http.NewRequest("GET", "http://localhost/api/v1/vm.console", nil)
+	// Query CH API for VM info which includes serial configuration
+	req, _ := http.NewRequest("GET", "http://localhost/api/v1/vm.info", nil)
 	if err := req.Write(conn); err != nil {
-		return "", fmt.Errorf("failed to query console via API: %w", err)
+		return "", fmt.Errorf("failed to query VM info via API: %w", err)
 	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
@@ -217,12 +217,19 @@ func (s *VMConsoleService) getSerialConsole(apiSocket string) (string, error) {
 
 	if resp.StatusCode == http.StatusOK {
 		var result struct {
-			Path string `json:"path"`
+			Config struct {
+				Serial struct {
+					File string `json:"file"`
+					Mode string `json:"mode"`
+				} `json:"serial"`
+			} `json:"config"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Path != "" {
-			// Verify it exists
-			if _, err := os.Stat(result.Path); err == nil {
-				return result.Path, nil
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+			if result.Config.Serial.Mode == "Pty" && result.Config.Serial.File != "" {
+				// Verify it exists
+				if _, err := os.Stat(result.Config.Serial.File); err == nil {
+					return result.Config.Serial.File, nil
+				}
 			}
 		}
 	}

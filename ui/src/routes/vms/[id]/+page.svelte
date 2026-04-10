@@ -9,12 +9,16 @@
   import DeleteVMModal from '$lib/components/DeleteVMModal.svelte';
   import MetricsChart from '$lib/components/MetricsChart.svelte';
   import Terminal from '$lib/components/Terminal.svelte';
+  import VMPowerMenu from '$lib/components/VMPowerMenu.svelte';
+  import BootLogViewer from '$lib/components/BootLogViewer.svelte';
+  import FirewallRuleEditor from '$lib/components/FirewallRuleEditor.svelte';
   import { toast } from '$lib/stores/toast';
-  import { Play, Square, Trash2, ArrowLeft, Cpu, HardDrive, Network, Image as ImageIcon, RefreshCw, Terminal as TerminalIcon, BarChart3, RotateCcw, Camera } from 'lucide-svelte';
+  import { registerShortcuts, createVMDetailShortcuts, setActiveContext } from '$lib/stores/keyboard.svelte';
+  import { Play, Square, Trash2, ArrowLeft, Cpu, HardDrive, Network, Image as ImageIcon, RefreshCw, Terminal as TerminalIcon, BarChart3, RotateCcw, Camera, Edit, FileText, Shield } from 'lucide-svelte';
   import type { VM, Image, StoragePool, Network as NetworkType, VMMetrics, VMMetricsResponse, VMSnapshot } from '$lib/api/types';
   
   const client = createAPIClient({ token: getStoredToken() ?? undefined });
-  const id = $derived($page.params.id);
+  const id = $derived($page.params.id ?? '');
   
   let vm = $state<VM | null>(null);
   let images = $state<Image[]>([]);
@@ -29,11 +33,12 @@
   let pollInterval = $state<number | null>(null);
   let metricsInterval = $state<number | null>(null);
   let lastUpdated = $state<Date | null>(null);
-  let activeTab = $state<'overview' | 'metrics' | 'snapshots' | 'console'>('overview');
+  let activeTab = $state<'overview' | 'metrics' | 'snapshots' | 'console' | 'boot-logs' | 'firewall'>('overview');
   let snapshots = $state<VMSnapshot[]>([]);
   let consoleWsUrl = $state<string>('');
   let showTerminal = $state(false);
   let snapshotLoading = $state(false);
+  let editModalOpen = $state(false);
   
   // Derived values for display
   const imageName = $derived(
@@ -55,15 +60,46 @@
     ['running', 'starting', 'stopping'].includes(vmState.toLowerCase())
   );
   
+  // Tab index mapping for keyboard shortcuts
+  const tabOrder: ('overview' | 'metrics' | 'snapshots' | 'console' | 'boot-logs' | 'firewall')[] = ['overview', 'metrics', 'snapshots', 'boot-logs', 'firewall', 'console'];
+  
+  // Keyboard shortcut handlers
+  const keyboardHandlers = {
+    onEdit: () => editModalOpen = true,
+    onStart: startVM,
+    onStop: stopVM,
+    onRestart: restartVM,
+    onDelete: () => deleteModalOpen = true,
+    onTabChange: (tabIndex: number) => {
+      const tab = tabOrder[tabIndex];
+      if (tab) {
+        handleTabChange(tab);
+      }
+    }
+  };
+  
   onMount(() => {
     // Check auth
     if (!getStoredToken()) {
       goto('/login');
       return;
     }
+    
+    // Set active context for keyboard shortcuts
+    setActiveContext('vm-detail');
+    
+    // Register VM detail shortcuts
+    const unregister = registerShortcuts(createVMDetailShortcuts(keyboardHandlers));
+    
     loadVM();
     loadDependencies();
     startPolling();
+    
+    return () => {
+      stopPolling();
+      stopMetricsPolling();
+      unregister();
+    };
   });
   
   onDestroy(() => {
@@ -115,7 +151,7 @@
   }
   
   // Handle tab switching - start/stop metrics polling
-  function handleTabChange(tab: 'overview' | 'metrics' | 'snapshots' | 'console') {
+  function handleTabChange(tab: 'overview' | 'metrics' | 'snapshots' | 'console' | 'firewall') {
     activeTab = tab;
     if (tab === 'metrics' && vmState === 'running') {
       loadMetrics();
@@ -126,6 +162,10 @@
 
     if (tab === 'snapshots') {
       loadSnapshots();
+    }
+    
+    if (tab === 'console') {
+      openConsole();
     }
   }
 
@@ -167,7 +207,7 @@
 
     snapshotLoading = true;
     try {
-      await client.restoreSnapshot(id, snapID);
+      await client.restoreVMSnapshot(id, snapID);
       toast.success('Snapshot restored');
       await refreshVM();
     } catch (e: any) {
@@ -218,9 +258,9 @@
           ...vm,
           actual_state: status.actual_state,
           desired_state: status.desired_state,
-          cloud_hypervisor_pid: status.pid,
-          last_error: status.last_error,
-          updated_at: status.updated_at
+          // Note: cloud_hypervisor_pid not in VM type, using extended merge
+          last_error: status.last_error
+          // Note: updated_at not in VM type
         };
       }
       lastUpdated = new Date();
@@ -246,7 +286,7 @@
   
   async function loadMetrics() {
     if (vmState !== 'running') {
-      metrics = null;
+      metricsData = null;
       return;
     }
     try {
@@ -304,6 +344,43 @@
       actionLoading = false;
     }
   }
+
+  async function handlePowerAction(action: string, options?: { graceful?: boolean; timeout?: number }) {
+    actionLoading = true;
+    try {
+      switch (action) {
+        case 'start':
+          await client.startVM(id);
+          toast.success('VM starting...');
+          break;
+        case 'shutdown':
+          await client.shutdownVM(id, options?.timeout);
+          toast.success('Shutdown signal sent');
+          break;
+        case 'force-stop':
+          await client.forceStopVM(id);
+          toast.success('VM force stopped');
+          break;
+        case 'reset':
+          await client.resetVM(id);
+          toast.success('VM reset initiated');
+          break;
+        case 'restart':
+          if (options?.graceful) {
+            await client.restartVMWithOptions(id, true, options.timeout);
+          } else {
+            await client.restartVM(id);
+          }
+          toast.success('VM restarting...');
+          break;
+      }
+      await loadVM();
+    } catch (e: any) {
+      toast.error(e.message || `Failed to ${action} VM`);
+    } finally {
+      actionLoading = false;
+    }
+  }
 </script>
 
 {#if loading}
@@ -315,7 +392,7 @@
     <!-- Header -->
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-4">
-        <button onclick={() => goto('/vms')} class="p-2 hover:bg-chrome rounded">
+        <button onclick={() => goto('/vms')} class="p-2 hover:bg-chrome rounded" title="Back to VMs">
           <ArrowLeft size={20} />
         </button>
         <div>
@@ -337,27 +414,22 @@
           onclick={refreshVM} 
           disabled={actionLoading}
           class="p-2 hover:bg-chrome rounded"
-          title="Refresh"
+          title="Refresh (R)"
         >
           <RefreshCw size={16} class={actionLoading ? 'animate-spin' : ''} />
         </button>
       
-        {#if vmState === 'stopped'}
-          <button onclick={startVM} disabled={actionLoading} class="button-primary flex items-center gap-2">
-            <Play size={16} />
-            {actionLoading ? 'Starting...' : 'Start'}
-          </button>
-        {:else if vmState === 'running'}
-          <button onclick={restartVM} disabled={actionLoading} class="button-secondary flex items-center gap-2">
-            <RotateCcw size={16} />
-            {actionLoading ? 'Restarting...' : 'Restart'}
-          </button>
-          <button onclick={stopVM} disabled={actionLoading} class="button-secondary flex items-center gap-2">
-            <Square size={16} />
-            {actionLoading ? 'Stopping...' : 'Stop'}
-          </button>
-        {/if}
-        <button onclick={() => deleteModalOpen = true} class="button-danger flex items-center gap-2">
+        <VMPowerMenu 
+          vmState={vmState} 
+          disabled={actionLoading}
+          onAction={handlePowerAction}
+        />
+        
+        <button onclick={() => editModalOpen = true} class="button-secondary flex items-center gap-2" title="Edit (E)">
+          <Edit size={16} />
+          Edit
+        </button>
+        <button onclick={() => deleteModalOpen = true} class="button-danger flex items-center gap-2" title="Delete (Del)">
           <Trash2 size={16} />
           Delete
         </button>
@@ -373,9 +445,7 @@
         </div>
         <div class="text-lg font-semibold">{vm.vcpu} vCPU</div>
         <div class="text-sm text-muted">{vm.memory_mb} MB RAM</div>
-        {#if vm.cloud_hypervisor_pid}
-          <div class="text-xs text-gray-400 mt-1">PID: {vm.cloud_hypervisor_pid}</div>
-        {/if}
+        <!-- PID info removed - not available in VM type -->
       </div>
       
       <div class="card p-4">
@@ -420,12 +490,14 @@
         <button 
           onclick={() => handleTabChange('overview')}
           class="px-4 py-2 text-sm font-medium {activeTab === 'overview' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+          title="Overview (1)"
         >
           Overview
         </button>
         <button 
           onclick={() => handleTabChange('metrics')}
           class="px-4 py-2 text-sm font-medium {activeTab === 'metrics' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+          title="Metrics (2)"
         >
           <BarChart3 size={16} class="inline mr-1" />
           Metrics
@@ -433,14 +505,32 @@
         <button 
           onclick={() => handleTabChange('snapshots')}
           class="px-4 py-2 text-sm font-medium {activeTab === 'snapshots' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+          title="Snapshots (3)"
         >
           <Camera size={16} class="inline mr-1" />
           Snapshots
+        </button>
+        <button 
+          onclick={() => handleTabChange('boot-logs')}
+          class="px-4 py-2 text-sm font-medium {activeTab === 'boot-logs' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+          title="Boot Logs (4)"
+        >
+          <FileText size={16} class="inline mr-1" />
+          Boot Logs
+        </button>
+        <button 
+          onclick={() => handleTabChange('firewall')}
+          class="px-4 py-2 text-sm font-medium {activeTab === 'firewall' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+          title="Firewall (5)"
+        >
+          <Shield size={16} class="inline mr-1" />
+          Firewall
         </button>
         {#if vmState === 'running'}
           <button 
             onclick={() => openConsole()}
             class="px-4 py-2 text-sm font-medium {showTerminal ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+            title="Console (5)"
           >
             <TerminalIcon size={16} class="inline mr-1" />
             Console
@@ -571,6 +661,14 @@
             </table>
           </div>
         {/if}
+      </div>
+    {:else if activeTab === 'boot-logs'}
+      <div class="space-y-4">
+        <BootLogViewer {vmId} />
+      </div>
+    {:else if activeTab === 'firewall'}
+      <div class="space-y-4">
+        <FirewallRuleEditor {vmId} />
       </div>
     {/if}
   </div>

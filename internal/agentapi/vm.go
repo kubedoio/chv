@@ -103,6 +103,7 @@ type VMSnapshotDeleteRequest struct {
 // VMProvisionRequest requests a VM to be provisioned (disk clone + cloud-init)
 type VMProvisionRequest struct {
 	VMID              string   `json:"vm_id"`
+	VMName            string   `json:"vm_name"`
 	ImagePath         string   `json:"image_path"`
 	DiskPath          string   `json:"disk_path"`
 	WorkspacePath     string   `json:"workspace_path"`

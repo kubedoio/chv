@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -9,6 +10,8 @@ import (
 
 // VMConsoleWebSocket proxies WebSocket connections to the agent
 func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
+	slog.Info("WebSocket console request", "remote", r.RemoteAddr, "url", r.URL.String())
+	
 	// Authenticate via query parameter (browsers can't send custom headers for WebSocket)
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -19,10 +22,12 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if token == "" {
+		slog.Warn("WebSocket: no token provided", "remote", r.RemoteAddr)
 		http.Error(w, "token required", http.StatusUnauthorized)
 		return
 	}
 	if _, err := h.auth.ValidateToken(r.Context(), "Bearer "+token); err != nil {
+		slog.Warn("WebSocket: invalid token", "remote", r.RemoteAddr, "error", err)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -31,6 +36,7 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 	apiSocket := r.URL.Query().Get("api_socket")
 
 	if vmID == "" || apiSocket == "" {
+		slog.Warn("WebSocket: missing params", "vm_id", vmID, "api_socket", apiSocket)
 		http.Error(w, "vm_id and api_socket query params required", http.StatusBadRequest)
 		return
 	}
@@ -53,6 +59,7 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Build target URL
 	targetURL := agentURL + "/v1/vms/console?vm_id=" + vmID + "&api_socket=" + apiSocket
+	slog.Info("WebSocket: connecting to agent", "target", targetURL, "vm_id", vmID)
 
 	// Upgrade the HTTP connection to a WebSocket
 	upgrader := websocket.Upgrader{
@@ -66,17 +73,21 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	clientConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		slog.Error("WebSocket: upgrade failed", "error", err)
 		return
 	}
 	defer clientConn.Close()
+	slog.Info("WebSocket: client connected", "vm_id", vmID)
 
 	// Connect to agent WebSocket
 	agentConn, _, err := websocket.DefaultDialer.Dial(targetURL, nil)
 	if err != nil {
+		slog.Error("WebSocket: failed to connect to agent", "target", targetURL, "error", err)
 		clientConn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to agent: "+err.Error()))
 		return
 	}
 	defer agentConn.Close()
+	slog.Info("WebSocket: connected to agent", "vm_id", vmID)
 
 	// Proxy bidirectionally
 	errChan := make(chan error, 2)

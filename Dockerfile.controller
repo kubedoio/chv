@@ -2,7 +2,7 @@
 FROM node:20-alpine AS ui-builder
 WORKDIR /app/ui
 COPY ui/package*.json ./
-RUN npm install --include=optional
+RUN npm install --include=optional && npm rebuild
 COPY ui/ .
 RUN npm run build
 

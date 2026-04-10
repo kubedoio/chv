@@ -27,7 +27,7 @@ func (h *BootstrapHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.service.Bootstrap(ctx, &req)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "bootstrap_failed", err.Error(), true)
+		respondError(w, http.StatusInternalServerError, "bootstrap_failed", "Bootstrap operation failed", true)
 		return
 	}
 

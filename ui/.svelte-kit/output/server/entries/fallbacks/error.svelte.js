@@ -1,4 +1,4 @@
-import { g as getContext, c as escape_html } from "../../chunks/renderer.js";
+import { l as getContext, e as escape_html } from "../../chunks/renderer.js";
 import "clsx";
 import { s as stores } from "../../chunks/client.js";
 ({

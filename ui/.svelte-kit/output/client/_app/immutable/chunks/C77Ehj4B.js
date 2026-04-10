@@ -1,0 +1,1 @@
+function t(){return{id:"local",name:"Local Node",hostname:"localhost",ip_address:"127.0.0.1",status:"online",is_local:!0,capabilities:void 0,last_seen_at:new Date().toISOString(),created_at:new Date().toISOString(),updated_at:new Date().toISOString()}}export{t as g};

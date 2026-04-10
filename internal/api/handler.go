@@ -9,23 +9,30 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/chv/chv/internal/audit"
 	"github.com/chv/chv/internal/auth"
+	"github.com/chv/chv/internal/backup"
 	"github.com/chv/chv/internal/bootstrap"
 	"github.com/chv/chv/internal/config"
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/images"
+	"github.com/chv/chv/internal/logger"
 	"github.com/chv/chv/internal/vm"
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Handler struct {
-	repo        *db.Repository
-	auth        *auth.Service
-	bootstrap   *bootstrap.Service
-	config      config.ControllerConfig
-	router      chi.Router
-	imageWorker *images.Worker
-	vmService   *vm.Service
+	repo          *db.Repository
+	auth          *auth.Service
+	bootstrap     *bootstrap.Service
+	config        config.ControllerConfig
+	router        chi.Router
+	imageWorker   *images.Worker
+	vmService     *vm.Service
+	backupService *backup.Service
+	reconciler    *ReconciliationLoop
+	auditLogger   *audit.Logger
 }
 
 type errorEnvelope struct {
@@ -41,18 +48,37 @@ type apiError struct {
 	Hint         string `json:"hint,omitempty"`
 }
 
-func NewHandler(repo *db.Repository, authService *auth.Service, bootstrapService *bootstrap.Service, cfg config.ControllerConfig, imageWorker *images.Worker, vmService *vm.Service) *Handler {
+func NewHandler(repo *db.Repository, authService *auth.Service, bootstrapService *bootstrap.Service, cfg config.ControllerConfig, imageWorker *images.Worker, vmService *vm.Service, backupService *backup.Service) *Handler {
 	handler := &Handler{
-		repo:        repo,
-		auth:        authService,
-		bootstrap:   bootstrapService,
-		config:      cfg,
-		router:      chi.NewRouter(),
-		imageWorker: imageWorker,
-		vmService:   vmService,
+		repo:          repo,
+		auth:          authService,
+		bootstrap:     bootstrapService,
+		config:        cfg,
+		router:        chi.NewRouter(),
+		imageWorker:   imageWorker,
+		vmService:     vmService,
+		backupService: backupService,
 	}
 	handler.registerRoutes()
 	return handler
+}
+
+// StartReconciliationLoop starts the background VM state reconciliation loop
+func (h *Handler) StartReconciliationLoop(ctx context.Context) {
+	if h.vmService == nil {
+		logger.L().Warn("Cannot start reconciliation loop: vmService is nil")
+		return
+	}
+	logger.L().Info("Starting VM state reconciliation loop")
+	h.reconciler = NewReconciliationLoop(h)
+	h.reconciler.Start(ctx)
+}
+
+// StopReconciliationLoop stops the background VM state reconciliation loop
+func (h *Handler) StopReconciliationLoop() {
+	if h.reconciler != nil {
+		h.reconciler.Stop()
+	}
 }
 
 func (h *Handler) Router() http.Handler {
@@ -64,7 +90,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Set CORS headers
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 
@@ -82,9 +108,8 @@ func (h *Handler) registerRoutes() {
 	// CORS middleware
 	h.router.Use(corsMiddleware)
 
-	h.router.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		h.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	})
+	// Metrics middleware - records API request metrics
+	h.router.Use(MetricsMiddleware)
 
 	// Serve static files for UI (SPA support)
 	workDir, _ := os.Getwd()
@@ -92,6 +117,7 @@ func (h *Handler) registerRoutes() {
 	spaFileServer(h.router, "/", filesDir)
 
 	h.router.Route("/api/v1", func(r chi.Router) {
+		r.Get("/health", h.healthHandler)
 		r.Post("/tokens", h.createToken)
 		r.Post("/auth/login", h.login)
 		r.Post("/auth/logout", h.logout)
@@ -100,11 +126,34 @@ func (h *Handler) registerRoutes() {
 		r.Post("/install/bootstrap", h.installBootstrap)
 		r.Post("/install/repair", h.installRepair)
 
+		// Agent endpoints (TODO: implement agent-specific auth)
+		r.Route("/agents", func(r chi.Router) {
+			r.Use(h.authMiddleware)
+			r.Post("/register", h.registerAgent)
+			r.Post("/heartbeat", h.agentHeartbeat)
+		})
+
 		r.Group(func(r chi.Router) {
 			r.Use(h.authMiddleware)
 			r.Post("/login/validate", h.loginValidate)
 			r.Get("/networks", h.listNetworks)
 			r.Post("/networks", h.createNetwork)
+			r.Route("/networks/{id}", func(r chi.Router) {
+				r.Get("/", h.getNetworkHandler)
+				r.Delete("/", h.deleteNetworkHandler)
+				r.Route("/vlans", func(r chi.Router) {
+					r.Get("/", h.listVLANsHandler)
+					r.Post("/", h.createVLANHandler)
+					r.Delete("/{vlanId}", h.deleteVLANHandler)
+				})
+				r.Route("/dhcp", func(r chi.Router) {
+					r.Get("/", h.getDHCPStatusHandler)
+					r.Post("/", h.configureDHCPHandler)
+					r.Post("/start", h.startDHCPHandler)
+					r.Post("/stop", h.stopDHCPHandler)
+					r.Get("/leases", h.getDHCPLeasesHandler)
+				})
+			})
 			r.Get("/storage-pools", h.listStoragePools)
 			r.Post("/storage-pools", h.createStoragePool)
 			r.Get("/images", h.listImages)
@@ -112,7 +161,6 @@ func (h *Handler) registerRoutes() {
 			r.Post("/images/upload", h.uploadImage)
 			r.Get("/images/{id}/progress", h.getImageProgress)
 			r.Get("/events", h.listEvents)
-			r.Get("/vms/console/ws", h.vmConsoleWebSocket)
 			r.Route("/vms", func(r chi.Router) {
 				r.Get("/", h.listVMs)
 				r.Post("/", h.createVM)
@@ -123,8 +171,12 @@ func (h *Handler) registerRoutes() {
 					r.Get("/", h.getVM)
 					r.Get("/status", h.getVMStatus)
 					r.Get("/metrics", h.getVMMetrics)
+					r.Get("/boot-logs", h.getVMBootLogs)
 					r.Post("/start", h.startVM)
 					r.Post("/stop", h.stopVM)
+					r.Post("/shutdown", h.shutdownVM)
+					r.Post("/force-stop", h.forceStopVM)
+					r.Post("/reset", h.resetVM)
 					r.Post("/restart", h.restartVM)
 					r.Delete("/", h.deleteVM)
 					r.Get("/console", h.getVMConsole)
@@ -134,25 +186,109 @@ func (h *Handler) registerRoutes() {
 						r.Post("/{snapId}/restore", h.restoreVMSnapshot)
 						r.Delete("/{snapId}", h.deleteVMSnapshot)
 					})
+					r.Route("/firewall", func(r chi.Router) {
+						r.Get("/rules", h.listFirewallRulesHandler)
+						r.Post("/rules", h.createFirewallRuleHandler)
+						r.Delete("/rules/{ruleId}", h.deleteFirewallRuleHandler)
+					})
+					r.Get("/backups", h.listVMBackups)
 				})
 			})
 			r.Get("/operations", h.listOperations)
-		})
-	})
-}
 
-func (h *Handler) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := h.auth.ValidateToken(r.Context(), r.Header.Get("Authorization")); err != nil {
-			h.writeError(w, http.StatusUnauthorized, apiError{
-				Code:      "unauthorized",
-				Message:   "A valid bearer token is required.",
-				Retryable: false,
-				Hint:      "Create a token with POST /api/v1/tokens and retry with Authorization: Bearer <token>.",
+			// Node-scoped resource endpoints
+			r.Route("/nodes", func(r chi.Router) {
+				r.Get("/", h.listNodes)
+				r.Post("/", h.createNode)
+				r.Get("/health", h.getAllNodesHealth)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.getNode)
+					r.Patch("/", h.updateNode)
+					r.Delete("/", h.deleteNode)
+					r.Post("/maintenance", h.setNodeMaintenance)
+					r.Get("/health", h.getNodeHealth)
+					r.Get("/metrics", h.getNodeMetrics)
+					r.Get("/vms", h.listNodeVMs)
+					r.Get("/images", h.listNodeImages)
+					r.Get("/storage", h.listNodeStoragePools)
+					r.Get("/networks", h.listNodeNetworks)
+				})
 			})
-			return
-		}
-		next.ServeHTTP(w, r)
+
+			// RBAC endpoints
+			r.Route("/users", func(r chi.Router) {
+				r.Get("/", h.listUsers)
+				r.Post("/", h.createUser)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.getUser)
+					r.Patch("/", h.updateUser)
+					r.Delete("/", h.deleteUser)
+					r.Post("/reset-password", h.resetPassword)
+				})
+			})
+			r.Get("/roles", h.listRoles)
+			r.Get("/audit-logs", h.listAuditLogs)
+
+			// VM Templates endpoints
+			r.Route("/vm-templates", func(r chi.Router) {
+				r.Get("/", h.listVMTemplates)
+				r.Post("/", h.createVMTemplate)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.getVMTemplate)
+					r.Delete("/", h.deleteVMTemplate)
+					r.Post("/clone", h.cloneFromTemplate)
+					r.Get("/preview", h.previewVMTemplate)
+				})
+			})
+
+			// Cloud-init Templates endpoints
+			r.Route("/cloud-init-templates", func(r chi.Router) {
+				r.Get("/", h.listCloudInitTemplates)
+				r.Post("/", h.createCloudInitTemplate)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.getCloudInitTemplate)
+					r.Delete("/", h.deleteCloudInitTemplate)
+					r.Post("/render", h.renderCloudInitTemplate)
+				})
+			})
+
+			// Backup Jobs endpoints
+			r.Route("/backup-jobs", func(r chi.Router) {
+				r.Get("/", h.listBackupJobs)
+				r.Post("/", h.createBackupJob)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.getBackupJob)
+					r.Delete("/", h.deleteBackupJob)
+					r.Post("/run", h.runBackupJob)
+					r.Post("/toggle", h.toggleBackupJob)
+				})
+			})
+
+			// VM Export/Import endpoints
+			r.Post("/vms/{id}/export", h.exportVM)
+			r.Post("/vms/import", h.importVM)
+			r.Get("/exports/{id}/download", h.downloadExport)
+
+			// Quota endpoints
+			r.Route("/quotas", func(r chi.Router) {
+				r.Get("/", h.listQuotas)
+				r.Post("/", h.createQuota)
+				r.Get("/me", h.getMyQuota)
+				r.Post("/check", h.checkQuota)
+				r.Route("/{userId}", func(r chi.Router) {
+					r.Get("/", h.getQuota)
+					r.Patch("/", h.updateQuota)
+					r.Get("/usage", h.getUserUsage)
+				})
+			})
+
+			// Usage endpoint (current user's usage)
+			r.Get("/usage", h.getUsage)
+		})
+		// Prometheus metrics endpoint
+		r.Get("/metrics", promhttp.Handler().ServeHTTP)
+		// WebSocket console endpoint - outside auth middleware (token passed in query param)
+		r.Get("/vms/console/ws", h.vmConsoleWebSocket)
 	})
 }
 

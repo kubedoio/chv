@@ -6,6 +6,9 @@ import type {
   CreateNetworkInput,
   CreateStoragePoolInput,
   CreateVMInput,
+  CreateNodeInput,
+  CreateNodeResponse,
+  UpdateNodeInput,
   Event,
   Image,
   ImportProgress,
@@ -13,6 +16,8 @@ import type {
   InstallStatusResponse,
   LoginResponse,
   Network,
+  Node,
+  NodeWithResources,
   Operation,
   StoragePool,
   UserInfo,
@@ -21,6 +26,27 @@ import type {
   VMMetricsResponse,
   BulkVMResponse,
   VMSnapshot,
+  VMTemplate,
+  CreateVMTemplateInput,
+  CloneFromTemplateInput,
+  CloudInitTemplate,
+  CreateCloudInitTemplateInput,
+  RenderCloudInitTemplateInput,
+  RenderCloudInitTemplateResponse,
+  VLANNetwork,
+  CreateVLANInput,
+  DHCPServerConfig,
+  ConfigureDHCPInput,
+  DHCPLease,
+  FirewallRule,
+  CreateFirewallRuleInput,
+  Quota,
+  Usage,
+  UsageWithQuota,
+  CheckQuotaRequest,
+  CheckQuotaResponse,
+  SetQuotaInput,
+  UpdateQuotaInput,
 } from '$lib/api/types';
 
 const DEFAULT_BASE_URL = env.PUBLIC_CHV_API_BASE_URL || ''; // Empty string means same origin
@@ -392,6 +418,265 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     },
     deleteVMSnapshot(vmId: string, snapId: string) {
       return request<{ success: boolean }>(`/api/v1/vms/${vmId}/snapshots/${snapId}`, { method: 'DELETE' });
+    },
+    // Node management endpoints
+    listNodes() {
+      return request<NodeWithResources[]>('/api/v1/nodes');
+    },
+    createNode(data: CreateNodeInput) {
+      return request<CreateNodeResponse>('/api/v1/nodes', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    getNode(nodeId: string) {
+      return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`);
+    },
+    updateNode(nodeId: string, data: UpdateNodeInput) {
+      return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data)
+      });
+    },
+    deleteNode(nodeId: string) {
+      return request<void>(`/api/v1/nodes/${nodeId}`, { method: 'DELETE' });
+    },
+    setNodeMaintenance(nodeId: string, enabled: boolean) {
+      return request<{ message: string; maintenance: boolean; status: string }>(`/api/v1/nodes/${nodeId}/maintenance`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled })
+      });
+    },
+    // Node-scoped resource endpoints
+    listNodeVMs(nodeId: string) {
+      return request<{
+        node_id: string;
+        node_name: string;
+        resources: VM[];
+        count: number;
+      }>(`/api/v1/nodes/${nodeId}/vms`);
+    },
+    listNodeImages(nodeId: string) {
+      return request<{
+        node_id: string;
+        node_name: string;
+        resources: Image[];
+        count: number;
+      }>(`/api/v1/nodes/${nodeId}/images`);
+    },
+    listNodeStoragePools(nodeId: string) {
+      return request<{
+        node_id: string;
+        node_name: string;
+        resources: StoragePool[];
+        count: number;
+      }>(`/api/v1/nodes/${nodeId}/storage`);
+    },
+    listNodeNetworks(nodeId: string) {
+      return request<{
+        node_id: string;
+        node_name: string;
+        resources: Network[];
+        count: number;
+      }>(`/api/v1/nodes/${nodeId}/networks`);
+    },
+    // VM Power Actions
+    shutdownVM(id: string, timeout?: number) {
+      const query = timeout ? `?timeout=${timeout}` : '';
+      return request<{ message: string; timeout: number }>(`/api/v1/vms/${id}/shutdown${query}`, { method: 'POST' });
+    },
+    forceStopVM(id: string) {
+      return request<{ message: string }>(`/api/v1/vms/${id}/force-stop`, { method: 'POST' });
+    },
+    resetVM(id: string) {
+      return request<{ message: string }>(`/api/v1/vms/${id}/reset`, { method: 'POST' });
+    },
+    restartVMWithOptions(id: string, graceful?: boolean, timeout?: number) {
+      const params = new URLSearchParams();
+      if (graceful !== undefined) params.append('graceful', String(graceful));
+      if (timeout !== undefined) params.append('timeout', String(timeout));
+      const query = params.toString() ? `?${params.toString()}` : '';
+      return request<{ message: string; graceful: boolean; timeout: number }>(`/api/v1/vms/${id}/restart${query}`, { method: 'POST' });
+    },
+    getBootLogs(id: string, lines?: number) {
+      const query = lines ? `?lines=${lines}` : '';
+      return request<{
+        vm_id: string;
+        lines: { line_number: number; content: string; timestamp: string }[];
+        count: number;
+      }>(`/api/v1/vms/${id}/boot-logs${query}`);
+    },
+    // VM Templates
+    listVMTemplates() {
+      return request<VMTemplate[]>('/api/v1/vm-templates');
+    },
+    createVMTemplate(data: CreateVMTemplateInput) {
+      return request<VMTemplate>('/api/v1/vm-templates', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    getVMTemplate(id: string) {
+      return request<VMTemplate>(`/api/v1/vm-templates/${id}`);
+    },
+    deleteVMTemplate(id: string) {
+      return request<void>(`/api/v1/vm-templates/${id}`, { method: 'DELETE' });
+    },
+    cloneFromTemplate(templateId: string, data: CloneFromTemplateInput) {
+      return request<VM>(`/api/v1/vm-templates/${templateId}/clone`, {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    previewVMTemplate(id: string) {
+      return request<VMTemplate>(`/api/v1/vm-templates/${id}/preview`);
+    },
+    // Cloud-init Templates
+    listCloudInitTemplates() {
+      return request<CloudInitTemplate[]>('/api/v1/cloud-init-templates');
+    },
+    getCloudInitTemplate(id: string) {
+      return request<CloudInitTemplate>(`/api/v1/cloud-init-templates/${id}`);
+    },
+    createCloudInitTemplate(data: CreateCloudInitTemplateInput) {
+      return request<CloudInitTemplate>('/api/v1/cloud-init-templates', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    deleteCloudInitTemplate(id: string) {
+      return request<void>(`/api/v1/cloud-init-templates/${id}`, { method: 'DELETE' });
+    },
+    renderCloudInitTemplate(templateId: string, data: RenderCloudInitTemplateInput) {
+      return request<RenderCloudInitTemplateResponse>(`/api/v1/cloud-init-templates/${templateId}/render`, {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    // VLAN endpoints
+    listVLANs(networkId: string) {
+      return request<VLANNetwork[]>(`/api/v1/networks/${networkId}/vlans`);
+    },
+    createVLAN(networkId: string, data: CreateVLANInput) {
+      return request<VLANNetwork>(`/api/v1/networks/${networkId}/vlans`, {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    deleteVLAN(networkId: string, vlanId: string) {
+      return request<{ success: boolean }>(`/api/v1/networks/${networkId}/vlans/${vlanId}`, {
+        method: 'DELETE'
+      });
+    },
+    // DHCP endpoints
+    getDHCPStatus(networkId: string) {
+      return request<DHCPServerConfig>(`/api/v1/networks/${networkId}/dhcp`);
+    },
+    configureDHCP(networkId: string, data: ConfigureDHCPInput) {
+      return request<DHCPServerConfig>(`/api/v1/networks/${networkId}/dhcp`, {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    startDHCPServer(networkId: string) {
+      return request<{ message: string; is_running: boolean }>(`/api/v1/networks/${networkId}/dhcp/start`, {
+        method: 'POST'
+      });
+    },
+    stopDHCPServer(networkId: string) {
+      return request<{ message: string; is_running: boolean }>(`/api/v1/networks/${networkId}/dhcp/stop`, {
+        method: 'POST'
+      });
+    },
+    getDHCPLeases(networkId: string) {
+      return request<DHCPLease[]>(`/api/v1/networks/${networkId}/dhcp/leases`);
+    },
+    // Firewall endpoints
+    listFirewallRules(vmId: string) {
+      return request<FirewallRule[]>(`/api/v1/vms/${vmId}/firewall/rules`);
+    },
+    createFirewallRule(vmId: string, data: CreateFirewallRuleInput) {
+      return request<FirewallRule>(`/api/v1/vms/${vmId}/firewall/rules`, {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    deleteFirewallRule(vmId: string, ruleId: string) {
+      return request<{ success: boolean }>(`/api/v1/vms/${vmId}/firewall/rules/${ruleId}`, {
+        method: 'DELETE'
+      });
+    },
+    // Backup Jobs
+    listBackupJobs() {
+      return request<BackupJobResponse[]>('/api/v1/backup-jobs');
+    },
+    createBackupJob(data: CreateBackupJobInput) {
+      return request<BackupJob>('/api/v1/backup-jobs', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    deleteBackupJob(id: string) {
+      return request<{ success: boolean }>(`/api/v1/backup-jobs/${id}`, { method: 'DELETE' });
+    },
+    runBackupJob(id: string) {
+      return request<BackupHistory>(`/api/v1/backup-jobs/${id}/run`, { method: 'POST' });
+    },
+    toggleBackupJob(id: string) {
+      return request<{ success: boolean; enabled: boolean }>(`/api/v1/backup-jobs/${id}/toggle`, { method: 'POST' });
+    },
+    // VM Backups
+    listVMBackups(vmId: string) {
+      return request<BackupHistory[]>(`/api/v1/vms/${vmId}/backups`);
+    },
+    // Export/Import
+    exportVM(vmId: string) {
+      return request<{ export_id: string; filename: string; download_url: string }>(`/api/v1/vms/${vmId}/export`, { method: 'POST' });
+    },
+    downloadExport(exportId: string) {
+      return fetch(`${baseUrl}/api/v1/exports/${exportId}/download`, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+    },
+    importVM(file: File, name: string) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('name', name);
+      return upload<VM>('/api/v1/vms/import', formData);
+    },
+    // Quota endpoints
+    listQuotas() {
+      return request<Quota[]>('/api/v1/quotas');
+    },
+    createQuota(data: SetQuotaInput) {
+      return request<Quota>('/api/v1/quotas', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+    getQuota(userId: string) {
+      return request<Quota>(`/api/v1/quotas/${userId}`);
+    },
+    getMyQuota() {
+      return request<Quota>('/api/v1/quotas/me');
+    },
+    updateQuota(userId: string, data: UpdateQuotaInput) {
+      return request<Quota>(`/api/v1/quotas/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data)
+      });
+    },
+    getUsage() {
+      return request<UsageWithQuota>('/api/v1/usage');
+    },
+    getUserUsage(userId: string) {
+      return request<UsageWithQuota>(`/api/v1/quotas/${userId}/usage`);
+    },
+    checkQuota(data: CheckQuotaRequest) {
+      return request<CheckQuotaResponse>('/api/v1/quotas/check', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
     }
   };
 }

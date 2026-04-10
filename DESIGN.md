@@ -116,6 +116,12 @@ No gradients, no decorative illustrations. Visual hierarchy comes from:
 - Tabs for object detail views: Summary | Console | Settings | Logs
 - Stats cards at top of list views
 
+**Node-scoped navigation:**
+- Datacenter overview shows aggregate stats across all nodes
+- Node detail pages show node-specific resources only
+- Resource tables filtered by node context
+- Breadcrumbs show: Datacenter > Node Name > Resource Type
+
 ---
 
 ## Components
@@ -150,6 +156,15 @@ No gradients, no decorative illustrations. Visual hierarchy comes from:
 | Stopped | ● | Gray #999999 |
 | Warning | ▲ | Amber #F0AB00 |
 | Error | ◼ | Red #E60000 |
+
+### Node Status
+
+| State | Icon | Color | Description |
+|-------|------|-------|-------------|
+| Online | ● | Green #54B435 | Node is healthy and responsive |
+| Offline | ● | Gray #999999 | Node is unreachable |
+| Maintenance | 🛠 | Amber #F0AB00 | Node is in maintenance mode |
+| Error | ◼ | Red #E60000 | Node has errors |
 
 ---
 
@@ -198,6 +213,8 @@ open docs/design-preview.html
 | 2024-04-05 | Roboto font family | Enterprise-standard, highly readable, available via Google Fonts |
 | 2024-04-05 | Three-pane layout | Industry standard for resource management since Windows Explorer |
 | 2024-04-05 | Border-heavy UI | Creates clear separation between functional areas |
+| 2026-04-10 | Node-scoped navigation | Multi-node support requires clear resource ownership in the UI |
+| 2026-04-10 | Tree navigation with node hierarchy | Proxmox-style datacenter → node → resource drill-down pattern |
 
 ---
 

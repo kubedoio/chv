@@ -19,7 +19,7 @@ func (h *InstallHandler) Check(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.service.Check(ctx)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "check_failed", err.Error(), true)
+		respondError(w, http.StatusInternalServerError, "install_check_failed", "Failed to check installation status", true)
 		return
 	}
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"sync"
@@ -70,6 +71,11 @@ func (s *Service) SetAgentClient(agentURL string) {
 	}
 }
 
+// GetAgentClient returns the agent client for external use
+func (s *Service) GetAgentClient() *agentclient.Client {
+	return s.agentClient
+}
+
 // CreateVMInput holds parameters for creating a VM
 type CreateVMInput struct {
 	Name              string
@@ -118,6 +124,15 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 		return nil, fmt.Errorf("storage pool not found: %s", input.StoragePoolID)
 	}
 
+	// Get local node ID
+	localNode, err := s.repo.GetLocalNode(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get local node: %w", err)
+	}
+	if localNode == nil {
+		return nil, fmt.Errorf("local node not found")
+	}
+
 	// Create VM record
 	vmID := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -125,6 +140,7 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 
 	vm := &models.VirtualMachine{
 		ID:            vmID,
+		NodeID:        localNode.ID,
 		Name:          input.Name,
 		ImageID:       input.ImageID,
 		StoragePoolID: input.StoragePoolID,
@@ -173,6 +189,7 @@ func (s *Service) provisionVM(ctx context.Context, vm *models.VirtualMachine, im
 	// Delegate provisioning to the agent (Phase 4.1 Distributed Infrastructure)
 	provisionReq := &agentapi.VMProvisionRequest{
 		VMID:              vm.ID,
+		VMName:            vm.Name,
 		ImagePath:         image.LocalPath,
 		DiskPath:          vm.DiskPath,
 		WorkspacePath:     vm.WorkspacePath,
@@ -293,6 +310,19 @@ func (s *Service) StartVM(ctx context.Context, vmID string) error {
 
 		resp, err := s.agentClient.StartVM(ctx, req)
 		if err != nil {
+			// If agent says VM is already running, reconcile state instead of failing
+			if strings.Contains(err.Error(), "already running") {
+				statusResp, statusErr := s.agentClient.GetVMStatus(ctx, &agentapi.VMStatusRequest{VMID: vmID})
+				if statusErr == nil && statusResp.Running {
+					vm.ActualState = StatusRunning
+					vm.DesiredState = "running"
+					vm.CloudHypervisorPID = statusResp.PID
+					vm.LastError = ""
+					vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					_ = s.repo.UpdateVM(ctx, vm)
+					return nil // State is now consistent
+				}
+			}
 			// Mark as error
 			vm.ActualState = StatusError
 			vm.LastError = fmt.Sprintf("Failed to start VM: %v", err)
@@ -364,6 +394,11 @@ func (s *Service) StopVM(ctx context.Context, vmID string) error {
 
 // RestartVM stops and restarts a VM atomically
 func (s *Service) RestartVM(ctx context.Context, vmID string) error {
+	return s.RestartVMWithOptions(ctx, vmID, false, 60*time.Second)
+}
+
+// RestartVMWithOptions restarts a VM with configurable graceful shutdown
+func (s *Service) RestartVMWithOptions(ctx context.Context, vmID string, graceful bool, timeout time.Duration) error {
 	// Get VM
 	vm, err := s.repo.GetVMByID(ctx, vmID)
 	if err != nil {
@@ -380,12 +415,22 @@ func (s *Service) RestartVM(ctx context.Context, vmID string) error {
 
 	// Stop if running
 	if vm.ActualState == StatusRunning {
-		if err := s.StopVM(ctx, vmID); err != nil {
-			return fmt.Errorf("failed to stop VM for restart: %w", err)
+		if graceful {
+			if err := s.ShutdownVM(ctx, vmID, timeout); err != nil {
+				return fmt.Errorf("failed to shutdown VM for restart: %w", err)
+			}
+		} else {
+			if err := s.StopVM(ctx, vmID); err != nil {
+				return fmt.Errorf("failed to stop VM for restart: %w", err)
+			}
 		}
 
 		// Wait for stop with timeout
-		if err := s.waitForState(ctx, vmID, StatusStopped, 30*time.Second); err != nil {
+		waitTimeout := timeout + 10*time.Second // Add buffer to shutdown timeout
+		if !graceful {
+			waitTimeout = 30 * time.Second
+		}
+		if err := s.waitForState(ctx, vmID, StatusStopped, waitTimeout); err != nil {
 			return fmt.Errorf("timeout waiting for VM to stop: %w", err)
 		}
 	}
@@ -395,6 +440,148 @@ func (s *Service) RestartVM(ctx context.Context, vmID string) error {
 
 	// Start VM
 	return s.StartVM(ctx, vmID)
+}
+
+// ShutdownVM gracefully shuts down a VM using ACPI signal
+func (s *Service) ShutdownVM(ctx context.Context, vmID string, timeout time.Duration) error {
+	vm, err := s.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		return fmt.Errorf("failed to get VM: %w", err)
+	}
+	if vm == nil {
+		return fmt.Errorf("VM not found: %s", vmID)
+	}
+
+	if vm.ActualState != StatusRunning {
+		return fmt.Errorf("VM is not running")
+	}
+
+	// Update to stopping state
+	vm.DesiredState = "stopped"
+	vm.ActualState = StatusStopping
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.repo.UpdateVM(ctx, vm); err != nil {
+		return fmt.Errorf("failed to update VM status: %w", err)
+	}
+
+	// If agent is available, use it to send ACPI shutdown
+	if s.agentClient != nil && vm.CloudHypervisorPID > 0 {
+		req := &agentapi.VMShutdownRequest{
+			VMID:    vmID,
+			PID:     vm.CloudHypervisorPID,
+			Timeout: int(timeout.Seconds()),
+		}
+
+		_, err := s.agentClient.ShutdownVM(ctx, req)
+		if err != nil {
+			// Log error but continue - VM might still shut down
+			fmt.Printf("Warning: failed to send shutdown signal via agent: %v\n", err)
+		}
+	}
+
+	// Wait for VM to stop (with timeout)
+	done := make(chan error, 1)
+	go func() {
+		err := s.waitForState(ctx, vmID, StatusStopped, timeout)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			// Shutdown timed out, VM may still be running
+			return fmt.Errorf("shutdown timed out after %v: %w", timeout, err)
+		}
+		// VM stopped successfully
+	case <-time.After(timeout + 5*time.Second):
+		// This shouldn't happen given waitForState has its own timeout
+		return fmt.Errorf("shutdown wait exceeded timeout")
+	}
+
+	return nil
+}
+
+// ForceStopVM immediately kills a VM process
+func (s *Service) ForceStopVM(ctx context.Context, vmID string) error {
+	vm, err := s.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		return fmt.Errorf("failed to get VM: %w", err)
+	}
+	if vm == nil {
+		return fmt.Errorf("VM not found: %s", vmID)
+	}
+
+	if vm.ActualState != StatusRunning && vm.ActualState != StatusStarting {
+		return fmt.Errorf("VM is not running")
+	}
+
+	// Update to stopping state
+	vm.DesiredState = "stopped"
+	vm.ActualState = StatusStopping
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.repo.UpdateVM(ctx, vm); err != nil {
+		return fmt.Errorf("failed to update VM status: %w", err)
+	}
+
+	// If agent is available, use it to force stop
+	if s.agentClient != nil && vm.CloudHypervisorPID > 0 {
+		req := &agentapi.VMForceStopRequest{
+			VMID: vmID,
+			PID:  vm.CloudHypervisorPID,
+		}
+
+		_, err := s.agentClient.ForceStopVM(ctx, req)
+		if err != nil {
+			// Log error but continue to update state
+			fmt.Printf("Warning: failed to force stop VM via agent: %v\n", err)
+		}
+	}
+
+	// Update state to stopped
+	vm.ActualState = StatusStopped
+	vm.CloudHypervisorPID = 0
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.repo.UpdateVM(ctx, vm); err != nil {
+		return fmt.Errorf("failed to update VM status: %w", err)
+	}
+
+	return nil
+}
+
+// ResetVM resets a VM (power cycle without full shutdown)
+func (s *Service) ResetVM(ctx context.Context, vmID string) error {
+	vm, err := s.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		return fmt.Errorf("failed to get VM: %w", err)
+	}
+	if vm == nil {
+		return fmt.Errorf("VM not found: %s", vmID)
+	}
+
+	if vm.ActualState != StatusRunning {
+		return fmt.Errorf("VM is not running")
+	}
+
+	// If agent is available, use it to reset
+	if s.agentClient != nil && vm.CloudHypervisorPID > 0 {
+		req := &agentapi.VMResetRequest{
+			VMID: vmID,
+			PID:  vm.CloudHypervisorPID,
+		}
+
+		_, err := s.agentClient.ResetVM(ctx, req)
+		if err != nil {
+			return fmt.Errorf("failed to reset VM via agent: %w", err)
+		}
+	}
+
+	// Update timestamp
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.repo.UpdateVM(ctx, vm); err != nil {
+		return fmt.Errorf("failed to update VM status: %w", err)
+	}
+
+	return nil
 }
 
 // waitForState polls the VM until it reaches the target state or timeout
@@ -535,6 +722,11 @@ func (s *Service) DeleteVM(ctx context.Context, vmID string) error {
 	}
 
 	return nil
+}
+
+// GetVM retrieves a VM by ID
+func (s *Service) GetVM(ctx context.Context, vmID string) (*models.VirtualMachine, error) {
+	return s.repo.GetVMByID(ctx, vmID)
 }
 
 // CreateSnapshot creates a new internal snapshot for a VM

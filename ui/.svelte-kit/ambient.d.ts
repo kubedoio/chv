@@ -39,6 +39,7 @@
  */
 declare module '$env/static/private' {
 	export const SUDO_GID: string;
+	export const TMUX: string;
 	export const MAIL: string;
 	export const USER: string;
 	export const npm_config_user_agent: string;
@@ -49,6 +50,7 @@ declare module '$env/static/private' {
 	export const LESS: string;
 	export const HOME: string;
 	export const OLDPWD: string;
+	export const TERM_PROGRAM_VERSION: string;
 	export const npm_package_json: string;
 	export const LSCOLORS: string;
 	export const ZSH: string;
@@ -70,10 +72,10 @@ declare module '$env/static/private' {
 	export const npm_package_name: string;
 	export const LANG: string;
 	export const LS_COLORS: string;
+	export const TERM_PROGRAM: string;
 	export const npm_lifecycle_script: string;
 	export const SUDO_COMMAND: string;
 	export const SHELL: string;
-	export const GIT_TERMINAL_PROMPT: string;
 	export const npm_package_version: string;
 	export const npm_lifecycle_event: string;
 	export const SUDO_USER: string;
@@ -85,6 +87,7 @@ declare module '$env/static/private' {
 	export const npm_execpath: string;
 	export const npm_config_global_prefix: string;
 	export const npm_command: string;
+	export const TMUX_PANE: string;
 	export const INIT_CWD: string;
 	export const EDITOR: string;
 	export const NODE_ENV: string;
@@ -175,6 +178,7 @@ declare module '$env/static/public' {
 declare module '$env/dynamic/private' {
 	export const env: {
 		SUDO_GID: string;
+		TMUX: string;
 		MAIL: string;
 		USER: string;
 		npm_config_user_agent: string;
@@ -185,6 +189,7 @@ declare module '$env/dynamic/private' {
 		LESS: string;
 		HOME: string;
 		OLDPWD: string;
+		TERM_PROGRAM_VERSION: string;
 		npm_package_json: string;
 		LSCOLORS: string;
 		ZSH: string;
@@ -206,10 +211,10 @@ declare module '$env/dynamic/private' {
 		npm_package_name: string;
 		LANG: string;
 		LS_COLORS: string;
+		TERM_PROGRAM: string;
 		npm_lifecycle_script: string;
 		SUDO_COMMAND: string;
 		SHELL: string;
-		GIT_TERMINAL_PROMPT: string;
 		npm_package_version: string;
 		npm_lifecycle_event: string;
 		SUDO_USER: string;
@@ -221,6 +226,7 @@ declare module '$env/dynamic/private' {
 		npm_execpath: string;
 		npm_config_global_prefix: string;
 		npm_command: string;
+		TMUX_PANE: string;
 		INIT_CWD: string;
 		EDITOR: string;
 		NODE_ENV: string;

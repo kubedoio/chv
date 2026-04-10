@@ -1,30 +1,42 @@
-import { b as attr, c as escape_html, o as attributes, h as stringify, d as bind_props, i as derived } from "./renderer.js";
+import { c as attr, e as escape_html, f as derived, m as attributes, i as stringify, k as bind_props } from "./renderer.js";
+import { V as VisuallyHidden } from "./VisuallyHidden.js";
 function FormField($$renderer, $$props) {
-  let { label, error, helper, required = false, labelFor, children } = $$props;
-  $$renderer.push(`<div class="flex flex-col gap-1"><label${attr("for", labelFor)} class="text-xs font-medium text-muted">${escape_html(label)} `);
-  if (required) {
-    $$renderer.push("<!--[0-->");
-    $$renderer.push(`<span class="text-danger">*</span>`);
-  } else {
-    $$renderer.push("<!--[-1-->");
-  }
-  $$renderer.push(`<!--]--></label> `);
-  children($$renderer);
-  $$renderer.push(`<!----> `);
-  if (helper && !error) {
-    $$renderer.push("<!--[0-->");
-    $$renderer.push(`<p class="text-xs text-muted mt-1">${escape_html(helper)}</p>`);
-  } else {
-    $$renderer.push("<!--[-1-->");
-  }
-  $$renderer.push(`<!--]--> `);
-  if (error) {
-    $$renderer.push("<!--[0-->");
-    $$renderer.push(`<div class="flex items-center gap-1.5 mt-1" role="alert"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-danger flex-shrink-0" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" x2="12" y1="8" y2="12"></line><line x1="12" x2="12.01" y1="16" y2="16"></line></svg> <p class="text-xs text-danger">${escape_html(error)}</p></div>`);
-  } else {
-    $$renderer.push("<!--[-1-->");
-  }
-  $$renderer.push(`<!--]--></div>`);
+  $$renderer.component(($$renderer2) => {
+    let { label, error, helper, required = false, labelFor, children } = $$props;
+    let fieldId = derived(() => labelFor || `field-${Math.random().toString(36).slice(2, 9)}`);
+    let helperId = derived(() => helper ? `${fieldId()}-helper` : void 0);
+    let errorId = derived(() => error ? `${fieldId()}-error` : void 0);
+    $$renderer2.push(`<div class="form-field svelte-py80wu"><label${attr("for", fieldId())} class="form-label svelte-py80wu">${escape_html(label)} `);
+    if (required) {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<span class="required-indicator svelte-py80wu" aria-hidden="true">*</span> `);
+      VisuallyHidden($$renderer2, {
+        children: ($$renderer3) => {
+          $$renderer3.push(`<!---->(required)`);
+        }
+      });
+      $$renderer2.push(`<!---->`);
+    } else {
+      $$renderer2.push("<!--[-1-->");
+    }
+    $$renderer2.push(`<!--]--></label>  `);
+    children($$renderer2);
+    $$renderer2.push(`<!----> `);
+    if (helper && !error) {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<p${attr("id", helperId())} class="helper-text svelte-py80wu">${escape_html(helper)}</p>`);
+    } else {
+      $$renderer2.push("<!--[-1-->");
+    }
+    $$renderer2.push(`<!--]--> `);
+    if (error) {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<div${attr("id", errorId())} class="error-container svelte-py80wu" role="alert" aria-live="assertive"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="error-icon svelte-py80wu" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" x2="12" y1="8" y2="12"></line><line x1="12" x2="12.01" y1="16" y2="16"></line></svg> <p class="error-text svelte-py80wu">${escape_html(error)}</p></div>`);
+    } else {
+      $$renderer2.push("<!--[-1-->");
+    }
+    $$renderer2.push(`<!--]--></div>`);
+  });
 }
 function Input($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {

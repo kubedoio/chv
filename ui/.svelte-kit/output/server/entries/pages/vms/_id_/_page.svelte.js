@@ -2,7 +2,8 @@ import "clsx";
 import { o as onDestroy } from "../../../../chunks/index-server.js";
 import { g as goto } from "../../../../chunks/client.js";
 import { c as createAPIClient, g as getStoredToken } from "../../../../chunks/client2.js";
-import { d as bind_props, c as escape_html } from "../../../../chunks/renderer.js";
+/* empty css                                                          */
+import { k as bind_props, e as escape_html } from "../../../../chunks/renderer.js";
 import { M as Modal } from "../../../../chunks/Modal.js";
 import "../../../../chunks/toast.js";
 import { T as Triangle_alert } from "../../../../chunks/triangle-alert.js";

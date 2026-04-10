@@ -1,6 +1,6 @@
 import "clsx";
 import { c as createAPIClient, g as getStoredToken } from "../../../chunks/client2.js";
-import { f as fallback, c as escape_html, e as ensure_array_like, b as attr, d as bind_props } from "../../../chunks/renderer.js";
+import { o as fallback, e as escape_html, d as ensure_array_like, c as attr, k as bind_props } from "../../../chunks/renderer.js";
 import { S as StateBadge } from "../../../chunks/StateBadge.js";
 import { t as toast } from "../../../chunks/toast.js";
 function InstallStatusPanel($$renderer, $$props) {

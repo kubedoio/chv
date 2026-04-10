@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -212,7 +213,24 @@ func (h *Handler) restartVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.vmService.RestartVM(ctx, vmID); err != nil {
+	// Parse query parameters for graceful restart
+	graceful := r.URL.Query().Get("graceful") == "true"
+	timeoutStr := r.URL.Query().Get("timeout")
+	timeout := 60 // default 60 seconds
+	if timeoutStr != "" {
+		if t, err := strconv.Atoi(timeoutStr); err == nil && t > 0 {
+			timeout = t
+		}
+	}
+
+	var err error
+	if graceful {
+		err = h.vmService.RestartVMWithOptions(ctx, vmID, true, time.Duration(timeout)*time.Second)
+	} else {
+		err = h.vmService.RestartVM(ctx, vmID)
+	}
+
+	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, apiError{
 			Code:      "vm_restart_failed",
 			Message:   err.Error(),
@@ -223,6 +241,144 @@ func (h *Handler) restartVM(w http.ResponseWriter, r *http.Request) {
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"message": "VM restart initiated",
+		"graceful": graceful,
+		"timeout": timeout,
+	})
+}
+
+func (h *Handler) shutdownVM(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+	vmID := chi.URLParam(r, "id")
+
+	if h.vmService == nil {
+		h.writeError(w, http.StatusServiceUnavailable, apiError{
+			Code:      "service_unavailable",
+			Message:   "VM service not available",
+			Retryable: true,
+		})
+		return
+	}
+
+	// Parse timeout parameter
+	timeoutStr := r.URL.Query().Get("timeout")
+	timeout := 60 // default 60 seconds
+	if timeoutStr != "" {
+		if t, err := strconv.Atoi(timeoutStr); err == nil && t > 0 {
+			timeout = t
+		}
+	}
+
+	if err := h.vmService.ShutdownVM(ctx, vmID, time.Duration(timeout)*time.Second); err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "timed out") {
+			status = http.StatusRequestTimeout
+		}
+		h.writeError(w, status, apiError{
+			Code:      "vm_shutdown_failed",
+			Message:   err.Error(),
+			Retryable: status != http.StatusRequestTimeout,
+		})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"message": "VM shutdown completed",
+		"timeout": timeout,
+	})
+}
+
+func (h *Handler) forceStopVM(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+	vmID := chi.URLParam(r, "id")
+
+	if h.vmService == nil {
+		h.writeError(w, http.StatusServiceUnavailable, apiError{
+			Code:      "service_unavailable",
+			Message:   "VM service not available",
+			Retryable: true,
+		})
+		return
+	}
+
+	if err := h.vmService.ForceStopVM(ctx, vmID); err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "vm_force_stop_failed",
+			Message:   err.Error(),
+			Retryable: true,
+		})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"message": "VM force stopped",
+	})
+}
+
+func (h *Handler) resetVM(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+	vmID := chi.URLParam(r, "id")
+
+	if h.vmService == nil {
+		h.writeError(w, http.StatusServiceUnavailable, apiError{
+			Code:      "service_unavailable",
+			Message:   "VM service not available",
+			Retryable: true,
+		})
+		return
+	}
+
+	if err := h.vmService.ResetVM(ctx, vmID); err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "vm_reset_failed",
+			Message:   err.Error(),
+			Retryable: true,
+		})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"message": "VM reset initiated",
+	})
+}
+
+func (h *Handler) getVMBootLogs(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+	vmID := chi.URLParam(r, "id")
+
+	// Parse lines parameter
+	linesStr := r.URL.Query().Get("lines")
+	lines := 100 // default 100 lines
+	if linesStr != "" {
+		if n, err := strconv.Atoi(linesStr); err == nil && n > 0 {
+			lines = n
+		}
+	}
+
+	// Get boot logs from repository
+	logEntries, err := h.repo.GetVMBootLogs(ctx, vmID, lines)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "boot_logs_fetch_failed",
+			Message:   err.Error(),
+			Retryable: true,
+		})
+		return
+	}
+
+	// Convert to response format
+	var linesResponse []map[string]any
+	for _, entry := range logEntries {
+		linesResponse = append(linesResponse, map[string]any{
+			"line_number": entry.LineNumber,
+			"content":     entry.Content,
+			"timestamp":   entry.Timestamp.Format(time.RFC3339),
+		})
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"vm_id": vmID,
+		"lines": linesResponse,
+		"count": len(linesResponse),
 	})
 }
 

@@ -57,6 +57,25 @@ func (h *Handler) createStoragePool(w http.ResponseWriter, r *http.Request) {
 
 	ctx := requestContext(r)
 
+	// Get local node ID
+	localNode, err := h.repo.GetLocalNode(ctx)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "storage_pool_create_failed",
+			Message:   "Could not determine local node.",
+			Retryable: true,
+		})
+		return
+	}
+	if localNode == nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "storage_pool_create_failed",
+			Message:   "Local node not found.",
+			Retryable: true,
+		})
+		return
+	}
+
 	existing, err := h.repo.GetStoragePoolByName(ctx, req.Name)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, apiError{
@@ -79,6 +98,7 @@ func (h *Handler) createStoragePool(w http.ResponseWriter, r *http.Request) {
 
 	pool := &models.StoragePool{
 		ID:               uuid.NewString(),
+		NodeID:           localNode.ID,
 		Name:             req.Name,
 		PoolType:         req.PoolType,
 		Path:             req.Path,

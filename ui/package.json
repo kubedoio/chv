@@ -28,9 +28,12 @@
     "vitest": "^2.1.4"
   },
   "optionalDependencies": {
-    "@rollup/rollup-linux-arm64-musl": "4.60.1",
-    "@rollup/rollup-linux-x64-musl": "4.60.1",
     "@rollup/rollup-linux-arm64-gnu": "4.60.1",
-    "@rollup/rollup-linux-x64-gnu": "4.60.1"
+    "@rollup/rollup-linux-arm64-musl": "4.60.1",
+    "@rollup/rollup-linux-x64-gnu": "4.60.1",
+    "@rollup/rollup-linux-x64-musl": "4.60.1"
+  },
+  "dependencies": {
+    "fuse.js": "^7.3.0"
   }
 }

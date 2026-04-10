@@ -29,6 +29,7 @@ Included in MVP-1:
 - VM create/start/stop/delete
 - operator web UI
 - opaque bearer API tokens
+- multi-node resource scoping (database and API support)
 
 Excluded from MVP-1:
 
@@ -39,6 +40,7 @@ Excluded from MVP-1:
 - raw-runtime-disk-first provisioning
 - JWT auth assumptions
 - advanced SDN or overlay networking
+- remote node management (all resources created on local node)
 
 ## Current Rebuild Status
 
@@ -122,6 +124,28 @@ Useful overrides:
 - `PUBLIC_CHV_API_BASE_URL` defaults to `http://localhost:8080/api/v1`
 
 On a remote server, set `PUBLIC_CHV_API_BASE_URL` to the server IP or DNS name the browser will use, not the internal Compose service name. The default `localhost` value is only suitable when the browser is running on the same machine as the compose stack.
+
+## API
+
+The CHV API is documented in [docs/API_SPEC.md](docs/API_SPEC.md).
+
+### Node-Scoped Resources
+
+Resources (VMs, images, storage pools, networks) are scoped to nodes. Access them via:
+
+```
+GET /api/v1/nodes/{node_id}/vms
+GET /api/v1/nodes/{node_id}/images
+GET /api/v1/nodes/{node_id}/storage
+GET /api/v1/nodes/{node_id}/networks
+```
+
+For backward compatibility, global endpoints still work:
+
+```
+GET /api/v1/vms
+GET /api/v1/images
+```
 
 ## Design
 

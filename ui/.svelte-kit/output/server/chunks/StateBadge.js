@@ -1,30 +1,37 @@
-import { a as attr_class, c as escape_html, d as bind_props } from "./renderer.js";
+import { g as attr_class, e as escape_html, k as bind_props } from "./renderer.js";
+/* empty css                                         */
 function StateBadge($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let label = $$props["label"];
     const toneClass = (value) => {
-      switch (value) {
+      const val = value.toLowerCase();
+      switch (val) {
         case "ready":
         case "running":
         case "active":
         case "succeeded":
-          return "border-success text-success";
+          return "bg-success/15 text-success-dark border-success/20 glow-success";
         case "degraded":
         case "warning":
         case "starting":
         case "stopping":
         case "importing":
-          return "border-warning text-warning";
+        case "provisioning":
+        case "prepared":
+          return "bg-warning/15 text-warning-dark border-warning/20 glow-warning";
         case "error":
         case "failed":
         case "missing_prerequisites":
         case "drift_detected":
-          return "border-danger text-danger";
+          return "bg-danger/15 text-danger-dark border-danger/20 glow-danger";
         default:
-          return "border-line text-muted";
+          return "bg-slate-100 text-slate-600 border-slate-200";
       }
     };
-    $$renderer2.push(`<span${attr_class(`inline-flex items-center gap-2 border px-2 py-1 text-[12px] font-medium uppercase tracking-[0.12em] ${toneClass(label)}`)}><span class="text-[10px]">●</span> ${escape_html(label.replaceAll("_", " "))}</span>`);
+    const isTransitioning = (value) => {
+      return ["starting", "stopping", "importing", "provisioning"].includes(value.toLowerCase());
+    };
+    $$renderer2.push(`<span${attr_class(`state-badge inline-flex items-center gap-1.5 border px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${toneClass(label)}`, "svelte-502yak")}><span${attr_class(`status-dot w-1.5 h-1.5 rounded-full ${isTransitioning(label) ? "animate-pulse" : ""}`, "svelte-502yak")} style="background-color: currentColor"></span> ${escape_html(label.replaceAll("_", " "))}</span>`);
     bind_props($$props, { label });
   });
 }

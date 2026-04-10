@@ -1,4 +1,4 @@
-import { e as ensure_array_like, n as attr_style, i as derived, h as stringify } from "./renderer.js";
+import { d as ensure_array_like, h as attr_style, f as derived, i as stringify } from "./renderer.js";
 function SkeletonRow($$renderer, $$props) {
   let { columns = 4 } = $$props;
   const columnArray = derived(() => Array.from({ length: columns }, (_, i) => i));

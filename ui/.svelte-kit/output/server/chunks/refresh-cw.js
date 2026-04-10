@@ -1,4 +1,4 @@
-import { l as sanitize_props, m as spread_props, j as slot } from "./renderer.js";
+import { s as sanitize_props, a as spread_props, b as slot } from "./renderer.js";
 import { I as Icon } from "./Icon.js";
 function Refresh_cw($$renderer, $$props) {
   const $$sanitized_props = sanitize_props($$props);

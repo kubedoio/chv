@@ -59,10 +59,7 @@ func (h *CloudInitHandler) GenerateSeedISO(w http.ResponseWriter, r *http.Reques
 func (h *CloudInitHandler) CheckISOSupport(w http.ResponseWriter, r *http.Request) {
 	tool, err := h.seedService.FindISOTool()
 	if err != nil {
-		respondJSON(w, http.StatusOK, map[string]any{
-			"supported": false,
-			"error":     err.Error(),
-		})
+		respondError(w, http.StatusInternalServerError, "iso_tool_not_found", "No ISO creation tool found (install xorriso or genisoimage)", false)
 		return
 	}
 

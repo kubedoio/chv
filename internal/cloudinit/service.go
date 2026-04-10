@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"text/template"
 )
 
@@ -161,3 +163,123 @@ ethernets:
     match:
       name: eth*
 `
+
+// Template represents a reusable cloud-init template
+type Template struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Content     string   `json:"content"`
+	Variables   []string `json:"variables"`
+}
+
+// DefaultTemplates returns the built-in cloud-init templates
+func DefaultTemplates() []Template {
+	return []Template{
+		{
+			ID:          "cit-basic",
+			Name:        "Basic User Setup",
+			Description: "Creates a user with sudo access and SSH key",
+			Content: `#cloud-config
+hostname: {{.Hostname}}
+manage_etc_hosts: true
+users:
+  - name: {{.Username}}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - {{.SSHKey}}
+chpasswd:
+  list: |
+    {{.Username}}:{{.Password}}
+  expire: False
+package_update: true
+packages:
+  - qemu-guest-agent`,
+			Variables: []string{"Hostname", "Username", "SSHKey", "Password"},
+		},
+		{
+			ID:          "cit-docker",
+			Name:        "Docker Ready",
+			Description: "Ubuntu with Docker pre-installed",
+			Content: `#cloud-config
+package_update: true
+packages:
+  - docker.io
+  - qemu-guest-agent
+users:
+  - name: {{.Username}}
+    groups: docker
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - {{.SSHKey}}
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker`,
+			Variables: []string{"Username", "SSHKey"},
+		},
+		{
+			ID:          "cit-kubernetes",
+			Name:        "Kubernetes Node",
+			Description: "Ubuntu with containerd and Kubernetes tools",
+			Content: `#cloud-config
+package_update: true
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - qemu-guest-agent
+users:
+  - name: {{.Username}}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - {{.SSHKey}}
+runcmd:
+  - sysctl -w net.ipv4.ip_forward=1
+  - echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf`,
+			Variables: []string{"Username", "SSHKey"},
+		},
+	}
+}
+
+// RenderTemplate renders a template with the given variables
+func RenderTemplate(templateContent string, variables map[string]string) (string, error) {
+	if templateContent == "" {
+		return "", nil
+	}
+
+	// Parse the template
+	tmpl, err := template.New("cloudinit").Parse(templateContent)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	// Execute with variables
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, variables); err != nil {
+		return "", fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// ExtractVariables extracts variable names from a template string
+// Looks for patterns like {{.VariableName}}
+func ExtractVariables(content string) []string {
+	var variables []string
+	seen := make(map[string]bool)
+
+	// Regex to match {{.VariableName}} or {{.VariableName | ... }}
+	re := regexp.MustCompile(`\{\{\s*\.([A-Za-z][A-Za-z0-9_]*)\s*\}\}`)
+	matches := re.FindAllStringSubmatch(content, -1)
+
+	for _, match := range matches {
+		if len(match) > 1 && !seen[match[1]] {
+			seen[match[1]] = true
+			variables = append(variables, match[1])
+		}
+	}
+
+	return variables
+}

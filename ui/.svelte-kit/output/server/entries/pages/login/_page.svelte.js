@@ -1,4 +1,4 @@
-import { b as attr } from "../../../chunks/renderer.js";
+import { c as attr } from "../../../chunks/renderer.js";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
 import "../../../chunks/utils.js";
@@ -22,7 +22,7 @@ function _page($$renderer, $$props) {
       $$renderer2.push("<!--[-1-->");
       $$renderer2.push(`Sign In`);
     }
-    $$renderer2.push(`<!--]--></button> <div class="border-t border-line pt-4"><div class="text-xs text-muted"><p class="mb-1"><strong>First time?</strong> Use the default credentials above.</p> <p>You can also <a href="/" class="text-primary hover:underline">create an API token</a> directly.</p></div></div></div></div></div>`);
+    $$renderer2.push(`<!--]--></button> <div class="border-t border-line pt-4"><div class="text-xs text-muted"><p><strong>First time?</strong> Use the default credentials above.</p></div></div></div></div></div>`);
   });
 }
 export {

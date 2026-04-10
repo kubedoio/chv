@@ -178,10 +178,26 @@ func TestGatekeeper_CheckAll_AllGatesPass(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Create a test node first (required for foreign key constraints)
+	node := &models.Node{
+		ID:        "node-1",
+		Name:      "test-node",
+		Hostname:  "test",
+		IPAddress: "127.0.0.1",
+		Status:    "online",
+		IsLocal:   true,
+		CreatedAt: "2024-01-01T00:00:00Z",
+		UpdatedAt: "2024-01-01T00:00:00Z",
+	}
+	if err := repo.CreateNode(ctx, node); err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
 	// Create necessary resources in DB
 	// 1. Create network
 	network := &models.Network{
 		ID:              "net-1",
+		NodeID:          "node-1",
 		Name:            "test-net",
 		Mode:            "bridge",
 		BridgeName:      "br0",
@@ -198,6 +214,7 @@ func TestGatekeeper_CheckAll_AllGatesPass(t *testing.T) {
 	// 2. Create storage pool
 	pool := &models.StoragePool{
 		ID:        "pool-1",
+		NodeID:      "node-1",
 		Name:      "test-pool",
 		PoolType:  "local",
 		Path:      tmpDir,
@@ -212,6 +229,7 @@ func TestGatekeeper_CheckAll_AllGatesPass(t *testing.T) {
 	// 3. Create image
 	image := &models.Image{
 		ID:                 "img-1",
+		NodeID:             "node-1",
 		Name:               "test-image",
 		OSFamily:           "ubuntu",
 		Architecture:       "x86_64",
@@ -279,9 +297,25 @@ func TestGatekeeper_CheckAll_ImageNotReady(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Create a test node first (required for foreign key constraints)
+	node := &models.Node{
+		ID:        "node-1",
+		Name:      "test-node",
+		Hostname:  "test",
+		IPAddress: "127.0.0.1",
+		Status:    "online",
+		IsLocal:   true,
+		CreatedAt: "2024-01-01T00:00:00Z",
+		UpdatedAt: "2024-01-01T00:00:00Z",
+	}
+	if err := repo.CreateNode(ctx, node); err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
 	// Create network and pool (ready)
 	network := &models.Network{
 		ID:              "net-1",
+		NodeID:          "node-1",
 		Name:            "test-net",
 		Mode:            "bridge",
 		BridgeName:      "br0",
@@ -297,6 +331,7 @@ func TestGatekeeper_CheckAll_ImageNotReady(t *testing.T) {
 
 	pool := &models.StoragePool{
 		ID:        "pool-1",
+		NodeID:      "node-1",
 		Name:      "test-pool",
 		PoolType:  "local",
 		Path:      tmpDir,
@@ -311,6 +346,7 @@ func TestGatekeeper_CheckAll_ImageNotReady(t *testing.T) {
 	// Create image with status "downloading" (not ready)
 	image := &models.Image{
 		ID:                 "img-1",
+		NodeID:             "node-1",
 		Name:               "test-image",
 		OSFamily:           "ubuntu",
 		Architecture:       "x86_64",
@@ -378,9 +414,25 @@ func TestGatekeeper_CheckAll_StorageNotReady(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Create a test node first (required for foreign key constraints)
+	node := &models.Node{
+		ID:        "node-1",
+		Name:      "test-node",
+		Hostname:  "test",
+		IPAddress: "127.0.0.1",
+		Status:    "online",
+		IsLocal:   true,
+		CreatedAt: "2024-01-01T00:00:00Z",
+		UpdatedAt: "2024-01-01T00:00:00Z",
+	}
+	if err := repo.CreateNode(ctx, node); err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
 	// Create network
 	network := &models.Network{
 		ID:              "net-1",
+		NodeID:          "node-1",
 		Name:            "test-net",
 		Mode:            "bridge",
 		BridgeName:      "br0",
@@ -397,6 +449,7 @@ func TestGatekeeper_CheckAll_StorageNotReady(t *testing.T) {
 	// Create storage pool with status "offline" (not ready)
 	pool := &models.StoragePool{
 		ID:        "pool-1",
+		NodeID:      "node-1",
 		Name:      "test-pool",
 		PoolType:  "local",
 		Path:      tmpDir,
@@ -411,6 +464,7 @@ func TestGatekeeper_CheckAll_StorageNotReady(t *testing.T) {
 	// Create ready image
 	image := &models.Image{
 		ID:                 "img-1",
+		NodeID:             "node-1",
 		Name:               "test-image",
 		OSFamily:           "ubuntu",
 		Architecture:       "x86_64",
@@ -475,9 +529,25 @@ func TestGatekeeper_CheckAll_NetworkNotFound(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Create a test node first (required for foreign key constraints)
+	node := &models.Node{
+		ID:        "node-1",
+		Name:      "test-node",
+		Hostname:  "test",
+		IPAddress: "127.0.0.1",
+		Status:    "online",
+		IsLocal:   true,
+		CreatedAt: "2024-01-01T00:00:00Z",
+		UpdatedAt: "2024-01-01T00:00:00Z",
+	}
+	if err := repo.CreateNode(ctx, node); err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
 	// Create storage pool (ready)
 	pool := &models.StoragePool{
 		ID:        "pool-1",
+		NodeID:      "node-1",
 		Name:      "test-pool",
 		PoolType:  "local",
 		Path:      tmpDir,
@@ -492,6 +562,7 @@ func TestGatekeeper_CheckAll_NetworkNotFound(t *testing.T) {
 	// Create ready image
 	image := &models.Image{
 		ID:                 "img-1",
+		NodeID:             "node-1",
 		Name:               "test-image",
 		OSFamily:           "ubuntu",
 		Architecture:       "x86_64",

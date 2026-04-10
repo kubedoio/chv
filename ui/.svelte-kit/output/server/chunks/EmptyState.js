@@ -1,8 +1,8 @@
-import { c as escape_html } from "./renderer.js";
-import "clsx";
+import { c as attr, e as escape_html, i as stringify } from "./renderer.js";
+/* empty css                                         */
 function EmptyState($$renderer, $$props) {
-  let { icon: Icon, title, description, children } = $$props;
-  $$renderer.push(`<div class="flex flex-col items-center justify-center py-12 text-center" role="status" aria-live="polite"><div class="mb-4 text-line">`);
+  let { icon: Icon, title, description, children, role = "status" } = $$props;
+  $$renderer.push(`<div class="empty-state svelte-13862ru"${attr("role", role)} aria-live="polite"${attr("aria-label", `${stringify(title)}: ${stringify(description)}`)}><div class="empty-state-icon svelte-13862ru" aria-hidden="true">`);
   if (Icon) {
     $$renderer.push("<!--[-->");
     Icon($$renderer, { size: 48 });
@@ -11,10 +11,10 @@ function EmptyState($$renderer, $$props) {
     $$renderer.push("<!--[!-->");
     $$renderer.push("<!--]-->");
   }
-  $$renderer.push(`</div> <h3 class="mb-2 text-base font-medium text-muted">${escape_html(title)}</h3> <p class="mb-6 max-w-sm text-sm text-light">${escape_html(description)}</p> `);
+  $$renderer.push(`</div> <h2 class="empty-state-title svelte-13862ru">${escape_html(title)}</h2> <p class="empty-state-description svelte-13862ru">${escape_html(description)}</p> `);
   if (children) {
     $$renderer.push("<!--[0-->");
-    $$renderer.push(`<div>`);
+    $$renderer.push(`<div class="empty-state-actions svelte-13862ru">`);
     children($$renderer);
     $$renderer.push(`<!----></div>`);
   } else {

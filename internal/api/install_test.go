@@ -86,7 +86,7 @@ func TestInstallStatusEndpointReturnsStructuredStatus(t *testing.T) {
 	}
 
 	cfg := config.ControllerConfig{DataRoot: root}
-	handler := NewHandler(repo, auth.NewService(repo), service, cfg, nil, nil)
+	handler := NewHandler(repo, auth.NewService(repo), service, cfg, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/install/status", nil)
 	rr := httptest.NewRecorder()
 	handler.Router().ServeHTTP(rr, req)
@@ -135,7 +135,7 @@ func TestLoginValidateRequiresToken(t *testing.T) {
 	}
 
 	cfg := config.ControllerConfig{DataRoot: root}
-	handler := NewHandler(repo, authService, service, cfg, nil, nil)
+	handler := NewHandler(repo, authService, service, cfg, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/login/validate", nil)
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	rr := httptest.NewRecorder()

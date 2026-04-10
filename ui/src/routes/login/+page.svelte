@@ -113,8 +113,7 @@
 
       <div class="border-t border-line pt-4">
         <div class="text-xs text-muted">
-          <p class="mb-1"><strong>First time?</strong> Use the default credentials above.</p>
-          <p>You can also <a href="/" class="text-primary hover:underline">create an API token</a> directly.</p>
+          <p><strong>First time?</strong> Use the default credentials above.</p>
         </div>
       </div>
     </div>

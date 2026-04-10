@@ -32,7 +32,7 @@ func (h *ImageHandler) Download(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.downloadService.Download(ctx, req.SourceURL, req.DestPath)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "download_failed", err.Error(), true)
+		respondError(w, http.StatusInternalServerError, "download_failed", "Image download failed", true)
 		return
 	}
 

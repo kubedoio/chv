@@ -104,13 +104,14 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 	}
 
 	// Build command arguments
+	// Note: cloud-hypervisor v51+ accepts multiple disk paths as separate arguments after --disk flag
 	args := []string{
 		"--kernel", kernelPath,
 		"--disk", fmt.Sprintf("path=%s", req.DiskPath),
 	}
 
 	if req.SeedISOPath != "" {
-		args = append(args, "--disk", fmt.Sprintf("path=%s,readonly=on", req.SeedISOPath))
+		args = append(args, fmt.Sprintf("path=%s,readonly=on", req.SeedISOPath))
 	}
 
 	// Build network config (only include IP/mask if IP is provided)
@@ -123,66 +124,76 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 	}
 	args = append(args, "--net", netConfig)
 	
+	// Kernel cmdline - Ubuntu cloud image needs root device and console
+	kernelCmdline := "root=/dev/vda1 console=ttyS0"
+	
 	args = append(args,
 		"--cpus", fmt.Sprintf("boot=%d", req.VCPU),
 		"--memory", fmt.Sprintf("size=%dM", req.MemoryMB),
 		"--api-socket", filepath.Join(req.WorkspacePath, "api.sock"),
+		"--cmdline", kernelCmdline,
 		"--console", "off",
-		"--serial", "tty",
+		"--serial", "pty",
 	)
 
-	// Create command
-	cmd := exec.CommandContext(ctx, chPath, args...)
+	// Create command - use background context so VM doesn't get killed when HTTP request completes
+	cmd := exec.Command(chPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true, // Create new session so CH survives parent
 	}
 
-	// Capture stdout/stderr to parse PTY path
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Redirect stdout/stderr to log files to prevent blocking
+	// Note: Don't use defer Close() here - the files need to stay open
+	// for the child process to write to them
+	stdoutFile := filepath.Join(req.WorkspacePath, "chv.stdout.log")
+	stderrFile := filepath.Join(req.WorkspacePath, "chv.stderr.log")
+	
+	stdout, err := os.Create(stdoutFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+		return nil, fmt.Errorf("failed to create stdout log: %w", err)
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	
+	stderr, err := os.Create(stderrFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+		stdout.Close()
+		return nil, fmt.Errorf("failed to create stderr log: %w", err)
 	}
+	
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	
+	// Files will be closed when the command finishes via waitForProcess goroutine
 
 	// Start the process
+	fmt.Fprintf(os.Stderr, "Starting cloud-hypervisor with args: %v\n", args)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start cloud-hypervisor: %w", err)
 	}
 
 	pid := cmd.Process.Pid
+	fmt.Fprintf(os.Stderr, "Cloud-hypervisor started with PID: %d\n", pid)
 
 	// Store process info
 	s.processes[req.VMID] = cmd
 	s.pids[req.VMID] = pid
-
-	// Parse PTY path from stdout/stderr
-	ptyPath, err := s.parsePtyPath(stdoutPipe, stderrPipe, req.WorkspacePath)
-	if err != nil {
-		// Log but don't fail - console may still work via API
-		fmt.Fprintf(os.Stderr, "Warning: could not capture PTY path: %v\n", err)
-	} else if ptyPath != "" {
-		// Store PTY path for console access
-		ptyFile := filepath.Join(req.WorkspacePath, "serial.ptty")
-		if writeErr := os.WriteFile(ptyFile, []byte(ptyPath), 0644); writeErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not write PTY path to file: %v\n", writeErr)
-		}
-	}
 
 	// Wait a moment to ensure process didn't immediately exit
 	time.Sleep(500 * time.Millisecond)
 
 	if !s.isProcessRunning(pid) {
 		// Process exited quickly, likely an error
+		stdout.Close()
+		stderr.Close()
 		delete(s.processes, req.VMID)
 		delete(s.pids, req.VMID)
 		return nil, fmt.Errorf("cloud-hypervisor process exited immediately")
 	}
 
+	// Give CH time to output the PTY path, then try to capture it
+	go s.capturePtyPath(req.VMID, req.WorkspacePath, stdoutFile, stdout)
+
 	// Start background waiter to clean up when process exits
-	go s.waitForProcess(req.VMID, cmd)
+	go s.waitForProcess(req.VMID, cmd, stdout, stderr)
 
 	return &agentapi.VMStartResponse{
 		PID: pid,
@@ -344,6 +355,12 @@ func (s *VMManagementService) isProcessRunning(pid int) bool {
 
 // isProcessRunningBySocket checks if any cloud-hypervisor process is using the given socket
 func (s *VMManagementService) isProcessRunningBySocket(socketPath string) (int, bool) {
+	// Normalize the socket path for comparison
+	absSocketPath, err := filepath.Abs(socketPath)
+	if err != nil {
+		absSocketPath = socketPath
+	}
+
 	// Look through /proc for cloud-hypervisor processes with matching --api-socket
 	matches, err := filepath.Glob("/proc/[0-9]*/cmdline")
 	if err != nil {
@@ -355,20 +372,45 @@ func (s *VMManagementService) isProcessRunningBySocket(socketPath string) (int, 
 		if err != nil {
 			continue
 		}
-		
-		// cmdline is null-separated
-		content := string(data)
-		if !strings.Contains(content, "cloud-hypervisor") {
+
+		// cmdline is null-separated - convert to args slice for proper parsing
+		args := strings.Split(string(data), "\x00")
+		if len(args) == 0 {
 			continue
 		}
 
-		if strings.Contains(content, socketPath) {
-			// Found it. Extract PID from path /proc/<PID>/cmdline
-			parts := strings.Split(match, "/")
-			if len(parts) >= 3 {
-				pid, _ := strconv.Atoi(parts[2])
-				if s.isProcessRunning(pid) {
-					return pid, true
+		// Check if this is a cloud-hypervisor process
+		isCH := false
+		for _, arg := range args {
+			if strings.Contains(arg, "cloud-hypervisor") {
+				isCH = true
+				break
+			}
+		}
+		if !isCH {
+			continue
+		}
+
+		// Look for --api-socket argument
+		for i, arg := range args {
+			if arg == "--api-socket" && i+1 < len(args) {
+				// Found socket path argument, compare it
+				procSocketPath := args[i+1]
+				procAbsPath, err := filepath.Abs(procSocketPath)
+				if err != nil {
+					procAbsPath = procSocketPath
+				}
+
+				// Also check raw string containment for robustness
+				if procAbsPath == absSocketPath || strings.Contains(procAbsPath, absSocketPath) || strings.Contains(absSocketPath, procAbsPath) {
+					// Found it. Extract PID from path /proc/<PID>/cmdline
+					parts := strings.Split(match, "/")
+					if len(parts) >= 3 {
+						pid, _ := strconv.Atoi(parts[2])
+						if s.isProcessRunning(pid) {
+							return pid, true
+						}
+					}
 				}
 			}
 		}
@@ -376,11 +418,216 @@ func (s *VMManagementService) isProcessRunningBySocket(socketPath string) (int, 
 	return 0, false
 }
 
+// ScanAndRecoverOrphans scans for existing cloud-hypervisor processes and rebuilds internal state
+// This should be called on agent startup to detect VMs that were running before a restart
+func (s *VMManagementService) ScanAndRecoverOrphans(dataRoot string) ([]string, error) {
+	var recovered []string
+
+	// Look through /proc for all cloud-hypervisor processes
+	matches, err := filepath.Glob("/proc/[0-9]*/cmdline")
+	if err != nil {
+		return nil, fmt.Errorf("failed to glob /proc: %w", err)
+	}
+
+	for _, match := range matches {
+		data, err := os.ReadFile(match)
+		if err != nil {
+			continue
+		}
+
+		// cmdline is null-separated - convert to args slice
+		args := strings.Split(string(data), "\x00")
+		if len(args) == 0 {
+			continue
+		}
+
+		// Check if this is a cloud-hypervisor process
+		isCH := false
+		for _, arg := range args {
+			if strings.Contains(arg, "cloud-hypervisor") {
+				isCH = true
+				break
+			}
+		}
+		if !isCH {
+			continue
+		}
+
+		// Extract PID
+		parts := strings.Split(match, "/")
+		if len(parts) < 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(parts[2])
+		if err != nil {
+			continue
+		}
+
+		// Verify process is actually running
+		if !s.isProcessRunning(pid) {
+			continue
+		}
+
+		// Look for --api-socket argument to identify VM
+		var socketPath string
+		for i, arg := range args {
+			if arg == "--api-socket" && i+1 < len(args) {
+				socketPath = args[i+1]
+				break
+			}
+		}
+
+		if socketPath == "" {
+			// No socket path found, can't identify this VM
+			continue
+		}
+
+		// Try to extract VM ID from socket path
+		// Expected: /path/to/data/root/vms/<vmid>/api.sock
+		vmID := s.extractVMIDFromSocketPath(socketPath, dataRoot)
+		if vmID == "" {
+			// Socket path doesn't match our data root, skip
+			continue
+		}
+
+		// Check if we already have this VM tracked
+		if existingPID, exists := s.pids[vmID]; exists {
+			if existingPID == pid {
+				// Already tracked correctly
+				recovered = append(recovered, vmID)
+				continue
+			}
+			// Different PID tracked, update it
+			fmt.Fprintf(os.Stderr, "Orphan recovery: Updating PID for VM %s from %d to %d\n", vmID, existingPID, pid)
+		}
+
+		// Store the PID - we can't recreate the exec.Cmd but we can track the PID
+		s.pids[vmID] = pid
+		// Note: s.processes[vmID] will remain nil for orphans, which is handled gracefully
+
+		fmt.Fprintf(os.Stderr, "Orphan recovery: Recovered VM %s with PID %d (socket: %s)\n", vmID, pid, socketPath)
+		recovered = append(recovered, vmID)
+	}
+
+	return recovered, nil
+}
+
+// extractVMIDFromSocketPath extracts the VM ID from a socket path
+// Expected format: /data/root/vms/<vmid>/api.sock or similar
+func (s *VMManagementService) extractVMIDFromSocketPath(socketPath, dataRoot string) string {
+	// Normalize paths
+	absSocket, err := filepath.Abs(socketPath)
+	if err != nil {
+		absSocket = socketPath
+	}
+	absDataRoot, err := filepath.Abs(dataRoot)
+	if err != nil {
+		absDataRoot = dataRoot
+	}
+
+	// Check if socket is within our data root
+	if !strings.HasPrefix(absSocket, absDataRoot) {
+		return ""
+	}
+
+	// Extract the relative path from data root
+	relPath, err := filepath.Rel(absDataRoot, absSocket)
+	if err != nil {
+		return ""
+	}
+
+	// Parse: vms/<vmid>/api.sock or just <vmid>/api.sock
+	parts := strings.Split(relPath, string(filepath.Separator))
+
+	// Look for api.sock and extract VM ID from parent directory
+	for i, part := range parts {
+		if part == "api.sock" && i > 0 {
+			return parts[i-1]
+		}
+	}
+
+	// Alternative: look for any path component that could be a VM ID
+	// (alphanumeric with dashes, typical UUID or name format)
+	for _, part := range parts {
+		if part != "" && part != "vms" && part != "workspace" {
+			// Validate it looks like a VM ID (not a generic directory)
+			if isValidVMID(part) {
+				return part
+			}
+		}
+	}
+
+	return ""
+}
+
+// isValidVMID checks if a string looks like a valid VM ID
+func isValidVMID(s string) bool {
+	if s == "" || len(s) < 3 {
+		return false
+	}
+	// Allow alphanumeric, dashes, underscores
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // waitForProcess waits for a process to exit and cleans up
-func (s *VMManagementService) waitForProcess(vmID string, cmd *exec.Cmd) {
-	cmd.Wait()
+func (s *VMManagementService) waitForProcess(vmID string, cmd *exec.Cmd, stdout, stderr *os.File) {
+	err := cmd.Wait()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "VM %s exited with error: %v\n", vmID, err)
+	} else {
+		fmt.Fprintf(os.Stderr, "VM %s exited normally\n", vmID)
+	}
+	
+	// Close log files
+	if stdout != nil {
+		stdout.Close()
+	}
+	if stderr != nil {
+		stderr.Close()
+	}
+	
 	delete(s.pids, vmID)
 	delete(s.processes, vmID)
+}
+
+// capturePtyPath reads the stdout log to find and save the PTY path
+func (s *VMManagementService) capturePtyPath(vmID, workspacePath, stdoutFile string, stdoutFileHandle *os.File) {
+	// Wait for CH to output the PTY path (usually happens within 1-2 seconds)
+	time.Sleep(2 * time.Second)
+	
+	// Close the file handle so we can read it
+	if stdoutFileHandle != nil {
+		stdoutFileHandle.Close()
+	}
+	
+	// Read the stdout log
+	data, err := os.ReadFile(stdoutFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not read stdout log for PTY: %v\n", err)
+		return
+	}
+	
+	// Parse PTY path from output
+	// Cloud Hypervisor outputs: "PTY path: /dev/pts/X" when started with --serial tty
+	ptyPattern := regexp.MustCompile(`PTY path:\s*(/dev/pts/\d+)`)
+	matches := ptyPattern.FindSubmatch(data)
+	
+	if matches != nil && len(matches) > 1 {
+		ptyPath := string(matches[1])
+		ptyFile := filepath.Join(workspacePath, "serial.ptty")
+		if err := os.WriteFile(ptyFile, []byte(ptyPath), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not write PTY path to file: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Captured PTY path for VM %s: %s\n", vmID, ptyPath)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: PTY path not found in stdout for VM %s\n", vmID)
+	}
 }
 
 // findKernel searches for a vmlinux kernel
@@ -580,7 +827,8 @@ func (s *VMManagementService) ProvisionVM(ctx context.Context, req *agentapi.VMP
 	if s.cloudInit != nil && s.seedService != nil {
 		ciCfg := cloudinit.Config{
 			VMID:              req.VMID,
-			Hostname:          req.VMID, // Use ID as default hostname
+			VMName:            req.VMName,
+			Hostname:          req.VMName, // Use VM name as hostname
 			Username:          req.Username,
 			Password:          req.Password,
 			SSHAuthorizedKeys: req.SSHAuthorizedKeys,

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import FocusTrap from './FocusTrap.svelte';
 
 	interface Props {
 		open: boolean;
@@ -8,6 +9,7 @@
 		closeOnBackdrop?: boolean;
 		closeOnEscape?: boolean;
 		onClose?: () => void;
+		description?: string;
 		header?: Snippet;
 		children?: Snippet;
 		footer?: Snippet;
@@ -20,6 +22,7 @@
 		closeOnBackdrop = true,
 		closeOnEscape = true,
 		onClose,
+		description,
 		header,
 		children,
 		footer
@@ -35,14 +38,9 @@
 	let previouslyFocusedElement = $state<HTMLElement | null>(null);
 	let isVisible = $state(false);
 	let isClosing = $state(false);
-
-	function getFocusableElements(): HTMLElement[] {
-		if (!modalRef) return [];
-		const selector = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-		return Array.from(modalRef.querySelectorAll<HTMLElement>(selector)).filter(
-			(el) => !el.hasAttribute('disabled') && !el.getAttribute('aria-hidden')
-		);
-	}
+	let modalId = $state(`modal-${Math.random().toString(36).slice(2, 9)}`);
+	let titleId = $derived(title ? `${modalId}-title` : undefined);
+	let descId = $derived(description ? `${modalId}-description` : undefined);
 
 	function handleKeydown(event: KeyboardEvent) {
 		if (!open) return;
@@ -50,23 +48,6 @@
 			event.preventDefault();
 			handleClose();
 			return;
-		}
-		if (event.key === 'Tab') {
-			const focusableElements = getFocusableElements();
-			if (focusableElements.length === 0) return;
-			const firstElement = focusableElements[0];
-			const lastElement = focusableElements[focusableElements.length - 1];
-			if (event.shiftKey) {
-				if (document.activeElement === firstElement) {
-					event.preventDefault();
-					lastElement.focus();
-				}
-			} else {
-				if (document.activeElement === lastElement) {
-					event.preventDefault();
-					firstElement.focus();
-				}
-			}
 		}
 	}
 
@@ -125,52 +106,60 @@
 		onclick={handleBackdropClick}
 		aria-hidden="true"
 	>
-		<!-- Modal Container - tabindex=-1 allows focus but doesn't add to tab order -->
-		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-		<div
-			bind:this={modalRef}
-			role="dialog"
-			aria-modal="true"
-			aria-labelledby={title ? 'modal-title' : undefined}
-			tabindex="-1"
-			class="{widthClasses[width]} max-h-[80vh] overflow-hidden rounded-lg bg-white shadow-[0_4px_16px_rgba(0,0,0,0.15)] transition-all duration-200 ease-out"
-			class:scale-95={!isVisible || isClosing}
-			class:scale-100={isVisible && !isClosing}
-			class:opacity-0={!isVisible || isClosing}
-			class:opacity-100={isVisible && !isClosing}
-			onclick={(e) => e.stopPropagation()}
-		>
-			<div class="flex h-14 items-center justify-between border-b border-line px-6">
-				{#if header}
-					{@render header()}
-				{:else if title}
-					<h2 id="modal-title" class="text-base font-semibold text-ink">{title}</h2>
-				{:else}
-					<div></div>
+		<!-- Modal Container with Focus Trap -->
+		<FocusTrap active={isVisible && !isClosing} onEscape={closeOnEscape ? handleClose : undefined}>
+			<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+			<div
+				bind:this={modalRef}
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby={titleId}
+				aria-describedby={descId}
+				tabindex="-1"
+				class="{widthClasses[width]} max-h-[80vh] overflow-hidden rounded-lg bg-white shadow-[0_4px_16px_rgba(0,0,0,0.15)] transition-all duration-200 ease-out mx-4"
+				class:scale-95={!isVisible || isClosing}
+				class:scale-100={isVisible && !isClosing}
+				class:opacity-0={!isVisible || isClosing}
+				class:opacity-100={isVisible && !isClosing}
+				onclick={(e) => e.stopPropagation()}
+			>
+				<div class="flex h-14 items-center justify-between border-b border-line px-6">
+					{#if header}
+						{@render header()}
+					{:else if title}
+						<div>
+							<h2 id={titleId} class="text-base font-semibold text-ink">{title}</h2>
+							{#if description}
+								<p id={descId} class="text-sm text-muted mt-0.5">{description}</p>
+							{/if}
+						</div>
+					{:else}
+						<div></div>
+					{/if}
+					<button
+						bind:this={closeButtonRef}
+						onclick={handleClose}
+						class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded text-muted transition-colors hover:bg-black/5 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+						aria-label="Close modal"
+						type="button"
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<path d="M18 6 6 18" />
+							<path d="m6 6 12 12" />
+						</svg>
+					</button>
+				</div>
+				{#if children}
+					<div class="max-h-[calc(80vh-3.5rem-4.5rem)] overflow-y-auto p-6">
+						{@render children()}
+					</div>
 				{/if}
-				<button
-					bind:this={closeButtonRef}
-					onclick={handleClose}
-					class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-muted transition-colors hover:bg-black/5 hover:text-ink"
-					aria-label="Close modal"
-					type="button"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<path d="M18 6 6 18" />
-						<path d="m6 6 12 12" />
-					</svg>
-				</button>
+				{#if footer}
+					<div class="flex justify-end gap-2 border-t border-line px-6 py-4">
+						{@render footer()}
+					</div>
+				{/if}
 			</div>
-			{#if children}
-				<div class="max-h-[calc(80vh-3.5rem-4.5rem)] overflow-y-auto p-6">
-					{@render children()}
-				</div>
-			{/if}
-			{#if footer}
-				<div class="flex justify-end gap-2 border-t border-line px-6 py-4">
-					{@render footer()}
-				</div>
-			{/if}
-		</div>
+		</FocusTrap>
 	</div>
 {/if}

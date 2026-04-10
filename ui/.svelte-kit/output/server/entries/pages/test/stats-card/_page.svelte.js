@@ -1,5 +1,7 @@
 import "clsx";
-import { S as StatsCard, a as Server, P as Play, b as Square } from "../../../../chunks/StatsCard.js";
+import { S as StatsCard, P as Play } from "../../../../chunks/StatsCard.js";
+import { S as Server } from "../../../../chunks/server.js";
+import { S as Square } from "../../../../chunks/square.js";
 import { A as Activity } from "../../../../chunks/activity.js";
 function _page($$renderer) {
   $$renderer.push(`<div class="p-6"><h1 class="mb-6 text-xl font-semibold text-ink">Stats Card Test</h1> <div class="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">`);

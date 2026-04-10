@@ -18,7 +18,17 @@ export const nodes = [
 	() => import('./nodes/14'),
 	() => import('./nodes/15'),
 	() => import('./nodes/16'),
-	() => import('./nodes/17')
+	() => import('./nodes/17'),
+	() => import('./nodes/18'),
+	() => import('./nodes/19'),
+	() => import('./nodes/20'),
+	() => import('./nodes/21'),
+	() => import('./nodes/22'),
+	() => import('./nodes/23'),
+	() => import('./nodes/24'),
+	() => import('./nodes/25'),
+	() => import('./nodes/26'),
+	() => import('./nodes/27')
 ];
 
 export const server_loads = [];
@@ -29,17 +39,27 @@ export const dictionary = {
 		"/images": [4],
 		"/install": [5],
 		"/login": [6],
-		"/networks": [7],
-		"/operations": [8],
-		"/settings": [9],
-		"/storage": [10],
-		"/test/confirm-dialog": [11],
-		"/test/forms": [12],
-		"/test/modal": [13],
-		"/test/skeletons": [14],
-		"/test/stats-card": [15],
-		"/vms": [16],
-		"/vms/[id]": [17]
+		"/metrics": [7],
+		"/networks": [8],
+		"/networks/[id]": [9],
+		"/nodes": [10],
+		"/nodes/[id]": [11],
+		"/nodes/[id]/images": [12],
+		"/nodes/[id]/networks": [13],
+		"/nodes/[id]/storage": [14],
+		"/nodes/[id]/vms": [15],
+		"/operations": [16],
+		"/quotas": [17],
+		"/settings": [18],
+		"/storage": [19],
+		"/templates": [20],
+		"/test/confirm-dialog": [21],
+		"/test/forms": [22],
+		"/test/modal": [23],
+		"/test/skeletons": [24],
+		"/test/stats-card": [25],
+		"/vms": [26],
+		"/vms/[id]": [27]
 	};
 
 export const hooks = {

@@ -168,7 +168,7 @@ func (h *VMHandler) Console(w http.ResponseWriter, r *http.Request) {
 	apiSocket := r.URL.Query().Get("api_socket")
 
 	if vmID == "" || apiSocket == "" {
-		http.Error(w, "vm_id and api_socket query params required", http.StatusBadRequest)
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id and api_socket query params required", false)
 		return
 	}
 
@@ -183,7 +183,7 @@ func (h *VMHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req agentapi.VMSnapshotCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
 		return
 	}
 
@@ -204,7 +204,7 @@ func (h *VMHandler) ListSnapshots(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req agentapi.VMSnapshotListRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
 		return
 	}
 
@@ -225,7 +225,7 @@ func (h *VMHandler) RestoreSnapshot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req agentapi.VMSnapshotRestoreRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
 		return
 	}
 
@@ -246,7 +246,7 @@ func (h *VMHandler) DeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req agentapi.VMSnapshotDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
 		return
 	}
 
@@ -267,7 +267,7 @@ func (h *VMHandler) ProvisionVM(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req agentapi.VMProvisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid_request", "invalid JSON", false)
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
 		return
 	}
 

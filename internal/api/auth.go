@@ -124,3 +124,51 @@ func (h *Handler) getCurrentUser(w http.ResponseWriter, r *http.Request) {
 		IsActive: user.IsActive,
 	})
 }
+
+// authMiddleware validates user bearer tokens
+func (h *Handler) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := h.auth.ValidateToken(requestContext(r), r.Header.Get("Authorization"))
+		if err != nil {
+			h.writeError(w, http.StatusUnauthorized, apiError{
+				Code:      "unauthorized",
+				Message:   "A valid bearer token is required.",
+				Retryable: false,
+				Hint:      "Create a token with POST /api/v1/tokens and retry with Authorization: Bearer <token>.",
+			})
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// agentAuthMiddleware validates tokens for agent endpoints
+// For now, accepts any valid user token
+func (h *Handler) agentAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := requestContext(r)
+		authHeader := r.Header.Get("Authorization")
+
+		if authHeader == "" {
+			h.writeError(w, http.StatusUnauthorized, apiError{
+				Code:      "missing_token",
+				Message:   "Authorization header is required",
+				Retryable: false,
+			})
+			return
+		}
+
+		// For now, accept any valid user token for agent endpoints
+		if _, err := h.auth.ValidateToken(ctx, authHeader); err != nil {
+			h.writeError(w, http.StatusUnauthorized, apiError{
+				Code:      "unauthorized",
+				Message:   "A valid bearer token is required.",
+				Retryable: false,
+			})
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
