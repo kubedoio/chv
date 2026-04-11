@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chv/chv/internal/models"
@@ -952,8 +953,30 @@ func (h *Handler) deleteNetworkHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Check if network is in use by any VMs
-	// For now, we'll allow deletion
+	// Check if network is in use by any VMs
+	vms, err := h.repo.ListVMsByNetwork(ctx, networkID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "check_failed",
+			Message:   "Could not check if network is in use.",
+			Retryable: true,
+		})
+		return
+	}
+	if len(vms) > 0 {
+		vmNames := make([]string, 0, len(vms))
+		for _, vm := range vms {
+			vmNames = append(vmNames, vm.Name)
+		}
+		h.writeError(w, http.StatusConflict, apiError{
+			Code:         "network_in_use",
+			Message:      "Network is in use by VMs: " + strings.Join(vmNames, ", ") + ". Please reassign or delete those VMs first.",
+			ResourceType: "network",
+			ResourceID:   networkID,
+			Retryable:    false,
+		})
+		return
+	}
 
 	if err := h.repo.DeleteNetwork(ctx, networkID); err != nil {
 		h.writeError(w, http.StatusInternalServerError, apiError{

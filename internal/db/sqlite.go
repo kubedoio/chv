@@ -746,6 +746,24 @@ func (r *Repository) ListVMsByDesiredState(ctx context.Context, desiredState str
 	return out, rows.Err()
 }
 
+func (r *Repository) ListVMsByNetwork(ctx context.Context, networkID string) ([]models.VirtualMachine, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines WHERE network_id = ? ORDER BY created_at ASC`, networkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []models.VirtualMachine
+	for rows.Next() {
+		var item models.VirtualMachine
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Name, &item.ImageID, &item.StoragePoolID, &item.NetworkID, &item.DesiredState, &item.ActualState, &item.VCPU, &item.MemoryMB, &item.DiskPath, &item.SeedISOPath, &item.WorkspacePath, &item.CloudHypervisorPID, &item.IPAddress, &item.MACAddress, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) ListOperations(ctx context.Context) ([]models.Operation, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id, resource_type, resource_id, operation_type, state, COALESCE(request_payload, ''), COALESCE(result_payload, ''), COALESCE(error_payload, ''), COALESCE(started_at, ''), COALESCE(finished_at, ''), created_at FROM operations ORDER BY created_at DESC`)
 	if err != nil {
