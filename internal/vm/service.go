@@ -456,8 +456,8 @@ func (s *Service) StartVM(ctx context.Context, vmID string) error {
 
 		vm.CloudHypervisorPID = resp.PID
 	} else {
-		// No agent - simulate for development/testing
-		vm.CloudHypervisorPID = 12345 // Placeholder
+		// No agent available — PID will be populated on next status check
+		vm.CloudHypervisorPID = 0
 	}
 
 	vm.ActualState = StatusRunning

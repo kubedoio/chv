@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/gorilla/websocket"
@@ -66,8 +67,24 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin: func(r *http.Request) bool {
-			// Allow all origins for now
-			return true
+			// Allow same-origin requests
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			// Parse allowed origins from env var
+			allowedOrigins := parseAllowedOrigins()
+			for _, allowed := range allowedOrigins {
+				if origin == allowed {
+					return true
+				}
+			}
+			// Also allow if origin matches the request host (same-origin)
+			if origin == "http://"+r.Host || origin == "https://"+r.Host {
+				return true
+			}
+			slog.Warn("WebSocket: rejected cross-origin request", "origin", origin, "host", r.Host)
+			return false
 		},
 	}
 
@@ -130,4 +147,18 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Wait for either direction to close
 	<-errChan
+}
+
+// parseAllowedOrigins reads CHV_CORS_ORIGINS env var and returns allowed origins for WebSocket
+func parseAllowedOrigins() []string {
+	var origins []string
+	if env := os.Getenv("CHV_CORS_ORIGINS"); env != "" {
+		for _, o := range strings.Split(env, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+	}
+	return origins
 }

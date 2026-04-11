@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chv/chv/internal/agentapi"
+	"github.com/chv/chv/internal/logger"
 	"github.com/chv/chv/internal/vm"
 	"github.com/go-chi/chi/v5"
 )
@@ -534,7 +535,12 @@ func (h *Handler) getVMMetrics(w http.ResponseWriter, r *http.Request) {
 
 	var metrics *agentapi.VMMetricsResponse
 	if vm.ActualState == "running" && vm.CloudHypervisorPID > 0 && h.vmService != nil {
-		metrics, _ = h.vmService.GetVMMetrics(ctx, vm.ID, vm.CloudHypervisorPID, vm.WorkspacePath)
+		m, err := h.vmService.GetVMMetrics(ctx, vm.ID, vm.CloudHypervisorPID, vm.WorkspacePath)
+		if err != nil {
+			logger.L().Warn("Failed to get VM metrics", logger.F("vm_id", vm.ID), logger.ErrorField(err))
+		} else {
+			metrics = m
+		}
 	}
 
 	history := []agentapi.VMMetricsResponse{}

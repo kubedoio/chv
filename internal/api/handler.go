@@ -349,7 +349,8 @@ func requestContext(r *http.Request) context.Context {
 // spaFileServer serves static files and falls back to index.html for SPA routes
 func spaFileServer(r chi.Router, path string, root http.FileSystem) {
 	if strings.ContainsAny(path, "{}*") {
-		panic("FileServer does not permit any URL parameters.")
+		logger.L().Error("FileServer does not permit URL parameters", logger.F("path", path))
+		return
 	}
 
 	if path != "/" && path[len(path)-1] != '/' {

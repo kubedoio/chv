@@ -82,7 +82,8 @@ func (c *Collector) collect() {
 	nodes, err := c.repo.ListNodes(ctx)
 	if err != nil {
 		logger.L().Error("Failed to list nodes for metrics", logger.ErrorField(err))
-		return
+		// Continue to collect VM metrics even if node list fails
+		nodes = nil
 	}
 
 	for _, node := range nodes {

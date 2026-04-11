@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/chv/chv/internal/agentapi"
@@ -23,6 +24,7 @@ type ReconciliationLoop struct {
 	handler   *Handler
 	interval  time.Duration
 	stopChan  chan struct{}
+	mu        sync.RWMutex
 	isRunning bool
 }
 
@@ -37,12 +39,17 @@ func NewReconciliationLoop(handler *Handler) *ReconciliationLoop {
 
 // Start begins the reconciliation loop in a background goroutine
 func (rl *ReconciliationLoop) Start(ctx context.Context) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
 	if rl.isRunning {
 		logger.L().Warn("Reconciliation loop is already running")
 		return
 	}
 
 	rl.isRunning = true
+	// Recreate stopChan in case Stop() was called before
+	rl.stopChan = make(chan struct{})
 	logger.L().Info("Starting VM state reconciliation loop", logger.F("interval", rl.interval))
 
 	// Run initial reconciliation immediately
@@ -54,6 +61,9 @@ func (rl *ReconciliationLoop) Start(ctx context.Context) {
 
 // Stop gracefully stops the reconciliation loop
 func (rl *ReconciliationLoop) Stop() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
 	if !rl.isRunning {
 		return
 	}
@@ -61,6 +71,13 @@ func (rl *ReconciliationLoop) Stop() {
 	logger.L().Info("Stopping VM state reconciliation loop")
 	close(rl.stopChan)
 	rl.isRunning = false
+}
+
+// IsRunning returns whether the reconciliation loop is currently running
+func (rl *ReconciliationLoop) IsRunning() bool {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+	return rl.isRunning
 }
 
 // loop runs the periodic reconciliation with a ticker
@@ -72,11 +89,12 @@ func (rl *ReconciliationLoop) loop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			logger.L().Info("Reconciliation loop stopping due to context cancellation")
+			rl.mu.Lock()
 			rl.isRunning = false
+			rl.mu.Unlock()
 			return
 		case <-rl.stopChan:
 			logger.L().Info("Reconciliation loop stopped")
-			rl.isRunning = false
 			return
 		case <-ticker.C:
 			rl.runReconciliation(ctx)
