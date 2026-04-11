@@ -89,7 +89,7 @@ type CreateVMInput struct {
 	NetworkID         string
 	VCPU              int
 	MemoryMB          int
-	ConsoleType       string // "pty" or "vnc", defaults to "pty"
+	ConsoleType       string // "serial" only (Unix socket-based console)
 	UserData          string
 	Username          string
 	Password          string
@@ -144,11 +144,6 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 	now := time.Now().UTC().Format(time.RFC3339)
 	workspacePath := filepath.Join(s.dataRoot, "vms", vmID)
 
-	consoleType := input.ConsoleType
-	if consoleType == "" {
-		consoleType = "pty"
-	}
-
 	vm := &models.VirtualMachine{
 		ID:            vmID,
 		NodeID:        localNode.ID,
@@ -158,7 +153,7 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 		NetworkID:     input.NetworkID,
 		VCPU:          input.VCPU,
 		MemoryMB:      input.MemoryMB,
-		ConsoleType:   consoleType,
+		ConsoleType:   "serial",
 		DesiredState:  "stopped",
 		ActualState:   StatusProvisioning,
 		WorkspacePath: workspacePath,

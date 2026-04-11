@@ -12,7 +12,7 @@ type VMStartRequest struct {
 	Netmask         string   `json:"netmask"`
 	VCPU            int      `json:"vcpu"`
 	MemoryMB        int      `json:"memory_mb"`
-	ConsoleType     string   `json:"console_type,omitempty"` // "pty" or "vnc"
+	ConsoleType     string   `json:"console_type,omitempty"` // "serial" only (Unix socket-based console)
 	WorkspacePath   string   `json:"workspace_path"`
 	CloudHypervisorPath string `json:"cloud_hypervisor_path,omitempty"`
 	BridgeName      string   `json:"bridge_name,omitempty"`

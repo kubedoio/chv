@@ -23,10 +23,14 @@
   let importModalOpen = $state(false);
 
   // Table state management
-  let table = $derived(useTable<Image>({
-    data: items,
+  let table = useTable<Image>({
+    data: [],
     pageSize: 10
-  }));
+  });
+
+  $effect(() => {
+    table.data = items;
+  });
 
   // Table columns definition
   const columns = [

@@ -49,10 +49,13 @@ func NewVMConsoleService() *VMConsoleService {
 }
 
 // HandleWebSocket handles WebSocket connections for VM console
-func (s *VMConsoleService) HandleWebSocket(w http.ResponseWriter, r *http.Request, vmID, apiSocket string) error {
-	// Check if VM is running
-	if !s.isVMRunning(apiSocket) {
-		return fmt.Errorf("VM is not running or API socket not found")
+// Uses Unix Domain Socket for reliable bidirectional communication
+func (s *VMConsoleService) HandleWebSocket(w http.ResponseWriter, r *http.Request, vmID, workspacePath string) error {
+	consoleSocket := filepath.Join(workspacePath, "console.sock")
+
+	// Check if console socket exists (VM is running)
+	if _, err := os.Stat(consoleSocket); err != nil {
+		return fmt.Errorf("VM console not available. Is the VM running?")
 	}
 
 	// Upgrade HTTP to WebSocket
@@ -62,27 +65,20 @@ func (s *VMConsoleService) HandleWebSocket(w http.ResponseWriter, r *http.Reques
 	}
 	defer conn.Close()
 
-	// Get serial console PTY from CH
-	serialPath, err := s.getSerialConsole(apiSocket)
+	// Connect to serial console Unix socket
+	vmSocket, err := net.Dial("unix", consoleSocket)
 	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte("Error: "+err.Error()))
-		return err
+		conn.WriteMessage(websocket.TextMessage, []byte("Error connecting to VM console: "+err.Error()))
+		return fmt.Errorf("failed to connect to console socket: %w", err)
 	}
-
-	// Connect to serial console PTY (it's a device file, not a unix socket)
-	serialConn, err := os.OpenFile(serialPath, os.O_RDWR, 0)
-	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte("Error connecting to console: "+err.Error()))
-		return fmt.Errorf("failed to connect to serial console: %w", err)
-	}
-	defer serialConn.Close()
+	defer vmSocket.Close()
 
 	// Create session
 	ctx, cancel := context.WithCancel(r.Context())
 	session := &ConsoleSession{
 		VMID:       vmID,
 		Conn:       conn,
-		SerialConn: serialConn,
+		SerialConn: vmSocket,
 		Cancel:     cancel,
 	}
 
@@ -234,73 +230,7 @@ func (s *VMConsoleService) getSerialConsole(apiSocket string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("console not available: VM may not have serial enabled or PTY not yet created")
-}
-
-// HandleVNCWebSocket handles WebSocket connections for VM VNC console
-// Proxies raw binary data between the WebSocket and the VNC Unix socket
-func (s *VMConsoleService) HandleVNCWebSocket(w http.ResponseWriter, r *http.Request, vmID, workspacePath string) error {
-	vncSocket := filepath.Join(workspacePath, "vnc.sock")
-
-	// Check if VNC socket exists
-	if _, err := os.Stat(vncSocket); err != nil {
-		return fmt.Errorf("VNC socket not found: %w", err)
-	}
-
-	// Upgrade HTTP to WebSocket
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return fmt.Errorf("failed to upgrade connection: %w", err)
-	}
-	defer conn.Close()
-
-	// Connect to VNC Unix socket
-	vncConn, err := net.Dial("unix", vncSocket)
-	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte("Error connecting to VNC: "+err.Error()))
-		return fmt.Errorf("failed to connect to VNC socket: %w", err)
-	}
-	defer vncConn.Close()
-
-	// Proxy bidirectionally with raw binary data
-	errChan := make(chan error, 2)
-
-	// WebSocket -> VNC
-	go func() {
-		for {
-			_, data, err := conn.ReadMessage()
-			if err != nil {
-				errChan <- err
-				return
-			}
-			if _, err := vncConn.Write(data); err != nil {
-				errChan <- err
-				return
-			}
-		}
-	}()
-
-	// VNC -> WebSocket
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := vncConn.Read(buf)
-			if err != nil {
-				errChan <- err
-				return
-			}
-			if n > 0 {
-				if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-					errChan <- err
-					return
-				}
-			}
-		}
-	}()
-
-	// Wait for either direction to close
-	<-errChan
-	return nil
+	return "", fmt.Errorf("console not available: VM may not have serial enabled or socket not yet created")
 }
 
 // GetActiveSessions returns list of active console sessions

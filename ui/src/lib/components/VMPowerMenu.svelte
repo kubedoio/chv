@@ -16,93 +16,44 @@
   let confirmTimeout = $state(60);
   let confirmGraceful = $state(true);
 
-  const isRunning = $derived(vmState === 'running');
-  const isStopped = $derived(vmState === 'stopped' || vmState === 'prepared');
-  const isTransitioning = $derived(['starting', 'stopping', 'provisioning'].includes(vmState));
+  // Computed state values
+  let isRunning = $derived(vmState === 'running');
+  let isStopped = $derived(vmState === 'stopped' || vmState === 'prepared');
+  let isTransitioning = $derived(['starting', 'stopping', 'provisioning'].includes(vmState));
 
-  const actions = $derived([
-    { 
-      id: 'start', 
-      label: 'Start', 
-      icon: Play, 
-      show: isStopped,
-      danger: false,
-      confirm: false
-    },
-    { 
-      id: 'shutdown', 
-      label: 'Graceful Shutdown', 
-      icon: Power, 
-      show: isRunning,
-      danger: false,
-      confirm: true,
-      confirmTitle: 'Shutdown VM?',
-      confirmMessage: 'Send ACPI shutdown signal to gracefully stop the VM.',
-      options: { graceful: true }
-    },
-    { 
-      id: 'force-stop', 
-      label: 'Force Stop', 
-      icon: Square, 
-      show: isRunning,
-      danger: true,
-      confirm: true,
-      confirmTitle: 'Force Stop VM?',
-      confirmMessage: 'This will immediately terminate the VM process. Data loss may occur.'
-    },
-    { 
-      id: 'reset', 
-      label: 'Reset', 
-      icon: RotateCcw, 
-      show: isRunning,
-      danger: false,
-      confirm: true,
-      confirmTitle: 'Reset VM?',
-      confirmMessage: 'Power cycle the VM without shutdown. Unsaved data may be lost.'
-    },
-    { 
-      id: 'restart', 
-      label: 'Restart', 
-      icon: RefreshCw, 
-      show: isRunning,
-      danger: false,
-      confirm: true,
-      confirmTitle: 'Restart VM?',
-      confirmMessage: 'Shutdown and restart the VM.',
-      hasOptions: true
-    },
-  ]);
-
-  const visibleActions = $derived(actions.filter(a => a.show));
+  // Action visibility computed as separate values, not as array
+  let showStart = $derived(isStopped);
+  let showShutdown = $derived(isRunning);
+  let showForceStop = $derived(isRunning);
+  let showReset = $derived(isRunning);
+  let showRestart = $derived(isRunning);
 
   function handleActionClick(actionId: string) {
-    const action = actions.find(a => a.id === actionId);
-    if (!action) return;
-
-    if (action.confirm) {
-      showConfirm = actionId;
-      // Reset options to defaults
-      confirmTimeout = 60;
-      confirmGraceful = true;
-    } else {
-      executeAction(actionId);
+    if (actionId === 'start') {
+      onAction('start');
+      isOpen = false;
+      return;
     }
+
+    // For actions that need confirmation
+    showConfirm = actionId;
+    confirmTimeout = 60;
+    confirmGraceful = true;
     isOpen = false;
   }
 
-  function executeAction(actionId: string) {
-    const action = actions.find(a => a.id === actionId);
-    if (!action) return;
+  function executeAction() {
+    if (!showConfirm) return;
 
     let options: { graceful?: boolean; timeout?: number } = {};
     
-    if (actionId === 'restart' && confirmGraceful) {
+    if (showConfirm === 'restart' && confirmGraceful) {
       options = { graceful: true, timeout: confirmTimeout };
-    } else if (actionId === 'shutdown') {
+    } else if (showConfirm === 'shutdown') {
       options = { timeout: confirmTimeout };
     }
 
-    onAction(actionId, options);
+    onAction(showConfirm, options);
     showConfirm = null;
   }
 
@@ -112,6 +63,43 @@
 
   function toggleMenu() {
     isOpen = !isOpen;
+  }
+
+  // Get action config for confirmation modal
+  function getActionConfig(actionId: string) {
+    switch (actionId) {
+      case 'shutdown':
+        return {
+          title: 'Shutdown VM?',
+          message: 'Send ACPI shutdown signal to gracefully stop the VM.',
+          danger: false,
+          label: 'Graceful Shutdown'
+        };
+      case 'force-stop':
+        return {
+          title: 'Force Stop VM?',
+          message: 'This will immediately terminate the VM process. Data loss may occur.',
+          danger: true,
+          label: 'Force Stop'
+        };
+      case 'reset':
+        return {
+          title: 'Reset VM?',
+          message: 'Power cycle the VM without shutdown. Unsaved data may be lost.',
+          danger: false,
+          label: 'Reset'
+        };
+      case 'restart':
+        return {
+          title: 'Restart VM?',
+          message: 'Shutdown and restart the VM.',
+          danger: false,
+          label: 'Restart',
+          hasOptions: true
+        };
+      default:
+        return null;
+    }
   }
 </script>
 
@@ -143,23 +131,61 @@
       transition:slide={{ duration: 150 }}
     >
       <div class="py-1">
-        {#each visibleActions as action}
+        {#if showStart}
           <button
-            onclick={() => handleActionClick(action.id)}
-            class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors
-              {action.danger 
-                ? 'text-rose-600 hover:bg-rose-50' 
-                : 'text-gray-700 hover:bg-gray-50'}"
+            onclick={() => handleActionClick('start')}
+            class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
           >
-            <action.icon size={16} />
-            <span>{action.label}</span>
-            {#if action.confirm}
-              <AlertTriangle size={14} class="ml-auto opacity-50" />
-            {/if}
+            <Play size={16} />
+            <span>Start</span>
           </button>
-        {/each}
+        {/if}
         
-        {#if visibleActions.length === 0}
+        {#if showShutdown}
+          <button
+            onclick={() => handleActionClick('shutdown')}
+            class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
+          >
+            <Power size={16} />
+            <span>Graceful Shutdown</span>
+            <AlertTriangle size={14} class="ml-auto opacity-50" />
+          </button>
+        {/if}
+        
+        {#if showForceStop}
+          <button
+            onclick={() => handleActionClick('force-stop')}
+            class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-rose-600 hover:bg-rose-50"
+          >
+            <Square size={16} />
+            <span>Force Stop</span>
+            <AlertTriangle size={14} class="ml-auto opacity-50" />
+          </button>
+        {/if}
+        
+        {#if showReset}
+          <button
+            onclick={() => handleActionClick('reset')}
+            class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
+          >
+            <RotateCcw size={16} />
+            <span>Reset</span>
+            <AlertTriangle size={14} class="ml-auto opacity-50" />
+          </button>
+        {/if}
+        
+        {#if showRestart}
+          <button
+            onclick={() => handleActionClick('restart')}
+            class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
+          >
+            <RefreshCw size={16} />
+            <span>Restart</span>
+            <AlertTriangle size={14} class="ml-auto opacity-50" />
+          </button>
+        {/if}
+        
+        {#if !showStart && !showShutdown && !showForceStop && !showReset && !showRestart}
           <div class="px-4 py-3 text-sm text-gray-500 text-center">
             No actions available
           </div>
@@ -171,18 +197,18 @@
 
 <!-- Confirmation Modal -->
 {#if showConfirm}
-  {@const action = actions.find(a => a.id === showConfirm)}
-  {#if action}
+  {@const config = getActionConfig(showConfirm)}
+  {#if config}
     <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-lg shadow-lg w-full max-w-md" transition:slide={{ duration: 200 }}>
         <div class="px-6 py-4 border-b border-line">
-          <h3 class="text-lg font-semibold text-gray-900">{action.confirmTitle}</h3>
+          <h3 class="text-lg font-semibold text-gray-900">{config.title}</h3>
         </div>
         
         <div class="px-6 py-4">
-          <p class="text-gray-600 mb-4">{action.confirmMessage}</p>
+          <p class="text-gray-600 mb-4">{config.message}</p>
           
-          {#if action.hasOptions && showConfirm === 'restart'}
+          {#if showConfirm === 'restart'}
             <div class="space-y-3 bg-gray-50 p-3 rounded">
               <label class="flex items-center gap-2">
                 <input 
@@ -234,11 +260,11 @@
             Cancel
           </button>
           <button 
-            onclick={() => executeAction(showConfirm)}
+            onclick={executeAction}
             class="px-4 py-2 text-sm font-medium text-white rounded transition-colors
-              {action.danger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-accent hover:bg-accent/90'}"
+              {config.danger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-accent hover:bg-accent/90'}"
           >
-            {action.label}
+            {config.label}
           </button>
         </div>
       </div>

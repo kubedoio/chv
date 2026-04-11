@@ -108,6 +108,13 @@ func (s *Server) routes() {
 		r.Post("/cloud-init/seed-iso", cloudInitHandler.GenerateSeedISO)
 		r.Post("/vms/start", vmHandler.StartVM)
 		r.Post("/vms/stop", vmHandler.StopVM)
+		r.Post("/vms/shutdown", vmHandler.ShutdownVM)
+		r.Post("/vms/force-stop", vmHandler.ForceStopVM)
+		r.Post("/vms/reboot", vmHandler.RebootVM)
+		r.Post("/vms/pause", vmHandler.PauseVM)
+		r.Post("/vms/resume", vmHandler.ResumeVM)
+		r.Post("/vms/resize", vmHandler.ResizeVM)
+		r.Post("/vms/state", vmHandler.GetVMState)
 		r.Post("/vms/destroy", vmHandler.DestroyVM)
 		r.Post("/vms/provision", vmHandler.ProvisionVM)
 		r.Post("/vms/status", vmHandler.GetVMStatus)
@@ -115,11 +122,13 @@ func (s *Server) routes() {
 		r.Post("/vms/metrics", vmHandler.GetVMMetrics)
 		r.Post("/vms/health", vmHandler.HealthCheck)
 		r.Get("/vms/console", vmHandler.Console)
-		r.Get("/vms/vnc", vmHandler.VNCConsole)
+
 		r.Post("/vms/snapshots", vmHandler.CreateSnapshot)
 		r.Post("/vms/snapshots/list", vmHandler.ListSnapshots)
 		r.Post("/vms/snapshots/restore", vmHandler.RestoreSnapshot)
 		r.Post("/vms/snapshots/delete", vmHandler.DeleteSnapshot)
+		r.Post("/vms/validate", vmHandler.ValidateVMs)
+		r.Get("/vms/details", vmHandler.GetRunningVMDetails)
 	})
 }
 

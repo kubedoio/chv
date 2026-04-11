@@ -38,28 +38,51 @@
     action: async () => {}
   });
 
-  // Table state management - create new table when items change
-  let table = $derived(useTable<VM>({
-    data: items,
+  // Table state management - create once and sync data separately
+  let table = useTable<VM>({
+    data: [],
     pageSize: 10
-  }));
+  });
+  
+  // Sync table data when items change
+  $effect(() => {
+    table.data = items;
+  });
 
-  // Lookup maps for related data
-  const imageMap = $derived(
-    new Map(images.map(i => [i.id, i]))
-  );
-  const poolMap = $derived(
-    new Map(pools.map(p => [p.id, p]))
-  );
-  const networkMap = $derived(
-    new Map(networks.map(n => [n.id, n]))
-  );
+  // Helper functions for lookup (not derived to avoid object creation)
+  function getImage(id: string) {
+    return images.find(i => i.id === id);
+  }
+  function getPool(id: string) {
+    return pools.find(p => p.id === id);
+  }
+  function getNetwork(id: string) {
+    return networks.find(n => n.id === id);
+  }
 
-  // Computed stats
-  const total = $derived(items.length);
-  const running = $derived(items.filter(vm => vm.actual_state === 'running').length);
-  const stopped = $derived(items.filter(vm => vm.actual_state === 'stopped').length);
-  const other = $derived(items.filter(vm => !['running', 'stopped'].includes(vm.actual_state)).length);
+  // Computed stats (primitives only)
+  let total = $derived(items.length);
+  let runningCount = $derived(() => {
+    let count = 0;
+    for (const vm of items) {
+      if (vm.actual_state === 'running') count++;
+    }
+    return count;
+  });
+  let stoppedCount = $derived(() => {
+    let count = 0;
+    for (const vm of items) {
+      if (vm.actual_state === 'stopped') count++;
+    }
+    return count;
+  });
+  let otherCount = $derived(() => {
+    let count = 0;
+    for (const vm of items) {
+      if (vm.actual_state !== 'running' && vm.actual_state !== 'stopped') count++;
+    }
+    return count;
+  });
 
   // Filter options
   const filterOptions = [
@@ -76,7 +99,7 @@
     }
   ];
 
-  // Table columns definition
+  // Table columns definition - defined once outside component to maintain stable reference
   const columns = [
     {
       key: 'name',
@@ -100,7 +123,7 @@
       key: 'image_id',
       title: 'Image',
       render: (vm: VM) => {
-        const img = imageMap.get(vm.image_id);
+        const img = getImage(vm.image_id);
         return img?.name ?? vm.image_id;
       }
     },
@@ -108,7 +131,7 @@
       key: 'storage_pool_id',
       title: 'Pool',
       render: (vm: VM) => {
-        const pool = poolMap.get(vm.storage_pool_id);
+        const pool = getPool(vm.storage_pool_id);
         return pool?.name ?? vm.storage_pool_id;
       }
     },
@@ -116,7 +139,7 @@
       key: 'network_id',
       title: 'Network',
       render: (vm: VM) => {
-        const net = networkMap.get(vm.network_id);
+        const net = getNetwork(vm.network_id);
         return net?.name ?? vm.network_id;
       }
     },
@@ -288,9 +311,9 @@
 <div class="flex justify-between items-start mb-6">
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1">
     <StatsCard title="Total VMs" value={total} icon={Server} />
-    <StatsCard title="Running" value={running} icon={Play} trend="up" />
-    <StatsCard title="Stopped" value={stopped} icon={Square} />
-    <StatsCard title="Other" value={other} icon={AlertCircle} />
+    <StatsCard title="Running" value={runningCount()} icon={Play} trend="up" />
+    <StatsCard title="Stopped" value={stoppedCount()} icon={Square} />
+    <StatsCard title="Other" value={otherCount()} icon={AlertCircle} />
   </div>
   <button 
     onclick={() => createModalOpen = true} 

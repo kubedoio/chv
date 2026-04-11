@@ -93,3 +93,51 @@ type ProgressUpdate struct {
 	Completed int64  `json:"completed"` // bytes or percent
 	Total     int64  `json:"total"`
 }
+
+// VMValidationRequest requests validation of running VMs
+type VMValidationRequest struct {
+	// Optional: if provided, only validate these VM IDs
+	ExpectedVMIDs []string `json:"expected_vm_ids,omitempty"`
+	// Optional: data root path to identify managed VMs
+	DataRoot string `json:"data_root,omitempty"`
+}
+
+// RunningVMInfo contains information about a running VM process
+type RunningVMInfo struct {
+	PID          int    `json:"pid"`
+	VMID         string `json:"vm_id"`
+	SocketPath   string `json:"socket_path"`
+	DiskPath     string `json:"disk_path"`
+	SeedISOPath  string `json:"seed_iso_path,omitempty"`
+	VCPU         int    `json:"vcpu"`
+	MemoryMB     int    `json:"memory_mb"`
+	TAPDevice    string `json:"tap_device,omitempty"`
+	MACAddress   string `json:"mac_address,omitempty"`
+	IPAddress    string `json:"ip_address,omitempty"`
+	KernelPath   string `json:"kernel_path"`
+	CommandLine  string `json:"command_line"`
+	IsManaged    bool   `json:"is_managed"`     // Whether this VM is in the expected list
+	WorkspacePath string `json:"workspace_path,omitempty"`
+}
+
+// VMValidationResponse returns the validation results
+type VMValidationResponse struct {
+	// All running VMs found on the system
+	RunningVMs []RunningVMInfo `json:"running_vms"`
+	// VMs that are running but not in the expected list (orphans)
+	OrphanVMs []RunningVMInfo `json:"orphan_vms"`
+	// VMs that were expected but not found running (missing)
+	MissingVMs []string `json:"missing_vm_ids"`
+	// VMs that are running as expected (valid)
+	ValidVMs []RunningVMInfo `json:"valid_vms"`
+	// Summary counts
+	Summary ValidationSummary `json:"summary"`
+}
+
+// ValidationSummary provides quick counts for validation results
+type ValidationSummary struct {
+	TotalRunning int `json:"total_running"`
+	Valid        int `json:"valid"`
+	Orphans      int `json:"orphans"`
+	Missing      int `json:"missing"`
+}

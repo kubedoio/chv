@@ -23,10 +23,14 @@
   let createModalOpen = $state(false);
 
   // Table state management
-  let table = $derived(useTable<NetworkType>({
-    data: items,
+  let table = useTable<NetworkType>({
+    data: [],
     pageSize: 10
-  }));
+  });
+
+  $effect(() => {
+    table.data = items;
+  });
 
   // Table columns definition
   const columns = [

@@ -197,8 +197,10 @@ func (h *Handler) registerRoutes() {
 				r.Post("/bulk/start", h.bulkStartVMs)
 				r.Post("/bulk/stop", h.bulkStopVMs)
 				r.Post("/bulk/delete", h.bulkDeleteVMs)
+				r.Post("/validate", h.validateVMs)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.getVM)
+					r.Patch("/", h.updateVM)
 					r.Get("/status", h.getVMStatus)
 					r.Get("/metrics", h.getVMMetrics)
 					r.Get("/boot-logs", h.getVMBootLogs)
@@ -319,7 +321,7 @@ func (h *Handler) registerRoutes() {
 		r.Get("/metrics", promhttp.Handler().ServeHTTP)
 		// WebSocket console endpoint - outside auth middleware (token passed in query param)
 		r.Get("/vms/console/ws", h.vmConsoleWebSocket)
-		r.Get("/vms/vnc/ws", h.vmVNCWebSocket)
+
 	})
 }
 

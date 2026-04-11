@@ -71,33 +71,36 @@
 	let columnVisibilityOpen = $state(false);
 	let visibleColumns = $state<Set<string>>(new Set(columns.map(c => c.key)));
 	let resizingColumn = $state<string | null>(null);
-	let columnWidths = $state<Record<string, string>>({});
 	let tableRef = $state<HTMLTableElement | null>(null);
-
-	// Initialize column widths from column definitions
-	$effect(() => {
+	
+	// Initialize column widths from column definitions (only once)
+	function initColumnWidths(): Record<string, string> {
 		const widths: Record<string, string> = {};
 		columns.forEach(col => {
 			if (col.width) {
 				widths[col.key] = col.width;
 			}
 		});
-		columnWidths = widths;
+		return widths;
+	}
+	let columnWidths = $state<Record<string, string>>(initColumnWidths());
+
+	// Selection handling - use functions to avoid creating new objects
+	function isRowSelected(row: T): boolean {
+		return selectedIds.includes(rowId(row));
+	}
+	
+	let isAllSelected = $derived(() => {
+		if (!selectable || data.length === 0) return false;
+		return data.every(row => selectedIds.includes(rowId(row)));
 	});
-
-	// Filtered columns based on visibility
-	const visibleColumnList = $derived(
-		columns.filter(col => visibleColumns.has(col.key))
-	);
-
-	// Selection handling
-	const selectedSet = $derived(new Set(selectedIds));
-	const isAllSelected = $derived(
-		selectable && data.length > 0 && data.every(row => selectedSet.has(rowId(row)))
-	);
-	const isPartiallySelected = $derived(
-		selectable && data.some(row => selectedSet.has(rowId(row))) && !isAllSelected
-	);
+	
+	let isPartiallySelected = $derived(() => {
+		if (!selectable) return false;
+		const someSelected = data.some(row => selectedIds.includes(rowId(row)));
+		const allSelected = data.every(row => selectedIds.includes(rowId(row)));
+		return someSelected && !allSelected;
+	});
 
 	function handleSort(column: Column<T>) {
 		if (!column.sortable || !onSort) return;
@@ -127,7 +130,7 @@
 	function toggleSelectAll() {
 		if (!onSelect) return;
 
-		if (isAllSelected) {
+		if (isAllSelected()) {
 			onSelect([]);
 		} else {
 			const allIds = data.map(row => rowId(row));
@@ -282,11 +285,11 @@
 								type="button"
 								class="select-btn"
 								onclick={toggleSelectAll}
-								aria-label={isAllSelected ? 'Deselect all' : 'Select all'}
+								aria-label={isAllSelected() ? 'Deselect all' : 'Select all'}
 							>
-								{#if isAllSelected}
+								{#if isAllSelected()}
 									<CheckSquare size={16} class="text-primary" />
-								{:else if isPartiallySelected}
+								{:else if isPartiallySelected()}
 									<MinusSquare size={16} class="text-primary" />
 								{:else}
 									<Square size={16} />
@@ -362,7 +365,7 @@
 						{@const id = rowId(row)}
 						<tr
 							class="datatable-row"
-							class:selected={selectedSet.has(id)}
+							class:selected={selectedIds.includes(id)}
 							class:clickable={!!onRowClick}
 							onclick={() => onRowClick?.(row)}
 						>
@@ -372,9 +375,9 @@
 										type="button"
 										class="select-btn"
 										onclick={(e) => { e.stopPropagation(); handleSelect(row, e); }}
-										aria-label={selectedSet.has(id) ? 'Deselect row' : 'Select row'}
+										aria-label={selectedIds.includes(id) ? 'Deselect row' : 'Select row'}
 									>
-										{#if selectedSet.has(id)}
+										{#if selectedIds.includes(id)}
 											<CheckSquare size={16} class="text-primary" />
 										{:else}
 											<Square size={16} />

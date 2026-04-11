@@ -27,10 +27,14 @@
 	const hasImportingImages = $derived(items.some(img => img.status === 'importing'));
 
 	// Table state management - reactive to items
-	let table = $derived(useTable<ImageType>({
-		data: items,
+	let table = useTable<ImageType>({
+		data: [],
 		pageSize: 10
-	}));
+	});
+
+	$effect(() => {
+		table.data = items;
+	});
 
 	// Filter options
 	const filterOptions = [

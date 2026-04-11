@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -136,6 +137,111 @@ func (h *Handler) getVM(w http.ResponseWriter, r *http.Request) {
 			Code:      "not_found",
 			Message:   "VM not found",
 			Retryable: false,
+		})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, vm)
+}
+
+// updateVMRequest represents the fields that can be updated on a VM
+type updateVMRequest struct {
+	Name     *string `json:"name,omitempty"`
+	VCPU     *int    `json:"vcpu,omitempty"`
+	MemoryMB *int    `json:"memory_mb,omitempty"`
+}
+
+func (h *Handler) updateVM(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+	vmID := chi.URLParam(r, "id")
+
+	var req updateVMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, apiError{
+			Code:      "invalid_request",
+			Message:   "Request body must be valid JSON",
+			Retryable: false,
+		})
+		return
+	}
+
+	// Get existing VM
+	vm, err := h.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "vm_get_failed",
+			Message:   err.Error(),
+			Retryable: true,
+		})
+		return
+	}
+
+	if vm == nil {
+		h.writeError(w, http.StatusNotFound, apiError{
+			Code:      "not_found",
+			Message:   "VM not found",
+			Retryable: false,
+		})
+		return
+	}
+
+	// Check if VM is running - some changes require the VM to be stopped
+	isRunning := vm.ActualState == "running"
+
+	// Apply updates
+	if req.Name != nil && *req.Name != "" {
+		vm.Name = *req.Name
+	}
+
+	// VCPU and Memory changes require the VM to be stopped
+	if req.VCPU != nil {
+		if isRunning {
+			h.writeError(w, http.StatusConflict, apiError{
+				Code:      "vm_running",
+				Message:   "Cannot change VCPU while VM is running. Please stop the VM first.",
+				Retryable: false,
+			})
+			return
+		}
+		if *req.VCPU < 1 {
+			h.writeError(w, http.StatusBadRequest, apiError{
+				Code:      "invalid_request",
+				Message:   "VCPU must be at least 1",
+				Retryable: false,
+			})
+			return
+		}
+		vm.VCPU = *req.VCPU
+	}
+
+	if req.MemoryMB != nil {
+		if isRunning {
+			h.writeError(w, http.StatusConflict, apiError{
+				Code:      "vm_running",
+				Message:   "Cannot change memory while VM is running. Please stop the VM first.",
+				Retryable: false,
+			})
+			return
+		}
+		if *req.MemoryMB < 64 {
+			h.writeError(w, http.StatusBadRequest, apiError{
+				Code:      "invalid_request",
+				Message:   "Memory must be at least 64 MB",
+				Retryable: false,
+			})
+			return
+		}
+		vm.MemoryMB = *req.MemoryMB
+	}
+
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+	// Save changes
+	if err := h.repo.UpdateVM(ctx, vm); err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "vm_update_failed",
+			Message:   err.Error(),
+			Retryable: true,
 		})
 		return
 	}
@@ -461,21 +567,16 @@ func (h *Handler) getVMConsole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build WebSocket URL pointing to controller's proxy endpoint
-	// Use appropriate endpoint based on console type
-	var wsURL string
-	if vm.ConsoleType == "vnc" {
-		wsURL = scheme + "://" + host + "/api/v1/vms/vnc/ws?vm_id=" + vmID + "&workspace_path=" + vm.WorkspacePath
-	} else {
-		wsURL = scheme + "://" + host + "/api/v1/vms/console/ws?vm_id=" + vmID + "&api_socket=" + vm.WorkspacePath + "/api.sock"
-	}
+	// Uses Unix Domain Socket via WebSocket for reliable bidirectional communication
+	wsURL := scheme + "://" + host + "/api/v1/vms/console/ws?vm_id=" + vmID + "&workspace_path=" + vm.WorkspacePath
 	if token != "" {
 		wsURL += "&token=" + token
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"ws_url":   wsURL,
-		"type":     vm.ConsoleType,
-		"message":  "Use WebSocket URL to connect to console",
+		"type":     "serial",
+		"message":  "Use WebSocket URL to connect to serial console",
 	})
 }
 
@@ -634,4 +735,58 @@ func (h *Handler) bulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, bulkVMResponse{Results: results})
+}
+
+// validateVMs validates running VMs against the expected state
+func (h *Handler) validateVMs(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+
+	// Get agent client
+	agentClient := h.vmService.GetAgentClient()
+	if agentClient == nil {
+		h.writeError(w, http.StatusServiceUnavailable, apiError{
+			Code:      "service_unavailable",
+			Message:   "Agent client not available",
+			Retryable: true,
+		})
+		return
+	}
+
+	// Get all VMs from database that should be running
+	vms, err := h.repo.ListVMsByDesiredState(ctx, "running")
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "internal_error",
+			Message:   fmt.Sprintf("Failed to list VMs: %v", err),
+			Retryable: true,
+		})
+		return
+	}
+
+	// Build list of expected VM IDs
+	var expectedVMIDs []string
+	for _, vm := range vms {
+		expectedVMIDs = append(expectedVMIDs, vm.ID)
+	}
+
+	// Call agent to validate running VMs
+	validationReq := &agentapi.VMValidationRequest{
+		ExpectedVMIDs: expectedVMIDs,
+	}
+
+	validationResp, err := agentClient.ValidateRunningVMs(ctx, validationReq)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "validation_failed",
+			Message:   fmt.Sprintf("Failed to validate VMs: %v", err),
+			Retryable: true,
+		})
+		return
+	}
+
+	// Return the validation results
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"validation": validationResp,
+		"expected":   expectedVMIDs,
+	})
 }

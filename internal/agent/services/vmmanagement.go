@@ -104,13 +104,16 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 	}
 
 	// Build command arguments
-	args := []string{
-		"--kernel", kernelPath,
-		"--disk", fmt.Sprintf("path=%s", req.DiskPath),
+	// Note: cloud-hypervisor requires all disks in a single --disk argument
+	// Multiple disks are separated by commas, not spaces
+	diskArg := fmt.Sprintf("path=%s", req.DiskPath)
+	if req.SeedISOPath != "" {
+		diskArg += fmt.Sprintf(",path=%s,readonly=on", req.SeedISOPath)
 	}
 
-	if req.SeedISOPath != "" {
-		args = append(args, "--disk", fmt.Sprintf("path=%s,readonly=on", req.SeedISOPath))
+	args := []string{
+		"--kernel", kernelPath,
+		"--disk", diskArg,
 	}
 
 	// Network config
@@ -124,15 +127,9 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 	args = append(args, "--net", netConfig)
 
 	// Console configuration
-	if req.ConsoleType == "vnc" {
-		vncSocket := filepath.Join(req.WorkspacePath, "vnc.sock")
-		args = append(args, "--vnc", fmt.Sprintf("socket=%s", vncSocket))
-		// Still use serial for boot logs
-		args = append(args, "--serial", "pty")
-	} else {
-		// Default PTY console
-		args = append(args, "--console", "off", "--serial", "pty")
-	}
+	// Use Unix socket for serial console (more reliable than PTY for WebSocket bridging)
+	consoleSocket := filepath.Join(req.WorkspacePath, "console.sock")
+	args = append(args, "--console", "off", "--serial", "socket="+consoleSocket)
 
 	args = append(args,
 		"--cpus", fmt.Sprintf("boot=%d", req.VCPU),
@@ -655,6 +652,8 @@ func (s *VMManagementService) findKernel() (string, error) {
 	return "", fmt.Errorf("no kernel found in standard locations")
 }
 
+
+
 // ListRunningVMs returns a list of running VM IDs
 func (s *VMManagementService) ListRunningVMs() []string {
 	var running []string
@@ -881,4 +880,296 @@ func (s *VMManagementService) cloneDisk(ctx context.Context, src, dst string) er
 	}
 
 	return nil
+}
+
+
+// ShutdownVM gracefully shuts down a VM via the Cloud Hypervisor API (ACPI shutdown)
+func (s *VMManagementService) ShutdownVM(ctx context.Context, req *agentapi.VMShutdownRequest) (*agentapi.VMShutdownResponse, error) {
+	// Get API socket path
+	apiSocket := filepath.Join(s.getWorkspacePath(req.VMID), "api.sock")
+	
+	// Verify the API socket exists
+	if _, err := os.Stat(apiSocket); err != nil {
+		return nil, fmt.Errorf("VM API socket not found at %s: %w", apiSocket, err)
+	}
+
+	// Create CH API client
+	client := NewCHAPIClient(apiSocket)
+	
+	// Try graceful shutdown first
+	if err := client.Shutdown(ctx); err != nil {
+		// Fallback to power button if shutdown endpoint not available
+		if err := client.PowerButton(ctx); err != nil {
+			return nil, fmt.Errorf("failed to initiate graceful shutdown: %w", err)
+		}
+	}
+
+	// Wait for VM to stop if timeout is specified
+	if req.Timeout > 0 {
+		timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
+		defer cancel()
+		
+		for {
+			select {
+			case <-timeoutCtx.Done():
+				return &agentapi.VMShutdownResponse{
+					Success: false,
+					Message: "shutdown timeout reached, VM may still be stopping",
+				}, nil
+			default:
+				// Check if process is still running
+				if pid, exists := s.pids[req.VMID]; exists {
+					if !s.isProcessRunning(pid) {
+						delete(s.pids, req.VMID)
+						delete(s.processes, req.VMID)
+						return &agentapi.VMShutdownResponse{
+							Success: true,
+							Message: "VM shutdown completed",
+						}, nil
+					}
+				} else {
+					// Not in our tracked processes
+					return &agentapi.VMShutdownResponse{
+						Success: true,
+						Message: "VM not tracked locally",
+					}, nil
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}
+
+	return &agentapi.VMShutdownResponse{
+		Success: true,
+		Message: "shutdown signal sent to VM",
+	}, nil
+}
+
+// RebootVM reboots a running VM via the Cloud Hypervisor API
+func (s *VMManagementService) RebootVM(ctx context.Context, req *agentapi.VMResetRequest) (*agentapi.VMResetResponse, error) {
+	// Get API socket path
+	apiSocket := filepath.Join(s.getWorkspacePath(req.VMID), "api.sock")
+	
+	// Verify the API socket exists
+	if _, err := os.Stat(apiSocket); err != nil {
+		return nil, fmt.Errorf("VM API socket not found at %s: %w", apiSocket, err)
+	}
+
+	// Verify VM is running
+	if pid, exists := s.pids[req.VMID]; exists {
+		if !s.isProcessRunning(pid) {
+			return nil, fmt.Errorf("VM %s is not running", req.VMID)
+		}
+	}
+
+	// Create CH API client and send reboot request
+	client := NewCHAPIClient(apiSocket)
+	if err := client.Reboot(ctx); err != nil {
+		return nil, fmt.Errorf("failed to reboot VM: %w", err)
+	}
+
+	return &agentapi.VMResetResponse{
+		Success: true,
+		Message: "reboot signal sent to VM",
+	}, nil
+}
+
+// PauseVM pauses a running VM
+func (s *VMManagementService) PauseVM(ctx context.Context, vmID string) error {
+	// Get API socket path
+	apiSocket := filepath.Join(s.getWorkspacePath(vmID), "api.sock")
+	
+	// Verify the API socket exists
+	if _, err := os.Stat(apiSocket); err != nil {
+		return fmt.Errorf("VM API socket not found at %s: %w", apiSocket, err)
+	}
+
+	// Verify VM is running
+	if pid, exists := s.pids[vmID]; exists {
+		if !s.isProcessRunning(pid) {
+			return fmt.Errorf("VM %s is not running", vmID)
+		}
+	}
+
+	// Create CH API client and send pause request
+	client := NewCHAPIClient(apiSocket)
+	if err := client.Pause(ctx); err != nil {
+		return fmt.Errorf("failed to pause VM: %w", err)
+	}
+
+	return nil
+}
+
+// ResumeVM resumes a paused VM
+func (s *VMManagementService) ResumeVM(ctx context.Context, vmID string) error {
+	// Get API socket path
+	apiSocket := filepath.Join(s.getWorkspacePath(vmID), "api.sock")
+	
+	// Verify the API socket exists
+	if _, err := os.Stat(apiSocket); err != nil {
+		return fmt.Errorf("VM API socket not found at %s: %w", apiSocket, err)
+	}
+
+	// Verify VM is running
+	if pid, exists := s.pids[vmID]; exists {
+		if !s.isProcessRunning(pid) {
+			return fmt.Errorf("VM %s is not running", vmID)
+		}
+	}
+
+	// Create CH API client and send resume request
+	client := NewCHAPIClient(apiSocket)
+	if err := client.Resume(ctx); err != nil {
+		return fmt.Errorf("failed to resume VM: %w", err)
+	}
+
+	return nil
+}
+
+// ResizeVM resizes a running VM (CPU/memory hot-plug)
+func (s *VMManagementService) ResizeVM(ctx context.Context, req *agentapi.VMResizeRequest) (*agentapi.VMResizeResponse, error) {
+	// Get API socket path
+	apiSocket := filepath.Join(s.getWorkspacePath(req.VMID), "api.sock")
+	
+	// Verify the API socket exists
+	if _, err := os.Stat(apiSocket); err != nil {
+		return nil, fmt.Errorf("VM API socket not found at %s: %w", apiSocket, err)
+	}
+
+	// Verify VM is running
+	if pid, exists := s.pids[req.VMID]; exists {
+		if !s.isProcessRunning(pid) {
+			return nil, fmt.Errorf("VM %s is not running", req.VMID)
+		}
+	}
+
+	// Create CH API client
+	client := NewCHAPIClient(apiSocket)
+	
+	// Get current VM info to validate resize parameters
+	info, err := client.GetInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM info: %w", err)
+	}
+
+	// Validate resize request
+	if req.VCPUs > 0 && req.VCPUs < info.Config.Cpus.BootVcpus {
+		return nil, fmt.Errorf("cannot decrease vCPUs below current count (%d)", info.Config.Cpus.BootVcpus)
+	}
+	if req.MemoryMB > 0 && req.MemoryMB < info.Config.Memory.Size/(1024*1024) {
+		return nil, fmt.Errorf("cannot decrease memory below current size (%d MB)", info.Config.Memory.Size/(1024*1024))
+	}
+
+	// Calculate desired resources
+	desiredVcpus := req.VCPUs
+	if desiredVcpus == 0 {
+		desiredVcpus = info.Config.Cpus.BootVcpus
+	}
+	desiredRam := req.MemoryMB * 1024 * 1024 // Convert MB to bytes
+	if desiredRam == 0 {
+		desiredRam = info.Config.Memory.Size
+	}
+
+	// Send resize request
+	resizeResp, err := client.Resize(ctx, desiredVcpus, desiredRam)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resize VM: %w", err)
+	}
+
+	return &agentapi.VMResizeResponse{
+		VCPUs:    resizeResp.Vcpus,
+		MemoryMB: resizeResp.Ram / (1024 * 1024),
+	}, nil
+}
+
+// GetVMState returns the current state of a VM
+func (s *VMManagementService) GetVMState(ctx context.Context, vmID string) (string, error) {
+	// Get API socket path
+	apiSocket := filepath.Join(s.getWorkspacePath(vmID), "api.sock")
+	
+	// Verify the API socket exists
+	if _, err := os.Stat(apiSocket); err != nil {
+		return "", fmt.Errorf("VM API socket not found at %s: %w", apiSocket, err)
+	}
+
+	// Verify VM is running
+	if pid, exists := s.pids[vmID]; exists {
+		if !s.isProcessRunning(pid) {
+			return "ShutDown", nil
+		}
+	}
+
+	// Create CH API client and get state
+	client := NewCHAPIClient(apiSocket)
+	info, err := client.GetInfo(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get VM state: %w", err)
+	}
+
+	return info.State, nil
+}
+
+// getWorkspacePath returns the expected workspace path for a VM
+func (s *VMManagementService) getWorkspacePath(vmID string) string {
+	// First try to get from processes map (if we started it)
+	if cmd, exists := s.processes[vmID]; exists && cmd != nil {
+		// Extract from args - look for --api-socket
+		for i, arg := range cmd.Args {
+			if arg == "--api-socket" && i+1 < len(cmd.Args) {
+				return filepath.Dir(cmd.Args[i+1])
+			}
+		}
+	}
+
+	// Default to standard location
+	return filepath.Join("/var/lib/chv/vms", vmID)
+}
+
+// ForceStopVM immediately terminates a VM process
+func (s *VMManagementService) ForceStopVM(ctx context.Context, req *agentapi.VMForceStopRequest) (*agentapi.VMForceStopResponse, error) {
+	pid, exists := s.pids[req.VMID]
+	if !exists {
+		// Try to find by system scan
+		socketPath := filepath.Join(s.getWorkspacePath(req.VMID), "api.sock")
+		if p, running := s.isProcessRunningBySocket(socketPath); running {
+			pid = p
+			exists = true
+		} else if req.PID != 0 {
+			pid = req.PID
+			exists = true
+		} else {
+			return nil, fmt.Errorf("VM %s is not running", req.VMID)
+		}
+	}
+
+	// Verify process exists
+	if !s.isProcessRunning(pid) {
+		delete(s.pids, req.VMID)
+		delete(s.processes, req.VMID)
+		return &agentapi.VMForceStopResponse{
+			Success: true,
+			Message: "VM was not running",
+		}, nil
+	}
+
+	// Send SIGKILL
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		return nil, fmt.Errorf("failed to kill VM process: %w", err)
+	}
+
+	// Wait briefly for process to die
+	time.Sleep(200 * time.Millisecond)
+	
+	// Verify it's dead
+	if s.isProcessRunning(pid) {
+		return nil, fmt.Errorf("VM process did not terminate after SIGKILL")
+	}
+
+	delete(s.pids, req.VMID)
+	delete(s.processes, req.VMID)
+
+	return &agentapi.VMForceStopResponse{
+		Success: true,
+		Message: "VM terminated immediately",
+	}, nil
 }

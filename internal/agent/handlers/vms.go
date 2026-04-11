@@ -3,22 +3,25 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/chv/chv/internal/agent/services"
 	"github.com/chv/chv/internal/agentapi"
 )
 
 type VMHandler struct {
-	vmService     *services.VMManagementService
-	healthService *services.VMHealthService
-	consoleService *services.VMConsoleService
+	vmService       *services.VMManagementService
+	validationService *services.VMValidationService
+	healthService   *services.VMHealthService
+	consoleService  *services.VMConsoleService
 }
 
 func NewVMHandler(vmService *services.VMManagementService, healthService *services.VMHealthService, consoleService *services.VMConsoleService) *VMHandler {
 	return &VMHandler{
-		vmService:      vmService,
-		healthService:  healthService,
-		consoleService: consoleService,
+		vmService:         vmService,
+		validationService: services.NewVMValidationService(vmService),
+		healthService:     healthService,
+		consoleService:    consoleService,
 	}
 }
 
@@ -165,23 +168,6 @@ func (h *VMHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 func (h *VMHandler) Console(w http.ResponseWriter, r *http.Request) {
 	// Get VM ID from query params
 	vmID := r.URL.Query().Get("vm_id")
-	apiSocket := r.URL.Query().Get("api_socket")
-
-	if vmID == "" || apiSocket == "" {
-		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id and api_socket query params required", false)
-		return
-	}
-
-	// Handle WebSocket upgrade
-	if err := h.consoleService.HandleWebSocket(w, r, vmID, apiSocket); err != nil {
-		// Error already handled by upgrade or sent to client
-		return
-	}
-}
-
-func (h *VMHandler) VNCConsole(w http.ResponseWriter, r *http.Request) {
-	// Get VM ID and workspace from query params
-	vmID := r.URL.Query().Get("vm_id")
 	workspacePath := r.URL.Query().Get("workspace_path")
 
 	if vmID == "" || workspacePath == "" {
@@ -189,8 +175,8 @@ func (h *VMHandler) VNCConsole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle WebSocket upgrade for VNC
-	if err := h.consoleService.HandleVNCWebSocket(w, r, vmID, workspacePath); err != nil {
+	// Handle WebSocket upgrade
+	if err := h.consoleService.HandleWebSocket(w, r, vmID, workspacePath); err != nil {
 		// Error already handled by upgrade or sent to client
 		return
 	}
@@ -300,4 +286,54 @@ func (h *VMHandler) ProvisionVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, agentapi.VMProvisionResponse{Success: true})
+}
+
+// ValidateVMs validates running VMs against expected state
+func (h *VMHandler) ValidateVMs(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.VMValidationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
+		return
+	}
+
+	resp, err := h.validationService.ValidateRunningVMs(&req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "validation_failed", err.Error(), false)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// GetRunningVMDetails returns detailed information about a running VM by PID or VM ID
+func (h *VMHandler) GetRunningVMDetails(w http.ResponseWriter, r *http.Request) {
+	// Get query parameters
+	pidStr := r.URL.Query().Get("pid")
+	vmID := r.URL.Query().Get("vm_id")
+
+	if pidStr == "" && vmID == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "Either pid or vm_id query param is required", false)
+		return
+	}
+
+	var info *agentapi.RunningVMInfo
+	var err error
+
+	if pidStr != "" {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "invalid_request", "Invalid PID format", false)
+			return
+		}
+		info, err = h.validationService.GetVMByPID(pid)
+	} else {
+		info, err = h.validationService.GetVMByVMID(vmID)
+	}
+
+	if err != nil {
+		respondError(w, http.StatusNotFound, "not_found", err.Error(), false)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, info)
 }

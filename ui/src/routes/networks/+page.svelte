@@ -19,10 +19,14 @@
   let createModalOpen = $state(false);
 
   // Table state management - reactive to items
-  let table = $derived(useTable<NetworkType>({
-    data: items,
+  let table = useTable<NetworkType>({
+    data: [],
     pageSize: 10
-  }));
+  });
+
+  $effect(() => {
+    table.data = items;
+  });
 
   // Filter options
   const filterOptions = [

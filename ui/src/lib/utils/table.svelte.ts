@@ -23,7 +23,7 @@ export interface TableOptions<T> {
 
 export interface TableState<T> {
 	// Data
-	readonly data: T[];
+	data: T[];
 	readonly sortedData: T[];
 	readonly paginatedData: T[];
 	readonly totalItems: number;
@@ -137,10 +137,7 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 	let selectedIds = $state<Set<string>>(new Set());
 	let filters = $state<FilterState>({});
 
-	// Sync data when options change
-	$effect(() => {
-		data = options.data;
-	});
+
 
 	// Derived: sorted data
 	const sortedData = $derived.by(() => {
@@ -334,8 +331,9 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 	}
 
 	return {
-		// Data (readonly getters)
+		// Data
 		get data() { return data; },
+		set data(newData: T[]) { data = newData; },
 		get sortedData() { return sortedData; },
 		get paginatedData() { return paginatedData; },
 		get totalItems() { return totalItems; },

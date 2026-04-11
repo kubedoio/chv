@@ -192,6 +192,34 @@ func (rl *ReconciliationLoop) runReconciliation(ctx context.Context) {
 				logger.F("vm_name", vm.Name),
 				logger.F("pid", pid))
 		}
+
+		// Case 3: DB says error, but agent says running -> Update DB to running (orphan recovery)
+		if isRunning && vm.ActualState == "error" {
+			logger.L().Info("VM state inconsistency detected: DB shows error but agent reports running (orphan recovered)",
+				logger.F("vm_id", vm.ID),
+				logger.F("vm_name", vm.Name),
+				logger.F("db_state", vm.ActualState),
+				logger.F("agent_state", "running"),
+				logger.F("pid", pid))
+
+			// Update the VM state in database
+			vm.ActualState = statusRunning
+			vm.CloudHypervisorPID = pid
+			vm.LastError = ""
+			vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+			if err := rl.handler.repo.UpdateVM(ctx, &vm); err != nil {
+				logger.L().Error("Failed to update VM state during reconciliation",
+					logger.F("vm_id", vm.ID),
+					logger.ErrorField(err))
+				continue
+			}
+
+			logger.L().Info("VM state reconciled: error -> running (orphan recovered)",
+				logger.F("vm_id", vm.ID),
+				logger.F("vm_name", vm.Name),
+				logger.F("pid", pid))
+		}
 	}
 }
 

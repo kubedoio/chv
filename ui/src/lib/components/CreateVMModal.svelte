@@ -33,7 +33,7 @@
 	let networkId = $state('');
 	let vcpu = $state(2);
 	let memoryMb = $state(2048);
-	let consoleType = $state<'pty' | 'vnc'>('pty');
+	let consoleType = $state<'serial'>('serial');
 
 	// Cloud-init
 	let userData = $state('#cloud-config\n');
@@ -109,7 +109,7 @@
 			user_data: userData,
 			username,
 			ssh_authorized_keys: sshKey ? [sshKey] : [],
-			console_type: consoleType
+			console_type: 'serial'
 		};
 
 		try {
@@ -202,17 +202,6 @@
 					{/each}
 				</select>
 			</FormField>
-
-			<div>
-				<label class="block text-sm font-medium text-gray-700 mb-1">Console Type</label>
-				<select bind:value={consoleType} class="w-full border border-gray-300 rounded px-3 py-2">
-					<option value="pty">PTY (Text Terminal)</option>
-					<option value="vnc">VNC (Graphical)</option>
-				</select>
-				<p class="text-xs text-gray-500 mt-1">
-					PTY provides text-based console access. VNC provides graphical desktop access for GUI VMs.
-				</p>
-			</div>
 
 			<div class="grid grid-cols-2 gap-4">
 				<FormField label="vCPUs" labelFor="vm-vcpu">

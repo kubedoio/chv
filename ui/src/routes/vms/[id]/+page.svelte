@@ -9,7 +9,7 @@
   import DeleteVMModal from '$lib/components/DeleteVMModal.svelte';
   import MetricsChart from '$lib/components/MetricsChart.svelte';
   import Terminal from '$lib/components/Terminal.svelte';
-  import VNCViewer from '$lib/components/VNCViewer.svelte';
+  
   import VMPowerMenu from '$lib/components/VMPowerMenu.svelte';
   import BootLogViewer from '$lib/components/BootLogViewer.svelte';
   import FirewallRuleEditor from '$lib/components/FirewallRuleEditor.svelte';
@@ -27,7 +27,10 @@
   let networks = $state<NetworkType[]>([]);
   let metricsData = $state<VMMetricsResponse | null>(null);
   let metrics = $derived(metricsData?.current);
-  let metricsHistory = $derived(metricsData?.history || []);
+  
+  // Use a stable empty array reference
+  const EMPTY_ARRAY: VMMetrics[] = [];
+  let metricsHistory = $derived(metricsData?.history ?? EMPTY_ARRAY);
   let loading = $state(true);
   let actionLoading = $state(false);
   let deleteModalOpen = $state(false);
@@ -39,22 +42,28 @@
   let consoleWsUrl = $state<string>('');
   let showTerminal = $state(false);
   let consoleFullscreen = $state(false);
-  let consoleType = $state<'pty' | 'vnc'>('pty');
+  
   let snapshotLoading = $state(false);
   let editModalOpen = $state(false);
   
-  // Derived values for display
-  const imageName = $derived(
-    images.find(i => i.id === vm?.image_id)?.name || vm?.image_id?.slice(0, 8) || 'Unknown'
-  );
+  // Helper functions for display values (not derived to avoid re-renders)
+  function getImageName() {
+    if (!vm) return 'Unknown';
+    const img = images.find(i => i.id === vm?.image_id);
+    return img?.name || vm?.image_id?.slice(0, 8) || 'Unknown';
+  }
   
-  const poolName = $derived(
-    pools.find(p => p.id === vm?.storage_pool_id)?.name || vm?.storage_pool_id?.slice(0, 8) || 'Unknown'
-  );
+  function getPoolName() {
+    if (!vm) return 'Unknown';
+    const pool = pools.find(p => p.id === vm?.storage_pool_id);
+    return pool?.name || vm?.storage_pool_id?.slice(0, 8) || 'Unknown';
+  }
   
-  const networkName = $derived(
-    networks.find(n => n.id === vm?.network_id)?.name || vm?.network_id?.slice(0, 8) || 'Unknown'
-  );
+  function getNetworkName() {
+    if (!vm) return 'Unknown';
+    const net = networks.find(n => n.id === vm?.network_id);
+    return net?.name || vm?.network_id?.slice(0, 8) || 'Unknown';
+  }
   
   const vmState = $derived(vm?.actual_state || 'unknown');
   
@@ -470,7 +479,7 @@
           <ImageIcon size={16} />
           <span class="text-xs uppercase tracking-wider">Image</span>
         </div>
-        <div class="text-lg font-semibold truncate">{imageName}</div>
+        <div class="text-lg font-semibold truncate">{getImageName()}</div>
         <div class="text-sm text-muted">{vm.image_id?.slice(0, 8)}...</div>
       </div>
       
@@ -479,7 +488,7 @@
           <HardDrive size={16} />
           <span class="text-xs uppercase tracking-wider">Storage</span>
         </div>
-        <div class="text-lg font-semibold">{poolName}</div>
+        <div class="text-lg font-semibold">{getPoolName()}</div>
         <div class="text-sm text-muted">{vm.storage_pool_id?.slice(0, 8)}...</div>
       </div>
       
@@ -488,7 +497,7 @@
           <Network size={16} />
           <span class="text-xs uppercase tracking-wider">Network</span>
         </div>
-        <div class="text-lg font-semibold">{networkName}</div>
+        <div class="text-lg font-semibold">{getNetworkName()}</div>
         <div class="text-sm text-muted">{vm.ip_address || 'No IP'}</div>
       </div>
     </div>
@@ -690,25 +699,11 @@
     {:else if activeTab === 'console'}
       <div class="space-y-4" class:console-fullscreen={consoleFullscreen}>
         <div class="flex justify-between items-center">
-          <div class="flex items-center gap-4">
-            <div class="text-sm text-muted">
-              {#if consoleFullscreen}
-                Fullscreen mode — press Escape or click the button to exit
-              {:else}
-                VM {vm.console_type === 'vnc' ? 'VNC' : 'serial'} console
-              {/if}
-            </div>
-            {#if vmState === 'running'}
-              <div class="flex items-center gap-1 bg-gray-100 rounded p-0.5">
-                <button
-                  onclick={() => consoleType = 'pty'}
-                  class="px-3 py-1 text-xs rounded {consoleType === 'pty' ? 'bg-white shadow-sm' : 'text-muted'}"
-                >PTY</button>
-                <button
-                  onclick={() => consoleType = 'vnc'}
-                  class="px-3 py-1 text-xs rounded {consoleType === 'vnc' ? 'bg-white shadow-sm' : 'text-muted'}"
-                >VNC</button>
-              </div>
+          <div class="text-sm text-muted">
+            {#if consoleFullscreen}
+              Fullscreen mode — press Escape or click the button to exit
+            {:else}
+              VM Serial Console
             {/if}
           </div>
           <button
@@ -725,11 +720,7 @@
         </div>
         {#if showTerminal && consoleWsUrl}
           <div class="terminal-wrapper" class:terminal-fullscreen={consoleFullscreen}>
-            {#if consoleType === 'vnc'}
-              <VNCViewer wsUrl={consoleWsUrl} onClose={() => { showTerminal = false; activeTab = 'overview'; }} fullscreen={consoleFullscreen} />
-            {:else}
-              <Terminal wsUrl={consoleWsUrl} onClose={() => { showTerminal = false; activeTab = 'overview'; }} fullscreen={consoleFullscreen} />
-            {/if}
+            <Terminal wsUrl={consoleWsUrl} onClose={() => { showTerminal = false; activeTab = 'overview'; }} fullscreen={consoleFullscreen} />
           </div>
         {:else}
           <div class="card p-8 text-center text-muted">

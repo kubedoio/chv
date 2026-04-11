@@ -21,10 +21,14 @@
   let loading = $state(true);
 
   // Table state management
-  let table = $derived(useTable<StoragePool>({
-    data: items,
+  let table = useTable<StoragePool>({
+    data: [],
     pageSize: 10
-  }));
+  });
+
+  $effect(() => {
+    table.data = items;
+  });
 
   // Table columns definition
   const columns = [

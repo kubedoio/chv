@@ -42,10 +42,14 @@
   });
 
   // Table state management
-  let table = $derived(useTable<VM>({
-    data: items,
+  let table = useTable<VM>({
+    data: [],
     pageSize: 10
-  }));
+  });
+
+  $effect(() => {
+    table.data = items;
+  });
 
   // Lookup maps for related data
   const imageMap = $derived(new Map(images.map(i => [i.id, i])));
