@@ -16,6 +16,9 @@
   let output = $state<string[]>([]);
   let command = $state('');
 
+  // Buffer for incomplete lines from the PTY
+  let lineBuffer = $state('');
+
   onMount(() => {
     connect();
   });
@@ -30,24 +33,29 @@
 
       ws.onopen = () => {
         connected = true;
-        addOutput('Connected to VM console', 'system');
+        addSystemLine('Connected to VM console');
       };
 
       ws.onmessage = (event) => {
-        addOutput(event.data, 'output');
+        appendConsoleData(event.data);
       };
 
       ws.onerror = (error) => {
-        addOutput('Connection error', 'error');
+        addSystemLine('Connection error');
       };
 
       ws.onclose = () => {
         connected = false;
-        addOutput('Disconnected from console', 'system');
+        // Flush any remaining buffered content
+        if (lineBuffer) {
+          output = [...output, lineBuffer];
+          lineBuffer = '';
+        }
+        addSystemLine('Disconnected from console');
         onClose?.();
       };
     } catch (err) {
-      addOutput(`Failed to connect: ${err}`, 'error');
+      addSystemLine(`Failed to connect: ${err}`);
     }
   }
 
@@ -58,9 +66,46 @@
     }
   }
 
-  function addOutput(text: string, type: 'output' | 'error' | 'system' | 'input' = 'output') {
-    output = [...output, `[${type}] ${text}`];
-    // Scroll to bottom
+  function addSystemLine(text: string) {
+    output = [...output, { text, type: 'system' as const }];
+    scrollToBottom();
+  }
+
+  function appendConsoleData(data: string) {
+    // Append incoming data to the line buffer
+    lineBuffer += data;
+
+    // Split on newlines - handle \r\n, \n, and \r
+    // \r is used by terminals to rewrite the current line (e.g. prompts)
+    const lines: string[] = [];
+    let current = '';
+
+    for (let i = 0; i < lineBuffer.length; i++) {
+      const ch = lineBuffer[i];
+      if (ch === '\r') {
+        // Carriage return - discard current line content (terminal rewriting)
+        current = '';
+      } else if (ch === '\n') {
+        // Newline - push current line and reset
+        lines.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+
+    // Update buffer with remaining incomplete line
+    lineBuffer = current;
+
+    // Add complete lines to output
+    if (lines.length > 0) {
+      const newLines = lines.map(text => ({ text, type: 'output' as const }));
+      output = [...output, ...newLines];
+      scrollToBottom();
+    }
+  }
+
+  function scrollToBottom() {
     if (terminal) {
       requestAnimationFrame(() => {
         if (terminal && terminal.isConnected) {
@@ -74,8 +119,9 @@
     e.preventDefault();
     if (ws && connected && command) {
       ws.send(command + '\n');
-      addOutput(`> ${command}`, 'input');
+      output = [...output, { text: `> ${command}`, type: 'input' as const }];
       command = '';
+      scrollToBottom();
     }
   }
 
@@ -102,10 +148,14 @@
     class:flex-1={fullscreen}
   >
     {#each output as line}
-      <div class="whitespace-pre-wrap break-all {line.startsWith('[error]') ? 'text-red-400' : line.startsWith('[system]') ? 'text-yellow-400' : line.startsWith('[input]') ? 'text-blue-400' : 'text-gray-200'}">
-        {line.replace(/^\[(\w+)\] /, '')}
+      <div class="whitespace-pre-wrap break-all {line.type === 'error' ? 'text-red-400' : line.type === 'system' ? 'text-yellow-400' : line.type === 'input' ? 'text-blue-400' : 'text-gray-200'}">
+        {line.text}
       </div>
     {/each}
+    <!-- Render incomplete buffer content (current line being typed by VM) -->
+    {#if lineBuffer}
+      <div class="whitespace-pre-wrap break-all text-gray-200">{lineBuffer}</div>
+    {/if}
   </div>
 
   <form onsubmit={sendCommand} class="terminal-input flex border-t border-gray-700">
