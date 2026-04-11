@@ -721,10 +721,11 @@ func (r *Repository) UpdateVM(ctx context.Context, vm *models.VirtualMachine) er
 		ctx,
 		`UPDATE virtual_machines SET
 			desired_state = ?, actual_state = ?, last_error = ?, seed_iso_path = ?,
-			ip_address = ?, mac_address = ?, console_type = ?, updated_at = ?
+			ip_address = ?, mac_address = ?, console_type = ?, cloud_hypervisor_pid = ?, updated_at = ?
 		 WHERE id = ?`,
 		vm.DesiredState, vm.ActualState, nullable(vm.LastError), nullable(vm.SeedISOPath),
-		nullable(vm.IPAddress), nullable(vm.MACAddress), nullable(vm.ConsoleType), vm.UpdatedAt, vm.ID,
+		nullable(vm.IPAddress), nullable(vm.MACAddress), nullable(vm.ConsoleType),
+		nullableInt(vm.CloudHypervisorPID), vm.UpdatedAt, vm.ID,
 	)
 	return err
 }
@@ -896,6 +897,13 @@ func (r *Repository) DeleteVMSnapshot(ctx context.Context, id string) error {
 
 func nullable(value string) any {
 	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableInt(value int) any {
+	if value == 0 {
 		return nil
 	}
 	return value
@@ -1389,7 +1397,7 @@ func (r *Repository) ListImagesByNode(ctx context.Context, nodeID string) ([]mod
 
 func (r *Repository) ListVMsByNode(ctx context.Context, nodeID string) ([]models.VirtualMachine, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, seed_iso_path, workspace_path, cloud_hypervisor_pid, ip_address, mac_address, console_type, last_error, created_at, updated_at FROM virtual_machines WHERE node_id = ? ORDER BY created_at DESC`, nodeID)
+		`SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), COALESCE(workspace_path, ''), COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(console_type, 'pty'), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines WHERE node_id = ? ORDER BY created_at DESC`, nodeID)
 	if err != nil {
 		return nil, err
 	}

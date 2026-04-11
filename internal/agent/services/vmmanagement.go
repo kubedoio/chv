@@ -110,7 +110,7 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 	}
 
 	if req.SeedISOPath != "" {
-		args = append(args, fmt.Sprintf("path=%s,readonly=on", req.SeedISOPath))
+		args = append(args, "--disk", fmt.Sprintf("path=%s,readonly=on", req.SeedISOPath))
 	}
 
 	// Network config
