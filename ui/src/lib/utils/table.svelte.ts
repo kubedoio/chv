@@ -184,15 +184,16 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 		return (row as unknown as { id: string }).id;
 	}
 
-	// Derived: selection state
+	// Derived: selection state (use functions to avoid object creation)
 	const selectedCount = $derived(selectedIds.size);
-	const isAllSelected = $derived(
-		paginatedData.length > 0 && paginatedData.every(item => selectedIds.has(getRowId(item)))
-	);
-	const isPartiallySelected = $derived(
-		paginatedData.some(item => selectedIds.has(getRowId(item))) && 
-		!paginatedData.every(item => selectedIds.has(getRowId(item)))
-	);
+	const isAllSelected = $derived(() => {
+		return paginatedData.length > 0 && paginatedData.every(item => selectedIds.has(getRowId(item)));
+	});
+	const isPartiallySelected = $derived(() => {
+		const hasSome = paginatedData.some(item => selectedIds.has(getRowId(item)));
+		const hasAll = paginatedData.every(item => selectedIds.has(getRowId(item)));
+		return hasSome && !hasAll;
+	});
 
 	// Active filter count
 	const activeFilterCount = $derived(
@@ -359,8 +360,8 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 		// Selection
 		get selectedIds() { return selectedIds; },
 		get selectedCount() { return selectedCount; },
-		get isAllSelected() { return isAllSelected; },
-		get isPartiallySelected() { return isPartiallySelected; },
+		get isAllSelected() { return isAllSelected(); },
+		get isPartiallySelected() { return isPartiallySelected(); },
 		toggleSelect,
 		select,
 		deselect,

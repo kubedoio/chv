@@ -52,10 +52,21 @@
   const isStopped = $derived(vm.actual_state === 'stopped');
   const isTransitioning = $derived(['starting', 'stopping'].includes(vm.actual_state));
 
-  // Mini sparkline data (simulated history based on current state)
-  const sparklineData = $derived({
-    cpu: Array(20).fill(0).map(() => Math.random() * (isRunning ? 60 : 5) + (isRunning ? 10 : 0)),
-    memory: Array(20).fill(0).map(() => Math.random() * (isRunning ? 40 : 5) + (isRunning ? 20 : 0))
+  // Mini sparkline data - generated once, not reactive to avoid loops
+  function generateSparklineData(running: boolean) {
+    return {
+      cpu: Array(20).fill(0).map(() => Math.random() * (running ? 60 : 5) + (running ? 10 : 0)),
+      memory: Array(20).fill(0).map(() => Math.random() * (running ? 40 : 5) + (running ? 20 : 0))
+    };
+  }
+  
+  // Use state instead of derived - only regenerate when running state changes
+  let sparklineData = $state(generateSparklineData(vm.actual_state === 'running'));
+  
+  // Update when vm state changes
+  $effect(() => {
+    const running = vm.actual_state === 'running';
+    sparklineData = generateSparklineData(running);
   });
 
   function handleCopyId() {

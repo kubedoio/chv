@@ -19,20 +19,24 @@
 
   const padding = 2;
   
-  const chartData = $derived({
-    min: Math.min(...data, 0),
-    max: Math.max(...data, 1),
-    range: Math.max(...data, 1) - Math.min(...data, 0)
-  });
+  // Helper functions instead of derived objects to avoid re-renders
+  function getMin() { return Math.min(...data, 0); }
+  function getMax() { return Math.max(...data, 1); }
+  function getRange() { return getMax() - getMin(); }
+  function getChartMin() { return getMin(); }
+  function getChartMax() { return getMax(); }
+  function getChartRange() { return getRange(); }
 
   function getX(index: number): number {
     return padding + (index / (data.length - 1)) * (width - 2 * padding);
   }
 
   function getY(value: number): number {
-    const normalized = chartData.range === 0 
+    const range = getChartRange();
+    const min = getChartMin();
+    const normalized = range === 0 
       ? 0.5 
-      : (value - chartData.min) / chartData.range;
+      : (value - min) / range;
     return height - padding - (normalized * (height - 2 * padding));
   }
 
