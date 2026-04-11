@@ -596,27 +596,29 @@ func (s *VMManagementService) waitForProcess(vmID string, cmd *exec.Cmd, stdout,
 }
 
 // capturePtyPath reads the stdout log to find and save the PTY path
+// Note: does NOT close stdoutFileHandle - it's also cmd.Stdout and will be
+// closed by waitForProcess when the VM exits
 func (s *VMManagementService) capturePtyPath(vmID, workspacePath, stdoutFile string, stdoutFileHandle *os.File) {
 	// Wait for CH to output the PTY path (usually happens within 1-2 seconds)
 	time.Sleep(2 * time.Second)
-	
-	// Close the file handle so we can read it
+
+	// Sync the file to ensure all data is written to disk before reading
 	if stdoutFileHandle != nil {
-		stdoutFileHandle.Close()
+		stdoutFileHandle.Sync()
 	}
-	
+
 	// Read the stdout log
 	data, err := os.ReadFile(stdoutFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not read stdout log for PTY: %v\n", err)
 		return
 	}
-	
+
 	// Parse PTY path from output
 	// Cloud Hypervisor outputs: "PTY path: /dev/pts/X" when started with --serial tty
 	ptyPattern := regexp.MustCompile(`PTY path:\s*(/dev/pts/\d+)`)
 	matches := ptyPattern.FindSubmatch(data)
-	
+
 	if matches != nil && len(matches) > 1 {
 		ptyPath := string(matches[1])
 		ptyFile := filepath.Join(workspacePath, "serial.ptty")

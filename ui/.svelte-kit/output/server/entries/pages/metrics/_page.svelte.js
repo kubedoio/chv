@@ -1,4 +1,4 @@
-import { e as escape_html, d as ensure_array_like } from "../../../chunks/renderer.js";
+import { e as escape_html, d as ensure_array_like } from "../../../chunks/root.js";
 import { c as createAPIClient } from "../../../chunks/client2.js";
 import { C as Clock } from "../../../chunks/clock.js";
 function _page($$renderer, $$props) {

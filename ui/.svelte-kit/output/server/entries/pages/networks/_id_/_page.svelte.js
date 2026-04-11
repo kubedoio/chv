@@ -6,7 +6,6 @@ import "@sveltejs/kit/internal/server";
 import "../../../../chunks/root.js";
 import "../../../../chunks/client.js";
 import { c as createAPIClient, g as getStoredToken } from "../../../../chunks/client2.js";
-import "../../../../chunks/toast.js";
 /* empty css                                                          */
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {

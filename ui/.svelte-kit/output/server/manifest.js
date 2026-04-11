@@ -10,7 +10,7 @@ return {
 	assets: new Set([]),
 	mimeTypes: {},
 	_: {
-		client: {start:"_app/immutable/entry/start.D9dre0Hy.js",app:"_app/immutable/entry/app.CS_y1I9K.js",imports:["_app/immutable/entry/start.D9dre0Hy.js","_app/immutable/chunks/VrmAOdqb.js","_app/immutable/chunks/BHYhJk7g.js","_app/immutable/chunks/CtGJc0BY.js","_app/immutable/chunks/CbGaT70M.js","_app/immutable/entry/app.CS_y1I9K.js","_app/immutable/chunks/BHYhJk7g.js","_app/immutable/chunks/CPTbUf0F.js","_app/immutable/chunks/C_58zuTQ.js","_app/immutable/chunks/CbGaT70M.js","_app/immutable/chunks/DSKmG3fE.js","_app/immutable/chunks/BbOtE-Ur.js","_app/immutable/chunks/_ELI6-wl.js","_app/immutable/chunks/COtMK8WK.js","_app/immutable/chunks/CtGJc0BY.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:true},
+		client: {start:"_app/immutable/entry/start.Cw2GpSiz.js",app:"_app/immutable/entry/app.C5PCSkAZ.js",imports:["_app/immutable/entry/start.Cw2GpSiz.js","_app/immutable/chunks/BgQY13Js.js","_app/immutable/chunks/CD0AeUN1.js","_app/immutable/chunks/gz8L2jlR.js","_app/immutable/entry/app.C5PCSkAZ.js","_app/immutable/chunks/CD0AeUN1.js","_app/immutable/chunks/jRuktn7D.js","_app/immutable/chunks/Dhysq48Y.js","_app/immutable/chunks/gz8L2jlR.js","_app/immutable/chunks/QUCH3Vci.js","_app/immutable/chunks/BWhxrUxN.js","_app/immutable/chunks/B9JqOBrw.js","_app/immutable/chunks/DhnqYNKl.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:true},
 		nodes: [
 			__memo(() => import('./nodes/0.js')),
 			__memo(() => import('./nodes/1.js')),
@@ -34,12 +34,7 @@ return {
 			__memo(() => import('./nodes/19.js')),
 			__memo(() => import('./nodes/20.js')),
 			__memo(() => import('./nodes/21.js')),
-			__memo(() => import('./nodes/22.js')),
-			__memo(() => import('./nodes/23.js')),
-			__memo(() => import('./nodes/24.js')),
-			__memo(() => import('./nodes/25.js')),
-			__memo(() => import('./nodes/26.js')),
-			__memo(() => import('./nodes/27.js'))
+			__memo(() => import('./nodes/22.js'))
 		],
 		remotes: {
 			
@@ -179,52 +174,17 @@ return {
 				endpoint: null
 			},
 			{
-				id: "/test/confirm-dialog",
-				pattern: /^\/test\/confirm-dialog\/?$/,
-				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 21 },
-				endpoint: null
-			},
-			{
-				id: "/test/forms",
-				pattern: /^\/test\/forms\/?$/,
-				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 22 },
-				endpoint: null
-			},
-			{
-				id: "/test/modal",
-				pattern: /^\/test\/modal\/?$/,
-				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 23 },
-				endpoint: null
-			},
-			{
-				id: "/test/skeletons",
-				pattern: /^\/test\/skeletons\/?$/,
-				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 24 },
-				endpoint: null
-			},
-			{
-				id: "/test/stats-card",
-				pattern: /^\/test\/stats-card\/?$/,
-				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 25 },
-				endpoint: null
-			},
-			{
 				id: "/vms",
 				pattern: /^\/vms\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 26 },
+				page: { layouts: [0,], errors: [1,], leaf: 21 },
 				endpoint: null
 			},
 			{
 				id: "/vms/[id]",
 				pattern: /^\/vms\/([^/]+?)\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 27 },
+				page: { layouts: [0,], errors: [1,], leaf: 22 },
 				endpoint: null
 			}
 		],

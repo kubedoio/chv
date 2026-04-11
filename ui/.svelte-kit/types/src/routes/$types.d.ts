@@ -11,7 +11,7 @@ type EnsureDefined<T> = T extends null | undefined ? {} : T;
 type OptionalUnion<U extends Record<string, any>, A extends keyof U = U extends U ? keyof U : never> = U extends unknown ? { [P in Exclude<A, keyof U>]?: never } & U : never;
 export type Snapshot<T = any> = Kit.Snapshot<T>;
 type PageParentData = EnsureDefined<LayoutData>;
-type LayoutRouteId = RouteId | "/" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | "/networks/[id]" | "/nodes" | "/nodes/[id]" | "/nodes/[id]/images" | "/nodes/[id]/networks" | "/nodes/[id]/storage" | "/nodes/[id]/vms" | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/test/confirm-dialog" | "/test/forms" | "/test/modal" | "/test/skeletons" | "/test/stats-card" | "/vms" | "/vms/[id]" | null
+type LayoutRouteId = RouteId | "/" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | "/networks/[id]" | "/nodes" | "/nodes/[id]" | "/nodes/[id]/images" | "/nodes/[id]/networks" | "/nodes/[id]/storage" | "/nodes/[id]/vms" | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/vms" | "/vms/[id]" | null
 type LayoutParams = RouteParams & { id?: string }
 type LayoutParentData = EnsureDefined<{}>;
 

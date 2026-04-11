@@ -1,4 +1,4 @@
-import { c as attr, e as escape_html, f as derived, m as attributes, i as stringify, k as bind_props } from "./renderer.js";
+import { c as attr, e as escape_html, f as derived, m as attributes, i as stringify, k as bind_props } from "./root.js";
 import { V as VisuallyHidden } from "./VisuallyHidden.js";
 function FormField($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {

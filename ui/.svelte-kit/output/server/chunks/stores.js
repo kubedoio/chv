@@ -1,10 +1,9 @@
-import { l as getContext } from "./renderer.js";
+import { l as getContext } from "./root.js";
 import "clsx";
 import "@sveltejs/kit/internal";
 import "./exports.js";
 import "./utils.js";
 import "@sveltejs/kit/internal/server";
-import "./root.js";
 import "./client.js";
 const getStores = () => {
   const stores$1 = getContext("__svelte__");

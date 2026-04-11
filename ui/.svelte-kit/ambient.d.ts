@@ -76,6 +76,7 @@ declare module '$env/static/private' {
 	export const npm_lifecycle_script: string;
 	export const SUDO_COMMAND: string;
 	export const SHELL: string;
+	export const GIT_TERMINAL_PROMPT: string;
 	export const npm_package_version: string;
 	export const npm_lifecycle_event: string;
 	export const SUDO_USER: string;
@@ -215,6 +216,7 @@ declare module '$env/dynamic/private' {
 		npm_lifecycle_script: string;
 		SUDO_COMMAND: string;
 		SHELL: string;
+		GIT_TERMINAL_PROMPT: string;
 		npm_package_version: string;
 		npm_lifecycle_event: string;
 		SUDO_USER: string;

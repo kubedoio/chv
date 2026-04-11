@@ -1,4 +1,4 @@
-import { g as attr_class, e as escape_html, k as bind_props } from "./renderer.js";
+import { g as attr_class, e as escape_html, k as bind_props } from "./root.js";
 /* empty css                                         */
 function StateBadge($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {

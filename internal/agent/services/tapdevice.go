@@ -193,6 +193,21 @@ func GenerateTAPName(vmID string) string {
 	return "tap" + vmID
 }
 
+// GenerateMACAddress generates a locally-administered MAC address for a VM
+// Uses the VM ID to create a deterministic, unique MAC
+func GenerateMACAddress(vmID string) string {
+	// Locally administered MAC prefix (02:00:00)
+	// Last 3 bytes derived from VM ID hash
+	var hash uint32 = 0
+	for i := 0; i < len(vmID) && i < 12; i++ {
+		hash = hash*31 + uint32(vmID[i])
+	}
+	return fmt.Sprintf("02:00:00:%02x:%02x:%02x",
+		(byte(hash>>16) & 0xFF),
+		(byte(hash>>8) & 0xFF),
+		(byte(hash) & 0xFF))
+}
+
 // GetVMIP generates an IP address for a VM based on its ID
 func GetVMIP(vmID string, subnet string) (string, error) {
 	// Parse the subnet

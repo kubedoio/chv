@@ -160,6 +160,27 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 		UpdatedAt:     now,
 	}
 
+	// Get network for IP/MAC allocation
+	network, err := s.repo.GetNetworkByID(ctx, input.NetworkID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network: %w", err)
+	}
+	if network == nil {
+		return nil, fmt.Errorf("network not found: %s", input.NetworkID)
+	}
+
+	// Generate MAC address from VM ID
+	vm.MACAddress = services.GenerateMACAddress(vmID)
+
+	// Generate IP address from VM ID + network CIDR
+	if network.CIDR != "" {
+		vmIP, err := services.GetVMIP(vmID, network.CIDR)
+		if err != nil {
+			return nil, fmt.Errorf("failed to allocate IP: %w", err)
+		}
+		vm.IPAddress = vmIP
+	}
+
 	// Create VM record in DB
 	if err := s.repo.CreateVM(ctx, vm); err != nil {
 		return nil, fmt.Errorf("failed to create VM record: %w", err)

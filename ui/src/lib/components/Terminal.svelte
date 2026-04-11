@@ -1,45 +1,46 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  
+
   interface Props {
     wsUrl: string;
     onClose?: () => void;
+    fullscreen?: boolean;
   }
-  
-  let { wsUrl, onClose }: Props = $props();
-  
+
+  let { wsUrl, onClose, fullscreen = false }: Props = $props();
+
   let terminal: HTMLDivElement;
   let input: HTMLInputElement;
   let ws: WebSocket | null = null;
   let connected = $state(false);
   let output = $state<string[]>([]);
   let command = $state('');
-  
+
   onMount(() => {
     connect();
   });
-  
+
   onDestroy(() => {
     disconnect();
   });
-  
+
   function connect() {
     try {
       ws = new WebSocket(wsUrl);
-      
+
       ws.onopen = () => {
         connected = true;
         addOutput('Connected to VM console', 'system');
       };
-      
+
       ws.onmessage = (event) => {
         addOutput(event.data, 'output');
       };
-      
+
       ws.onerror = (error) => {
         addOutput('Connection error', 'error');
       };
-      
+
       ws.onclose = () => {
         connected = false;
         addOutput('Disconnected from console', 'system');
@@ -49,15 +50,15 @@
       addOutput(`Failed to connect: ${err}`, 'error');
     }
   }
-  
+
   function disconnect() {
     if (ws) {
       ws.close();
       ws = null;
     }
   }
-  
-  function addOutput(text: string, type: 'output' | 'error' | 'system' = 'output') {
+
+  function addOutput(text: string, type: 'output' | 'error' | 'system' | 'input' = 'output') {
     output = [...output, `[${type}] ${text}`];
     // Scroll to bottom
     if (terminal) {
@@ -68,7 +69,7 @@
       });
     }
   }
-  
+
   function sendCommand(e: Event) {
     e.preventDefault();
     if (ws && connected && command) {
@@ -77,7 +78,7 @@
       command = '';
     }
   }
-  
+
   function handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       sendCommand(e);
@@ -85,7 +86,7 @@
   }
 </script>
 
-<div class="terminal-container border border-line rounded bg-gray-900 text-white">
+<div class="terminal-container border border-line rounded bg-gray-900 text-white" class:terminal-fullscreen={fullscreen}>
   <div class="terminal-header flex justify-between items-center px-3 py-2 bg-gray-800 border-b border-gray-700">
     <div class="flex items-center gap-2">
       <div class="w-3 h-3 rounded-full" class:bg-green-500={connected} class:bg-red-500={!connected}></div>
@@ -93,10 +94,12 @@
     </div>
     <button onclick={onClose} class="text-xs text-gray-400 hover:text-white">Close</button>
   </div>
-  
-  <div 
+
+  <div
     bind:this={terminal}
-    class="terminal-output p-3 font-mono text-sm h-64 overflow-y-auto"
+    class="terminal-output p-3 font-mono text-sm overflow-y-auto"
+    class:h-64={!fullscreen}
+    class:flex-1={fullscreen}
   >
     {#each output as line}
       <div class="whitespace-pre-wrap break-all {line.startsWith('[error]') ? 'text-red-400' : line.startsWith('[system]') ? 'text-yellow-400' : line.startsWith('[input]') ? 'text-blue-400' : 'text-gray-200'}">
@@ -104,7 +107,7 @@
       </div>
     {/each}
   </div>
-  
+
   <form onsubmit={sendCommand} class="terminal-input flex border-t border-gray-700">
     <span class="px-3 py-2 text-green-400 font-mono text-sm">$</span>
     <input
@@ -122,16 +125,23 @@
 <style>
   .terminal-container {
     font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
   }
-  
+
+  .terminal-fullscreen {
+    height: 100%;
+    width: 100%;
+  }
+
   .terminal-output::-webkit-scrollbar {
     width: 8px;
   }
-  
+
   .terminal-output::-webkit-scrollbar-track {
     background: #1f2937;
   }
-  
+
   .terminal-output::-webkit-scrollbar-thumb {
     background: #4b5563;
     border-radius: 4px;

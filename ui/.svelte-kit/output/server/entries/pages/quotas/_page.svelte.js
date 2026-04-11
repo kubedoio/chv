@@ -1,6 +1,5 @@
-import { c as attr, g as attr_class } from "../../../chunks/renderer.js";
+import { c as attr, g as attr_class } from "../../../chunks/root.js";
 import "../../../chunks/client2.js";
-import "../../../chunks/toast.js";
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let loading = true;

@@ -715,9 +715,11 @@ func (r *Repository) UpdateVM(ctx context.Context, vm *models.VirtualMachine) er
 	_, err := r.db.ExecContext(
 		ctx,
 		`UPDATE virtual_machines SET
-			desired_state = ?, actual_state = ?, last_error = ?, seed_iso_path = ?, updated_at = ?
+			desired_state = ?, actual_state = ?, last_error = ?, seed_iso_path = ?,
+			ip_address = ?, mac_address = ?, updated_at = ?
 		 WHERE id = ?`,
-		vm.DesiredState, vm.ActualState, nullable(vm.LastError), nullable(vm.SeedISOPath), vm.UpdatedAt, vm.ID,
+		vm.DesiredState, vm.ActualState, nullable(vm.LastError), nullable(vm.SeedISOPath),
+		nullable(vm.IPAddress), nullable(vm.MACAddress), vm.UpdatedAt, vm.ID,
 	)
 	return err
 }

@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, f as derived, e as escape_html, c as attr, d as ensure_array_like, g as attr_class } from "./renderer.js";
+import { s as sanitize_props, a as spread_props, b as slot, f as derived, e as escape_html, c as attr, d as ensure_array_like, g as attr_class } from "./root.js";
 import { I as Icon } from "./Icon.js";
 import { C as Chevron_right } from "./chevron-right.js";
 function Chevron_left($$renderer, $$props) {

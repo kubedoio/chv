@@ -1,12 +1,10 @@
-import { c as attr } from "../../../chunks/renderer.js";
+import { c as attr } from "../../../chunks/root.js";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
 import "../../../chunks/utils.js";
 import "@sveltejs/kit/internal/server";
-import "../../../chunks/root.js";
 import "../../../chunks/client.js";
 import { c as createAPIClient } from "../../../chunks/client2.js";
-import "../../../chunks/toast.js";
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let username = "";

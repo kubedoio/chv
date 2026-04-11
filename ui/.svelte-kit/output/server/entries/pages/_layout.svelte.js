@@ -1,13 +1,11 @@
-import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, d as ensure_array_like, f as derived, g as attr_class, h as attr_style, i as stringify, j as store_get, u as unsubscribe_stores, k as bind_props } from "../../chunks/renderer.js";
+import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, d as ensure_array_like, f as derived, g as attr_class, h as attr_style, i as stringify, j as store_get, u as unsubscribe_stores, k as bind_props } from "../../chunks/root.js";
 import "@sveltejs/kit/internal";
 import "../../chunks/exports.js";
 import "../../chunks/utils.js";
 import "@sveltejs/kit/internal/server";
-import "../../chunks/root.js";
 import { g as goto } from "../../chunks/client.js";
 import { p as page } from "../../chunks/stores.js";
-import { c as createAPIClient } from "../../chunks/client2.js";
-import { t as toast } from "../../chunks/toast.js";
+import { c as createAPIClient, t as toast } from "../../chunks/client2.js";
 import { V as VisuallyHidden } from "../../chunks/VisuallyHidden.js";
 import { D as Database } from "../../chunks/database.js";
 import { C as Chevron_down } from "../../chunks/chevron-down.js";
@@ -1202,19 +1200,22 @@ function getSearchQuery() {
 function getRecentSearches() {
   return recentSearches;
 }
+function escapeHtml(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 function highlightMatches(text, matches, key) {
-  if (!matches) return text;
+  if (!matches) return escapeHtml(text);
   const match = matches.find((m) => m.key === key);
-  if (!match) return text;
+  if (!match) return escapeHtml(text);
   let result = "";
   let lastIndex = 0;
   const indices = [...match.indices].sort((a, b) => a[0] - b[0]);
   for (const [start, end] of indices) {
-    result += text.slice(lastIndex, start);
-    result += `<mark class="search-highlight">${text.slice(start, end + 1)}</mark>`;
+    result += escapeHtml(text.slice(lastIndex, start));
+    result += `<mark class="search-highlight">${escapeHtml(text.slice(start, end + 1))}</mark>`;
     lastIndex = end + 1;
   }
-  result += text.slice(lastIndex);
+  result += escapeHtml(text.slice(lastIndex));
   return result;
 }
 function SearchModal($$renderer, $$props) {

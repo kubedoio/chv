@@ -1,8 +1,7 @@
-import { k as bind_props, g as attr_class, c as attr, e as escape_html, i as stringify } from "./renderer.js";
+import { k as bind_props, g as attr_class, c as attr, e as escape_html, i as stringify } from "./root.js";
 import { c as createAPIClient, g as getStoredToken } from "./client2.js";
 import { M as Modal } from "./Modal.js";
 import { F as FormField, I as Input } from "./Input.js";
-import "./toast.js";
 function ImportImageModal($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let { open = false, onSuccess } = $$props;

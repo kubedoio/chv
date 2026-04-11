@@ -14,7 +14,7 @@
   import FirewallRuleEditor from '$lib/components/FirewallRuleEditor.svelte';
   import { toast } from '$lib/stores/toast';
   import { registerShortcuts, createVMDetailShortcuts, setActiveContext } from '$lib/stores/keyboard.svelte';
-  import { Play, Square, Trash2, ArrowLeft, Cpu, HardDrive, Network, Image as ImageIcon, RefreshCw, Terminal as TerminalIcon, BarChart3, RotateCcw, Camera, Edit, FileText, Shield } from 'lucide-svelte';
+  import { Play, Square, Trash2, ArrowLeft, Cpu, HardDrive, Network, Image as ImageIcon, RefreshCw, Terminal as TerminalIcon, BarChart3, RotateCcw, Camera, Edit, FileText, Shield, Maximize2, Minimize2 } from 'lucide-svelte';
   import type { VM, Image, StoragePool, Network as NetworkType, VMMetrics, VMMetricsResponse, VMSnapshot } from '$lib/api/types';
   
   const client = createAPIClient({ token: getStoredToken() ?? undefined });
@@ -37,6 +37,7 @@
   let snapshots = $state<VMSnapshot[]>([]);
   let consoleWsUrl = $state<string>('');
   let showTerminal = $state(false);
+  let consoleFullscreen = $state(false);
   let snapshotLoading = $state(false);
   let editModalOpen = $state(false);
   
@@ -84,21 +85,30 @@
       goto('/login');
       return;
     }
-    
+
     // Set active context for keyboard shortcuts
     setActiveContext('vm-detail');
-    
+
     // Register VM detail shortcuts
     const unregister = registerShortcuts(createVMDetailShortcuts(keyboardHandlers));
-    
+
+    // Escape key to exit fullscreen console
+    const handleKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && consoleFullscreen) {
+        consoleFullscreen = false;
+      }
+    };
+    document.addEventListener('keydown', handleKeydown);
+
     loadVM();
     loadDependencies();
     startPolling();
-    
+
     return () => {
       stopPolling();
       stopMetricsPolling();
       unregister();
+      document.removeEventListener('keydown', handleKeydown);
     };
   });
   
@@ -304,6 +314,10 @@
     } catch (e: any) {
       toast.error(e.message || 'Failed to get console URL');
     }
+  }
+
+  function toggleConsoleFullscreen() {
+    consoleFullscreen = !consoleFullscreen;
   }
   
   async function startVM() {
@@ -527,10 +541,10 @@
           Firewall
         </button>
         {#if vmState === 'running'}
-          <button 
-            onclick={() => openConsole()}
-            class="px-4 py-2 text-sm font-medium {showTerminal ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
-            title="Console (5)"
+          <button
+            onclick={() => handleTabChange('console')}
+            class="px-4 py-2 text-sm font-medium {activeTab === 'console' ? 'border-b-2 border-accent text-accent' : 'text-muted hover:text-gray-700'}"
+            title="Console (6)"
           >
             <TerminalIcon size={16} class="inline mr-1" />
             Console
@@ -670,24 +684,40 @@
       <div class="space-y-4">
         <FirewallRuleEditor {vmId} />
       </div>
+    {:else if activeTab === 'console'}
+      <div class="space-y-4" class:console-fullscreen={consoleFullscreen}>
+        <div class="flex justify-between items-center">
+          <div class="text-sm text-muted">
+            {#if consoleFullscreen}
+              Fullscreen mode — press Escape or click the button to exit
+            {:else}
+              VM serial console via WebSocket
+            {/if}
+          </div>
+          <button
+            onclick={toggleConsoleFullscreen}
+            class="p-2 hover:bg-chrome rounded flex items-center gap-2 text-sm text-muted"
+            title={consoleFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          >
+            {#if consoleFullscreen}
+              <Minimize2 size={16} />
+            {:else}
+              <Maximize2 size={16} />
+            {/if}
+          </button>
+        </div>
+        {#if showTerminal && consoleWsUrl}
+          <div class="terminal-wrapper" class:terminal-fullscreen={consoleFullscreen}>
+            <Terminal wsUrl={consoleWsUrl} onClose={() => { showTerminal = false; activeTab = 'overview'; }} fullscreen={consoleFullscreen} />
+          </div>
+        {:else}
+          <div class="card p-8 text-center text-muted">
+            <TerminalIcon size={32} class="mx-auto mb-3 opacity-40" />
+            <p>Console not available. Make sure the VM is running.</p>
+          </div>
+        {/if}
+      </div>
     {/if}
-  </div>
-{/if}
-
-<!-- Terminal Modal -->
-{#if showTerminal && consoleWsUrl}
-  <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-    <div class="bg-white rounded-lg shadow-lg w-full max-w-4xl">
-      <div class="flex justify-between items-center px-4 py-3 border-b border-line">
-        <h3 class="font-semibold">VM Console</h3>
-        <button onclick={() => showTerminal = false} class="text-gray-500 hover:text-gray-700">
-          Close
-        </button>
-      </div>
-      <div class="p-4">
-        <Terminal wsUrl={consoleWsUrl} onClose={() => showTerminal = false} />
-      </div>
-    </div>
   </div>
 {/if}
 
@@ -748,5 +778,30 @@
   }
   .button-danger:hover {
     background: #cc0000;
+  }
+
+  .console-fullscreen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 100;
+    background: var(--color-bg);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .terminal-wrapper {
+    flex: 1;
+    min-height: 400px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .terminal-fullscreen {
+    min-height: unset;
+    height: 100%;
   }
 </style>

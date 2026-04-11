@@ -1,5 +1,5 @@
-import { c as attr, e as escape_html, i as stringify } from "./renderer.js";
-/* empty css                                         */
+import { c as attr, e as escape_html, i as stringify } from "./root.js";
+import "./EmptyState.svelte_svelte_type_style_lang.js";
 function EmptyState($$renderer, $$props) {
   let { icon: Icon, title, description, children, role = "status" } = $$props;
   $$renderer.push(`<div class="empty-state svelte-13862ru"${attr("role", role)} aria-live="polite"${attr("aria-label", `${stringify(title)}: ${stringify(description)}`)}><div class="empty-state-icon svelte-13862ru" aria-hidden="true">`);

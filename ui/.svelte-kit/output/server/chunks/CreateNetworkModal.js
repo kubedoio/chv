@@ -1,9 +1,8 @@
-import { k as bind_props, c as attr, e as escape_html } from "./renderer.js";
+import { k as bind_props, c as attr, e as escape_html } from "./root.js";
 import { M as Modal } from "./Modal.js";
 import { F as FormField, I as Input } from "./Input.js";
 import { S as Select } from "./Select.js";
 import { c as createAPIClient, g as getStoredToken } from "./client2.js";
-import "./toast.js";
 function CreateNetworkModal($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let { open = false, onSuccess } = $$props;

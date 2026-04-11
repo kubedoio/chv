@@ -1,10 +1,9 @@
-import { n as head, e as escape_html } from "../../../../chunks/renderer.js";
+import { n as head, e as escape_html } from "../../../../chunks/root.js";
 import { o as onDestroy } from "../../../../chunks/index-server.js";
 import "@sveltejs/kit/internal";
 import "../../../../chunks/exports.js";
 import "../../../../chunks/utils.js";
 import "@sveltejs/kit/internal/server";
-import "../../../../chunks/root.js";
 import "../../../../chunks/client.js";
 import { g as getStoredToken, c as createAPIClient } from "../../../../chunks/client2.js";
 /* empty css                                                          */

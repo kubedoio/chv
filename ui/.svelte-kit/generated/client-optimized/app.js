@@ -23,12 +23,7 @@ export const nodes = [
 	() => import('./nodes/19'),
 	() => import('./nodes/20'),
 	() => import('./nodes/21'),
-	() => import('./nodes/22'),
-	() => import('./nodes/23'),
-	() => import('./nodes/24'),
-	() => import('./nodes/25'),
-	() => import('./nodes/26'),
-	() => import('./nodes/27')
+	() => import('./nodes/22')
 ];
 
 export const server_loads = [];
@@ -53,13 +48,8 @@ export const dictionary = {
 		"/settings": [18],
 		"/storage": [19],
 		"/templates": [20],
-		"/test/confirm-dialog": [21],
-		"/test/forms": [22],
-		"/test/modal": [23],
-		"/test/skeletons": [24],
-		"/test/stats-card": [25],
-		"/vms": [26],
-		"/vms/[id]": [27]
+		"/vms": [21],
+		"/vms/[id]": [22]
 	};
 
 export const hooks = {

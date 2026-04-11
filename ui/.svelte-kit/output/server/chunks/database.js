@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot } from "./renderer.js";
+import { s as sanitize_props, a as spread_props, b as slot } from "./root.js";
 import { I as Icon } from "./Icon.js";
 function Database($$renderer, $$props) {
   const $$sanitized_props = sanitize_props($$props);

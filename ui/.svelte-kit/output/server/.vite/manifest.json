@@ -15,7 +15,7 @@
     "file": "chunks/ConfirmDialog.js",
     "name": "ConfirmDialog",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Modal.js",
       "_triangle-alert.js"
     ]
@@ -24,34 +24,31 @@
     "file": "chunks/CreateNetworkModal.js",
     "name": "CreateNetworkModal",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Modal.js",
       "_Input.js",
       "_Select.js",
-      "_client2.js",
-      "_toast.js"
+      "_client2.js"
     ]
   },
   "_CreateVMModal.js": {
     "file": "chunks/CreateVMModal.js",
     "name": "CreateVMModal",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Modal.js",
       "_Input.js",
-      "_client2.js",
-      "_toast.js"
+      "_client2.js"
     ]
   },
   "_DataTable.js": {
     "file": "chunks/DataTable.js",
     "name": "DataTable",
     "imports": [
-      "_renderer.js",
-      "_SkeletonRow.js",
+      "_root.js",
+      "_EmptyState.svelte_svelte_type_style_lang.js",
       "_EmptyState.js",
       "_Icon.js",
-      "_square.js",
       "_chevron-up.js",
       "_chevron-down.js"
     ],
@@ -63,21 +60,25 @@
     "file": "chunks/EmptyState.js",
     "name": "EmptyState",
     "imports": [
-      "_renderer.js"
-    ],
-    "css": [
-      "_app/immutable/assets/EmptyState.FZG0zv4J.css"
+      "_root.js",
+      "_EmptyState.svelte_svelte_type_style_lang.js"
     ]
   },
   "_EmptyState.svelte_svelte_type_style_lang.js": {
-    "file": "_app/immutable/assets/EmptyState.FZG0zv4J.css",
-    "src": "_EmptyState.svelte_svelte_type_style_lang.js"
+    "file": "chunks/EmptyState.svelte_svelte_type_style_lang.js",
+    "name": "EmptyState.svelte_svelte_type_style_lang",
+    "imports": [
+      "_root.js"
+    ],
+    "css": [
+      "_app/immutable/assets/EmptyState.CrfTTczR.css"
+    ]
   },
   "_FilterBar.js": {
     "file": "chunks/FilterBar.js",
     "name": "FilterBar",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js",
       "_chevron-down.js",
       "_x.js"
@@ -90,18 +91,17 @@
     "file": "chunks/Icon.js",
     "name": "Icon",
     "imports": [
-      "_renderer.js"
+      "_root.js"
     ]
   },
   "_ImportImageModal.js": {
     "file": "chunks/ImportImageModal.js",
     "name": "ImportImageModal",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_client2.js",
       "_Modal.js",
-      "_Input.js",
-      "_toast.js"
+      "_Input.js"
     ],
     "css": [
       "_app/immutable/assets/ImportImageModal.fKW9OkuO.css"
@@ -111,7 +111,7 @@
     "file": "chunks/Input.js",
     "name": "Input",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_VisuallyHidden.js"
     ],
     "css": [
@@ -122,7 +122,7 @@
     "file": "chunks/Modal.js",
     "name": "Modal",
     "imports": [
-      "_renderer.js"
+      "_root.js"
     ],
     "css": [
       "_app/immutable/assets/Modal.DJFul9VM.css"
@@ -132,7 +132,7 @@
     "file": "chunks/Pagination.js",
     "name": "Pagination",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js",
       "_chevron-right.js"
     ],
@@ -144,24 +144,14 @@
     "file": "chunks/Select.js",
     "name": "Select",
     "imports": [
-      "_renderer.js"
-    ]
-  },
-  "_SkeletonRow.js": {
-    "file": "chunks/SkeletonRow.js",
-    "name": "SkeletonRow",
-    "imports": [
-      "_renderer.js"
-    ],
-    "css": [
-      "_app/immutable/assets/SkeletonRow.TjwYfMqy.css"
+      "_root.js"
     ]
   },
   "_StateBadge.js": {
     "file": "chunks/StateBadge.js",
     "name": "StateBadge",
     "imports": [
-      "_renderer.js"
+      "_root.js"
     ],
     "css": [
       "_app/immutable/assets/StateBadge.D32Qu_3D.css"
@@ -170,16 +160,6 @@
   "_StateBadge.svelte_svelte_type_style_lang.js": {
     "file": "_app/immutable/assets/StateBadge.D32Qu_3D.css",
     "src": "_StateBadge.svelte_svelte_type_style_lang.js"
-  },
-  "_StatsCard.js": {
-    "file": "chunks/StatsCard.js",
-    "name": "StatsCard",
-    "imports": [
-      "_renderer.js",
-      "_Icon.js",
-      "_trending-up.js",
-      "_chevron-right.js"
-    ]
   },
   "_VisuallyHidden.js": {
     "file": "chunks/VisuallyHidden.js",
@@ -192,7 +172,7 @@
     "file": "chunks/activity.js",
     "name": "activity",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -200,7 +180,7 @@
     "file": "chunks/arrow-left.js",
     "name": "arrow-left",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -208,7 +188,7 @@
     "file": "chunks/chevron-down.js",
     "name": "chevron-down",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -216,7 +196,7 @@
     "file": "chunks/chevron-right.js",
     "name": "chevron-right",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -224,15 +204,7 @@
     "file": "chunks/chevron-up.js",
     "name": "chevron-up",
     "imports": [
-      "_renderer.js",
-      "_Icon.js"
-    ]
-  },
-  "_circle-alert.js": {
-    "file": "chunks/circle-alert.js",
-    "name": "circle-alert",
-    "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -240,7 +212,7 @@
     "file": "chunks/circle.js",
     "name": "circle",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -250,9 +222,7 @@
     "imports": [
       "_exports.js",
       "_utils.js",
-      "_index.js",
-      "_root.js",
-      "_renderer.js"
+      "_root.js"
     ]
   },
   "_client2.js": {
@@ -261,14 +231,14 @@
     "imports": [
       "_shared-server.js",
       "_client.js",
-      "_toast.js"
+      "_exports.js"
     ]
   },
   "_clock.js": {
     "file": "chunks/clock.js",
     "name": "clock",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -276,7 +246,7 @@
     "file": "chunks/copy.js",
     "name": "copy",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -284,7 +254,7 @@
     "file": "chunks/cpu.js",
     "name": "cpu",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -292,7 +262,7 @@
     "file": "chunks/database.js",
     "name": "database",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -300,7 +270,7 @@
     "file": "chunks/download.js",
     "name": "download",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -310,13 +280,16 @@
   },
   "_exports.js": {
     "file": "chunks/exports.js",
-    "name": "exports"
+    "name": "exports",
+    "imports": [
+      "_root.js"
+    ]
   },
   "_funnel.js": {
     "file": "chunks/funnel.js",
     "name": "funnel",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -324,7 +297,7 @@
     "file": "chunks/hard-drive.js",
     "name": "hard-drive",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -336,7 +309,7 @@
     "file": "chunks/image.js",
     "name": "image",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -344,14 +317,7 @@
     "file": "chunks/index-server.js",
     "name": "index-server",
     "imports": [
-      "_renderer.js"
-    ]
-  },
-  "_index.js": {
-    "file": "chunks/index.js",
-    "name": "index",
-    "imports": [
-      "_renderer.js"
+      "_root.js"
     ]
   },
   "_internal.js": {
@@ -367,7 +333,7 @@
     "file": "chunks/network.js",
     "name": "network",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -379,7 +345,7 @@
     "file": "chunks/plus.js",
     "name": "plus",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -387,7 +353,7 @@
     "file": "chunks/refresh-cw.js",
     "name": "refresh-cw",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -395,25 +361,18 @@
     "file": "chunks/render-context.js",
     "name": "render-context"
   },
-  "_renderer.js": {
-    "file": "chunks/renderer.js",
-    "name": "renderer",
-    "imports": [
-      "_render-context.js"
-    ]
-  },
   "_root.js": {
     "file": "chunks/root.js",
     "name": "root",
     "imports": [
-      "_renderer.js"
+      "_render-context.js"
     ]
   },
   "_server.js": {
     "file": "chunks/server.js",
     "name": "server",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -421,7 +380,7 @@
     "file": "chunks/settings.js",
     "name": "settings",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -437,37 +396,21 @@
       "_render-context.js"
     ]
   },
-  "_square.js": {
-    "file": "chunks/square.js",
-    "name": "square",
-    "imports": [
-      "_renderer.js",
-      "_Icon.js"
-    ]
-  },
   "_stores.js": {
     "file": "chunks/stores.js",
     "name": "stores",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js"
-    ]
-  },
-  "_toast.js": {
-    "file": "chunks/toast.js",
-    "name": "toast",
-    "imports": [
-      "_index.js"
     ]
   },
   "_trash-2.js": {
     "file": "chunks/trash-2.js",
     "name": "trash-2",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -475,7 +418,7 @@
     "file": "chunks/trending-up.js",
     "name": "trending-up",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -483,7 +426,7 @@
     "file": "chunks/triangle-alert.js",
     "name": "triangle-alert",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -495,7 +438,7 @@
     "file": "chunks/x.js",
     "name": "x",
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_Icon.js"
     ]
   },
@@ -516,7 +459,7 @@
     "src": "node_modules/@sveltejs/kit/src/runtime/components/svelte-5/error.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_client.js"
     ]
   },
@@ -531,7 +474,6 @@
       "_shared.js",
       "_exports.js",
       "_utils.js",
-      "_index.js",
       "_shared-server.js",
       "_internal.js"
     ]
@@ -542,14 +484,12 @@
     "src": "src/routes/+layout.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_stores.js",
       "_client2.js",
-      "_toast.js",
       "_VisuallyHidden.js",
       "_database.js",
       "_chevron-down.js",
@@ -571,7 +511,7 @@
       "_nodes.js"
     ],
     "css": [
-      "_app/immutable/assets/_layout.D2npqqAf.css"
+      "_app/immutable/assets/_layout.p8ZLAoGk.css"
     ]
   },
   "src/routes/+page.svelte": {
@@ -580,17 +520,15 @@
     "src": "src/routes/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_index-server.js",
       "_client.js",
       "_client2.js",
       "_nodes.js",
-      "_toast.js",
       "_Icon.js",
       "_trending-up.js",
       "_refresh-cw.js",
       "_chevron-up.js",
-      "_circle-alert.js",
       "_cpu.js",
       "_chevron-down.js",
       "_StateBadge.js",
@@ -620,13 +558,12 @@
     "src": "src/routes/events/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_index-server.js",
       "_client2.js",
       "_StateBadge.js",
-      "_SkeletonRow.js",
+      "_EmptyState.svelte_svelte_type_style_lang.js",
       "_EmptyState.js",
-      "_toast.js",
       "_refresh-cw.js",
       "_funnel.js",
       "_clock.js",
@@ -642,14 +579,12 @@
     "src": "src/routes/images/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_index-server.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_FilterBar.js",
@@ -670,9 +605,8 @@
     "isEntry": true,
     "imports": [
       "_client2.js",
-      "_renderer.js",
-      "_StateBadge.js",
-      "_toast.js"
+      "_root.js",
+      "_StateBadge.js"
     ]
   },
   "src/routes/login/+page.svelte": {
@@ -681,13 +615,11 @@
     "src": "src/routes/login/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
-      "_client2.js",
-      "_toast.js"
+      "_client2.js"
     ]
   },
   "src/routes/metrics/+page.svelte": {
@@ -696,7 +628,7 @@
     "src": "src/routes/metrics/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_client2.js",
       "_clock.js"
     ]
@@ -707,13 +639,11 @@
     "src": "src/routes/networks/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_FilterBar.js",
@@ -733,8 +663,7 @@
       "_utils.js",
       "_root.js",
       "_client.js",
-      "_client2.js",
-      "_toast.js"
+      "_client2.js"
     ],
     "css": [
       "_app/immutable/assets/_page.DiVO0fmU.css",
@@ -747,13 +676,11 @@
     "src": "src/routes/nodes/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_Modal.js",
       "_Input.js",
       "_plus.js",
@@ -776,11 +703,10 @@
     "src": "src/routes/nodes/[id]/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_index-server.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
       "_refresh-cw.js"
@@ -795,14 +721,12 @@
     "src": "src/routes/nodes/[id]/images/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_stores.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_ImportImageModal.js",
@@ -821,14 +745,12 @@
     "src": "src/routes/nodes/[id]/networks/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_stores.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_CreateNetworkModal.js",
@@ -847,14 +769,12 @@
     "src": "src/routes/nodes/[id]/storage/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_stores.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_nodes.js",
@@ -871,14 +791,12 @@
     "src": "src/routes/nodes/[id]/vms/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_stores.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_FilterBar.js",
@@ -898,18 +816,15 @@
     "src": "src/routes/operations/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
-      "_SkeletonRow.js"
+      "_EmptyState.svelte_svelte_type_style_lang.js"
     ],
     "css": [
-      "_app/immutable/assets/StateBadge.D32Qu_3D.css",
-      "_app/immutable/assets/EmptyState.FZG0zv4J.css"
+      "_app/immutable/assets/StateBadge.D32Qu_3D.css"
     ]
   },
   "src/routes/quotas/+page.svelte": {
@@ -918,9 +833,8 @@
     "src": "src/routes/quotas/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
-      "_client2.js",
-      "_toast.js"
+      "_root.js",
+      "_client2.js"
     ]
   },
   "src/routes/settings/+page.svelte": {
@@ -935,13 +849,11 @@
     "src": "src/routes/storage/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_FilterBar.js",
@@ -959,13 +871,11 @@
     "src": "src/routes/templates/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_exports.js",
       "_utils.js",
-      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Modal.js",
       "_Input.js",
@@ -980,82 +890,25 @@
       "_app/immutable/assets/StateBadge.D32Qu_3D.css"
     ]
   },
-  "src/routes/test/confirm-dialog/+page.svelte": {
-    "file": "entries/pages/test/confirm-dialog/_page.svelte.js",
-    "name": "entries/pages/test/confirm-dialog/_page.svelte",
-    "src": "src/routes/test/confirm-dialog/+page.svelte",
-    "isEntry": true,
-    "imports": [
-      "_renderer.js",
-      "_ConfirmDialog.js",
-      "_toast.js"
-    ]
-  },
-  "src/routes/test/forms/+page.svelte": {
-    "file": "entries/pages/test/forms/_page.svelte.js",
-    "name": "entries/pages/test/forms/_page.svelte",
-    "src": "src/routes/test/forms/+page.svelte",
-    "isEntry": true,
-    "imports": [
-      "_renderer.js",
-      "_Input.js",
-      "_Select.js"
-    ]
-  },
-  "src/routes/test/modal/+page.svelte": {
-    "file": "entries/pages/test/modal/_page.svelte.js",
-    "name": "entries/pages/test/modal/_page.svelte",
-    "src": "src/routes/test/modal/+page.svelte",
-    "isEntry": true,
-    "imports": [
-      "_Modal.js"
-    ]
-  },
-  "src/routes/test/skeletons/+page.svelte": {
-    "file": "entries/pages/test/skeletons/_page.svelte.js",
-    "name": "entries/pages/test/skeletons/_page.svelte",
-    "src": "src/routes/test/skeletons/+page.svelte",
-    "isEntry": true,
-    "imports": [
-      "_renderer.js",
-      "_SkeletonRow.js"
-    ],
-    "css": [
-      "_app/immutable/assets/_page.Fj8CY7X_.css"
-    ]
-  },
-  "src/routes/test/stats-card/+page.svelte": {
-    "file": "entries/pages/test/stats-card/_page.svelte.js",
-    "name": "entries/pages/test/stats-card/_page.svelte",
-    "src": "src/routes/test/stats-card/+page.svelte",
-    "isEntry": true,
-    "imports": [
-      "_StatsCard.js",
-      "_server.js",
-      "_square.js",
-      "_activity.js"
-    ]
-  },
   "src/routes/vms/+page.svelte": {
     "file": "entries/pages/vms/_page.svelte.js",
     "name": "entries/pages/vms/_page.svelte",
     "src": "src/routes/vms/+page.svelte",
     "isEntry": true,
     "imports": [
-      "_renderer.js",
+      "_root.js",
       "_client.js",
       "_client2.js",
-      "_toast.js",
       "_DataTable.js",
       "_Pagination.js",
       "_FilterBar.js",
-      "_StatsCard.js",
+      "_trending-up.js",
+      "_chevron-right.js",
       "_CreateVMModal.js",
       "_ConfirmDialog.js",
-      "_server.js",
-      "_square.js",
-      "_circle-alert.js",
       "_plus.js",
+      "_server.js",
+      "_Icon.js",
       "_trash-2.js",
       "_settings.js"
     ],
@@ -1073,13 +926,12 @@
       "_index-server.js",
       "_client.js",
       "_client2.js",
-      "_renderer.js",
+      "_root.js",
       "_Modal.js",
-      "_toast.js",
       "_triangle-alert.js"
     ],
     "css": [
-      "_app/immutable/assets/_page.CF6i_jtp.css",
+      "_app/immutable/assets/_page.Dsethjeb.css",
       "_app/immutable/assets/StateBadge.D32Qu_3D.css"
     ]
   }

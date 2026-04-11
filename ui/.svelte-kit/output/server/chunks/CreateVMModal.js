@@ -1,8 +1,7 @@
-import { k as bind_props, i as stringify, c as attr, d as ensure_array_like, e as escape_html } from "./renderer.js";
+import { k as bind_props, i as stringify, c as attr, d as ensure_array_like, e as escape_html } from "./root.js";
 import { M as Modal } from "./Modal.js";
 import { F as FormField, I as Input } from "./Input.js";
 import { c as createAPIClient, g as getStoredToken } from "./client2.js";
-import "./toast.js";
 function CreateVMModal($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let {

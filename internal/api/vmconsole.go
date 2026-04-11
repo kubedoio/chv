@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -58,8 +59,11 @@ func (h *Handler) vmConsoleWebSocket(w http.ResponseWriter, r *http.Request) {
 		agentURL = "ws://" + agentURL
 	}
 
-	// Build target URL
-	targetURL := agentURL + "/v1/vms/console?vm_id=" + vmID + "&api_socket=" + apiSocket
+	// Build target URL with proper query encoding
+	query := url.Values{}
+	query.Set("vm_id", vmID)
+	query.Set("api_socket", apiSocket)
+	targetURL := agentURL + "/v1/vms/console?" + query.Encode()
 	slog.Info("WebSocket: connecting to agent", "target", targetURL, "vm_id", vmID)
 
 	// Upgrade the HTTP connection to a WebSocket
