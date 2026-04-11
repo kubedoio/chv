@@ -149,7 +149,7 @@
     // Load search index data
     loadSearchIndex();
     
-    // TODO: Fetch actual nodes from API when backend supports it
+    // Fetch actual nodes from API
     updateNodeResources();
     
     return () => {
@@ -178,9 +178,24 @@
   }
   
   async function updateNodeResources() {
-    // This would be replaced with actual API calls
-    // For now, just keep the default node
-    nodes = [getDefaultNode()];
+    const token = getStoredToken();
+    if (!token) {
+      nodes = [getDefaultNode()];
+      return;
+    }
+    
+    try {
+      const client = createAPIClient({ token });
+      const apiNodes = await client.listNodes();
+      if (apiNodes && apiNodes.length > 0) {
+        nodes = apiNodes;
+      } else {
+        nodes = [getDefaultNode()];
+      }
+    } catch (err) {
+      console.warn('Failed to fetch nodes:', err);
+      nodes = [getDefaultNode()];
+    }
   }
   
   async function loadSearchIndex() {
