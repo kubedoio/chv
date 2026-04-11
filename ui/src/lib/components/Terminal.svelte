@@ -13,11 +13,11 @@
   let input: HTMLInputElement;
   let ws: WebSocket | null = null;
   let connected = $state(false);
-  let output = $state<string[]>([]);
+  let buffer = $state('');
   let command = $state('');
 
-  // Buffer for incomplete lines from the PTY
-  let lineBuffer = $state('');
+  // Maximum buffer size to prevent memory growth
+  const MAX_BUFFER_SIZE = 100_000;
 
   onMount(() => {
     connect();
@@ -33,29 +33,24 @@
 
       ws.onopen = () => {
         connected = true;
-        addSystemLine('Connected to VM console');
+        appendText('\r\n[Connected to VM console]\r\n');
       };
 
       ws.onmessage = (event) => {
-        appendConsoleData(event.data);
+        appendText(event.data);
       };
 
-      ws.onerror = (error) => {
-        addSystemLine('Connection error');
+      ws.onerror = () => {
+        appendText('\r\n[Connection error]\r\n');
       };
 
       ws.onclose = () => {
         connected = false;
-        // Flush any remaining buffered content
-        if (lineBuffer) {
-          output = [...output, lineBuffer];
-          lineBuffer = '';
-        }
-        addSystemLine('Disconnected from console');
+        appendText('\r\n[Disconnected from console]\r\n');
         onClose?.();
       };
     } catch (err) {
-      addSystemLine(`Failed to connect: ${err}`);
+      appendText(`\r\n[Failed to connect: ${err}]\r\n`);
     }
   }
 
@@ -66,49 +61,19 @@
     }
   }
 
-  function addSystemLine(text: string) {
-    output = [...output, { text, type: 'system' as const }];
+  function appendText(text: string) {
+    buffer += text;
+    // Trim buffer if it gets too large (keep last 90%)
+    if (buffer.length > MAX_BUFFER_SIZE) {
+      buffer = buffer.slice(-Math.floor(MAX_BUFFER_SIZE * 0.9));
+    }
     scrollToBottom();
-  }
-
-  function appendConsoleData(data: string) {
-    // Append incoming data to the line buffer
-    lineBuffer += data;
-
-    // Split on newlines - handle \r\n, \n, and \r
-    // \r is used by terminals to rewrite the current line (e.g. prompts)
-    const lines: string[] = [];
-    let current = '';
-
-    for (let i = 0; i < lineBuffer.length; i++) {
-      const ch = lineBuffer[i];
-      if (ch === '\r') {
-        // Carriage return - discard current line content (terminal rewriting)
-        current = '';
-      } else if (ch === '\n') {
-        // Newline - push current line and reset
-        lines.push(current);
-        current = '';
-      } else {
-        current += ch;
-      }
-    }
-
-    // Update buffer with remaining incomplete line
-    lineBuffer = current;
-
-    // Add complete lines to output
-    if (lines.length > 0) {
-      const newLines = lines.map(text => ({ text, type: 'output' as const }));
-      output = [...output, ...newLines];
-      scrollToBottom();
-    }
   }
 
   function scrollToBottom() {
     if (terminal) {
       requestAnimationFrame(() => {
-        if (terminal && terminal.isConnected) {
+        if (terminal) {
           terminal.scrollTop = terminal.scrollHeight;
         }
       });
@@ -118,10 +83,9 @@
   function sendCommand(e: Event) {
     e.preventDefault();
     if (ws && connected && command) {
+      // Send command to VM - VM will echo it back naturally
       ws.send(command + '\n');
-      output = [...output, { text: `> ${command}`, type: 'input' as const }];
       command = '';
-      scrollToBottom();
     }
   }
 
@@ -129,6 +93,26 @@
     if (e.key === 'Enter' && !e.shiftKey) {
       sendCommand(e);
     }
+  }
+
+  // Strip ANSI escape sequences for display
+  function stripAnsi(text: string): string {
+    // eslint-disable-next-line no-control-regex
+    return text
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')   // CSI sequences like [?2004h, [0m, [32m
+      .replace(/\x1b\][0-9;]*\x07/g, '')       // OSC sequences
+      .replace(/\x1b\[\?[0-9]*[hl]/g, '')      // Set/reset mode sequences
+      .replace(/\x1b\[[0-9]*[ABCDEFGJKST]/g, '') // Cursor movement
+      .replace(/\x1b[@-Z\\-~]/g, '')          // Single-char sequences
+      .replace(/\x1b\[[0-9;]*m/g, '')          // Color codes
+      .replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '') // Extended sequences
+      .replace(/\x1b\[>\?[0-9;]*[a-zA-Z]/g, '')// Private sequences
+      .replace(/\x1b[()][0-9A-Za-z]/g, '')    // Character set sequences
+      .replace(/\x1b#\d/g, '')                // Line attributes
+      .replace(/\x1b%/g, '')                  // Select charset
+      .replace(/\x1b[0-7]/g, '')              // Control chars
+      .replace(/\x1b[89:;<=>?]/g, '')         // More control
+      .replace(/\x1b[cdefghlmnopsu`{|}~]/g, ''); // Final bytes
   }
 </script>
 
@@ -143,19 +127,11 @@
 
   <div
     bind:this={terminal}
-    class="terminal-output p-3 font-mono text-sm overflow-y-auto"
+    class="terminal-output p-3 font-mono text-sm overflow-y-auto whitespace-pre"
     class:h-64={!fullscreen}
     class:flex-1={fullscreen}
   >
-    {#each output as line}
-      <div class="whitespace-pre-wrap break-all {line.type === 'error' ? 'text-red-400' : line.type === 'system' ? 'text-yellow-400' : line.type === 'input' ? 'text-blue-400' : 'text-gray-200'}">
-        {line.text}
-      </div>
-    {/each}
-    <!-- Render incomplete buffer content (current line being typed by VM) -->
-    {#if lineBuffer}
-      <div class="whitespace-pre-wrap break-all text-gray-200">{lineBuffer}</div>
-    {/if}
+    {stripAnsi(buffer)}
   </div>
 
   <form onsubmit={sendCommand} class="terminal-input flex border-t border-gray-700">
