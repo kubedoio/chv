@@ -9,6 +9,7 @@
   import DeleteVMModal from '$lib/components/DeleteVMModal.svelte';
   import MetricsChart from '$lib/components/MetricsChart.svelte';
   import Terminal from '$lib/components/Terminal.svelte';
+  import VNCViewer from '$lib/components/VNCViewer.svelte';
   import VMPowerMenu from '$lib/components/VMPowerMenu.svelte';
   import BootLogViewer from '$lib/components/BootLogViewer.svelte';
   import FirewallRuleEditor from '$lib/components/FirewallRuleEditor.svelte';
@@ -38,6 +39,7 @@
   let consoleWsUrl = $state<string>('');
   let showTerminal = $state(false);
   let consoleFullscreen = $state(false);
+  let consoleType = $state<'pty' | 'vnc'>('pty');
   let snapshotLoading = $state(false);
   let editModalOpen = $state(false);
   
@@ -248,6 +250,7 @@
     loading = true;
     try {
       vm = await client.getVM(id);
+      consoleType = vm?.console_type || 'pty';
       lastUpdated = new Date();
     } catch (e) {
       toast.error('Failed to load VM');
@@ -687,11 +690,25 @@
     {:else if activeTab === 'console'}
       <div class="space-y-4" class:console-fullscreen={consoleFullscreen}>
         <div class="flex justify-between items-center">
-          <div class="text-sm text-muted">
-            {#if consoleFullscreen}
-              Fullscreen mode — press Escape or click the button to exit
-            {:else}
-              VM serial console via WebSocket
+          <div class="flex items-center gap-4">
+            <div class="text-sm text-muted">
+              {#if consoleFullscreen}
+                Fullscreen mode — press Escape or click the button to exit
+              {:else}
+                VM {vm.console_type === 'vnc' ? 'VNC' : 'serial'} console
+              {/if}
+            </div>
+            {#if vmState === 'running'}
+              <div class="flex items-center gap-1 bg-gray-100 rounded p-0.5">
+                <button
+                  onclick={() => consoleType = 'pty'}
+                  class="px-3 py-1 text-xs rounded {consoleType === 'pty' ? 'bg-white shadow-sm' : 'text-muted'}"
+                >PTY</button>
+                <button
+                  onclick={() => consoleType = 'vnc'}
+                  class="px-3 py-1 text-xs rounded {consoleType === 'vnc' ? 'bg-white shadow-sm' : 'text-muted'}"
+                >VNC</button>
+              </div>
             {/if}
           </div>
           <button
@@ -708,7 +725,11 @@
         </div>
         {#if showTerminal && consoleWsUrl}
           <div class="terminal-wrapper" class:terminal-fullscreen={consoleFullscreen}>
-            <Terminal wsUrl={consoleWsUrl} onClose={() => { showTerminal = false; activeTab = 'overview'; }} fullscreen={consoleFullscreen} />
+            {#if consoleType === 'vnc'}
+              <VNCViewer wsUrl={consoleWsUrl} onClose={() => { showTerminal = false; activeTab = 'overview'; }} fullscreen={consoleFullscreen} />
+            {:else}
+              <Terminal wsUrl={consoleWsUrl} onClose={() => { showTerminal = false; activeTab = 'overview'; }} fullscreen={consoleFullscreen} />
+            {/if}
           </div>
         {:else}
           <div class="card p-8 text-center text-muted">

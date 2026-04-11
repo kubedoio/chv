@@ -89,6 +89,7 @@ type CreateVMInput struct {
 	NetworkID         string
 	VCPU              int
 	MemoryMB          int
+	ConsoleType       string // "pty" or "vnc", defaults to "pty"
 	UserData          string
 	Username          string
 	Password          string
@@ -143,6 +144,11 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 	now := time.Now().UTC().Format(time.RFC3339)
 	workspacePath := filepath.Join(s.dataRoot, "vms", vmID)
 
+	consoleType := input.ConsoleType
+	if consoleType == "" {
+		consoleType = "pty"
+	}
+
 	vm := &models.VirtualMachine{
 		ID:            vmID,
 		NodeID:        localNode.ID,
@@ -152,6 +158,7 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 		NetworkID:     input.NetworkID,
 		VCPU:          input.VCPU,
 		MemoryMB:      input.MemoryMB,
+		ConsoleType:   consoleType,
 		DesiredState:  "stopped",
 		ActualState:   StatusProvisioning,
 		WorkspacePath: workspacePath,
@@ -448,6 +455,7 @@ func (s *Service) StartVM(ctx context.Context, vmID string) error {
 			Netmask:     "255.255.255.0", // Default for MVP
 			VCPU:        vm.VCPU,
 			MemoryMB:    vm.MemoryMB,
+			ConsoleType: vm.ConsoleType,
 			WorkspacePath: vm.WorkspacePath,
 			BridgeName:  network.BridgeName,
 		}

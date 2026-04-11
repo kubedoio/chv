@@ -111,6 +111,7 @@ export interface VM {
   workspace_path: string;
   ip_address?: string;
   mac_address?: string;
+  console_type?: 'pty' | 'vnc';
   last_error?: string;
   user_data?: string;
   meta_data?: string;
@@ -127,6 +128,7 @@ export interface CreateVMInput {
   user_data?: string;
   username?: string;
   ssh_authorized_keys?: string[];
+  console_type?: 'pty' | 'vnc';
 }
 
 export interface Operation {

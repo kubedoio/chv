@@ -128,6 +128,11 @@ func (r *Repository) initialize() error {
 		return fmt.Errorf("failed to migrate node_metrics table: %w", err)
 	}
 
+	// Run VNC console migration
+	if err := r.migrateAddConsoleTypeToVMs(); err != nil {
+		return fmt.Errorf("failed to migrate console_type to vms: %w", err)
+	}
+
 	// Ensure local node exists
 	if err := r.ensureLocalNode(context.Background()); err != nil {
 		return fmt.Errorf("failed to ensure local node: %w", err)
@@ -660,7 +665,7 @@ func (r *Repository) UpdateImage(ctx context.Context, image *models.Image) error
 }
 
 func (r *Repository) ListVMs(ctx context.Context) ([]models.VirtualMachine, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines ORDER BY created_at ASC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(console_type, 'pty'), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +674,7 @@ func (r *Repository) ListVMs(ctx context.Context) ([]models.VirtualMachine, erro
 	var out []models.VirtualMachine
 	for rows.Next() {
 		var item models.VirtualMachine
-		if err := rows.Scan(&item.ID, &item.NodeID, &item.Name, &item.ImageID, &item.StoragePoolID, &item.NetworkID, &item.DesiredState, &item.ActualState, &item.VCPU, &item.MemoryMB, &item.DiskPath, &item.SeedISOPath, &item.WorkspacePath, &item.CloudHypervisorPID, &item.IPAddress, &item.MACAddress, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Name, &item.ImageID, &item.StoragePoolID, &item.NetworkID, &item.DesiredState, &item.ActualState, &item.VCPU, &item.MemoryMB, &item.DiskPath, &item.SeedISOPath, &item.WorkspacePath, &item.CloudHypervisorPID, &item.IPAddress, &item.MACAddress, &item.ConsoleType, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -681,13 +686,13 @@ func (r *Repository) GetVMByID(ctx context.Context, id string) (*models.VirtualM
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb,
 		        disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0),
-		        COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(last_error, ''), created_at, updated_at
+		        COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(console_type, 'pty'), COALESCE(last_error, ''), created_at, updated_at
 		 FROM virtual_machines WHERE id = ?`, id)
 
 	var v models.VirtualMachine
 	if err := row.Scan(&v.ID, &v.NodeID, &v.Name, &v.ImageID, &v.StoragePoolID, &v.NetworkID,
 		&v.DesiredState, &v.ActualState, &v.VCPU, &v.MemoryMB, &v.DiskPath, &v.SeedISOPath,
-		&v.WorkspacePath, &v.CloudHypervisorPID, &v.IPAddress, &v.MACAddress, &v.LastError, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		&v.WorkspacePath, &v.CloudHypervisorPID, &v.IPAddress, &v.MACAddress, &v.ConsoleType, &v.LastError, &v.CreatedAt, &v.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -701,12 +706,12 @@ func (r *Repository) CreateVM(ctx context.Context, vm *models.VirtualMachine) er
 		ctx,
 		`INSERT INTO virtual_machines (
 			id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state,
-			vcpu, memory_mb, disk_path, seed_iso_path, workspace_path, last_error, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			vcpu, memory_mb, disk_path, seed_iso_path, workspace_path, console_type, last_error, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		vm.ID, vm.NodeID, vm.Name, vm.ImageID, vm.StoragePoolID, vm.NetworkID,
 		vm.DesiredState, vm.ActualState, vm.VCPU, vm.MemoryMB,
 		vm.DiskPath, nullable(vm.SeedISOPath), vm.WorkspacePath,
-		nullable(vm.LastError), vm.CreatedAt, vm.UpdatedAt,
+		nullable(vm.ConsoleType), nullable(vm.LastError), vm.CreatedAt, vm.UpdatedAt,
 	)
 	return err
 }
@@ -716,10 +721,10 @@ func (r *Repository) UpdateVM(ctx context.Context, vm *models.VirtualMachine) er
 		ctx,
 		`UPDATE virtual_machines SET
 			desired_state = ?, actual_state = ?, last_error = ?, seed_iso_path = ?,
-			ip_address = ?, mac_address = ?, updated_at = ?
+			ip_address = ?, mac_address = ?, console_type = ?, updated_at = ?
 		 WHERE id = ?`,
 		vm.DesiredState, vm.ActualState, nullable(vm.LastError), nullable(vm.SeedISOPath),
-		nullable(vm.IPAddress), nullable(vm.MACAddress), vm.UpdatedAt, vm.ID,
+		nullable(vm.IPAddress), nullable(vm.MACAddress), nullable(vm.ConsoleType), vm.UpdatedAt, vm.ID,
 	)
 	return err
 }
@@ -731,7 +736,7 @@ func (r *Repository) DeleteVM(ctx context.Context, id string) error {
 
 // ListVMsByDesiredState returns all VMs with the specified desired state
 func (r *Repository) ListVMsByDesiredState(ctx context.Context, desiredState string) ([]models.VirtualMachine, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines WHERE desired_state = ? ORDER BY created_at ASC`, desiredState)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(console_type, 'pty'), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines WHERE desired_state = ? ORDER BY created_at ASC`, desiredState)
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +745,7 @@ func (r *Repository) ListVMsByDesiredState(ctx context.Context, desiredState str
 	var out []models.VirtualMachine
 	for rows.Next() {
 		var item models.VirtualMachine
-		if err := rows.Scan(&item.ID, &item.NodeID, &item.Name, &item.ImageID, &item.StoragePoolID, &item.NetworkID, &item.DesiredState, &item.ActualState, &item.VCPU, &item.MemoryMB, &item.DiskPath, &item.SeedISOPath, &item.WorkspacePath, &item.CloudHypervisorPID, &item.IPAddress, &item.MACAddress, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Name, &item.ImageID, &item.StoragePoolID, &item.NetworkID, &item.DesiredState, &item.ActualState, &item.VCPU, &item.MemoryMB, &item.DiskPath, &item.SeedISOPath, &item.WorkspacePath, &item.CloudHypervisorPID, &item.IPAddress, &item.MACAddress, &item.ConsoleType, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -749,7 +754,7 @@ func (r *Repository) ListVMsByDesiredState(ctx context.Context, desiredState str
 }
 
 func (r *Repository) ListVMsByNetwork(ctx context.Context, networkID string) ([]models.VirtualMachine, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines WHERE network_id = ? ORDER BY created_at ASC`, networkID)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, COALESCE(seed_iso_path, ''), workspace_path, COALESCE(cloud_hypervisor_pid, 0), COALESCE(ip_address, ''), COALESCE(mac_address, ''), COALESCE(console_type, 'pty'), COALESCE(last_error, ''), created_at, updated_at FROM virtual_machines WHERE network_id = ? ORDER BY created_at ASC`, networkID)
 	if err != nil {
 		return nil, err
 	}
@@ -758,7 +763,7 @@ func (r *Repository) ListVMsByNetwork(ctx context.Context, networkID string) ([]
 	var out []models.VirtualMachine
 	for rows.Next() {
 		var item models.VirtualMachine
-		if err := rows.Scan(&item.ID, &item.NodeID, &item.Name, &item.ImageID, &item.StoragePoolID, &item.NetworkID, &item.DesiredState, &item.ActualState, &item.VCPU, &item.MemoryMB, &item.DiskPath, &item.SeedISOPath, &item.WorkspacePath, &item.CloudHypervisorPID, &item.IPAddress, &item.MACAddress, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Name, &item.ImageID, &item.StoragePoolID, &item.NetworkID, &item.DesiredState, &item.ActualState, &item.VCPU, &item.MemoryMB, &item.DiskPath, &item.SeedISOPath, &item.WorkspacePath, &item.CloudHypervisorPID, &item.IPAddress, &item.MACAddress, &item.ConsoleType, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -1384,7 +1389,7 @@ func (r *Repository) ListImagesByNode(ctx context.Context, nodeID string) ([]mod
 
 func (r *Repository) ListVMsByNode(ctx context.Context, nodeID string) ([]models.VirtualMachine, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, seed_iso_path, workspace_path, cloud_hypervisor_pid, ip_address, mac_address, last_error, created_at, updated_at FROM virtual_machines WHERE node_id = ? ORDER BY created_at DESC`, nodeID)
+		`SELECT id, node_id, name, image_id, storage_pool_id, network_id, desired_state, actual_state, vcpu, memory_mb, disk_path, seed_iso_path, workspace_path, cloud_hypervisor_pid, ip_address, mac_address, console_type, last_error, created_at, updated_at FROM virtual_machines WHERE node_id = ? ORDER BY created_at DESC`, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -1398,8 +1403,9 @@ func (r *Repository) ListVMsByNode(ctx context.Context, nodeID string) ([]models
 		var workspace sql.NullString
 		var ip sql.NullString
 		var mac sql.NullString
+		var consoleType sql.NullString
 		var lastError sql.NullString
-		if err := rows.Scan(&vm.ID, &vm.NodeID, &vm.Name, &vm.ImageID, &vm.StoragePoolID, &vm.NetworkID, &vm.DesiredState, &vm.ActualState, &vm.VCPU, &vm.MemoryMB, &vm.DiskPath, &seedISO, &workspace, &pid, &ip, &mac, &lastError, &vm.CreatedAt, &vm.UpdatedAt); err != nil {
+		if err := rows.Scan(&vm.ID, &vm.NodeID, &vm.Name, &vm.ImageID, &vm.StoragePoolID, &vm.NetworkID, &vm.DesiredState, &vm.ActualState, &vm.VCPU, &vm.MemoryMB, &vm.DiskPath, &seedISO, &workspace, &pid, &ip, &mac, &consoleType, &lastError, &vm.CreatedAt, &vm.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if seedISO.Valid {
@@ -1416,6 +1422,9 @@ func (r *Repository) ListVMsByNode(ctx context.Context, nodeID string) ([]models
 		}
 		if mac.Valid {
 			vm.MACAddress = mac.String
+		}
+		if consoleType.Valid {
+			vm.ConsoleType = consoleType.String
 		}
 		if lastError.Valid {
 			vm.LastError = lastError.String
@@ -2835,4 +2844,21 @@ func (r *Repository) migrateAddUserIDToVMs() error {
 	// Create index if it doesn't exist
 	_, err = r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_vms_user_id ON virtual_machines(user_id)`)
 	return err
+}
+
+// migrateAddConsoleTypeToVMs adds console_type column to virtual_machines table
+func (r *Repository) migrateAddConsoleTypeToVMs() error {
+	// Check if column exists
+	var count int
+	err := r.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('virtual_machines') WHERE name = 'console_type'`).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		_, err = r.db.Exec(`ALTER TABLE virtual_machines ADD COLUMN console_type TEXT NULL DEFAULT 'pty'`)
+		if err != nil {
+			return fmt.Errorf("failed to add console_type column: %w", err)
+		}
+	}
+	return nil
 }

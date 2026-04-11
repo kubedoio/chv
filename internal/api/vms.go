@@ -461,14 +461,21 @@ func (h *Handler) getVMConsole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build WebSocket URL pointing to controller's proxy endpoint
-	wsURL := scheme + "://" + host + "/api/v1/vms/console/ws?vm_id=" + vmID + "&api_socket=" + vm.WorkspacePath + "/api.sock"
+	// Use appropriate endpoint based on console type
+	var wsURL string
+	if vm.ConsoleType == "vnc" {
+		wsURL = scheme + "://" + host + "/api/v1/vms/vnc/ws?vm_id=" + vmID + "&workspace_path=" + vm.WorkspacePath
+	} else {
+		wsURL = scheme + "://" + host + "/api/v1/vms/console/ws?vm_id=" + vmID + "&api_socket=" + vm.WorkspacePath + "/api.sock"
+	}
 	if token != "" {
 		wsURL += "&token=" + token
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
-		"ws_url":  wsURL,
-		"message": "Use WebSocket URL to connect to console",
+		"ws_url":   wsURL,
+		"type":     vm.ConsoleType,
+		"message":  "Use WebSocket URL to connect to console",
 	})
 }
 

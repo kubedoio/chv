@@ -104,7 +104,6 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 	}
 
 	// Build command arguments
-	// Note: cloud-hypervisor v51+ accepts multiple disk paths as separate arguments after --disk flag
 	args := []string{
 		"--kernel", kernelPath,
 		"--disk", fmt.Sprintf("path=%s", req.DiskPath),
@@ -114,7 +113,7 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 		args = append(args, fmt.Sprintf("path=%s,readonly=on", req.SeedISOPath))
 	}
 
-	// Build network config (only include IP/mask if IP is provided)
+	// Network config
 	netConfig := fmt.Sprintf("tap=%s", tapDev)
 	if req.MACAddress != "" {
 		netConfig += fmt.Sprintf(",mac=%s", req.MACAddress)
@@ -123,17 +122,23 @@ func (s *VMManagementService) StartVM(ctx context.Context, req *agentapi.VMStart
 		netConfig += fmt.Sprintf(",ip=%s,mask=%s", req.IPAddress, req.Netmask)
 	}
 	args = append(args, "--net", netConfig)
-	
-	// Kernel cmdline - Ubuntu cloud image needs root device and console
-	kernelCmdline := "root=/dev/vda1 console=ttyS0"
-	
+
+	// Console configuration
+	if req.ConsoleType == "vnc" {
+		vncSocket := filepath.Join(req.WorkspacePath, "vnc.sock")
+		args = append(args, "--vnc", fmt.Sprintf("socket=%s", vncSocket))
+		// Still use serial for boot logs
+		args = append(args, "--serial", "pty")
+	} else {
+		// Default PTY console
+		args = append(args, "--console", "off", "--serial", "pty")
+	}
+
 	args = append(args,
 		"--cpus", fmt.Sprintf("boot=%d", req.VCPU),
 		"--memory", fmt.Sprintf("size=%dM", req.MemoryMB),
 		"--api-socket", filepath.Join(req.WorkspacePath, "api.sock"),
-		"--cmdline", kernelCmdline,
-		"--console", "off",
-		"--serial", "pty",
+		"--cmdline", "root=/dev/vda1 console=ttyS0",
 	)
 
 	// Create command - use background context so VM doesn't get killed when HTTP request completes

@@ -319,6 +319,7 @@ func (h *Handler) registerRoutes() {
 		r.Get("/metrics", promhttp.Handler().ServeHTTP)
 		// WebSocket console endpoint - outside auth middleware (token passed in query param)
 		r.Get("/vms/console/ws", h.vmConsoleWebSocket)
+		r.Get("/vms/vnc/ws", h.vmVNCWebSocket)
 	})
 }
 

@@ -179,6 +179,23 @@ func (h *VMHandler) Console(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *VMHandler) VNCConsole(w http.ResponseWriter, r *http.Request) {
+	// Get VM ID and workspace from query params
+	vmID := r.URL.Query().Get("vm_id")
+	workspacePath := r.URL.Query().Get("workspace_path")
+
+	if vmID == "" || workspacePath == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "vm_id and workspace_path query params required", false)
+		return
+	}
+
+	// Handle WebSocket upgrade for VNC
+	if err := h.consoleService.HandleVNCWebSocket(w, r, vmID, workspacePath); err != nil {
+		// Error already handled by upgrade or sent to client
+		return
+	}
+}
+
 func (h *VMHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req agentapi.VMSnapshotCreateRequest

@@ -147,6 +147,7 @@ type VirtualMachine struct {
 	CloudHypervisorPID int    `json:"cloud_hypervisor_pid,omitempty"`
 	IPAddress          string `json:"ip_address,omitempty"`
 	MACAddress         string `json:"mac_address,omitempty"`
+	ConsoleType        string `json:"console_type,omitempty"` // "pty" or "vnc"
 	LastError          string `json:"last_error,omitempty"`
 	CreatedAt          string `json:"created_at,omitempty"`
 	UpdatedAt          string `json:"updated_at,omitempty"`
