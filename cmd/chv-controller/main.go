@@ -141,9 +141,14 @@ func main() {
 
 	// Start metrics collector
 	collector := metrics.NewCollector(repo)
+	if agentClient != nil {
+		collector.SetAgentClient(agentClient)
+		log.Info("Metrics collector started with agent")
+	} else {
+		log.Info("Metrics collector started (no agent)")
+	}
 	go collector.Start()
 	defer collector.Stop()
-	log.Info("Metrics collector started")
 
 	// Handle graceful shutdown
 	stop := make(chan os.Signal, 1)

@@ -4,14 +4,17 @@ import (
 	"context"
 	"time"
 
+	"github.com/chv/chv/internal/agentapi"
+	"github.com/chv/chv/internal/agentclient"
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/logger"
 )
 
 type Collector struct {
-	repo     *db.Repository
-	interval time.Duration
-	stopChan chan struct{}
+	repo        *db.Repository
+	agentClient *agentclient.Client
+	interval    time.Duration
+	stopChan    chan struct{}
 }
 
 func NewCollector(repo *db.Repository) *Collector {
@@ -20,6 +23,11 @@ func NewCollector(repo *db.Repository) *Collector {
 		interval: 15 * time.Second,
 		stopChan: make(chan struct{}),
 	}
+}
+
+// SetAgentClient sets the agent client for collecting VM metrics
+func (c *Collector) SetAgentClient(client *agentclient.Client) {
+	c.agentClient = client
 }
 
 func (c *Collector) Start() {
@@ -85,14 +93,37 @@ func (c *Collector) collect() {
 		NodeHealth.WithLabelValues(node.ID).Set(health)
 	}
 
-	// For running VMs, set CPU/memory metrics
-	// Note: These are placeholder values - real metrics would come from the agent
-	for _, vm := range vms {
-		if vm.ActualState == "running" {
-			// TODO: Get actual metrics from agent
-			// For now, set placeholder values
-			VMCPUUsage.WithLabelValues(vm.ID, vm.NodeID).Set(0)
-			VMMemoryUsage.WithLabelValues(vm.ID, vm.NodeID).Set(float64(vm.MemoryMB * 1024 * 1024))
+	// For running VMs, fetch actual metrics from agent
+	if c.agentClient != nil {
+		for _, vm := range vms {
+			if vm.ActualState == "running" && vm.CloudHypervisorPID > 0 {
+				req := &agentapi.VMMetricsRequest{
+					VMID:      vm.ID,
+					PID:       vm.CloudHypervisorPID,
+					APISocket: vm.WorkspacePath + "/api.sock",
+				}
+				resp, err := c.agentClient.GetVMMetrics(ctx, req)
+				if err != nil {
+					logger.L().Debug("Failed to get VM metrics",
+						logger.F("vm_id", vm.ID),
+						logger.ErrorField(err))
+					continue
+				}
+				VMCPUUsage.WithLabelValues(vm.ID, vm.NodeID).Set(resp.CPU.UsagePercent)
+				VMMemoryUsage.WithLabelValues(vm.ID, vm.NodeID).Set(float64(resp.Memory.UsedMB * 1024 * 1024))
+			} else if vm.ActualState == "running" {
+				// Running but no PID yet — use placeholder
+				VMCPUUsage.WithLabelValues(vm.ID, vm.NodeID).Set(0)
+				VMMemoryUsage.WithLabelValues(vm.ID, vm.NodeID).Set(float64(vm.MemoryMB * 1024 * 1024))
+			}
+		}
+	} else {
+		// No agent client — use placeholder values
+		for _, vm := range vms {
+			if vm.ActualState == "running" {
+				VMCPUUsage.WithLabelValues(vm.ID, vm.NodeID).Set(0)
+				VMMemoryUsage.WithLabelValues(vm.ID, vm.NodeID).Set(float64(vm.MemoryMB * 1024 * 1024))
+			}
 		}
 	}
 
