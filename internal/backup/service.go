@@ -554,8 +554,15 @@ func (s *Service) Restore(ctx context.Context, historyID, newName string) (*mode
 
 		// If new name is different, clone it
 		if newName != "" && newName != origVM.Name {
-			// TODO: Implement VM clone operation
-			return nil, fmt.Errorf("cloning to new name not yet implemented")
+			cloneInput := vm.CloneVMInput{
+				Name:       newName,
+				SourceVMID: origVM.ID,
+			}
+			clonedVM, err := s.vmService.CloneVM(ctx, cloneInput)
+			if err != nil {
+				return nil, fmt.Errorf("failed to clone VM: %w", err)
+			}
+			return clonedVM, nil
 		}
 
 		return origVM, nil

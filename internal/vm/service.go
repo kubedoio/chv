@@ -185,6 +185,124 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 	return vm, nil
 }
 
+// CloneVMInput holds parameters for cloning a VM
+type CloneVMInput struct {
+	Name         string // New VM name (required)
+	SourceVMID   string // VM to clone from
+	NewNetworkID string // Optional: different network for clone
+}
+
+// CloneVM creates a new VM by cloning an existing VM's disk and configuration
+func (s *Service) CloneVM(ctx context.Context, input CloneVMInput) (*models.VirtualMachine, error) {
+	if input.Name == "" {
+		return nil, fmt.Errorf("clone VM name is required")
+	}
+	if input.SourceVMID == "" {
+		return nil, fmt.Errorf("source VM ID is required")
+	}
+
+	// Get source VM
+	sourceVM, err := s.repo.GetVMByID(ctx, input.SourceVMID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get source VM: %w", err)
+	}
+	if sourceVM == nil {
+		return nil, fmt.Errorf("source VM not found: %s", input.SourceVMID)
+	}
+
+	// Verify source disk exists
+	if _, err := os.Stat(sourceVM.DiskPath); err != nil {
+		return nil, fmt.Errorf("source VM disk not found: %w", err)
+	}
+
+	// Get local node ID
+	localNode, err := s.repo.GetLocalNode(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get local node: %w", err)
+	}
+	if localNode == nil {
+		return nil, fmt.Errorf("local node not found")
+	}
+
+	// Create new VM record
+	vmID := uuid.NewString()
+	now := time.Now().UTC().Format(time.RFC3339)
+	workspacePath := filepath.Join(s.dataRoot, "vms", vmID)
+
+	// Use source network or override
+	networkID := sourceVM.NetworkID
+	if input.NewNetworkID != "" {
+		networkID = input.NewNetworkID
+	}
+
+	vm := &models.VirtualMachine{
+		ID:            vmID,
+		NodeID:        localNode.ID,
+		Name:          input.Name,
+		ImageID:       sourceVM.ImageID,
+		StoragePoolID: sourceVM.StoragePoolID,
+		NetworkID:     networkID,
+		VCPU:          sourceVM.VCPU,
+		MemoryMB:      sourceVM.MemoryMB,
+		DesiredState:  "stopped",
+		ActualState:   StatusProvisioning,
+		WorkspacePath: workspacePath,
+		DiskPath:      filepath.Join(workspacePath, "disk.qcow2"),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+
+	// Create workspace directory
+	if err := os.MkdirAll(workspacePath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create workspace: %w", err)
+	}
+
+	// Copy disk from source VM
+	if err := s.cloneDisk(sourceVM.DiskPath, vm.DiskPath); err != nil {
+		os.RemoveAll(workspacePath)
+		return nil, fmt.Errorf("failed to clone disk: %w", err)
+	}
+
+	// Create seed ISO if source has one
+	if sourceVM.SeedISOPath != "" {
+		vm.SeedISOPath = filepath.Join(workspacePath, "seed.iso")
+		if err := s.cloneDisk(sourceVM.SeedISOPath, vm.SeedISOPath); err != nil {
+			// Non-fatal: VM can still boot without seed ISO
+			vm.SeedISOPath = ""
+		}
+	}
+
+	// Write VM config
+	config := VMConfig{
+		ID:       vm.ID,
+		Name:     vm.Name,
+		VCPU:     vm.VCPU,
+		MemoryMB: vm.MemoryMB,
+		DiskPath: vm.DiskPath,
+		SeedISO:  vm.SeedISOPath,
+	}
+	configPath := filepath.Join(workspacePath, "vm.json")
+	if err := s.writeConfig(configPath, config); err != nil {
+		os.RemoveAll(workspacePath)
+		return nil, fmt.Errorf("failed to write VM config: %w", err)
+	}
+
+	// Create VM record in DB
+	if err := s.repo.CreateVM(ctx, vm); err != nil {
+		os.RemoveAll(workspacePath)
+		return nil, fmt.Errorf("failed to create VM record: %w", err)
+	}
+
+	// Update to prepared
+	vm.ActualState = StatusPrepared
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.repo.UpdateVM(ctx, vm); err != nil {
+		return nil, fmt.Errorf("failed to update VM status: %w", err)
+	}
+
+	return vm, nil
+}
+
 // provisionVM creates workspace, cloud-init files, clones disk, writes config
 func (s *Service) provisionVM(ctx context.Context, vm *models.VirtualMachine, image *models.Image, input CreateVMInput) error {
 	if s.agentClient == nil {
