@@ -299,6 +299,18 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(data)
       });
     },
+    getNetwork(networkId: string) {
+      return request<Network>(`/api/v1/networks/${networkId}`);
+    },
+    updateNetwork(networkId: string, data: Partial<CreateNetworkInput>) {
+      return request<Network>(`/api/v1/networks/${networkId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data)
+      });
+    },
+    deleteNetwork(networkId: string) {
+      return request<void>(`/api/v1/networks/${networkId}`, { method: 'DELETE' });
+    },
     listStoragePools() {
       return request<StoragePool[]>('/api/v1/storage-pools');
     },

@@ -459,8 +459,7 @@ func (h *Handler) registerAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.repo.UpdateNodeLastSeen(ctx, req.NodeID); err != nil {
-		// Log but don't fail
-		// TODO: add logging
+		logger.L().Warn("Failed to update node last seen", logger.F("node_id", req.NodeID), logger.ErrorField(err))
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{

@@ -2546,12 +2546,19 @@ func (r *Repository) GetUserUsage(ctx context.Context, userID string) (*models.R
 		return nil, err
 	}
 
+	// Count networks (no per-user ownership yet, so count all)
+	var networkCount int
+	err = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM networks`).Scan(&networkCount)
+	if err != nil {
+		return nil, err
+	}
+
 	return &models.ResourceUsage{
 		VMs:        vmCount,
 		CPUs:       totalCPUs,
 		MemoryGB:   totalMemoryMB / 1024,
 		StorageGB:  totalStorageMB,
-		Networks:   0, // TODO: track user networks
+		Networks:   networkCount,
 	}, nil
 }
 

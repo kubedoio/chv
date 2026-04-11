@@ -48,16 +48,10 @@
   async function loadNetwork() {
     loading = true;
     try {
-      // For now, list networks and find the one we need
-      // TODO: Add getNetwork(id) endpoint
-      const networks = await client.listNetworks();
-      network = networks.find(n => n.id === id) || null;
-      if (!network) {
-        toast.error('Network not found');
-        goto('/networks');
-      }
+      network = await client.getNetwork(id);
     } catch (e) {
       toast.error('Failed to load network');
+      goto('/networks');
     } finally {
       loading = false;
     }

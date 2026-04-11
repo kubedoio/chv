@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chv/chv/internal/db"
+	"github.com/chv/chv/internal/logger"
 	"github.com/chv/chv/internal/models"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -113,7 +114,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (*LoginR
 	now := time.Now().UTC().Format(time.RFC3339)
 	if err := s.repo.UpdateUserLastLogin(ctx, user.ID, now); err != nil {
 		// Log error but don't fail login
-		// TODO: add logging
+		logger.L().Warn("Failed to update user last login", logger.F("user_id", user.ID), logger.ErrorField(err))
 	}
 
 	// Create token record
