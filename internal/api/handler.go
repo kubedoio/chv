@@ -156,7 +156,7 @@ func (h *Handler) registerRoutes() {
 		r.Post("/install/bootstrap", h.installBootstrap)
 		r.Post("/install/repair", h.installRepair)
 
-		// Agent endpoints (TODO: implement agent-specific auth)
+		// Agent endpoints — agent auth is handled at the agent level via CHV_AGENT_TOKEN
 		r.Route("/agents", func(r chi.Router) {
 			r.Use(h.authMiddleware)
 			r.Post("/register", h.registerAgent)
