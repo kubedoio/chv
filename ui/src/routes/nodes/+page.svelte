@@ -31,7 +31,7 @@
   async function loadNodes() {
     loading = true;
     try {
-      const data = await client.listNodes();
+      const data = (await client.listNodes()) ?? [];
       nodes = data;
     } catch (e) {
       console.error('Failed to load nodes:', e);

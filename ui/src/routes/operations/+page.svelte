@@ -17,7 +17,7 @@
   async function loadOperations() {
     loading = true;
     try {
-      items = await client.listOperations();
+      items = (await client.listOperations()) ?? [];
     } catch (err) {
       toast.error('Failed to load operations');
       items = [];

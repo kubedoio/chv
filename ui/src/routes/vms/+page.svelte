@@ -170,7 +170,7 @@
     loading = true;
     error = '';
     try {
-      items = await client.listVMs();
+      items = (await client.listVMs()) ?? [];
     } catch (err) {
       error = err instanceof Error ? err.message : 'Failed to load VMs';
       toast.error(error);
@@ -187,9 +187,9 @@
         client.listStoragePools(),
         client.listNetworks()
       ]);
-      images = imgs;
-      pools = ps;
-      networks = nets;
+      images = imgs ?? [];
+      pools = ps ?? [];
+      networks = nets ?? [];
     } catch (e) {
       console.error('Failed to load dependencies:', e);
     }

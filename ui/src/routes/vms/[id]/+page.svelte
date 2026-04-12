@@ -14,7 +14,7 @@
   import BootLogViewer from '$lib/components/BootLogViewer.svelte';
   import FirewallRuleEditor from '$lib/components/FirewallRuleEditor.svelte';
   import { toast } from '$lib/stores/toast';
-  import { registerShortcuts, createVMDetailShortcuts, setActiveContext } from '$lib/stores/keyboard.svelte';
+  import { registerShortcuts, createVMDetailShortcuts, setActiveContext } from '$lib/stores/keyboard.svelte.ts';
   import { Play, Square, Trash2, ArrowLeft, Cpu, HardDrive, Network, Image as ImageIcon, RefreshCw, Terminal as TerminalIcon, BarChart3, RotateCcw, Camera, Edit, FileText, Shield, Maximize2, Minimize2 } from 'lucide-svelte';
   import type { VM, Image, StoragePool, Network as NetworkType, VMMetrics, VMMetricsResponse, VMSnapshot } from '$lib/api/types';
   

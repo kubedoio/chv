@@ -49,7 +49,7 @@
     
     try {
       const client = createAPIClient({ token });
-      vms = await client.listVMs();
+      vms = (await client.listVMs()) ?? [];
     } catch (err) {
       console.error('Failed to fetch VMs:', err);
       vms = [];

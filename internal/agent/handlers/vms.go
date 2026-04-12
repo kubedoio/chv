@@ -337,3 +337,27 @@ func (h *VMHandler) GetRunningVMDetails(w http.ResponseWriter, r *http.Request) 
 
 	respondJSON(w, http.StatusOK, info)
 }
+
+// DiscoverVMs scans for pre-existing VM directories in the data root
+func (h *VMHandler) DiscoverVMs(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.VMDiscoveryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON", false)
+		return
+	}
+
+	if req.DataRoot == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "data_root is required", false)
+		return
+	}
+
+	found, err := h.vmService.DiscoverResources(req.DataRoot)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "discovery_failed", err.Error(), false)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, agentapi.VMDiscoveryResponse{
+		FoundVMIDs: found,
+	})
+}

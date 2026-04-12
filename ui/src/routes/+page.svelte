@@ -25,11 +25,11 @@
   import CreateVMModal from '$lib/components/CreateVMModal.svelte';
   import ImportImageModal from '$lib/components/ImportImageModal.svelte';
   import CreateNetworkModal from '$lib/components/CreateNetworkModal.svelte';
-  import type { VM, Image, StoragePool, Network as NetworkType, Event } from '$lib/api/types';
+  import type { VM, Image, StoragePool, Network as NetworkType, Event, NodeWithResources } from '$lib/api/types';
   import type { HealthCheck } from '$lib/components/HealthStatus.svelte';
 
   const token = getStoredToken();
-  const client = createAPIClient({ token: token ?? undefined });
+  let client: ReturnType<typeof createAPIClient>;
 
   // State
   let vms = $state<VM[]>([]);
@@ -37,8 +37,10 @@
   let pools = $state<StoragePool[]>([]);
   let networks = $state<NetworkType[]>([]);
   let events = $state<Event[]>([]);
+  let nodes = $state<NodeWithResources[]>([]);
   let installState = $state<string>('unknown');
   let loading = $state(true);
+  let scanning = $state(false);
   let lastUpdated = $state<Date>(new Date());
   let pollInterval: ReturnType<typeof setInterval> | null = $state(null);
 
@@ -73,7 +75,7 @@
   const storageHistory = $derived([usedStorageGB * 0.7, usedStorageGB * 0.75, usedStorageGB * 0.8, usedStorageGB * 0.78, usedStorageGB * 0.85, usedStorageGB * 0.9, usedStorageGB]);
 
   // Current node info
-  const currentNode = $derived(getDefaultNode());
+  const currentNode = $derived(nodes.length > 0 ? nodes[0] : getDefaultNode());
 
   // Health checks derived from data
   const healthChecks = $derived<HealthCheck[]>([
@@ -109,21 +111,24 @@
   ]);
 
   async function loadData() {
+    if (!client) return;
     try {
-      const [vmsData, imagesData, poolsData, networksData, eventsData, installData] = await Promise.all([
+      const [vmsData, imagesData, poolsData, networksData, eventsData, installData, nodesData] = await Promise.all([
         client.listVMs(),
         client.listImages(),
         client.listStoragePools(),
         client.listNetworks(),
         client.listEvents(),
-        client.getInstallStatus()
+        client.getInstallStatus(),
+        client.listNodes()
       ]);
-      vms = vmsData;
-      images = imagesData;
-      pools = poolsData;
-      networks = networksData;
-      events = eventsData;
+      vms = vmsData ?? [];
+      images = imagesData ?? [];
+      pools = poolsData ?? [];
+      networks = networksData ?? [];
+      events = eventsData ?? [];
       installState = installData.overall_state;
+      nodes = nodesData ?? [];
       lastUpdated = new Date();
     } catch (e) {
       console.error('Failed to load dashboard data:', e);
@@ -181,7 +186,28 @@
     toast.success('Network created successfully');
   }
 
+  async function handleScanNode() {
+    if (!client || !currentNode || currentNode.id === 'placeholder') return;
+    
+    scanning = true;
+    try {
+      const result = await client.discoverNode(currentNode.id);
+      if (result.count > 0) {
+        toast.success(`Discovered ${result.count} new VMs`);
+        loadData();
+      } else {
+        toast.info('No new VMs discovered');
+      }
+    } catch (e) {
+      console.error('Scan failed:', e);
+      toast.error('Failed to scan node for existing VMs');
+    } finally {
+      scanning = false;
+    }
+  }
+
   onMount(() => {
+    client = createAPIClient();
     if (!token) {
       goto('/login');
       return;
@@ -300,6 +326,16 @@
         >
           <Plus size={16} />
           Create VM
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onclick={handleScanNode}
+          disabled={scanning || currentNode.id === 'placeholder'}
+        >
+          <Loader2 size={16} class={scanning ? 'animate-spin' : 'hidden'} />
+          <RefreshCw size={16} class={scanning ? 'hidden' : ''} />
+          Scan Node for VMs
         </Button>
         <Button
           variant="secondary"

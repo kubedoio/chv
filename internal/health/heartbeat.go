@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/chv/chv/internal/db"
@@ -98,7 +99,8 @@ func (s *HeartbeatService) RecordHeartbeat(ctx context.Context, nodeID string, m
 	return nil
 }
 
-// checkNodes checks all nodes and marks stale ones as offline
+// checkNodes checks all nodes and marks stale ones as offline.
+// For nodes with an agent_url, it actively probes the agent's /health endpoint.
 func (s *HeartbeatService) checkNodes() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -111,8 +113,6 @@ func (s *HeartbeatService) checkNodes() {
 		return
 	}
 
-	cutoff := time.Now().UTC().Add(-s.timeout)
-
 	for _, node := range nodes {
 		// Skip local node - it's always online if controller is running
 		if node.IsLocal {
@@ -124,7 +124,39 @@ func (s *HeartbeatService) checkNodes() {
 			continue
 		}
 
-		// Check if node has missed heartbeats
+		// Active health check: if the node has an agent_url, probe it
+		if node.AgentURL != "" {
+			reachable := s.probeAgent(node.AgentURL)
+			if reachable {
+				// Agent is reachable — mark online and record last_seen
+				if err := s.repo.UpdateNodeLastSeen(ctx, node.ID); err != nil {
+					log.Error("Failed to update node last seen", logger.ErrorField(err), logger.F("node_id", node.ID))
+				}
+				if node.Status != models.NodeStatusOnline {
+					if err := s.repo.UpdateNodeStatus(ctx, node.ID, models.NodeStatusOnline); err != nil {
+						log.Error("Failed to mark node as online", logger.ErrorField(err), logger.F("node_id", node.ID))
+					} else {
+						log.Info("Node is now online (active probe)", logger.F("node_id", node.ID), logger.F("node_name", node.Name))
+					}
+				}
+			} else {
+				// Agent is unreachable — mark offline
+				if node.Status == models.NodeStatusOnline {
+					if err := s.repo.UpdateNodeStatus(ctx, node.ID, models.NodeStatusOffline); err != nil {
+						log.Error("Failed to mark node as offline", logger.ErrorField(err), logger.F("node_id", node.ID))
+					} else {
+						log.Warn("Node marked offline - agent unreachable",
+							logger.F("node_id", node.ID),
+							logger.F("node_name", node.Name),
+							logger.F("agent_url", node.AgentURL))
+					}
+				}
+			}
+			continue
+		}
+
+		// Passive heartbeat check for nodes without agent_url
+		cutoff := time.Now().UTC().Add(-s.timeout)
 		if node.LastSeenAt != "" {
 			lastSeen, err := time.Parse(time.RFC3339, node.LastSeenAt)
 			if err != nil {
@@ -133,7 +165,6 @@ func (s *HeartbeatService) checkNodes() {
 			}
 
 			if lastSeen.Before(cutoff) && node.Status == models.NodeStatusOnline {
-				// Node has timed out - mark as offline
 				if err := s.repo.UpdateNodeStatus(ctx, node.ID, models.NodeStatusOffline); err != nil {
 					log.Error("Failed to mark node as offline", logger.ErrorField(err), logger.F("node_id", node.ID))
 					continue
@@ -144,7 +175,6 @@ func (s *HeartbeatService) checkNodes() {
 					logger.F("last_seen", node.LastSeenAt))
 			}
 		} else if node.Status == models.NodeStatusOnline {
-			// Node has never sent a heartbeat but is marked online
 			if err := s.repo.UpdateNodeStatus(ctx, node.ID, models.NodeStatusOffline); err != nil {
 				log.Error("Failed to mark node as offline", logger.ErrorField(err), logger.F("node_id", node.ID))
 				continue
@@ -154,6 +184,17 @@ func (s *HeartbeatService) checkNodes() {
 				logger.F("node_name", node.Name))
 		}
 	}
+}
+
+// probeAgent checks if a remote agent is reachable by hitting its /health endpoint.
+func (s *HeartbeatService) probeAgent(agentURL string) bool {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(agentURL + "/health")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // NodeMetrics represents resource metrics for a node

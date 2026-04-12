@@ -2,7 +2,9 @@
 FROM node:20-alpine AS ui-builder
 WORKDIR /app/ui
 COPY ui/package*.json ./
-RUN npm install --include=optional && npm rebuild
+RUN rm -f package-lock.json && \
+    npm install && \
+    npm install @rollup/rollup-linux-arm64-musl
 COPY ui/ .
 RUN npm run build
 

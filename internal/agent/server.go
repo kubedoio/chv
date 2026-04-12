@@ -123,6 +123,7 @@ func (s *Server) routes() {
 		r.Post("/vms/health", vmHandler.HealthCheck)
 		r.Get("/vms/console", vmHandler.Console)
 
+		r.Post("/vms/discover", vmHandler.DiscoverVMs)
 		r.Post("/vms/snapshots", vmHandler.CreateSnapshot)
 		r.Post("/vms/snapshots/list", vmHandler.ListSnapshots)
 		r.Post("/vms/snapshots/restore", vmHandler.RestoreSnapshot)

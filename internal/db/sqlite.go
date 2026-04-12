@@ -60,14 +60,6 @@ func (r *Repository) initialize() error {
 		}
 	}
 
-	schema, err := os.ReadFile(schemaPath())
-	if err != nil {
-		return err
-	}
-	if _, err = r.db.Exec(string(schema)); err != nil {
-		return err
-	}
-
 	// Run migrations for existing databases
 	if err := r.migrateAddImageFormat(); err != nil {
 		return fmt.Errorf("failed to migrate images table: %w", err)
@@ -79,6 +71,14 @@ func (r *Repository) initialize() error {
 	}
 	if err := r.migrateAddNodeIDColumns(); err != nil {
 		return fmt.Errorf("failed to migrate node_id columns: %w", err)
+	}
+
+	schema, err := os.ReadFile(schemaPath())
+	if err != nil {
+		return err
+	}
+	if _, err = r.db.Exec(string(schema)); err != nil {
+		return err
 	}
 
 	// Run agent token migrations
@@ -408,9 +408,10 @@ func (r *Repository) GetInstallStatus(ctx context.Context) (*models.InstallStatu
 func (r *Repository) EnsureDefaultNetwork(ctx context.Context) error {
 	_, err := r.db.ExecContext(
 		ctx,
-		`INSERT OR IGNORE INTO networks (id, name, mode, bridge_name, cidr, gateway_ip, is_system_managed, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO networks (id, node_id, name, mode, bridge_name, cidr, gateway_ip, is_system_managed, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		uuid.NewString(),
+		"local",
 		"default",
 		"bridge",
 		config.DefaultBridgeName,
@@ -426,9 +427,10 @@ func (r *Repository) EnsureDefaultNetwork(ctx context.Context) error {
 func (r *Repository) EnsureDefaultStoragePool(ctx context.Context, path string) error {
 	_, err := r.db.ExecContext(
 		ctx,
-		`INSERT OR IGNORE INTO storage_pools (id, name, pool_type, path, is_default, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO storage_pools (id, node_id, name, pool_type, path, is_default, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		uuid.NewString(),
+		"local",
 		"localdisk",
 		"localdisk",
 		path,
@@ -836,9 +838,7 @@ func (r *Repository) migrateAddImageFormat() error {
 
 	for _, col := range columns {
 		var count int
-		err := r.db.QueryRow(`
-			SELECT COUNT(*) FROM pragma_table_info('images') WHERE name = ?
-		`, col.name).Scan(&count)
+		err := r.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('images') WHERE name = ?"), col.name).Scan(&count)
 		if err != nil {
 			return err
 		}
@@ -963,9 +963,7 @@ func (r *Repository) migrateAddAgentTokenColumns() error {
 
 	for _, col := range columns {
 		var count int
-		err := r.db.QueryRow(`
-			SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name = ?
-		`, col.name).Scan(&count)
+		err := r.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name = ?"), col.name).Scan(&count)
 		if err != nil {
 			return err
 		}
@@ -1031,14 +1029,41 @@ func (r *Repository) migrateAddNodeIDColumns() error {
 			},
 			createIndex: true,
 		},
+		{
+			name: "vm_templates",
+			columns: []struct {
+				name string
+				def  string
+			}{
+				{"node_id", "TEXT DEFAULT 'local'"},
+			},
+			createIndex: true,
+		},
+		{
+			name: "node_metrics",
+			columns: []struct {
+				name string
+				def  string
+			}{
+				{"node_id", "TEXT DEFAULT 'local'"},
+			},
+			createIndex: true,
+		},
 	}
 
 	for _, table := range tables {
 		for _, col := range table.columns {
+			var tableExists int
+			err := r.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table.name).Scan(&tableExists)
+			if err != nil {
+				return err
+			}
+			if tableExists == 0 {
+				continue
+			}
+
 			var count int
-			err := r.db.QueryRow(`
-				SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?
-			`, table.name, col.name).Scan(&count)
+			err = r.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?", table.name), col.name).Scan(&count)
 			if err != nil {
 				return err
 			}
@@ -1053,10 +1078,17 @@ func (r *Repository) migrateAddNodeIDColumns() error {
 
 		// Create index if needed
 		if table.createIndex {
-			indexName := fmt.Sprintf("idx_%s_node_id", table.name)
-			_, err := r.db.Exec(fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s(node_id)`, indexName, table.name))
+			var tableExists int
+			err := r.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table.name).Scan(&tableExists)
 			if err != nil {
-				return fmt.Errorf("failed to create index %s: %w", indexName, err)
+				return err
+			}
+			if tableExists > 0 {
+				indexName := fmt.Sprintf("idx_%s_node_id", table.name)
+				_, err := r.db.Exec(fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s(node_id)`, indexName, table.name))
+				if err != nil {
+					return fmt.Errorf("failed to create index %s: %w", indexName, err)
+				}
 			}
 		}
 	}
@@ -1088,7 +1120,7 @@ func (r *Repository) ensureLocalNode(ctx context.Context) error {
 			_, err = r.db.ExecContext(ctx, `
 				INSERT INTO nodes (id, name, hostname, ip_address, status, is_local, created_at, updated_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			`, localNodeID, "Local Node", "localhost", "127.0.0.1", models.NodeStatusOnline, 1, now, now)
+			`, localNodeID, "Datacenter Node", "localhost", "127.0.0.1", models.NodeStatusOnline, 1, now, now)
 			if err != nil {
 				return fmt.Errorf("failed to create local node: %w", err)
 			}
@@ -1100,6 +1132,9 @@ func (r *Repository) ensureLocalNode(ctx context.Context) error {
 			}
 		}
 	}
+
+	// Rename legacy "Local Node" to "Datacenter Node" for existing installations
+	_, _ = r.db.ExecContext(ctx, `UPDATE nodes SET name = 'Datacenter Node' WHERE name = 'Local Node' AND is_local = 1`)
 
 	return nil
 }

@@ -113,7 +113,7 @@
   async function loadStoragePools() {
     loading = true;
     try {
-      items = await client.listStoragePools();
+      items = (await client.listStoragePools()) ?? [];
     } catch (err) {
       toast.error('Failed to load storage pools');
       items = [];

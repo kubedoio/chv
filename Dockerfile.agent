@@ -14,7 +14,8 @@ RUN apk --no-cache add \
     iproute2 \
     qemu-img \
     xorriso \
-    wget
+    wget \
+    nftables
 
 WORKDIR /app
 

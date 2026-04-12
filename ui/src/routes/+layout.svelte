@@ -18,8 +18,8 @@
     registerShortcuts,
     createGlobalShortcuts,
     setActiveContext
-  } from '$lib/stores/keyboard.svelte';
-  import { buildSearchIndex } from '$lib/stores/search.svelte';
+  } from '$lib/stores/keyboard.svelte.ts';
+  import { buildSearchIndex } from '$lib/stores/search.svelte.ts';
   import '../app.css';
 
   // Public paths that don't require auth
@@ -211,7 +211,12 @@
         client.listStoragePools().catch(() => [])
       ]);
       
-      buildSearchIndex({ vms, images, networks, storagePools });
+      buildSearchIndex({
+        vms: vms ?? [],
+        images: images ?? [],
+        networks: networks ?? [],
+        storagePools: storagePools ?? []
+      });
     } catch (err) {
       console.error('Failed to load search index:', err);
     }

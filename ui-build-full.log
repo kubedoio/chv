@@ -1,0 +1,275 @@
+#0 building with "orbstack" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.controller
+#1 transferring dockerfile: 938B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:20-alpine
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 132B done
+#3 DONE 0.0s
+
+#4 [ui-builder 1/6] FROM docker.io/library/node:20-alpine
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 50.09kB 0.0s done
+#5 DONE 0.0s
+
+#6 [ui-builder 3/6] COPY ui/package*.json ./
+#6 CACHED
+
+#7 [ui-builder 2/6] WORKDIR /app/ui
+#7 CACHED
+
+#8 [ui-builder 4/6] RUN rm -f package-lock.json &&     npm install &&     npm install @rollup/rollup-linux-arm64-musl
+#8 CACHED
+
+#9 [ui-builder 5/6] COPY ui/ .
+#9 CACHED
+
+#10 [ui-builder 6/6] RUN npm run build
+#10 0.181 
+#10 0.181 > chv-ui@0.1.0 build
+#10 0.181 > svelte-kit sync && vite build
+#10 0.181 
+#10 1.140 vite v5.4.21 building SSR bundle for production...
+#10 1.167 transforming...
+#10 1.228 10:55:38 PM [vite-plugin-svelte] src/routes/+layout.svelte:228:2 Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead
+#10 1.228 https://svelte.dev/e/slot_element_deprecated
+#10 1.228 226: 
+#10 1.228 227: {#if $page.url.pathname === '/login'}
+#10 1.228 228:   <slot />
+#10 1.228                ^
+#10 1.228 229: {:else}
+#10 1.228 230:   <div class="proxmox-layout">
+#10 1.228 10:55:38 PM [vite-plugin-svelte] src/routes/+layout.svelte:295:12 Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead
+#10 1.228 https://svelte.dev/e/slot_element_deprecated
+#10 1.228 293:             class="max-w-[1600px] mx-auto"
+#10 1.228 294:           >
+#10 1.228 295:             <slot />
+#10 1.228                          ^
+#10 1.228 296:           </div>
+#10 1.228 297:         {/key}
+#10 1.324 10:55:38 PM [vite-plugin-svelte] src/routes/images/+page.svelte:285:1 Unused CSS selector ".animate-spin"
+#10 1.324 https://svelte.dev/e/css_unused_selector
+#10 1.324 283: 
+#10 1.324 284: <style>
+#10 1.324 285:   .animate-spin {
+#10 1.324                     ^
+#10 1.324 286:     animation: spin 1s linear infinite;
+#10 1.324 287:   }
+#10 1.366 10:55:38 PM [vite-plugin-svelte] src/routes/networks/[id]/+page.svelte:276:16 A form label must be associated with a control
+#10 1.366 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.366 274:             <div class="grid grid-cols-2 gap-4">
+#10 1.366 275:               <div>
+#10 1.366 276:                 <label class="block text-sm text-muted mb-1">VLAN ID (1-4094)</label>
+#10 1.366                                                                                           ^
+#10 1.366 277:                 <input 
+#10 1.366 278:                   type="number" 
+#10 1.366 10:55:38 PM [vite-plugin-svelte] src/routes/networks/[id]/+page.svelte:286:16 A form label must be associated with a control
+#10 1.366 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.366 284:               </div>
+#10 1.366 285:               <div>
+#10 1.366 286:                 <label class="block text-sm text-muted mb-1">Name</label>
+#10 1.366                                                                               ^
+#10 1.366 287:                 <input 
+#10 1.366 288:                   type="text" 
+#10 1.366 10:55:38 PM [vite-plugin-svelte] src/routes/networks/[id]/+page.svelte:295:16 A form label must be associated with a control
+#10 1.366 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.366 293:               </div>
+#10 1.366 294:               <div>
+#10 1.366 295:                 <label class="block text-sm text-muted mb-1">CIDR</label>
+#10 1.366                                                                               ^
+#10 1.366 296:                 <input 
+#10 1.366 297:                   type="text" 
+#10 1.366 10:55:38 PM [vite-plugin-svelte] src/routes/networks/[id]/+page.svelte:304:16 A form label must be associated with a control
+#10 1.366 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.366 302:               </div>
+#10 1.366 303:               <div>
+#10 1.366 304:                 <label class="block text-sm text-muted mb-1">Gateway IP</label>
+#10 1.366                                                                                     ^
+#10 1.366 305:                 <input 
+#10 1.366 306:                   type="text" 
+#10 1.367 10:55:38 PM [vite-plugin-svelte] src/routes/networks/[id]/+page.svelte:408:16 A form label must be associated with a control
+#10 1.367 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.367 406:             <div class="grid grid-cols-3 gap-4">
+#10 1.367 407:               <div>
+#10 1.367 408:                 <label class="block text-sm text-muted mb-1">Range Start</label>
+#10 1.367                                                                                      ^
+#10 1.367 409:                 <input 
+#10 1.367 410:                   type="text" 
+#10 1.367 10:55:38 PM [vite-plugin-svelte] src/routes/networks/[id]/+page.svelte:417:16 A form label must be associated with a control
+#10 1.367 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.367 415:               </div>
+#10 1.367 416:               <div>
+#10 1.367 417:                 <label class="block text-sm text-muted mb-1">Range End</label>
+#10 1.367                                                                                    ^
+#10 1.367 418:                 <input 
+#10 1.367 419:                   type="text" 
+#10 1.367 10:55:38 PM [vite-plugin-svelte] src/routes/networks/[id]/+page.svelte:426:16 A form label must be associated with a control
+#10 1.367 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.367 424:               </div>
+#10 1.367 425:               <div>
+#10 1.367 426:                 <label class="block text-sm text-muted mb-1">Lease Time (seconds)</label>
+#10 1.367                                                                                               ^
+#10 1.367 427:                 <input 
+#10 1.367 428:                   type="number" 
+#10 1.445 10:55:38 PM [vite-plugin-svelte] src/routes/quotas/+page.svelte:147:32 Quoted attributes on components and custom elements will be stringified in a future version of Svelte. If this isn't what you want, remove the quotes
+#10 1.445 https://svelte.dev/e/attribute_quoted
+#10 1.445 145:             <div class="flex items-center gap-3">
+#10 1.445 146:               <div class="p-2 rounded-lg {resource.color} bg-opacity-10">
+#10 1.445 147:                 <Icon size={20} class="{resource.color.replace('bg-', 'text-')}" />
+#10 1.445                                                                                      ^
+#10 1.445 148:               </div>
+#10 1.445 149:               <div>
+#10 1.742 10:55:39 PM [vite-plugin-svelte] /app/ui/src/lib/components/DataTable.svelte:1:18 `context="module"` is deprecated, use the `module` attribute instead
+#10 1.742 https://svelte.dev/e/script_context_deprecated
+#10 1.742 1: <script lang="ts" context="module">
+#10 1.742                                      ^
+#10 1.742 2:   import type { Component, Snippet } from 'svelte';
+#10 1.742 3:   
+#10 1.742 10:55:39 PM [vite-plugin-svelte] src/lib/components/DataTable.svelte:72:50 This reference only captures the initial value of `columns`. Did you mean to reference it inside a derived instead?
+#10 1.742 https://svelte.dev/e/state_referenced_locally
+#10 1.742 70:   let lastSelectedId = $state<string | null>(null);
+#10 1.742 71:   let columnVisibilityOpen = $state(false);
+#10 1.742 72:   let visibleColumns = $state<Set<string>>(new Set(columns.map(c => c.key)));
+#10 1.742                                                               ^
+#10 1.742 73:   let resizingColumn = $state<string | null>(null);
+#10 1.742 74:   let tableRef = $state<HTMLTableElement | null>(null);
+#10 1.755 10:55:39 PM [vite-plugin-svelte] src/lib/components/AddNodeModal.svelte:142:8 A form label must be associated with a control
+#10 1.755 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.755 140: 
+#10 1.755 141:       <div class="space-y-2">
+#10 1.755 142:         <label class="block text-sm font-medium text-slate-700">
+#10 1.755                      ^
+#10 1.755 143:           Agent Token <span class="text-red-500">*</span>
+#10 1.755 144:           <span class="text-xs font-normal text-slate-500 ml-2">Copy and save this token - it will not be shown again</span>
+#10 1.755 10:55:39 PM [vite-plugin-svelte] src/lib/components/AddNodeModal.svelte:169:10 A form label must be associated with a control
+#10 1.755 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.755 167:       {#if result.agent_url}
+#10 1.755 168:         <div class="space-y-2">
+#10 1.755 169:           <label class="block text-sm font-medium text-slate-700">Agent URL</label>
+#10 1.755                                                                                         ^
+#10 1.755 170:           <div class="flex gap-2">
+#10 1.755 171:             <code class="flex-1 bg-slate-100 text-slate-700 px-4 py-3 rounded-lg text-sm font-mono">
+#10 1.770 10:55:39 PM [vite-plugin-svelte] src/lib/components/CloudInitViewer.svelte:106:16 A form label must be associated with a control
+#10 1.770 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.771 104:             {#each template.variables as varName}
+#10 1.771 105:               <div>
+#10 1.771 106:                 <label class="block text-xs text-muted mb-1">{varName}</label>
+#10 1.771                                                                                    ^
+#10 1.771 107:                 <input
+#10 1.771 108:                   type="text"
+#10 1.798 10:55:39 PM [vite-plugin-svelte] src/lib/components/Terminal.svelte:158:2 noninteractive element cannot have nonnegative tabIndex value
+#10 1.798 https://svelte.dev/e/a11y_no_noninteractive_tabindex
+#10 1.798 156:   </div>
+#10 1.798 157: 
+#10 1.798 158:   <div
+#10 1.798            ^
+#10 1.798 159:     bind:this={terminalElement}
+#10 1.798 160:     class="terminal-content"
+#10 1.798 10:55:39 PM [vite-plugin-svelte] src/lib/components/Terminal.svelte:158:2 `<div>` with a keydown handler must have an ARIA role
+#10 1.798 https://svelte.dev/e/a11y_no_static_element_interactions
+#10 1.798 156:   </div>
+#10 1.798 157: 
+#10 1.798 158:   <div
+#10 1.798            ^
+#10 1.798 159:     bind:this={terminalElement}
+#10 1.798 160:     class="terminal-content"
+#10 1.819 10:55:39 PM [vite-plugin-svelte] src/lib/components/FirewallRuleEditor.svelte:121:10 A form label must be associated with a control
+#10 1.819 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.819 119:       <div class="grid grid-cols-3 gap-4">
+#10 1.819 120:         <div>
+#10 1.819 121:           <label class="block text-sm text-muted mb-1">Direction</label>
+#10 1.819                                                                              ^
+#10 1.819 122:           <select 
+#10 1.819 123:             bind:value={form.direction}
+#10 1.819 10:55:39 PM [vite-plugin-svelte] src/lib/components/FirewallRuleEditor.svelte:131:10 A form label must be associated with a control
+#10 1.819 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.819 129:         </div>
+#10 1.819 130:         <div>
+#10 1.819 131:           <label class="block text-sm text-muted mb-1">Protocol</label>
+#10 1.819                                                                             ^
+#10 1.819 132:           <select 
+#10 1.819 133:             bind:value={form.protocol}
+#10 1.819 10:55:39 PM [vite-plugin-svelte] src/lib/components/FirewallRuleEditor.svelte:143:10 A form label must be associated with a control
+#10 1.819 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.819 141:         </div>
+#10 1.819 142:         <div>
+#10 1.819 143:           <label class="block text-sm text-muted mb-1">Action</label>
+#10 1.819                                                                           ^
+#10 1.819 144:           <select 
+#10 1.819 145:             bind:value={form.action}
+#10 1.819 10:55:39 PM [vite-plugin-svelte] src/lib/components/FirewallRuleEditor.svelte:154:12 A form label must be associated with a control
+#10 1.819 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.819 152:         {#if form.protocol === 'tcp' || form.protocol === 'udp'}
+#10 1.819 153:           <div>
+#10 1.819 154:             <label class="block text-sm text-muted mb-1">Port Range</label>
+#10 1.819                                                                                 ^
+#10 1.819 155:             <input 
+#10 1.819 156:               type="text" 
+#10 1.819 10:55:39 PM [vite-plugin-svelte] src/lib/components/FirewallRuleEditor.svelte:165:10 A form label must be associated with a control
+#10 1.819 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.819 163:         {/if}
+#10 1.819 164:         <div>
+#10 1.819 165:           <label class="block text-sm text-muted mb-1">Source CIDR</label>
+#10 1.819                                                                                ^
+#10 1.819 166:           <input 
+#10 1.819 167:             type="text" 
+#10 1.819 10:55:39 PM [vite-plugin-svelte] src/lib/components/FirewallRuleEditor.svelte:174:10 A form label must be associated with a control
+#10 1.819 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.819 172:         </div>
+#10 1.819 173:         <div>
+#10 1.819 174:           <label class="block text-sm text-muted mb-1">Priority (100-999)</label>
+#10 1.819                                                                                       ^
+#10 1.819 175:           <input 
+#10 1.819 176:             type="number" 
+#10 1.819 10:55:39 PM [vite-plugin-svelte] src/lib/components/FirewallRuleEditor.svelte:185:10 A form label must be associated with a control
+#10 1.819 https://svelte.dev/e/a11y_label_has_associated_control
+#10 1.819 183:         </div>
+#10 1.819 184:         <div class="col-span-3">
+#10 1.819 185:           <label class="block text-sm text-muted mb-1">Description (optional)</label>
+#10 1.819                                                                                           ^
+#10 1.819 186:           <input 
+#10 1.819 187:             type="text" 
+#10 1.860 ✓ 88 modules transformed.
+#10 1.863 x Build failed in 712ms
+#10 1.863 error during build:
+#10 1.863 [vite]: Rollup failed to resolve import "xterm" from "/app/ui/src/lib/components/Terminal.svelte".
+#10 1.863 This is most likely unintended because it can break your application at runtime.
+#10 1.863 If you do want to externalize this module explicitly add it to
+#10 1.863 `build.rollupOptions.external`
+#10 1.863     at viteWarn (file:///app/ui/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:65855:17)
+#10 1.863     at onwarn (file:///app/ui/node_modules/@sveltejs/kit/src/exports/vite/index.js:963:10)
+#10 1.863     at onRollupWarning (file:///app/ui/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:65885:5)
+#10 1.863     at onwarn (file:///app/ui/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:65550:7)
+#10 1.863     at file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:21383:13
+#10 1.863     at Object.logger [as onLog] (file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:23364:9)
+#10 1.863     at ModuleLoader.handleInvalidResolvedId (file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:22108:26)
+#10 1.863     at file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:22066:26
+#10 ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1
+------
+ > [ui-builder 6/6] RUN npm run build:
+1.863 If you do want to externalize this module explicitly add it to
+1.863 `build.rollupOptions.external`
+1.863     at viteWarn (file:///app/ui/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:65855:17)
+1.863     at onwarn (file:///app/ui/node_modules/@sveltejs/kit/src/exports/vite/index.js:963:10)
+1.863     at onRollupWarning (file:///app/ui/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:65885:5)
+1.863     at onwarn (file:///app/ui/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:65550:7)
+1.863     at file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:21383:13
+1.863     at Object.logger [as onLog] (file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:23364:9)
+1.863     at ModuleLoader.handleInvalidResolvedId (file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:22108:26)
+1.863     at file:///app/ui/node_modules/rollup/dist/es/shared/node-entry.js:22066:26
+------
+Dockerfile.controller:9
+--------------------
+   7 |         npm install @rollup/rollup-linux-arm64-musl
+   8 |     COPY ui/ .
+   9 | >>> RUN npm run build
+  10 |     
+  11 |     # Stage 2: Build Controller
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1

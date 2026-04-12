@@ -19,7 +19,7 @@
     Download
   } from 'lucide-svelte';
   import Fuse from 'fuse.js';
-  import { getModifierKey } from '$lib/stores/keyboard.svelte';
+  import { getModifierKey } from '$lib/stores/keyboard.svelte.ts';
   
   // Props
   interface Props {

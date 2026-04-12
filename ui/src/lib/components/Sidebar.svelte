@@ -31,12 +31,13 @@
     { href: '/settings', label: 'Settings', icon: Settings }
   ];
 
-  const client = createAPIClient();
+  let client: ReturnType<typeof createAPIClient>;
   let newEvents = 0;
   let lastEventCheck = new Date();
   let pollInterval: ReturnType<typeof setInterval>;
 
   onMount(() => {
+    client = createAPIClient();
     // Check immediately
     checkNewEvents();
 
@@ -53,8 +54,9 @@
   });
 
   async function checkNewEvents() {
+    if (!client) return;
     try {
-      const events = await client.listEvents();
+      const events = (await client.listEvents()) ?? [];
       // Count events newer than last check
       newEvents = events.filter(e => new Date(e.timestamp) > lastEventCheck).length;
     } catch (err) {

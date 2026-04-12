@@ -141,3 +141,13 @@ type ValidationSummary struct {
 	Orphans      int `json:"orphans"`
 	Missing      int `json:"missing"`
 }
+
+// VMDiscoveryRequest requests scanning for pre-existing VM directories
+type VMDiscoveryRequest struct {
+	DataRoot string `json:"data_root"`
+}
+
+// VMDiscoveryResponse returns the list of found VM IDs
+type VMDiscoveryResponse struct {
+	FoundVMIDs []string `json:"found_vm_ids"`
+}

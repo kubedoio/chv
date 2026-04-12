@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/chv/chv/internal/bootstrap"
+	"github.com/chv/chv/internal/logger"
 )
 
 type createTokenRequest struct {
@@ -84,6 +85,7 @@ func (h *Handler) installStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) installBootstrap(w http.ResponseWriter, r *http.Request) {
 	result, err := h.bootstrap.Bootstrap(requestContext(r))
 	if err != nil {
+		logger.L().Error("Bootstrap failed", logger.ErrorField(err))
 		h.writeError(w, http.StatusInternalServerError, apiError{
 			Code:      "bootstrap_failed",
 			Message:   err.Error(),
