@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, f as derived } from "../../../chunks/root.js";
+import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, i as derived } from "../../../chunks/root.js";
 import { g as goto } from "../../../chunks/client.js";
 import { g as getStoredToken, c as createAPIClient, t as toast } from "../../../chunks/client2.js";
 import { D as DataTable, S as Square } from "../../../chunks/DataTable.js";
@@ -212,14 +212,38 @@ function _page($$renderer, $$props) {
       action: async () => {
       }
     };
-    let table = derived(() => useTable({ data: items, pageSize: 10 }));
-    const imageMap = derived(() => new Map(images.map((i) => [i.id, i])));
-    const poolMap = derived(() => new Map(pools.map((p) => [p.id, p])));
-    const networkMap = derived(() => new Map(networks.map((n) => [n.id, n])));
-    const total = derived(() => items.length);
-    const running = derived(() => items.filter((vm) => vm.actual_state === "running").length);
-    const stopped = derived(() => items.filter((vm) => vm.actual_state === "stopped").length);
-    const other = derived(() => items.filter((vm) => !["running", "stopped"].includes(vm.actual_state)).length);
+    let table = useTable({ data: [], pageSize: 10 });
+    function getImage(id) {
+      return images.find((i) => i.id === id);
+    }
+    function getPool(id) {
+      return pools.find((p) => p.id === id);
+    }
+    function getNetwork(id) {
+      return networks.find((n) => n.id === id);
+    }
+    let total = derived(() => items.length);
+    let runningCount = derived(() => () => {
+      let count = 0;
+      for (const vm of items) {
+        if (vm.actual_state === "running") count++;
+      }
+      return count;
+    });
+    let stoppedCount = derived(() => () => {
+      let count = 0;
+      for (const vm of items) {
+        if (vm.actual_state === "stopped") count++;
+      }
+      return count;
+    });
+    let otherCount = derived(() => () => {
+      let count = 0;
+      for (const vm of items) {
+        if (vm.actual_state !== "running" && vm.actual_state !== "stopped") count++;
+      }
+      return count;
+    });
     const filterOptions = [
       {
         key: "actual_state",
@@ -256,7 +280,7 @@ function _page($$renderer, $$props) {
         key: "image_id",
         title: "Image",
         render: (vm) => {
-          const img = imageMap().get(vm.image_id);
+          const img = getImage(vm.image_id);
           return img?.name ?? vm.image_id;
         }
       },
@@ -264,7 +288,7 @@ function _page($$renderer, $$props) {
         key: "storage_pool_id",
         title: "Pool",
         render: (vm) => {
-          const pool = poolMap().get(vm.storage_pool_id);
+          const pool = getPool(vm.storage_pool_id);
           return pool?.name ?? vm.storage_pool_id;
         }
       },
@@ -272,7 +296,7 @@ function _page($$renderer, $$props) {
         key: "network_id",
         title: "Network",
         render: (vm) => {
-          const net = networkMap().get(vm.network_id);
+          const net = getNetwork(vm.network_id);
           return net?.name ?? vm.network_id;
         }
       },
@@ -313,18 +337,18 @@ function _page($$renderer, $$props) {
     }
     function handleSort(column, direction) {
       if (direction) {
-        table().setSort(column, direction);
+        table.setSort(column, direction);
       } else {
-        table().clearSort();
+        table.clearSort();
       }
     }
     function handleSelect(ids) {
       const newSet = new Set(ids);
-      table().selectedIds.forEach((id) => {
-        if (!newSet.has(id)) table().deselect(id);
+      table.selectedIds.forEach((id) => {
+        if (!newSet.has(id)) table.deselect(id);
       });
       ids.forEach((id) => {
-        if (!table().selectedIds.has(id)) table().select(id);
+        if (!table.selectedIds.has(id)) table.select(id);
       });
     }
     function navigateToVM(vm) {
@@ -336,11 +360,16 @@ function _page($$renderer, $$props) {
       $$renderer3.push(`<div class="flex justify-between items-start mb-6"><div class="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1">`);
       StatsCard($$renderer3, { title: "Total VMs", value: total(), icon: Server });
       $$renderer3.push(`<!----> `);
-      StatsCard($$renderer3, { title: "Running", value: running(), icon: Play, trend: "up" });
+      StatsCard($$renderer3, {
+        title: "Running",
+        value: runningCount()(),
+        icon: Play,
+        trend: "up"
+      });
       $$renderer3.push(`<!----> `);
-      StatsCard($$renderer3, { title: "Stopped", value: stopped(), icon: Square });
+      StatsCard($$renderer3, { title: "Stopped", value: stoppedCount()(), icon: Square });
       $$renderer3.push(`<!----> `);
-      StatsCard($$renderer3, { title: "Other", value: other(), icon: Circle_alert });
+      StatsCard($$renderer3, { title: "Other", value: otherCount()(), icon: Circle_alert });
       $$renderer3.push(`<!----></div> <button class="ml-4 button-primary flex items-center gap-2">`);
       Plus($$renderer3, { size: 16 });
       $$renderer3.push(`<!----> Create VM</button></div> `);
@@ -353,9 +382,9 @@ function _page($$renderer, $$props) {
       $$renderer3.push(`<!--]--> <section class="table-card">`);
       FilterBar($$renderer3, {
         filters: filterOptions,
-        activeFilters: table().filters,
-        onFilterChange: table().setFilter,
-        onClearAll: table().clearAllFilters
+        activeFilters: table.filters,
+        onFilterChange: table.setFilter,
+        onClearAll: table.clearAllFilters
       });
       $$renderer3.push(`<!----> `);
       {
@@ -381,13 +410,13 @@ function _page($$renderer, $$props) {
           $$renderer4.push(`<!----></button></div>`);
         };
         DataTable($$renderer3, {
-          data: table().paginatedData,
+          data: table.paginatedData,
           columns,
           loading,
           selectable: true,
-          selectedIds: Array.from(table().selectedIds),
-          sortColumn: table().sortColumn ?? void 0,
-          sortDirection: table().sortDirection,
+          selectedIds: Array.from(table.selectedIds),
+          sortColumn: table.sortColumn ?? void 0,
+          sortDirection: table.sortDirection,
           emptyIcon: Server,
           emptyTitle: "No VMs yet",
           emptyDescription: "Create a virtual machine to get started",
@@ -399,22 +428,22 @@ function _page($$renderer, $$props) {
         });
       }
       $$renderer3.push(`<!----> `);
-      if (!loading && table().totalItems > 0) {
+      if (!loading && table.totalItems > 0) {
         $$renderer3.push("<!--[0-->");
         Pagination($$renderer3, {
-          page: table().page,
-          pageSize: table().pageSize,
-          totalItems: table().totalItems,
-          onPageChange: table().setPage,
-          onPageSizeChange: table().setPageSize
+          page: table.page,
+          pageSize: table.pageSize,
+          totalItems: table.totalItems,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize
         });
       } else {
         $$renderer3.push("<!--[-1-->");
       }
       $$renderer3.push(`<!--]--></section> `);
-      if (table().selectedCount > 0) {
+      if (table.selectedCount > 0) {
         $$renderer3.push("<!--[0-->");
-        $$renderer3.push(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-ink text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300 svelte-1httffh"><div class="flex items-center gap-2 border-r border-white/20 pr-6"><span class="bg-primary text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">${escape_html(table().selectedCount)}</span> <span class="text-sm font-medium">Selected</span></div> <div class="flex items-center gap-4"><button class="flex items-center gap-2 text-sm hover:text-primary transition-colors font-medium">`);
+        $$renderer3.push(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-ink text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300 svelte-1httffh"><div class="flex items-center gap-2 border-r border-white/20 pr-6"><span class="bg-primary text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">${escape_html(table.selectedCount)}</span> <span class="text-sm font-medium">Selected</span></div> <div class="flex items-center gap-4"><button class="flex items-center gap-2 text-sm hover:text-primary transition-colors font-medium">`);
         Play($$renderer3, { size: 14, fill: "currentColor" });
         $$renderer3.push(`<!----> Start</button> <button class="flex items-center gap-2 text-sm hover:text-primary transition-colors font-medium">`);
         Square($$renderer3, { size: 14, fill: "currentColor" });

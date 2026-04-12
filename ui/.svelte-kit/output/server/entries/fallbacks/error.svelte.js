@@ -1,4 +1,4 @@
-import { l as getContext, e as escape_html } from "../../chunks/root.js";
+import { k as getContext, e as escape_html } from "../../chunks/root.js";
 import "clsx";
 import { s as stores } from "../../chunks/client.js";
 ({

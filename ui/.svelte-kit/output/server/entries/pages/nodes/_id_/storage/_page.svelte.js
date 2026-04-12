@@ -1,4 +1,4 @@
-import { n as head, c as attr, i as stringify, e as escape_html, f as derived, j as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
+import { n as head, c as attr, h as stringify, e as escape_html, i as derived, d as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
 import { p as page } from "../../../../../chunks/stores.js";
 import "@sveltejs/kit/internal";
 import "../../../../../chunks/exports.js";
@@ -7,7 +7,7 @@ import "@sveltejs/kit/internal/server";
 import "../../../../../chunks/client.js";
 import { g as getStoredToken, c as createAPIClient } from "../../../../../chunks/client2.js";
 import { D as DataTable } from "../../../../../chunks/DataTable.js";
-import { f as formatBytes, P as Pagination, u as useTable } from "../../../../../chunks/Pagination.js";
+import { u as useTable, f as formatBytes, P as Pagination } from "../../../../../chunks/Pagination.js";
 /* empty css                                                             */
 import { g as getDefaultNode } from "../../../../../chunks/nodes.js";
 import { A as Arrow_left } from "../../../../../chunks/arrow-left.js";
@@ -21,7 +21,7 @@ function _page($$renderer, $$props) {
     const node = derived(getDefaultNode);
     let items = [];
     let loading = true;
-    let table = derived(() => useTable({ data: items, pageSize: 10 }));
+    let table = useTable({ data: [], pageSize: 10 });
     const columns = [
       {
         key: "name",
@@ -61,9 +61,9 @@ function _page($$renderer, $$props) {
     ];
     function handleSort(column, direction) {
       if (direction) {
-        table().setSort(column, direction);
+        table.setSort(column, direction);
       } else {
-        table().clearSort();
+        table.clearSort();
       }
     }
     const totalCapacity = derived(() => items.reduce((acc, p) => acc + (p.capacity_bytes || 0), 0));
@@ -85,21 +85,21 @@ function _page($$renderer, $$props) {
     Hard_drive($$renderer2, { size: 20, class: "text-purple-600" });
     $$renderer2.push(`<!----></div> <div><p class="text-xs text-slate-500 uppercase">Used</p> <p class="text-xl font-bold text-slate-900">${escape_html(totalCapacity() > 0 ? ((totalCapacity() - totalAvailable()) / totalCapacity() * 100).toFixed(1) : 0)}%</p></div></div></div></div> <div class="bg-white rounded-lg shadow-sm border border-slate-200">`);
     DataTable($$renderer2, {
-      data: table().paginatedData,
+      data: table.paginatedData,
       columns,
       loading,
-      sortColumn: table().sortColumn,
-      sortDirection: table().sortDirection,
+      sortColumn: table.sortColumn,
+      sortDirection: table.sortDirection,
       onSort: handleSort,
       rowId: (pool) => pool.id
     });
     $$renderer2.push(`<!----> `);
     Pagination($$renderer2, {
-      page: table().page,
-      pageSize: table().pageSize,
-      totalItems: table().totalItems,
-      onPageChange: (p) => table().setPage(p),
-      onPageSizeChange: (size) => table().setPageSize(size)
+      page: table.page,
+      pageSize: table.pageSize,
+      totalItems: table.totalItems,
+      onPageChange: (p) => table.setPage(p),
+      onPageSizeChange: (size) => table.setPageSize(size)
     });
     $$renderer2.push(`<!----></div></div>`);
     if ($$store_subs) unsubscribe_stores($$store_subs);

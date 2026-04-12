@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, m as attributes, f as derived, i as stringify, c as attr, e as escape_html, g as attr_class, d as ensure_array_like, h as attr_style, n as head } from "../../chunks/root.js";
+import { s as sanitize_props, a as spread_props, b as slot, l as attributes, i as derived, h as stringify, c as attr, e as escape_html, f as attr_class, g as ensure_array_like, m as attr_style, n as head } from "../../chunks/root.js";
 import { o as onDestroy } from "../../chunks/index-server.js";
 import { g as goto } from "../../chunks/client.js";
 import { g as getStoredToken, c as createAPIClient, t as toast } from "../../chunks/client2.js";

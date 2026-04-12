@@ -1,5 +1,26 @@
-import { c as attr, e as escape_html, f as derived, m as attributes, i as stringify, k as bind_props } from "./root.js";
-import { V as VisuallyHidden } from "./VisuallyHidden.js";
+import { c as attr, e as escape_html, i as derived, l as attributes, h as stringify, j as bind_props } from "./root.js";
+import "clsx";
+/* empty css                                             */
+function VisuallyHidden($$renderer, $$props) {
+  let { children, as = "span" } = $$props;
+  if (as === "div") {
+    $$renderer.push("<!--[0-->");
+    $$renderer.push(`<div class="sr-only svelte-1764d75">`);
+    children($$renderer);
+    $$renderer.push(`<!----></div>`);
+  } else if (as === "p") {
+    $$renderer.push("<!--[1-->");
+    $$renderer.push(`<p class="sr-only svelte-1764d75">`);
+    children($$renderer);
+    $$renderer.push(`<!----></p>`);
+  } else {
+    $$renderer.push("<!--[-1-->");
+    $$renderer.push(`<span class="sr-only svelte-1764d75">`);
+    children($$renderer);
+    $$renderer.push(`<!----></span>`);
+  }
+  $$renderer.push(`<!--]-->`);
+}
 function FormField($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let { label, error, helper, required = false, labelFor, children } = $$props;

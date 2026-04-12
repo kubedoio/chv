@@ -1,12 +1,13 @@
-import { k as bind_props, c as attr, e as escape_html, f as derived } from "../../../chunks/root.js";
+import "clsx";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
 import "../../../chunks/utils.js";
 import "@sveltejs/kit/internal/server";
+import { j as bind_props, c as attr, e as escape_html } from "../../../chunks/root.js";
 import "../../../chunks/client.js";
 import { c as createAPIClient, g as getStoredToken, t as toast } from "../../../chunks/client2.js";
 import { D as DataTable } from "../../../chunks/DataTable.js";
-import { f as formatBytes, u as useTable, P as Pagination } from "../../../chunks/Pagination.js";
+import { u as useTable, f as formatBytes, P as Pagination } from "../../../chunks/Pagination.js";
 import { F as FilterBar } from "../../../chunks/FilterBar.js";
 import { S as StateBadge } from "../../../chunks/StateBadge.js";
 import { M as Modal } from "../../../chunks/Modal.js";
@@ -210,7 +211,7 @@ function _page($$renderer, $$props) {
     let items = [];
     let loading = true;
     let createModalOpen = false;
-    let table = derived(() => useTable({ data: items, pageSize: 10 }));
+    let table = useTable({ data: [], pageSize: 10 });
     const filterOptions = [
       {
         key: "pool_type",
@@ -292,9 +293,9 @@ function _page($$renderer, $$props) {
     }
     function handleSort(column, direction) {
       if (direction) {
-        table().setSort(column, direction);
+        table.setSort(column, direction);
       } else {
-        table().clearSort();
+        table.clearSort();
       }
     }
     let $$settled = true;
@@ -305,9 +306,9 @@ function _page($$renderer, $$props) {
       $$renderer3.push(`<!----> Create Pool</button></div> `);
       FilterBar($$renderer3, {
         filters: filterOptions,
-        activeFilters: table().filters,
-        onFilterChange: table().setFilter,
-        onClearAll: table().clearAllFilters
+        activeFilters: table.filters,
+        onFilterChange: table.setFilter,
+        onClearAll: table.clearAllFilters
       });
       $$renderer3.push(`<!----> `);
       {
@@ -315,11 +316,11 @@ function _page($$renderer, $$props) {
           StateBadge($$renderer4, { label: pool.status });
         };
         DataTable($$renderer3, {
-          data: table().paginatedData,
+          data: table.paginatedData,
           columns,
           loading,
-          sortColumn: table().sortColumn ?? void 0,
-          sortDirection: table().sortDirection,
+          sortColumn: table.sortColumn ?? void 0,
+          sortDirection: table.sortDirection,
           emptyIcon: Hard_drive,
           emptyTitle: "No storage pools yet",
           emptyDescription: "Create a storage pool to store VM disks",
@@ -329,14 +330,14 @@ function _page($$renderer, $$props) {
         });
       }
       $$renderer3.push(`<!----> `);
-      if (!loading && table().totalItems > 0) {
+      if (!loading && table.totalItems > 0) {
         $$renderer3.push("<!--[0-->");
         Pagination($$renderer3, {
-          page: table().page,
-          pageSize: table().pageSize,
-          totalItems: table().totalItems,
-          onPageChange: table().setPage,
-          onPageSizeChange: table().setPageSize
+          page: table.page,
+          pageSize: table.pageSize,
+          totalItems: table.totalItems,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize
         });
       } else {
         $$renderer3.push("<!--[-1-->");

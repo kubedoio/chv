@@ -1,4 +1,4 @@
-import { k as bind_props, i as stringify, c as attr, d as ensure_array_like, e as escape_html } from "./root.js";
+import { j as bind_props, h as stringify, c as attr, g as ensure_array_like, e as escape_html } from "./root.js";
 import { M as Modal } from "./Modal.js";
 import { F as FormField, I as Input } from "./Input.js";
 import { c as createAPIClient, g as getStoredToken } from "./client2.js";
@@ -19,7 +19,6 @@ function CreateVMModal($$renderer, $$props) {
     let networkId = "";
     let vcpu = 2;
     let memoryMb = 2048;
-    let consoleType = "pty";
     let submitting = false;
     let nameError = "";
     const nameRegex = /^[a-z0-9-]+$/;
@@ -184,22 +183,7 @@ function CreateVMModal($$renderer, $$props) {
                   );
                 }
               });
-              $$renderer4.push(`<!----> <div><label class="block text-sm font-medium text-gray-700 mb-1">Console Type</label> `);
-              $$renderer4.select(
-                {
-                  value: consoleType,
-                  class: "w-full border border-gray-300 rounded px-3 py-2"
-                },
-                ($$renderer5) => {
-                  $$renderer5.option({ value: "pty" }, ($$renderer6) => {
-                    $$renderer6.push(`PTY (Text Terminal)`);
-                  });
-                  $$renderer5.option({ value: "vnc" }, ($$renderer6) => {
-                    $$renderer6.push(`VNC (Graphical)`);
-                  });
-                }
-              );
-              $$renderer4.push(` <p class="text-xs text-gray-500 mt-1">PTY provides text-based console access. VNC provides graphical desktop access for GUI VMs.</p></div> <div class="grid grid-cols-2 gap-4">`);
+              $$renderer4.push(`<!----> <div class="grid grid-cols-2 gap-4">`);
               FormField($$renderer4, {
                 label: "vCPUs",
                 labelFor: "vm-vcpu",

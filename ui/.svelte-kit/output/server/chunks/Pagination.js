@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, f as derived, e as escape_html, c as attr, d as ensure_array_like, g as attr_class } from "./root.js";
+import { s as sanitize_props, a as spread_props, b as slot, i as derived, e as escape_html, c as attr, g as ensure_array_like, f as attr_class } from "./root.js";
 import { I as Icon } from "./Icon.js";
 import { C as Chevron_right } from "./chevron-right.js";
 function Chevron_left($$renderer, $$props) {
@@ -305,8 +305,14 @@ function useTable(options) {
     return row.id;
   }
   const selectedCount = derived(() => selectedIds.size);
-  const isAllSelected = derived(() => paginatedData().length > 0 && paginatedData().every((item) => selectedIds.has(getRowId(item))));
-  const isPartiallySelected = derived(() => paginatedData().some((item) => selectedIds.has(getRowId(item))) && !paginatedData().every((item) => selectedIds.has(getRowId(item))));
+  const isAllSelected = derived(() => () => {
+    return paginatedData().length > 0 && paginatedData().every((item) => selectedIds.has(getRowId(item)));
+  });
+  const isPartiallySelected = derived(() => () => {
+    const hasSome = paginatedData().some((item) => selectedIds.has(getRowId(item)));
+    const hasAll = paginatedData().every((item) => selectedIds.has(getRowId(item)));
+    return hasSome && !hasAll;
+  });
   const activeFilterCount = derived(() => Object.values(filters).filter((v) => v !== void 0 && v !== null && v !== "").length);
   function sort(column) {
     if (sortColumn === column) {
@@ -414,9 +420,12 @@ function useTable(options) {
     return paginatedData().map(getId);
   }
   return {
-    // Data (readonly getters)
+    // Data
     get data() {
       return data;
+    },
+    set data(newData) {
+      data = newData;
     },
     get sortedData() {
       return sortedData();
@@ -461,10 +470,10 @@ function useTable(options) {
       return selectedCount();
     },
     get isAllSelected() {
-      return isAllSelected();
+      return isAllSelected()();
     },
     get isPartiallySelected() {
-      return isPartiallySelected();
+      return isPartiallySelected()();
     },
     toggleSelect,
     select,

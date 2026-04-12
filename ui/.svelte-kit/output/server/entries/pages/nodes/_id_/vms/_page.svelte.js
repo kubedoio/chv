@@ -1,4 +1,4 @@
-import { n as head, e as escape_html, c as attr, i as stringify, f as derived, j as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
+import { n as head, e as escape_html, c as attr, h as stringify, i as derived, d as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
 import { p as page } from "../../../../../chunks/stores.js";
 import "@sveltejs/kit/internal";
 import "../../../../../chunks/exports.js";
@@ -7,7 +7,7 @@ import "@sveltejs/kit/internal/server";
 import "../../../../../chunks/client.js";
 import { g as getStoredToken, c as createAPIClient, t as toast } from "../../../../../chunks/client2.js";
 import { D as DataTable } from "../../../../../chunks/DataTable.js";
-import { P as Pagination, u as useTable } from "../../../../../chunks/Pagination.js";
+import { u as useTable, P as Pagination } from "../../../../../chunks/Pagination.js";
 import { F as FilterBar } from "../../../../../chunks/FilterBar.js";
 /* empty css                                                             */
 import { C as CreateVMModal } from "../../../../../chunks/CreateVMModal.js";
@@ -36,7 +36,7 @@ function _page($$renderer, $$props) {
       action: async () => {
       }
     };
-    let table = derived(() => useTable({ data: items, pageSize: 10 }));
+    let table = useTable({ data: [], pageSize: 10 });
     const imageMap = derived(() => new Map(images.map((i) => [i.id, i])));
     const poolMap = derived(() => new Map(pools.map((p) => [p.id, p])));
     const filterOptions = [
@@ -134,9 +134,9 @@ function _page($$renderer, $$props) {
     }
     function handleSort(column, direction) {
       if (direction) {
-        table().setSort(column, direction);
+        table.setSort(column, direction);
       } else {
-        table().clearSort();
+        table.clearSort();
       }
     }
     let $$settled = true;
@@ -162,33 +162,33 @@ function _page($$renderer, $$props) {
       $$renderer3.push(`<!----></div> <div><p class="text-xs text-slate-500 uppercase">Error</p> <p class="text-xl font-bold text-slate-900">${escape_html(items.filter((v) => v.actual_state === "error").length)}</p></div></div></div></div> <div class="bg-white rounded-lg shadow-sm border border-slate-200">`);
       FilterBar($$renderer3, {
         filters: filterOptions,
-        activeFilters: { actual_state: table().filters.actual_state },
-        onFilterChange: (key, value) => table().setFilter(key, value),
-        onClearAll: table().clearAllFilters
+        activeFilters: { actual_state: table.filters.actual_state },
+        onFilterChange: (key, value) => table.setFilter(key, value),
+        onClearAll: table.clearAllFilters
       });
       $$renderer3.push(`<!----> `);
       DataTable($$renderer3, {
-        data: table().paginatedData,
+        data: table.paginatedData,
         columns,
         loading,
         selectable: true,
-        selectedIds: Array.from(table().selectedIds),
-        sortColumn: table().sortColumn,
-        sortDirection: table().sortDirection,
+        selectedIds: Array.from(table.selectedIds),
+        sortColumn: table.sortColumn,
+        sortDirection: table.sortDirection,
         onSort: handleSort,
         onSelect: (ids) => {
-          table().selectNone();
-          ids.forEach((id) => table().select(id));
+          table.selectNone();
+          ids.forEach((id) => table.select(id));
         },
         rowId: (vm) => vm.id
       });
       $$renderer3.push(`<!----> `);
       Pagination($$renderer3, {
-        page: table().page,
-        pageSize: table().pageSize,
-        totalItems: table().totalItems,
-        onPageChange: (p) => table().setPage(p),
-        onPageSizeChange: (size) => table().setPageSize(size)
+        page: table.page,
+        pageSize: table.pageSize,
+        totalItems: table.totalItems,
+        onPageChange: (p) => table.setPage(p),
+        onPageSizeChange: (size) => table.setPageSize(size)
       });
       $$renderer3.push(`<!----></div></div> `);
       CreateVMModal($$renderer3, {

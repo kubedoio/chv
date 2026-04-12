@@ -3,9 +3,12 @@ import { o as onDestroy } from "../../../../chunks/index-server.js";
 import { g as goto } from "../../../../chunks/client.js";
 import { c as createAPIClient, g as getStoredToken } from "../../../../chunks/client2.js";
 /* empty css                                                          */
-import { k as bind_props, e as escape_html } from "../../../../chunks/root.js";
+import { j as bind_props, e as escape_html } from "../../../../chunks/root.js";
 import { M as Modal } from "../../../../chunks/Modal.js";
 import { T as Triangle_alert } from "../../../../chunks/triangle-alert.js";
+import "xterm";
+import "xterm-addon-attach";
+import "xterm-addon-fit";
 function DeleteVMModal($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let { open = false, vm = null, onSuccess } = $$props;

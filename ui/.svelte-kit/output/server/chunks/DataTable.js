@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, c as attr, g as attr_class, d as ensure_array_like, i as stringify, h as attr_style, e as escape_html, f as derived } from "./root.js";
+import { s as sanitize_props, a as spread_props, b as slot, c as attr, f as attr_class, g as ensure_array_like, h as stringify, m as attr_style, e as escape_html, i as derived } from "./root.js";
 import { S as SkeletonRow } from "./EmptyState.svelte_svelte_type_style_lang.js";
 import { E as EmptyState } from "./EmptyState.js";
 import { I as Icon } from "./Icon.js";
@@ -435,12 +435,27 @@ function DataTable($$renderer, $$props) {
       children
     } = $$props;
     let columnVisibilityOpen = false;
-    let visibleColumns = new Set(columns.map((c) => c.key));
-    let columnWidths = {};
-    const visibleColumnList = derived(() => columns.filter((col) => visibleColumns.has(col.key)));
-    const selectedSet = derived(() => new Set(selectedIds));
-    const isAllSelected = derived(() => selectable && data.length > 0 && data.every((row) => selectedSet().has(rowId(row))));
-    const isPartiallySelected = derived(() => selectable && data.some((row) => selectedSet().has(rowId(row))) && !isAllSelected());
+    new Set(columns.map((c) => c.key));
+    function initColumnWidths() {
+      const widths = {};
+      columns.forEach((col) => {
+        if (col.width) {
+          widths[col.key] = col.width;
+        }
+      });
+      return widths;
+    }
+    let columnWidths = initColumnWidths();
+    let isAllSelected = derived(() => () => {
+      if (!selectable || data.length === 0) return false;
+      return data.every((row) => selectedIds.includes(rowId(row)));
+    });
+    let isPartiallySelected = derived(() => () => {
+      if (!selectable) return false;
+      const someSelected = data.some((row) => selectedIds.includes(rowId(row)));
+      const allSelected = data.every((row) => selectedIds.includes(rowId(row)));
+      return someSelected && !allSelected;
+    });
     function getSortAriaSort(column) {
       if (!column.sortable || sortColumn !== column.key) return "none";
       return sortDirection === "asc" ? "ascending" : "descending";
@@ -484,11 +499,11 @@ function DataTable($$renderer, $$props) {
     $$renderer2.push(`<!--]--> <div class="datatable-container svelte-16k18c8"><table${attr_class("datatable svelte-16k18c8", void 0, { "resizing": false })}><thead class="datatable-head svelte-16k18c8"><tr>`);
     if (selectable) {
       $$renderer2.push("<!--[0-->");
-      $$renderer2.push(`<th class="col-select svelte-16k18c8" scope="col"><button type="button" class="select-btn svelte-16k18c8"${attr("aria-label", isAllSelected() ? "Deselect all" : "Select all")}>`);
-      if (isAllSelected()) {
+      $$renderer2.push(`<th class="col-select svelte-16k18c8" scope="col"><button type="button" class="select-btn svelte-16k18c8"${attr("aria-label", isAllSelected()() ? "Deselect all" : "Select all")}>`);
+      if (isAllSelected()()) {
         $$renderer2.push("<!--[0-->");
         Square_check_big($$renderer2, { size: 16, class: "text-primary" });
-      } else if (isPartiallySelected()) {
+      } else if (isPartiallySelected()()) {
         $$renderer2.push("<!--[1-->");
         Square_minus($$renderer2, { size: 16, class: "text-primary" });
       } else {
@@ -500,7 +515,7 @@ function DataTable($$renderer, $$props) {
       $$renderer2.push("<!--[-1-->");
     }
     $$renderer2.push(`<!--]--><!--[-->`);
-    const each_array_1 = ensure_array_like(visibleColumnList());
+    const each_array_1 = ensure_array_like(visibleColumnList);
     for (let $$index_1 = 0, $$length = each_array_1.length; $$index_1 < $$length; $$index_1++) {
       let column = each_array_1[$$index_1];
       $$renderer2.push(`<th${attr_class(`datatable-th ${stringify(getCellAlignment(column.align))}`, "svelte-16k18c8", { "sortable": column.sortable })}${attr("data-column", column.key)} scope="col"${attr("aria-sort", getSortAriaSort(column))}${attr_style("", { width: columnWidths[column.key] ?? column.width })}>`);
@@ -538,13 +553,13 @@ function DataTable($$renderer, $$props) {
       for (let $$index_2 = 0, $$length = each_array_2.length; $$index_2 < $$length; $$index_2++) {
         each_array_2[$$index_2];
         SkeletonRow($$renderer2, {
-          columns: visibleColumnList().length + (selectable ? 1 : 0) + (children ? 1 : 0)
+          columns: visibleColumnList.length + (selectable ? 1 : 0) + (children ? 1 : 0)
         });
       }
       $$renderer2.push(`<!--]-->`);
     } else if (data.length === 0) {
       $$renderer2.push("<!--[1-->");
-      $$renderer2.push(`<tr><td${attr("colspan", visibleColumnList().length + (selectable ? 1 : 0) + (children ? 1 : 0))} class="empty-cell svelte-16k18c8">`);
+      $$renderer2.push(`<tr><td${attr("colspan", visibleColumnList.length + (selectable ? 1 : 0) + (children ? 1 : 0))} class="empty-cell svelte-16k18c8">`);
       EmptyState($$renderer2, {
         icon: emptyIcon,
         title: emptyTitle,
@@ -558,11 +573,14 @@ function DataTable($$renderer, $$props) {
       for (let $$index_4 = 0, $$length = each_array_3.length; $$index_4 < $$length; $$index_4++) {
         let row = each_array_3[$$index_4];
         const id = rowId(row);
-        $$renderer2.push(`<tr${attr_class("datatable-row svelte-16k18c8", void 0, { "selected": selectedSet().has(id), "clickable": !!onRowClick })}>`);
+        $$renderer2.push(`<tr${attr_class("datatable-row svelte-16k18c8", void 0, {
+          "selected": selectedIds.includes(id),
+          "clickable": !!onRowClick
+        })}>`);
         if (selectable) {
           $$renderer2.push("<!--[0-->");
-          $$renderer2.push(`<td class="col-select svelte-16k18c8"><button type="button" class="select-btn svelte-16k18c8"${attr("aria-label", selectedSet().has(id) ? "Deselect row" : "Select row")}>`);
-          if (selectedSet().has(id)) {
+          $$renderer2.push(`<td class="col-select svelte-16k18c8"><button type="button" class="select-btn svelte-16k18c8"${attr("aria-label", selectedIds.includes(id) ? "Deselect row" : "Select row")}>`);
+          if (selectedIds.includes(id)) {
             $$renderer2.push("<!--[0-->");
             Square_check_big($$renderer2, { size: 16, class: "text-primary" });
           } else {
@@ -574,7 +592,7 @@ function DataTable($$renderer, $$props) {
           $$renderer2.push("<!--[-1-->");
         }
         $$renderer2.push(`<!--]--><!--[-->`);
-        const each_array_4 = ensure_array_like(visibleColumnList());
+        const each_array_4 = ensure_array_like(visibleColumnList);
         for (let $$index_3 = 0, $$length2 = each_array_4.length; $$index_3 < $$length2; $$index_3++) {
           let column = each_array_4[$$index_3];
           $$renderer2.push(`<td${attr_class(`datatable-cell ${stringify(getCellAlignment(column.align))}`, "svelte-16k18c8")}>`);

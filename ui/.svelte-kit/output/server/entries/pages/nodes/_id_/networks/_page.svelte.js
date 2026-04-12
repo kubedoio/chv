@@ -1,4 +1,4 @@
-import { n as head, e as escape_html, c as attr, i as stringify, f as derived, j as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
+import { n as head, e as escape_html, c as attr, h as stringify, i as derived, d as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
 import { p as page } from "../../../../../chunks/stores.js";
 import "@sveltejs/kit/internal";
 import "../../../../../chunks/exports.js";
@@ -7,7 +7,7 @@ import "@sveltejs/kit/internal/server";
 import "../../../../../chunks/client.js";
 import { g as getStoredToken, c as createAPIClient, t as toast } from "../../../../../chunks/client2.js";
 import { D as DataTable } from "../../../../../chunks/DataTable.js";
-import { P as Pagination, u as useTable } from "../../../../../chunks/Pagination.js";
+import { u as useTable, P as Pagination } from "../../../../../chunks/Pagination.js";
 /* empty css                                                             */
 import { C as CreateNetworkModal } from "../../../../../chunks/CreateNetworkModal.js";
 import { g as getDefaultNode } from "../../../../../chunks/nodes.js";
@@ -24,7 +24,7 @@ function _page($$renderer, $$props) {
     let items = [];
     let loading = true;
     let createModalOpen = false;
-    let table = derived(() => useTable({ data: items, pageSize: 10 }));
+    let table = useTable({ data: [], pageSize: 10 });
     const columns = [
       {
         key: "name",
@@ -78,9 +78,9 @@ function _page($$renderer, $$props) {
     }
     function handleSort(column, direction) {
       if (direction) {
-        table().setSort(column, direction);
+        table.setSort(column, direction);
       } else {
-        table().clearSort();
+        table.clearSort();
       }
     }
     let $$settled = true;
@@ -105,21 +105,21 @@ function _page($$renderer, $$props) {
       Network($$renderer3, { size: 20, class: "text-green-600" });
       $$renderer3.push(`<!----></div> <div><p class="text-xs text-slate-500 uppercase">Active</p> <p class="text-xl font-bold text-slate-900">${escape_html(items.filter((n) => n.status === "active").length)}</p></div></div></div></div> <div class="bg-white rounded-lg shadow-sm border border-slate-200">`);
       DataTable($$renderer3, {
-        data: table().paginatedData,
+        data: table.paginatedData,
         columns,
         loading,
-        sortColumn: table().sortColumn,
-        sortDirection: table().sortDirection,
+        sortColumn: table.sortColumn,
+        sortDirection: table.sortDirection,
         onSort: handleSort,
         rowId: (net) => net.id
       });
       $$renderer3.push(`<!----> `);
       Pagination($$renderer3, {
-        page: table().page,
-        pageSize: table().pageSize,
-        totalItems: table().totalItems,
-        onPageChange: (p) => table().setPage(p),
-        onPageSizeChange: (size) => table().setPageSize(size)
+        page: table.page,
+        pageSize: table.pageSize,
+        totalItems: table.totalItems,
+        onPageChange: (p) => table.setPage(p),
+        onPageSizeChange: (size) => table.setPageSize(size)
       });
       $$renderer3.push(`<!----></div></div> `);
       CreateNetworkModal($$renderer3, {

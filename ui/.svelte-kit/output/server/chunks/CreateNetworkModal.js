@@ -1,4 +1,4 @@
-import { k as bind_props, c as attr, e as escape_html } from "./root.js";
+import { j as bind_props, c as attr, e as escape_html } from "./root.js";
 import { M as Modal } from "./Modal.js";
 import { F as FormField, I as Input } from "./Input.js";
 import { S as Select } from "./Select.js";

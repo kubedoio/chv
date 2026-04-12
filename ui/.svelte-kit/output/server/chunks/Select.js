@@ -1,4 +1,4 @@
-import { i as stringify, e as escape_html, d as ensure_array_like, k as bind_props, f as derived } from "./root.js";
+import { h as stringify, e as escape_html, g as ensure_array_like, j as bind_props, i as derived } from "./root.js";
 function Select($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let {

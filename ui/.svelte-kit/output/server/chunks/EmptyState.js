@@ -1,4 +1,4 @@
-import { c as attr, e as escape_html, i as stringify } from "./root.js";
+import { c as attr, e as escape_html, h as stringify } from "./root.js";
 import "./EmptyState.svelte_svelte_type_style_lang.js";
 function EmptyState($$renderer, $$props) {
   let { icon: Icon, title, description, children, role = "status" } = $$props;

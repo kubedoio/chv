@@ -1,4 +1,4 @@
-import { e as escape_html, g as attr_class, i as stringify, h as attr_style, c as attr, f as derived } from "../../../chunks/root.js";
+import { e as escape_html, f as attr_class, h as stringify, m as attr_style, c as attr, i as derived } from "../../../chunks/root.js";
 import { o as onDestroy } from "../../../chunks/index-server.js";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
@@ -56,7 +56,7 @@ function _page($$renderer, $$props) {
     let importModalOpen = false;
     let progressMap = /* @__PURE__ */ new Map();
     const hasImportingImages = derived(() => items.some((img) => img.status === "importing"));
-    let table = derived(() => useTable({ data: items, pageSize: 10 }));
+    let table = useTable({ data: [], pageSize: 10 });
     const filterOptions = [
       {
         key: "status",
@@ -144,9 +144,9 @@ function _page($$renderer, $$props) {
     });
     function handleSort(column, direction) {
       if (direction) {
-        table().setSort(column, direction);
+        table.setSort(column, direction);
       } else {
-        table().clearSort();
+        table.clearSort();
       }
     }
     function getProgressForImage(imageId) {
@@ -174,9 +174,9 @@ function _page($$renderer, $$props) {
       $$renderer3.push(`<!----> Import</button></div></div> `);
       FilterBar($$renderer3, {
         filters: filterOptions,
-        activeFilters: table().filters,
-        onFilterChange: table().setFilter,
-        onClearAll: table().clearAllFilters
+        activeFilters: table.filters,
+        onFilterChange: table.setFilter,
+        onClearAll: table.clearAllFilters
       });
       $$renderer3.push(`<!----> `);
       {
@@ -205,11 +205,11 @@ function _page($$renderer, $$props) {
           $$renderer4.push(`<!--]-->`);
         };
         DataTable($$renderer3, {
-          data: table().paginatedData,
+          data: table.paginatedData,
           columns,
           loading,
-          sortColumn: table().sortColumn ?? void 0,
-          sortDirection: table().sortDirection,
+          sortColumn: table.sortColumn ?? void 0,
+          sortDirection: table.sortDirection,
           emptyIcon: Image,
           emptyTitle: "No images yet",
           emptyDescription: "Import cloud images to create VMs from",
@@ -219,14 +219,14 @@ function _page($$renderer, $$props) {
         });
       }
       $$renderer3.push(`<!----> `);
-      if (!loading && table().totalItems > 0) {
+      if (!loading && table.totalItems > 0) {
         $$renderer3.push("<!--[0-->");
         Pagination($$renderer3, {
-          page: table().page,
-          pageSize: table().pageSize,
-          totalItems: table().totalItems,
-          onPageChange: table().setPage,
-          onPageSizeChange: table().setPageSize
+          page: table.page,
+          pageSize: table.pageSize,
+          totalItems: table.totalItems,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize
         });
       } else {
         $$renderer3.push("<!--[-1-->");

@@ -1,113 +1,31 @@
-import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, d as ensure_array_like, f as derived, g as attr_class, h as attr_style, i as stringify, j as store_get, u as unsubscribe_stores, k as bind_props } from "../../chunks/root.js";
+import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, d as store_get, f as attr_class, g as ensure_array_like, h as stringify, u as unsubscribe_stores, i as derived, j as bind_props } from "../../chunks/root.js";
 import "@sveltejs/kit/internal";
 import "../../chunks/exports.js";
 import "../../chunks/utils.js";
 import "@sveltejs/kit/internal/server";
 import { g as goto } from "../../chunks/client.js";
 import { p as page } from "../../chunks/stores.js";
-import { c as createAPIClient, t as toast } from "../../chunks/client2.js";
-import { V as VisuallyHidden } from "../../chunks/VisuallyHidden.js";
+import { t as toast } from "../../chunks/client2.js";
+/* empty css                                                        */
 import { D as Database } from "../../chunks/database.js";
+import { I as Icon } from "../../chunks/Icon.js";
 import { C as Chevron_down } from "../../chunks/chevron-down.js";
 import { C as Chevron_right } from "../../chunks/chevron-right.js";
 import { C as Circle } from "../../chunks/circle.js";
-import { I as Icon } from "../../chunks/Icon.js";
-import { S as Settings } from "../../chunks/settings.js";
-import { A as Activity } from "../../chunks/activity.js";
+import { S as Server } from "../../chunks/server.js";
 import { N as Network } from "../../chunks/network.js";
 import { H as Hard_drive } from "../../chunks/hard-drive.js";
-import { I as Image } from "../../chunks/image.js";
-import { S as Server } from "../../chunks/server.js";
 import "clsx";
 import { X } from "../../chunks/x.js";
 import { C as Clock } from "../../chunks/clock.js";
+import { I as Image } from "../../chunks/image.js";
 import { h as html } from "../../chunks/html.js";
 import Fuse from "fuse.js";
 import { P as Plus } from "../../chunks/plus.js";
 import { D as Download } from "../../chunks/download.js";
 import { R as Refresh_cw } from "../../chunks/refresh-cw.js";
+import { S as Settings } from "../../chunks/settings.js";
 import { g as getDefaultNode } from "../../chunks/nodes.js";
-function Chart_column($$renderer, $$props) {
-  const $$sanitized_props = sanitize_props($$props);
-  /**
-   * @license lucide-svelte v1.0.1 - ISC
-   *
-   * ISC License
-   *
-   * Copyright (c) 2026 Lucide Icons and Contributors
-   *
-   * Permission to use, copy, modify, and/or distribute this software for any
-   * purpose with or without fee is hereby granted, provided that the above
-   * copyright notice and this permission notice appear in all copies.
-   *
-   * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-   * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-   * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-   * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-   * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-   * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-   * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-   *
-   * ---
-   *
-   * The following Lucide icons are derived from the Feather project:
-   *
-   * airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
-   *
-   * The MIT License (MIT) (for the icons listed above)
-   *
-   * Copyright (c) 2013-present Cole Bemis
-   *
-   * Permission is hereby granted, free of charge, to any person obtaining a copy
-   * of this software and associated documentation files (the "Software"), to deal
-   * in the Software without restriction, including without limitation the rights
-   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-   * copies of the Software, and to permit persons to whom the Software is
-   * furnished to do so, subject to the following conditions:
-   *
-   * The above copyright notice and this permission notice shall be included in all
-   * copies or substantial portions of the Software.
-   *
-   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-   * SOFTWARE.
-   *
-   */
-  const iconNode = [
-    ["path", { "d": "M3 3v16a2 2 0 0 0 2 2h16" }],
-    ["path", { "d": "M18 17V9" }],
-    ["path", { "d": "M13 17V5" }],
-    ["path", { "d": "M8 17v-3" }]
-  ];
-  Icon($$renderer, spread_props([
-    { name: "chart-column" },
-    $$sanitized_props,
-    {
-      /**
-       * @component @name ChartColumn
-       * @description Lucide SVG icon component, renders SVG Element with children.
-       *
-       * @preview ![img](data:image/svg+xml;base64,PHN2ZyAgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIgogIHdpZHRoPSIyNCIKICBoZWlnaHQ9IjI0IgogIHZpZXdCb3g9IjAgMCAyNCAyNCIKICBmaWxsPSJub25lIgogIHN0cm9rZT0iIzAwMCIgc3R5bGU9ImJhY2tncm91bmQtY29sb3I6ICNmZmY7IGJvcmRlci1yYWRpdXM6IDJweCIKICBzdHJva2Utd2lkdGg9IjIiCiAgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIgogIHN0cm9rZS1saW5lam9pbj0icm91bmQiCj4KICA8cGF0aCBkPSJNMyAzdjE2YTIgMiAwIDAgMCAyIDJoMTYiIC8+CiAgPHBhdGggZD0iTTE4IDE3VjkiIC8+CiAgPHBhdGggZD0iTTEzIDE3VjUiIC8+CiAgPHBhdGggZD0iTTggMTd2LTMiIC8+Cjwvc3ZnPgo=) - https://lucide.dev/icons/chart-column
-       * @see https://lucide.dev/guide/packages/lucide-svelte - Documentation
-       *
-       * @param {Object} props - Lucide icons props and any valid SVG attribute
-       * @returns {FunctionalComponent} Svelte component
-       *
-       */
-      iconNode,
-      children: ($$renderer2) => {
-        $$renderer2.push(`<!--[-->`);
-        slot($$renderer2, $$props, "default", {});
-        $$renderer2.push(`<!--]-->`);
-      },
-      $$slots: { default: true }
-    }
-  ]));
-}
 function Command($$renderer, $$props) {
   const $$sanitized_props = sanitize_props($$props);
   /**
@@ -807,268 +725,144 @@ function TreeNavigation($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     var $$store_subs;
     let { nodes = [] } = $$props;
-    function generateTree(nodes2) {
-      const nodeChildren = nodes2.map((node) => ({
-        id: node.id,
-        type: "node",
-        label: node.name,
-        status: node.status,
-        expanded: true,
-        href: `/nodes/${node.id}`,
-        children: [
-          {
-            id: `${node.id}-vms`,
-            type: "resource",
-            label: "Virtual Machines",
-            icon: "server",
-            href: `/nodes/${node.id}/vms`,
-            badge: node.resources?.vms ?? 0
-          },
-          {
-            id: `${node.id}-images`,
-            type: "resource",
-            label: "Images",
-            icon: "image",
-            href: `/nodes/${node.id}/images`,
-            badge: node.resources?.images ?? 0
-          },
-          {
-            id: `${node.id}-storage`,
-            type: "resource",
-            label: "Storage",
-            icon: "hardDrive",
-            href: `/nodes/${node.id}/storage`,
-            badge: node.resources?.storagePools ?? 0
-          },
-          {
-            id: `${node.id}-networks`,
-            type: "resource",
-            label: "Networks",
-            icon: "network",
-            href: `/nodes/${node.id}/networks`,
-            badge: node.resources?.networks ?? 0
-          }
-        ]
-      }));
-      return [
-        {
-          id: "datacenter",
-          type: "datacenter",
-          label: "Datacenter",
-          expanded: true,
-          icon: "datacenter",
-          href: "/",
-          children: [
-            {
-              id: "overview",
-              type: "resource",
-              label: "Overview",
-              icon: "layout",
-              href: "/"
-            },
-            ...nodeChildren.length > 0 ? nodeChildren : [],
-            {
-              id: "global-images",
-              type: "resource",
-              label: "Images",
-              icon: "image",
-              href: "/images"
-            },
-            {
-              id: "global-storage",
-              type: "resource",
-              label: "Storage",
-              icon: "hardDrive",
-              href: "/storage"
-            },
-            {
-              id: "global-networks",
-              type: "resource",
-              label: "Networks",
-              icon: "network",
-              href: "/networks"
-            },
-            {
-              id: "global-metrics",
-              type: "resource",
-              label: "Metrics",
-              icon: "metrics",
-              href: "/metrics"
-            }
-          ]
-        }
-      ];
-    }
-    let treeNodes = derived(() => generateTree(nodes));
-    let expandedNodes = /* @__PURE__ */ new Set(["datacenter"]);
-    let currentPath = derived(() => store_get($$store_subs ??= {}, "$page", page).url.pathname);
-    let focusedNodeId = null;
-    createAPIClient();
-    function isExpanded(node) {
-      return node.expanded || expandedNodes.has(node.id);
+    let vms = [];
+    let expandedNodes = /* @__PURE__ */ new Set(["datacenter", "nodes"]);
+    let currentPath = store_get($$store_subs ??= {}, "$page", page).url.pathname;
+    function isExpanded(nodeId) {
+      return expandedNodes.has(nodeId);
     }
     function isActive(href) {
       if (!href) return false;
-      if (href === "/") return currentPath() === "/";
-      return currentPath().startsWith(href);
-    }
-    function isNodeActive(node) {
-      if (!node.href) return false;
-      return isActive(node.href);
-    }
-    function getIcon(iconName) {
-      switch (iconName) {
-        case "server":
-          return Server;
-        case "image":
-          return Image;
-        case "hardDrive":
-          return Hard_drive;
-        case "network":
-          return Network;
-        case "activity":
-          return Activity;
-        case "settings":
-          return Settings;
-        case "datacenter":
-          return Database;
-        case "folder":
-          return Folder_tree;
-        case "layout":
-          return Layout_grid;
-        case "metrics":
-          return Chart_column;
-        default:
-          return Circle;
-      }
+      if (href === "/") return currentPath === "/";
+      return currentPath.startsWith(href);
     }
     function getStatusColor(status) {
       switch (status) {
         case "online":
+        case "running":
           return "text-green-500";
         case "offline":
-          return "text-red-500";
+        case "stopped":
+          return "text-gray-400";
         case "warning":
           return "text-yellow-500";
-        case "maintenance":
-          return "text-orange-500";
+        case "error":
+          return "text-red-500";
         default:
           return "text-slate-400";
       }
     }
-    function getStatusLabel(status) {
-      switch (status) {
-        case "online":
-          return "Online";
-        case "offline":
-          return "Offline";
-        case "warning":
-          return "Warning";
-        case "maintenance":
-          return "Maintenance";
-        default:
-          return "Unknown";
-      }
+    $$renderer2.push(`<aside class="h-screen flex flex-col bg-[#252532] text-slate-300 w-64 border-r border-[#1e1e28] svelte-2ilt8a" role="navigation" aria-label="Main navigation"><header class="h-14 flex items-center px-4 border-b border-[#1e1e28] bg-[#1e1e28]"><div class="flex items-center gap-3"><div class="w-8 h-8 rounded bg-gradient-to-br from-[#e57035] to-[#d14a28] flex items-center justify-center">`);
+    Database($$renderer2, { class: "text-white", size: 18 });
+    $$renderer2.push(`<!----></div> <div><div class="text-sm font-semibold text-white">CHV Manager</div> <div class="text-[10px] text-slate-500">Virtualization Platform</div></div></div></header> <nav class="flex-1 overflow-y-auto py-2 svelte-2ilt8a" aria-label="Resource tree"><ul role="tree"><li class="select-none"><div${attr_class(`mx-2 rounded-md ${stringify(isActive("/") ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5")}`)}><a href="/" class="flex items-center gap-2 px-3 py-2 text-sm"${attr("aria-current", isActive("/") ? "page" : void 0)}>`);
+    Database($$renderer2, {
+      size: 16,
+      class: isActive("/") ? "text-[#e57035]" : "text-slate-400"
+    });
+    $$renderer2.push(`<!----> <span class="flex-1 truncate font-medium">Datacenter</span></a></div> <ul class="mt-0.5"><li class="select-none"><div${attr_class(`mx-2 rounded-md ${stringify(isActive("/") ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5")}`)} style="margin-left: 1.25rem;"><a href="/" class="flex items-center gap-2 px-3 py-2 text-sm"${attr("aria-current", isActive("/") ? "page" : void 0)}>`);
+    Layout_grid($$renderer2, {
+      size: 16,
+      class: isActive("/") ? "text-[#e57035]" : "text-slate-400"
+    });
+    $$renderer2.push(`<!----> <span class="truncate">Overview</span></a></div></li></ul></li> <li class="select-none mt-2"><div class="mx-2 rounded-md hover:bg-white/5"><button type="button" class="flex items-center gap-2 w-full px-3 py-2 text-sm text-left"${attr("aria-expanded", isExpanded("nodes"))}>`);
+    if (isExpanded("nodes")) {
+      $$renderer2.push("<!--[0-->");
+      Chevron_down($$renderer2, { size: 14, class: "text-slate-400" });
+    } else {
+      $$renderer2.push("<!--[-1-->");
+      Chevron_right($$renderer2, { size: 14, class: "text-slate-400" });
     }
-    function treeNodeItem($$renderer3, node, level) {
-      const expanded = isExpanded(node);
-      const active = isNodeActive(node);
-      const hasChildren = node.children && node.children.length > 0;
-      const IconComponent = getIcon(node.icon);
-      const paddingLeft = `${0.5 + level * 0.75}rem`;
-      $$renderer3.push(`<li class="select-none" role="none"><div${attr_class(`group flex items-center relative mx-2 rounded-md transition-all duration-150 ${stringify(active ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5 hover:text-slate-100")}`)}${attr_style(`margin-left: ${stringify(paddingLeft)}; margin-right: 0.5rem;`)}>`);
-      if (active) {
-        $$renderer3.push("<!--[0-->");
-        $$renderer3.push(`<div class="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-6 bg-[#e57035] rounded-full" aria-hidden="true"></div>`);
-      } else {
-        $$renderer3.push("<!--[-1-->");
-      }
-      $$renderer3.push(`<!--]--> <a${attr("data-tree-node", node.id)}${attr("href", node.href || "#")} class="flex items-center gap-2 flex-1 px-3 py-2 text-sm focus-visible:outline-none svelte-2ilt8a"${attr_style(`padding-left: calc(0.5rem + ${stringify(active ? "2px" : "0")});`)} role="treeitem"${attr("aria-expanded", hasChildren ? expanded : void 0)}${attr("aria-selected", active)}${attr("aria-current", active ? "page" : void 0)}${attr("tabindex", focusedNodeId === node.id || active ? 0 : -1)}>`);
-      if (hasChildren) {
-        $$renderer3.push("<!--[0-->");
-        $$renderer3.push(`<button type="button" class="w-5 h-5 flex items-center justify-center rounded hover:bg-white/10 transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#e57035] focus-visible:outline-offset-0" tabindex="-1"${attr("aria-label", expanded ? `Collapse ${node.label}` : `Expand ${node.label}`)}${attr("aria-expanded", expanded)}>`);
-        if (expanded) {
-          $$renderer3.push("<!--[0-->");
-          Chevron_down($$renderer3, {
-            size: 14,
-            class: "text-slate-400 transition-transform duration-150",
-            "aria-hidden": "true"
-          });
+    $$renderer2.push(`<!--]--> `);
+    Folder_tree($$renderer2, { size: 16, class: "text-slate-400" });
+    $$renderer2.push(`<!----> <span class="flex-1 truncate font-medium">Nodes</span></button></div> `);
+    if (isExpanded("nodes")) {
+      $$renderer2.push("<!--[0-->");
+      $$renderer2.push(`<ul class="mt-0.5"><!--[-->`);
+      const each_array = ensure_array_like(nodes);
+      for (let $$index_1 = 0, $$length = each_array.length; $$index_1 < $$length; $$index_1++) {
+        let node = each_array[$$index_1];
+        $$renderer2.push(`<li class="select-none"><div${attr_class(`mx-2 rounded-md ${stringify(isActive(`/nodes/${node.id}`) ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5")}`)} style="margin-left: 1.25rem;"><button type="button" class="flex items-center gap-2 w-full px-3 py-2 text-sm text-left"${attr("aria-expanded", isExpanded(node.id))}>`);
+        if (isExpanded(node.id)) {
+          $$renderer2.push("<!--[0-->");
+          Chevron_down($$renderer2, { size: 14, class: "text-slate-400" });
         } else {
-          $$renderer3.push("<!--[-1-->");
-          Chevron_right($$renderer3, {
-            size: 14,
-            class: "text-slate-400 transition-transform duration-150",
-            "aria-hidden": "true"
-          });
+          $$renderer2.push("<!--[-1-->");
+          Chevron_right($$renderer2, { size: 14, class: "text-slate-400" });
         }
-        $$renderer3.push(`<!--]--></button>`);
-      } else {
-        $$renderer3.push("<!--[-1-->");
-        $$renderer3.push(`<span class="w-5" aria-hidden="true"></span>`);
-      }
-      $$renderer3.push(`<!--]--> <span class="flex items-center justify-center w-5 shrink-0">`);
-      if (node.type === "node") {
-        $$renderer3.push("<!--[0-->");
-        Circle($$renderer3, {
-          size: 10,
-          class: `${stringify(getStatusColor(node.status))} ${stringify(active ? "animate-pulse" : "")}`,
-          fill: "currentColor",
-          "aria-hidden": "true"
+        $$renderer2.push(`<!--]--> `);
+        Circle($$renderer2, {
+          size: 8,
+          class: getStatusColor(node.status),
+          fill: "currentColor"
         });
-        $$renderer3.push(`<!----> `);
-        VisuallyHidden($$renderer3, {
-          children: ($$renderer4) => {
-            $$renderer4.push(`<!---->${escape_html(getStatusLabel(node.status))}`);
+        $$renderer2.push(`<!----> <span class="truncate font-medium">${escape_html(node.name)}</span></button></div> `);
+        if (isExpanded(node.id)) {
+          $$renderer2.push("<!--[0-->");
+          $$renderer2.push(`<ul class="mt-0.5"><li class="select-none"><div${attr_class(`mx-2 rounded-md ${stringify(isActive(`/nodes/${node.id}/vms`) ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5")}`)} style="margin-left: 2rem;"><button type="button" class="flex items-center gap-2 w-full px-3 py-2 text-sm text-left"${attr("aria-expanded", isExpanded(`${node.id}-vms`))}>`);
+          if (isExpanded(`${node.id}-vms`)) {
+            $$renderer2.push("<!--[0-->");
+            Chevron_down($$renderer2, { size: 14, class: "text-slate-400" });
+          } else {
+            $$renderer2.push("<!--[-1-->");
+            Chevron_right($$renderer2, { size: 14, class: "text-slate-400" });
           }
-        });
-        $$renderer3.push(`<!---->`);
-      } else {
-        $$renderer3.push("<!--[-1-->");
-        if (IconComponent) {
-          $$renderer3.push("<!--[-->");
-          IconComponent($$renderer3, {
-            size: 16,
-            class: active ? "text-orange-400" : "text-slate-400",
-            "aria-hidden": "true"
-          });
-          $$renderer3.push("<!--]-->");
+          $$renderer2.push(`<!--]--> `);
+          Server($$renderer2, { size: 16, class: "text-slate-400" });
+          $$renderer2.push(`<!----> <span class="truncate">Virtual Machines</span> `);
+          if (vms.length > 0) {
+            $$renderer2.push("<!--[0-->");
+            $$renderer2.push(`<span class="ml-auto bg-[#e57035] text-white text-[10px] px-1.5 py-0.5 rounded min-w-[1.25rem] text-center">${escape_html(vms.length)}</span>`);
+          } else {
+            $$renderer2.push("<!--[-1-->");
+          }
+          $$renderer2.push(`<!--]--></button></div> `);
+          if (isExpanded(`${node.id}-vms`)) {
+            $$renderer2.push("<!--[0-->");
+            $$renderer2.push(`<ul class="mt-0.5"><!--[-->`);
+            const each_array_1 = ensure_array_like(vms);
+            for (let $$index = 0, $$length2 = each_array_1.length; $$index < $$length2; $$index++) {
+              let vm = each_array_1[$$index];
+              $$renderer2.push(`<li class="select-none"><div${attr_class(`mx-2 rounded-md ${stringify(isActive(`/vms/${vm.id}`) ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5")}`)} style="margin-left: 2.75rem;"><a${attr("href", `/vms/${vm.id}`)} class="flex items-center gap-2 px-3 py-2 text-sm"${attr("aria-current", isActive(`/vms/${vm.id}`) ? "page" : void 0)}>`);
+              Circle($$renderer2, {
+                size: 6,
+                class: getStatusColor(vm.actual_state),
+                fill: "currentColor"
+              });
+              $$renderer2.push(`<!----> <span class="truncate">${escape_html(vm.name)}</span></a></div></li>`);
+            }
+            $$renderer2.push(`<!--]--></ul>`);
+          } else {
+            $$renderer2.push("<!--[-1-->");
+          }
+          $$renderer2.push(`<!--]--></li> <li class="select-none"><div${attr_class(`mx-2 rounded-md ${stringify(isActive(`/nodes/${node.id}/networks`) ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5")}`)} style="margin-left: 2rem;"><a${attr("href", `/nodes/${node.id}/networks`)} class="flex items-center gap-2 px-3 py-2 text-sm"${attr("aria-current", isActive(`/nodes/${node.id}/networks`) ? "page" : void 0)}><span class="w-5"></span> `);
+          Network($$renderer2, { size: 16, class: "text-slate-400" });
+          $$renderer2.push(`<!----> <span class="truncate">cell network</span> `);
+          if (node.resources?.networks) {
+            $$renderer2.push("<!--[0-->");
+            $$renderer2.push(`<span class="ml-auto text-xs text-slate-500">${escape_html(node.resources.networks)}</span>`);
+          } else {
+            $$renderer2.push("<!--[-1-->");
+          }
+          $$renderer2.push(`<!--]--></a></div></li> <li class="select-none"><div${attr_class(`mx-2 rounded-md ${stringify(isActive(`/nodes/${node.id}/storage`) ? "bg-[#e57035]/15 text-[#ff9a65]" : "hover:bg-white/5")}`)} style="margin-left: 2rem;"><a${attr("href", `/nodes/${node.id}/storage`)} class="flex items-center gap-2 px-3 py-2 text-sm"${attr("aria-current", isActive(`/nodes/${node.id}/storage`) ? "page" : void 0)}><span class="w-5"></span> `);
+          Hard_drive($$renderer2, { size: 16, class: "text-slate-400" });
+          $$renderer2.push(`<!----> <span class="truncate">cell storage</span> `);
+          if (node.resources?.storagePools) {
+            $$renderer2.push("<!--[0-->");
+            $$renderer2.push(`<span class="ml-auto text-xs text-slate-500">${escape_html(node.resources.storagePools)}</span>`);
+          } else {
+            $$renderer2.push("<!--[-1-->");
+          }
+          $$renderer2.push(`<!--]--></a></div></li></ul>`);
         } else {
-          $$renderer3.push("<!--[!-->");
-          $$renderer3.push("<!--]-->");
+          $$renderer2.push("<!--[-1-->");
         }
+        $$renderer2.push(`<!--]--></li>`);
       }
-      $$renderer3.push(`<!--]--></span> <span class="flex-1 truncate font-medium">${escape_html(node.label)}</span> `);
-      if (node.badge !== void 0 && node.badge > 0) {
-        $$renderer3.push("<!--[0-->");
-        $$renderer3.push(`<span class="bg-[#e57035] text-white text-[10px] px-1.5 py-0.5 rounded min-w-[1.25rem] text-center font-semibold shadow-sm ml-2 shrink-0"${attr("aria-label", `${stringify(node.badge)} items`)}>${escape_html(node.badge)}</span>`);
-      } else {
-        $$renderer3.push("<!--[-1-->");
-      }
-      $$renderer3.push(`<!--]--></a></div> `);
-      if (hasChildren && expanded) {
-        $$renderer3.push("<!--[0-->");
-        $$renderer3.push(`<ul class="mt-0.5 overflow-hidden" role="group"${attr("aria-label", `${stringify(node.label)} children`)}><!--[-->`);
-        const each_array = ensure_array_like(node.children);
-        for (let $$index_1 = 0, $$length = each_array.length; $$index_1 < $$length; $$index_1++) {
-          let child = each_array[$$index_1];
-          treeNodeItem($$renderer3, child, level + 1);
-        }
-        $$renderer3.push(`<!--]--></ul>`);
-      } else {
-        $$renderer3.push("<!--[-1-->");
-      }
-      $$renderer3.push(`<!--]--></li>`);
+      $$renderer2.push(`<!--]--></ul>`);
+    } else {
+      $$renderer2.push("<!--[-1-->");
     }
-    $$renderer2.push(`<aside class="h-screen flex flex-col bg-[#252532] text-slate-300 w-64 border-r border-[#1e1e28] svelte-2ilt8a" role="navigation" aria-label="Main navigation"><header class="h-14 flex items-center px-4 border-b border-[#1e1e28] bg-[#1e1e28]"><div class="flex items-center gap-3"><div class="w-8 h-8 rounded bg-gradient-to-br from-[#e57035] to-[#d14a28] flex items-center justify-center shadow-lg shadow-orange-900/20">`);
-    Database($$renderer2, { class: "text-white", size: 18, "aria-hidden": "true" });
-    $$renderer2.push(`<!----></div> <div><div class="text-sm font-semibold text-white">CHV Manager</div> <div class="text-[10px] text-slate-500">Virtualization Platform</div></div></div></header> <nav class="flex-1 overflow-y-auto py-2 svelte-2ilt8a" aria-label="Resource tree"><ul role="tree" aria-label="Navigation tree"><!--[-->`);
-    const each_array_1 = ensure_array_like(treeNodes());
-    for (let $$index = 0, $$length = each_array_1.length; $$index < $$length; $$index++) {
-      let node = each_array_1[$$index];
-      treeNodeItem($$renderer2, node, 0);
-    }
-    $$renderer2.push(`<!--]--></ul></nav> <footer class="border-t border-[#1e1e28] p-3 bg-[#1e1e28]">`);
+    $$renderer2.push(`<!--]--></li></ul></nav> <footer class="border-t border-[#1e1e28] p-3 bg-[#1e1e28]">`);
     UserMenu($$renderer2, { userName: "Administrator", userEmail: "admin@chv.local" });
     $$renderer2.push(`<!----></footer></aside>`);
     if ($$store_subs) unsubscribe_stores($$store_subs);

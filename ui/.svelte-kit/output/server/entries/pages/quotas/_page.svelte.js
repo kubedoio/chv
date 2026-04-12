@@ -1,4 +1,4 @@
-import { c as attr, g as attr_class } from "../../../chunks/root.js";
+import { c as attr, f as attr_class } from "../../../chunks/root.js";
 import "../../../chunks/client2.js";
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
