@@ -58,69 +58,56 @@
     canManageStorage: true
   });
 
-  // Derived stats
-  const runningVMs = $derived(vms.filter(v => v.actual_state === 'running').length);
-  const stoppedVMs = $derived(vms.filter(v => v.actual_state === 'stopped').length);
-  const totalVcpus = $derived(vms.reduce((acc, v) => acc + (v.vcpu || 0), 0));
-  const totalMemoryGB = $derived(vms.reduce((acc, v) => acc + ((v.memory_mb || 0) / 1024), 0));
-  
-  const totalStorageGB = $derived(
-    pools.reduce((acc, p) => acc + (p.capacity_bytes || 0), 0) / (1024 ** 3)
-  );
-  const usedStorageGB = $derived(
-    pools.reduce((acc, p) => acc + ((p.capacity_bytes || 0) - (p.allocatable_bytes || 0)), 0) / (1024 ** 3)
-  );
+  // Stats functions (not derived to avoid object creation)
+  function getRunningVMs() { return vms.filter(v => v.actual_state === 'running').length; }
+  function getStoppedVMs() { return vms.filter(v => v.actual_state === 'stopped').length; }
+  function getTotalVcpus() { return vms.reduce((acc, v) => acc + (v.vcpu || 0), 0); }
+  function getTotalMemoryGB() { return vms.reduce((acc, v) => acc + ((v.memory_mb || 0) / 1024), 0); }
+  function getTotalStorageGB() { return pools.reduce((acc, p) => acc + (p.capacity_bytes || 0), 0) / (1024 ** 3); }
+  function getUsedStorageGB() { return pools.reduce((acc, p) => acc + ((p.capacity_bytes || 0) - (p.allocatable_bytes || 0)), 0) / (1024 ** 3); }
 
   // Mock historical data for sparklines (would come from metrics API)
-  const vmHistory = $derived.by(() => [vms.length * 0.8, vms.length * 0.85, vms.length * 0.9, vms.length * 0.88, vms.length * 0.92, vms.length * 0.95, vms.length]);
-  const storageHistory = $derived.by(() => [usedStorageGB * 0.7, usedStorageGB * 0.75, usedStorageGB * 0.8, usedStorageGB * 0.78, usedStorageGB * 0.85, usedStorageGB * 0.9, usedStorageGB]);
+  function getVmHistory() { return [vms.length * 0.8, vms.length * 0.85, vms.length * 0.9, vms.length * 0.88, vms.length * 0.92, vms.length * 0.95, vms.length]; }
+  function getStorageHistory() { return [getUsedStorageGB() * 0.7, getUsedStorageGB() * 0.75, getUsedStorageGB() * 0.8, getUsedStorageGB() * 0.78, getUsedStorageGB() * 0.85, getUsedStorageGB() * 0.9, getUsedStorageGB()]; }
 
   // Current node info
-  const currentNode = $derived(nodes.length > 0 ? nodes[0] : getDefaultNode());
+  function getCurrentNode() { return nodes.length > 0 ? nodes[0] : getDefaultNode(); }
 
-  // Health checks derived from data
-  const healthChecks = $derived.by(() => {
-    // Only access primitive values that change
-    const isLoading = loading;
-    const nodeStatus = currentNode?.status;
-    const nodeName = currentNode?.name;
-    const poolCount = pools.length;
-    const hasStorage = totalStorageGB > 0;
-    const iState = installState;
-    const lastTS = healthChecksLastUpdated;
-
+  // Health checks function (not derived to avoid object creation)
+  function getHealthChecks(): HealthCheck[] {
+    const currentNode = getCurrentNode();
     return [
       {
         id: 'api',
         name: 'API Status',
-        status: isLoading ? 'pending' : 'healthy',
-        message: isLoading ? 'Checking...' : 'Responding normally',
-        lastChecked: lastTS
+        status: loading ? 'pending' : 'healthy',
+        message: loading ? 'Checking...' : 'Responding normally',
+        lastChecked: healthChecksLastUpdated
       },
       {
         id: 'node',
         name: 'Node Status',
-        status: nodeStatus === 'online' ? 'healthy' : 'warning',
-        message: nodeStatus === 'online' ? `${nodeName} online` : 'Node unavailable',
-        lastChecked: lastTS
+        status: currentNode?.status === 'online' ? 'healthy' : 'warning',
+        message: currentNode?.status === 'online' ? `${currentNode?.name} online` : 'Node unavailable',
+        lastChecked: healthChecksLastUpdated
       },
       {
         id: 'storage',
         name: 'Storage Health',
-        status: hasStorage ? 'healthy' : 'warning',
-        message: poolCount > 0 ? `${poolCount} pools active` : 'No storage pools',
+        status: getTotalStorageGB() > 0 ? 'healthy' : 'warning',
+        message: pools.length > 0 ? `${pools.length} pools active` : 'No storage pools',
         details: pools.map(p => `${p.name}: ${((p.capacity_bytes || 0) / (1024**3)).toFixed(1)} GB`),
-        lastChecked: lastTS
+        lastChecked: healthChecksLastUpdated
       },
       {
         id: 'platform',
         name: 'Platform',
-        status: iState === 'ready' ? 'healthy' : iState === 'bootstrap_required' ? 'warning' : 'pending',
-        message: iState.replace('_', ' '),
-        lastChecked: lastTS
+        status: installState === 'ready' ? 'healthy' : installState === 'bootstrap_required' ? 'warning' : 'pending',
+        message: installState.replace('_', ' '),
+        lastChecked: healthChecksLastUpdated
       }
-    ] as HealthCheck[];
-  });
+    ];
+  }
 
   async function loadData() {
     if (!client) return;
@@ -200,11 +187,11 @@
   }
 
   async function handleScanNode() {
-    if (!client || !currentNode || currentNode.id === 'placeholder') return;
+    if (!client || !getCurrentNode() || getCurrentNode().id === 'placeholder') return;
     
     scanning = true;
     try {
-      const result = await client.discoverNode(currentNode.id);
+      const result = await client.discoverNode(getCurrentNode().id);
       if (result.count > 0) {
         toast.success(`Discovered ${result.count} new VMs`);
         loadData();
@@ -244,7 +231,7 @@
     <div>
       <h1 class="text-2xl font-bold text-slate-900">Dashboard</h1>
       <p class="text-sm text-slate-500 mt-1">
-        {currentNode?.name || 'Datacenter'} overview and system status
+        {getCurrentNode()?.name || 'Datacenter'} overview and system status
       </p>
     </div>
     <div class="flex items-center gap-2">
@@ -276,8 +263,8 @@
       <!-- Node Card -->
       <ResourceCard
         title="Node"
-        value={currentNode?.name || 'Unknown'}
-        subtitle={currentNode?.hostname || ''}
+        value={getCurrentNode()?.name || 'Unknown'}
+        subtitle={getCurrentNode()?.hostname || ''}
         icon={Server}
         iconColor="slate"
         loading={loading && vms.length === 0}
@@ -288,12 +275,12 @@
       <ResourceCard
         title="Virtual Machines"
         value={vms.length}
-        subtitle={runningVMs + ' running, ' + stoppedVMs + ' stopped'}
+        subtitle={getRunningVMs() + ' running, ' + getStoppedVMs() + ' stopped'}
         icon={Cpu}
         iconColor="blue"
         trend={vms.length > 0 ? 'up' : 'neutral'}
         trendValue={vms.length > 0 ? '+1 this week' : undefined}
-        sparklineData={vmHistory}
+        sparklineData={getVmHistory()}
         loading={loading && vms.length === 0}
         href="/vms"
       />
@@ -310,7 +297,7 @@
           max: totalStorageGB,
           label: 'Usage'
         } : undefined}
-        sparklineData={storageHistory}
+        sparklineData={getStorageHistory()}
         loading={loading && vms.length === 0}
         href="/storage"
       />
@@ -344,7 +331,7 @@
           variant="secondary"
           size="sm"
           onclick={handleScanNode}
-          disabled={scanning || currentNode.id === 'placeholder'}
+          disabled={scanning || getCurrentNode().id === 'placeholder'}
         >
           <Loader2 size={16} class={scanning ? 'animate-spin' : 'hidden'} />
           <RefreshCw size={16} class={scanning ? 'hidden' : ''} />
@@ -405,7 +392,7 @@
       <div class="space-y-6">
         <!-- Health Status -->
         <HealthStatus
-          checks={healthChecks}
+          checks={getHealthChecks()}
           {loading}
           onRefresh={handleRefresh}
           {lastUpdated}
@@ -425,16 +412,16 @@
                   <Cpu size={14} class="text-slate-400" />
                   CPU Cores
                 </span>
-                <span class="font-medium text-slate-700">{totalVcpus}</span>
+                <span class="font-medium text-slate-700">{getTotalVcpus()}</span>
               </div>
               <div class="w-full bg-slate-100 rounded-full h-2">
                 <div
                   class="h-2 rounded-full bg-gradient-to-r from-blue-500 to-blue-600 transition-all duration-500"
-                  style="width: {Math.min(100, (totalVcpus / 32) * 100)}%"
+                  style="width: {Math.min(100, (getTotalVcpus() / 32) * 100)}%"
                 ></div>
               </div>
               <p class="text-xs text-slate-400 mt-1">
-                {totalVcpus} of 32 vCPUs allocated
+                {getTotalVcpus()} of 32 vCPUs allocated
               </p>
             </div>
 
@@ -445,16 +432,16 @@
                   <Activity size={14} class="text-slate-400" />
                   Memory
                 </span>
-                <span class="font-medium text-slate-700">{totalMemoryGB.toFixed(1)} GB</span>
+                <span class="font-medium text-slate-700">{getTotalMemoryGB().toFixed(1)} GB</span>
               </div>
               <div class="w-full bg-slate-100 rounded-full h-2">
                 <div
                   class="h-2 rounded-full bg-gradient-to-r from-purple-500 to-purple-600 transition-all duration-500"
-                  style="width: {Math.min(100, (totalMemoryGB / 64) * 100)}%"
+                  style="width: {Math.min(100, (getTotalMemoryGB() / 64) * 100)}%"
                 ></div>
               </div>
               <p class="text-xs text-slate-400 mt-1">
-                {totalMemoryGB.toFixed(1)} of 64 GB allocated
+                {getTotalMemoryGB().toFixed(1)} of 64 GB allocated
               </p>
             </div>
 
