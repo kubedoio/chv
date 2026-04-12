@@ -8,6 +8,8 @@ import (
 	"github.com/chv/chv/internal/agentclient"
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/logger"
+
+	"github.com/google/uuid"
 )
 
 type Collector struct {
@@ -112,6 +114,25 @@ func (c *Collector) collect() {
 				}
 				VMCPUUsage.WithLabelValues(vm.ID, vm.NodeID).Set(resp.CPU.UsagePercent)
 				VMMemoryUsage.WithLabelValues(vm.ID, vm.NodeID).Set(float64(resp.Memory.UsedMB * 1024 * 1024))
+
+				// Record metrics history
+				record := &db.VMMetricsRecord{
+					ID:             uuid.New().String(),
+					VMID:           vm.ID,
+					CPUPercent:     resp.CPU.UsagePercent,
+					MemoryUsedMB:   resp.Memory.UsedMB,
+					MemoryTotalMB:  resp.Memory.TotalMB,
+					DiskReadBytes:  resp.Disk.ReadBytes,
+					DiskWriteBytes: resp.Disk.WriteBytes,
+					NetRXBytes:     resp.Network.RxBytes,
+					NetTXBytes:     resp.Network.TxBytes,
+					Timestamp:      time.Now().UTC().Format(time.RFC3339),
+				}
+				if err := c.repo.RecordVMMetrics(ctx, record); err != nil {
+					logger.L().Debug("Failed to record VM metrics history",
+						logger.F("vm_id", vm.ID),
+						logger.ErrorField(err))
+				}
 			} else if vm.ActualState == "running" {
 				// Running but no PID yet — use placeholder
 				VMCPUUsage.WithLabelValues(vm.ID, vm.NodeID).Set(0)

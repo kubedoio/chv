@@ -573,6 +573,12 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(data)
       });
     },
+    applyCloudInit(vmId: string, data: { template_id?: string; variables?: Record<string, string>; user_data?: string }) {
+      return request<{ message: string; vm_id: string; warning: string }>(`/api/v1/vms/${vmId}/cloud-init/apply`, {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
     // VLAN endpoints
     listVLANs(networkId: string) {
       return request<VLANNetwork[]>(`/api/v1/networks/${networkId}/vlans`);

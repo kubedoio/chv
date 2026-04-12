@@ -127,6 +127,9 @@ func (r *Repository) initialize() error {
 	if err := r.migrateAddNodeMetricsTable(); err != nil {
 		return fmt.Errorf("failed to migrate node_metrics table: %w", err)
 	}
+	if err := r.migrateAddVMMetricsHistoryTable(); err != nil {
+		return fmt.Errorf("failed to migrate vm_metrics_history table: %w", err)
+	}
 
 	// Run VNC console migration
 	if err := r.migrateAddConsoleTypeToVMs(); err != nil {
@@ -1647,6 +1650,89 @@ type NodeMetricsRecord struct {
 	Timestamp     string
 }
 
+// VMMetricsRecord represents a VM metrics history record
+type VMMetricsRecord struct {
+	ID              string
+	VMID            string
+	CPUPercent      float64
+	MemoryUsedMB    int
+	MemoryTotalMB   int
+	DiskReadBytes   int64
+	DiskWriteBytes  int64
+	NetRXBytes      int64
+	NetTXBytes      int64
+	Timestamp       string
+}
+
+// RecordVMMetrics inserts a new VM metrics record
+func (r *Repository) RecordVMMetrics(ctx context.Context, record *VMMetricsRecord) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO vm_metrics_history (id, vm_id, cpu_percent, memory_used_mb, memory_total_mb, 
+		 disk_read_bytes, disk_write_bytes, net_rx_bytes, net_tx_bytes, timestamp)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.ID, record.VMID, record.CPUPercent, record.MemoryUsedMB, record.MemoryTotalMB,
+		record.DiskReadBytes, record.DiskWriteBytes, record.NetRXBytes, record.NetTXBytes, record.Timestamp)
+	return err
+}
+
+// GetVMMetricsHistory retrieves metrics history for a VM within a time range
+func (r *Repository) GetVMMetricsHistory(ctx context.Context, vmID string, since string) ([]VMMetricsRecord, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, vm_id, cpu_percent, memory_used_mb, memory_total_mb, 
+		 disk_read_bytes, disk_write_bytes, net_rx_bytes, net_tx_bytes, timestamp
+		 FROM vm_metrics_history
+		 WHERE vm_id = ? AND timestamp >= ?
+		 ORDER BY timestamp DESC
+		 LIMIT 100`,
+		vmID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []VMMetricsRecord
+	for rows.Next() {
+		var m VMMetricsRecord
+		if err := rows.Scan(&m.ID, &m.VMID, &m.CPUPercent, &m.MemoryUsedMB, &m.MemoryTotalMB,
+			&m.DiskReadBytes, &m.DiskWriteBytes, &m.NetRXBytes, &m.NetTXBytes, &m.Timestamp); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// GetLatestVMMetrics retrieves the most recent metrics for a VM
+func (r *Repository) GetLatestVMMetrics(ctx context.Context, vmID string) (*VMMetricsRecord, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT id, vm_id, cpu_percent, memory_used_mb, memory_total_mb, 
+		 disk_read_bytes, disk_write_bytes, net_rx_bytes, net_tx_bytes, timestamp
+		 FROM vm_metrics_history
+		 WHERE vm_id = ?
+		 ORDER BY timestamp DESC
+		 LIMIT 1`,
+		vmID)
+
+	var m VMMetricsRecord
+	if err := row.Scan(&m.ID, &m.VMID, &m.CPUPercent, &m.MemoryUsedMB, &m.MemoryTotalMB,
+		&m.DiskReadBytes, &m.DiskWriteBytes, &m.NetRXBytes, &m.NetTXBytes, &m.Timestamp); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+// CleanupOldVMMetrics removes metrics older than the specified retention period
+func (r *Repository) CleanupOldVMMetrics(ctx context.Context, retentionDays int) error {
+	_, err := r.db.ExecContext(ctx,
+		`DELETE FROM vm_metrics_history 
+		 WHERE timestamp < datetime('now', '-' || ? || ' days')`,
+		retentionDays)
+	return err
+}
+
 // GetCPUPercent returns CPU percent for interface compatibility
 func (m NodeMetricsRecord) GetCPUPercent() float64 { return m.CPUPercent }
 
@@ -2869,6 +2955,33 @@ func (r *Repository) migrateAddNodeMetricsTable() error {
 	return err
 }
 
+// migrateAddVMMetricsHistoryTable creates the vm_metrics_history table if it doesn't exist
+func (r *Repository) migrateAddVMMetricsHistoryTable() error {
+	_, err := r.db.Exec(`
+		CREATE TABLE IF NOT EXISTS vm_metrics_history (
+			id TEXT PRIMARY KEY,
+			vm_id TEXT NOT NULL,
+			cpu_percent REAL,
+			memory_used_mb INTEGER,
+			memory_total_mb INTEGER,
+			disk_read_bytes INTEGER,
+			disk_write_bytes INTEGER,
+			net_rx_bytes INTEGER,
+			net_tx_bytes INTEGER,
+			timestamp TEXT NOT NULL,
+			FOREIGN KEY(vm_id) REFERENCES virtual_machines(id) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_vm_metrics_time ON vm_metrics_history(vm_id, timestamp)`)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_vm_metrics_timestamp ON vm_metrics_history(timestamp)`)
+	return err
+}
 
 // migrateAddUserIDToVMs adds user_id column to virtual_machines table
 func (r *Repository) migrateAddUserIDToVMs() error {

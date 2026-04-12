@@ -224,6 +224,9 @@ func (h *Handler) registerRoutes() {
 						r.Post("/rules", h.createFirewallRuleHandler)
 						r.Delete("/rules/{ruleId}", h.deleteFirewallRuleHandler)
 					})
+					r.Route("/cloud-init", func(r chi.Router) {
+						r.Post("/apply", h.applyCloudInit)
+					})
 					r.Get("/backups", h.listVMBackups)
 				})
 			})

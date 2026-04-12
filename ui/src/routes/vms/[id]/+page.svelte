@@ -8,6 +8,7 @@
   import CloudInitPreview from '$lib/components/CloudInitPreview.svelte';
   import DeleteVMModal from '$lib/components/DeleteVMModal.svelte';
   import MetricsChart from '$lib/components/MetricsChart.svelte';
+  import VMMetricsHistory from '$lib/components/VMMetricsHistory.svelte';
   import Terminal from '$lib/components/Terminal.svelte';
   
   import VMPowerMenu from '$lib/components/VMPowerMenu.svelte';
@@ -576,47 +577,22 @@
         />
       </div>
     {:else if activeTab === 'metrics'}
-      <div class="space-y-4">
-        {#if metrics}
-          <div class="grid grid-cols-2 gap-4">
-            <MetricsChart 
-              title="CPU & Memory"
-              data={[
-                { label: 'CPU Usage', value: metrics.cpu.usage_percent, max: 100, color: '#3b82f6', history: getMetricHistory('cpu') },
-                { label: 'Memory Usage', value: metrics.memory.usage_percent, max: 100, color: '#10b981', history: getMetricHistory('memory') }
-              ]}
-            />
-            <MetricsChart 
-              title="Disk I/O"
-              data={[
-                { label: 'Read (MB)', value: metrics.disk.read_bytes / 1024 / 1024, max: 100, color: '#f59e0b', history: getMetricHistory('disk_read') },
-                { label: 'Write (MB)', value: metrics.disk.write_bytes / 1024 / 1024, max: 100, color: '#ef4444', history: getMetricHistory('disk_write') }
-              ]}
-            />
-          </div>
-          <div class="bg-white border border-line rounded p-4">
-            <h3 class="text-sm font-semibold text-gray-700 mb-3">System Info</h3>
-            <div class="grid grid-cols-3 gap-4 text-sm">
-              <div>
-                <span class="text-muted">Uptime:</span>
-                <span class="ml-2">{metrics.uptime}</span>
-              </div>
-              <div>
-                <span class="text-muted">Memory:</span>
-                <span class="ml-2">{metrics.memory.used_mb} / {metrics.memory.total_mb} MB</span>
-              </div>
-              <div>
-                <span class="text-muted">vCPUs:</span>
-                <span class="ml-2">{metrics.cpu.vcpus}</span>
-              </div>
-            </div>
-          </div>
-        {:else}
-          <div class="text-center py-8 text-muted">
-            {vmState === 'running' ? 'Loading metrics...' : 'VM must be running to view metrics'}
-          </div>
-        {/if}
-      </div>
+      {#if vmState === 'running'}
+        <VMMetricsHistory vmId={id} />
+      {:else}
+        <div class="text-center py-12 bg-white border border-line rounded-lg">
+          <BarChart3 size={48} class="mx-auto text-slate-300 mb-4" />
+          <h3 class="text-lg font-medium text-slate-900 mb-1">Metrics Unavailable</h3>
+          <p class="text-sm text-slate-500">VM must be running to view metrics history</p>
+          <button 
+            onclick={startVM} 
+            disabled={actionLoading}
+            class="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+          >
+            Start VM
+          </button>
+        </div>
+      {/if}
     {:else if activeTab === 'snapshots'}
       <div class="space-y-4">
         <div class="flex justify-between items-center bg-white border border-line p-4 rounded">

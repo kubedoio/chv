@@ -1,15 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { Server, Copy, Trash2, Plus, FileCode, Box } from 'lucide-svelte';
+  import { Server, Copy, Trash2, Plus, FileCode, Box, LayoutTemplate } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import DataTable from '$lib/components/DataTable.svelte';
   import StateBadge from '$lib/components/StateBadge.svelte';
   import CreateFromTemplate from '$lib/components/CreateFromTemplate.svelte';
   import CloudInitViewer from '$lib/components/CloudInitViewer.svelte';
+  import CloudInitEditor from '$lib/components/CloudInitEditor.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
-  import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool } from '$lib/api/types';
+  import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });
@@ -20,6 +21,7 @@
   let images: Image[] = $state([]);
   let networks: Network[] = $state([]);
   let pools: StoragePool[] = $state([]);
+  let vms: VM[] = $state([]);
   let loading = $state(true);
   let error = $state('');
   let activeTab = $state<'vm' | 'cloudinit'>('vm');
@@ -28,7 +30,16 @@
   let createFromTemplateOpen = $state(false);
   let selectedTemplate: VMTemplate | null = $state(null);
   let cloudInitViewerOpen = $state(false);
+  let cloudInitEditorOpen = $state(false);
   let selectedCloudInitTemplate: CloudInitTemplate | null = $state(null);
+  let createVMTemplateOpen = $state(false);
+
+  // Create VM Template form state
+  let newTemplateName = $state('');
+  let newTemplateDescription = $state('');
+  let selectedVMId = $state('');
+  let selectedCloudInitId = $state('');
+  let creatingTemplate = $state(false);
 
   // Confirm dialog state
   let confirmDialog = $state<{
@@ -43,10 +54,11 @@
     action: async () => {}
   });
 
-  // Lookup maps - use functions to avoid creating new Maps on every render
+  // Lookup maps
   function getImage(id: string) { return images.find(i => i.id === id); }
   function getNetwork(id: string) { return networks.find(n => n.id === id); }
   function getPool(id: string) { return pools.find(p => p.id === id); }
+  function getVM(id: string) { return vms.find(v => v.id === id); }
 
   // VM Template columns
   const vmTemplateColumns = [
@@ -111,18 +123,20 @@
     loading = true;
     error = '';
     try {
-      const [vmTemps, cloudTemps, imgs, nets, ps] = await Promise.all([
+      const [vmTemps, cloudTemps, imgs, nets, ps, vmList] = await Promise.all([
         client.listVMTemplates(),
         client.listCloudInitTemplates(),
         client.listImages(),
         client.listNetworks(),
-        client.listStoragePools()
+        client.listStoragePools(),
+        client.listVMs()
       ]);
       vmTemplates = vmTemps ?? [];
       cloudInitTemplates = cloudTemps ?? [];
       images = imgs ?? [];
       networks = nets ?? [];
       pools = ps ?? [];
+      vms = vmList ?? [];
     } catch (err) {
       error = err instanceof Error ? err.message : 'Failed to load templates';
       toast.error(error);
@@ -147,6 +161,50 @@
   function viewCloudInit(template: CloudInitTemplate) {
     selectedCloudInitTemplate = template;
     cloudInitViewerOpen = true;
+  }
+
+  function createCloudInitTemplate() {
+    cloudInitEditorOpen = true;
+  }
+
+  function openCreateVMTemplate() {
+    newTemplateName = '';
+    newTemplateDescription = '';
+    selectedVMId = '';
+    selectedCloudInitId = '';
+    createVMTemplateOpen = true;
+  }
+
+  async function handleCreateVMTemplate() {
+    if (!newTemplateName.trim()) {
+      toast.error('Template name is required');
+      return;
+    }
+    if (!selectedVMId) {
+      toast.error('Please select a source VM');
+      return;
+    }
+
+    creatingTemplate = true;
+    try {
+      const template = await client.createVMTemplate({
+        source_vm_id: selectedVMId,
+        name: newTemplateName.trim(),
+        description: newTemplateDescription.trim() || undefined,
+        cloud_init_config: selectedCloudInitId ? 
+          cloudInitTemplates.find(t => t.id === selectedCloudInitId)?.content : 
+          undefined
+      });
+      
+      toast.success(`VM Template "${template.name}" created successfully`);
+      createVMTemplateOpen = false;
+      loadData();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to create template';
+      toast.error(message);
+    } finally {
+      creatingTemplate = false;
+    }
   }
 
   function deleteVMTemplate(template: VMTemplate) {
@@ -188,6 +246,27 @@
   <div>
     <h1 class="text-2xl font-bold text-ink">Templates</h1>
     <p class="text-muted text-sm mt-1">VM templates and cloud-init configurations for rapid provisioning</p>
+  </div>
+  <div class="flex gap-2">
+    {#if activeTab === 'vm'}
+      <button
+        type="button"
+        onclick={openCreateVMTemplate}
+        class="inline-flex items-center gap-2 px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors"
+      >
+        <LayoutTemplate size={16} />
+        Create VM Template
+      </button>
+    {:else}
+      <button
+        type="button"
+        onclick={createCloudInitTemplate}
+        class="inline-flex items-center gap-2 px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors"
+      >
+        <FileCode size={16} />
+        Create Cloud-init Template
+      </button>
+    {/if}
   </div>
 </div>
 
@@ -295,6 +374,7 @@
   </section>
 {/if}
 
+<!-- Create From Template Modal -->
 <CreateFromTemplate
   bind:open={createFromTemplateOpen}
   template={selectedTemplate}
@@ -304,10 +384,140 @@
   onSuccess={loadData}
 />
 
+<!-- Cloud-init Viewer Modal -->
 <CloudInitViewer
   bind:open={cloudInitViewerOpen}
   template={selectedCloudInitTemplate}
 />
+
+<!-- Cloud-init Editor Modal -->
+<CloudInitEditor
+  bind:open={cloudInitEditorOpen}
+  onSuccess={loadData}
+/>
+
+<!-- Create VM Template Modal -->
+{#if createVMTemplateOpen}
+  <div 
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" 
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="create-template-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget) createVMTemplateOpen = false;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') createVMTemplateOpen = false;
+    }}
+  >
+    <div class="bg-white rounded-lg shadow-lg w-full max-w-lg mx-4">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-line">
+        <h2 class="text-lg font-semibold text-ink">Create VM Template</h2>
+        <button
+          type="button"
+          onclick={() => createVMTemplateOpen = false}
+          class="text-muted hover:text-ink"
+          aria-label="Close dialog"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+      
+      <div class="p-6 space-y-4">
+        <div>
+          <label for="template-name" class="block text-sm font-medium text-ink mb-1">
+            Template Name <span class="text-danger">*</span>
+          </label>
+          <input
+            id="template-name"
+            type="text"
+            bind:value={newTemplateName}
+            placeholder="e.g., Ubuntu Web Server"
+            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+          />
+        </div>
+
+        <div>
+          <label for="template-description" class="block text-sm font-medium text-ink mb-1">
+            Description
+          </label>
+          <input
+            id="template-description"
+            type="text"
+            bind:value={newTemplateDescription}
+            placeholder="Brief description of this template"
+            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+          />
+        </div>
+
+        <div>
+          <label for="source-vm" class="block text-sm font-medium text-ink mb-1">
+            Source VM <span class="text-danger">*</span>
+          </label>
+          <select
+            id="source-vm"
+            bind:value={selectedVMId}
+            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+          >
+            <option value="">Select a VM...</option>
+            {#each vms as vm}
+              <option value={vm.id}>{vm.name} ({vm.vcpu} vCPU, {vm.memory_mb} MB)</option>
+            {/each}
+          </select>
+          {#if vms.length === 0}
+            <p class="text-xs text-muted mt-1">No VMs available. Create a VM first to use as a template.</p>
+          {/if}
+        </div>
+
+        <div>
+          <label for="cloud-init-template" class="block text-sm font-medium text-ink mb-1">
+            Default Cloud-init Template (Optional)
+          </label>
+          <select
+            id="cloud-init-template"
+            bind:value={selectedCloudInitId}
+            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+          >
+            <option value="">None</option>
+            {#each cloudInitTemplates as cit}
+              <option value={cit.id}>{cit.name}</option>
+            {/each}
+          </select>
+          <p class="text-xs text-muted mt-1">
+            This cloud-init config will be used by default when cloning from this template.
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 px-6 py-4 border-t border-line">
+        <button
+          type="button"
+          onclick={() => createVMTemplateOpen = false}
+          disabled={creatingTemplate}
+          class="px-4 py-2 rounded border border-line text-ink bg-white hover:bg-chrome transition-colors disabled:opacity-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onclick={handleCreateVMTemplate}
+          disabled={creatingTemplate || !newTemplateName.trim() || !selectedVMId}
+          class="px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors disabled:bg-primary/30 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {#if creatingTemplate}
+            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Creating...
+          {:else}
+            Create Template
+          {/if}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <ConfirmDialog
   bind:open={confirmDialog.open}

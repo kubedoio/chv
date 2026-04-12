@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/chv/chv/internal/vm"
 	"github.com/go-chi/chi/v5"
@@ -373,4 +374,114 @@ func (h *Handler) previewVMTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, preview)
+}
+
+// Cloud-init apply request
+type applyCloudInitRequest struct {
+	TemplateID string            `json:"template_id,omitempty"`
+	Variables  map[string]string `json:"variables,omitempty"`
+	UserData   string            `json:"user_data,omitempty"`
+}
+
+// applyCloudInit applies a cloud-init configuration to an existing VM
+// Note: This regenerates the cloud-init ISO but requires VM restart to take effect
+func (h *Handler) applyCloudInit(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+	vmID := chi.URLParam(r, "id")
+
+	var req applyCloudInitRequest
+	if err := decodeJSON(r, &req); err != nil {
+		h.writeError(w, http.StatusBadRequest, apiError{
+			Code:      "invalid_request",
+			Message:   "Request body must be valid JSON",
+			Retryable: false,
+		})
+		return
+	}
+
+	// Get the VM
+	vmModel, err := h.vmService.GetVM(ctx, vmID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "vm_get_failed",
+			Message:   err.Error(),
+			Retryable: true,
+		})
+		return
+	}
+	if vmModel == nil {
+		h.writeError(w, http.StatusNotFound, apiError{
+			Code:      "not_found",
+			Message:   "VM not found",
+			Retryable: false,
+		})
+		return
+	}
+
+	// Build cloud-init config
+	var userData string
+	if req.UserData != "" {
+		userData = req.UserData
+	} else if req.TemplateID != "" {
+		// Render template with variables
+		rendered, err := h.vmService.RenderCloudInitTemplateByID(ctx, req.TemplateID, req.Variables)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, apiError{
+				Code:      "render_failed",
+				Message:   err.Error(),
+				Retryable: true,
+			})
+			return
+		}
+		userData = rendered
+	} else {
+		h.writeError(w, http.StatusBadRequest, apiError{
+			Code:      "invalid_request",
+			Message:   "Either template_id or user_data must be provided",
+			Retryable: false,
+		})
+		return
+	}
+
+	// Validate cloud-init content
+	if !strings.Contains(userData, "#cloud-config") {
+		h.writeError(w, http.StatusBadRequest, apiError{
+			Code:      "invalid_cloudinit",
+			Message:   "Cloud-init content must contain '#cloud-config' header",
+			Retryable: false,
+		})
+		return
+	}
+
+	// Get template cloud-init vars for username/ssh keys
+	username := ""
+	var sshKeys []string
+	if req.Variables != nil {
+		username = req.Variables["Username"]
+		if sshKey := req.Variables["SSHKey"]; sshKey != "" {
+			sshKeys = []string{sshKey}
+		}
+	}
+
+	// Update VM with new cloud-init config
+	// Note: This updates the stored config but requires VM restart to apply
+	err = h.vmService.UpdateVMCloudInit(ctx, vmID, vm.UpdateCloudInitInput{
+		UserData:          userData,
+		Username:          username,
+		SSHAuthorizedKeys: sshKeys,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:      "apply_failed",
+			Message:   err.Error(),
+			Retryable: true,
+		})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"message": "Cloud-init configuration applied. Restart the VM to apply changes.",
+		"vm_id":   vmID,
+		"warning": "VM must be restarted for changes to take effect",
+	})
 }

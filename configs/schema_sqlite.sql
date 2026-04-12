@@ -845,6 +845,24 @@ CREATE TABLE IF NOT EXISTS usage_cache (
 
 CREATE INDEX IF NOT EXISTS idx_usage_cache_user_id ON usage_cache(user_id);
 
+-- VM metrics history for time-series graphs
+CREATE TABLE IF NOT EXISTS vm_metrics_history (
+    id TEXT PRIMARY KEY,
+    vm_id TEXT NOT NULL,
+    cpu_percent REAL,
+    memory_used_mb INTEGER,
+    memory_total_mb INTEGER,
+    disk_read_bytes INTEGER,
+    disk_write_bytes INTEGER,
+    net_rx_bytes INTEGER,
+    net_tx_bytes INTEGER,
+    timestamp TEXT NOT NULL,
+    FOREIGN KEY(vm_id) REFERENCES virtual_machines(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_vm_metrics_time ON vm_metrics_history(vm_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_vm_metrics_timestamp ON vm_metrics_history(timestamp);
+
 -- Insert default cloud-init templates
 INSERT OR IGNORE INTO cloud_init_templates (id, name, description, content, variables, created_at) VALUES
 ('cit-basic', 'Basic User Setup', 'Creates a user with sudo access and SSH key', '#cloud-config
