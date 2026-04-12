@@ -53,7 +53,7 @@
   );
 
   // Calculate sparkline points
-  const sparklinePoints = $derived(() => {
+  const sparklinePoints = $derived.by(() => {
     if (!sparklineData || sparklineData.length < 2) return [];
     const min = Math.min(...sparklineData);
     const max = Math.max(...sparklineData);
@@ -108,10 +108,10 @@
               <span class="text-2xl font-bold text-slate-900">{value}</span>
               {#if sparklineData && sparklineData.length > 1}
                 <svg width="60" height="24" viewBox="0 0 60 24" class="sparkline-mini">
-                  {#each sparklinePoints() as point, i}
+                  {#each sparklinePoints as point, i}
                     <circle cx={point.x} cy={point.y} r="1.5" fill="var(--color-primary)" />
                     {#if point.hasPrev}
-                      {@const prev = sparklinePoints()[i - 1]}
+                      {@const prev = sparklinePoints[i - 1]}
                       <line 
                         x1={prev.x} y1={prev.y} 
                         x2={point.x} y2={point.y} 
@@ -190,10 +190,10 @@
               <span class="text-2xl font-bold text-slate-900">{value}</span>
               {#if sparklineData && sparklineData.length > 1}
                 <svg width="60" height="24" viewBox="0 0 60 24" class="sparkline-mini">
-                  {#each sparklinePoints() as point, i}
+                  {#each sparklinePoints as point, i}
                     <circle cx={point.x} cy={point.y} r="1.5" fill="var(--color-primary)" />
                     {#if point.hasPrev}
-                      {@const prev = sparklinePoints()[i - 1]}
+                      {@const prev = sparklinePoints[i - 1]}
                       <line 
                         x1={prev.x} y1={prev.y} 
                         x2={point.x} y2={point.y} 

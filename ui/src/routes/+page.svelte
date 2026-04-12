@@ -43,6 +43,7 @@
   let scanning = $state(false);
   let lastUpdated = $state<Date>(new Date());
   let pollInterval: ReturnType<typeof setInterval> | null = $state(null);
+  let healthChecksLastUpdated = $state<string>(new Date().toISOString());
 
   // Modal states
   let showCreateVM = $state(false);
@@ -71,44 +72,55 @@
   );
 
   // Mock historical data for sparklines (would come from metrics API)
-  const vmHistory = $derived([vms.length * 0.8, vms.length * 0.85, vms.length * 0.9, vms.length * 0.88, vms.length * 0.92, vms.length * 0.95, vms.length]);
-  const storageHistory = $derived([usedStorageGB * 0.7, usedStorageGB * 0.75, usedStorageGB * 0.8, usedStorageGB * 0.78, usedStorageGB * 0.85, usedStorageGB * 0.9, usedStorageGB]);
+  const vmHistory = $derived.by(() => [vms.length * 0.8, vms.length * 0.85, vms.length * 0.9, vms.length * 0.88, vms.length * 0.92, vms.length * 0.95, vms.length]);
+  const storageHistory = $derived.by(() => [usedStorageGB * 0.7, usedStorageGB * 0.75, usedStorageGB * 0.8, usedStorageGB * 0.78, usedStorageGB * 0.85, usedStorageGB * 0.9, usedStorageGB]);
 
   // Current node info
   const currentNode = $derived(nodes.length > 0 ? nodes[0] : getDefaultNode());
 
   // Health checks derived from data
-  const healthChecks = $derived<HealthCheck[]>([
-    {
-      id: 'api',
-      name: 'API Status',
-      status: loading ? 'pending' : 'healthy',
-      message: loading ? 'Checking...' : 'Responding normally',
-      lastChecked: lastUpdated.toISOString()
-    },
-    {
-      id: 'node',
-      name: 'Node Status',
-      status: currentNode?.status === 'online' ? 'healthy' : 'warning',
-      message: currentNode?.status === 'online' ? `${currentNode.name} online` : 'Node unavailable',
-      lastChecked: lastUpdated.toISOString()
-    },
-    {
-      id: 'storage',
-      name: 'Storage Health',
-      status: totalStorageGB > 0 ? 'healthy' : 'warning',
-      message: pools.length > 0 ? `${pools.length} pools active` : 'No storage pools',
-      details: pools.map(p => `${p.name}: ${((p.capacity_bytes || 0) / (1024**3)).toFixed(1)} GB`),
-      lastChecked: lastUpdated.toISOString()
-    },
-    {
-      id: 'platform',
-      name: 'Platform',
-      status: installState === 'ready' ? 'healthy' : installState === 'bootstrap_required' ? 'warning' : 'pending',
-      message: installState.replace('_', ' '),
-      lastChecked: lastUpdated.toISOString()
-    }
-  ]);
+  const healthChecks = $derived.by(() => {
+    // Only access primitive values that change
+    const isLoading = loading;
+    const nodeStatus = currentNode?.status;
+    const nodeName = currentNode?.name;
+    const poolCount = pools.length;
+    const hasStorage = totalStorageGB > 0;
+    const iState = installState;
+    const lastTS = healthChecksLastUpdated;
+
+    return [
+      {
+        id: 'api',
+        name: 'API Status',
+        status: isLoading ? 'pending' : 'healthy',
+        message: isLoading ? 'Checking...' : 'Responding normally',
+        lastChecked: lastTS
+      },
+      {
+        id: 'node',
+        name: 'Node Status',
+        status: nodeStatus === 'online' ? 'healthy' : 'warning',
+        message: nodeStatus === 'online' ? `${nodeName} online` : 'Node unavailable',
+        lastChecked: lastTS
+      },
+      {
+        id: 'storage',
+        name: 'Storage Health',
+        status: hasStorage ? 'healthy' : 'warning',
+        message: poolCount > 0 ? `${poolCount} pools active` : 'No storage pools',
+        details: pools.map(p => `${p.name}: ${((p.capacity_bytes || 0) / (1024**3)).toFixed(1)} GB`),
+        lastChecked: lastTS
+      },
+      {
+        id: 'platform',
+        name: 'Platform',
+        status: iState === 'ready' ? 'healthy' : iState === 'bootstrap_required' ? 'warning' : 'pending',
+        message: iState.replace('_', ' '),
+        lastChecked: lastTS
+      }
+    ] as HealthCheck[];
+  });
 
   async function loadData() {
     if (!client) return;
@@ -130,6 +142,7 @@
       installState = installData.overall_state;
       nodes = nodesData ?? [];
       lastUpdated = new Date();
+      healthChecksLastUpdated = lastUpdated.toISOString();
     } catch (e) {
       console.error('Failed to load dashboard data:', e);
       toast.error('Failed to load dashboard data');
