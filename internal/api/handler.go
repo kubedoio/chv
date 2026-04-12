@@ -58,6 +58,7 @@ func NewHandler(repo *db.Repository, authService *auth.Service, bootstrapService
 		imageWorker:   imageWorker,
 		vmService:     vmService,
 		backupService: backupService,
+		auditLogger:   audit.NewLogger(repo),
 	}
 	handler.registerRoutes()
 	return handler

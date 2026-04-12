@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chv/chv/internal/agentapi"
+	"github.com/chv/chv/internal/agentclient"
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/health"
 	"github.com/chv/chv/internal/logger"
@@ -813,8 +814,31 @@ func (h *Handler) discoverNodeResources(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Create agent client
-	client := h.vmService.GetAgentClient()
+	// Get the node to determine agent URL and token
+	node, err := h.repo.GetNode(ctx, nodeID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:    "node_lookup_failed",
+			Message: "Failed to look up node: " + err.Error(),
+		})
+		return
+	}
+
+	// Create agent client for this node
+	var client *agentclient.Client
+	if node.IsLocal {
+		client = h.vmService.GetAgentClient()
+	} else {
+		if node.AgentURL == "" {
+			h.writeError(w, http.StatusBadRequest, apiError{
+				Code:    "missing_agent_url",
+				Message: "Node has no agent URL configured",
+			})
+			return
+		}
+		client = agentclient.NewClientWithAuth(node.AgentURL, node.AgentToken)
+	}
+
 	if client == nil {
 		h.writeError(w, http.StatusInternalServerError, apiError{
 			Code:    "agent_client_failed",
@@ -835,10 +859,11 @@ func (h *Handler) discoverNodeResources(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var discovered []string
-	var added []string
+	var discovered []string = []string{}
+	var added []string = []string{}
 
-	for _, vmID := range discoveryResp.FoundVMIDs {
+	if discoveryResp != nil && discoveryResp.FoundVMIDs != nil {
+		for _, vmID := range discoveryResp.FoundVMIDs {
 		discovered = append(discovered, vmID)
 		
 		// Check if VM exists in DB
@@ -872,6 +897,7 @@ func (h *Handler) discoverNodeResources(w http.ResponseWriter, r *http.Request) 
 			h.auditLogger.Log("system", "Discovery", "adopt_vm", "vm", vmID, "Discovered and adopted VM during node scan", "127.0.0.1", true, nil)
 		}
 	}
+}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"node_id":    nodeID,

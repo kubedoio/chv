@@ -1,8 +1,12 @@
 <script lang="ts">
-  export let label: string;
+  interface Props {
+    label: string;
+  }
 
-  const toneClass = (value: string) => {
-    const val = value.toLowerCase();
+  let { label }: Props = $props();
+
+  const tone = $derived.by(() => {
+    const val = label.toLowerCase();
     switch (val) {
       case 'ready':
       case 'running':
@@ -25,15 +29,13 @@
       default:
         return 'bg-slate-100 text-slate-600 border-slate-200';
     }
-  };
+  });
 
-  const isTransitioning = (value: string) => {
-    return ['starting', 'stopping', 'importing', 'provisioning'].includes(value.toLowerCase());
-  };
+  const transitioning = $derived(['starting', 'stopping', 'importing', 'provisioning'].includes(label.toLowerCase()));
 </script>
 
-<span class={`state-badge inline-flex items-center gap-1.5 border px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${toneClass(label)}`}>
-  <span class={`status-dot w-1.5 h-1.5 rounded-full ${isTransitioning(label) ? 'animate-pulse' : ''}`} style="background-color: currentColor"></span>
+<span class={`state-badge inline-flex items-center gap-1.5 border px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${tone}`}>
+  <span class={`status-dot w-1.5 h-1.5 rounded-full ${transitioning ? 'animate-pulse' : ''}`} style="background-color: currentColor"></span>
   {label.replaceAll('_', ' ')}
 </span>
 

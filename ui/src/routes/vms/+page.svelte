@@ -44,10 +44,9 @@
     pageSize: 10
   });
   
-  // Sync table data when items change
-  $effect(() => {
-    table.data = items;
-  });
+  // Summary counts and helpers
+  const totalCount = $derived(items.length);
+  const selectedIdsArray = $derived(Array.from(table.selectedIds));
 
   // Helper functions for lookup (not derived to avoid object creation)
   function getImage(id: string) {
@@ -61,22 +60,21 @@
   }
 
   // Computed stats (primitives only)
-  let total = $derived(items.length);
-  let runningCount = $derived(() => {
+  const runningCount = $derived.by(() => {
     let count = 0;
     for (const vm of items) {
       if (vm.actual_state === 'running') count++;
     }
     return count;
   });
-  let stoppedCount = $derived(() => {
+  const stoppedCount = $derived.by(() => {
     let count = 0;
     for (const vm of items) {
       if (vm.actual_state === 'stopped') count++;
     }
     return count;
   });
-  let otherCount = $derived(() => {
+  const otherCount = $derived.by(() => {
     let count = 0;
     for (const vm of items) {
       if (vm.actual_state !== 'running' && vm.actual_state !== 'stopped') count++;
@@ -170,7 +168,9 @@
     loading = true;
     error = '';
     try {
-      items = (await client.listVMs()) ?? [];
+      const vms = await client.listVMs();
+      items = vms ?? [];
+      table.data = items;
     } catch (err) {
       error = err instanceof Error ? err.message : 'Failed to load VMs';
       toast.error(error);
@@ -310,10 +310,10 @@
 <!-- Header with stats cards and create button -->
 <div class="flex justify-between items-start mb-6">
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1">
-    <StatsCard title="Total VMs" value={total} icon={Server} />
-    <StatsCard title="Running" value={runningCount()} icon={Play} trend="up" />
-    <StatsCard title="Stopped" value={stoppedCount()} icon={Square} />
-    <StatsCard title="Other" value={otherCount()} icon={AlertCircle} />
+    <StatsCard title="Total VMs" value={totalCount} icon={Server} />
+    <StatsCard title="Running" value={runningCount} icon={Play} trend="up" />
+    <StatsCard title="Stopped" value={stoppedCount} icon={Square} />
+    <StatsCard title="Other" value={otherCount} icon={AlertCircle} />
   </div>
   <button 
     onclick={() => createModalOpen = true} 
@@ -345,7 +345,7 @@
     {columns}
     {loading}
     selectable={true}
-    selectedIds={Array.from(table.selectedIds)}
+    selectedIds={selectedIdsArray}
     sortColumn={table.sortColumn ?? undefined}
     sortDirection={table.sortDirection}
     emptyIcon={Server as unknown as typeof import('svelte').SvelteComponent}

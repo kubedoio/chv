@@ -52,20 +52,18 @@
     { id: 'storage', label: 'Storage', icon: HardDrive }
   ];
 
-  const filteredEvents = $derived(() => {
-    if (!currentFilter) return events;
-    return events.filter(e => e.resource.toLowerCase().includes(currentFilter!.toLowerCase()));
-  });
+  const filteredEvents = $derived(
+    currentFilter 
+      ? events.filter(e => e.resource.toLowerCase().includes(currentFilter.toLowerCase())) 
+      : events
+  );
 
-  const paginatedEvents = $derived(() => {
-    const filtered = filteredEvents();
+  const paginatedEvents = $derived.by(() => {
     const start = (currentPage - 1) * itemsPerPage;
-    return filtered.slice(start, start + itemsPerPage);
+    return filteredEvents.slice(start, start + itemsPerPage);
   });
 
-  const totalPages = $derived(() => {
-    return Math.ceil(filteredEvents().length / itemsPerPage);
-  });
+  const totalPages = $derived(Math.ceil(filteredEvents.length / itemsPerPage));
 
   function toggleExpand(id: string) {
     const newSet = new Set(expandedEvents);
@@ -109,7 +107,7 @@
   }
 
   function goToPage(page: number) {
-    if (page >= 1 && page <= totalPages()) {
+    if (page >= 1 && page <= totalPages) {
       currentPage = page;
     }
   }
@@ -125,7 +123,7 @@
           {#if loading}
             Loading events...
           {:else}
-            {filteredEvents().length} events
+            {filteredEvents.length} events
             {#if currentFilter}
               <span class="text-slate-400">(filtered)</span>
             {/if}
@@ -199,7 +197,7 @@
         <Loader2 size={24} class="mx-auto mb-2 text-slate-400 animate-spin" />
         <p class="text-sm text-slate-500">Loading events...</p>
       </div>
-    {:else if paginatedEvents().length === 0}
+    {:else if paginatedEvents.length === 0}
       <div class="p-8 text-center">
         <Activity size={32} class="mx-auto mb-3 opacity-40 text-slate-400" />
         <p class="text-sm text-slate-500">
@@ -207,7 +205,7 @@
         </p>
       </div>
     {:else}
-      {#each paginatedEvents() as event}
+      {#each paginatedEvents as event}
         {@const ResourceIcon = getResourceIcon(event.resource)}
         {@const isExpanded = expandedEvents.has(event.id)}
         <div class="event-item">
@@ -279,7 +277,7 @@
   </div>
 
   <!-- Pagination -->
-  {#if totalPages() > 1}
+  {#if totalPages > 1}
     <div class="px-5 py-3 border-t border-slate-100 flex items-center justify-between">
       <button
         onclick={() => goToPage(currentPage - 1)}
@@ -289,11 +287,11 @@
         Previous
       </button>
       <span class="text-sm text-slate-500">
-        Page {currentPage} of {totalPages()}
+        Page {currentPage} of {totalPages}
       </span>
       <button
         onclick={() => goToPage(currentPage + 1)}
-        disabled={currentPage === totalPages()}
+        disabled={currentPage === totalPages}
         class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         Next

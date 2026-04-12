@@ -70,6 +70,17 @@
 	let lastSelectedId = $state<string | null>(null);
 	let columnVisibilityOpen = $state(false);
 	let visibleColumns = $state<Set<string>>(new Set(columns.map(c => c.key)));
+	const visibleColumnList = $derived(columns.filter(c => visibleColumns.has(c.key)));
+
+	// Re-initialize visibleColumns if columns prop changes significantly
+	$effect(() => {
+		const keys = columns.map(c => c.key);
+		const currentKeys = Array.from(visibleColumns);
+		// Check if keys have changed (simplistic check)
+		if (keys.length !== currentKeys.length || keys.some(k => !currentKeys.includes(k))) {
+			visibleColumns = new Set(keys);
+		}
+	});
 	let resizingColumn = $state<string | null>(null);
 	let tableRef = $state<HTMLTableElement | null>(null);
 	
@@ -90,12 +101,11 @@
 		return selectedIds.includes(rowId(row));
 	}
 	
-	let isAllSelected = $derived(() => {
-		if (!selectable || data.length === 0) return false;
-		return data.every(row => selectedIds.includes(rowId(row)));
-	});
+	const isAllSelected = $derived(
+		selectable && data.length > 0 && data.every(row => selectedIds.includes(rowId(row)))
+	);
 	
-	let isPartiallySelected = $derived(() => {
+	const isPartiallySelected = $derived.by(() => {
 		if (!selectable) return false;
 		const someSelected = data.some(row => selectedIds.includes(rowId(row)));
 		const allSelected = data.every(row => selectedIds.includes(rowId(row)));
@@ -130,7 +140,7 @@
 	function toggleSelectAll() {
 		if (!onSelect) return;
 
-		if (isAllSelected()) {
+		if (isAllSelected) {
 			onSelect([]);
 		} else {
 			const allIds = data.map(row => rowId(row));
@@ -285,11 +295,11 @@
 								type="button"
 								class="select-btn"
 								onclick={toggleSelectAll}
-								aria-label={isAllSelected() ? 'Deselect all' : 'Select all'}
+								aria-label={isAllSelected ? 'Deselect all' : 'Select all'}
 							>
-								{#if isAllSelected()}
+								{#if isAllSelected}
 									<CheckSquare size={16} class="text-primary" />
-								{:else if isPartiallySelected()}
+								{:else if isPartiallySelected}
 									<MinusSquare size={16} class="text-primary" />
 								{:else}
 									<Square size={16} />

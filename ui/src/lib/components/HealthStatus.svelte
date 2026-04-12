@@ -53,14 +53,14 @@
     }
   };
 
-  const overallStatus = $derived(() => {
+  const overallStatus = $derived.by(() => {
     if (checks.length === 0) return 'pending';
     if (checks.some(c => c.status === 'error')) return 'error';
     if (checks.some(c => c.status === 'warning')) return 'warning';
     return 'healthy';
   });
 
-  const overallConfig = $derived(statusConfig[overallStatus()]);
+  const overallConfig = $derived(statusConfig[overallStatus]);
 
   function toggleExpand(id: string) {
     const newSet = new Set(expandedChecks);

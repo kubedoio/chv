@@ -24,9 +24,9 @@ export function getDefaultNode(): Node {
     status: 'online',
     is_local: false,
     capabilities: undefined,
-    last_seen_at: new Date().toISOString(),
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString()
+    last_seen_at: '2024-01-01T00:00:00Z',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z'
   };
 }
 
