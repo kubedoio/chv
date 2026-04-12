@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, i as derived, e as escape_html, c as attr, g as ensure_array_like, f as attr_class } from "./root.js";
+import { s as sanitize_props, a as spread_props, b as slot, h as derived, e as escape_html, c as attr, g as ensure_array_like, d as attr_class } from "./root.js";
 import { I as Icon } from "./Icon.js";
 import { C as Chevron_right } from "./chevron-right.js";
 function Chevron_left($$renderer, $$props) {
@@ -272,18 +272,19 @@ function useTable(options) {
   let pageSize = options.pageSize ?? 10;
   let selectedIds = /* @__PURE__ */ new Set();
   let filters = {};
-  const sortedData = derived(() => {
+  function getSortedData() {
     if (!sortColumn || !sortDirection) return data;
     return [...data].sort((a, b) => {
       const aVal = getValue(a, sortColumn);
       const bVal = getValue(b, sortColumn);
       return compareValues(aVal, bVal, sortDirection);
     });
-  });
-  const filteredData = derived(() => {
+  }
+  function getFilteredData() {
+    const sorted = getSortedData();
     const activeFilters = Object.entries(filters).filter(([_, v]) => v !== void 0 && v !== null && v !== "");
-    if (activeFilters.length === 0) return sortedData();
-    return sortedData().filter((item) => {
+    if (activeFilters.length === 0) return sorted;
+    return sorted.filter((item) => {
       return activeFilters.every(([key, value]) => {
         const itemValue = getValue(item, key);
         if (typeof value === "string") {
@@ -292,28 +293,33 @@ function useTable(options) {
         return itemValue === value;
       });
     });
-  });
-  const totalItems = derived(() => filteredData().length);
+  }
+  const totalItems = derived(() => getFilteredData().length);
   const totalPages = derived(() => Math.max(1, Math.ceil(totalItems() / pageSize)));
   const safePage = derived(() => Math.min(page, totalPages()));
-  const paginatedData = derived(() => {
+  function getPaginatedData() {
+    const filtered = getFilteredData();
     const start = (safePage() - 1) * pageSize;
     const end = start + pageSize;
-    return filteredData().slice(start, end);
-  });
+    return filtered.slice(start, end);
+  }
   function getRowId(row) {
     return row.id;
   }
   const selectedCount = derived(() => selectedIds.size);
-  const isAllSelected = derived(() => () => {
-    return paginatedData().length > 0 && paginatedData().every((item) => selectedIds.has(getRowId(item)));
-  });
-  const isPartiallySelected = derived(() => () => {
-    const hasSome = paginatedData().some((item) => selectedIds.has(getRowId(item)));
-    const hasAll = paginatedData().every((item) => selectedIds.has(getRowId(item)));
+  function getIsAllSelected() {
+    const data2 = getPaginatedData();
+    return data2.length > 0 && data2.every((item) => selectedIds.has(getRowId(item)));
+  }
+  function getIsPartiallySelected() {
+    const data2 = getPaginatedData();
+    const hasSome = data2.some((item) => selectedIds.has(getRowId(item)));
+    const hasAll = data2.every((item) => selectedIds.has(getRowId(item)));
     return hasSome && !hasAll;
-  });
-  const activeFilterCount = derived(() => Object.values(filters).filter((v) => v !== void 0 && v !== null && v !== "").length);
+  }
+  function getActiveFilterCount() {
+    return Object.values(filters).filter((v) => v !== void 0 && v !== null && v !== "").length;
+  }
   function sort(column) {
     if (sortColumn === column) {
       if (sortDirection === "asc") {
@@ -377,19 +383,20 @@ function useTable(options) {
   }
   function selectAll() {
     const newSet = new Set(selectedIds);
-    paginatedData().forEach((item) => {
+    getPaginatedData().forEach((item) => {
       newSet.add(getRowId(item));
     });
     selectedIds = newSet;
   }
   function selectNone() {
-    paginatedData().forEach((item) => {
+    getPaginatedData().forEach((item) => {
       selectedIds.delete(getRowId(item));
     });
     selectedIds = new Set(selectedIds);
   }
   function selectRange(startId, endId, getId) {
-    const visibleIds = paginatedData().map(getId);
+    const paginated = getPaginatedData();
+    const visibleIds = paginated.map(getId);
     const startIndex = visibleIds.indexOf(startId);
     const endIndex = visibleIds.indexOf(endId);
     if (startIndex === -1 || endIndex === -1) return;
@@ -417,7 +424,7 @@ function useTable(options) {
     return selectedIds.has(id);
   }
   function getVisibleIds(getId) {
-    return paginatedData().map(getId);
+    return getPaginatedData().map(getId);
   }
   return {
     // Data
@@ -428,10 +435,10 @@ function useTable(options) {
       data = newData;
     },
     get sortedData() {
-      return sortedData();
+      return getSortedData();
     },
     get paginatedData() {
-      return paginatedData();
+      return getPaginatedData();
     },
     get totalItems() {
       return totalItems();
@@ -470,10 +477,10 @@ function useTable(options) {
       return selectedCount();
     },
     get isAllSelected() {
-      return isAllSelected()();
+      return getIsAllSelected();
     },
     get isPartiallySelected() {
-      return isPartiallySelected()();
+      return getIsPartiallySelected();
     },
     toggleSelect,
     select,
@@ -489,7 +496,7 @@ function useTable(options) {
     clearFilter,
     clearAllFilters,
     get activeFilterCount() {
-      return activeFilterCount();
+      return getActiveFilterCount();
     },
     // Helpers
     isSelected,

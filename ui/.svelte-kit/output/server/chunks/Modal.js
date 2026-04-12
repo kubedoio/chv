@@ -1,4 +1,4 @@
-import { f as attr_class, j as bind_props, c as attr, h as stringify, e as escape_html, i as derived } from "./root.js";
+import { d as attr_class, j as bind_props, c as attr, f as stringify, e as escape_html, h as derived } from "./root.js";
 import "clsx";
 function FocusTrap($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {

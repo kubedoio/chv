@@ -605,6 +605,11 @@ func (s *Service) ListBackupHistory(ctx context.Context, vmID string) ([]BackupH
 	return s.ListHistory(ctx, vmID)
 }
 
+// ListAllBackupHistory lists all backup history across all VMs
+func (s *Service) ListAllBackupHistory(ctx context.Context) ([]BackupHistory, error) {
+	return s.repo.ListAllBackupHistory(ctx)
+}
+
 // ExportVM exports a VM to a file and returns the path
 func (s *Service) ExportVM(ctx context.Context, vmID string) (string, error) {
 	vm, err := s.vmService.GetVM(ctx, vmID)

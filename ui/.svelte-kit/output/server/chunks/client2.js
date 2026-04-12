@@ -377,6 +377,9 @@ function createAPIClient(options) {
         body: JSON.stringify({ enabled })
       });
     },
+    discoverNode(nodeId) {
+      return request(`/api/v1/nodes/${nodeId}/discover`, { method: "POST" });
+    },
     // Node-scoped resource endpoints
     listNodeVMs(nodeId) {
       return request(`/api/v1/nodes/${nodeId}/vms`);
@@ -459,6 +462,12 @@ function createAPIClient(options) {
         body: JSON.stringify(data)
       });
     },
+    applyCloudInit(vmId, data) {
+      return request(`/api/v1/vms/${vmId}/cloud-init/apply`, {
+        method: "POST",
+        body: JSON.stringify(data)
+      });
+    },
     // VLAN endpoints
     listVLANs(networkId) {
       return request(`/api/v1/networks/${networkId}/vlans`);
@@ -535,6 +544,9 @@ function createAPIClient(options) {
     listVMBackups(vmId) {
       return request(`/api/v1/vms/${vmId}/backups`);
     },
+    listBackupHistory() {
+      return request("/api/v1/backup-history");
+    },
     // Export/Import
     exportVM(vmId) {
       return request(`/api/v1/vms/${vmId}/export`, { method: "POST" });
@@ -587,6 +599,7 @@ function createAPIClient(options) {
   };
 }
 export {
+  APIError as A,
   createAPIClient as c,
   getStoredToken as g,
   toast as t

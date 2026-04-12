@@ -133,6 +133,7 @@ type Image struct {
 type VirtualMachine struct {
 	ID                 string `json:"id"`
 	NodeID             string `json:"node_id"`
+	UserID             string `json:"user_id,omitempty"` // Owner of the VM
 	Name               string `json:"name"`
 	ImageID            string `json:"image_id"`
 	StoragePoolID      string `json:"storage_pool_id"`

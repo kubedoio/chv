@@ -1,13 +1,13 @@
-import { s as sanitize_props, a as spread_props, b as slot, l as attributes, i as derived, h as stringify, c as attr, e as escape_html, f as attr_class, g as ensure_array_like, m as attr_style, n as head } from "../../chunks/root.js";
+import { s as sanitize_props, a as spread_props, b as slot, l as attributes, h as derived, f as stringify, c as attr, e as escape_html, d as attr_class, g as ensure_array_like, m as attr_style, n as head } from "../../chunks/root.js";
 import { o as onDestroy } from "../../chunks/index-server.js";
 import { g as goto } from "../../chunks/client.js";
-import { g as getStoredToken, c as createAPIClient, t as toast } from "../../chunks/client2.js";
+import { g as getStoredToken, t as toast } from "../../chunks/client2.js";
 import { g as getDefaultNode } from "../../chunks/nodes.js";
 import { I as Icon } from "../../chunks/Icon.js";
 import { M as Minus, T as Trending_down, a as Trending_up, C as Circle_alert } from "../../chunks/trending-up.js";
 import { R as Refresh_cw } from "../../chunks/refresh-cw.js";
 import { C as Chevron_up } from "../../chunks/chevron-up.js";
-import { C as Circle_check_big, a as Cpu } from "../../chunks/cpu.js";
+import { C as Circle_check_big } from "../../chunks/circle-check-big.js";
 import { C as Chevron_down } from "../../chunks/chevron-down.js";
 import { S as StateBadge } from "../../chunks/StateBadge.js";
 import { F as Funnel } from "../../chunks/funnel.js";
@@ -24,6 +24,7 @@ import { C as CreateNetworkModal } from "../../chunks/CreateNetworkModal.js";
 import { P as Plus } from "../../chunks/plus.js";
 import { D as Download } from "../../chunks/download.js";
 import { S as Settings } from "../../chunks/settings.js";
+import { C as Cpu } from "../../chunks/cpu.js";
 import { D as Database } from "../../chunks/database.js";
 function Check_check($$renderer, $$props) {
   const $$sanitized_props = sanitize_props($$props);
@@ -356,7 +357,7 @@ function ResourceCard($$renderer, $$props) {
       }
     };
     const percentage = derived(() => progress ? Math.min(100, Math.max(0, progress.value / progress.max * 100)) : 0);
-    const sparklinePoints = derived(() => () => {
+    const sparklinePoints = derived(() => {
       if (!sparklineData || sparklineData.length < 2) return [];
       const min = Math.min(...sparklineData);
       const max = Math.max(...sparklineData);
@@ -398,13 +399,13 @@ function ResourceCard($$renderer, $$props) {
         if (sparklineData && sparklineData.length > 1) {
           $$renderer2.push("<!--[0-->");
           $$renderer2.push(`<svg width="60" height="24" viewBox="0 0 60 24" class="sparkline-mini svelte-svj27m"><!--[-->`);
-          const each_array = ensure_array_like(sparklinePoints()());
+          const each_array = ensure_array_like(sparklinePoints());
           for (let i = 0, $$length = each_array.length; i < $$length; i++) {
             let point = each_array[i];
             $$renderer2.push(`<circle${attr("cx", point.x)}${attr("cy", point.y)} r="1.5" fill="var(--color-primary)"></circle>`);
             if (point.hasPrev) {
               $$renderer2.push("<!--[0-->");
-              const prev = sparklinePoints()()[i - 1];
+              const prev = sparklinePoints()[i - 1];
               $$renderer2.push(`<line${attr("x1", prev.x)}${attr("y1", prev.y)}${attr("x2", point.x)}${attr("y2", point.y)} stroke="var(--color-primary)" stroke-width="1.5" stroke-linecap="round"></line>`);
             } else {
               $$renderer2.push("<!--[-1-->");
@@ -477,13 +478,13 @@ function ResourceCard($$renderer, $$props) {
         if (sparklineData && sparklineData.length > 1) {
           $$renderer2.push("<!--[0-->");
           $$renderer2.push(`<svg width="60" height="24" viewBox="0 0 60 24" class="sparkline-mini svelte-svj27m"><!--[-->`);
-          const each_array_1 = ensure_array_like(sparklinePoints()());
+          const each_array_1 = ensure_array_like(sparklinePoints());
           for (let i = 0, $$length = each_array_1.length; i < $$length; i++) {
             let point = each_array_1[i];
             $$renderer2.push(`<circle${attr("cx", point.x)}${attr("cy", point.y)} r="1.5" fill="var(--color-primary)"></circle>`);
             if (point.hasPrev) {
               $$renderer2.push("<!--[0-->");
-              const prev = sparklinePoints()()[i - 1];
+              const prev = sparklinePoints()[i - 1];
               $$renderer2.push(`<line${attr("x1", prev.x)}${attr("y1", prev.y)}${attr("x2", point.x)}${attr("y2", point.y)} stroke="var(--color-primary)" stroke-width="1.5" stroke-linecap="round"></line>`);
             } else {
               $$renderer2.push("<!--[-1-->");
@@ -565,13 +566,13 @@ function HealthStatus($$renderer, $$props) {
         label: "Checking"
       }
     };
-    const overallStatus = derived(() => () => {
+    const overallStatus = derived(() => {
       if (checks.length === 0) return "pending";
       if (checks.some((c) => c.status === "error")) return "error";
       if (checks.some((c) => c.status === "warning")) return "warning";
       return "healthy";
     });
-    const overallConfig = derived(() => statusConfig[overallStatus()()]);
+    const overallConfig = derived(() => statusConfig[overallStatus()]);
     function formatTime(date) {
       const now = /* @__PURE__ */ new Date();
       const diff = Math.floor((now.getTime() - date.getTime()) / 1e3);
@@ -693,18 +694,17 @@ function EventList($$renderer, $$props) {
       { id: "network", label: "Network", icon: Network },
       { id: "storage", label: "Storage", icon: Hard_drive }
     ];
-    const filteredEvents = derived(() => () => {
-      if (!currentFilter) return events;
-      return events.filter((e) => e.resource.toLowerCase().includes(currentFilter.toLowerCase()));
-    });
-    const paginatedEvents = derived(() => () => {
-      const filtered = filteredEvents()();
+    function getFilteredEvents() {
+      return currentFilter ? events.filter((e) => e.resource.toLowerCase().includes(currentFilter.toLowerCase())) : events;
+    }
+    function getPaginatedEvents() {
+      const filtered = getFilteredEvents();
       const start = (currentPage - 1) * itemsPerPage;
       return filtered.slice(start, start + itemsPerPage);
-    });
-    const totalPages = derived(() => () => {
-      return Math.ceil(filteredEvents()().length / itemsPerPage);
-    });
+    }
+    function getTotalPages() {
+      return Math.ceil(getFilteredEvents().length / itemsPerPage);
+    }
     function setFilter(filter) {
       currentFilter = filter;
       currentPage = 1;
@@ -737,7 +737,7 @@ function EventList($$renderer, $$props) {
       $$renderer2.push(`Loading events...`);
     } else {
       $$renderer2.push("<!--[-1-->");
-      $$renderer2.push(`${escape_html(filteredEvents()().length)} events `);
+      $$renderer2.push(`${escape_html(getFilteredEvents().length)} events `);
       if (currentFilter) {
         $$renderer2.push("<!--[0-->");
         $$renderer2.push(`<span class="text-slate-400">(filtered)</span>`);
@@ -807,7 +807,7 @@ function EventList($$renderer, $$props) {
       $$renderer2.push(`<div class="p-8 text-center">`);
       Loader_circle($$renderer2, { size: 24, class: "mx-auto mb-2 text-slate-400 animate-spin" });
       $$renderer2.push(`<!----> <p class="text-sm text-slate-500">Loading events...</p></div>`);
-    } else if (paginatedEvents()().length === 0) {
+    } else if (getPaginatedEvents().length === 0) {
       $$renderer2.push("<!--[1-->");
       $$renderer2.push(`<div class="p-8 text-center">`);
       Activity($$renderer2, { size: 32, class: "mx-auto mb-3 opacity-40 text-slate-400" });
@@ -815,7 +815,7 @@ function EventList($$renderer, $$props) {
     } else {
       $$renderer2.push("<!--[-1-->");
       $$renderer2.push(`<!--[-->`);
-      const each_array_1 = ensure_array_like(paginatedEvents()());
+      const each_array_1 = ensure_array_like(getPaginatedEvents());
       for (let $$index_1 = 0, $$length = each_array_1.length; $$index_1 < $$length; $$index_1++) {
         let event = each_array_1[$$index_1];
         const ResourceIcon = getResourceIcon(event.resource);
@@ -876,9 +876,9 @@ function EventList($$renderer, $$props) {
       $$renderer2.push(`<!--]-->`);
     }
     $$renderer2.push(`<!--]--></div> `);
-    if (totalPages()() > 1) {
+    if (getTotalPages() > 1) {
       $$renderer2.push("<!--[0-->");
-      $$renderer2.push(`<div class="px-5 py-3 border-t border-slate-100 flex items-center justify-between"><button${attr("disabled", currentPage === 1, true)} class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Previous</button> <span class="text-sm text-slate-500">Page ${escape_html(currentPage)} of ${escape_html(totalPages()())}</span> <button${attr("disabled", currentPage === totalPages()(), true)} class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Next</button></div>`);
+      $$renderer2.push(`<div class="px-5 py-3 border-t border-slate-100 flex items-center justify-between"><button${attr("disabled", currentPage === 1, true)} class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Previous</button> <span class="text-sm text-slate-500">Page ${escape_html(currentPage)} of ${escape_html(getTotalPages())}</span> <button${attr("disabled", currentPage === getTotalPages(), true)} class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Next</button></div>`);
     } else {
       $$renderer2.push("<!--[-1-->");
     }
@@ -887,105 +887,99 @@ function EventList($$renderer, $$props) {
 }
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
-    const token = getStoredToken();
-    const client = createAPIClient({ token: token ?? void 0 });
+    getStoredToken();
     let vms = [];
     let images = [];
     let pools = [];
     let networks = [];
     let events = [];
+    let nodes = [];
     let installState = "unknown";
     let loading = true;
     let lastUpdated = /* @__PURE__ */ new Date();
+    let healthChecksLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
     let showCreateVM = false;
     let showImportImage = false;
     let showCreateNetwork = false;
-    const runningVMs = derived(() => vms.filter((v) => v.actual_state === "running").length);
-    const stoppedVMs = derived(() => vms.filter((v) => v.actual_state === "stopped").length);
-    const totalVcpus = derived(() => vms.reduce((acc, v) => acc + (v.vcpu || 0), 0));
-    const totalMemoryGB = derived(() => vms.reduce((acc, v) => acc + (v.memory_mb || 0) / 1024, 0));
-    const totalStorageGB = derived(() => pools.reduce((acc, p) => acc + (p.capacity_bytes || 0), 0) / 1024 ** 3);
-    const usedStorageGB = derived(() => pools.reduce((acc, p) => acc + ((p.capacity_bytes || 0) - (p.allocatable_bytes || 0)), 0) / 1024 ** 3);
-    const vmHistory = derived(() => [
-      vms.length * 0.8,
-      vms.length * 0.85,
-      vms.length * 0.9,
-      vms.length * 0.88,
-      vms.length * 0.92,
-      vms.length * 0.95,
-      vms.length
-    ]);
-    const storageHistory = derived(() => [
-      usedStorageGB() * 0.7,
-      usedStorageGB() * 0.75,
-      usedStorageGB() * 0.8,
-      usedStorageGB() * 0.78,
-      usedStorageGB() * 0.85,
-      usedStorageGB() * 0.9,
-      usedStorageGB()
-    ]);
-    const currentNode = derived(getDefaultNode);
-    const healthChecks = derived(() => [
-      {
-        id: "api",
-        name: "API Status",
-        status: loading ? "pending" : "healthy",
-        message: loading ? "Checking..." : "Responding normally",
-        lastChecked: lastUpdated.toISOString()
-      },
-      {
-        id: "node",
-        name: "Node Status",
-        status: currentNode()?.status === "online" ? "healthy" : "warning",
-        message: currentNode()?.status === "online" ? `${currentNode().name} online` : "Node unavailable",
-        lastChecked: lastUpdated.toISOString()
-      },
-      {
-        id: "storage",
-        name: "Storage Health",
-        status: totalStorageGB() > 0 ? "healthy" : "warning",
-        message: pools.length > 0 ? `${pools.length} pools active` : "No storage pools",
-        details: pools.map((p) => `${p.name}: ${((p.capacity_bytes || 0) / 1024 ** 3).toFixed(1)} GB`),
-        lastChecked: lastUpdated.toISOString()
-      },
-      {
-        id: "platform",
-        name: "Platform",
-        status: installState === "ready" ? "healthy" : installState === "bootstrap_required" ? "warning" : "pending",
-        message: installState.replace("_", " "),
-        lastChecked: lastUpdated.toISOString()
-      }
-    ]);
+    function getRunningVMs() {
+      return vms.filter((v) => v.actual_state === "running").length;
+    }
+    function getStoppedVMs() {
+      return vms.filter((v) => v.actual_state === "stopped").length;
+    }
+    function getTotalVcpus() {
+      return vms.reduce((acc, v) => acc + (v.vcpu || 0), 0);
+    }
+    function getTotalMemoryGB() {
+      return vms.reduce((acc, v) => acc + (v.memory_mb || 0) / 1024, 0);
+    }
+    function getTotalStorageGB() {
+      return pools.reduce((acc, p) => acc + (p.capacity_bytes || 0), 0) / 1024 ** 3;
+    }
+    function getUsedStorageGB() {
+      return pools.reduce((acc, p) => acc + ((p.capacity_bytes || 0) - (p.allocatable_bytes || 0)), 0) / 1024 ** 3;
+    }
+    function getVmHistory() {
+      return [
+        vms.length * 0.8,
+        vms.length * 0.85,
+        vms.length * 0.9,
+        vms.length * 0.88,
+        vms.length * 0.92,
+        vms.length * 0.95,
+        vms.length
+      ];
+    }
+    function getStorageHistory() {
+      return [
+        getUsedStorageGB() * 0.7,
+        getUsedStorageGB() * 0.75,
+        getUsedStorageGB() * 0.8,
+        getUsedStorageGB() * 0.78,
+        getUsedStorageGB() * 0.85,
+        getUsedStorageGB() * 0.9,
+        getUsedStorageGB()
+      ];
+    }
+    function getCurrentNode() {
+      return nodes.length > 0 ? nodes[0] : getDefaultNode();
+    }
+    function getHealthChecks() {
+      const currentNode = getCurrentNode();
+      return [
+        {
+          id: "api",
+          name: "API Status",
+          status: loading ? "pending" : "healthy",
+          message: loading ? "Checking..." : "Responding normally",
+          lastChecked: healthChecksLastUpdated
+        },
+        {
+          id: "node",
+          name: "Node Status",
+          status: currentNode?.status === "online" ? "healthy" : "warning",
+          message: currentNode?.status === "online" ? `${currentNode?.name} online` : "Node unavailable",
+          lastChecked: healthChecksLastUpdated
+        },
+        {
+          id: "storage",
+          name: "Storage Health",
+          status: getTotalStorageGB() > 0 ? "healthy" : "warning",
+          message: pools.length > 0 ? `${pools.length} pools active` : "No storage pools",
+          details: pools.map((p) => `${p.name}: ${((p.capacity_bytes || 0) / 1024 ** 3).toFixed(1)} GB`),
+          lastChecked: healthChecksLastUpdated
+        },
+        {
+          id: "platform",
+          name: "Platform",
+          status: "pending",
+          message: installState.replace("_", " "),
+          lastChecked: healthChecksLastUpdated
+        }
+      ];
+    }
     async function loadData() {
-      try {
-        const [
-          vmsData,
-          imagesData,
-          poolsData,
-          networksData,
-          eventsData,
-          installData
-        ] = await Promise.all([
-          client.listVMs(),
-          client.listImages(),
-          client.listStoragePools(),
-          client.listNetworks(),
-          client.listEvents(),
-          client.getInstallStatus()
-        ]);
-        vms = vmsData;
-        images = imagesData;
-        pools = poolsData;
-        networks = networksData;
-        events = eventsData;
-        installState = installData.overall_state;
-        lastUpdated = /* @__PURE__ */ new Date();
-      } catch (e) {
-        console.error("Failed to load dashboard data:", e);
-        toast.error("Failed to load dashboard data");
-      } finally {
-        loading = false;
-      }
+      return;
     }
     function handleRefresh() {
       loading = true;
@@ -1015,6 +1009,9 @@ function _page($$renderer, $$props) {
       loadData();
       toast.success("Network created successfully");
     }
+    async function handleScanNode() {
+      return;
+    }
     onDestroy(() => {
     });
     let $$settled = true;
@@ -1025,7 +1022,7 @@ function _page($$renderer, $$props) {
           $$renderer5.push(`<title>Dashboard | CHV</title>`);
         });
       });
-      $$renderer3.push(`<div class="space-y-6"><div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4"><div><h1 class="text-2xl font-bold text-slate-900">Dashboard</h1> <p class="text-sm text-slate-500 mt-1">${escape_html(currentNode()?.name || "Datacenter")} overview and system status</p></div> <div class="flex items-center gap-2"><span class="text-xs text-slate-500">Last updated: ${escape_html(lastUpdated.toLocaleTimeString())}</span> <button class="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" aria-label="Refresh data"${attr("disabled", loading, true)}>`);
+      $$renderer3.push(`<div class="space-y-6"><div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4"><div><h1 class="text-2xl font-bold text-slate-900">Dashboard</h1> <p class="text-sm text-slate-500 mt-1">${escape_html(getCurrentNode()?.name || "Datacenter")} overview and system status</p></div> <div class="flex items-center gap-2"><span class="text-xs text-slate-500">Last updated: ${escape_html(lastUpdated.toLocaleTimeString())}</span> <button class="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" aria-label="Refresh data"${attr("disabled", loading, true)}>`);
       Refresh_cw($$renderer3, { size: 16, class: loading ? "animate-spin" : "" });
       $$renderer3.push(`<!----></button></div></div> `);
       if (loading && vms.length === 0) {
@@ -1038,8 +1035,8 @@ function _page($$renderer, $$props) {
         $$renderer3.push(`<section class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">`);
         ResourceCard($$renderer3, {
           title: "Node",
-          value: currentNode()?.name || "Unknown",
-          subtitle: currentNode()?.hostname || "",
+          value: getCurrentNode()?.name || "Unknown",
+          subtitle: getCurrentNode()?.hostname || "",
           icon: Server,
           iconColor: "slate",
           loading: loading && vms.length === 0,
@@ -1049,12 +1046,12 @@ function _page($$renderer, $$props) {
         ResourceCard($$renderer3, {
           title: "Virtual Machines",
           value: vms.length,
-          subtitle: runningVMs() + " running, " + stoppedVMs() + " stopped",
+          subtitle: getRunningVMs() + " running, " + getStoppedVMs() + " stopped",
           icon: Cpu,
           iconColor: "blue",
           trend: vms.length > 0 ? "up" : "neutral",
           trendValue: vms.length > 0 ? "+1 this week" : void 0,
-          sparklineData: vmHistory(),
+          sparklineData: getVmHistory(),
           loading: loading && vms.length === 0,
           href: "/vms"
         });
@@ -1062,15 +1059,11 @@ function _page($$renderer, $$props) {
         ResourceCard($$renderer3, {
           title: "Storage",
           value: pools.length,
-          subtitle: usedStorageGB().toFixed(1) + " GB of " + totalStorageGB().toFixed(1) + " GB used",
+          subtitle: usedStorageGB.toFixed(1) + " GB of " + totalStorageGB.toFixed(1) + " GB used",
           icon: Database,
           iconColor: "amber",
-          progress: totalStorageGB() > 0 ? {
-            value: usedStorageGB(),
-            max: totalStorageGB(),
-            label: "Usage"
-          } : void 0,
-          sparklineData: storageHistory(),
+          progress: totalStorageGB > 0 ? { value: usedStorageGB, max: totalStorageGB, label: "Usage" } : void 0,
+          sparklineData: getStorageHistory(),
           loading: loading && vms.length === 0,
           href: "/storage"
         });
@@ -1093,6 +1086,20 @@ function _page($$renderer, $$props) {
           children: ($$renderer4) => {
             Plus($$renderer4, { size: 16 });
             $$renderer4.push(`<!----> Create VM`);
+          },
+          $$slots: { default: true }
+        });
+        $$renderer3.push(`<!----> `);
+        Button($$renderer3, {
+          variant: "secondary",
+          size: "sm",
+          onclick: handleScanNode,
+          disabled: getCurrentNode().id === "placeholder",
+          children: ($$renderer4) => {
+            Loader_circle($$renderer4, { size: 16, class: "hidden" });
+            $$renderer4.push(`<!----> `);
+            Refresh_cw($$renderer4, { size: 16, class: "" });
+            $$renderer4.push(`<!----> Scan Node for VMs`);
           },
           $$slots: { default: true }
         });
@@ -1153,16 +1160,16 @@ function _page($$renderer, $$props) {
         });
         $$renderer3.push(`<!----></div> <div class="space-y-6">`);
         HealthStatus($$renderer3, {
-          checks: healthChecks(),
+          checks: getHealthChecks(),
           loading,
           onRefresh: handleRefresh,
           lastUpdated
         });
         $$renderer3.push(`<!----> <div class="card"><div class="px-5 py-4 border-b border-slate-100"><h3 class="font-semibold text-slate-900">Resource Usage</h3> <p class="text-xs text-slate-500 mt-0.5">Across all VMs</p></div> <div class="p-5 space-y-4"><div><div class="flex items-center justify-between text-sm mb-1.5"><span class="text-slate-600 flex items-center gap-2">`);
         Cpu($$renderer3, { size: 14, class: "text-slate-400" });
-        $$renderer3.push(`<!----> CPU Cores</span> <span class="font-medium text-slate-700">${escape_html(totalVcpus())}</span></div> <div class="w-full bg-slate-100 rounded-full h-2"><div class="h-2 rounded-full bg-gradient-to-r from-blue-500 to-blue-600 transition-all duration-500"${attr_style(`width: ${stringify(Math.min(100, totalVcpus() / 32 * 100))}%`)}></div></div> <p class="text-xs text-slate-400 mt-1">${escape_html(totalVcpus())} of 32 vCPUs allocated</p></div> <div><div class="flex items-center justify-between text-sm mb-1.5"><span class="text-slate-600 flex items-center gap-2">`);
+        $$renderer3.push(`<!----> CPU Cores</span> <span class="font-medium text-slate-700">${escape_html(getTotalVcpus())}</span></div> <div class="w-full bg-slate-100 rounded-full h-2"><div class="h-2 rounded-full bg-gradient-to-r from-blue-500 to-blue-600 transition-all duration-500"${attr_style(`width: ${stringify(Math.min(100, getTotalVcpus() / 32 * 100))}%`)}></div></div> <p class="text-xs text-slate-400 mt-1">${escape_html(getTotalVcpus())} of 32 vCPUs allocated</p></div> <div><div class="flex items-center justify-between text-sm mb-1.5"><span class="text-slate-600 flex items-center gap-2">`);
         Activity($$renderer3, { size: 14, class: "text-slate-400" });
-        $$renderer3.push(`<!----> Memory</span> <span class="font-medium text-slate-700">${escape_html(totalMemoryGB().toFixed(1))} GB</span></div> <div class="w-full bg-slate-100 rounded-full h-2"><div class="h-2 rounded-full bg-gradient-to-r from-purple-500 to-purple-600 transition-all duration-500"${attr_style(`width: ${stringify(Math.min(100, totalMemoryGB() / 64 * 100))}%`)}></div></div> <p class="text-xs text-slate-400 mt-1">${escape_html(totalMemoryGB().toFixed(1))} of 64 GB allocated</p></div> `);
+        $$renderer3.push(`<!----> Memory</span> <span class="font-medium text-slate-700">${escape_html(getTotalMemoryGB().toFixed(1))} GB</span></div> <div class="w-full bg-slate-100 rounded-full h-2"><div class="h-2 rounded-full bg-gradient-to-r from-purple-500 to-purple-600 transition-all duration-500"${attr_style(`width: ${stringify(Math.min(100, getTotalMemoryGB() / 64 * 100))}%`)}></div></div> <p class="text-xs text-slate-400 mt-1">${escape_html(getTotalMemoryGB().toFixed(1))} of 64 GB allocated</p></div> `);
         if (pools.length > 0) {
           $$renderer3.push("<!--[0-->");
           $$renderer3.push(`<div class="pt-2 border-t border-slate-100"><span class="text-xs font-medium text-slate-500 uppercase tracking-wider">Storage by Pool</span> <div class="mt-2 space-y-2"><!--[-->`);

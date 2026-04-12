@@ -47,6 +47,10 @@ import type {
   CheckQuotaResponse,
   SetQuotaInput,
   UpdateQuotaInput,
+  BackupHistory,
+  BackupJob,
+  BackupJobResponse,
+  CreateBackupJobInput,
 } from '$lib/api/types';
 
 const DEFAULT_BASE_URL = env.PUBLIC_CHV_API_BASE_URL || ''; // Empty string means same origin
@@ -655,6 +659,9 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     listVMBackups(vmId: string) {
       return request<BackupHistory[]>(`/api/v1/vms/${vmId}/backups`);
     },
+    listBackupHistory() {
+      return request<BackupHistory[]>('/api/v1/backup-history');
+    },
     // Export/Import
     exportVM(vmId: string) {
       return request<{ export_id: string; filename: string; download_url: string }>(`/api/v1/vms/${vmId}/export`, { method: 'POST' });
@@ -702,6 +709,11 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       return request<CheckQuotaResponse>('/api/v1/quotas/check', {
         method: 'POST',
         body: JSON.stringify(data)
+      });
+    },
+    deleteQuota(userId: string) {
+      return request<{ success: boolean }>(`/api/v1/quotas/${userId}`, {
+        method: 'DELETE'
       });
     }
   };

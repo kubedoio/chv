@@ -1,4 +1,4 @@
-import { j as bind_props, e as escape_html, f as attr_class, h as stringify } from "./root.js";
+import { j as bind_props, e as escape_html, d as attr_class, f as stringify } from "./root.js";
 import { M as Modal } from "./Modal.js";
 import { T as Triangle_alert } from "./triangle-alert.js";
 function ConfirmDialog($$renderer, $$props) {

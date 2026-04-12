@@ -1,14 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Cpu, HardDrive, Network, Server } from 'lucide-svelte';
+  import { Cpu, HardDrive, Network, Server, Settings, AlertTriangle } from 'lucide-svelte';
   import { createAPIClient, APIError } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import type { UsageWithQuota } from '$lib/api/types';
+  import QuotaSettingsModal from '$lib/components/QuotaSettingsModal.svelte';
+  import type { UsageWithQuota, Quota, UserInfo } from '$lib/api/types';
 
   // State
   let usageData = $state<UsageWithQuota | null>(null);
+  let allQuotas = $state<Quota[]>([]);
+  let users = $state<UserInfo[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let showSettingsModal = $state(false);
+  let editingQuota = $state<Quota | null>(null);
+  let isAdmin = $state(false); // TODO: Get from auth context
+
+  const client = createAPIClient();
 
   // Resource configuration
   const resources = [
@@ -26,7 +34,6 @@
     error = null;
 
     try {
-      const client = createAPIClient();
       usageData = await client.getUsage();
     } catch (err) {
       console.error('Failed to load quota data:', err);
@@ -39,6 +46,26 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function loadAllQuotas() {
+    try {
+      allQuotas = await client.listQuotas();
+    } catch (err) {
+      console.error('Failed to load quotas:', err);
+    }
+  }
+
+  function handleEditQuota() {
+    if (usageData) {
+      editingQuota = usageData.quota;
+      showSettingsModal = true;
+    }
+  }
+
+  function handleModalSuccess() {
+    loadQuotaData();
+    loadAllQuotas();
   }
 
   function getUsageValue(key: ResourceKey): number {
@@ -103,14 +130,23 @@
         Monitor your resource usage and limits
       </p>
     </div>
-    <button
-      onclick={loadQuotaData}
-      disabled={loading}
-      class="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50 flex items-center gap-2"
-    >
-      <span class:hidden={!loading} class="animate-spin">↻</span>
-      Refresh
-    </button>
+    <div class="flex items-center gap-2">
+      <button
+        onclick={handleEditQuota}
+        class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+      >
+        <Settings size={18} />
+        Adjust Quota
+      </button>
+      <button
+        onclick={loadQuotaData}
+        disabled={loading}
+        class="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50 flex items-center gap-2"
+      >
+        <span class:hidden={!loading} class="animate-spin">↻</span>
+        Refresh
+      </button>
+    </div>
   </div>
 
   <!-- Loading State -->
@@ -132,6 +168,37 @@
       </button>
     </div>
   {:else if usageData}
+    <!-- Quota Status Banner -->
+    {@const criticalResources = resources.filter(r => getPercentage(r.key) >= 95)}
+    {@const warningResources = resources.filter(r => {
+      const p = getPercentage(r.key);
+      return p >= 80 && p < 95;
+    })}
+    
+    {#if criticalResources.length > 0}
+      <div class="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
+        <AlertTriangle class="text-red-500 mt-0.5" size={20} />
+        <div>
+          <h3 class="text-sm font-medium text-red-800">Critical Usage Alert</h3>
+          <p class="text-sm text-red-700 mt-1">
+            The following resources are at critical usage levels (≥95%):
+            {criticalResources.map(r => `${r.label} (${getPercentage(r.key)}%)`).join(', ')}
+          </p>
+        </div>
+      </div>
+    {:else if warningResources.length > 0}
+      <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
+        <AlertTriangle class="text-amber-500 mt-0.5" size={20} />
+        <div>
+          <h3 class="text-sm font-medium text-amber-800">Usage Warning</h3>
+          <p class="text-sm text-amber-700 mt-1">
+            The following resources are approaching limits (≥80%):
+            {warningResources.map(r => `${r.label} (${getPercentage(r.key)}%)`).join(', ')}
+          </p>
+        </div>
+      </div>
+    {/if}
+
     <!-- Overview Cards -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       {#each resources as resource}
@@ -234,15 +301,15 @@
       </div>
     {/if}
 
-    {@const warningResources = resources.filter(r => {
+    {@const warningResources2 = resources.filter(r => {
       const p = getPercentage(r.key);
       return p >= 75 && p < 90;
     })}
-    {#if warningResources.length > 0}
+    {#if warningResources2.length > 0}
       <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
         <h3 class="text-sm font-medium text-amber-800 mb-2">⚡ Usage Warnings</h3>
         <ul class="space-y-1">
-          {#each warningResources as resource}
+          {#each warningResources2 as resource}
             <li class="text-sm text-amber-700">
               {resource.label} is at {getPercentage(resource.key)}% capacity
             </li>
@@ -252,3 +319,11 @@
     {/if}
   {/if}
 </div>
+
+<!-- Quota Settings Modal -->
+<QuotaSettingsModal
+  bind:open={showSettingsModal}
+  quota={editingQuota}
+  {users}
+  onSuccess={handleModalSuccess}
+/>

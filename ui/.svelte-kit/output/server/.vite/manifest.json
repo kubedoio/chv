@@ -11,6 +11,10 @@
       "_shared-server.js"
     ]
   },
+  "_ChartJS.svelte_svelte_type_style_lang.js": {
+    "file": "_app/immutable/assets/ChartJS.BdQNfW8t.css",
+    "src": "_ChartJS.svelte_svelte_type_style_lang.js"
+  },
   "_ConfirmDialog.js": {
     "file": "chunks/ConfirmDialog.js",
     "name": "ConfirmDialog",
@@ -205,6 +209,14 @@
       "_Icon.js"
     ]
   },
+  "_circle-check-big.js": {
+    "file": "chunks/circle-check-big.js",
+    "name": "circle-check-big",
+    "imports": [
+      "_root.js",
+      "_Icon.js"
+    ]
+  },
   "_circle.js": {
     "file": "chunks/circle.js",
     "name": "circle",
@@ -337,6 +349,14 @@
   "_nodes.js": {
     "file": "chunks/nodes.js",
     "name": "nodes"
+  },
+  "_play.js": {
+    "file": "chunks/play.js",
+    "name": "play",
+    "imports": [
+      "_root.js",
+      "_Icon.js"
+    ]
   },
   "_plus.js": {
     "file": "chunks/plus.js",
@@ -506,7 +526,7 @@
       "_nodes.js"
     ],
     "css": [
-      "_app/immutable/assets/_layout.GeM8rXUu.css",
+      "_app/immutable/assets/_layout.tYm6e2KS.css",
       "_app/immutable/assets/VisuallyHidden.D5Pdf31i.css"
     ]
   },
@@ -525,7 +545,7 @@
       "_trending-up.js",
       "_refresh-cw.js",
       "_chevron-up.js",
-      "_cpu.js",
+      "_circle-check-big.js",
       "_chevron-down.js",
       "_StateBadge.js",
       "_funnel.js",
@@ -542,10 +562,35 @@
       "_plus.js",
       "_download.js",
       "_settings.js",
+      "_cpu.js",
       "_database.js"
     ],
     "css": [
       "_app/immutable/assets/_page.HFv_nlUj.css"
+    ]
+  },
+  "src/routes/backup-jobs/+page.svelte": {
+    "file": "entries/pages/backup-jobs/_page.svelte.js",
+    "name": "entries/pages/backup-jobs/_page.svelte",
+    "src": "src/routes/backup-jobs/+page.svelte",
+    "isEntry": true,
+    "imports": [
+      "_root.js",
+      "_exports.js",
+      "_utils.js",
+      "_client.js",
+      "_client2.js",
+      "_DataTable.js",
+      "_ConfirmDialog.js",
+      "_Icon.js",
+      "_plus.js",
+      "_database.js",
+      "_play.js",
+      "_trash-2.js"
+    ],
+    "css": [
+      "_app/immutable/assets/_page.WLFpg19T.css",
+      "_app/immutable/assets/StateBadge.D32Qu_3D.css"
     ]
   },
   "src/routes/events/+page.svelte": {
@@ -625,8 +670,16 @@
     "isEntry": true,
     "imports": [
       "_root.js",
+      "_index-server.js",
       "_client2.js",
-      "_clock.js"
+      "_clock.js",
+      "_Icon.js",
+      "_server.js",
+      "_cpu.js"
+    ],
+    "css": [
+      "_app/immutable/assets/_page.B1mMxLlE.css",
+      "_app/immutable/assets/ChartJS.BdQNfW8t.css"
     ]
   },
   "src/routes/networks/+page.svelte": {
@@ -686,6 +739,7 @@
       "_DataTable.js",
       "_circle.js",
       "_cpu.js",
+      "_circle-check-big.js",
       "_hard-drive.js",
       "_network.js",
       "_activity.js",
@@ -830,7 +884,15 @@
     "isEntry": true,
     "imports": [
       "_root.js",
-      "_client2.js"
+      "_client2.js",
+      "_Modal.js",
+      "_Input.js",
+      "_settings.js",
+      "_server.js",
+      "_cpu.js",
+      "_hard-drive.js",
+      "_network.js",
+      "_triangle-alert.js"
     ]
   },
   "src/routes/settings/+page.svelte": {
@@ -877,8 +939,8 @@
       "_Input.js",
       "_copy.js",
       "_html.js",
-      "_ConfirmDialog.js",
       "_Icon.js",
+      "_ConfirmDialog.js",
       "_trash-2.js"
     ],
     "css": [
@@ -904,7 +966,7 @@
       "_ConfirmDialog.js",
       "_plus.js",
       "_server.js",
-      "_Icon.js",
+      "_play.js",
       "_trash-2.js",
       "_settings.js"
     ],
@@ -928,7 +990,8 @@
     ],
     "css": [
       "_app/immutable/assets/_page.v375Wq4v.css",
-      "_app/immutable/assets/StateBadge.D32Qu_3D.css"
+      "_app/immutable/assets/StateBadge.D32Qu_3D.css",
+      "_app/immutable/assets/ChartJS.BdQNfW8t.css"
     ]
   }
 }

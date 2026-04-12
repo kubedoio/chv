@@ -390,3 +390,26 @@ func (h *Handler) checkQuota(w http.ResponseWriter, r *http.Request) {
 
 	h.writeJSON(w, status, response)
 }
+
+// deleteQuota handles DELETE /api/v1/quotas/{userId}
+func (h *Handler) deleteQuota(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "userId")
+	if userID == "" {
+		h.writeError(w, http.StatusBadRequest, apiError{
+			Code:    "missing_user_id",
+			Message: "User ID is required",
+		})
+		return
+	}
+
+	// Delete quota from repository
+	if err := h.repo.DeleteQuota(r.Context(), userID); err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:    "delete_failed",
+			Message: "Failed to delete quota: " + err.Error(),
+		})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}

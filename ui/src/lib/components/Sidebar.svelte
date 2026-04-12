@@ -13,7 +13,8 @@
     Bell, 
     Settings,
     ChevronRight,
-    Box
+    Box,
+    Database
   } from 'lucide-svelte';
 
   export let currentPath = '/';
@@ -26,6 +27,7 @@
     { href: '/images', label: 'Images', icon: ImageIcon },
     { href: '/vms', label: 'Virtual Machines', icon: Cpu },
     { href: '/templates', label: 'Templates', icon: Box },
+    { href: '/backup-jobs', label: 'Backups', icon: Database },
     { href: '/operations', label: 'Operations', icon: Activity },
     { href: '/events', label: 'Events', icon: Bell },
     { href: '/settings', label: 'Settings', icon: Settings }

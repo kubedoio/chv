@@ -10,7 +10,7 @@ return {
 	assets: new Set([]),
 	mimeTypes: {},
 	_: {
-		client: {start:"_app/immutable/entry/start.D7lWbA01.js",app:"_app/immutable/entry/app.JFJLeX5p.js",imports:["_app/immutable/entry/start.D7lWbA01.js","_app/immutable/chunks/Ca5EUCpB.js","_app/immutable/chunks/C49PwTfW.js","_app/immutable/chunks/DVKisCas.js","_app/immutable/entry/app.JFJLeX5p.js","_app/immutable/chunks/C49PwTfW.js","_app/immutable/chunks/hmeTpSi1.js","_app/immutable/chunks/Da0dvoLU.js","_app/immutable/chunks/DVKisCas.js","_app/immutable/chunks/CeihwRYg.js","_app/immutable/chunks/wjOkgJtD.js","_app/immutable/chunks/DeSndZvy.js","_app/immutable/chunks/BMzyfAZr.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:true},
+		client: {start:"_app/immutable/entry/start.BwtSK6B3.js",app:"_app/immutable/entry/app.BDxygzql.js",imports:["_app/immutable/entry/start.BwtSK6B3.js","_app/immutable/chunks/WFL9UeeG.js","_app/immutable/chunks/CxHtshv_.js","_app/immutable/chunks/CZKTBLkW.js","_app/immutable/entry/app.BDxygzql.js","_app/immutable/chunks/CxHtshv_.js","_app/immutable/chunks/CVIZchUz.js","_app/immutable/chunks/CN9aTnHa.js","_app/immutable/chunks/CZKTBLkW.js","_app/immutable/chunks/BNAw1YXB.js","_app/immutable/chunks/BzBpgHoi.js","_app/immutable/chunks/f2ozJQ7e.js","_app/immutable/chunks/l5guW54h.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:true},
 		nodes: [
 			__memo(() => import('./nodes/0.js')),
 			__memo(() => import('./nodes/1.js')),
@@ -34,7 +34,8 @@ return {
 			__memo(() => import('./nodes/19.js')),
 			__memo(() => import('./nodes/20.js')),
 			__memo(() => import('./nodes/21.js')),
-			__memo(() => import('./nodes/22.js'))
+			__memo(() => import('./nodes/22.js')),
+			__memo(() => import('./nodes/23.js'))
 		],
 		remotes: {
 			
@@ -48,143 +49,150 @@ return {
 				endpoint: null
 			},
 			{
+				id: "/backup-jobs",
+				pattern: /^\/backup-jobs\/?$/,
+				params: [],
+				page: { layouts: [0,], errors: [1,], leaf: 3 },
+				endpoint: null
+			},
+			{
 				id: "/events",
 				pattern: /^\/events\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 3 },
+				page: { layouts: [0,], errors: [1,], leaf: 4 },
 				endpoint: null
 			},
 			{
 				id: "/images",
 				pattern: /^\/images\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 4 },
+				page: { layouts: [0,], errors: [1,], leaf: 5 },
 				endpoint: null
 			},
 			{
 				id: "/install",
 				pattern: /^\/install\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 5 },
+				page: { layouts: [0,], errors: [1,], leaf: 6 },
 				endpoint: null
 			},
 			{
 				id: "/login",
 				pattern: /^\/login\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 6 },
+				page: { layouts: [0,], errors: [1,], leaf: 7 },
 				endpoint: null
 			},
 			{
 				id: "/metrics",
 				pattern: /^\/metrics\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 7 },
+				page: { layouts: [0,], errors: [1,], leaf: 8 },
 				endpoint: null
 			},
 			{
 				id: "/networks",
 				pattern: /^\/networks\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 8 },
+				page: { layouts: [0,], errors: [1,], leaf: 9 },
 				endpoint: null
 			},
 			{
 				id: "/networks/[id]",
 				pattern: /^\/networks\/([^/]+?)\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 9 },
+				page: { layouts: [0,], errors: [1,], leaf: 10 },
 				endpoint: null
 			},
 			{
 				id: "/nodes",
 				pattern: /^\/nodes\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 10 },
+				page: { layouts: [0,], errors: [1,], leaf: 11 },
 				endpoint: null
 			},
 			{
 				id: "/nodes/[id]",
 				pattern: /^\/nodes\/([^/]+?)\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 11 },
+				page: { layouts: [0,], errors: [1,], leaf: 12 },
 				endpoint: null
 			},
 			{
 				id: "/nodes/[id]/images",
 				pattern: /^\/nodes\/([^/]+?)\/images\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 12 },
+				page: { layouts: [0,], errors: [1,], leaf: 13 },
 				endpoint: null
 			},
 			{
 				id: "/nodes/[id]/networks",
 				pattern: /^\/nodes\/([^/]+?)\/networks\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 13 },
+				page: { layouts: [0,], errors: [1,], leaf: 14 },
 				endpoint: null
 			},
 			{
 				id: "/nodes/[id]/storage",
 				pattern: /^\/nodes\/([^/]+?)\/storage\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 14 },
+				page: { layouts: [0,], errors: [1,], leaf: 15 },
 				endpoint: null
 			},
 			{
 				id: "/nodes/[id]/vms",
 				pattern: /^\/nodes\/([^/]+?)\/vms\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 15 },
+				page: { layouts: [0,], errors: [1,], leaf: 16 },
 				endpoint: null
 			},
 			{
 				id: "/operations",
 				pattern: /^\/operations\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 16 },
+				page: { layouts: [0,], errors: [1,], leaf: 17 },
 				endpoint: null
 			},
 			{
 				id: "/quotas",
 				pattern: /^\/quotas\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 17 },
+				page: { layouts: [0,], errors: [1,], leaf: 18 },
 				endpoint: null
 			},
 			{
 				id: "/settings",
 				pattern: /^\/settings\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 18 },
+				page: { layouts: [0,], errors: [1,], leaf: 19 },
 				endpoint: null
 			},
 			{
 				id: "/storage",
 				pattern: /^\/storage\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 19 },
+				page: { layouts: [0,], errors: [1,], leaf: 20 },
 				endpoint: null
 			},
 			{
 				id: "/templates",
 				pattern: /^\/templates\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 20 },
+				page: { layouts: [0,], errors: [1,], leaf: 21 },
 				endpoint: null
 			},
 			{
 				id: "/vms",
 				pattern: /^\/vms\/?$/,
 				params: [],
-				page: { layouts: [0,], errors: [1,], leaf: 21 },
+				page: { layouts: [0,], errors: [1,], leaf: 22 },
 				endpoint: null
 			},
 			{
 				id: "/vms/[id]",
 				pattern: /^\/vms\/([^/]+?)\/?$/,
 				params: [{"name":"id","optional":false,"rest":false,"chained":false}],
-				page: { layouts: [0,], errors: [1,], leaf: 22 },
+				page: { layouts: [0,], errors: [1,], leaf: 23 },
 				endpoint: null
 			}
 		],

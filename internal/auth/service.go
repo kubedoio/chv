@@ -38,8 +38,18 @@ func NewService(repo *db.Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// CreateUser creates a new user with a hashed password
+// QuotaService interface for creating default quotas
+type QuotaService interface {
+	EnsureQuotaForUser(ctx context.Context, userID string) error
+}
+
+// CreateUser creates a new user with a hashed password and default quota
 func (s *Service) CreateUser(ctx context.Context, username, password, email, role string) (*models.User, error) {
+	return s.CreateUserWithQuota(ctx, username, password, email, role, nil)
+}
+
+// CreateUserWithQuota creates a new user with a hashed password and ensures quota exists
+func (s *Service) CreateUserWithQuota(ctx context.Context, username, password, email, role string, quotaSvc QuotaService) (*models.User, error) {
 	if username == "" || password == "" {
 		return nil, errors.New("username and password are required")
 	}
@@ -73,6 +83,31 @@ func (s *Service) CreateUser(ctx context.Context, username, password, email, rol
 
 	if err := s.repo.CreateUser(ctx, user); err != nil {
 		return nil, err
+	}
+
+	// Create default quota for the user
+	if quotaSvc != nil {
+		if err := quotaSvc.EnsureQuotaForUser(ctx, user.ID); err != nil {
+			// Log error but don't fail user creation
+			logger.L().Warn("Failed to create default quota for user", logger.F("user_id", user.ID), logger.ErrorField(err))
+		}
+	} else {
+		// Try to create quota directly via repository
+		defaultQuota := &models.Quota{
+			ID:           uuid.NewString(),
+			UserID:       user.ID,
+			MaxVMs:       10,
+			MaxCPUs:      20,
+			MaxMemoryGB:  64,
+			MaxStorageGB: 500,
+			MaxNetworks:  5,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := s.repo.CreateQuota(ctx, user.ID, defaultQuota); err != nil {
+			// Log error but don't fail user creation
+			logger.L().Warn("Failed to create default quota for user", logger.F("user_id", user.ID), logger.ErrorField(err))
+		}
 	}
 
 	return user, nil

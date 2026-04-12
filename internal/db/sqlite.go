@@ -2660,35 +2660,52 @@ func (r *Repository) UpsertQuota(ctx context.Context, q *models.Quota) error {
 func (r *Repository) GetUserUsage(ctx context.Context, userID string) (*models.ResourceUsage, error) {
 	// Count VMs owned by user
 	var vmCount int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vms WHERE owner_id = ?`, userID).Scan(&vmCount)
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM virtual_machines WHERE user_id = ?`, userID).Scan(&vmCount)
 	if err != nil {
 		return nil, err
 	}
 
 	// Sum CPU cores
 	var totalCPUs int
-	err = r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(vcpu), 0) FROM vms WHERE owner_id = ?`, userID).Scan(&totalCPUs)
+	err = r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(vcpu), 0) FROM virtual_machines WHERE user_id = ?`, userID).Scan(&totalCPUs)
 	if err != nil {
 		return nil, err
 	}
 
-	// Sum memory
+	// Sum memory (convert MB to GB)
 	var totalMemoryMB int
-	err = r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(memory_mb), 0) FROM vms WHERE owner_id = ?`, userID).Scan(&totalMemoryMB)
+	err = r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(memory_mb), 0) FROM virtual_machines WHERE user_id = ?`, userID).Scan(&totalMemoryMB)
 	if err != nil {
 		return nil, err
 	}
 
-	// Sum storage
-	var totalStorageMB int
-	err = r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(disk_gb), 0) FROM vms WHERE owner_id = ?`, userID).Scan(&totalStorageMB)
+	// Estimate storage based on disk file sizes
+	// This is a simplified approach - in production you'd track actual disk usage
+	var totalStorageGB int
+	rows, err := r.db.QueryContext(ctx, `SELECT disk_path FROM virtual_machines WHERE user_id = ?`, userID)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
-	// Count networks (no per-user ownership yet, so count all)
+	for rows.Next() {
+		var diskPath string
+		if err := rows.Scan(&diskPath); err != nil {
+			continue
+		}
+		// Try to get actual file size
+		if info, err := os.Stat(diskPath); err == nil {
+			totalStorageGB += int(info.Size() / (1024 * 1024 * 1024))
+		} else {
+			// Fallback: estimate 10GB per VM
+			totalStorageGB += 10
+		}
+	}
+
+	// Count networks created by this user (using a networks table with user_id if available)
+	// For now, count all non-system networks as belonging to the user
 	var networkCount int
-	err = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM networks`).Scan(&networkCount)
+	err = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM networks WHERE is_system_managed = 0`).Scan(&networkCount)
 	if err != nil {
 		return nil, err
 	}
@@ -2697,7 +2714,7 @@ func (r *Repository) GetUserUsage(ctx context.Context, userID string) (*models.R
 		VMs:        vmCount,
 		CPUs:       totalCPUs,
 		MemoryGB:   totalMemoryMB / 1024,
-		StorageGB:  totalStorageMB,
+		StorageGB:  totalStorageGB,
 		Networks:   networkCount,
 	}, nil
 }
@@ -2731,6 +2748,12 @@ func (r *Repository) UpdateQuota(ctx context.Context, quota *models.Quota) error
 		`UPDATE quotas SET max_vms = ?, max_cpu = ?, max_memory_gb = ?, max_storage_gb = ?, max_networks = ?, updated_at = ? WHERE id = ?`,
 		quota.MaxVMs, quota.MaxCPUs, quota.MaxMemoryGB, quota.MaxStorageGB, quota.MaxNetworks, now, quota.ID,
 	)
+	return err
+}
+
+// DeleteQuota deletes a quota for a user
+func (r *Repository) DeleteQuota(ctx context.Context, userID string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM quotas WHERE user_id = ?`, userID)
 	return err
 }
 

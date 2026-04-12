@@ -1,4 +1,4 @@
-import { j as bind_props, h as stringify, c as attr, g as ensure_array_like, e as escape_html } from "./root.js";
+import { j as bind_props, f as stringify, c as attr, g as ensure_array_like, e as escape_html } from "./root.js";
 import { M as Modal } from "./Modal.js";
 import { F as FormField, I as Input } from "./Input.js";
 import { c as createAPIClient, g as getStoredToken } from "./client2.js";
@@ -21,6 +21,9 @@ function CreateVMModal($$renderer, $$props) {
     let memoryMb = 2048;
     let submitting = false;
     let nameError = "";
+    function wouldExceedQuota() {
+      return { exceeded: false, message: "" };
+    }
     const nameRegex = /^[a-z0-9-]+$/;
     function validateName() {
       if (!name.trim()) {
@@ -39,7 +42,8 @@ function CreateVMModal($$renderer, $$props) {
       return true;
     }
     function canProceedToStep2() {
-      return name.trim() !== "" && nameRegex.test(name) && !name.startsWith("-") && !name.endsWith("-") && imageId !== "" && poolId !== "" && networkId !== "";
+      const quotaCheck = wouldExceedQuota();
+      return name.trim() !== "" && nameRegex.test(name) && !name.startsWith("-") && !name.endsWith("-") && imageId !== "" && poolId !== "" && networkId !== "" && !quotaCheck.exceeded;
     }
     let $$settled = true;
     let $$inner_renderer;
@@ -225,7 +229,11 @@ function CreateVMModal($$renderer, $$props) {
                   });
                 }
               });
-              $$renderer4.push(`<!----></div></form>`);
+              $$renderer4.push(`<!----></div> `);
+              {
+                $$renderer4.push("<!--[-1-->");
+              }
+              $$renderer4.push(`<!--]--></form>`);
             }
             $$renderer4.push(`<!--]-->`);
           },

@@ -29,7 +29,7 @@ declare module "$app/types" {
 	type MatcherParam<M> = M extends (param : string) => param is (infer U extends string) ? U : string;
 
 	export interface AppTypes {
-		RouteId(): "/" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | "/networks/[id]" | "/nodes" | "/nodes/[id]" | "/nodes/[id]/images" | "/nodes/[id]/networks" | "/nodes/[id]/storage" | "/nodes/[id]/vms" | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/vms" | "/vms/[id]";
+		RouteId(): "/" | "/backup-jobs" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | "/networks/[id]" | "/nodes" | "/nodes/[id]" | "/nodes/[id]/images" | "/nodes/[id]/networks" | "/nodes/[id]/storage" | "/nodes/[id]/vms" | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/vms" | "/vms/[id]";
 		RouteParams(): {
 			"/networks/[id]": { id: string };
 			"/nodes/[id]": { id: string };
@@ -41,6 +41,7 @@ declare module "$app/types" {
 		};
 		LayoutParams(): {
 			"/": { id?: string };
+			"/backup-jobs": Record<string, never>;
 			"/events": Record<string, never>;
 			"/images": Record<string, never>;
 			"/install": Record<string, never>;
@@ -62,7 +63,7 @@ declare module "$app/types" {
 			"/vms": { id?: string };
 			"/vms/[id]": { id: string }
 		};
-		Pathname(): "/" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | `/networks/${string}` & {} | "/nodes" | `/nodes/${string}` & {} | `/nodes/${string}/images` & {} | `/nodes/${string}/networks` & {} | `/nodes/${string}/storage` & {} | `/nodes/${string}/vms` & {} | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/vms" | `/vms/${string}` & {};
+		Pathname(): "/" | "/backup-jobs" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | `/networks/${string}` & {} | "/nodes" | `/nodes/${string}` & {} | `/nodes/${string}/images` & {} | `/nodes/${string}/networks` & {} | `/nodes/${string}/storage` & {} | `/nodes/${string}/vms` & {} | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/vms" | `/vms/${string}` & {};
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
 		Asset(): string & {};
 	}

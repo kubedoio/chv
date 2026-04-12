@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, d as store_get, f as attr_class, g as ensure_array_like, h as stringify, u as unsubscribe_stores, i as derived, j as bind_props } from "../../chunks/root.js";
+import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, d as attr_class, f as stringify, g as ensure_array_like, h as derived, i as store_get, u as unsubscribe_stores, j as bind_props } from "../../chunks/root.js";
 import "@sveltejs/kit/internal";
 import "../../chunks/exports.js";
 import "../../chunks/utils.js";
@@ -727,14 +727,14 @@ function TreeNavigation($$renderer, $$props) {
     let { nodes = [] } = $$props;
     let vms = [];
     let expandedNodes = /* @__PURE__ */ new Set(["datacenter", "nodes"]);
-    let currentPath = store_get($$store_subs ??= {}, "$page", page).url.pathname;
+    let currentPath = derived(() => store_get($$store_subs ??= {}, "$page", page).url.pathname);
     function isExpanded(nodeId) {
       return expandedNodes.has(nodeId);
     }
     function isActive(href) {
       if (!href) return false;
-      if (href === "/") return currentPath === "/";
-      return currentPath.startsWith(href);
+      if (href === "/") return currentPath() === "/";
+      return currentPath().startsWith(href);
     }
     function getStatusColor(status) {
       switch (status) {

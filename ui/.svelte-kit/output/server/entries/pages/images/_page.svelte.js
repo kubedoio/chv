@@ -1,4 +1,4 @@
-import { e as escape_html, f as attr_class, h as stringify, m as attr_style, c as attr, i as derived } from "../../../chunks/root.js";
+import { e as escape_html, d as attr_class, f as stringify, m as attr_style, c as attr, h as derived } from "../../../chunks/root.js";
 import { o as onDestroy } from "../../../chunks/index-server.js";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
@@ -132,7 +132,7 @@ function _page($$renderer, $$props) {
     async function loadImages() {
       loading = true;
       try {
-        items = await client.listImages();
+        items = await client.listImages() ?? [];
       } catch {
         toast.error("Failed to load images");
         items = [];

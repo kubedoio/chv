@@ -17,7 +17,9 @@ import (
 	"github.com/chv/chv/internal/agentclient"
 	"github.com/chv/chv/internal/cloudinit"
 	"github.com/chv/chv/internal/db"
+	"github.com/chv/chv/internal/logger"
 	"github.com/chv/chv/internal/models"
+	"github.com/chv/chv/internal/quota"
 	"github.com/google/uuid"
 )
 
@@ -41,6 +43,7 @@ type Service struct {
 	seedSvc      *services.SeedISOService
 	agentClient  *agentclient.Client
 	agentURL     string
+	quotaService *quota.Service
 
 	// Metrics history
 	metricsMu sync.RWMutex
@@ -61,6 +64,11 @@ func NewService(repo *db.Repository, dataRoot string) *Service {
 	go s.startMetricsPoller()
 
 	return s
+}
+
+// SetQuotaService sets the quota service for quota enforcement
+func (s *Service) SetQuotaService(qs *quota.Service) {
+	s.quotaService = qs
 }
 
 // SetAgentClient sets the agent client for VM lifecycle operations
@@ -89,11 +97,13 @@ type CreateVMInput struct {
 	NetworkID         string
 	VCPU              int
 	MemoryMB          int
+	DiskGB            int64 // Optional disk size in GB (0 = use image size)
 	ConsoleType       string // "serial" only (Unix socket-based console)
 	UserData          string
 	Username          string
 	Password          string
 	SSHAuthorizedKeys []string
+	UserID            string // User creating the VM (for quota tracking)
 }
 
 // CreateVM creates a new VM with provisioning workflow
@@ -110,6 +120,35 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 	}
 	if input.NetworkID == "" {
 		return nil, fmt.Errorf("network ID is required")
+	}
+
+	// Check quota if userID is provided and quota service is available
+	if input.UserID != "" && s.quotaService != nil {
+		// Get image size for storage calculation
+		image, err := s.repo.GetImageByID(ctx, input.ImageID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get image: %w", err)
+		}
+		if image == nil {
+			return nil, fmt.Errorf("image not found: %s", input.ImageID)
+		}
+
+		// Use specified disk size or default to image size
+		diskGB := input.DiskGB
+		if diskGB == 0 {
+			// Estimate image size in GB (rough estimate)
+			stat, err := os.Stat(image.LocalPath)
+			if err == nil {
+				diskGB = (stat.Size() / (1024 * 1024 * 1024)) + 1 // Round up
+			} else {
+				diskGB = 10 // Default 10GB if can't determine
+			}
+		}
+
+		// Check if user can create VM
+		if err := s.quotaService.CanCreateVM(ctx, input.UserID, input.VCPU, int64(input.MemoryMB), diskGB); err != nil {
+			return nil, fmt.Errorf("quota check failed: %w", err)
+		}
 	}
 
 	// Get image
@@ -183,9 +222,22 @@ func (s *Service) CreateVM(ctx context.Context, input CreateVMInput) (*models.Vi
 		vm.IPAddress = vmIP
 	}
 
+	// Set user ID if provided
+	if input.UserID != "" {
+		vm.UserID = input.UserID
+	}
+
 	// Create VM record in DB
 	if err := s.repo.CreateVM(ctx, vm); err != nil {
 		return nil, fmt.Errorf("failed to create VM record: %w", err)
+	}
+
+	// Update usage cache if quota service is available
+	if s.quotaService != nil && input.UserID != "" {
+		if err := s.updateUsageCache(ctx, input.UserID); err != nil {
+			// Log error but don't fail VM creation
+			logger.L().Warn("Failed to update usage cache", logger.F("user_id", input.UserID), logger.ErrorField(err))
+		}
 	}
 
 	// Provision VM (async in production, sync for MVP)
@@ -840,6 +892,9 @@ func (s *Service) DeleteVM(ctx context.Context, vmID string) error {
 		return fmt.Errorf("VM not found: %s", vmID)
 	}
 
+	// Capture user ID before deletion for usage cache update
+	userID := vm.UserID
+
 	// Stop if running
 	if vm.ActualState == StatusRunning {
 		if err := s.StopVM(ctx, vmID); err != nil {
@@ -868,7 +923,23 @@ func (s *Service) DeleteVM(ctx context.Context, vmID string) error {
 		return fmt.Errorf("failed to delete VM: %w", err)
 	}
 
+	// Update usage cache if quota service is available
+	if s.quotaService != nil && userID != "" {
+		if err := s.updateUsageCache(ctx, userID); err != nil {
+			// Log error but don't fail VM deletion
+			logger.L().Warn("Failed to update usage cache after delete", logger.F("user_id", userID), logger.ErrorField(err))
+		}
+	}
+
 	return nil
+}
+
+// updateUsageCache updates the usage cache for a user
+func (s *Service) updateUsageCache(ctx context.Context, userID string) error {
+	if s.quotaService == nil {
+		return nil
+	}
+	return s.quotaService.RefreshUsageCache(ctx, userID)
 }
 
 // GetVM retrieves a VM by ID

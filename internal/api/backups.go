@@ -253,6 +253,28 @@ func (h *Handler) listVMBackups(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, histories)
 }
 
+// listBackupHistory handles GET /api/v1/backup-history
+func (h *Handler) listBackupHistory(w http.ResponseWriter, r *http.Request) {
+	if h.backupService == nil {
+		h.writeError(w, http.StatusServiceUnavailable, apiError{
+			Code:    "service_unavailable",
+			Message: "Backup service is not available",
+		})
+		return
+	}
+
+	histories, err := h.backupService.ListAllBackupHistory(r.Context())
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:    "list_failed",
+			Message: fmt.Sprintf("Failed to list backup history: %v", err),
+		})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, histories)
+}
+
 // exportVM handles POST /api/v1/vms/{id}/export
 func (h *Handler) exportVM(w http.ResponseWriter, r *http.Request) {
 	if h.backupService == nil {

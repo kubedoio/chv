@@ -1,4 +1,4 @@
-import { j as bind_props, f as attr_class, c as attr, e as escape_html, h as stringify } from "./root.js";
+import { j as bind_props, d as attr_class, c as attr, e as escape_html, f as stringify } from "./root.js";
 import { c as createAPIClient, g as getStoredToken } from "./client2.js";
 import { M as Modal } from "./Modal.js";
 import { F as FormField, I as Input } from "./Input.js";

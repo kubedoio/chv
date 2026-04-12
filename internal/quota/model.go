@@ -35,3 +35,5 @@ type CheckResult struct {
 	Limit     int    `json:"limit"`
 	Message   string `json:"message,omitempty"`
 }
+
+

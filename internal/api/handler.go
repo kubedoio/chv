@@ -17,6 +17,7 @@ import (
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/images"
 	"github.com/chv/chv/internal/logger"
+	"github.com/chv/chv/internal/quota"
 	"github.com/chv/chv/internal/vm"
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -31,6 +32,7 @@ type Handler struct {
 	imageWorker   *images.Worker
 	vmService     *vm.Service
 	backupService *backup.Service
+	quotaService  *quota.Service
 	reconciler    *ReconciliationLoop
 	auditLogger   *audit.Logger
 }
@@ -49,6 +51,14 @@ type apiError struct {
 }
 
 func NewHandler(repo *db.Repository, authService *auth.Service, bootstrapService *bootstrap.Service, cfg config.ControllerConfig, imageWorker *images.Worker, vmService *vm.Service, backupService *backup.Service) *Handler {
+	// Create quota service
+	quotaSvc := quota.NewService(repo)
+
+	// Set quota service on VM service if available
+	if vmService != nil {
+		vmService.SetQuotaService(quotaSvc)
+	}
+
 	handler := &Handler{
 		repo:          repo,
 		auth:          authService,
@@ -58,6 +68,7 @@ func NewHandler(repo *db.Repository, authService *auth.Service, bootstrapService
 		imageWorker:   imageWorker,
 		vmService:     vmService,
 		backupService: backupService,
+		quotaService:  quotaSvc,
 		auditLogger:   audit.NewLogger(repo),
 	}
 	handler.registerRoutes()
@@ -300,6 +311,7 @@ func (h *Handler) registerRoutes() {
 					r.Post("/toggle", h.toggleBackupJob)
 				})
 			})
+			r.Get("/backup-history", h.listBackupHistory)
 
 			// VM Export/Import endpoints
 			r.Post("/vms/{id}/export", h.exportVM)
@@ -315,6 +327,7 @@ func (h *Handler) registerRoutes() {
 				r.Route("/{userId}", func(r chi.Router) {
 					r.Get("/", h.getQuota)
 					r.Patch("/", h.updateQuota)
+					r.Delete("/", h.deleteQuota)
 					r.Get("/usage", h.getUserUsage)
 				})
 			})

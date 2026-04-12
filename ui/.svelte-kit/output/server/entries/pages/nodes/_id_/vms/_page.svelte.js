@@ -1,4 +1,4 @@
-import { n as head, e as escape_html, c as attr, h as stringify, i as derived, d as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
+import { n as head, e as escape_html, c as attr, f as stringify, h as derived, i as store_get, u as unsubscribe_stores } from "../../../../../chunks/root.js";
 import { p as page } from "../../../../../chunks/stores.js";
 import "@sveltejs/kit/internal";
 import "../../../../../chunks/exports.js";
@@ -37,8 +37,12 @@ function _page($$renderer, $$props) {
       }
     };
     let table = useTable({ data: [], pageSize: 10 });
-    const imageMap = derived(() => new Map(images.map((i) => [i.id, i])));
-    const poolMap = derived(() => new Map(pools.map((p) => [p.id, p])));
+    function getImage(id) {
+      return images.find((i) => i.id === id);
+    }
+    function getPool(id) {
+      return pools.find((p) => p.id === id);
+    }
     const filterOptions = [
       {
         key: "actual_state",
@@ -75,7 +79,7 @@ function _page($$renderer, $$props) {
         key: "image_id",
         title: "Image",
         render: (vm) => {
-          const img = imageMap().get(vm.image_id);
+          const img = getImage(vm.image_id);
           return img?.name ?? vm.image_id;
         }
       },
@@ -83,7 +87,7 @@ function _page($$renderer, $$props) {
         key: "storage_pool_id",
         title: "Pool",
         render: (vm) => {
-          const pool = poolMap().get(vm.storage_pool_id);
+          const pool = getPool(vm.storage_pool_id);
           return pool?.name ?? vm.storage_pool_id;
         }
       },

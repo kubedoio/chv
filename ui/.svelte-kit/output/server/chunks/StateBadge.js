@@ -1,10 +1,10 @@
-import { f as attr_class, e as escape_html, j as bind_props } from "./root.js";
+import { d as attr_class, e as escape_html, h as derived } from "./root.js";
 /* empty css                                         */
 function StateBadge($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
-    let label = $$props["label"];
-    const toneClass = (value) => {
-      const val = value.toLowerCase();
+    let { label } = $$props;
+    const tone = derived(() => {
+      const val = label.toLowerCase();
       switch (val) {
         case "ready":
         case "running":
@@ -27,12 +27,9 @@ function StateBadge($$renderer, $$props) {
         default:
           return "bg-slate-100 text-slate-600 border-slate-200";
       }
-    };
-    const isTransitioning = (value) => {
-      return ["starting", "stopping", "importing", "provisioning"].includes(value.toLowerCase());
-    };
-    $$renderer2.push(`<span${attr_class(`state-badge inline-flex items-center gap-1.5 border px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${toneClass(label)}`, "svelte-502yak")}><span${attr_class(`status-dot w-1.5 h-1.5 rounded-full ${isTransitioning(label) ? "animate-pulse" : ""}`, "svelte-502yak")} style="background-color: currentColor"></span> ${escape_html(label.replaceAll("_", " "))}</span>`);
-    bind_props($$props, { label });
+    });
+    const transitioning = derived(() => ["starting", "stopping", "importing", "provisioning"].includes(label.toLowerCase()));
+    $$renderer2.push(`<span${attr_class(`state-badge inline-flex items-center gap-1.5 border px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${tone()}`, "svelte-502yak")}><span${attr_class(`status-dot w-1.5 h-1.5 rounded-full ${transitioning() ? "animate-pulse" : ""}`, "svelte-502yak")} style="background-color: currentColor"></span> ${escape_html(label.replaceAll("_", " "))}</span>`);
   });
 }
 export {

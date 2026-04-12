@@ -81,7 +81,7 @@ function _page($$renderer, $$props) {
     async function loadNetworks() {
       loading = true;
       try {
-        items = await client.listNetworks();
+        items = await client.listNetworks() ?? [];
       } catch (err) {
         toast.error("Failed to load networks");
         items = [];

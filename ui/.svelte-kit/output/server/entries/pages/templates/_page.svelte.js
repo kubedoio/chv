@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, j as bind_props, e as escape_html, c as attr, g as ensure_array_like, i as derived, f as attr_class, h as stringify } from "../../../chunks/root.js";
+import { s as sanitize_props, a as spread_props, b as slot, j as bind_props, e as escape_html, c as attr, g as ensure_array_like, h as derived, d as attr_class, f as stringify } from "../../../chunks/root.js";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
 import "../../../chunks/utils.js";
@@ -11,8 +11,8 @@ import { M as Modal } from "../../../chunks/Modal.js";
 import { F as FormField, I as Input } from "../../../chunks/Input.js";
 import { C as Copy } from "../../../chunks/copy.js";
 import { h as html } from "../../../chunks/html.js";
-import { C as ConfirmDialog } from "../../../chunks/ConfirmDialog.js";
 import { I as Icon } from "../../../chunks/Icon.js";
+import { C as ConfirmDialog } from "../../../chunks/ConfirmDialog.js";
 import { T as Trash_2 } from "../../../chunks/trash-2.js";
 function Box($$renderer, $$props) {
   const $$sanitized_props = sanitize_props($$props);
@@ -99,6 +99,90 @@ function Box($$renderer, $$props) {
     }
   ]));
 }
+function Eye($$renderer, $$props) {
+  const $$sanitized_props = sanitize_props($$props);
+  /**
+   * @license lucide-svelte v1.0.1 - ISC
+   *
+   * ISC License
+   *
+   * Copyright (c) 2026 Lucide Icons and Contributors
+   *
+   * Permission to use, copy, modify, and/or distribute this software for any
+   * purpose with or without fee is hereby granted, provided that the above
+   * copyright notice and this permission notice appear in all copies.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+   * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+   * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+   *
+   * ---
+   *
+   * The following Lucide icons are derived from the Feather project:
+   *
+   * airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+   *
+   * The MIT License (MIT) (for the icons listed above)
+   *
+   * Copyright (c) 2013-present Cole Bemis
+   *
+   * Permission is hereby granted, free of charge, to any person obtaining a copy
+   * of this software and associated documentation files (the "Software"), to deal
+   * in the Software without restriction, including without limitation the rights
+   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   * copies of the Software, and to permit persons to whom the Software is
+   * furnished to do so, subject to the following conditions:
+   *
+   * The above copyright notice and this permission notice shall be included in all
+   * copies or substantial portions of the Software.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   * SOFTWARE.
+   *
+   */
+  const iconNode = [
+    [
+      "path",
+      {
+        "d": "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"
+      }
+    ],
+    ["circle", { "cx": "12", "cy": "12", "r": "3" }]
+  ];
+  Icon($$renderer, spread_props([
+    { name: "eye" },
+    $$sanitized_props,
+    {
+      /**
+       * @component @name Eye
+       * @description Lucide SVG icon component, renders SVG Element with children.
+       *
+       * @preview ![img](data:image/svg+xml;base64,PHN2ZyAgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIgogIHdpZHRoPSIyNCIKICBoZWlnaHQ9IjI0IgogIHZpZXdCb3g9IjAgMCAyNCAyNCIKICBmaWxsPSJub25lIgogIHN0cm9rZT0iIzAwMCIgc3R5bGU9ImJhY2tncm91bmQtY29sb3I6ICNmZmY7IGJvcmRlci1yYWRpdXM6IDJweCIKICBzdHJva2Utd2lkdGg9IjIiCiAgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIgogIHN0cm9rZS1saW5lam9pbj0icm91bmQiCj4KICA8cGF0aCBkPSJNMi4wNjIgMTIuMzQ4YTEgMSAwIDAgMSAwLS42OTYgMTAuNzUgMTAuNzUgMCAwIDEgMTkuODc2IDAgMSAxIDAgMCAxIDAgLjY5NiAxMC43NSAxMC43NSAwIDAgMS0xOS44NzYgMCIgLz4KICA8Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIzIiAvPgo8L3N2Zz4K) - https://lucide.dev/icons/eye
+       * @see https://lucide.dev/guide/packages/lucide-svelte - Documentation
+       *
+       * @param {Object} props - Lucide icons props and any valid SVG attribute
+       * @returns {FunctionalComponent} Svelte component
+       *
+       */
+      iconNode,
+      children: ($$renderer2) => {
+        $$renderer2.push(`<!--[-->`);
+        slot($$renderer2, $$props, "default", {});
+        $$renderer2.push(`<!--]-->`);
+      },
+      $$slots: { default: true }
+    }
+  ]));
+}
 function File_code($$renderer, $$props) {
   const $$sanitized_props = sanitize_props($$props);
   /**
@@ -169,6 +253,176 @@ function File_code($$renderer, $$props) {
        * @description Lucide SVG icon component, renders SVG Element with children.
        *
        * @preview ![img](data:image/svg+xml;base64,PHN2ZyAgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIgogIHdpZHRoPSIyNCIKICBoZWlnaHQ9IjI0IgogIHZpZXdCb3g9IjAgMCAyNCAyNCIKICBmaWxsPSJub25lIgogIHN0cm9rZT0iIzAwMCIgc3R5bGU9ImJhY2tncm91bmQtY29sb3I6ICNmZmY7IGJvcmRlci1yYWRpdXM6IDJweCIKICBzdHJva2Utd2lkdGg9IjIiCiAgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIgogIHN0cm9rZS1saW5lam9pbj0icm91bmQiCj4KICA8cGF0aCBkPSJNNiAyMmEyIDIgMCAwIDEtMi0yVjRhMiAyIDAgMCAxIDItMmg4YTIuNCAyLjQgMCAwIDEgMS43MDQuNzA2bDMuNTg4IDMuNTg4QTIuNCAyLjQgMCAwIDEgMjAgOHYxMmEyIDIgMCAwIDEtMiAyeiIgLz4KICA8cGF0aCBkPSJNMTQgMnY1YTEgMSAwIDAgMCAxIDFoNSIgLz4KICA8cGF0aCBkPSJNMTAgMTIuNSA4IDE1bDIgMi41IiAvPgogIDxwYXRoIGQ9Im0xNCAxMi41IDIgMi41LTIgMi41IiAvPgo8L3N2Zz4K) - https://lucide.dev/icons/file-code
+       * @see https://lucide.dev/guide/packages/lucide-svelte - Documentation
+       *
+       * @param {Object} props - Lucide icons props and any valid SVG attribute
+       * @returns {FunctionalComponent} Svelte component
+       *
+       */
+      iconNode,
+      children: ($$renderer2) => {
+        $$renderer2.push(`<!--[-->`);
+        slot($$renderer2, $$props, "default", {});
+        $$renderer2.push(`<!--]-->`);
+      },
+      $$slots: { default: true }
+    }
+  ]));
+}
+function Layout_template($$renderer, $$props) {
+  const $$sanitized_props = sanitize_props($$props);
+  /**
+   * @license lucide-svelte v1.0.1 - ISC
+   *
+   * ISC License
+   *
+   * Copyright (c) 2026 Lucide Icons and Contributors
+   *
+   * Permission to use, copy, modify, and/or distribute this software for any
+   * purpose with or without fee is hereby granted, provided that the above
+   * copyright notice and this permission notice appear in all copies.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+   * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+   * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+   *
+   * ---
+   *
+   * The following Lucide icons are derived from the Feather project:
+   *
+   * airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+   *
+   * The MIT License (MIT) (for the icons listed above)
+   *
+   * Copyright (c) 2013-present Cole Bemis
+   *
+   * Permission is hereby granted, free of charge, to any person obtaining a copy
+   * of this software and associated documentation files (the "Software"), to deal
+   * in the Software without restriction, including without limitation the rights
+   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   * copies of the Software, and to permit persons to whom the Software is
+   * furnished to do so, subject to the following conditions:
+   *
+   * The above copyright notice and this permission notice shall be included in all
+   * copies or substantial portions of the Software.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   * SOFTWARE.
+   *
+   */
+  const iconNode = [
+    [
+      "rect",
+      { "width": "18", "height": "7", "x": "3", "y": "3", "rx": "1" }
+    ],
+    [
+      "rect",
+      { "width": "9", "height": "7", "x": "3", "y": "14", "rx": "1" }
+    ],
+    [
+      "rect",
+      { "width": "5", "height": "7", "x": "16", "y": "14", "rx": "1" }
+    ]
+  ];
+  Icon($$renderer, spread_props([
+    { name: "layout-template" },
+    $$sanitized_props,
+    {
+      /**
+       * @component @name LayoutTemplate
+       * @description Lucide SVG icon component, renders SVG Element with children.
+       *
+       * @preview ![img](data:image/svg+xml;base64,PHN2ZyAgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIgogIHdpZHRoPSIyNCIKICBoZWlnaHQ9IjI0IgogIHZpZXdCb3g9IjAgMCAyNCAyNCIKICBmaWxsPSJub25lIgogIHN0cm9rZT0iIzAwMCIgc3R5bGU9ImJhY2tncm91bmQtY29sb3I6ICNmZmY7IGJvcmRlci1yYWRpdXM6IDJweCIKICBzdHJva2Utd2lkdGg9IjIiCiAgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIgogIHN0cm9rZS1saW5lam9pbj0icm91bmQiCj4KICA8cmVjdCB3aWR0aD0iMTgiIGhlaWdodD0iNyIgeD0iMyIgeT0iMyIgcng9IjEiIC8+CiAgPHJlY3Qgd2lkdGg9IjkiIGhlaWdodD0iNyIgeD0iMyIgeT0iMTQiIHJ4PSIxIiAvPgogIDxyZWN0IHdpZHRoPSI1IiBoZWlnaHQ9IjciIHg9IjE2IiB5PSIxNCIgcng9IjEiIC8+Cjwvc3ZnPgo=) - https://lucide.dev/icons/layout-template
+       * @see https://lucide.dev/guide/packages/lucide-svelte - Documentation
+       *
+       * @param {Object} props - Lucide icons props and any valid SVG attribute
+       * @returns {FunctionalComponent} Svelte component
+       *
+       */
+      iconNode,
+      children: ($$renderer2) => {
+        $$renderer2.push(`<!--[-->`);
+        slot($$renderer2, $$props, "default", {});
+        $$renderer2.push(`<!--]-->`);
+      },
+      $$slots: { default: true }
+    }
+  ]));
+}
+function Variable($$renderer, $$props) {
+  const $$sanitized_props = sanitize_props($$props);
+  /**
+   * @license lucide-svelte v1.0.1 - ISC
+   *
+   * ISC License
+   *
+   * Copyright (c) 2026 Lucide Icons and Contributors
+   *
+   * Permission to use, copy, modify, and/or distribute this software for any
+   * purpose with or without fee is hereby granted, provided that the above
+   * copyright notice and this permission notice appear in all copies.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+   * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+   * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+   *
+   * ---
+   *
+   * The following Lucide icons are derived from the Feather project:
+   *
+   * airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+   *
+   * The MIT License (MIT) (for the icons listed above)
+   *
+   * Copyright (c) 2013-present Cole Bemis
+   *
+   * Permission is hereby granted, free of charge, to any person obtaining a copy
+   * of this software and associated documentation files (the "Software"), to deal
+   * in the Software without restriction, including without limitation the rights
+   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   * copies of the Software, and to permit persons to whom the Software is
+   * furnished to do so, subject to the following conditions:
+   *
+   * The above copyright notice and this permission notice shall be included in all
+   * copies or substantial portions of the Software.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   * SOFTWARE.
+   *
+   */
+  const iconNode = [
+    ["path", { "d": "M8 21s-4-3-4-9 4-9 4-9" }],
+    ["path", { "d": "M16 3s4 3 4 9-4 9-4 9" }],
+    ["line", { "x1": "15", "x2": "9", "y1": "9", "y2": "15" }],
+    ["line", { "x1": "9", "x2": "15", "y1": "9", "y2": "15" }]
+  ];
+  Icon($$renderer, spread_props([
+    { name: "variable" },
+    $$sanitized_props,
+    {
+      /**
+       * @component @name Variable
+       * @description Lucide SVG icon component, renders SVG Element with children.
+       *
+       * @preview ![img](data:image/svg+xml;base64,PHN2ZyAgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIgogIHdpZHRoPSIyNCIKICBoZWlnaHQ9IjI0IgogIHZpZXdCb3g9IjAgMCAyNCAyNCIKICBmaWxsPSJub25lIgogIHN0cm9rZT0iIzAwMCIgc3R5bGU9ImJhY2tncm91bmQtY29sb3I6ICNmZmY7IGJvcmRlci1yYWRpdXM6IDJweCIKICBzdHJva2Utd2lkdGg9IjIiCiAgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIgogIHN0cm9rZS1saW5lam9pbj0icm91bmQiCj4KICA8cGF0aCBkPSJNOCAyMXMtNC0zLTQtOSA0LTkgNC05IiAvPgogIDxwYXRoIGQ9Ik0xNiAzczQgMyA0IDktNCA5LTQgOSIgLz4KICA8bGluZSB4MT0iMTUiIHgyPSI5IiB5MT0iOSIgeTI9IjE1IiAvPgogIDxsaW5lIHgxPSI5IiB4Mj0iMTUiIHkxPSI5IiB5Mj0iMTUiIC8+Cjwvc3ZnPgo=) - https://lucide.dev/icons/variable
        * @see https://lucide.dev/guide/packages/lucide-svelte - Documentation
        *
        * @param {Object} props - Lucide icons props and any valid SVG attribute
@@ -454,6 +708,191 @@ function CloudInitViewer($$renderer, $$props) {
     bind_props($$props, { open });
   });
 }
+function CloudInitEditor($$renderer, $$props) {
+  $$renderer.component(($$renderer2) => {
+    let {
+      open = false,
+      initialContent = "",
+      initialName = "",
+      initialDescription = "",
+      onSuccess
+    } = $$props;
+    createAPIClient({ token: getStoredToken() ?? void 0 });
+    let name = initialName;
+    let description = initialDescription;
+    let content = initialContent || "#cloud-config\n";
+    let variables = [];
+    let previewVariables = {};
+    let submitting = false;
+    let nameError = "";
+    const nameRegex = /^[a-zA-Z0-9\s-_]+$/;
+    function validateName() {
+      if (!name.trim()) {
+        nameError = "Name is required";
+        return false;
+      }
+      if (!nameRegex.test(name)) {
+        nameError = "Name can only contain letters, numbers, spaces, hyphens, and underscores";
+        return false;
+      }
+      if (name.length > 50) {
+        nameError = "Name must be 50 characters or less";
+        return false;
+      }
+      nameError = "";
+      return true;
+    }
+    const commonSnippets = [
+      {
+        name: "User",
+        snippet: "users:\n  - name: {{.Username}}\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    ssh_authorized_keys:\n      - {{.SSHKey}}"
+      },
+      { name: "Package", snippet: "packages:\n  - package-name" },
+      { name: "Runcmd", snippet: 'runcmd:\n  - echo "Hello World"' },
+      {
+        name: "Write Files",
+        snippet: "write_files:\n  - path: /etc/example.conf\n    content: |\n      example content"
+      },
+      {
+        name: "Hostname",
+        snippet: "hostname: {{.Hostname}}\nmanage_etc_hosts: true"
+      }
+    ];
+    let $$settled = true;
+    let $$inner_renderer;
+    function $$render_inner($$renderer3) {
+      {
+        let footer = function($$renderer4) {
+          $$renderer4.push(`<button type="button"${attr("disabled", submitting, true)} class="px-4 py-2 rounded border border-line text-ink bg-white hover:bg-chrome transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Cancel</button> <button type="button"${attr("disabled", !name.trim() || !content.trim(), true)} class="px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors disabled:bg-primary/30 disabled:cursor-not-allowed flex items-center gap-2">`);
+          {
+            $$renderer4.push("<!--[-1-->");
+          }
+          $$renderer4.push(`<!--]--> ${escape_html(initialName ? "Update Template" : "Create Template")}</button>`);
+        };
+        Modal($$renderer3, {
+          title: initialName ? "Edit Cloud-init Template" : "Create Cloud-init Template",
+          closeOnBackdrop: !submitting,
+          width: "wide",
+          get open() {
+            return open;
+          },
+          set open($$value) {
+            open = $$value;
+            $$settled = false;
+          },
+          footer,
+          children: ($$renderer4) => {
+            $$renderer4.push(`<div class="space-y-5">`);
+            {
+              $$renderer4.push("<!--[-1-->");
+            }
+            $$renderer4.push(`<!--]--> `);
+            FormField($$renderer4, {
+              label: "Template Name",
+              error: nameError,
+              required: true,
+              labelFor: "template-name",
+              children: ($$renderer5) => {
+                Input($$renderer5, {
+                  id: "template-name",
+                  placeholder: "e.g., My Custom Template",
+                  disabled: !!initialName,
+                  onblur: validateName,
+                  get value() {
+                    return name;
+                  },
+                  set value($$value) {
+                    name = $$value;
+                    $$settled = false;
+                  }
+                });
+              }
+            });
+            $$renderer4.push(`<!----> `);
+            FormField($$renderer4, {
+              label: "Description",
+              labelFor: "template-description",
+              children: ($$renderer5) => {
+                Input($$renderer5, {
+                  id: "template-description",
+                  placeholder: "Brief description of what this template does...",
+                  disabled: submitting,
+                  get value() {
+                    return description;
+                  },
+                  set value($$value) {
+                    description = $$value;
+                    $$settled = false;
+                  }
+                });
+              }
+            });
+            $$renderer4.push(`<!----> <div class="grid grid-cols-1 lg:grid-cols-2 gap-4"><div><div class="flex items-center justify-between mb-2"><label for="cloudinit-content" class="text-sm font-medium text-ink">Cloud-init Content</label> <div class="flex items-center gap-2"><button type="button" class="flex items-center gap-1 text-xs text-muted hover:text-ink" title="Copy to clipboard">`);
+            {
+              $$renderer4.push("<!--[-1-->");
+              Copy($$renderer4, { size: 12 });
+            }
+            $$renderer4.push(`<!--]--> ${escape_html("Copy")}</button></div></div> `);
+            {
+              $$renderer4.push("<!--[-1-->");
+            }
+            $$renderer4.push(`<!--]--> <textarea id="cloudinit-content" class="w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 font-mono text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"${attr("rows", 20)}${attr("disabled", submitting, true)}${attr("spellcheck", false)}>`);
+            const $$body = escape_html(content);
+            if ($$body) {
+              $$renderer4.push(`${$$body}`);
+            }
+            $$renderer4.push(`</textarea> <div class="mt-2 text-xs text-muted">${escape_html(content.length)} characters • ${escape_html(variables.length)} variable${escape_html(variables.length !== 1 ? "s" : "")}</div></div> <div class="space-y-4"><div class="bg-chrome rounded-lg p-4"><div class="flex items-center gap-2 mb-3">`);
+            Variable($$renderer4, { size: 16, class: "text-primary" });
+            $$renderer4.push(`<!----> <h4 class="text-sm font-semibold text-ink">Template Variables</h4></div> `);
+            if (variables.length > 0) {
+              $$renderer4.push("<!--[0-->");
+              $$renderer4.push(`<div class="flex flex-wrap gap-2 mb-3"><!--[-->`);
+              const each_array = ensure_array_like(variables);
+              for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
+                let varName = each_array[$$index];
+                $$renderer4.push(`<button type="button" class="text-xs bg-white px-2 py-1 rounded border border-line text-primary hover:border-primary transition-colors" title="Insert variable">${escape_html("{{." + varName + "}}")}</button>`);
+              }
+              $$renderer4.push(`<!--]--></div> <div class="border-t border-line pt-3 mt-3"><h5 class="text-xs font-medium text-muted mb-2">Preview Values</h5> <div class="space-y-2"><!--[-->`);
+              const each_array_1 = ensure_array_like(variables);
+              for (let $$index_1 = 0, $$length = each_array_1.length; $$index_1 < $$length; $$index_1++) {
+                let varName = each_array_1[$$index_1];
+                $$renderer4.push(`<div><label class="block text-xs text-muted mb-1">${escape_html(varName)}</label> <input type="text"${attr("value", previewVariables[varName] || "")}${attr("placeholder", `Enter ${varName}...`)} class="w-full h-7 rounded border border-[#CCCCCC] bg-white px-2 py-1 text-sm"/></div>`);
+              }
+              $$renderer4.push(`<!--]--></div> <button type="button" class="mt-3 text-xs text-primary hover:text-primary/80 font-medium">Update Preview</button></div>`);
+            } else {
+              $$renderer4.push("<!--[-1-->");
+              $$renderer4.push(`<p class="text-sm text-muted">No variables detected. Use {{.VariableName}} syntax to add variables.</p>`);
+            }
+            $$renderer4.push(`<!--]--></div> <div class="bg-chrome rounded-lg p-4"><div class="flex items-center gap-2 mb-3">`);
+            File_code($$renderer4, { size: 16, class: "text-primary" });
+            $$renderer4.push(`<!----> <h4 class="text-sm font-semibold text-ink">Quick Snippets</h4></div> <div class="space-y-2"><!--[-->`);
+            const each_array_2 = ensure_array_like(commonSnippets);
+            for (let $$index_2 = 0, $$length = each_array_2.length; $$index_2 < $$length; $$index_2++) {
+              let snippet = each_array_2[$$index_2];
+              $$renderer4.push(`<button type="button" class="w-full text-left text-xs px-3 py-2 rounded border border-line hover:border-primary hover:bg-white transition-colors">${escape_html(snippet.name)}</button>`);
+            }
+            $$renderer4.push(`<!--]--></div></div> `);
+            {
+              $$renderer4.push("<!--[-1-->");
+              $$renderer4.push(`<button type="button" class="flex items-center gap-2 text-sm text-primary hover:text-primary/80">`);
+              Eye($$renderer4, { size: 16 });
+              $$renderer4.push(`<!----> Show Preview</button>`);
+            }
+            $$renderer4.push(`<!--]--></div></div></div>`);
+          },
+          $$slots: { footer: true, default: true }
+        });
+      }
+    }
+    do {
+      $$settled = true;
+      $$inner_renderer = $$renderer2.copy();
+      $$render_inner($$inner_renderer);
+    } while (!$$settled);
+    $$renderer2.subsume($$inner_renderer);
+    bind_props($$props, { open });
+  });
+}
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     const token = getStoredToken();
@@ -463,11 +902,13 @@ function _page($$renderer, $$props) {
     let images = [];
     let networks = [];
     let pools = [];
+    let vms = [];
     let loading = true;
     let error = "";
     let createFromTemplateOpen = false;
     let selectedTemplate = null;
     let cloudInitViewerOpen = false;
+    let cloudInitEditorOpen = false;
     let selectedCloudInitTemplate = null;
     let confirmDialog = {
       open: false,
@@ -476,7 +917,9 @@ function _page($$renderer, $$props) {
       action: async () => {
       }
     };
-    const imageMap = derived(() => new Map(images.map((i) => [i.id, i])));
+    function getImage(id) {
+      return images.find((i) => i.id === id);
+    }
     const vmTemplateColumns = [
       {
         key: "name",
@@ -498,7 +941,7 @@ function _page($$renderer, $$props) {
         key: "image_id",
         title: "Image",
         render: (t) => {
-          const img = imageMap().get(t.image_id);
+          const img = getImage(t.image_id);
           return img?.name || t.image_id;
         }
       },
@@ -515,18 +958,20 @@ function _page($$renderer, $$props) {
       loading = true;
       error = "";
       try {
-        const [vmTemps, cloudTemps, imgs, nets, ps] = await Promise.all([
+        const [vmTemps, cloudTemps, imgs, nets, ps, vmList] = await Promise.all([
           client.listVMTemplates(),
           client.listCloudInitTemplates(),
           client.listImages(),
           client.listNetworks(),
-          client.listStoragePools()
+          client.listStoragePools(),
+          client.listVMs()
         ]);
-        vmTemplates = vmTemps;
-        cloudInitTemplates = cloudTemps;
-        images = imgs;
-        networks = nets;
-        pools = ps;
+        vmTemplates = vmTemps ?? [];
+        cloudInitTemplates = cloudTemps ?? [];
+        images = imgs ?? [];
+        networks = nets ?? [];
+        pools = ps ?? [];
+        vms = vmList ?? [];
       } catch (err) {
         error = err instanceof Error ? err.message : "Failed to load templates";
         toast.error(error);
@@ -537,7 +982,14 @@ function _page($$renderer, $$props) {
     let $$settled = true;
     let $$inner_renderer;
     function $$render_inner($$renderer3) {
-      $$renderer3.push(`<div class="flex justify-between items-center mb-6"><div><h1 class="text-2xl font-bold text-ink">Templates</h1> <p class="text-muted text-sm mt-1">VM templates and cloud-init configurations for rapid provisioning</p></div></div> <div class="border-b border-line mb-6"><div class="flex gap-6"><button${attr_class(`pb-3 text-sm font-medium border-b-2 transition-colors ${stringify(
+      $$renderer3.push(`<div class="flex justify-between items-center mb-6"><div><h1 class="text-2xl font-bold text-ink">Templates</h1> <p class="text-muted text-sm mt-1">VM templates and cloud-init configurations for rapid provisioning</p></div> <div class="flex gap-2">`);
+      {
+        $$renderer3.push("<!--[0-->");
+        $$renderer3.push(`<button type="button" class="inline-flex items-center gap-2 px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors">`);
+        Layout_template($$renderer3, { size: 16 });
+        $$renderer3.push(`<!----> Create VM Template</button>`);
+      }
+      $$renderer3.push(`<!--]--></div></div> <div class="border-b border-line mb-6"><div class="flex gap-6"><button${attr_class(`pb-3 text-sm font-medium border-b-2 transition-colors ${stringify(
         "border-primary text-primary"
       )}`)}><span class="flex items-center gap-2">`);
       Box($$renderer3, { size: 16 });
@@ -603,6 +1055,21 @@ function _page($$renderer, $$props) {
         }
       });
       $$renderer3.push(`<!----> `);
+      CloudInitEditor($$renderer3, {
+        onSuccess: loadData,
+        get open() {
+          return cloudInitEditorOpen;
+        },
+        set open($$value) {
+          cloudInitEditorOpen = $$value;
+          $$settled = false;
+        }
+      });
+      $$renderer3.push(`<!----> `);
+      {
+        $$renderer3.push("<!--[-1-->");
+      }
+      $$renderer3.push(`<!--]--> `);
       ConfirmDialog($$renderer3, {
         title: confirmDialog.title,
         description: confirmDialog.description,

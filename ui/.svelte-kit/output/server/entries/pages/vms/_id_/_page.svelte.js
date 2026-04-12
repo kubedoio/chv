@@ -6,6 +6,7 @@ import { c as createAPIClient, g as getStoredToken } from "../../../../chunks/cl
 import { j as bind_props, e as escape_html } from "../../../../chunks/root.js";
 import { M as Modal } from "../../../../chunks/Modal.js";
 import { T as Triangle_alert } from "../../../../chunks/triangle-alert.js";
+/* empty css                                                       */
 import "xterm";
 import "xterm-addon-attach";
 import "xterm-addon-fit";

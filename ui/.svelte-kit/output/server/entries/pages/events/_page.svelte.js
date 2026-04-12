@@ -1,4 +1,4 @@
-import { n as head, c as attr, g as ensure_array_like, e as escape_html, i as derived } from "../../../chunks/root.js";
+import { n as head, c as attr, g as ensure_array_like, e as escape_html, h as derived } from "../../../chunks/root.js";
 import { o as onDestroy } from "../../../chunks/index-server.js";
 import { c as createAPIClient, g as getStoredToken, t as toast } from "../../../chunks/client2.js";
 import { S as StateBadge } from "../../../chunks/StateBadge.js";
@@ -28,7 +28,7 @@ function _page($$renderer, $$props) {
         if (filterStatus) ;
         if (filterResource) ;
         const query = params.toString();
-        let data = await client.listEvents(query ? `?${query}` : "");
+        let data = await client.listEvents(query ? `?${query}` : "") ?? [];
         if (sinceAppLoad) {
           data = data.filter((e) => new Date(e.timestamp) >= appStartTime);
         }

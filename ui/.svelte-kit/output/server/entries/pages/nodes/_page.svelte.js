@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, j as bind_props, c as attr, e as escape_html, n as head, g as ensure_array_like, h as stringify, f as attr_class } from "../../../chunks/root.js";
+import { s as sanitize_props, a as spread_props, b as slot, j as bind_props, c as attr, e as escape_html, n as head, g as ensure_array_like, f as stringify, d as attr_class } from "../../../chunks/root.js";
 import "@sveltejs/kit/internal";
 import "../../../chunks/exports.js";
 import "../../../chunks/utils.js";
@@ -13,7 +13,8 @@ import { I as Icon } from "../../../chunks/Icon.js";
 import { C as Copy } from "../../../chunks/copy.js";
 import { D as DataTable } from "../../../chunks/DataTable.js";
 import { C as Circle } from "../../../chunks/circle.js";
-import { a as Cpu, C as Circle_check_big } from "../../../chunks/cpu.js";
+import { C as Cpu } from "../../../chunks/cpu.js";
+import { C as Circle_check_big } from "../../../chunks/circle-check-big.js";
 import { H as Hard_drive } from "../../../chunks/hard-drive.js";
 import { N as Network } from "../../../chunks/network.js";
 import { A as Activity } from "../../../chunks/activity.js";
@@ -441,7 +442,7 @@ function _page($$renderer, $$props) {
     async function loadNodes() {
       loading = true;
       try {
-        const data = await client.listNodes();
+        const data = await client.listNodes() ?? [];
         nodes = data;
       } catch (e) {
         console.error("Failed to load nodes:", e);

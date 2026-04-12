@@ -4,7 +4,8 @@
 	import Input from '$lib/components/Input.svelte';
 	import { createAPIClient, getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
-	import type { Image, Network, StoragePool, VM } from '$lib/api/types';
+	import { onMount } from 'svelte';
+	import type { Image, Network, StoragePool, VM, UsageWithQuota } from '$lib/api/types';
 
 	interface Props {
 		open?: boolean;
@@ -24,6 +25,10 @@
 
 	const client = createAPIClient({ token: getStoredToken() ?? undefined });
 
+	// Quota checking
+	let usageData = $state<UsageWithQuota | null>(null);
+	let quotaError = $state<string | null>(null);
+
 	let step = $state(1); // 1: Basic, 2: Cloud-init, 3: Review
 
 	// Basic config
@@ -42,9 +47,88 @@
 
 	let submitting = $state(false);
 	let formError = $state('');
+	let checkingQuota = $state(false);
 
 	// Field errors
 	let nameError = $state('');
+
+	// Load quota data when modal opens
+	$effect(() => {
+		if (open) {
+			loadQuotaData();
+		}
+	});
+
+	async function loadQuotaData() {
+		checkingQuota = true;
+		quotaError = null;
+		try {
+			usageData = await client.getUsage();
+		} catch (err) {
+			console.error('Failed to load quota data:', err);
+			// Don't block form if quota check fails
+		} finally {
+			checkingQuota = false;
+		}
+	}
+
+	function getResourceUsagePercent(used: number, limit: number): number {
+		if (limit === 0) return 0;
+		return Math.min(100, Math.round((used / limit) * 100));
+	}
+
+	function wouldExceedQuota(): { exceeded: boolean; message: string } {
+		if (!usageData) return { exceeded: false, message: '' };
+
+		const { usage, quota } = usageData;
+
+		// Check VMs
+		if (usage.vms + 1 > quota.max_vms) {
+			return { exceeded: true, message: `VM limit exceeded (${usage.vms}/${quota.max_vms})` };
+		}
+
+		// Check CPU
+		if (usage.cpus + vcpu > quota.max_cpu) {
+			return { exceeded: true, message: `CPU limit would be exceeded (${usage.cpus + vcpu}/${quota.max_cpu})` };
+		}
+
+		// Check Memory
+		const memoryGB = Math.ceil(memoryMb / 1024);
+		if (usage.memory_gb + memoryGB > quota.max_memory_gb) {
+			return { exceeded: true, message: `Memory limit would be exceeded (${usage.memory_gb + memoryGB}GB/${quota.max_memory_gb}GB)` };
+		}
+
+		// Check Storage (estimate 10GB if can't determine)
+		const storageGB = 10;
+		if (usage.storage_gb + storageGB > quota.max_storage_gb) {
+			return { exceeded: true, message: `Storage limit would be exceeded (${usage.storage_gb + storageGB}GB/${quota.max_storage_gb}GB)` };
+		}
+
+		return { exceeded: false, message: '' };
+	}
+
+	function getQuotaWarning(): string | null {
+		if (!usageData) return null;
+		const { usage, quota } = usageData;
+
+		const warnings: string[] = [];
+
+		// Check if approaching limits after this VM
+		const vmPercent = getResourceUsagePercent(usage.vms + 1, quota.max_vms);
+		const cpuPercent = getResourceUsagePercent(usage.cpus + vcpu, quota.max_cpu);
+		const memoryGB = Math.ceil(memoryMb / 1024);
+		const memoryPercent = getResourceUsagePercent(usage.memory_gb + memoryGB, quota.max_memory_gb);
+
+		if (vmPercent >= 80) warnings.push(`VM usage will be at ${vmPercent}%`);
+		if (cpuPercent >= 80) warnings.push(`CPU usage will be at ${cpuPercent}%`);
+		if (memoryPercent >= 80) warnings.push(`Memory usage will be at ${memoryPercent}%`);
+
+		if (warnings.length > 0) {
+			return 'Approaching quota limits: ' + warnings.join(', ');
+		}
+
+		return null;
+	}
 
 	const nameRegex = /^[a-z0-9-]+$/;
 
@@ -82,6 +166,7 @@
 	}
 
 	function canProceedToStep2(): boolean {
+		const quotaCheck = wouldExceedQuota();
 		return (
 			name.trim() !== '' &&
 			nameRegex.test(name) &&
@@ -89,7 +174,8 @@
 			!name.endsWith('-') &&
 			imageId !== '' &&
 			poolId !== '' &&
-			networkId !== ''
+			networkId !== '' &&
+			!quotaCheck.exceeded
 		);
 	}
 
@@ -225,6 +311,43 @@
 					/>
 				</FormField>
 			</div>
+
+			<!-- Quota Check Display -->
+			{#if checkingQuota}
+				<div class="rounded bg-slate-50 px-3 py-2 text-sm text-slate-600 flex items-center gap-2">
+					<svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+					</svg>
+					Checking quota...
+				</div>
+			{:else if usageData}
+				{@const quotaCheck = wouldExceedQuota()}
+				{@const warning = getQuotaWarning()}
+				{#if quotaCheck.exceeded}
+					<div class="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+						<div class="font-medium mb-1">⚠️ Quota Exceeded</div>
+						<div>{quotaCheck.message}</div>
+						<div class="mt-2 text-xs">
+							Current usage: {usageData.usage.vms} VMs, {usageData.usage.cpus} CPUs, {usageData.usage.memory_gb}GB RAM
+						</div>
+					</div>
+				{:else if warning}
+					<div class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-700" role="alert">
+						<div class="font-medium mb-1">⚡ Quota Warning</div>
+						<div>{warning}</div>
+					</div>
+				{:else}
+					<div class="rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700">
+						<div class="font-medium mb-1">✓ Within Quota</div>
+						<div class="text-xs">
+							After this VM: {usageData.usage.vms + 1}/{usageData.quota.max_vms} VMs,
+							{usageData.usage.cpus + vcpu}/{usageData.quota.max_cpu} CPUs,
+							{usageData.usage.memory_gb + Math.ceil(memoryMb / 1024)}/{usageData.quota.max_memory_gb}GB RAM
+						</div>
+					</div>
+				{/if}
+			{/if}
 		</form>
 	{:else if step === 2}
 		<form id="create-vm-step2" class="space-y-5">

@@ -3,6 +3,7 @@ package quota
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/chv/chv/internal/db"
 	"github.com/google/uuid"
@@ -16,6 +17,54 @@ type Service struct {
 // NewService creates a new quota service
 func NewService(repo *db.Repository) *Service {
 	return &Service{repo: repo}
+}
+
+// EnsureQuotaForUser ensures a user has a quota entry, creating default if needed
+func (s *Service) EnsureQuotaForUser(ctx context.Context, userID string) error {
+	quota, err := s.repo.GetQuota(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("failed to check quota: %w", err)
+	}
+	if quota == nil {
+		// Create default quota
+		defaultQuota := DefaultQuota(userID)
+		defaultQuota.ID = uuid.NewString()
+		defaultQuota.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+		defaultQuota.UpdatedAt = defaultQuota.CreatedAt
+		if err := s.repo.CreateQuota(ctx, userID, defaultQuota); err != nil {
+			return fmt.Errorf("failed to create default quota: %w", err)
+		}
+	}
+	return nil
+}
+
+// CanCreateVM checks if a user can create a VM with the specified resources
+func (s *Service) CanCreateVM(ctx context.Context, userID string, vcpu int, memoryMB int64, storageGB int64) error {
+	// Check VMs count
+	if err := s.CheckQuota(ctx, userID, "vms", 1); err != nil {
+		return err
+	}
+
+	// Check CPU
+	if err := s.CheckQuota(ctx, userID, "cpu", vcpu); err != nil {
+		return err
+	}
+
+	// Check Memory (convert MB to GB for check)
+	memoryGB := int(memoryMB / 1024)
+	if memoryMB%1024 > 0 {
+		memoryGB++ // Round up
+	}
+	if err := s.CheckQuota(ctx, userID, "memory", memoryGB); err != nil {
+		return err
+	}
+
+	// Check Storage
+	if err := s.CheckQuota(ctx, userID, "storage", int(storageGB)); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // GetQuota retrieves the quota for a user

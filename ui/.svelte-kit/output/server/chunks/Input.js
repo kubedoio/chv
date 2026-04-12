@@ -1,4 +1,4 @@
-import { c as attr, e as escape_html, i as derived, l as attributes, h as stringify, j as bind_props } from "./root.js";
+import { c as attr, e as escape_html, h as derived, l as attributes, f as stringify, j as bind_props } from "./root.js";
 import "clsx";
 /* empty css                                             */
 function VisuallyHidden($$renderer, $$props) {

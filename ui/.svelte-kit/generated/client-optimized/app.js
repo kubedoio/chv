@@ -23,33 +23,35 @@ export const nodes = [
 	() => import('./nodes/19'),
 	() => import('./nodes/20'),
 	() => import('./nodes/21'),
-	() => import('./nodes/22')
+	() => import('./nodes/22'),
+	() => import('./nodes/23')
 ];
 
 export const server_loads = [];
 
 export const dictionary = {
 		"/": [2],
-		"/events": [3],
-		"/images": [4],
-		"/install": [5],
-		"/login": [6],
-		"/metrics": [7],
-		"/networks": [8],
-		"/networks/[id]": [9],
-		"/nodes": [10],
-		"/nodes/[id]": [11],
-		"/nodes/[id]/images": [12],
-		"/nodes/[id]/networks": [13],
-		"/nodes/[id]/storage": [14],
-		"/nodes/[id]/vms": [15],
-		"/operations": [16],
-		"/quotas": [17],
-		"/settings": [18],
-		"/storage": [19],
-		"/templates": [20],
-		"/vms": [21],
-		"/vms/[id]": [22]
+		"/backup-jobs": [3],
+		"/events": [4],
+		"/images": [5],
+		"/install": [6],
+		"/login": [7],
+		"/metrics": [8],
+		"/networks": [9],
+		"/networks/[id]": [10],
+		"/nodes": [11],
+		"/nodes/[id]": [12],
+		"/nodes/[id]/images": [13],
+		"/nodes/[id]/networks": [14],
+		"/nodes/[id]/storage": [15],
+		"/nodes/[id]/vms": [16],
+		"/operations": [17],
+		"/quotas": [18],
+		"/settings": [19],
+		"/storage": [20],
+		"/templates": [21],
+		"/vms": [22],
+		"/vms/[id]": [23]
 	};
 
 export const hooks = {

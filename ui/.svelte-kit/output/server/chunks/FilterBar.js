@@ -1,4 +1,4 @@
-import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, f as attr_class, g as ensure_array_like, i as derived } from "./root.js";
+import { s as sanitize_props, a as spread_props, b as slot, c as attr, e as escape_html, d as attr_class, g as ensure_array_like, h as derived } from "./root.js";
 import { I as Icon } from "./Icon.js";
 import { C as Chevron_down } from "./chevron-down.js";
 import { X } from "./x.js";
