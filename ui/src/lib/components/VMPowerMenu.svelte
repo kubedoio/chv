@@ -16,17 +16,17 @@
   let confirmTimeout = $state(60);
   let confirmGraceful = $state(true);
 
-  // Computed state values
-  let isRunning = $derived(vmState === 'running');
-  let isStopped = $derived(vmState === 'stopped' || vmState === 'prepared');
-  let isTransitioning = $derived(['starting', 'stopping', 'provisioning'].includes(vmState));
+  // Computed state values - use functions to avoid reactivity chains
+  function isRunning() { return vmState === 'running'; }
+  function isStopped() { return vmState === 'stopped' || vmState === 'prepared'; }
+  function isTransitioning() { return ['starting', 'stopping', 'provisioning'].includes(vmState); }
 
-  // Action visibility computed as separate values, not as array
-  let showStart = $derived(isStopped);
-  let showShutdown = $derived(isRunning);
-  let showForceStop = $derived(isRunning);
-  let showReset = $derived(isRunning);
-  let showRestart = $derived(isRunning);
+  // Action visibility
+  function showStart() { return isStopped(); }
+  function showShutdown() { return isRunning(); }
+  function showForceStop() { return isRunning(); }
+  function showReset() { return isRunning(); }
+  function showRestart() { return isRunning(); }
 
   function handleActionClick(actionId: string) {
     if (actionId === 'start') {
@@ -107,7 +107,7 @@
   <!-- Main Power Button -->
   <button
     onclick={toggleMenu}
-    disabled={disabled || isTransitioning}
+    disabled={disabled || isTransitioning()}
     class="flex items-center gap-2 px-3 py-2 rounded border transition-colors
       {isRunning 
         ? 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100' 
@@ -131,7 +131,7 @@
       transition:slide={{ duration: 150 }}
     >
       <div class="py-1">
-        {#if showStart}
+        {#if showStart()}
           <button
             onclick={() => handleActionClick('start')}
             class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
@@ -141,7 +141,7 @@
           </button>
         {/if}
         
-        {#if showShutdown}
+        {#if showShutdown()}
           <button
             onclick={() => handleActionClick('shutdown')}
             class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
@@ -152,7 +152,7 @@
           </button>
         {/if}
         
-        {#if showForceStop}
+        {#if showForceStop()}
           <button
             onclick={() => handleActionClick('force-stop')}
             class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-rose-600 hover:bg-rose-50"
@@ -163,7 +163,7 @@
           </button>
         {/if}
         
-        {#if showReset}
+        {#if showReset()}
           <button
             onclick={() => handleActionClick('reset')}
             class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
@@ -174,7 +174,7 @@
           </button>
         {/if}
         
-        {#if showRestart}
+        {#if showRestart()}
           <button
             onclick={() => handleActionClick('restart')}
             class="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50"
@@ -185,7 +185,7 @@
           </button>
         {/if}
         
-        {#if !showStart && !showShutdown && !showForceStop && !showReset && !showRestart}
+        {#if !showStart() && !showShutdown() && !showForceStop() && !showReset() && !showRestart()}
           <div class="px-4 py-3 text-sm text-gray-500 text-center">
             No actions available
           </div>
