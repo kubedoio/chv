@@ -33,7 +33,7 @@
       if (filterResource) params.set('resource', filterResource);
 
       const query = params.toString();
-      let data = await client.listEvents(query ? `?${query}` : '');
+      let data = (await client.listEvents(query ? `?${query}` : '')) ?? [];
 
       if (sinceAppLoad) {
         data = data.filter((e) => new Date(e.timestamp) >= appStartTime);

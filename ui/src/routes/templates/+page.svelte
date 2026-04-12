@@ -118,11 +118,11 @@
         client.listNetworks(),
         client.listStoragePools()
       ]);
-      vmTemplates = vmTemps;
-      cloudInitTemplates = cloudTemps;
-      images = imgs;
-      networks = nets;
-      pools = ps;
+      vmTemplates = vmTemps ?? [];
+      cloudInitTemplates = cloudTemps ?? [];
+      images = imgs ?? [];
+      networks = nets ?? [];
+      pools = ps ?? [];
     } catch (err) {
       error = err instanceof Error ? err.message : 'Failed to load templates';
       toast.error(error);

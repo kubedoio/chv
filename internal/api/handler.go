@@ -244,6 +244,7 @@ func (h *Handler) registerRoutes() {
 					r.Get("/images", h.listNodeImages)
 					r.Get("/storage", h.listNodeStoragePools)
 					r.Get("/networks", h.listNodeNetworks)
+					r.Post("/discover", h.discoverNodeResources)
 				})
 			})
 

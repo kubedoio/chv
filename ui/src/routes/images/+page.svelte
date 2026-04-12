@@ -119,7 +119,7 @@
 	async function loadImages() {
 		loading = true;
 		try {
-			items = await client.listImages();
+			items = (await client.listImages()) ?? [];
 		} catch {
 			toast.error('Failed to load images');
 			items = [];

@@ -19,7 +19,7 @@
     type SearchResult,
     type SearchItemType,
     type SearchItem
-  } from '$lib/stores/search.svelte';
+  } from '$lib/stores/search.svelte.ts';
   
   // Props
   interface Props {

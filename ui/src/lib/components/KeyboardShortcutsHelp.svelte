@@ -8,7 +8,7 @@
     formatShortcut,
     getModifierKey,
     type ShortcutGroup 
-  } from '$lib/stores/keyboard.svelte';
+  } from '$lib/stores/keyboard.svelte.ts';
   import KeyboardShortcut from './KeyboardShortcut.svelte';
   import Input from './primitives/Input.svelte';
   

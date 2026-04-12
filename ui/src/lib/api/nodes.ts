@@ -11,18 +11,18 @@ export type {
   ResourceType 
 } from './types';
 
-import type { Node } from './types';
+import type { Node, TreeNode } from './types';
 
-// Backward compatibility - generates a default local node
+// Backward compatibility - generates a default node placeholder
 // This is used by the UI when no nodes exist yet
 export function getDefaultNode(): Node {
   return {
-    id: 'local',
-    name: 'Local Node',
-    hostname: 'localhost',
-    ip_address: '127.0.0.1',
+    id: 'placeholder',
+    name: 'Datacenter Node',
+    hostname: 'connecting...',
+    ip_address: '...',
     status: 'online',
-    is_local: true,
+    is_local: false,
     capabilities: undefined,
     last_seen_at: new Date().toISOString(),
     created_at: new Date().toISOString(),
@@ -31,7 +31,6 @@ export function getDefaultNode(): Node {
 }
 
 // Tree navigation helper functions
-import type { Node, TreeNode } from './types';
 
 /**
  * Generate navigation tree from nodes

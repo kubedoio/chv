@@ -845,3 +845,37 @@ func (c *Client) GetVMState(ctx context.Context, req *agentapi.VMStateRequest) (
 
 	return &result, nil
 }
+
+// DiscoverVMs scans for pre-existing VM directories via the agent
+func (c *Client) DiscoverVMs(ctx context.Context, req *agentapi.VMDiscoveryRequest) (*agentapi.VMDiscoveryResponse, error) {
+	url := c.baseURL + "/v1/vms/discover"
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to agent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result agentapi.VMDiscoveryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}

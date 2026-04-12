@@ -459,6 +459,14 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify({ enabled })
       });
     },
+    discoverNode(nodeId: string) {
+      return request<{
+        node_id: string;
+        discovered: string[];
+        added: string[];
+        count: number;
+      }>(`/api/v1/nodes/${nodeId}/discover`, { method: 'POST' });
+    },
     // Node-scoped resource endpoints
     listNodeVMs(nodeId: string) {
       return request<{

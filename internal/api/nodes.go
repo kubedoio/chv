@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/chv/chv/internal/agentapi"
 	"github.com/chv/chv/internal/db"
 	"github.com/chv/chv/internal/health"
 	"github.com/chv/chv/internal/logger"
@@ -801,6 +802,83 @@ func (h *Handler) getAllNodesHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, healths)
+}
+
+// discoverNodeResources handles POST /api/v1/nodes/{id}/discover
+// Triggers the agent to scan for pre-existing resources and syncs them with the controller DB.
+func (h *Handler) discoverNodeResources(w http.ResponseWriter, r *http.Request) {
+	ctx := requestContext(r)
+	nodeID := chi.URLParam(r, "id")
+	if !h.validateNodeExists(w, r, nodeID) {
+		return
+	}
+
+	// Create agent client
+	client := h.vmService.GetAgentClient()
+	if client == nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:    "agent_client_failed",
+			Message: "Failed to create agent client for node",
+		})
+		return
+	}
+
+	// 1. Discover VMs
+	discoveryResp, err := client.DiscoverVMs(ctx, &agentapi.VMDiscoveryRequest{
+		DataRoot: h.config.DataRoot,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, apiError{
+			Code:    "discovery_failed",
+			Message: "Failed to discover VMs on agent: " + err.Error(),
+		})
+		return
+	}
+
+	var discovered []string
+	var added []string
+
+	for _, vmID := range discoveryResp.FoundVMIDs {
+		discovered = append(discovered, vmID)
+		
+		// Check if VM exists in DB
+		existing, err := h.repo.GetVMByID(ctx, vmID)
+		if err != nil {
+			logger.L().Error("Failed to check existing VM during discovery", logger.F("vm_id", vmID), logger.ErrorField(err))
+			continue
+		}
+
+		if existing == nil {
+			// Adopt the VM
+			now := time.Now().UTC().Format(time.RFC3339)
+			newVM := &models.VirtualMachine{
+				ID:           vmID,
+				Name:         "Discovered-" + vmID[:8],
+				NodeID:       nodeID,
+				ActualState:  "stopped", // Assume stopped for now, reconciler will update if running
+				DesiredState: "stopped",
+				VCPU:         1,
+				MemoryMB:     1024,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			if err := h.repo.CreateVM(ctx, newVM); err != nil {
+				logger.L().Error("Failed to create discovered VM record", logger.F("vm_id", vmID), logger.ErrorField(err))
+				continue
+			}
+			added = append(added, vmID)
+			
+			// Record audit log
+			h.auditLogger.Log("system", "Discovery", "adopt_vm", "vm", vmID, "Discovered and adopted VM during node scan", "127.0.0.1", true, nil)
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":    nodeID,
+		"discovered": discovered,
+		"added":      added,
+		"count":      len(added),
+	})
 }
 
 // getNodeMetrics handles GET /api/v1/nodes/{id}/metrics

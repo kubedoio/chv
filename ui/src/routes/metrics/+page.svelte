@@ -17,14 +17,14 @@
       loading = true;
       
       // Fetch VMs
-      const vms = await client.listVMs();
+      const vms = (await client.listVMs()) ?? [];
       vmStats.total = vms.length;
       vmStats.running = vms.filter(v => v.actual_state === 'running').length;
       vmStats.stopped = vms.filter(v => v.actual_state === 'stopped').length;
       vmStats.error = vms.filter(v => v.actual_state === 'error').length;
       
       // Fetch nodes
-      const nodes = await client.listNodes();
+      const nodes = (await client.listNodes()) ?? [];
       nodeHealth = nodes;
     } catch (err) {
       console.error('Failed to load metrics:', err);

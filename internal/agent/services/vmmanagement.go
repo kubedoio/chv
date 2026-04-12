@@ -668,6 +668,30 @@ func (s *VMManagementService) ListRunningVMs() []string {
 	return running
 }
 
+// DiscoverResources scans the dataRoot/vms directory for any subdirectories 
+// that might contain VM data but aren't currently tracked.
+func (s *VMManagementService) DiscoverResources(dataRoot string) ([]string, error) {
+	vmsPath := filepath.Join(dataRoot, "vms")
+	entries, err := os.ReadDir(vmsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("failed to read vms directory: %w", err)
+	}
+
+	var IDs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Basic validation: check if it looks like a VM ID
+			if isValidVMID(entry.Name()) {
+				IDs = append(IDs, entry.Name())
+			}
+		}
+	}
+	return IDs, nil
+}
+
 // GetVMPID returns the PID of a running VM
 func (s *VMManagementService) GetVMPID(vmID string) (int, bool) {
 	pid, exists := s.pids[vmID]
