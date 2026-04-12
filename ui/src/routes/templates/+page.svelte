@@ -43,10 +43,10 @@
     action: async () => {}
   });
 
-  // Lookup maps
-  const imageMap = $derived(new Map(images.map(i => [i.id, i])));
-  const networkMap = $derived(new Map(networks.map(n => [n.id, n])));
-  const poolMap = $derived(new Map(pools.map(p => [p.id, p])));
+  // Lookup maps - use functions to avoid creating new Maps on every render
+  function getImage(id: string) { return images.find(i => i.id === id); }
+  function getNetwork(id: string) { return networks.find(n => n.id === id); }
+  function getPool(id: string) { return pools.find(p => p.id === id); }
 
   // VM Template columns
   const vmTemplateColumns = [
@@ -70,7 +70,7 @@
       key: 'image_id',
       title: 'Image',
       render: (t: VMTemplate) => {
-        const img = imageMap.get(t.image_id);
+        const img = getImage(t.image_id);
         return img?.name || t.image_id;
       }
     },
