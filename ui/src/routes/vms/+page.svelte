@@ -46,7 +46,11 @@
   
   // Summary counts and helpers
   const totalCount = $derived(items.length);
-  const selectedIdsArray = $derived(Array.from(table.selectedIds));
+  
+  // Helper function instead of derived to avoid array creation
+  function getSelectedIdsArray(): string[] {
+    return Array.from(table.selectedIds);
+  }
 
   // Helper functions for lookup (not derived to avoid object creation)
   function getImage(id: string) {
@@ -345,7 +349,7 @@
     {columns}
     {loading}
     selectable={true}
-    selectedIds={selectedIdsArray}
+    selectedIds={getSelectedIdsArray()}
     sortColumn={table.sortColumn ?? undefined}
     sortDirection={table.sortDirection}
     emptyIcon={Server as unknown as typeof import('svelte').SvelteComponent}
