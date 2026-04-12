@@ -139,23 +139,21 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 
 
 
-	// Derived: sorted data
-	const sortedData = $derived.by(() => {
+	// Helper functions instead of derived to avoid creating new arrays on every render
+	function getSortedData(): T[] {
 		if (!sortColumn || !sortDirection) return data;
-
 		return [...data].sort((a, b) => {
 			const aVal = getValue(a, sortColumn!);
 			const bVal = getValue(b, sortColumn!);
 			return compareValues(aVal, bVal, sortDirection!);
 		});
-	});
+	}
 
-	// Derived: filtered data
-	const filteredData = $derived.by(() => {
+	function getFilteredData(): T[] {
+		const sorted = getSortedData();
 		const activeFilters = Object.entries(filters).filter(([_, v]) => v !== undefined && v !== null && v !== '');
-		if (activeFilters.length === 0) return sortedData;
-
-		return sortedData.filter(item => {
+		if (activeFilters.length === 0) return sorted;
+		return sorted.filter(item => {
 			return activeFilters.every(([key, value]) => {
 				const itemValue = getValue(item, key);
 				if (typeof value === 'string') {
@@ -164,20 +162,21 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 				return itemValue === value;
 			});
 		});
-	});
+	}
 
-	// Derived: paginated data
-	const totalItems = $derived(filteredData.length);
+	// Derived: pagination primitives only (not arrays)
+	const totalItems = $derived(getFilteredData().length);
 	const totalPages = $derived(Math.max(1, Math.ceil(totalItems / pageSize)));
 	
 	// Clamp page to valid range
 	const safePage = $derived(Math.min(page, totalPages));
 	
-	const paginatedData = $derived.by(() => {
+	function getPaginatedData(): T[] {
+		const filtered = getFilteredData();
 		const start = (safePage - 1) * pageSize;
 		const end = start + pageSize;
-		return filteredData.slice(start, end);
-	});
+		return filtered.slice(start, end);
+	}
 
 	// Helper: get row id (placeholder, will be replaced by user-provided function)
 	function getRowId(row: T): string {
@@ -186,19 +185,21 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 
 	// Derived: selection state (use functions to avoid object creation)
 	const selectedCount = $derived(selectedIds.size);
-	const isAllSelected = $derived(() => {
-		return paginatedData.length > 0 && paginatedData.every(item => selectedIds.has(getRowId(item)));
-	});
-	const isPartiallySelected = $derived(() => {
-		const hasSome = paginatedData.some(item => selectedIds.has(getRowId(item)));
-		const hasAll = paginatedData.every(item => selectedIds.has(getRowId(item)));
+	function getIsAllSelected(): boolean {
+		const data = getPaginatedData();
+		return data.length > 0 && data.every(item => selectedIds.has(getRowId(item)));
+	}
+	function getIsPartiallySelected(): boolean {
+		const data = getPaginatedData();
+		const hasSome = data.some(item => selectedIds.has(getRowId(item)));
+		const hasAll = data.every(item => selectedIds.has(getRowId(item)));
 		return hasSome && !hasAll;
-	});
+	}
 
-	// Active filter count
-	const activeFilterCount = $derived(
-		Object.values(filters).filter(v => v !== undefined && v !== null && v !== '').length
-	);
+	// Active filter count - use function instead of derived
+	function getActiveFilterCount(): number {
+		return Object.values(filters).filter(v => v !== undefined && v !== null && v !== '').length;
+	}
 
 	// Actions
 	function sort(column: string) {
@@ -277,21 +278,22 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 
 	function selectAll() {
 		const newSet = new Set(selectedIds);
-		paginatedData.forEach(item => {
+		getPaginatedData().forEach(item => {
 			newSet.add(getRowId(item));
 		});
 		selectedIds = newSet;
 	}
 
 	function selectNone() {
-		paginatedData.forEach(item => {
+		getPaginatedData().forEach(item => {
 			selectedIds.delete(getRowId(item));
 		});
 		selectedIds = new Set(selectedIds); // Trigger reactivity
 	}
 
 	function selectRange(startId: string, endId: string, getId: (item: T) => string) {
-		const visibleIds = paginatedData.map(getId);
+		const paginated = getPaginatedData();
+		const visibleIds = paginated.map(getId);
 		const startIndex = visibleIds.indexOf(startId);
 		const endIndex = visibleIds.indexOf(endId);
 		
@@ -328,15 +330,15 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 	}
 
 	function getVisibleIds(getId: (item: T) => string): string[] {
-		return paginatedData.map(getId);
+		return getPaginatedData().map(getId);
 	}
 
 	return {
 		// Data
 		get data() { return data; },
 		set data(newData: T[]) { data = newData; },
-		get sortedData() { return sortedData; },
-		get paginatedData() { return paginatedData; },
+		get sortedData() { return getSortedData(); },
+		get paginatedData() { return getPaginatedData(); },
 		get totalItems() { return totalItems; },
 		get totalPages() { return totalPages; },
 
@@ -360,8 +362,8 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 		// Selection
 		get selectedIds() { return selectedIds; },
 		get selectedCount() { return selectedCount; },
-		get isAllSelected() { return isAllSelected(); },
-		get isPartiallySelected() { return isPartiallySelected(); },
+		get isAllSelected() { return getIsAllSelected(); },
+		get isPartiallySelected() { return getIsPartiallySelected(); },
 		toggleSelect,
 		select,
 		deselect,
@@ -374,7 +376,7 @@ export function useTable<T>(options: TableOptions<T>): TableState<T> {
 		setFilter,
 		clearFilter,
 		clearAllFilters,
-		get activeFilterCount() { return activeFilterCount; },
+		get activeFilterCount() { return getActiveFilterCount(); },
 
 		// Helpers
 		isSelected,
