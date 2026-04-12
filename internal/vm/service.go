@@ -1004,3 +1004,56 @@ func (s *Service) DeleteSnapshot(ctx context.Context, vmID, snapID string) error
 
 	return s.repo.DeleteVMSnapshot(ctx, snapID)
 }
+
+// UpdateCloudInitInput holds parameters for updating VM cloud-init config
+type UpdateCloudInitInput struct {
+	UserData          string
+	Username          string
+	Password          string
+	SSHAuthorizedKeys []string
+}
+
+// UpdateVMCloudInit updates the cloud-init configuration for an existing VM
+// Note: This regenerates the seed ISO but requires VM restart to apply
+func (s *Service) UpdateVMCloudInit(ctx context.Context, vmID string, input UpdateCloudInitInput) error {
+	vm, err := s.repo.GetVMByID(ctx, vmID)
+	if err != nil {
+		return err
+	}
+	if vm == nil {
+		return fmt.Errorf("VM not found")
+	}
+
+	// Regenerate cloud-init files
+	cfg := cloudinit.Config{
+		VMID:              vm.ID,
+		VMName:            vm.Name,
+		Hostname:          vm.Name,
+		Username:          input.Username,
+		Password:          input.Password,
+		SSHAuthorizedKeys: input.SSHAuthorizedKeys,
+		UserData:          input.UserData,
+	}
+
+	result, err := s.cloudinitRdr.Render(ctx, vm.ID, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to render cloud-init: %w", err)
+	}
+
+	// Recreate the seed ISO using local service
+	seedReq := services.GenerateRequest{
+		VMID:         vm.ID,
+		CloudinitDir: result.CloudinitDir,
+		OutputDir:    filepath.Join(s.dataRoot, "vms", vm.ID),
+	}
+
+	seedResult, err := s.seedSvc.Generate(ctx, seedReq)
+	if err != nil {
+		return fmt.Errorf("failed to create seed ISO: %w", err)
+	}
+	vm.SeedISOPath = seedResult.ISOPath
+
+	// Update VM in database
+	vm.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.repo.UpdateVM(ctx, vm)
+}

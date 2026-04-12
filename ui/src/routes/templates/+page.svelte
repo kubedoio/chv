@@ -412,7 +412,7 @@
   >
     <div class="bg-white rounded-lg shadow-lg w-full max-w-lg mx-4">
       <div class="flex items-center justify-between px-6 py-4 border-b border-line">
-        <h2 class="text-lg font-semibold text-ink">Create VM Template</h2>
+        <h2 id="create-template-title" class="text-lg font-semibold text-ink">Create VM Template</h2>
         <button
           type="button"
           onclick={() => createVMTemplateOpen = false}
