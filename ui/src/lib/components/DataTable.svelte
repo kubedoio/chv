@@ -70,17 +70,11 @@
 	let lastSelectedId = $state<string | null>(null);
 	let columnVisibilityOpen = $state(false);
 	let visibleColumns = $state<Set<string>>(new Set(columns.map(c => c.key)));
-	const visibleColumnList = $derived(columns.filter(c => visibleColumns.has(c.key)));
-
-	// Re-initialize visibleColumns if columns prop changes significantly
-	$effect(() => {
-		const keys = columns.map(c => c.key);
-		const currentKeys = Array.from(visibleColumns);
-		// Check if keys have changed (simplistic check)
-		if (keys.length !== currentKeys.length || keys.some(k => !currentKeys.includes(k))) {
-			visibleColumns = new Set(keys);
-		}
-	});
+	
+	// Helper function instead of derived to avoid array creation
+	function getVisibleColumns() {
+		return columns.filter(c => visibleColumns.has(c.key));
+	}
 	let resizingColumn = $state<string | null>(null);
 	let tableRef = $state<HTMLTableElement | null>(null);
 	
@@ -101,16 +95,17 @@
 		return selectedIds.includes(rowId(row));
 	}
 	
-	const isAllSelected = $derived(
-		selectable && data.length > 0 && data.every(row => selectedIds.includes(rowId(row)))
-	);
+	// Helper functions instead of derived to avoid re-renders
+	function getIsAllSelected() {
+		return selectable && data.length > 0 && data.every(row => selectedIds.includes(rowId(row)));
+	}
 	
-	const isPartiallySelected = $derived.by(() => {
+	function getIsPartiallySelected() {
 		if (!selectable) return false;
 		const someSelected = data.some(row => selectedIds.includes(rowId(row)));
 		const allSelected = data.every(row => selectedIds.includes(rowId(row)));
 		return someSelected && !allSelected;
-	});
+	}
 
 	function handleSort(column: Column<T>) {
 		if (!column.sortable || !onSort) return;
@@ -140,7 +135,7 @@
 	function toggleSelectAll() {
 		if (!onSelect) return;
 
-		if (isAllSelected) {
+		if (getIsAllSelected()) {
 			onSelect([]);
 		} else {
 			const allIds = data.map(row => rowId(row));
@@ -295,11 +290,11 @@
 								type="button"
 								class="select-btn"
 								onclick={toggleSelectAll}
-								aria-label={isAllSelected ? 'Deselect all' : 'Select all'}
+								aria-label={getIsAllSelected() ? 'Deselect all' : 'Select all'}
 							>
-								{#if isAllSelected}
+								{#if getIsAllSelected()}
 									<CheckSquare size={16} class="text-primary" />
-								{:else if isPartiallySelected}
+								{:else if getIsPartiallySelected()}
 									<MinusSquare size={16} class="text-primary" />
 								{:else}
 									<Square size={16} />
@@ -307,7 +302,7 @@
 							</button>
 						</th>
 					{/if}
-					{#each visibleColumnList as column}
+					{#each getVisibleColumns() as column}
 						<th
 							class="datatable-th {getCellAlignment(column.align)}"
 							class:sortable={column.sortable}
@@ -355,12 +350,12 @@
 			<tbody class="datatable-body">
 				{#if loading}
 					{#each Array(5) as _}
-						<SkeletonRow columns={visibleColumnList.length + (selectable ? 1 : 0) + (children ? 1 : 0)} />
+						<SkeletonRow columns={getVisibleColumns().length + (selectable ? 1 : 0) + (children ? 1 : 0)} />
 					{/each}
 				{:else if data.length === 0}
 					<tr>
 						<td 
-							colspan={visibleColumnList.length + (selectable ? 1 : 0) + (children ? 1 : 0)}
+							colspan={getVisibleColumns().length + (selectable ? 1 : 0) + (children ? 1 : 0)}
 							class="empty-cell"
 						>
 							<EmptyState
@@ -395,7 +390,7 @@
 									</button>
 								</td>
 							{/if}
-							{#each visibleColumnList as column}
+							{#each getVisibleColumns() as column}
 								<td class="datatable-cell {getCellAlignment(column.align)}">
 									{#if column.render}
 										{@const rendered = column.render(row)}
