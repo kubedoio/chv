@@ -29,14 +29,10 @@
   // Simple state - no complex derived objects
   let vms = $state<VM[]>([]);
   let expandedNodes = $state<Set<string>>(new Set(['datacenter', 'nodes']));
-  let currentPath = $state($page.url.pathname);
+  // Use derived from page store - don't use $effect to avoid re-render loops
+  let currentPath = $derived($page.url.pathname);
   let focusedNodeId = $state<string | null>(null);
   let treeElement = $state<HTMLElement | null>(null);
-  
-  // Update current path when page changes
-  $effect(() => {
-    currentPath = $page.url.pathname;
-  });
   
   // Fetch VMs once on mount
   onMount(() => {
