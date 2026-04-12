@@ -51,10 +51,10 @@
     table.data = items;
   });
 
-  // Lookup maps for related data
-  const imageMap = $derived(new Map(images.map(i => [i.id, i])));
-  const poolMap = $derived(new Map(pools.map(p => [p.id, p])));
-  const networkMap = $derived(new Map(networks.map(n => [n.id, n])));
+  // Lookup functions for related data
+  function getImage(id: string) { return images.find(i => i.id === id); }
+  function getPool(id: string) { return pools.find(p => p.id === id); }
+  function getNetwork(id: string) { return networks.find(n => n.id === id); }
 
   // Filter options
   const filterOptions = [
@@ -95,7 +95,7 @@
       key: 'image_id',
       title: 'Image',
       render: (vm: VM) => {
-        const img = imageMap.get(vm.image_id);
+        const img = getImage(vm.image_id);
         return img?.name ?? vm.image_id;
       }
     },
@@ -103,7 +103,7 @@
       key: 'storage_pool_id',
       title: 'Pool',
       render: (vm: VM) => {
-        const pool = poolMap.get(vm.storage_pool_id);
+        const pool = getPool(vm.storage_pool_id);
         return pool?.name ?? vm.storage_pool_id;
       }
     },
