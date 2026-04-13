@@ -1,4 +1,5 @@
 use chv_observability::Metrics;
+use chv_stord_core::store::SessionStore;
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, BackendLocator,
     CloseVolumeRequest, DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest,
@@ -29,20 +30,20 @@ async fn make_client(socket: PathBuf) -> StorageServiceClient<tonic::transport::
     StorageServiceClient::new(channel)
 }
 
-async fn setup_server() -> (tempfile::TempDir, PathBuf, StorageServiceClient<tonic::transport::Channel>) {
+async fn setup_server() -> (
+    tempfile::TempDir,
+    PathBuf,
+    StorageServiceClient<tonic::transport::Channel>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("stord.sock");
 
     let backend = LocalFileBackend::new(dir.path().to_path_buf());
-    let server = StorageServer::new(
-        backend,
-        Metrics::new(),
-        vec!["local".to_string()],
-    );
+    let server = StorageServer::new(backend, Metrics::new(), vec!["local".to_string()], None);
 
     let socket_clone = socket.clone();
     tokio::spawn(async move {
-        server.serve(&socket_clone).await.ok();
+        server.serve(&socket_clone, None).await.ok();
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -66,7 +67,11 @@ async fn open_close_health_list_smoke() {
         policy: None,
     };
 
-    let open_resp = client.open_volume(open_req.clone()).await.unwrap().into_inner();
+    let open_resp = client
+        .open_volume(open_req.clone())
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(open_resp.volume_id, "vol-1");
     assert_eq!(open_resp.export_kind, "raw");
     let handle = open_resp.attachment_handle;
@@ -545,4 +550,62 @@ async fn prepare_clone_missing_session_returns_not_found() {
         .into_inner();
     assert_eq!(resp.status, "error");
     assert_eq!(resp.error_code, "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn sqlite_persistence_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("stord-persist.sock");
+    let db_path = dir.path().join("stord.db");
+
+    let backend = LocalFileBackend::new(dir.path().to_path_buf());
+    let store = SessionStore::new(&db_path).unwrap();
+    let server = StorageServer::new(backend, Metrics::new(), vec!["local".to_string()], Some(store));
+    let socket_clone = socket.clone();
+    let db_path_clone = db_path.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone, Some(&db_path_clone)).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    // Open volume
+    let open_resp = client
+        .open_volume(OpenVolumeRequest {
+            meta: None,
+            volume_id: "vol-persist".to_string(),
+            backend: Some(BackendLocator {
+                backend_class: "local".to_string(),
+                locator: "vol-persist.img".to_string(),
+                options: Default::default(),
+            }),
+            policy: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(open_resp.volume_id, "vol-persist");
+
+    // Verify persisted to SQLite by opening a new store connection
+    let store2 = SessionStore::new(&db_path).unwrap();
+    let sessions = store2.list().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].volume_id, "vol-persist");
+
+    // Close volume
+    client
+        .close_volume(CloseVolumeRequest {
+            meta: None,
+            volume_id: "vol-persist".to_string(),
+            attachment_handle: open_resp.attachment_handle,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Verify removed from SQLite
+    let store3 = SessionStore::new(&db_path).unwrap();
+    let sessions = store3.list().unwrap();
+    assert!(sessions.is_empty());
 }

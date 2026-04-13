@@ -38,3 +38,4 @@ tempfile = "3"
 tower = "0.5"
 hyper-util = { version = "0.1", features = ["client", "server", "tokio"] }
 metrics-exporter-prometheus = "0.16"
+rusqlite = { version = "0.32", features = ["bundled"] }

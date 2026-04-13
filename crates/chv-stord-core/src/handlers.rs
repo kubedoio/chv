@@ -12,6 +12,7 @@ pub struct StorageServiceImpl<B: StorageBackend> {
     sessions: Arc<SessionTable>,
     metrics: Arc<Metrics>,
     backend_allowlist: Vec<String>,
+    store: Option<Arc<tokio::sync::Mutex<crate::store::SessionStore>>>,
 }
 
 impl<B: StorageBackend> StorageServiceImpl<B> {
@@ -26,12 +27,37 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             sessions,
             metrics,
             backend_allowlist,
+            store: None,
         }
     }
 
-    fn map_backend_locator(
-        b: Option<proto::BackendLocator>,
-    ) -> Result<BackendLocator, ChvError> {
+    pub fn sessions(&self) -> Arc<SessionTable> {
+        self.sessions.clone()
+    }
+
+    pub fn set_store(&mut self, store: crate::store::SessionStore) {
+        self.store = Some(Arc::new(tokio::sync::Mutex::new(store)));
+    }
+
+    async fn persist_upsert(&self, session: &crate::session::Session) {
+        if let Some(store) = &self.store {
+            let store = store.lock().await;
+            if let Err(e) = store.upsert(session) {
+                tracing::error!(error = %e, "failed to persist session to SQLite");
+            }
+        }
+    }
+
+    async fn persist_remove(&self, volume_id: &str, handle: &str) {
+        if let Some(store) = &self.store {
+            let store = store.lock().await;
+            if let Err(e) = store.remove(volume_id, handle) {
+                tracing::error!(error = %e, "failed to remove session from SQLite");
+            }
+        }
+    }
+
+    fn map_backend_locator(b: Option<proto::BackendLocator>) -> Result<BackendLocator, ChvError> {
         let b = b.ok_or_else(|| ChvError::InvalidArgument {
             field: "backend".to_string(),
             reason: "missing".to_string(),
@@ -71,18 +97,13 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         }
         Err(ChvError::BackendUnavailable {
             backend: backend_class.to_string(),
-            reason: format!(
-                "backend class '{}' not in allowlist",
-                backend_class
-            ),
+            reason: format!("backend class '{}' not in allowlist", backend_class),
         })
     }
 }
 
 #[tonic::async_trait]
-impl<B: StorageBackend> proto::storage_service_server::StorageService
-    for StorageServiceImpl<B>
-{
+impl<B: StorageBackend> proto::storage_service_server::StorageService for StorageServiceImpl<B> {
     async fn open_volume(
         &self,
         request: Request<proto::OpenVolumeRequest>,
@@ -177,7 +198,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
             export_path: export.export_path.clone(),
             runtime_status: "open".to_string(),
         };
-        self.sessions.upsert(session);
+        self.sessions.upsert(session.clone());
+        self.persist_upsert(&session).await;
 
         Ok(Response::new(proto::OpenVolumeResponse {
             result: Some(Self::ok_result()),
@@ -206,6 +228,7 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
                 return Ok(Response::new(e.to_proto_result()));
             }
             self.sessions.remove(&req.volume_id, &req.attachment_handle);
+            self.persist_remove(&req.volume_id, &req.attachment_handle).await;
         }
 
         Ok(Response::new(Self::ok_result()))
@@ -221,20 +244,16 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
 
         let (status, backend_state, last_error) = if let Some(s) = session {
-            match self.backend.health(&s.volume_id, &s.attachment_handle).await {
+            match self
+                .backend
+                .health(&s.volume_id, &s.attachment_handle)
+                .await
+            {
                 Ok(h) => (h.status, h.backend_state, h.last_error),
-                Err(e) => (
-                    "unhealthy".to_string(),
-                    "error".to_string(),
-                    e.to_string(),
-                ),
+                Err(e) => ("unhealthy".to_string(), "error".to_string(), e.to_string()),
             }
         } else {
-            (
-                "unknown".to_string(),
-                "closed".to_string(),
-                String::new(),
-            )
+            ("unknown".to_string(), "closed".to_string(), String::new())
         };
 
         Ok(Response::new(proto::VolumeHealthResponse {
@@ -264,7 +283,9 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
             })
             .collect();
 
-        Ok(Response::new(proto::ListVolumeSessionsResponse { sessions }))
+        Ok(Response::new(proto::ListVolumeSessionsResponse {
+            sessions,
+        }))
     }
 
     async fn attach_volume_to_vm(
@@ -280,7 +301,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
             .unwrap_or_else(|| operation_span(""));
         let _enter = span.enter();
 
-        if self.sessions.get(&req.volume_id, &req.attachment_handle).is_none() {
+        if self
+            .sessions
+            .get(&req.volume_id, &req.attachment_handle)
+            .is_none()
+        {
             let e = ChvError::NotFound {
                 resource: "session".to_string(),
                 id: format!("{}/{}", req.volume_id, req.attachment_handle),
@@ -345,6 +370,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
             }));
         }
 
+        if let Some(session) = self.sessions.get(&req.volume_id, &req.attachment_handle) {
+            self.persist_upsert(&session).await;
+        }
+
         Ok(Response::new(proto::AttachVolumeToVmResponse {
             result: Some(Self::ok_result()),
             volume_id: req.volume_id,
@@ -369,9 +398,9 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
 
         // TODO: add a secondary index or find_by_volume_and_vm method if this becomes a hot path.
         let sessions = self.sessions.list();
-        let session = sessions.into_iter().find(|s| {
-            s.volume_id == req.volume_id && s.vm_id.as_deref() == Some(&req.vm_id)
-        });
+        let session = sessions
+            .into_iter()
+            .find(|s| s.volume_id == req.volume_id && s.vm_id.as_deref() == Some(&req.vm_id));
 
         if let Some(s) = session {
             if let Err(e) = self
@@ -403,6 +432,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
                     vm_id = %req.vm_id,
                     "concurrent session removal detected during detach"
                 );
+            }
+
+            if let Some(session) = self.sessions.get(&req.volume_id, &s.attachment_handle) {
+                self.persist_upsert(&session).await;
             }
         }
 
@@ -448,7 +481,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
         &self,
         request: Request<proto::PrepareSnapshotRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        self.metrics.increment_counter("stord_prepare_snapshot_total");
+        self.metrics
+            .increment_counter("stord_prepare_snapshot_total");
         let req = request.into_inner();
         let span = req
             .meta
@@ -518,7 +552,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
         &self,
         request: Request<proto::SetDevicePolicyRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        self.metrics.increment_counter("stord_set_device_policy_total");
+        self.metrics
+            .increment_counter("stord_set_device_policy_total");
         let req = request.into_inner();
         let span = req
             .meta

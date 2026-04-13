@@ -19,9 +19,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend,
         chv_observability::Metrics::new(),
         config.backend_allowlist,
+        None,
     );
 
-    server.serve(&config.socket_path).await?;
+    server.serve(&config.socket_path, None).await?;
 
     Ok(())
 }
