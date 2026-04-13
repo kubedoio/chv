@@ -1,3 +1,4 @@
+pub mod agent_server;
 pub mod cache;
 pub mod config;
 pub mod control_plane;
@@ -8,6 +9,7 @@ pub mod state_machine;
 pub mod telemetry;
 pub mod vm_runtime;
 
+pub use agent_server::AgentServer;
 pub use cache::NodeCache;
 pub use config::AgentConfig;
 pub use control_plane::ControlPlaneClient;
