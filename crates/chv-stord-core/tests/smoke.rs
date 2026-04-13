@@ -1,11 +1,12 @@
 use chv_observability::Metrics;
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, BackendLocator,
-    CloseVolumeRequest, DetachVolumeFromVmRequest, ListVolumeSessionsRequest, OpenVolumeRequest,
-    VolumeHealthRequest,
+    CloseVolumeRequest, DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest,
+    OpenVolumeRequest, ResizeVolumeRequest, SetDevicePolicyRequest, VolumeHealthRequest,
 };
 use chv_stord_backends::LocalFileBackend;
 use chv_stord_core::StorageServer;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -265,4 +266,121 @@ async fn allowlist_rejects_unknown_backend() {
     let result = resp.result.unwrap();
     assert_eq!(result.status, "error");
     assert_eq!(result.error_code, "BACKEND_UNAVAILABLE");
+}
+
+#[tokio::test]
+async fn resize_volume_smoke() {
+    let (dir, _socket, mut client) = setup_server().await;
+
+    let locator = "vol-resize.img".to_string();
+    let path = dir.path().join(&locator);
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&[0u8; 512]).unwrap();
+    }
+
+    let open_resp = client
+        .open_volume(OpenVolumeRequest {
+            meta: None,
+            volume_id: "vol-resize".to_string(),
+            backend: Some(BackendLocator {
+                backend_class: "local".to_string(),
+                locator,
+                options: Default::default(),
+            }),
+            policy: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let handle = open_resp.attachment_handle;
+
+    let resize_resp = client
+        .resize_volume(ResizeVolumeRequest {
+            meta: None,
+            volume_id: "vol-resize".to_string(),
+            new_size_bytes: 1024,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resize_resp.status, "OK");
+
+    let meta = std::fs::metadata(&path).unwrap();
+    assert_eq!(meta.len(), 1024);
+
+    let _ = client
+        .close_volume(CloseVolumeRequest {
+            meta: None,
+            volume_id: "vol-resize".to_string(),
+            attachment_handle: handle,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+}
+
+#[tokio::test]
+async fn set_device_policy_smoke() {
+    let (_dir, _socket, mut client) = setup_server().await;
+
+    let open_resp = client
+        .open_volume(OpenVolumeRequest {
+            meta: None,
+            volume_id: "vol-policy".to_string(),
+            backend: Some(BackendLocator {
+                backend_class: "local".to_string(),
+                locator: "vol-policy.img".to_string(),
+                options: Default::default(),
+            }),
+            policy: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let handle = open_resp.attachment_handle;
+
+    let policy_resp = client
+        .set_device_policy(SetDevicePolicyRequest {
+            meta: None,
+            volume_id: "vol-policy".to_string(),
+            policy: Some(DevicePolicy {
+                read_bps: 1000,
+                write_bps: 2000,
+                read_iops: 100,
+                write_iops: 100,
+                burst_allowed: false,
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(policy_resp.status, "OK");
+
+    let _ = client
+        .close_volume(CloseVolumeRequest {
+            meta: None,
+            volume_id: "vol-policy".to_string(),
+            attachment_handle: handle,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+}
+
+#[tokio::test]
+async fn resize_volume_missing_session_returns_not_found() {
+    let (_dir, _socket, mut client) = setup_server().await;
+
+    let resize_resp = client
+        .resize_volume(ResizeVolumeRequest {
+            meta: None,
+            volume_id: "vol-missing".to_string(),
+            new_size_bytes: 1024,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resize_resp.status, "error");
+    assert_eq!(resize_resp.error_code, "NOT_FOUND");
 }

@@ -411,11 +411,37 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
 
     async fn resize_volume(
         &self,
-        _request: Request<proto::ResizeVolumeRequest>,
+        request: Request<proto::ResizeVolumeRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "resize_volume not yet implemented",
-        ))
+        self.metrics.increment_counter("stord_resize_volume_total");
+        let req = request.into_inner();
+        let span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = span.enter();
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
+
+        let Some(s) = session else {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: req.volume_id.clone(),
+            };
+            return Ok(Response::new(e.to_proto_result()));
+        };
+
+        if let Err(e) = self
+            .backend
+            .resize(&s.volume_id, &s.attachment_handle, req.new_size_bytes)
+            .await
+        {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
     }
 
     async fn prepare_snapshot(
@@ -438,10 +464,38 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
 
     async fn set_device_policy(
         &self,
-        _request: Request<proto::SetDevicePolicyRequest>,
+        request: Request<proto::SetDevicePolicyRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "set_device_policy not yet implemented",
-        ))
+        self.metrics.increment_counter("stord_set_device_policy_total");
+        let req = request.into_inner();
+        let span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = span.enter();
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
+
+        let Some(s) = session else {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: req.volume_id.clone(),
+            };
+            return Ok(Response::new(e.to_proto_result()));
+        };
+
+        let policy = Self::map_device_policy(req.policy);
+
+        if let Err(e) = self
+            .backend
+            .set_device_policy(&s.volume_id, &s.attachment_handle, &policy)
+            .await
+        {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
     }
 }
