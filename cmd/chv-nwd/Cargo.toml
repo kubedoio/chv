@@ -1,0 +1,15 @@
+[package]
+name = "chv-nwd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "chv-nwd"
+path = "src/main.rs"
+
+[dependencies]
+chv-config = { path = "../../crates/chv-config" }
+chv-observability = { path = "../../crates/chv-observability" }
+chv-nwd-core = { path = "../../crates/chv-nwd-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }

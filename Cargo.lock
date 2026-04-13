@@ -210,6 +210,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "chv-nwd"
+version = "0.1.0"
+dependencies = [
+ "chv-config",
+ "chv-nwd-core",
+ "chv-observability",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "chv-nwd-api"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "chv-nwd-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chv-common",
+ "chv-errors",
+ "chv-nwd-api",
+ "chv-observability",
+ "dashmap",
+ "hyper-util",
+ "prost",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "chv-observability"
 version = "0.1.0"
 dependencies = [

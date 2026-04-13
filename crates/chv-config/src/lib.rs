@@ -39,3 +39,31 @@ pub fn load_stord_config(path: Option<&Path>) -> Result<StordConfig, ConfigError
     }
     Ok(cfg)
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NwdConfig {
+    pub socket_path: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub log_level: String,
+    pub metrics_bind: Option<String>,
+}
+
+impl Default for NwdConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: PathBuf::from("/run/chv/nwd/api.sock"),
+            runtime_dir: PathBuf::from("/run/chv/nwd"),
+            log_level: "info".to_string(),
+            metrics_bind: None,
+        }
+    }
+}
+
+pub fn load_nwd_config(path: Option<&Path>) -> Result<NwdConfig, ConfigError> {
+    let mut cfg = NwdConfig::default();
+    if let Some(p) = path {
+        let text = std::fs::read_to_string(p)?;
+        cfg = toml::from_str(&text)?;
+    }
+    Ok(cfg)
+}

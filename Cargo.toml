@@ -8,6 +8,9 @@ members = [
     "crates/chv-stord-core",
     "crates/chv-stord-backends",
     "gen/rust/chv-stord-api",
+    "cmd/chv-nwd",
+    "crates/chv-nwd-core",
+    "gen/rust/chv-nwd-api",
 ]
 resolver = "2"
 
