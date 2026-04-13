@@ -8,6 +8,7 @@ chv-common = { path = "../chv-common" }
 chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }
 chv-config = { path = "../chv-config" }
+chv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }
 chv-stord-api = { path = "../../gen/rust/chv-stord-api" }
 chv-nwd-api = { path = "../../gen/rust/chv-nwd-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
