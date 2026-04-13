@@ -1,5 +1,6 @@
 use crate::cache::NodeCache;
 use crate::state_machine::{NodeState, StateMachine};
+use crate::vm_runtime::VmRuntime;
 use chv_errors::ChvError;
 use std::path::PathBuf;
 use tracing::info;
@@ -7,6 +8,7 @@ use tracing::info;
 pub struct Reconciler {
     pub cache: NodeCache,
     pub state_machine: StateMachine,
+    pub vm_runtime: VmRuntime,
     pub stord_socket: PathBuf,
     pub nwd_socket: PathBuf,
 }
@@ -14,6 +16,7 @@ pub struct Reconciler {
 impl Reconciler {
     pub fn new(
         cache: NodeCache,
+        vm_runtime: VmRuntime,
         stord_socket: PathBuf,
         nwd_socket: PathBuf,
     ) -> Self {
@@ -24,6 +27,7 @@ impl Reconciler {
         Self {
             cache,
             state_machine: StateMachine::new(initial),
+            vm_runtime,
             stord_socket,
             nwd_socket,
         }
@@ -34,8 +38,17 @@ impl Reconciler {
             state = %self.state_machine.current().as_str(),
             "reconcile tick"
         );
-        // Phase 1: skeleton only. Health probes and state transitions happen
-        // in the binary's main loop for now.
+        // Phase 2: iterate over cached VM fragments and ensure they match runtime.
+        // For now, log the divergence count without acting.
+        let vm_count = self.cache.vm_fragments.len();
+        let runtime_count = self.vm_runtime.list().len();
+        if vm_count != runtime_count {
+            info!(
+                cached_vms = vm_count,
+                runtime_vms = runtime_count,
+                "reconcile divergence detected"
+            );
+        }
         Ok(())
     }
 }
