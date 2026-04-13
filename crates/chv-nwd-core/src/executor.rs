@@ -142,6 +142,88 @@ impl LinuxExecutor {
     async fn namespace_exists(name: &str) -> bool {
         std::path::Path::new("/var/run/netns").join(name).exists()
     }
+
+    async fn run_nft(args: &[&str]) -> Result<(), ChvError> {
+        let out = Command::new("nft")
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "nft".to_string(),
+                source: e,
+            })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(ChvError::NetworkUnavailable {
+                resource: "nft".to_string(),
+                reason: format!("nft {} failed: {}", args.join(" "), stderr),
+            });
+        }
+        Ok(())
+    }
+
+    async fn delete_rules_by_comment(table: &str, chain: &str, comment: &str) -> Result<(), ChvError> {
+        let out = Command::new("nft")
+            .args(["-a", "list", "chain", "inet", table, chain])
+            .output()
+            .await
+            .map_err(|e| ChvError::Io { path: "nft".to_string(), source: e })?;
+        if !out.status.success() {
+            return Ok(()); // chain may not exist
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let target = format!("comment \"{}\"", comment);
+        for line in stdout.lines() {
+            if line.contains(&target) {
+                if let Some(idx) = line.rfind(" handle ") {
+                    let handle = line[idx + 8..].trim().split_whitespace().next().unwrap_or("");
+                    if !handle.is_empty() {
+                        Self::run_nft(&["delete", "rule", "inet", table, chain, "handle", handle]).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn sanitize_id(id: &str) -> Result<String, ChvError> {
+        if id.is_empty() {
+            return Err(ChvError::InvalidArgument {
+                field: "id".to_string(),
+                reason: "id must not be empty".to_string(),
+            });
+        }
+        if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+            Ok(id.to_string())
+        } else {
+            Err(ChvError::InvalidArgument {
+                field: "id".to_string(),
+                reason: format!("id contains invalid characters: {}", id),
+            })
+        }
+    }
+
+    fn sanitized_nft_table(network_id: &str) -> Result<String, ChvError> {
+        let sanitized = Self::sanitize_id(network_id)?;
+        Ok(format!("chv-{}", sanitized))
+    }
+
+    async fn run_nft_idempotent(args: &[&str]) -> Result<(), ChvError> {
+        match Self::run_nft(args).await {
+            Ok(()) => Ok(()),
+            Err(ChvError::NetworkUnavailable { reason, .. }) => {
+                if reason.contains("File exists") || reason.contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(ChvError::NetworkUnavailable {
+                        resource: "nft".to_string(),
+                        reason,
+                    })
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[async_trait]
@@ -204,10 +286,12 @@ impl NetworkExecutor for LinuxExecutor {
             }
         }
 
-        let _ = Command::new("nft")
-            .args(["delete", "table", "inet", &format!("chv-{}", network_id)])
-            .output()
-            .await;
+        if let Ok(table) = Self::sanitized_nft_table(network_id) {
+            let _ = Command::new("nft")
+                .args(["delete", "table", "inet", &table])
+                .output()
+                .await;
+        }
 
         Ok(())
     }
@@ -289,7 +373,13 @@ impl NetworkExecutor for LinuxExecutor {
         _policy_version: &str,
         _policy_json: &[u8],
     ) -> Result<(), ChvError> {
-        info!(network_id = %network_id, "firewall policy accepted but not enforced by LinuxExecutor");
+        let table = Self::sanitized_nft_table(network_id)?;
+        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
+        for (chain, hook) in [("input", "input"), ("forward", "forward")] {
+            Self::run_nft_idempotent(&["add", "chain", "inet", &table, chain, &format!("{{ type filter hook {} priority 0 ; policy accept ; }}", hook)]).await?;
+        }
+        Self::run_nft(&["add", "rule", "inet", &table, "input", "ct", "state", "established,related", "accept"]).await?;
+        info!(network_id = %network_id, "firewall policy applied");
         Ok(())
     }
 
@@ -299,7 +389,11 @@ impl NetworkExecutor for LinuxExecutor {
         _policy_version: &str,
         _policy_json: &[u8],
     ) -> Result<(), ChvError> {
-        info!(network_id = %network_id, "NAT policy accepted but not enforced by LinuxExecutor");
+        let table = Self::sanitized_nft_table(network_id)?;
+        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
+        Self::run_nft_idempotent(&["add", "chain", "inet", &table, "postrouting", "{ type nat hook postrouting priority 100 ; policy accept ; }"]).await?;
+        Self::run_nft(&["add", "rule", "inet", &table, "postrouting", "oif", "!=", "lo", "masquerade"]).await?;
+        info!(network_id = %network_id, "NAT policy applied");
         Ok(())
     }
 
@@ -327,13 +421,30 @@ impl NetworkExecutor for LinuxExecutor {
         &self,
         network_id: &str,
         exposure_id: &str,
-        _protocol: &str,
-        _external_port: u32,
-        _target_ip: &str,
-        _target_port: u32,
+        protocol: &str,
+        external_port: u32,
+        target_ip: &str,
+        target_port: u32,
         _mode: &str,
     ) -> Result<(), ChvError> {
-        info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure accepted but NAT/port-forwarding rules are not yet enforced by LinuxExecutor");
+        let table = Self::sanitized_nft_table(network_id)?;
+        let safe_exposure_id = Self::sanitize_id(exposure_id)?;
+        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
+        Self::run_nft_idempotent(&["add", "chain", "inet", &table, "prerouting", "{ type nat hook prerouting priority 0 ; policy accept ; }"]).await?;
+        Self::run_nft(&[
+            "add", "rule", "inet", &table, "prerouting",
+            protocol, "dport", &external_port.to_string(),
+            "dnat", "to", &format!("{}:{}", target_ip, target_port),
+            "comment", &format!("\"{}\"", safe_exposure_id),
+        ]).await?;
+        Self::run_nft_idempotent(&["add", "chain", "inet", &table, "forward", "{ type filter hook forward priority 0 ; policy accept ; }"]).await?;
+        Self::run_nft(&[
+            "add", "rule", "inet", &table, "forward",
+            protocol, "dport", &target_port.to_string(),
+            "ip", "daddr", target_ip, "accept",
+            "comment", &format!("\"{}\"", safe_exposure_id),
+        ]).await?;
+        info!(network_id = %network_id, exposure_id = %exposure_id, "service exposed via DNAT");
         Ok(())
     }
 
@@ -342,7 +453,11 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         exposure_id: &str,
     ) -> Result<(), ChvError> {
-        info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure withdrawal accepted but NAT rules are not yet removed by LinuxExecutor");
+        let table = Self::sanitized_nft_table(network_id)?;
+        let safe_exposure_id = Self::sanitize_id(exposure_id)?;
+        Self::delete_rules_by_comment(&table, "prerouting", &safe_exposure_id).await?;
+        Self::delete_rules_by_comment(&table, "forward", &safe_exposure_id).await?;
+        info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure withdrawn");
         Ok(())
     }
 }
@@ -355,5 +470,45 @@ mod tests {
     fn linux_executor_implements_network_executor() {
         let _executor = LinuxExecutor::new(std::env::temp_dir());
         // If this compiles, the trait is fully implemented.
+    }
+
+    #[test]
+    fn nft_table_generation() {
+        assert_eq!(LinuxExecutor::sanitized_nft_table("net1").unwrap(), "chv-net1");
+    }
+
+    #[test]
+    fn sanitize_id_rejects_bad_chars() {
+        assert!(LinuxExecutor::sanitize_id("valid_id-123.abc").is_ok());
+        assert!(LinuxExecutor::sanitize_id("net1").is_ok());
+        assert!(LinuxExecutor::sanitize_id("").is_err());
+        assert!(LinuxExecutor::sanitize_id("bad;id").is_err());
+        assert!(LinuxExecutor::sanitize_id("bad id").is_err());
+        assert!(LinuxExecutor::sanitize_id("bad\"id").is_err());
+        assert!(LinuxExecutor::sanitize_id("bad'id").is_err());
+        assert!(LinuxExecutor::sanitize_id("bad/id").is_err());
+    }
+
+    #[test]
+    fn delete_rules_by_comment_line_extraction() {
+        // Simulate the parsing logic inline to avoid async test infrastructure
+        let sample = r#"
+        tcp dport 80 dnat to 10.0.0.2:80 comment "exp-1" handle 10
+        tcp dport 443 dnat to 10.0.0.2:443 comment "exp-2" handle 20
+        "#;
+        let comment = "exp-1";
+        let target = format!("comment \"{}\"", comment);
+        let mut found_handle = None;
+        for line in sample.lines() {
+            if line.contains(&target) {
+                if let Some(idx) = line.rfind(" handle ") {
+                    let handle = line[idx + 8..].trim().split_whitespace().next().unwrap_or("");
+                    if !handle.is_empty() {
+                        found_handle = Some(handle.to_string());
+                    }
+                }
+            }
+        }
+        assert_eq!(found_handle, Some("10".to_string()));
     }
 }

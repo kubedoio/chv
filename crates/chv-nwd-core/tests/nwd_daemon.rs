@@ -437,3 +437,73 @@ async fn attach_vm_nic_missing_topology_returns_not_found() {
     assert_eq!(result.result.as_ref().unwrap().status, "error");
     assert_eq!(result.result.as_ref().unwrap().error_code, "NOT_FOUND");
 }
+
+#[tokio::test]
+async fn firewall_nat_and_exposure_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    // Ensure topology first
+    let _ = client.ensure_network_topology(EnsureNetworkTopologyRequest {
+        meta: None,
+        topology: Some(TopologySpec {
+            network_id: "net-fw".to_string(),
+            tenant_id: "t1".to_string(),
+            bridge_name: "br-fw".to_string(),
+            namespace_name: "ns-fw".to_string(),
+            subnet_cidr: "10.0.99.0/24".to_string(),
+            gateway_ip: "10.0.99.1".to_string(),
+            options: Default::default(),
+        }),
+    }).await.unwrap().into_inner();
+
+    let fw = client.set_firewall_policy(SetFirewallPolicyRequest {
+        meta: None,
+        network_id: "net-fw".to_string(),
+        policy: Some(FirewallPolicy {
+            policy_version: "v1".to_string(),
+            policy_json: b"{}".to_vec(),
+        }),
+    }).await.unwrap().into_inner();
+    assert_eq!(fw.status, "OK");
+
+    let nat = client.set_nat_policy(chv_nwd_api::chv_nwd_api::SetNatPolicyRequest {
+        meta: None,
+        network_id: "net-fw".to_string(),
+        policy: Some(NatPolicy {
+            policy_version: "v1".to_string(),
+            policy_json: b"{}".to_vec(),
+        }),
+    }).await.unwrap().into_inner();
+    assert_eq!(nat.status, "OK");
+
+    let exp = client.expose_service(ExposeServiceRequest {
+        meta: None,
+        exposure: Some(chv_nwd_api::chv_nwd_api::ExposureSpec {
+            network_id: "net-fw".to_string(),
+            exposure_id: "exp1".to_string(),
+            protocol: "tcp".to_string(),
+            external_port: 8080,
+            target_ip: "10.0.99.10".to_string(),
+            target_port: 80,
+            mode: "dnat".to_string(),
+        }),
+    }).await.unwrap().into_inner();
+    assert_eq!(exp.status, "OK");
+
+    let wd = client.withdraw_service_exposure(WithdrawServiceExposureRequest {
+        meta: None,
+        exposure_id: "exp1".to_string(),
+        network_id: "net-fw".to_string(),
+    }).await.unwrap().into_inner();
+    assert_eq!(wd.status, "OK");
+}
