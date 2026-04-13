@@ -269,20 +269,102 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
 
     async fn attach_volume_to_vm(
         &self,
-        _request: Request<proto::AttachVolumeToVmRequest>,
+        request: Request<proto::AttachVolumeToVmRequest>,
     ) -> Result<Response<proto::AttachVolumeToVmResponse>, Status> {
-        Err(Status::unimplemented(
-            "attach_volume_to_vm not yet implemented",
-        ))
+        self.metrics.increment_counter("stord_attach_volume_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        if self.sessions.get(&req.volume_id, &req.attachment_handle).is_none() {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: format!("{}/{}", req.volume_id, req.attachment_handle),
+            };
+            return Ok(Response::new(proto::AttachVolumeToVmResponse {
+                result: Some(e.to_proto_result()),
+                volume_id: req.volume_id,
+                vm_id: req.vm_id,
+                export_kind: String::new(),
+                export_path: String::new(),
+            }));
+        }
+
+        let export = match self
+            .backend
+            .attach(&req.volume_id, &req.attachment_handle, &req.vm_id)
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return Ok(Response::new(proto::AttachVolumeToVmResponse {
+                    result: Some(e.to_proto_result()),
+                    volume_id: req.volume_id,
+                    vm_id: req.vm_id,
+                    export_kind: String::new(),
+                    export_path: String::new(),
+                }));
+            }
+        };
+
+        self.sessions.update_vm_id(
+            &req.volume_id,
+            &req.attachment_handle,
+            Some(req.vm_id.clone()),
+            "attached".to_string(),
+        );
+
+        Ok(Response::new(proto::AttachVolumeToVmResponse {
+            result: Some(Self::ok_result()),
+            volume_id: req.volume_id,
+            vm_id: req.vm_id,
+            export_kind: export.export_kind,
+            export_path: export.export_path,
+        }))
     }
 
     async fn detach_volume_from_vm(
         &self,
-        _request: Request<proto::DetachVolumeFromVmRequest>,
+        request: Request<proto::DetachVolumeFromVmRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "detach_volume_from_vm not yet implemented",
-        ))
+        self.metrics.increment_counter("stord_detach_volume_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| {
+            s.volume_id == req.volume_id && s.vm_id.as_deref() == Some(&req.vm_id)
+        });
+
+        if let Some(s) = session {
+            if let Err(e) = self
+                .backend
+                .detach(&req.volume_id, &s.attachment_handle, &req.vm_id, req.force)
+                .await
+            {
+                if !req.force {
+                    return Ok(Response::new(e.to_proto_result()));
+                }
+            }
+
+            self.sessions.update_vm_id(
+                &req.volume_id,
+                &s.attachment_handle,
+                None,
+                "open".to_string(),
+            );
+        }
+
+        Ok(Response::new(Self::ok_result()))
     }
 
     async fn resize_volume(

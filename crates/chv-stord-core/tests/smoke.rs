@@ -1,7 +1,8 @@
 use chv_observability::Metrics;
 use chv_stord_api::chv_stord_api::{
-    storage_service_client::StorageServiceClient, BackendLocator, CloseVolumeRequest,
-    ListVolumeSessionsRequest, OpenVolumeRequest, VolumeHealthRequest,
+    storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, BackendLocator,
+    CloseVolumeRequest, DetachVolumeFromVmRequest, ListVolumeSessionsRequest, OpenVolumeRequest,
+    VolumeHealthRequest,
 };
 use chv_stord_backends::LocalFileBackend;
 use chv_stord_core::StorageServer;
@@ -123,6 +124,150 @@ async fn open_close_health_list_smoke() {
         .into_inner();
     assert_eq!(health_resp2.health_status, "unknown");
     assert_eq!(health_resp2.backend_state, "closed");
+}
+
+#[tokio::test]
+async fn attach_and_detach_volume_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("stord.sock");
+
+    let backend = LocalFileBackend::new(dir.path().to_path_buf());
+    let server = StorageServer::new(
+        backend,
+        Metrics::new(),
+        vec!["local".to_string()],
+    );
+
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    // Open volume
+    let open_resp = client
+        .open_volume(OpenVolumeRequest {
+            meta: None,
+            volume_id: "vol-1".to_string(),
+            backend: Some(BackendLocator {
+                backend_class: "local".to_string(),
+                locator: "vol-1.img".to_string(),
+                options: Default::default(),
+            }),
+            policy: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let handle = open_resp.attachment_handle;
+
+    // Attach volume to VM
+    let attach_resp = client
+        .attach_volume_to_vm(AttachVolumeToVmRequest {
+            meta: None,
+            volume_id: "vol-1".to_string(),
+            vm_id: "vm-1".to_string(),
+            attachment_handle: handle.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(attach_resp.volume_id, "vol-1");
+    assert_eq!(attach_resp.vm_id, "vm-1");
+    assert_eq!(attach_resp.result.as_ref().unwrap().status, "OK");
+
+    // List sessions to verify attachment state
+    let list_resp = client
+        .list_volume_sessions(ListVolumeSessionsRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(list_resp.sessions.len(), 1);
+    assert_eq!(list_resp.sessions[0].vm_id, "vm-1");
+    assert_eq!(list_resp.sessions[0].runtime_status, "attached");
+
+    // Detach volume from VM
+    let detach_resp = client
+        .detach_volume_from_vm(DetachVolumeFromVmRequest {
+            meta: None,
+            volume_id: "vol-1".to_string(),
+            vm_id: "vm-1".to_string(),
+            force: false,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(detach_resp.status, "OK");
+
+    // Verify session is back to open
+    let list_resp2 = client
+        .list_volume_sessions(ListVolumeSessionsRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(list_resp2.sessions[0].vm_id, "");
+    assert_eq!(list_resp2.sessions[0].runtime_status, "open");
+
+    // Idempotent detach: no session with vm_id should still return OK
+    let detach_resp2 = client
+        .detach_volume_from_vm(DetachVolumeFromVmRequest {
+            meta: None,
+            volume_id: "vol-1".to_string(),
+            vm_id: "vm-1".to_string(),
+            force: false,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(detach_resp2.status, "OK");
+
+    // Close volume
+    let _ = client
+        .close_volume(CloseVolumeRequest {
+            meta: None,
+            volume_id: "vol-1".to_string(),
+            attachment_handle: handle,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+}
+
+#[tokio::test]
+async fn attach_volume_missing_session_returns_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("stord.sock");
+
+    let backend = LocalFileBackend::new(dir.path().to_path_buf());
+    let server = StorageServer::new(
+        backend,
+        Metrics::new(),
+        vec!["local".to_string()],
+    );
+
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    let attach_resp = client
+        .attach_volume_to_vm(AttachVolumeToVmRequest {
+            meta: None,
+            volume_id: "vol-missing".to_string(),
+            vm_id: "vm-1".to_string(),
+            attachment_handle: "no-handle".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let result = attach_resp.result.unwrap();
+    assert_eq!(result.status, "error");
+    assert_eq!(result.error_code, "NOT_FOUND");
 }
 
 #[tokio::test]
