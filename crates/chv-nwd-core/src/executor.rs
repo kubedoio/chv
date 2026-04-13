@@ -43,7 +43,6 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     async fn detach_vm_nic(
         &self,
         nic_id: &str,
-        tap_handle: &str,
     ) -> Result<(), ChvError>;
 
     async fn set_firewall_policy(
@@ -257,11 +256,11 @@ impl NetworkExecutor for LinuxExecutor {
 
     async fn detach_vm_nic(
         &self,
-        _nic_id: &str,
-        tap_handle: &str,
+        nic_id: &str,
     ) -> Result<(), ChvError> {
+        let tap_handle = format!("tap-{}", nic_id);
         let out = Command::new("ip")
-            .args(["tuntap", "del", "dev", tap_handle, "mode", "tap"])
+            .args(["tuntap", "del", "dev", &tap_handle, "mode", "tap"])
             .output()
             .await
             .map_err(|e| ChvError::Io {

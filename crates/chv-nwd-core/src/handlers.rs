@@ -178,69 +178,281 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService
 
     async fn attach_vm_nic(
         &self,
-        _request: Request<proto::AttachVmNicRequest>,
+        request: Request<proto::AttachVmNicRequest>,
     ) -> Result<Response<proto::AttachVmNicResponse>, Status> {
-        Err(Status::unimplemented("attach_vm_nic not yet implemented"))
+        self.metrics.increment_counter("nwd_attach_vm_nic_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let nic = req.nic.ok_or_else(|| ChvError::InvalidArgument {
+            field: "nic".to_string(),
+            reason: "missing".to_string(),
+        });
+        let nic = match nic {
+            Ok(n) => n,
+            Err(e) => {
+                return Ok(Response::new(proto::AttachVmNicResponse {
+                    result: Some(Self::err_result(&e)),
+                    namespace_handle: String::new(),
+                    tap_handle: String::new(),
+                }));
+            }
+        };
+
+        let state = match self.topologies.get(&nic.network_id) {
+            Some(s) => s,
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: nic.network_id.clone(),
+                };
+                return Ok(Response::new(proto::AttachVmNicResponse {
+                    result: Some(Self::err_result(&e)),
+                    namespace_handle: String::new(),
+                    tap_handle: String::new(),
+                }));
+            }
+        };
+
+        match self
+            .executor
+            .attach_vm_nic(
+                &nic.network_id,
+                &nic.nic_id,
+                &nic.vm_id,
+                &state.bridge_name,
+                &nic.mac_address,
+                &nic.ip_address,
+            )
+            .await
+        {
+            Ok((namespace_handle, tap_handle)) => Ok(Response::new(proto::AttachVmNicResponse {
+                result: Some(Self::ok_result()),
+                namespace_handle,
+                tap_handle,
+            })),
+            Err(e) => Ok(Response::new(proto::AttachVmNicResponse {
+                result: Some(Self::err_result(&e)),
+                namespace_handle: String::new(),
+                tap_handle: String::new(),
+            })),
+        }
     }
 
     async fn detach_vm_nic(
         &self,
-        _request: Request<proto::DetachVmNicRequest>,
+        request: Request<proto::DetachVmNicRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented("detach_vm_nic not yet implemented"))
+        self.metrics.increment_counter("nwd_detach_vm_nic_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        match self.executor.detach_vm_nic(&req.nic_id).await {
+            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Err(e) => Ok(Response::new(Self::err_result(&e))),
+        }
     }
 
     async fn set_firewall_policy(
         &self,
-        _request: Request<proto::SetFirewallPolicyRequest>,
+        request: Request<proto::SetFirewallPolicyRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "set_firewall_policy not yet implemented",
-        ))
+        self.metrics.increment_counter("nwd_set_firewall_policy_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let policy = req.policy.ok_or_else(|| ChvError::InvalidArgument {
+            field: "policy".to_string(),
+            reason: "missing".to_string(),
+        });
+        let policy = match policy {
+            Ok(p) => p,
+            Err(e) => return Ok(Response::new(Self::err_result(&e))),
+        };
+
+        match self
+            .executor
+            .set_firewall_policy(&req.network_id, &policy.policy_version, &policy.policy_json)
+            .await
+        {
+            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Err(e) => Ok(Response::new(Self::err_result(&e))),
+        }
     }
 
     async fn set_nat_policy(
         &self,
-        _request: Request<proto::SetNatPolicyRequest>,
+        request: Request<proto::SetNatPolicyRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "set_nat_policy not yet implemented",
-        ))
+        self.metrics.increment_counter("nwd_set_nat_policy_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let policy = req.policy.ok_or_else(|| ChvError::InvalidArgument {
+            field: "policy".to_string(),
+            reason: "missing".to_string(),
+        });
+        let policy = match policy {
+            Ok(p) => p,
+            Err(e) => return Ok(Response::new(Self::err_result(&e))),
+        };
+
+        match self
+            .executor
+            .set_nat_policy(&req.network_id, &policy.policy_version, &policy.policy_json)
+            .await
+        {
+            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Err(e) => Ok(Response::new(Self::err_result(&e))),
+        }
     }
 
     async fn ensure_dhcp_scope(
         &self,
-        _request: Request<proto::EnsureDhcpScopeRequest>,
+        request: Request<proto::EnsureDhcpScopeRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "ensure_dhcp_scope not yet implemented",
-        ))
+        self.metrics.increment_counter("nwd_ensure_dhcp_scope_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let scope = req.scope.ok_or_else(|| ChvError::InvalidArgument {
+            field: "scope".to_string(),
+            reason: "missing".to_string(),
+        });
+        let scope = match scope {
+            Ok(s) => s,
+            Err(e) => return Ok(Response::new(Self::err_result(&e))),
+        };
+
+        match self
+            .executor
+            .ensure_dhcp_scope(
+                &scope.network_id,
+                &scope.cidr,
+                &scope.range_start,
+                &scope.range_end,
+            )
+            .await
+        {
+            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Err(e) => Ok(Response::new(Self::err_result(&e))),
+        }
     }
 
     async fn ensure_dns_scope(
         &self,
-        _request: Request<proto::EnsureDnsScopeRequest>,
+        request: Request<proto::EnsureDnsScopeRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "ensure_dns_scope not yet implemented",
-        ))
+        self.metrics.increment_counter("nwd_ensure_dns_scope_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let scope = req.scope.ok_or_else(|| ChvError::InvalidArgument {
+            field: "scope".to_string(),
+            reason: "missing".to_string(),
+        });
+        let scope = match scope {
+            Ok(s) => s,
+            Err(e) => return Ok(Response::new(Self::err_result(&e))),
+        };
+
+        let fw: Vec<&str> = scope.forwarders.iter().map(|s| s.as_str()).collect();
+        match self.executor.ensure_dns_scope(&scope.network_id, &fw).await {
+            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Err(e) => Ok(Response::new(Self::err_result(&e))),
+        }
     }
 
     async fn expose_service(
         &self,
-        _request: Request<proto::ExposeServiceRequest>,
+        request: Request<proto::ExposeServiceRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "expose_service not yet implemented",
-        ))
+        self.metrics.increment_counter("nwd_expose_service_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let exposure = req.exposure.ok_or_else(|| ChvError::InvalidArgument {
+            field: "exposure".to_string(),
+            reason: "missing".to_string(),
+        });
+        let exposure = match exposure {
+            Ok(e) => e,
+            Err(e) => return Ok(Response::new(Self::err_result(&e))),
+        };
+
+        match self
+            .executor
+            .expose_service(
+                &exposure.network_id,
+                &exposure.exposure_id,
+                &exposure.protocol,
+                exposure.external_port,
+                &exposure.target_ip,
+                exposure.target_port,
+                &exposure.mode,
+            )
+            .await
+        {
+            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Err(e) => Ok(Response::new(Self::err_result(&e))),
+        }
     }
 
     async fn withdraw_service_exposure(
         &self,
-        _request: Request<proto::WithdrawServiceExposureRequest>,
+        request: Request<proto::WithdrawServiceExposureRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "withdraw_service_exposure not yet implemented",
-        ))
+        self.metrics.increment_counter("nwd_withdraw_service_exposure_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        match self
+            .executor
+            .withdraw_service_exposure(&req.network_id, &req.exposure_id)
+            .await
+        {
+            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Err(e) => Ok(Response::new(Self::err_result(&e))),
+        }
     }
 }

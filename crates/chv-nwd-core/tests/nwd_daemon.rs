@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{
-    network_service_client::NetworkServiceClient, DeleteNetworkTopologyRequest,
-    EnsureNetworkTopologyRequest, ListNamespaceStateRequest, NetworkHealthRequest,
-    TopologySpec,
+    network_service_client::NetworkServiceClient, AttachVmNicRequest, DeleteNetworkTopologyRequest,
+    DetachVmNicRequest, DhcpScope, DnsScope, EnsureDhcpScopeRequest, EnsureDnsScopeRequest,
+    EnsureNetworkTopologyRequest, ExposeServiceRequest, ExposureSpec, FirewallPolicy,
+    ListNamespaceStateRequest, NatPolicy, NetworkHealthRequest, NicSpec, SetFirewallPolicyRequest,
+    TopologySpec, WithdrawServiceExposureRequest,
 };
 use chv_nwd_core::executor::{NetworkExecutor, TopologyApplyResult};
 use chv_nwd_core::{NetworkServer, TopologyState};
@@ -59,7 +61,6 @@ impl NetworkExecutor for MockExecutor {
     async fn detach_vm_nic(
         &self,
         _nic_id: &str,
-        _tap_handle: &str,
     ) -> Result<(), ChvError> {
         Ok(())
     }
@@ -231,4 +232,208 @@ async fn ensure_and_delete_topology_idempotent() {
         .unwrap()
         .into_inner();
     assert_eq!(health2.health_status, "unknown");
+}
+
+#[tokio::test]
+async fn all_network_handlers_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    // Ensure topology first
+    let ensure = client
+        .ensure_network_topology(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(TopologySpec {
+                network_id: "net-1".to_string(),
+                tenant_id: "t1".to_string(),
+                bridge_name: "br-net1".to_string(),
+                namespace_name: "ns-net1".to_string(),
+                subnet_cidr: "10.0.1.0/24".to_string(),
+                gateway_ip: "10.0.1.1".to_string(),
+                options: Default::default(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ensure.status, "OK");
+
+    // attach_vm_nic
+    let attach = client
+        .attach_vm_nic(AttachVmNicRequest {
+            meta: None,
+            nic: Some(NicSpec {
+                nic_id: "nic-1".to_string(),
+                vm_id: "vm-1".to_string(),
+                network_id: "net-1".to_string(),
+                mac_address: "02:00:00:00:00:01".to_string(),
+                tap_name: "tap-nic-1".to_string(),
+                ip_address: "10.0.1.10".to_string(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(attach.result.as_ref().unwrap().status, "OK");
+    assert_eq!(attach.namespace_handle, "ns-net-1");
+    assert_eq!(attach.tap_handle, "tap-nic-1");
+
+    // detach_vm_nic
+    let detach = client
+        .detach_vm_nic(DetachVmNicRequest {
+            meta: None,
+            vm_id: "vm-1".to_string(),
+            nic_id: "nic-1".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(detach.status, "OK");
+
+    // set_firewall_policy
+    let fw = client
+        .set_firewall_policy(SetFirewallPolicyRequest {
+            meta: None,
+            network_id: "net-1".to_string(),
+            policy: Some(FirewallPolicy {
+                policy_version: "v1".to_string(),
+                policy_json: b"{}".to_vec(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(fw.status, "OK");
+
+    // set_nat_policy
+    let nat = client
+        .set_nat_policy(chv_nwd_api::chv_nwd_api::SetNatPolicyRequest {
+            meta: None,
+            network_id: "net-1".to_string(),
+            policy: Some(NatPolicy {
+                policy_version: "v1".to_string(),
+                policy_json: b"{}".to_vec(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(nat.status, "OK");
+
+    // ensure_dhcp_scope
+    let dhcp = client
+        .ensure_dhcp_scope(EnsureDhcpScopeRequest {
+            meta: None,
+            scope: Some(DhcpScope {
+                network_id: "net-1".to_string(),
+                cidr: "10.0.1.0/24".to_string(),
+                range_start: "10.0.1.50".to_string(),
+                range_end: "10.0.1.100".to_string(),
+                dns_servers: vec!["10.0.1.1".to_string()],
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(dhcp.status, "OK");
+
+    // ensure_dns_scope
+    let dns = client
+        .ensure_dns_scope(EnsureDnsScopeRequest {
+            meta: None,
+            scope: Some(DnsScope {
+                network_id: "net-1".to_string(),
+                forwarders: vec!["8.8.8.8".to_string()],
+                static_records: Default::default(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(dns.status, "OK");
+
+    // expose_service
+    let expose = client
+        .expose_service(ExposeServiceRequest {
+            meta: None,
+            exposure: Some(ExposureSpec {
+                network_id: "net-1".to_string(),
+                exposure_id: "exp-1".to_string(),
+                protocol: "tcp".to_string(),
+                external_port: 8080,
+                target_ip: "10.0.1.10".to_string(),
+                target_port: 80,
+                mode: "dnat".to_string(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(expose.status, "OK");
+
+    // withdraw_service_exposure
+    let withdraw = client
+        .withdraw_service_exposure(WithdrawServiceExposureRequest {
+            meta: None,
+            exposure_id: "exp-1".to_string(),
+            network_id: "net-1".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(withdraw.status, "OK");
+
+    // Cleanup
+    let del = client
+        .delete_network_topology(DeleteNetworkTopologyRequest {
+            meta: None,
+            network_id: "net-1".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(del.status, "OK");
+}
+
+#[tokio::test]
+async fn attach_vm_nic_missing_topology_returns_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    let result = client
+        .attach_vm_nic(AttachVmNicRequest {
+            meta: None,
+            nic: Some(NicSpec {
+                nic_id: "nic-1".to_string(),
+                vm_id: "vm-1".to_string(),
+                network_id: "net-not-ensured".to_string(),
+                mac_address: "02:00:00:00:00:01".to_string(),
+                tap_name: "tap-nic-1".to_string(),
+                ip_address: "10.0.1.10".to_string(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(result.result.as_ref().unwrap().status, "error");
+    assert_eq!(result.result.as_ref().unwrap().error_code, "NOT_FOUND");
 }
