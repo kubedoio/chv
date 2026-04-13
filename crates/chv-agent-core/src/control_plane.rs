@@ -5,6 +5,7 @@ use tonic::transport::Channel;
 
 pub struct ControlPlaneClient {
     reconcile: proto::reconcile_service_client::ReconcileServiceClient<Channel>,
+    telemetry: proto::telemetry_service_client::TelemetryServiceClient<Channel>,
 }
 
 impl ControlPlaneClient {
@@ -21,7 +22,8 @@ impl ControlPlaneClient {
                 reason: e.to_string(),
             })?;
         Ok(Self {
-            reconcile: proto::reconcile_service_client::ReconcileServiceClient::new(channel),
+            reconcile: proto::reconcile_service_client::ReconcileServiceClient::new(channel.clone()),
+            telemetry: proto::telemetry_service_client::TelemetryServiceClient::new(channel),
         })
     }
 
@@ -53,6 +55,45 @@ impl ControlPlaneClient {
     ) -> Result<proto::AckResponse, ChvError> {
         self.reconcile
             .apply_node_desired_state(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
+    pub async fn report_node_state(
+        &mut self,
+        req: proto::NodeStateReport,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.telemetry
+            .report_node_state(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
+    pub async fn report_vm_state(
+        &mut self,
+        req: proto::VmStateReport,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.telemetry
+            .report_vm_state(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
+    pub async fn publish_event(
+        &mut self,
+        req: proto::PublishEventRequest,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.telemetry
+            .publish_event(req)
             .await
             .map(|r| r.into_inner())
             .map_err(|e| ChvError::ControlPlaneUnavailable {

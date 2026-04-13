@@ -5,6 +5,7 @@ pub mod daemon_clients;
 pub mod health;
 pub mod reconcile;
 pub mod state_machine;
+pub mod telemetry;
 pub mod vm_runtime;
 
 pub use cache::NodeCache;
@@ -14,4 +15,5 @@ pub use daemon_clients::{NwdClient, StordClient};
 pub use health::HealthAggregator;
 pub use reconcile::Reconciler;
 pub use state_machine::{NodeState, StateMachine};
+pub use telemetry::TelemetryReporter;
 pub use vm_runtime::{VmRecord, VmRuntime};
