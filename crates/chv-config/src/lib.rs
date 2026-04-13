@@ -67,3 +67,43 @@ pub fn load_nwd_config(path: Option<&Path>) -> Result<NwdConfig, ConfigError> {
     }
     Ok(cfg)
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+    pub socket_path: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub log_level: String,
+    pub control_plane_addr: String,
+    pub stord_socket: PathBuf,
+    pub nwd_socket: PathBuf,
+    pub chv_binary_path: PathBuf,
+    pub cache_path: PathBuf,
+    pub node_id: String,
+    pub metrics_bind: Option<String>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: PathBuf::from("/run/chv/agent/api.sock"),
+            runtime_dir: PathBuf::from("/run/chv/agent"),
+            log_level: "info".to_string(),
+            control_plane_addr: "https://localhost:8443".to_string(),
+            stord_socket: PathBuf::from("/run/chv/stord/api.sock"),
+            nwd_socket: PathBuf::from("/run/chv/nwd/api.sock"),
+            chv_binary_path: PathBuf::from("/usr/bin/cloud-hypervisor"),
+            cache_path: PathBuf::from("/var/lib/chv/cache/agent-cache.json"),
+            node_id: String::new(),
+            metrics_bind: None,
+        }
+    }
+}
+
+pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError> {
+    let mut cfg = AgentConfig::default();
+    if let Some(p) = path {
+        let text = std::fs::read_to_string(p)?;
+        cfg = toml::from_str(&text)?;
+    }
+    Ok(cfg)
+}

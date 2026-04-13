@@ -20,6 +20,12 @@ pub enum ChvError {
     #[error("conflict: {resource} {id}")]
     Conflict { resource: String, id: String },
 
+    #[error("stale generation: {resource} {id} — expected >= {expected}, got {got}")]
+    StaleGeneration { resource: String, id: String, expected: String, got: String },
+
+    #[error("control plane unavailable: {reason}")]
+    ControlPlaneUnavailable { reason: String },
+
     #[error("io error on {path}: {source}")]
     Io {
         path: String,
@@ -42,6 +48,8 @@ impl ErrorCode {
     pub const BACKEND_UNAVAILABLE: &str = "BACKEND_UNAVAILABLE";
     pub const NETWORK_UNAVAILABLE: &str = "NETWORK_UNAVAILABLE";
     pub const CONFLICT: &str = "CONFLICT";
+    pub const STALE_GENERATION: &str = "STALE_GENERATION";
+    pub const CONTROL_PLANE_UNAVAILABLE: &str = "CONTROL_PLANE_UNAVAILABLE";
     pub const IO: &str = "IO_ERROR";
     pub const INTERNAL: &str = "INTERNAL_ERROR";
 }
@@ -55,6 +63,8 @@ impl ChvError {
             ChvError::BackendUnavailable { .. } => ErrorCode::BACKEND_UNAVAILABLE,
             ChvError::NetworkUnavailable { .. } => ErrorCode::NETWORK_UNAVAILABLE,
             ChvError::Conflict { .. } => ErrorCode::CONFLICT,
+            ChvError::StaleGeneration { .. } => ErrorCode::STALE_GENERATION,
+            ChvError::ControlPlaneUnavailable { .. } => ErrorCode::CONTROL_PLANE_UNAVAILABLE,
             ChvError::Io { .. } => ErrorCode::IO,
             ChvError::Internal { .. } => ErrorCode::INTERNAL,
         }

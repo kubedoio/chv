@@ -1,0 +1,17 @@
+[package]
+name = "chv-agent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "chv-agent"
+path = "src/main.rs"
+
+[dependencies]
+chv-config = { path = "../../crates/chv-config" }
+chv-observability = { path = "../../crates/chv-observability" }
+chv-agent-core = { path = "../../crates/chv-agent-core" }
+chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
+chv-errors = { path = "../../crates/chv-errors" }
+tokio = { workspace = true }
+tracing = { workspace = true }

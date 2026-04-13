@@ -1,0 +1,325 @@
+syntax = "proto3";
+
+package chv.controlplane.node.v1;
+
+message RequestMeta {
+  string operation_id = 1;
+  string requested_by = 2;
+  string target_node_id = 3;
+  string desired_state_version = 4;
+  int64 request_unix_ms = 5;
+}
+
+message ResultMeta {
+  string operation_id = 1;
+  string status = 2;
+  string node_observed_generation = 3;
+  string error_code = 4;
+  string human_summary = 5;
+}
+
+message NodeInventory {
+  string node_id = 1;
+  string hostname = 2;
+  string architecture = 3;
+  uint64 cpu_threads = 4;
+  uint64 memory_bytes = 5;
+  repeated string storage_classes = 6;
+  repeated string network_capabilities = 7;
+  map<string, string> labels = 8;
+}
+
+message ServiceVersions {
+  string node_id = 1;
+  string chv_agent_version = 2;
+  string chv_stord_version = 3;
+  string chv_nwd_version = 4;
+  string cloud_hypervisor_version = 5;
+  string host_bundle_version = 6;
+}
+
+message EnrollmentRequest {
+  string bootstrap_token = 1;
+  NodeInventory inventory = 2;
+  ServiceVersions versions = 3;
+}
+
+message EnrollmentResponse {
+  ResultMeta result = 1;
+  string issued_node_id = 2;
+  bytes certificate_pem = 3;
+  bytes private_key_pem = 4;
+  bytes ca_pem = 5;
+}
+
+message RotateNodeCertificateRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+}
+
+message RotateNodeCertificateResponse {
+  ResultMeta result = 1;
+  bytes certificate_pem = 2;
+  bytes private_key_pem = 3;
+  bytes ca_pem = 4;
+}
+
+message ReportBootstrapResultRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string bootstrap_status = 3;
+  string message = 4;
+}
+
+message AckResponse {
+  ResultMeta result = 1;
+}
+
+message ReportNodeInventoryRequest {
+  RequestMeta meta = 1;
+  NodeInventory inventory = 2;
+}
+
+message ReportServiceVersionsRequest {
+  RequestMeta meta = 1;
+  ServiceVersions versions = 2;
+}
+
+message DesiredStateFragment {
+  string id = 1;
+  string kind = 2;
+  string generation = 3;
+  bytes spec_json = 4;
+  bytes policy_json = 5;
+  string updated_at = 6;
+  string updated_by = 7;
+}
+
+message ApplyNodeDesiredStateRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  DesiredStateFragment fragment = 3;
+}
+
+message ApplyVmDesiredStateRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  DesiredStateFragment fragment = 4;
+}
+
+message ApplyVolumeDesiredStateRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string volume_id = 3;
+  DesiredStateFragment fragment = 4;
+}
+
+message ApplyNetworkDesiredStateRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+  DesiredStateFragment fragment = 4;
+}
+
+message AcknowledgeDesiredStateVersionRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string fragment_kind = 3;
+  string fragment_id = 4;
+  string observed_generation = 5;
+  string apply_status = 6;
+}
+
+message VmMutationSpec {
+  string vm_id = 1;
+  bytes vm_spec_json = 2;
+}
+
+message VolumeMutationSpec {
+  string volume_id = 1;
+  string vm_id = 2;
+  bytes volume_spec_json = 3;
+}
+
+message CreateVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  VmMutationSpec vm = 3;
+}
+
+message StartVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+}
+
+message StopVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  bool force = 4;
+}
+
+message RebootVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  bool force = 4;
+}
+
+message DeleteVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  bool force = 4;
+}
+
+message AttachVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  VolumeMutationSpec volume = 3;
+}
+
+message DetachVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string volume_id = 4;
+  bool force = 5;
+}
+
+message ResizeVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string volume_id = 3;
+  uint64 new_size_bytes = 4;
+}
+
+message PauseNodeSchedulingRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+}
+
+message ResumeNodeSchedulingRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+}
+
+message DrainNodeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  bool allow_workload_stop = 3;
+}
+
+message EnterMaintenanceRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string reason = 3;
+}
+
+message ExitMaintenanceRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+}
+
+message NodeStateReport {
+  string node_id = 1;
+  string state = 2;
+  string observed_generation = 3;
+  string health_status = 4;
+  string last_error = 5;
+  int64 reported_unix_ms = 6;
+}
+
+message VmStateReport {
+  string node_id = 1;
+  string vm_id = 2;
+  string runtime_status = 3;
+  string observed_generation = 4;
+  string health_status = 5;
+  string last_error = 6;
+  int64 reported_unix_ms = 7;
+}
+
+message VolumeStateReport {
+  string node_id = 1;
+  string volume_id = 2;
+  string runtime_status = 3;
+  string observed_generation = 4;
+  string health_status = 5;
+  string last_error = 6;
+  int64 reported_unix_ms = 7;
+}
+
+message NetworkStateReport {
+  string node_id = 1;
+  string network_id = 2;
+  string runtime_status = 3;
+  string observed_generation = 4;
+  string health_status = 5;
+  string last_error = 6;
+  int64 reported_unix_ms = 7;
+}
+
+message PublishEventRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string severity = 3;
+  string event_type = 4;
+  string summary = 5;
+  bytes details_json = 6;
+}
+
+message PublishAlertRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string severity = 3;
+  string alert_type = 4;
+  string summary = 5;
+  bytes details_json = 6;
+}
+
+service EnrollmentService {
+  rpc EnrollNode(EnrollmentRequest) returns (EnrollmentResponse);
+  rpc RotateNodeCertificate(RotateNodeCertificateRequest) returns (RotateNodeCertificateResponse);
+  rpc ReportBootstrapResult(ReportBootstrapResultRequest) returns (AckResponse);
+}
+
+service InventoryService {
+  rpc ReportNodeInventory(ReportNodeInventoryRequest) returns (AckResponse);
+  rpc ReportServiceVersions(ReportServiceVersionsRequest) returns (AckResponse);
+}
+
+service ReconcileService {
+  rpc ApplyNodeDesiredState(ApplyNodeDesiredStateRequest) returns (AckResponse);
+  rpc ApplyVmDesiredState(ApplyVmDesiredStateRequest) returns (AckResponse);
+  rpc ApplyVolumeDesiredState(ApplyVolumeDesiredStateRequest) returns (AckResponse);
+  rpc ApplyNetworkDesiredState(ApplyNetworkDesiredStateRequest) returns (AckResponse);
+  rpc AcknowledgeDesiredStateVersion(AcknowledgeDesiredStateVersionRequest) returns (AckResponse);
+}
+
+service LifecycleService {
+  rpc CreateVm(CreateVmRequest) returns (AckResponse);
+  rpc StartVm(StartVmRequest) returns (AckResponse);
+  rpc StopVm(StopVmRequest) returns (AckResponse);
+  rpc RebootVm(RebootVmRequest) returns (AckResponse);
+  rpc DeleteVm(DeleteVmRequest) returns (AckResponse);
+  rpc AttachVolume(AttachVolumeRequest) returns (AckResponse);
+  rpc DetachVolume(DetachVolumeRequest) returns (AckResponse);
+  rpc ResizeVolume(ResizeVolumeRequest) returns (AckResponse);
+  rpc PauseNodeScheduling(PauseNodeSchedulingRequest) returns (AckResponse);
+  rpc ResumeNodeScheduling(ResumeNodeSchedulingRequest) returns (AckResponse);
+  rpc DrainNode(DrainNodeRequest) returns (AckResponse);
+  rpc EnterMaintenance(EnterMaintenanceRequest) returns (AckResponse);
+  rpc ExitMaintenance(ExitMaintenanceRequest) returns (AckResponse);
+}
+
+service TelemetryService {
+  rpc ReportNodeState(NodeStateReport) returns (AckResponse);
+  rpc ReportVmState(VmStateReport) returns (AckResponse);
+  rpc ReportVolumeState(VolumeStateReport) returns (AckResponse);
+  rpc ReportNetworkState(NetworkStateReport) returns (AckResponse);
+  rpc PublishEvent(PublishEventRequest) returns (AckResponse);
+  rpc PublishAlert(PublishAlertRequest) returns (AckResponse);
+}

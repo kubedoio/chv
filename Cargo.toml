@@ -11,6 +11,10 @@ members = [
     "cmd/chv-nwd",
     "crates/chv-nwd-core",
     "gen/rust/chv-nwd-api",
+    "cmd/chv-agent",
+    "crates/chv-agent-core",
+    "crates/chv-agent-runtime-ch",
+    "gen/rust/control-plane-node-api",
 ]
 resolver = "2"
 
@@ -23,6 +27,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "v7"] }

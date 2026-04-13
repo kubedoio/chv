@@ -1,0 +1,11 @@
+[package]
+name = "chv-agent-runtime-ch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chv-common = { path = "../chv-common" }
+chv-errors = { path = "../chv-errors" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
