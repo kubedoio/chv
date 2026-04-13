@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct AgentServer {
@@ -17,20 +18,31 @@ pub struct AgentServer {
     pub vm_runtime: VmRuntime,
     pub stord_socket: std::path::PathBuf,
     pub nwd_socket: std::path::PathBuf,
+    pub cache_path: Option<std::path::PathBuf>,
 }
 
 impl AgentServer {
     pub fn new(
-        cache: NodeCache,
+        cache: Arc<tokio::sync::Mutex<NodeCache>>,
         vm_runtime: VmRuntime,
         stord_socket: std::path::PathBuf,
         nwd_socket: std::path::PathBuf,
+        cache_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
-            cache: Arc::new(tokio::sync::Mutex::new(cache)),
+            cache,
             vm_runtime,
             stord_socket,
             nwd_socket,
+            cache_path,
+        }
+    }
+
+    async fn persist_cache(&self, cache: &NodeCache) {
+        if let Some(ref path) = self.cache_path {
+            if let Err(e) = cache.save(path).await {
+                tracing::warn!(error = %e, "failed to persist cache");
+            }
         }
     }
 
@@ -115,6 +127,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         if let Some(frag) = inner.fragment {
             cache.observe_generation("node", &inner.node_id, &frag.generation);
+            self.persist_cache(&cache).await;
         }
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -154,6 +167,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                     updated_by: frag.updated_by,
                 },
             );
+            self.persist_cache(&cache).await;
         }
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -197,6 +211,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                         updated_by: frag.updated_by,
                     },
                 );
+                self.persist_cache(&cache).await;
             }
             spec_json
             // lock dropped here
@@ -212,6 +227,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
 
                 let mut cache = self.cache.lock().await;
                 cache.volume_handles.insert(inner.volume_id.clone(), handle);
+                self.persist_cache(&cache).await;
             }
         }
 
@@ -254,6 +270,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                     updated_by: frag.updated_by,
                 },
             );
+            self.persist_cache(&cache).await;
 
             let spec =
                 serde_json::from_slice::<serde_json::Value>(&frag.spec_json).unwrap_or_default();
@@ -366,18 +383,20 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .vm
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing vm"))?;
-        let cache = self.cache.lock().await;
-        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &vm.vm_id)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        let node_state = cache
-            .node_state
-            .parse::<crate::state_machine::NodeState>()
-            .unwrap_or(crate::state_machine::NodeState::Bootstrapping);
-        if node_state != crate::state_machine::NodeState::TenantReady {
-            return Err(Status::failed_precondition(format!(
-                "node not schedulable: {}",
-                cache.node_state
-            )));
+        {
+            let cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &vm.vm_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let node_state = cache
+                .node_state
+                .parse::<crate::state_machine::NodeState>()
+                .unwrap_or(crate::state_machine::NodeState::Bootstrapping);
+            if node_state != crate::state_machine::NodeState::TenantReady {
+                return Err(Status::failed_precondition(format!(
+                    "node not schedulable: {}",
+                    cache.node_state
+                )));
+            }
         }
         let vm_spec = crate::spec::VmSpec::from_json(
             std::str::from_utf8(&vm.vm_spec_json).unwrap_or(""),
@@ -386,44 +405,81 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         vm_spec
             .validate()
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let op_id = meta.operation_id.as_str();
+        let mut disks = Vec::new();
+        if !vm_spec.disks.is_empty() {
+            let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+                .await
+                .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+            for disk in &vm_spec.disks {
+                let (_, handle, export_path) = stord
+                    .open_volume(&disk.volume_id, "local", &format!("{}.img", disk.volume_id), Some(op_id))
+                    .await
+                    .map_err(|e| Status::internal(format!("open_volume failed: {}", e)))?;
+                stord
+                    .attach_volume_to_vm(&disk.volume_id, &vm.vm_id, &handle, Some(op_id))
+                    .await
+                    .map_err(|e| Status::internal(format!("attach_volume_to_vm failed: {}", e)))?;
+                disks.push(chv_agent_runtime_ch::adapter::VmDiskConfig {
+                    path: std::path::PathBuf::from(export_path),
+                    read_only: disk.read_only,
+                });
+                {
+                    let mut cache = self.cache.lock().await;
+                    cache.volume_handles.insert(disk.volume_id.clone(), handle);
+                    self.persist_cache(&cache).await;
+                }
+            }
+        }
+
+        let mut nics = Vec::new();
+        if !vm_spec.nics.is_empty() {
+            let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+                .await
+                .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+            for nic in &vm_spec.nics {
+                if let Err(e) = nwd
+                    .ensure_network_topology(&nic.network_id, &format!("br-{}", nic.network_id), "10.0.0.0/24", Some(op_id))
+                    .await
+                {
+                    warn!(network_id = %nic.network_id, error = %e, "failed to ensure network topology in create_vm");
+                }
+                let nic_id = format!("{}-{}", vm.vm_id, nic.network_id);
+                let (_ns, tap_handle) = nwd
+                    .attach_vm_nic(&nic_id, &vm.vm_id, &nic.network_id, &nic.mac_address, &nic.ip_address, Some(op_id))
+                    .await
+                    .map_err(|e| Status::internal(format!("attach_vm_nic failed: {}", e)))?;
+                nics.push(chv_agent_runtime_ch::adapter::VmNicConfig {
+                    network_id: nic.network_id.clone(),
+                    mac_address: nic.mac_address.clone(),
+                    ip_address: nic.ip_address.clone(),
+                    tap_name: tap_handle,
+                });
+            }
+        }
+
         let config = VmConfig {
             vm_id: vm.vm_id.clone(),
             cpus: vm_spec.cpus,
             memory_bytes: vm_spec.memory_bytes,
             kernel_path: std::path::PathBuf::from(vm_spec.kernel_path),
-            disks: vm_spec
-                .disks
-                .iter()
-                .map(|d| chv_agent_runtime_ch::adapter::VmDiskConfig {
-                    path: std::path::PathBuf::from(&d.volume_id),
-                    read_only: d.read_only,
-                })
-                .collect(),
-            nics: vm_spec
-                .nics
-                .iter()
-                .map(|n| chv_agent_runtime_ch::adapter::VmNicConfig {
-                    network_id: n.network_id.clone(),
-                    mac_address: n.mac_address.clone(),
-                    ip_address: n.ip_address.clone(),
-                    tap_name: n.tap_name.clone(),
-                })
-                .collect(),
+            disks,
+            nics,
             api_socket_path: std::path::PathBuf::from(format!(
                 "/run/chv/agent/vm-{}.sock",
                 vm.vm_id
             )),
         };
-        let op_id = meta.operation_id.as_str();
         self.vm_runtime
             .create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "vm created".to_string(),
             }),
@@ -564,6 +620,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
 
         let mut cache = self.cache.lock().await;
         cache.volume_handles.insert(vol.volume_id.clone(), handle);
+        self.persist_cache(&cache).await;
 
         let observed_generation = cache.observed_generation.clone();
         Ok(Response::new(proto::AckResponse {
@@ -609,6 +666,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 .close_volume(&inner.volume_id, &handle, Some(&meta.operation_id))
                 .await;
         }
+        self.persist_cache(&cache).await;
 
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -644,6 +702,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             return Err(Status::failed_precondition(e.to_string()));
         }
         cache.node_state = sm.current().as_str().to_string();
+        self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
@@ -672,6 +731,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             return Err(Status::failed_precondition(e.to_string()));
         }
         cache.node_state = sm.current().as_str().to_string();
+        self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
@@ -699,6 +759,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             return Err(Status::failed_precondition(e.to_string()));
         }
         cache.node_state = sm.current().as_str().to_string();
+        self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
@@ -726,6 +787,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             return Err(Status::failed_precondition(e.to_string()));
         }
         cache.node_state = sm.current().as_str().to_string();
+        self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
@@ -753,6 +815,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             return Err(Status::failed_precondition(e.to_string()));
         }
         cache.node_state = sm.current().as_str().to_string();
+        self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
@@ -777,10 +840,11 @@ mod tests {
             .as_str()
             .to_string();
         AgentServer::new(
-            cache,
+            Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
             std::path::PathBuf::from("/run/chv/stord/api.sock"),
             std::path::PathBuf::from("/run/chv/nwd/api.sock"),
+            None,
         )
     }
 
@@ -1118,10 +1182,11 @@ mod tests {
             .as_str()
             .to_string();
         let server = AgentServer::new(
-            cache,
+            Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
             socket,
             std::path::PathBuf::from("/run/chv/nwd/api.sock"),
+            None,
         );
 
         let req = proto::ApplyVolumeDesiredStateRequest {

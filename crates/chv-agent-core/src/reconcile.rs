@@ -6,10 +6,11 @@ use chv_agent_runtime_ch::adapter::{VmConfig, VmDiskConfig, VmNicConfig};
 use chv_errors::ChvError;
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 pub struct Reconciler {
-    pub cache: NodeCache,
+    pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
     pub state_machine: StateMachine,
     pub vm_runtime: VmRuntime,
     pub stord_socket: PathBuf,
@@ -17,13 +18,16 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
-    pub fn new(
-        cache: NodeCache,
+    pub async fn new(
+        cache: Arc<tokio::sync::Mutex<NodeCache>>,
         vm_runtime: VmRuntime,
         stord_socket: PathBuf,
         nwd_socket: PathBuf,
     ) -> Self {
-        let initial = cache.node_state.parse().unwrap_or(NodeState::Bootstrapping);
+        let initial = {
+            let c = cache.lock().await;
+            c.node_state.parse().unwrap_or(NodeState::Bootstrapping)
+        };
         Self {
             cache,
             state_machine: StateMachine::new(initial),
@@ -51,9 +55,10 @@ impl Reconciler {
     }
 
     async fn reconcile_networks(&mut self) -> Result<(), ChvError> {
+        let cache = self.cache.lock().await;
         let mut desired_networks: BTreeSet<String> =
-            self.cache.vm_network_ids().into_iter().collect();
-        desired_networks.extend(self.cache.network_fragments.keys().cloned());
+            cache.vm_network_ids().into_iter().collect();
+        desired_networks.extend(cache.network_fragments.keys().cloned());
 
         let mut nwd = NwdClient::connect(&self.nwd_socket).await?;
         for net_id in &desired_networks {
@@ -76,7 +81,8 @@ impl Reconciler {
     }
 
     async fn reconcile_volumes(&mut self) -> Result<(), ChvError> {
-        let pairs: HashSet<(String, String)> = self.cache.vm_volume_handles().into_iter().collect();
+        let cache = self.cache.lock().await;
+        let pairs: HashSet<(String, String)> = cache.vm_volume_handles().into_iter().collect();
         if pairs.is_empty() {
             return Ok(());
         }
@@ -104,13 +110,14 @@ impl Reconciler {
         nwd: &mut NwdClient,
         vm_id: &str,
     ) -> Result<(), ChvError> {
+        let mut cache = self.cache.lock().await;
         // Detach volumes
-        for (cached_vm_id, volume_id) in self.cache.vm_volume_handles() {
+        for (cached_vm_id, volume_id) in cache.vm_volume_handles() {
             if cached_vm_id == vm_id {
                 if let Err(e) = stord.detach_volume_from_vm(&volume_id, vm_id, false, None).await {
                     warn!(vm_id = %vm_id, volume_id = %volume_id, error = %e, "failed to detach volume");
                 }
-                if let Some(handle) = self.cache.volume_handles.remove(&volume_id) {
+                if let Some(handle) = cache.volume_handles.remove(&volume_id) {
                     if let Err(e) = stord.close_volume(&volume_id, &handle, None).await {
                         warn!(vm_id = %vm_id, volume_id = %volume_id, error = %e, "failed to close volume");
                     }
@@ -119,7 +126,7 @@ impl Reconciler {
         }
 
         // Detach NICs
-        if let Some(fragment) = self.cache.vm_fragments.get(vm_id) {
+        if let Some(fragment) = cache.vm_fragments.get(vm_id) {
             if let Ok(spec) = crate::spec::VmSpec::from_json(std::str::from_utf8(&fragment.spec_json).unwrap_or("")) {
                 for nic in &spec.nics {
                     let nic_id = format!("{}-{}", vm_id, nic.network_id);
@@ -185,8 +192,12 @@ impl Reconciler {
     }
 
     async fn reconcile_vms(&mut self) -> Result<(), ChvError> {
-        let desired: BTreeSet<String> = self.cache.vm_fragments.keys().cloned().collect();
-        let actual: BTreeSet<String> = self.vm_runtime.list().into_iter().map(|r| r.vm_id).collect();
+        let (desired, actual) = {
+            let cache = self.cache.lock().await;
+            let desired: BTreeSet<String> = cache.vm_fragments.keys().cloned().collect();
+            let actual: BTreeSet<String> = self.vm_runtime.list().into_iter().map(|r| r.vm_id).collect();
+            (desired, actual)
+        };
 
         let mut stord = match StordClient::connect(&self.stord_socket).await {
             Ok(c) => c,
@@ -205,12 +216,15 @@ impl Reconciler {
 
         // Create missing VMs
         for vm_id in desired.difference(&actual) {
-            let Some(fragment) = self.cache.vm_fragments.get(vm_id) else {
-                warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
-                continue;
+            let (generation, raw) = {
+                let cache = self.cache.lock().await;
+                let Some(fragment) = cache.vm_fragments.get(vm_id) else {
+                    warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
+                    continue;
+                };
+                (fragment.generation.clone(), fragment.spec_json.clone())
             };
-            let generation = fragment.generation.clone();
-            let raw = match std::str::from_utf8(&fragment.spec_json) {
+            let raw = match std::str::from_utf8(&raw) {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
@@ -259,11 +273,15 @@ impl Reconciler {
 
         // Reconcile existing VMs
         for vm_id in desired.intersection(&actual) {
-            let Some(fragment) = self.cache.vm_fragments.get(vm_id) else {
-                warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
-                continue;
+            let raw = {
+                let cache = self.cache.lock().await;
+                let Some(fragment) = cache.vm_fragments.get(vm_id) else {
+                    warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
+                    continue;
+                };
+                fragment.spec_json.clone()
             };
-            let raw = match std::str::from_utf8(&fragment.spec_json) {
+            let raw = match std::str::from_utf8(&raw) {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
@@ -337,11 +355,11 @@ mod tests {
         let mut cache = test_cache();
         cache.node_state = "Bootstrapping".to_string();
         let mut rec = Reconciler::new(
-            cache,
+            Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default())),
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
-        );
+        ).await;
         assert!(rec.run_once().await.is_ok());
     }
 
@@ -608,11 +626,11 @@ mod tests {
 
         let mock = std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
         let mut rec = Reconciler::new(
-            test_cache(),
+            Arc::new(tokio::sync::Mutex::new(test_cache())),
             VmRuntime::new(mock.clone()),
             stord_socket,
             nwd_socket,
-        );
+        ).await;
         rec.reconcile_vms().await.unwrap();
 
         let vms = mock.vms.lock().unwrap();
@@ -644,11 +662,11 @@ mod tests {
         runtime.create_vm("vm-orphan", "1", &config, None).await.unwrap();
 
         let mut rec = Reconciler::new(
-            empty_cache(),
+            Arc::new(tokio::sync::Mutex::new(empty_cache())),
             runtime,
             stord_socket,
             nwd_socket,
-        );
+        ).await;
         rec.reconcile_vms().await.unwrap();
 
         assert!(mock.vms.lock().unwrap().get("vm-orphan").is_none());
@@ -678,11 +696,11 @@ mod tests {
         assert_eq!(runtime.get("vm-1").unwrap().runtime_status, "Stopped");
 
         let mut rec = Reconciler::new(
-            test_cache(),
+            Arc::new(tokio::sync::Mutex::new(test_cache())),
             runtime,
             stord_socket,
             nwd_socket,
-        );
+        ).await;
         rec.reconcile_vms().await.unwrap();
 
         assert_eq!(rec.vm_runtime.get("vm-1").unwrap().runtime_status, "Running");

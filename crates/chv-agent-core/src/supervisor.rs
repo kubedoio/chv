@@ -160,12 +160,32 @@ async fn start_daemon(
     if child.is_some() {
         return Ok(());
     }
+    if let Err(e) = tokio::fs::create_dir_all(runtime_dir).await {
+        return Err(ChvError::Io {
+            path: runtime_dir.to_string_lossy().to_string(),
+            source: e,
+        });
+    }
+    let config_path = runtime_dir.join(format!("{}.toml", name));
+    let toml = format!(
+        r#"socket_path = {:?}
+runtime_dir = {:?}
+log_level = "info"
+"#,
+        socket.to_string_lossy(),
+        runtime_dir.to_string_lossy()
+    );
+    if let Err(e) = tokio::fs::write(&config_path, toml).await {
+        return Err(ChvError::Io {
+            path: config_path.to_string_lossy().to_string(),
+            source: e,
+        });
+    }
     let mut cmd = Command::new(bin);
-    cmd.arg(socket)
-        .arg(runtime_dir)
+    cmd.arg(&config_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    info!(bin = %bin.display(), socket = %socket.display(), "starting {}", name);
+    info!(bin = %bin.display(), config = %config_path.display(), "starting {}", name);
     let c = cmd.spawn().map_err(|e| ChvError::Io {
         path: bin.to_string_lossy().to_string(),
         source: e,

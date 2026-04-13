@@ -126,11 +126,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
     let vm_runtime = VmRuntime::new(adapter);
 
+    let cache = Arc::new(tokio::sync::Mutex::new(cache));
+
     let agent_server = AgentServer::new(
         cache.clone(),
         vm_runtime.clone(),
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
+        Some(config.cache_path.clone()),
     );
     let server_socket = config.socket_path.clone();
     tokio::spawn(async move {
@@ -144,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vm_runtime.clone(),
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
-    );
+    ).await;
 
     let mut supervisor = DaemonSupervisor::new(
         config.stord_binary_path.clone(),
@@ -154,9 +157,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.runtime_dir.clone(),
     );
 
-    let tls_cert = cache.certificate_path.as_ref().map(PathBuf::from).or_else(|| config.tls_cert_path.clone());
-    let tls_key = cache.private_key_path.as_ref().map(PathBuf::from).or_else(|| config.tls_key_path.clone());
-    let ca_cert = cache.ca_path.as_ref().map(PathBuf::from).or_else(|| config.ca_cert_path.clone());
+    let (tls_cert, tls_key, ca_cert) = {
+        let cache = cache.lock().await;
+        let tls_cert = cache.certificate_path.as_ref().map(PathBuf::from).or_else(|| config.tls_cert_path.clone());
+        let tls_key = cache.private_key_path.as_ref().map(PathBuf::from).or_else(|| config.tls_key_path.clone());
+        let ca_cert = cache.ca_path.as_ref().map(PathBuf::from).or_else(|| config.ca_cert_path.clone());
+        (tls_cert, tls_key, ca_cert)
+    };
 
     let mut telemetry = match ControlPlaneClient::new(
         &config.control_plane_addr,
@@ -168,7 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(client) => {
             info!("connected to control plane");
-            Some((TelemetryReporter::new(&cache.node_id), client))
+            let node_id = cache.lock().await.node_id.clone();
+            Some((TelemetryReporter::new(&node_id), client))
         }
         Err(e) => {
             warn!(error = %e, "control plane unavailable; will retry later");
@@ -180,7 +188,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "unknown".to_string())
         .trim()
         .to_string();
-    let inventory_reporter = InventoryReporter::new(&cache.node_id, hostname);
+    let node_id = cache.lock().await.node_id.clone();
+    let inventory_reporter = InventoryReporter::new(&node_id, hostname);
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
     const FAILED_THRESHOLD: u32 = 6; // 6 ticks * 5s = 30s
@@ -219,9 +228,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = reconciler.state_machine.transition(derived) {
                 warn!(error = %e, "invalid state transition ignored");
             } else {
-                cache.node_state = reconciler.state_machine.current().as_str().to_string();
-                if let Err(e) = cache.save(&config.cache_path).await {
-                    warn!(error = %e, "failed to save cache");
+                {
+                    let mut cache = cache.lock().await;
+                    cache.node_state = reconciler.state_machine.current().as_str().to_string();
+                    if let Err(e) = cache.save(&config.cache_path).await {
+                        warn!(error = %e, "failed to save cache");
+                    }
                 }
                 if derived != NodeState::Degraded {
                     consecutive_health_failures = 0;
@@ -233,12 +245,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         NodeState::TenantReady => "info",
                         _ => "info",
                     };
+                    let (target_node_id, desired_state_version) = {
+                        let cache = cache.lock().await;
+                        (cache.node_id.clone(), cache.observed_generation.clone())
+                    };
                     let event = reporter.event_report(
                         control_plane_node_api::control_plane_node_api::RequestMeta {
                             operation_id: format!("state-transition-{}", tick_count),
                             requested_by: "agent".to_string(),
-                            target_node_id: cache.node_id.clone(),
-                            desired_state_version: cache.observed_generation.clone(),
+                            target_node_id,
+                            desired_state_version,
                             request_unix_ms: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -260,17 +276,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Err(e) = reconciler.state_machine.transition(NodeState::Failed) {
                     warn!(error = %e, "failed to transition to Failed");
                 } else {
-                    cache.node_state = NodeState::Failed.as_str().to_string();
-                    if let Err(e) = cache.save(&config.cache_path).await {
-                        warn!(error = %e, "failed to save cache");
+                    {
+                        let mut cache = cache.lock().await;
+                        cache.node_state = NodeState::Failed.as_str().to_string();
+                        if let Err(e) = cache.save(&config.cache_path).await {
+                            warn!(error = %e, "failed to save cache");
+                        }
                     }
                     if let Some((ref reporter, ref mut client)) = telemetry {
+                        let (target_node_id, desired_state_version) = {
+                            let cache = cache.lock().await;
+                            (cache.node_id.clone(), cache.observed_generation.clone())
+                        };
                         let event = reporter.event_report(
                             control_plane_node_api::control_plane_node_api::RequestMeta {
                                 operation_id: format!("state-transition-failed-{}", tick_count),
                                 requested_by: "agent".to_string(),
-                                target_node_id: cache.node_id.clone(),
-                                desired_state_version: cache.observed_generation.clone(),
+                                target_node_id,
+                                desired_state_version,
                                 request_unix_ms: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -292,23 +315,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Some((ref reporter, ref mut client)) = telemetry {
+            let (node_state, observed_generation, last_error) = {
+                let cache = cache.lock().await;
+                (cache.node_state.clone(), cache.observed_generation.clone(), cache.last_error.clone())
+            };
             let report = reporter.node_state_report(
-                cache.node_state.as_str(),
-                cache.observed_generation.as_str(),
+                node_state.as_str(),
+                observed_generation.as_str(),
                 if reconciler.state_machine.current() == NodeState::TenantReady {
                     "Healthy"
                 } else {
                     "Degraded"
                 },
-                cache.last_error.clone(),
+                last_error,
             );
             if let Err(e) = client.report_node_state(report).await {
                 warn!(error = %e, "failed to report node state");
             }
 
+            let node_id = cache.lock().await.node_id.clone();
             for vm in reconciler.vm_runtime.list() {
                 let vm_report = control_plane_node_api::control_plane_node_api::VmStateReport {
-                    node_id: cache.node_id.clone(),
+                    node_id: node_id.clone(),
                     vm_id: vm.vm_id.clone(),
                     runtime_status: vm.runtime_status.clone(),
                     observed_generation: vm.observed_generation.clone(),
@@ -324,22 +352,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            for volume_id in cache.volume_handles.keys() {
+            let volume_generations: std::collections::HashMap<String, String> = {
+                let cache = cache.lock().await;
+                cache.volume_handles.keys().map(|k| (k.clone(), cache.volume_generations.get(k).cloned().unwrap_or_default())).collect()
+            };
+            for (volume_id, observed_generation) in volume_generations {
                 let vol_report = reporter.volume_state_report(
-                    volume_id,
+                    &volume_id,
                     "Attached",
-                    cache.volume_generations.get(volume_id).map(|s| s.as_str()).unwrap_or(""),
+                    observed_generation.as_str(),
                 );
                 if let Err(e) = client.report_volume_state(vol_report).await {
                     warn!(volume_id = %volume_id, error = %e, "failed to report volume state");
                 }
             }
 
-            for (network_id, fragment) in &cache.network_fragments {
+            let network_fragments: Vec<(String, String)> = {
+                let cache = cache.lock().await;
+                cache.network_fragments.iter().map(|(k, v)| (k.clone(), v.generation.clone())).collect()
+            };
+            for (network_id, generation) in network_fragments {
                 let net_report = reporter.network_state_report(
-                    network_id,
+                    &network_id,
                     "Ready",
-                    &fragment.generation,
+                    &generation,
                 );
                 if let Err(e) = client.report_network_state(net_report).await {
                     warn!(network_id = %network_id, error = %e, "failed to report network state");
@@ -355,11 +391,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let op_id = format!("inventory-{}", tick_count);
                 let inv = inventory_reporter.build_inventory();
                 let ver = inventory_reporter.build_versions();
+                let target_node_id = cache.lock().await.node_id.clone();
                 let inv_req = control_plane_node_api::control_plane_node_api::ReportNodeInventoryRequest {
                     meta: Some(control_plane_node_api::control_plane_node_api::RequestMeta {
                         operation_id: op_id.clone(),
                         requested_by: "agent".to_string(),
-                        target_node_id: cache.node_id.clone(),
+                        target_node_id,
                         desired_state_version: "".to_string(),
                         request_unix_ms: now,
                     }),
@@ -368,11 +405,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Err(e) = client.report_node_inventory(inv_req).await {
                     warn!(error = %e, "failed to report node inventory");
                 }
+                let target_node_id = cache.lock().await.node_id.clone();
                 let ver_req = control_plane_node_api::control_plane_node_api::ReportServiceVersionsRequest {
                     meta: Some(control_plane_node_api::control_plane_node_api::RequestMeta {
                         operation_id: op_id,
                         requested_by: "agent".to_string(),
-                        target_node_id: cache.node_id.clone(),
+                        target_node_id,
                         desired_state_version: "".to_string(),
                         request_unix_ms: now,
                     }),
@@ -389,8 +427,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Periodically persist cache so gRPC mutations are durable even without state transitions.
-        if let Err(e) = cache.save(&config.cache_path).await {
-            warn!(error = %e, "failed to save cache");
+        {
+            let cache = cache.lock().await;
+            if let Err(e) = cache.save(&config.cache_path).await {
+                warn!(error = %e, "failed to save cache");
+            }
         }
     }
 }
