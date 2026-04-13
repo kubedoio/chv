@@ -529,3 +529,20 @@ async fn prepare_snapshot_missing_session_returns_not_found() {
     assert_eq!(resp.status, "error");
     assert_eq!(resp.error_code, "NOT_FOUND");
 }
+
+#[tokio::test]
+async fn prepare_clone_missing_session_returns_not_found() {
+    let (_dir, _socket, mut client) = setup_server().await;
+
+    let resp = client
+        .prepare_clone(PrepareCloneRequest {
+            meta: None,
+            volume_id: "vol-missing".to_string(),
+            clone_name: "clone1".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.status, "error");
+    assert_eq!(resp.error_code, "NOT_FOUND");
+}
