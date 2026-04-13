@@ -43,4 +43,18 @@ pub trait StorageBackend: Send + Sync + 'static {
     ) -> Result<(), ChvError>;
 
     async fn health(&self, volume_id: &str, handle: &str) -> Result<BackendHealth, ChvError>;
+
+    async fn resize(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        new_size_bytes: u64,
+    ) -> Result<(), ChvError>;
+
+    async fn set_device_policy(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        policy: &DevicePolicy,
+    ) -> Result<(), ChvError>;
 }

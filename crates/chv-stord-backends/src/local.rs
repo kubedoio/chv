@@ -165,6 +165,94 @@ impl StorageBackend for LocalFileBackend {
             last_error,
         })
     }
+
+    async fn resize(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        new_size_bytes: u64,
+    ) -> Result<(), ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        let locator_str = handle.strip_prefix(&prefix).unwrap_or(handle);
+        let path = std::path::Path::new(locator_str);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.runtime_dir.join(path)
+        };
+
+        if !path.exists() {
+            warn!(
+                volume_id,
+                handle,
+                path = %path.display(),
+                "resize called but path does not exist"
+            );
+            return Ok(());
+        }
+
+        let kind = Self::detect_kind(&path);
+        if kind == "qcow2" {
+            warn!(
+                volume_id,
+                handle,
+                path = %path.display(),
+                "qcow2 resize is not yet implemented"
+            );
+            return Ok(());
+        }
+
+        let file = std::fs::File::options().write(true).open(&path).map_err(|e| {
+            ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("failed to open file for resize: {}", e),
+            }
+        })?;
+        file.set_len(new_size_bytes).map_err(|e| {
+            ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("failed to resize file: {}", e),
+            }
+        })?;
+
+        info!(
+            volume_id,
+            handle,
+            path = %path.display(),
+            new_size_bytes,
+            "resized local volume"
+        );
+        Ok(())
+    }
+
+    async fn set_device_policy(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        _policy: &DevicePolicy,
+    ) -> Result<(), ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        info!(
+            volume_id,
+            handle,
+            "device policy accepted but not enforced by LocalFileBackend"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -277,5 +365,42 @@ mod tests {
 
         let res = backend.detach("vol-1", "local-vol-1-vol.img", "vm-1", true).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn local_backend_resize_raw_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vol.img");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&[0u8; 512]).unwrap();
+        }
+
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let handle = "local-vol-1-vol.img";
+        backend.resize("vol-1", handle, 1024).await.unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), 1024);
+    }
+
+    #[tokio::test]
+    async fn local_backend_set_device_policy_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+
+        let res = backend
+            .set_device_policy("vol-1", "local-vol-1-vol.img", &DevicePolicy::default())
+            .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn local_backend_resize_rejects_invalid_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+
+        let res = backend.resize("vol-1", "iscsi-vol-1-target", 1024).await;
+        assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 }
