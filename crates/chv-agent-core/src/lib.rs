@@ -6,6 +6,7 @@ pub mod daemon_clients;
 pub mod health;
 pub mod reconcile;
 pub mod state_machine;
+pub mod supervisor;
 pub mod telemetry;
 pub mod vm_runtime;
 
