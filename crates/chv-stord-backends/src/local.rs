@@ -238,6 +238,116 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
+    async fn prepare_snapshot(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        snapshot_name: &str,
+    ) -> Result<(), ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        let locator_str = handle.strip_prefix(&prefix).unwrap_or(handle);
+        let path = std::path::Path::new(locator_str);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.runtime_dir.join(path)
+        };
+
+        if !path.exists() {
+            return Err(ChvError::NotFound {
+                resource: "path".to_string(),
+                id: path.to_string_lossy().to_string(),
+            });
+        }
+
+        let kind = Self::detect_kind(&path);
+        if kind == "qcow2" {
+            return Err(ChvError::InvalidArgument {
+                field: "snapshot_name".to_string(),
+                reason: "qcow2 snapshot not supported".to_string(),
+            });
+        }
+
+        let dest = self
+            .runtime_dir
+            .join(format!("{}-{}.img", volume_id, snapshot_name));
+        std::fs::copy(&path, &dest).map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("failed to copy file for snapshot: {}", e),
+        })?;
+
+        info!(
+            volume_id,
+            handle,
+            path = %path.display(),
+            dest = %dest.display(),
+            "prepared local snapshot"
+        );
+        Ok(())
+    }
+
+    async fn prepare_clone(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        clone_name: &str,
+    ) -> Result<(), ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        let locator_str = handle.strip_prefix(&prefix).unwrap_or(handle);
+        let path = std::path::Path::new(locator_str);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.runtime_dir.join(path)
+        };
+
+        if !path.exists() {
+            return Err(ChvError::NotFound {
+                resource: "path".to_string(),
+                id: path.to_string_lossy().to_string(),
+            });
+        }
+
+        let kind = Self::detect_kind(&path);
+        if kind == "qcow2" {
+            return Err(ChvError::InvalidArgument {
+                field: "clone_name".to_string(),
+                reason: "qcow2 clone not supported".to_string(),
+            });
+        }
+
+        let dest = self
+            .runtime_dir
+            .join(format!("{}-{}.img", volume_id, clone_name));
+        std::fs::copy(&path, &dest).map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("failed to copy file for clone: {}", e),
+        })?;
+
+        info!(
+            volume_id,
+            handle,
+            path = %path.display(),
+            dest = %dest.display(),
+            "prepared local clone"
+        );
+        Ok(())
+    }
+
     async fn set_device_policy(
         &self,
         volume_id: &str,
@@ -432,5 +542,57 @@ mod tests {
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let res = backend.resize("vol-1", "local-vol-1-vol.qcow2", 1024).await;
         assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+    }
+
+    #[tokio::test]
+    async fn local_backend_prepare_snapshot_raw_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vol.img");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&[0u8; 512]).unwrap();
+        }
+
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let handle = "local-vol-1-vol.img";
+        backend.prepare_snapshot("vol-1", handle, "snap1").await.unwrap();
+
+        let dest = dir.path().join("vol-1-snap1.img");
+        assert!(dest.exists());
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 512);
+    }
+
+    #[tokio::test]
+    async fn local_backend_prepare_clone_raw_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vol.img");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&[0u8; 512]).unwrap();
+        }
+
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let handle = "local-vol-1-vol.img";
+        backend.prepare_clone("vol-1", handle, "clone1").await.unwrap();
+
+        let dest = dir.path().join("vol-1-clone1.img");
+        assert!(dest.exists());
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 512);
+    }
+
+    #[tokio::test]
+    async fn local_backend_prepare_snapshot_missing_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let res = backend.prepare_snapshot("vol-1", "local-vol-1-vol.img", "snap1").await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn local_backend_prepare_snapshot_invalid_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let res = backend.prepare_snapshot("vol-1", "iscsi-vol-1-target", "snap1").await;
+        assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 }
