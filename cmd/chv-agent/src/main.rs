@@ -1,10 +1,13 @@
 use chv_agent_core::{
-    cache::NodeCache, config::load_agent_config, control_plane::ControlPlaneClient,
-    daemon_clients::{NwdClient, StordClient}, health::HealthAggregator, reconcile::Reconciler,
-    state_machine::NodeState,
+    agent_server::AgentServer, cache::NodeCache, config::load_agent_config,
+    control_plane::ControlPlaneClient, daemon_clients::{NwdClient, StordClient},
+    health::HealthAggregator, reconcile::Reconciler, state_machine::NodeState,
+    telemetry::TelemetryReporter, vm_runtime::VmRuntime,
 };
+use chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter;
 use chv_observability::init_logger;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -17,7 +20,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("chv-agent starting");
 
-    // Load or initialize cache
     let mut cache = match NodeCache::load(&config.cache_path).await {
         Ok(c) => {
             info!(node_id = %c.node_id, "loaded cache");
@@ -29,9 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 config.node_id.clone()
             };
-            let c = NodeCache::new(node_id);
-            info!("initialized new cache");
-            c
+            NodeCache::new(node_id)
         }
         Err(e) => {
             warn!(error = %e, "failed to load cache, starting fresh");
@@ -44,20 +44,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Always reset to Bootstrapping on startup so readiness is re-evaluated.
     cache.node_state = NodeState::Bootstrapping.as_str().to_string();
+
+    // Phase 2 placeholder: the real CloudHypervisorAdapter is not yet implemented.
+    // We wire the mock adapter so the full control-plane -> agent -> adapter flow
+    // can be tested end-to-end. Replace with the production adapter in Phase 3.
+    warn!("using mock CloudHypervisorAdapter — real VM processes will not be launched");
+    let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
+        Arc::new(MockCloudHypervisorAdapter::default());
+    let vm_runtime = VmRuntime::new(adapter);
+
+    let agent_server = AgentServer::new(cache.clone(), vm_runtime.clone());
+    let server_socket = config.socket_path.clone();
+    tokio::spawn(async move {
+        if let Err(e) = agent_server.serve(&server_socket).await {
+            warn!(error = %e, "agent server exited");
+        }
+    });
 
     let mut reconciler = Reconciler::new(
         cache.clone(),
+        vm_runtime.clone(),
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
     );
 
-    // Instantiate control-plane client skeleton (not yet used in Phase 1 loop)
-    let mut _control_plane = match ControlPlaneClient::new(&config.control_plane_addr).await {
+    let mut telemetry = match ControlPlaneClient::new(&config.control_plane_addr).await {
         Ok(client) => {
             info!("connected to control plane");
-            Some(client)
+            Some((TelemetryReporter::new(&cache.node_id), client))
         }
         Err(e) => {
             warn!(error = %e, "control plane unavailable; will retry later");
@@ -65,7 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Simple health probe loop (Phase 1 skeleton)
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     loop {
         interval.tick().await;
@@ -91,15 +105,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 to = %derived.as_str(),
                 "state transition"
             );
-            reconciler.state_machine.transition(derived).ok();
-            cache.node_state = reconciler.state_machine.current().as_str().to_string();
-            if let Err(e) = cache.save(&config.cache_path).await {
-                warn!(error = %e, "failed to save cache");
+            if let Err(e) = reconciler.state_machine.transition(derived) {
+                warn!(error = %e, "invalid state transition ignored");
+            } else {
+                cache.node_state = reconciler.state_machine.current().as_str().to_string();
+                if let Err(e) = cache.save(&config.cache_path).await {
+                    warn!(error = %e, "failed to save cache");
+                }
+            }
+        }
+
+        if let Some((ref reporter, ref mut client)) = telemetry {
+            let report = reporter.node_state_report(
+                cache.node_state.as_str(),
+                cache.observed_generation.as_str(),
+                if reconciler.state_machine.current() == NodeState::TenantReady {
+                    "Healthy"
+                } else {
+                    "Degraded"
+                },
+                cache.last_error.clone(),
+            );
+            if let Err(e) = client.report_node_state(report).await {
+                warn!(error = %e, "failed to report node state");
+            }
+
+            for vm in reconciler.vm_runtime.list() {
+                let vm_report = control_plane_node_api::control_plane_node_api::VmStateReport {
+                    node_id: cache.node_id.clone(),
+                    vm_id: vm.vm_id.clone(),
+                    runtime_status: vm.runtime_status.clone(),
+                    observed_generation: vm.observed_generation.clone(),
+                    health_status: "Healthy".to_string(),
+                    last_error: vm.last_error.unwrap_or_default(),
+                    reported_unix_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64,
+                };
+                if let Err(e) = client.report_vm_state(vm_report).await {
+                    warn!(vm_id = %vm.vm_id, error = %e, "failed to report vm state");
+                }
             }
         }
 
         if let Err(e) = reconciler.run_once().await {
             warn!(error = %e, "reconcile tick failed");
+        }
+
+        // Periodically persist cache so gRPC mutations are durable even without state transitions.
+        if let Err(e) = cache.save(&config.cache_path).await {
+            warn!(error = %e, "failed to save cache");
         }
     }
 }

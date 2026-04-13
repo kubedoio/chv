@@ -13,5 +13,6 @@ chv-observability = { path = "../../crates/chv-observability" }
 chv-agent-core = { path = "../../crates/chv-agent-core" }
 chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
 chv-errors = { path = "../../crates/chv-errors" }
+control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 tokio = { workspace = true }
 tracing = { workspace = true }
