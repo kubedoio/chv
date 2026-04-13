@@ -54,7 +54,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(MockCloudHypervisorAdapter::default());
     let vm_runtime = VmRuntime::new(adapter);
 
-    let agent_server = AgentServer::new(cache.clone(), vm_runtime.clone());
+    let agent_server = AgentServer::new(
+        cache.clone(),
+        vm_runtime.clone(),
+        config.stord_socket.clone(),
+        config.nwd_socket.clone(),
+    );
     let server_socket = config.socket_path.clone();
     tokio::spawn(async move {
         if let Err(e) = agent_server.serve(&server_socket).await {

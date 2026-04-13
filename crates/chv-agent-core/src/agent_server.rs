@@ -14,13 +14,22 @@ use tonic::{Request, Response, Status};
 pub struct AgentServer {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
     pub vm_runtime: VmRuntime,
+    pub stord_socket: std::path::PathBuf,
+    pub nwd_socket: std::path::PathBuf,
 }
 
 impl AgentServer {
-    pub fn new(cache: NodeCache, vm_runtime: VmRuntime) -> Self {
+    pub fn new(
+        cache: NodeCache,
+        vm_runtime: VmRuntime,
+        stord_socket: std::path::PathBuf,
+        nwd_socket: std::path::PathBuf,
+    ) -> Self {
         Self {
             cache: Arc::new(tokio::sync::Mutex::new(cache)),
             vm_runtime,
+            stord_socket,
+            nwd_socket,
         }
     }
 
@@ -253,16 +262,84 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
 
     async fn attach_volume(
         &self,
-        _req: Request<proto::AttachVolumeRequest>,
+        req: Request<proto::AttachVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
-        Err(Status::unimplemented("attach_volume in Phase 3"))
+        let inner = req.into_inner();
+        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let vol = inner.volume.as_ref().ok_or_else(|| Status::invalid_argument("missing volume"))?;
+        let mut cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &vol.volume_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+        let (backend_class, locator) = if let Ok(spec) = serde_json::from_slice::<serde_json::Value>(&vol.volume_spec_json) {
+            let bc = spec.get("backend_class").and_then(|v| v.as_str()).unwrap_or("local");
+            let loc = spec.get("locator").and_then(|v| v.as_str()).unwrap_or(&vol.volume_id);
+            (bc.to_string(), loc.to_string())
+        } else {
+            ("local".to_string(), vol.volume_id.clone())
+        };
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        let (_, handle, _) = stord
+            .open_volume(&vol.volume_id, &backend_class, &locator, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(format!("open_volume failed: {}", e)))?;
+
+        stord
+            .attach_volume_to_vm(&vol.volume_id, &vol.vm_id, &handle, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(format!("attach_volume_to_vm failed: {}", e)))?;
+
+        cache.volume_handles.insert(vol.volume_id.clone(), handle);
+
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: cache.observed_generation.clone(),
+                error_code: "".to_string(),
+                human_summary: "volume attached".to_string(),
+            }),
+        }))
     }
 
     async fn detach_volume(
         &self,
-        _req: Request<proto::DetachVolumeRequest>,
+        req: Request<proto::DetachVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
-        Err(Status::unimplemented("detach_volume in Phase 3"))
+        let inner = req.into_inner();
+        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let mut cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        stord
+            .detach_volume_from_vm(&inner.volume_id, &inner.vm_id, inner.force, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(format!("detach_volume_from_vm failed: {}", e)))?;
+
+        if let Some(handle) = cache.volume_handles.remove(&inner.volume_id) {
+            let _ = stord
+                .close_volume(&inner.volume_id, &handle, Some(&meta.operation_id))
+                .await;
+        }
+
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: cache.observed_generation.clone(),
+                error_code: "".to_string(),
+                human_summary: "volume detached".to_string(),
+            }),
+        }))
     }
 
     async fn resize_volume(
@@ -320,6 +397,8 @@ mod tests {
         AgentServer::new(
             cache,
             VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            std::path::PathBuf::from("/run/chv/stord/api.sock"),
+            std::path::PathBuf::from("/run/chv/nwd/api.sock"),
         )
     }
 

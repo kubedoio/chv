@@ -28,6 +28,8 @@ pub struct NodeCache {
     pub vm_fragments: HashMap<String, DesiredStateFragment>,
     pub volume_fragments: HashMap<String, DesiredStateFragment>,
     pub network_fragments: HashMap<String, DesiredStateFragment>,
+    #[serde(default)]
+    pub volume_handles: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -45,6 +47,7 @@ impl NodeCache {
             vm_fragments: HashMap::new(),
             volume_fragments: HashMap::new(),
             network_fragments: HashMap::new(),
+            volume_handles: HashMap::new(),
             last_error: None,
         }
     }

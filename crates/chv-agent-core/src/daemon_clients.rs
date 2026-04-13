@@ -3,7 +3,9 @@ use chv_nwd_api::chv_nwd_api::{
     network_service_client::NetworkServiceClient, ListNamespaceStateRequest,
 };
 use chv_stord_api::chv_stord_api::{
-    storage_service_client::StorageServiceClient, ListVolumeSessionsRequest,
+    storage_service_client::StorageServiceClient, AttachVolumeToVmRequest,
+    CloseVolumeRequest, DetachVolumeFromVmRequest, ListVolumeSessionsRequest,
+    OpenVolumeRequest,
 };
 use std::path::Path;
 use tokio::net::UnixStream;
@@ -50,6 +52,134 @@ impl StordClient {
                 reason: e.to_string(),
             })?;
         Ok(true)
+    }
+
+    pub async fn open_volume(
+        &mut self,
+        volume_id: &str,
+        backend_class: &str,
+        locator: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(String, String, String), ChvError> {
+        let mut options = std::collections::HashMap::new();
+        options.insert("volume_id".to_string(), volume_id.to_string());
+        let req = OpenVolumeRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            backend: Some(chv_stord_api::chv_stord_api::BackendLocator {
+                backend_class: backend_class.to_string(),
+                locator: locator.to_string(),
+                options,
+            }),
+            policy: None,
+        };
+        let resp = self
+            .inner
+            .open_volume(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        Ok((
+            resp.volume_id,
+            resp.attachment_handle,
+            resp.export_path,
+        ))
+    }
+
+    pub async fn attach_volume_to_vm(
+        &mut self,
+        volume_id: &str,
+        vm_id: &str,
+        attachment_handle: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(String, String), ChvError> {
+        let req = AttachVolumeToVmRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            vm_id: vm_id.to_string(),
+            attachment_handle: attachment_handle.to_string(),
+        };
+        let resp = self
+            .inner
+            .attach_volume_to_vm(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        Ok((resp.export_kind, resp.export_path))
+    }
+
+    pub async fn detach_volume_from_vm(
+        &mut self,
+        volume_id: &str,
+        vm_id: &str,
+        force: bool,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = DetachVolumeFromVmRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            vm_id: vm_id.to_string(),
+            force,
+        };
+        self.inner
+            .detach_volume_from_vm(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn close_volume(
+        &mut self,
+        volume_id: &str,
+        attachment_handle: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = CloseVolumeRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            attachment_handle: attachment_handle.to_string(),
+        };
+        self.inner
+            .close_volume(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
     }
 }
 
