@@ -73,6 +73,67 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
+    async fn attach(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        vm_id: &str,
+    ) -> Result<VolumeExport, ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        let locator_str = handle.strip_prefix(&prefix).unwrap_or(handle);
+        let path = std::path::Path::new(locator_str);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.runtime_dir.join(path)
+        };
+
+        info!(volume_id, vm_id, handle, path = %path.display(), "attaching local volume");
+
+        if !path.exists() {
+            warn!(volume_id, vm_id, handle, path = %path.display(), "path does not exist");
+        }
+
+        let export_kind = Self::detect_kind(&path);
+
+        Ok(VolumeExport {
+            export_kind,
+            export_path: path.to_string_lossy().to_string(),
+            attachment_handle: handle.to_string(),
+        })
+    }
+
+    async fn detach(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        vm_id: &str,
+        force: bool,
+    ) -> Result<(), ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        if force {
+            warn!(volume_id, vm_id, handle, "force detaching local volume");
+        } else {
+            info!(volume_id, vm_id, handle, "detaching local volume");
+        }
+
+        Ok(())
+    }
+
     async fn health(&self, volume_id: &str, handle: &str) -> Result<BackendHealth, ChvError> {
         // Derive expected path from handle: local-{volume_id}-{locator}
         let prefix = format!("local-{}-", volume_id);
@@ -174,5 +235,47 @@ mod tests {
 
         let res = backend.open("vol-1", &locator, &DevicePolicy::default()).await;
         assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn local_backend_attach_succeeds_with_valid_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vol.img");
+        std::fs::File::create(&path).unwrap();
+
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let handle = "local-vol-1-vol.img";
+        let export = backend.attach("vol-1", handle, "vm-1").await.unwrap();
+
+        assert_eq!(export.export_kind, "raw");
+        assert_eq!(export.attachment_handle, handle);
+        assert!(export.export_path.ends_with("vol.img"));
+    }
+
+    #[tokio::test]
+    async fn local_backend_attach_fails_with_invalid_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+
+        let res = backend.attach("vol-1", "iscsi-vol-1-target", "vm-1").await;
+        assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn local_backend_detach_succeeds_with_valid_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+
+        let res = backend.detach("vol-1", "local-vol-1-vol.img", "vm-1", false).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn local_backend_detach_force_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+
+        let res = backend.detach("vol-1", "local-vol-1-vol.img", "vm-1", true).await;
+        assert!(res.is_ok());
     }
 }

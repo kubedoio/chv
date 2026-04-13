@@ -27,5 +27,20 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     async fn close(&self, volume_id: &str, handle: &str) -> Result<(), ChvError>;
 
+    async fn attach(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        vm_id: &str,
+    ) -> Result<VolumeExport, ChvError>;
+
+    async fn detach(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        vm_id: &str,
+        force: bool,
+    ) -> Result<(), ChvError>;
+
     async fn health(&self, volume_id: &str, handle: &str) -> Result<BackendHealth, ChvError>;
 }
