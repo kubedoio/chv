@@ -62,13 +62,16 @@ impl SessionTable {
         handle: &str,
         vm_id: Option<String>,
         runtime_status: String,
-    ) {
+    ) -> bool {
         if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
             self.inner.entry((volume_id.to_string(), handle.to_string()))
         {
             let session = entry.get_mut();
             session.vm_id = vm_id;
             session.runtime_status = runtime_status;
+            true
+        } else {
+            false
         }
     }
 }
@@ -136,7 +139,8 @@ mod tests {
     fn session_update_vm_id() {
         let table = SessionTable::new();
         table.upsert(dummy_session("vol-1", "h1"));
-        table.update_vm_id("vol-1", "h1", Some("vm-123".to_string()), "attached".to_string());
+        let updated = table.update_vm_id("vol-1", "h1", Some("vm-123".to_string()), "attached".to_string());
+        assert!(updated);
         let got = table.get("vol-1", "h1").unwrap();
         assert_eq!(got.vm_id, Some("vm-123".to_string()));
         assert_eq!(got.runtime_status, "attached");
@@ -145,7 +149,8 @@ mod tests {
     #[test]
     fn session_update_vm_id_missing_is_noop() {
         let table = SessionTable::new();
-        table.update_vm_id("vol-1", "h1", Some("vm-123".to_string()), "attached".to_string());
+        let updated = table.update_vm_id("vol-1", "h1", Some("vm-123".to_string()), "attached".to_string());
+        assert!(!updated);
         assert!(table.get("vol-1", "h1").is_none());
     }
 }

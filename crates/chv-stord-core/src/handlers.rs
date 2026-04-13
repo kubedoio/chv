@@ -311,12 +311,26 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
             }
         };
 
-        self.sessions.update_vm_id(
+        let updated = self.sessions.update_vm_id(
             &req.volume_id,
             &req.attachment_handle,
             Some(req.vm_id.clone()),
             "attached".to_string(),
         );
+
+        if !updated {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: format!("{}/{}", req.volume_id, req.attachment_handle),
+            };
+            return Ok(Response::new(proto::AttachVolumeToVmResponse {
+                result: Some(e.to_proto_result()),
+                volume_id: req.volume_id,
+                vm_id: req.vm_id,
+                export_kind: export.export_kind,
+                export_path: export.export_path,
+            }));
+        }
 
         Ok(Response::new(proto::AttachVolumeToVmResponse {
             result: Some(Self::ok_result()),
@@ -363,12 +377,20 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
                 );
             }
 
-            self.sessions.update_vm_id(
+            let updated = self.sessions.update_vm_id(
                 &req.volume_id,
                 &s.attachment_handle,
                 None,
                 "open".to_string(),
             );
+
+            if !updated {
+                tracing::warn!(
+                    volume_id = %req.volume_id,
+                    vm_id = %req.vm_id,
+                    "concurrent session removal detected during detach"
+                );
+            }
         }
 
         Ok(Response::new(Self::ok_result()))
