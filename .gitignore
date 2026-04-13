@@ -49,3 +49,6 @@ temp/
 
 # Rust
 target/
+
+#Agent specific
+docs/superpowers

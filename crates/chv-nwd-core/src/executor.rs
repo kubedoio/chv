@@ -13,10 +13,7 @@ pub struct TopologyApplyResult {
 
 #[async_trait]
 pub trait NetworkExecutor: Send + Sync + 'static {
-    async fn ensure_topology(
-        &self,
-        spec: &TopologySpec,
-    ) -> Result<TopologyApplyResult, ChvError>;
+    async fn ensure_topology(&self, spec: &TopologySpec) -> Result<TopologyApplyResult, ChvError>;
 
     async fn delete_topology(
         &self,
@@ -40,10 +37,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         ip_address: &str,
     ) -> Result<(String, String), ChvError>;
 
-    async fn detach_vm_nic(
-        &self,
-        nic_id: &str,
-    ) -> Result<(), ChvError>;
+    async fn detach_vm_nic(&self, nic_id: &str) -> Result<(), ChvError>;
 
     async fn set_firewall_policy(
         &self,
@@ -67,12 +61,10 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         range_end: &str,
     ) -> Result<(), ChvError>;
 
-    async fn ensure_dns_scope(
-        &self,
-        network_id: &str,
-        forwarders: &[&str],
-    ) -> Result<(), ChvError>;
+    async fn ensure_dns_scope(&self, network_id: &str, forwarders: &[&str])
+        -> Result<(), ChvError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn expose_service(
         &self,
         network_id: &str,
@@ -97,7 +89,9 @@ pub struct LinuxExecutor {
 
 impl LinuxExecutor {
     pub fn new(runtime_dir: PathBuf) -> Self {
-        Self { _runtime_dir: runtime_dir }
+        Self {
+            _runtime_dir: runtime_dir,
+        }
     }
 
     async fn run_ip(args: &[&str]) -> Result<(), ChvError> {
@@ -162,12 +156,19 @@ impl LinuxExecutor {
         Ok(())
     }
 
-    async fn delete_rules_by_comment(table: &str, chain: &str, comment: &str) -> Result<(), ChvError> {
+    async fn delete_rules_by_comment(
+        table: &str,
+        chain: &str,
+        comment: &str,
+    ) -> Result<(), ChvError> {
         let out = Command::new("nft")
             .args(["-a", "list", "chain", "inet", table, chain])
             .output()
             .await
-            .map_err(|e| ChvError::Io { path: "nft".to_string(), source: e })?;
+            .map_err(|e| ChvError::Io {
+                path: "nft".to_string(),
+                source: e,
+            })?;
         if !out.status.success() {
             return Ok(()); // chain may not exist
         }
@@ -176,9 +177,13 @@ impl LinuxExecutor {
         for line in stdout.lines() {
             if line.contains(&target) {
                 if let Some(idx) = line.rfind(" handle ") {
-                    let handle = line[idx + 8..].trim().split_whitespace().next().unwrap_or("");
+                    let handle = line[idx + 8..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("");
                     if !handle.is_empty() {
-                        Self::run_nft(&["delete", "rule", "inet", table, chain, "handle", handle]).await?;
+                        Self::run_nft(&["delete", "rule", "inet", table, chain, "handle", handle])
+                            .await?;
                     }
                 }
             }
@@ -193,7 +198,10 @@ impl LinuxExecutor {
                 reason: "id must not be empty".to_string(),
             });
         }
-        if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        if id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
             Ok(id.to_string())
         } else {
             Err(ChvError::InvalidArgument {
@@ -228,10 +236,7 @@ impl LinuxExecutor {
 
 #[async_trait]
 impl NetworkExecutor for LinuxExecutor {
-    async fn ensure_topology(
-        &self,
-        spec: &TopologySpec,
-    ) -> Result<TopologyApplyResult, ChvError> {
+    async fn ensure_topology(&self, spec: &TopologySpec) -> Result<TopologyApplyResult, ChvError> {
         info!(
             network_id = %spec.network_id,
             bridge = %spec.bridge_name,
@@ -338,10 +343,7 @@ impl NetworkExecutor for LinuxExecutor {
         Ok((format!("ns-{}", network_id), tap_name))
     }
 
-    async fn detach_vm_nic(
-        &self,
-        nic_id: &str,
-    ) -> Result<(), ChvError> {
+    async fn detach_vm_nic(&self, nic_id: &str) -> Result<(), ChvError> {
         let tap_handle = format!("tap-{}", nic_id);
         let out = Command::new("ip")
             .args(["tuntap", "del", "dev", &tap_handle, "mode", "tap"])
@@ -359,7 +361,10 @@ impl NetworkExecutor for LinuxExecutor {
             }
             return Err(ChvError::NetworkUnavailable {
                 resource: "ip".to_string(),
-                reason: format!("ip tuntap del dev {} mode tap failed: {}", tap_handle, stderr),
+                reason: format!(
+                    "ip tuntap del dev {} mode tap failed: {}",
+                    tap_handle, stderr
+                ),
             });
         }
 
@@ -376,9 +381,31 @@ impl NetworkExecutor for LinuxExecutor {
         let table = Self::sanitized_nft_table(network_id)?;
         Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
         for (chain, hook) in [("input", "input"), ("forward", "forward")] {
-            Self::run_nft_idempotent(&["add", "chain", "inet", &table, chain, &format!("{{ type filter hook {} priority 0 ; policy accept ; }}", hook)]).await?;
+            Self::run_nft_idempotent(&[
+                "add",
+                "chain",
+                "inet",
+                &table,
+                chain,
+                &format!(
+                    "{{ type filter hook {} priority 0 ; policy accept ; }}",
+                    hook
+                ),
+            ])
+            .await?;
         }
-        Self::run_nft(&["add", "rule", "inet", &table, "input", "ct", "state", "established,related", "accept"]).await?;
+        Self::run_nft(&[
+            "add",
+            "rule",
+            "inet",
+            &table,
+            "input",
+            "ct",
+            "state",
+            "established,related",
+            "accept",
+        ])
+        .await?;
         info!(network_id = %network_id, "firewall policy applied");
         Ok(())
     }
@@ -391,8 +418,27 @@ impl NetworkExecutor for LinuxExecutor {
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
         Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
-        Self::run_nft_idempotent(&["add", "chain", "inet", &table, "postrouting", "{ type nat hook postrouting priority 100 ; policy accept ; }"]).await?;
-        Self::run_nft(&["add", "rule", "inet", &table, "postrouting", "oif", "!=", "lo", "masquerade"]).await?;
+        Self::run_nft_idempotent(&[
+            "add",
+            "chain",
+            "inet",
+            &table,
+            "postrouting",
+            "{ type nat hook postrouting priority 100 ; policy accept ; }",
+        ])
+        .await?;
+        Self::run_nft(&[
+            "add",
+            "rule",
+            "inet",
+            &table,
+            "postrouting",
+            "oif",
+            "!=",
+            "lo",
+            "masquerade",
+        ])
+        .await?;
         info!(network_id = %network_id, "NAT policy applied");
         Ok(())
     }
@@ -417,6 +463,7 @@ impl NetworkExecutor for LinuxExecutor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn expose_service(
         &self,
         network_id: &str,
@@ -430,20 +477,57 @@ impl NetworkExecutor for LinuxExecutor {
         let table = Self::sanitized_nft_table(network_id)?;
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
         Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
-        Self::run_nft_idempotent(&["add", "chain", "inet", &table, "prerouting", "{ type nat hook prerouting priority 0 ; policy accept ; }"]).await?;
+        Self::run_nft_idempotent(&[
+            "add",
+            "chain",
+            "inet",
+            &table,
+            "prerouting",
+            "{ type nat hook prerouting priority 0 ; policy accept ; }",
+        ])
+        .await?;
         Self::run_nft(&[
-            "add", "rule", "inet", &table, "prerouting",
-            protocol, "dport", &external_port.to_string(),
-            "dnat", "to", &format!("{}:{}", target_ip, target_port),
-            "comment", &format!("\"{}\"", safe_exposure_id),
-        ]).await?;
-        Self::run_nft_idempotent(&["add", "chain", "inet", &table, "forward", "{ type filter hook forward priority 0 ; policy accept ; }"]).await?;
+            "add",
+            "rule",
+            "inet",
+            &table,
+            "prerouting",
+            protocol,
+            "dport",
+            &external_port.to_string(),
+            "dnat",
+            "to",
+            &format!("{}:{}", target_ip, target_port),
+            "comment",
+            &format!("\"{}\"", safe_exposure_id),
+        ])
+        .await?;
+        Self::run_nft_idempotent(&[
+            "add",
+            "chain",
+            "inet",
+            &table,
+            "forward",
+            "{ type filter hook forward priority 0 ; policy accept ; }",
+        ])
+        .await?;
         Self::run_nft(&[
-            "add", "rule", "inet", &table, "forward",
-            protocol, "dport", &target_port.to_string(),
-            "ip", "daddr", target_ip, "accept",
-            "comment", &format!("\"{}\"", safe_exposure_id),
-        ]).await?;
+            "add",
+            "rule",
+            "inet",
+            &table,
+            "forward",
+            protocol,
+            "dport",
+            &target_port.to_string(),
+            "ip",
+            "daddr",
+            target_ip,
+            "accept",
+            "comment",
+            &format!("\"{}\"", safe_exposure_id),
+        ])
+        .await?;
         info!(network_id = %network_id, exposure_id = %exposure_id, "service exposed via DNAT");
         Ok(())
     }
@@ -474,7 +558,10 @@ mod tests {
 
     #[test]
     fn nft_table_generation() {
-        assert_eq!(LinuxExecutor::sanitized_nft_table("net1").unwrap(), "chv-net1");
+        assert_eq!(
+            LinuxExecutor::sanitized_nft_table("net1").unwrap(),
+            "chv-net1"
+        );
     }
 
     #[test]
@@ -502,7 +589,10 @@ mod tests {
         for line in sample.lines() {
             if line.contains(&target) {
                 if let Some(idx) = line.rfind(" handle ") {
-                    let handle = line[idx + 8..].trim().split_whitespace().next().unwrap_or("");
+                    let handle = line[idx + 8..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("");
                     if !handle.is_empty() {
                         found_handle = Some(handle.to_string());
                     }

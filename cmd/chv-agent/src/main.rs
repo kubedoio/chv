@@ -1,8 +1,14 @@
 use chv_agent_core::{
-    agent_server::AgentServer, cache::NodeCache, config::load_agent_config,
-    control_plane::ControlPlaneClient, daemon_clients::{NwdClient, StordClient},
-    health::HealthAggregator, reconcile::Reconciler, state_machine::NodeState,
-    telemetry::TelemetryReporter, vm_runtime::VmRuntime,
+    agent_server::AgentServer,
+    cache::NodeCache,
+    config::load_agent_config,
+    control_plane::ControlPlaneClient,
+    daemon_clients::{NwdClient, StordClient},
+    health::HealthAggregator,
+    reconcile::Reconciler,
+    state_machine::NodeState,
+    telemetry::TelemetryReporter,
+    vm_runtime::VmRuntime,
 };
 use chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter;
 use chv_observability::init_logger;
@@ -75,7 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.tls_cert_path.as_deref(),
         config.tls_key_path.as_deref(),
         config.ca_cert_path.as_deref(),
-    ).await {
+    )
+    .await
+    {
         Ok(client) => {
             info!("connected to control plane");
             Some((TelemetryReporter::new(&cache.node_id), client))

@@ -35,16 +35,20 @@ impl AgentServer {
 
     pub async fn serve(self, socket_path: &Path) -> Result<(), ChvError> {
         if let Some(parent) = socket_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| ChvError::Io {
-                path: parent.to_string_lossy().to_string(),
-                source: e,
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: parent.to_string_lossy().to_string(),
+                    source: e,
+                })?;
         }
         if socket_path.exists() {
-            tokio::fs::remove_file(socket_path).await.map_err(|e| ChvError::Io {
-                path: socket_path.to_string_lossy().to_string(),
-                source: e,
-            })?;
+            tokio::fs::remove_file(socket_path)
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: socket_path.to_string_lossy().to_string(),
+                    source: e,
+                })?;
         }
         let uds = UnixListener::bind(socket_path).map_err(|e| ChvError::Io {
             path: socket_path.to_string_lossy().to_string(),
@@ -69,7 +73,10 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         req: Request<proto::ApplyNodeDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "node", &inner.node_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
@@ -92,21 +99,28 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         req: Request<proto::ApplyVmDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         if let Some(frag) = inner.fragment {
             cache.observe_generation("vm", &inner.vm_id, &frag.generation);
-            cache.store_fragment("vm", &inner.vm_id, crate::cache::DesiredStateFragment {
-                id: frag.id,
-                kind: frag.kind,
-                generation: frag.generation,
-                spec_json: frag.spec_json,
-                policy_json: frag.policy_json,
-                updated_at: frag.updated_at,
-                updated_by: frag.updated_by,
-            });
+            cache.store_fragment(
+                "vm",
+                &inner.vm_id,
+                crate::cache::DesiredStateFragment {
+                    id: frag.id,
+                    kind: frag.kind,
+                    generation: frag.generation,
+                    spec_json: frag.spec_json,
+                    policy_json: frag.policy_json,
+                    updated_at: frag.updated_at,
+                    updated_by: frag.updated_by,
+                },
+            );
         }
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -131,45 +145,78 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         req: Request<proto::ApplyNetworkDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         if let Some(frag) = inner.fragment {
             cache.observe_generation("network", &inner.network_id, &frag.generation);
-            cache.store_fragment("network", &inner.network_id, crate::cache::DesiredStateFragment {
-                id: frag.id,
-                kind: frag.kind,
-                generation: frag.generation,
-                spec_json: frag.spec_json.clone(),
-                policy_json: frag.policy_json,
-                updated_at: frag.updated_at,
-                updated_by: frag.updated_by,
-            });
+            cache.store_fragment(
+                "network",
+                &inner.network_id,
+                crate::cache::DesiredStateFragment {
+                    id: frag.id,
+                    kind: frag.kind,
+                    generation: frag.generation,
+                    spec_json: frag.spec_json.clone(),
+                    policy_json: frag.policy_json,
+                    updated_at: frag.updated_at,
+                    updated_by: frag.updated_by,
+                },
+            );
 
-            let spec = serde_json::from_slice::<serde_json::Value>(&frag.spec_json).unwrap_or_default();
-            let bridge = spec.get("bridge_name").and_then(|v| v.as_str()).unwrap_or("br0");
-            let cidr = spec.get("subnet_cidr").and_then(|v| v.as_str()).unwrap_or("10.0.0.0/24");
+            let spec =
+                serde_json::from_slice::<serde_json::Value>(&frag.spec_json).unwrap_or_default();
+            let bridge = spec
+                .get("bridge_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("br0");
+            let cidr = spec
+                .get("subnet_cidr")
+                .and_then(|v| v.as_str())
+                .unwrap_or("10.0.0.0/24");
 
             let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
                 .await
                 .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
 
-            nwd.ensure_network_topology(&inner.network_id, bridge, cidr, Some(&meta.operation_id)
-            ).await.map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
+            nwd.ensure_network_topology(&inner.network_id, bridge, cidr, Some(&meta.operation_id))
+                .await
+                .map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
 
             if let Some(exposures) = spec.get("exposures").and_then(|v| v.as_array()) {
                 for exp in exposures {
-                    let eid = exp.get("exposure_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let proto_str = exp.get("protocol").and_then(|v| v.as_str()).unwrap_or("tcp");
-                    let ext_port = exp.get("external_port").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let eid = exp
+                        .get("exposure_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let proto_str = exp
+                        .get("protocol")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tcp");
+                    let ext_port = exp
+                        .get("external_port")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
                     let tip = exp.get("target_ip").and_then(|v| v.as_str()).unwrap_or("");
                     let tport = exp.get("target_port").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     let mode = exp.get("mode").and_then(|v| v.as_str()).unwrap_or("nat");
                     if !eid.is_empty() {
-                        let _ = nwd.expose_service(
-                            &inner.network_id, eid, proto_str, ext_port, tip, tport, mode, Some(&meta.operation_id)
-                        ).await;
+                        let _ = nwd
+                            .expose_service(
+                                &inner.network_id,
+                                eid,
+                                proto_str,
+                                ext_port,
+                                tip,
+                                tport,
+                                mode,
+                                Some(&meta.operation_id),
+                            )
+                            .await;
                     }
                 }
             }
@@ -189,7 +236,9 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         &self,
         _req: Request<proto::AcknowledgeDesiredStateVersionRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
-        Err(Status::unimplemented("acknowledge desired state in Phase 3"))
+        Err(Status::unimplemented(
+            "acknowledge desired state in Phase 3",
+        ))
     }
 }
 
@@ -200,17 +249,26 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::CreateVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let vm = inner.vm.as_ref().ok_or_else(|| Status::invalid_argument("missing vm"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let vm = inner
+            .vm
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing vm"))?;
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &vm.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        let node_state = cache.node_state.parse::<crate::state_machine::NodeState>()
+        let node_state = cache
+            .node_state
+            .parse::<crate::state_machine::NodeState>()
             .unwrap_or(crate::state_machine::NodeState::Bootstrapping);
         if node_state != crate::state_machine::NodeState::TenantReady {
-            return Err(Status::failed_precondition(
-                format!("node not schedulable: {}", cache.node_state)
-            ));
+            return Err(Status::failed_precondition(format!(
+                "node not schedulable: {}",
+                cache.node_state
+            )));
         }
         let config = VmConfig {
             vm_id: vm.vm_id.clone(),
@@ -218,10 +276,15 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             memory_bytes: 1024,
             kernel_path: std::path::PathBuf::from("/dev/null"),
             disk_paths: vec![],
-            api_socket_path: std::path::PathBuf::from(format!("/run/chv/agent/vm-{}.sock", vm.vm_id)),
+            api_socket_path: std::path::PathBuf::from(format!(
+                "/run/chv/agent/vm-{}.sock",
+                vm.vm_id
+            )),
         };
         let op_id = meta.operation_id.as_str();
-        self.vm_runtime.create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id)).await
+        self.vm_runtime
+            .create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id))
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -239,11 +302,16 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::StartVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        self.vm_runtime.start_vm(&inner.vm_id, Some(&meta.operation_id)).await
+        self.vm_runtime
+            .start_vm(&inner.vm_id, Some(&meta.operation_id))
+            .await
             .map_err(|e| Status::not_found(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -261,11 +329,16 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::StopVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        self.vm_runtime.stop_vm(&inner.vm_id, inner.force, Some(&meta.operation_id)).await
+        self.vm_runtime
+            .stop_vm(&inner.vm_id, inner.force, Some(&meta.operation_id))
+            .await
             .map_err(|e| Status::not_found(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -283,7 +356,10 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::RebootVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
@@ -295,11 +371,16 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::DeleteVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        self.vm_runtime.delete_vm(&inner.vm_id, Some(&meta.operation_id)).await
+        self.vm_runtime
+            .delete_vm(&inner.vm_id, Some(&meta.operation_id))
+            .await
             .map_err(|e| Status::not_found(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -317,31 +398,54 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::AttachVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let vol = inner.volume.as_ref().ok_or_else(|| Status::invalid_argument("missing volume"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let vol = inner
+            .volume
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing volume"))?;
         let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &vol.volume_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
 
-        let (backend_class, locator) = if let Ok(spec) = serde_json::from_slice::<serde_json::Value>(&vol.volume_spec_json) {
-            let bc = spec.get("backend_class").and_then(|v| v.as_str()).unwrap_or("local");
-            let loc = spec.get("locator").and_then(|v| v.as_str()).unwrap_or(&vol.volume_id);
-            (bc.to_string(), loc.to_string())
-        } else {
-            ("local".to_string(), vol.volume_id.clone())
-        };
+        let (backend_class, locator) =
+            if let Ok(spec) = serde_json::from_slice::<serde_json::Value>(&vol.volume_spec_json) {
+                let bc = spec
+                    .get("backend_class")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local");
+                let loc = spec
+                    .get("locator")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&vol.volume_id);
+                (bc.to_string(), loc.to_string())
+            } else {
+                ("local".to_string(), vol.volume_id.clone())
+            };
 
         let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
             .await
             .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
 
         let (_, handle, _) = stord
-            .open_volume(&vol.volume_id, &backend_class, &locator, Some(&meta.operation_id))
+            .open_volume(
+                &vol.volume_id,
+                &backend_class,
+                &locator,
+                Some(&meta.operation_id),
+            )
             .await
             .map_err(|e| Status::internal(format!("open_volume failed: {}", e)))?;
 
         stord
-            .attach_volume_to_vm(&vol.volume_id, &vol.vm_id, &handle, Some(&meta.operation_id))
+            .attach_volume_to_vm(
+                &vol.volume_id,
+                &vol.vm_id,
+                &handle,
+                Some(&meta.operation_id),
+            )
             .await
             .map_err(|e| Status::internal(format!("attach_volume_to_vm failed: {}", e)))?;
 
@@ -363,7 +467,10 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::DetachVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
-        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
@@ -373,7 +480,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
 
         stord
-            .detach_volume_from_vm(&inner.volume_id, &inner.vm_id, inner.force, Some(&meta.operation_id))
+            .detach_volume_from_vm(
+                &inner.volume_id,
+                &inner.vm_id,
+                inner.force,
+                Some(&meta.operation_id),
+            )
             .await
             .map_err(|e| Status::internal(format!("detach_volume_from_vm failed: {}", e)))?;
 
@@ -445,7 +557,9 @@ mod tests {
 
     fn test_server() -> AgentServer {
         let mut cache = NodeCache::new("node-1");
-        cache.node_state = crate::state_machine::NodeState::TenantReady.as_str().to_string();
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
         AgentServer::new(
             cache,
             VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
@@ -482,8 +596,10 @@ mod tests {
             }),
         };
         let resp = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
-            &server, Request::new(req)
-        ).await;
+            &server,
+            Request::new(req),
+        )
+        .await;
         assert!(resp.is_ok());
         let cache = server.cache.lock().await;
         assert_eq!(cache.get_generation("vm", "vm-1"), Some(&"5".to_string()));
@@ -502,8 +618,10 @@ mod tests {
             }),
         };
         let resp = proto::lifecycle_service_server::LifecycleService::create_vm(
-            &server, Request::new(create_req)
-        ).await;
+            &server,
+            Request::new(create_req),
+        )
+        .await;
         assert!(resp.is_ok());
 
         let start_req = proto::StartVmRequest {
@@ -512,10 +630,15 @@ mod tests {
             vm_id: "vm-1".to_string(),
         };
         let resp = proto::lifecycle_service_server::LifecycleService::start_vm(
-            &server, Request::new(start_req)
-        ).await;
+            &server,
+            Request::new(start_req),
+        )
+        .await;
         assert!(resp.is_ok());
-        assert_eq!(server.vm_runtime.get("vm-1").unwrap().runtime_status, "Running");
+        assert_eq!(
+            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            "Running"
+        );
 
         let stop_req = proto::StopVmRequest {
             meta: Some(test_meta("1")),
@@ -524,10 +647,15 @@ mod tests {
             force: false,
         };
         let resp = proto::lifecycle_service_server::LifecycleService::stop_vm(
-            &server, Request::new(stop_req)
-        ).await;
+            &server,
+            Request::new(stop_req),
+        )
+        .await;
         assert!(resp.is_ok());
-        assert_eq!(server.vm_runtime.get("vm-1").unwrap().runtime_status, "Stopped");
+        assert_eq!(
+            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            "Stopped"
+        );
 
         let delete_req = proto::DeleteVmRequest {
             meta: Some(test_meta("1")),
@@ -536,8 +664,10 @@ mod tests {
             force: false,
         };
         let resp = proto::lifecycle_service_server::LifecycleService::delete_vm(
-            &server, Request::new(delete_req)
-        ).await;
+            &server,
+            Request::new(delete_req),
+        )
+        .await;
         assert!(resp.is_ok());
         assert!(server.vm_runtime.get("vm-1").is_none());
     }
@@ -554,9 +684,9 @@ mod tests {
             node_id: "node-1".to_string(),
             vm_id: "vm-1".to_string(),
         };
-        let resp = proto::lifecycle_service_server::LifecycleService::start_vm(
-            &server, Request::new(req)
-        ).await;
+        let resp =
+            proto::lifecycle_service_server::LifecycleService::start_vm(&server, Request::new(req))
+                .await;
         assert_eq!(resp.unwrap_err().code(), tonic::Code::FailedPrecondition);
     }
 }

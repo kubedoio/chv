@@ -17,7 +17,10 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
         config: &VmConfig,
         _operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
-        self.vms.lock().unwrap().insert(config.vm_id.clone(), config.clone());
+        self.vms
+            .lock()
+            .unwrap()
+            .insert(config.vm_id.clone(), config.clone());
         Ok(config.vm_id.clone())
     }
 

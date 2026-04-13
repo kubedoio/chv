@@ -16,11 +16,12 @@ impl ControlPlaneClient {
         ca_cert_path: Option<&std::path::Path>,
     ) -> Result<Self, ChvError> {
         let endpoint = endpoint.into();
-        let mut endpoint = tonic::transport::Endpoint::try_from(endpoint)
-            .map_err(|e| ChvError::InvalidArgument {
+        let mut endpoint = tonic::transport::Endpoint::try_from(endpoint).map_err(|e| {
+            ChvError::InvalidArgument {
                 field: "control_plane_addr".to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         if let (Some(cert), Some(key)) = (tls_cert_path, tls_key_path) {
             let cert_pem = tokio::fs::read(cert).await.map_err(|e| ChvError::Io {
@@ -40,10 +41,12 @@ impl ControlPlaneClient {
                 })?;
                 tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
             }
-            endpoint = endpoint.tls_config(tls).map_err(|e| ChvError::InvalidArgument {
-                field: "tls_config".to_string(),
-                reason: e.to_string(),
-            })?;
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| ChvError::InvalidArgument {
+                    field: "tls_config".to_string(),
+                    reason: e.to_string(),
+                })?;
         }
 
         let channel = endpoint
@@ -53,7 +56,9 @@ impl ControlPlaneClient {
                 reason: e.to_string(),
             })?;
         Ok(Self {
-            reconcile: proto::reconcile_service_client::ReconcileServiceClient::new(channel.clone()),
+            reconcile: proto::reconcile_service_client::ReconcileServiceClient::new(
+                channel.clone(),
+            ),
             telemetry: proto::telemetry_service_client::TelemetryServiceClient::new(channel),
         })
     }
@@ -66,10 +71,7 @@ impl ControlPlaneClient {
     ) -> Result<(), ChvError> {
         let incoming = &meta.desired_state_version;
         if cache.is_stale(kind, id, incoming) {
-            let current = cache
-                .get_generation(kind, id)
-                .cloned()
-                .unwrap_or_default();
+            let current = cache.get_generation(kind, id).cloned().unwrap_or_default();
             return Err(ChvError::StaleGeneration {
                 resource: kind.to_string(),
                 id: id.to_string(),
@@ -185,6 +187,9 @@ mod tests {
         };
 
         let result = ControlPlaneClient::stale_generation_check(&meta, &cache, "node", "node-1");
-        assert!(result.is_ok(), "non-numeric generations should not be treated as stale");
+        assert!(
+            result.is_ok(),
+            "non-numeric generations should not be treated as stale"
+        );
     }
 }

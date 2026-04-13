@@ -21,7 +21,12 @@ pub enum ChvError {
     Conflict { resource: String, id: String },
 
     #[error("stale generation: {resource} {id} — expected >= {expected}, got {got}")]
-    StaleGeneration { resource: String, id: String, expected: String, got: String },
+    StaleGeneration {
+        resource: String,
+        id: String,
+        expected: String,
+        got: String,
+    },
 
     #[error("control plane unavailable: {reason}")]
     ControlPlaneUnavailable { reason: String },

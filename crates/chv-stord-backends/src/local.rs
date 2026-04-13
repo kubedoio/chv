@@ -77,10 +77,12 @@ impl LocalFileBackend {
         let dest = self
             .runtime_dir
             .join(format!("{}-{}.img", volume_id, dest_name));
-        tokio::fs::copy(&path, &dest).await.map_err(|e| ChvError::BackendUnavailable {
-            backend: "local".to_string(),
-            reason: format!("failed to copy file for {}: {}", op_label, e),
-        })?;
+        tokio::fs::copy(&path, &dest)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("failed to copy file for {}: {}", op_label, e),
+            })?;
 
         info!(
             volume_id,
@@ -272,18 +274,18 @@ impl StorageBackend for LocalFileBackend {
             });
         }
 
-        let file = std::fs::File::options().write(true).open(&path).map_err(|e| {
-            ChvError::BackendUnavailable {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .map_err(|e| ChvError::BackendUnavailable {
                 backend: "local".to_string(),
                 reason: format!("failed to open file for resize: {}", e),
-            }
-        })?;
-        file.set_len(new_size_bytes).map_err(|e| {
-            ChvError::BackendUnavailable {
+            })?;
+        file.set_len(new_size_bytes)
+            .map_err(|e| ChvError::BackendUnavailable {
                 backend: "local".to_string(),
                 reason: format!("failed to resize file: {}", e),
-            }
-        })?;
+            })?;
 
         info!(
             volume_id,
@@ -343,8 +345,7 @@ impl StorageBackend for LocalFileBackend {
 
         info!(
             volume_id,
-            handle,
-            "device policy accepted but not enforced by LocalFileBackend"
+            handle, "device policy accepted but not enforced by LocalFileBackend"
         );
         Ok(())
     }
@@ -365,7 +366,10 @@ mod tests {
             options: Default::default(),
         };
 
-        let export = backend.open("vol-1", &locator, &DevicePolicy::default()).await.unwrap();
+        let export = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
         assert_eq!(export.export_kind, "raw");
         assert!(export.export_path.ends_with("test.img"));
     }
@@ -380,8 +384,14 @@ mod tests {
             options: Default::default(),
         };
 
-        let e1 = backend.open("vol-1", &locator, &DevicePolicy::default()).await.unwrap();
-        let e2 = backend.open("vol-1", &locator, &DevicePolicy::default()).await.unwrap();
+        let e1 = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
+        let e2 = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
         assert_eq!(e1.attachment_handle, e2.attachment_handle);
     }
 
@@ -402,7 +412,10 @@ mod tests {
             options: Default::default(),
         };
 
-        let export = backend.open("vol-1", &locator, &DevicePolicy::default()).await.unwrap();
+        let export = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
         assert_eq!(export.export_kind, "qcow2");
     }
 
@@ -416,7 +429,9 @@ mod tests {
             options: Default::default(),
         };
 
-        let res = backend.open("vol-1", &locator, &DevicePolicy::default()).await;
+        let res = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await;
         assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 
@@ -449,7 +464,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
 
-        let res = backend.detach("vol-1", "local-vol-1-vol.img", "vm-1", false).await;
+        let res = backend
+            .detach("vol-1", "local-vol-1-vol.img", "vm-1", false)
+            .await;
         assert!(res.is_ok());
     }
 
@@ -458,7 +475,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
 
-        let res = backend.detach("vol-1", "local-vol-1-vol.img", "vm-1", true).await;
+        let res = backend
+            .detach("vol-1", "local-vol-1-vol.img", "vm-1", true)
+            .await;
         assert!(res.is_ok());
     }
 
@@ -534,7 +553,10 @@ mod tests {
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let handle = "local-vol-1-vol.img";
-        backend.prepare_snapshot("vol-1", handle, "snap1").await.unwrap();
+        backend
+            .prepare_snapshot("vol-1", handle, "snap1")
+            .await
+            .unwrap();
 
         let dest = dir.path().join("vol-1-snap1.img");
         assert!(dest.exists());
@@ -552,7 +574,10 @@ mod tests {
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let handle = "local-vol-1-vol.img";
-        backend.prepare_clone("vol-1", handle, "clone1").await.unwrap();
+        backend
+            .prepare_clone("vol-1", handle, "clone1")
+            .await
+            .unwrap();
 
         let dest = dir.path().join("vol-1-clone1.img");
         assert!(dest.exists());
@@ -563,7 +588,9 @@ mod tests {
     async fn local_backend_prepare_snapshot_missing_file_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
-        let res = backend.prepare_snapshot("vol-1", "local-vol-1-vol.img", "snap1").await;
+        let res = backend
+            .prepare_snapshot("vol-1", "local-vol-1-vol.img", "snap1")
+            .await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
 
@@ -571,7 +598,9 @@ mod tests {
     async fn local_backend_prepare_snapshot_invalid_handle() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
-        let res = backend.prepare_snapshot("vol-1", "iscsi-vol-1-target", "snap1").await;
+        let res = backend
+            .prepare_snapshot("vol-1", "iscsi-vol-1-target", "snap1")
+            .await;
         assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 
@@ -579,7 +608,9 @@ mod tests {
     async fn local_backend_prepare_clone_missing_file_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
-        let res = backend.prepare_clone("vol-1", "local-vol-1-vol.img", "clone1").await;
+        let res = backend
+            .prepare_clone("vol-1", "local-vol-1-vol.img", "clone1")
+            .await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
 
@@ -594,7 +625,9 @@ mod tests {
         }
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
-        let res = backend.prepare_clone("vol-1", "local-vol-1-vol.qcow2", "clone1").await;
+        let res = backend
+            .prepare_clone("vol-1", "local-vol-1-vol.qcow2", "clone1")
+            .await;
         assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
     }
 }

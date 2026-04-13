@@ -42,14 +42,11 @@ impl SessionTable {
             .map(|r| r.clone())
     }
 
-    pub fn find_by_volume_and_path(
-        &self,
-        volume_id: &str,
-        path: &str,
-    ) -> Option<Session> {
-        self.inner.iter().find(|r| {
-            r.value().volume_id == volume_id && r.value().export_path == path
-        }).map(|r| r.clone())
+    pub fn find_by_volume_and_path(&self, volume_id: &str, path: &str) -> Option<Session> {
+        self.inner
+            .iter()
+            .find(|r| r.value().volume_id == volume_id && r.value().export_path == path)
+            .map(|r| r.clone())
     }
 
     pub fn list(&self) -> Vec<Session> {
@@ -63,8 +60,9 @@ impl SessionTable {
         vm_id: Option<String>,
         runtime_status: String,
     ) -> bool {
-        if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
-            self.inner.entry((volume_id.to_string(), handle.to_string()))
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) = self
+            .inner
+            .entry((volume_id.to_string(), handle.to_string()))
         {
             let session = entry.get_mut();
             session.vm_id = vm_id;
@@ -131,15 +129,24 @@ mod tests {
         let mut s = dummy_session("vol-1", "h1");
         s.export_path = "/data/vol-1.img".to_string();
         table.upsert(s);
-        assert!(table.find_by_volume_and_path("vol-1", "/data/vol-1.img").is_some());
-        assert!(table.find_by_volume_and_path("vol-1", "/data/other.img").is_none());
+        assert!(table
+            .find_by_volume_and_path("vol-1", "/data/vol-1.img")
+            .is_some());
+        assert!(table
+            .find_by_volume_and_path("vol-1", "/data/other.img")
+            .is_none());
     }
 
     #[test]
     fn session_update_vm_id() {
         let table = SessionTable::new();
         table.upsert(dummy_session("vol-1", "h1"));
-        let updated = table.update_vm_id("vol-1", "h1", Some("vm-123".to_string()), "attached".to_string());
+        let updated = table.update_vm_id(
+            "vol-1",
+            "h1",
+            Some("vm-123".to_string()),
+            "attached".to_string(),
+        );
         assert!(updated);
         let got = table.get("vol-1", "h1").unwrap();
         assert_eq!(got.vm_id, Some("vm-123".to_string()));
@@ -149,7 +156,12 @@ mod tests {
     #[test]
     fn session_update_vm_id_missing_is_noop() {
         let table = SessionTable::new();
-        let updated = table.update_vm_id("vol-1", "h1", Some("vm-123".to_string()), "attached".to_string());
+        let updated = table.update_vm_id(
+            "vol-1",
+            "h1",
+            Some("vm-123".to_string()),
+            "attached".to_string(),
+        );
         assert!(!updated);
         assert!(table.get("vol-1", "h1").is_none());
     }

@@ -23,7 +23,10 @@ impl LVMBackend {
                 reason: "empty id".to_string(),
             });
         }
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        {
             return Err(ChvError::InvalidArgument {
                 field: "id".to_string(),
                 reason: format!("invalid id: {}", id),
@@ -34,7 +37,10 @@ impl LVMBackend {
 
     fn volume_path(&self, volume_id: &str) -> Result<PathBuf, ChvError> {
         Self::sanitize_id(volume_id)?;
-        Ok(PathBuf::from(format!("/dev/{}/{}", self.vg_name, volume_id)))
+        Ok(PathBuf::from(format!(
+            "/dev/{}/{}",
+            self.vg_name, volume_id
+        )))
     }
 
     fn validate_handle(&self, handle: &str) -> Result<(), ChvError> {
@@ -57,7 +63,12 @@ impl LVMBackend {
 
 #[async_trait]
 impl StorageBackend for LVMBackend {
-    async fn open(&self, volume_id: &str, locator: &BackendLocator, _policy: &DevicePolicy) -> Result<VolumeExport, ChvError> {
+    async fn open(
+        &self,
+        volume_id: &str,
+        locator: &BackendLocator,
+        _policy: &DevicePolicy,
+    ) -> Result<VolumeExport, ChvError> {
         if locator.backend_class != "lvm" {
             return Err(ChvError::BackendUnavailable {
                 backend: locator.backend_class.clone(),
@@ -85,7 +96,12 @@ impl StorageBackend for LVMBackend {
         Ok(())
     }
 
-    async fn attach(&self, volume_id: &str, handle: &str, vm_id: &str) -> Result<VolumeExport, ChvError> {
+    async fn attach(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        vm_id: &str,
+    ) -> Result<VolumeExport, ChvError> {
         self.validate_handle(handle)?;
         if handle != self.expected_handle(volume_id) {
             return Err(ChvError::InvalidArgument {
@@ -102,7 +118,13 @@ impl StorageBackend for LVMBackend {
         })
     }
 
-    async fn detach(&self, volume_id: &str, _handle: &str, vm_id: &str, force: bool) -> Result<(), ChvError> {
+    async fn detach(
+        &self,
+        volume_id: &str,
+        _handle: &str,
+        vm_id: &str,
+        force: bool,
+    ) -> Result<(), ChvError> {
         if force {
             warn!(volume_id, vm_id, "force detaching LVM volume");
         } else {
@@ -115,11 +137,24 @@ impl StorageBackend for LVMBackend {
         let path = self.volume_path(volume_id)?;
         let exists = path.exists();
         let status = if exists { "healthy" } else { "unhealthy" };
-        let last_error = if exists { String::new() } else { format!("path does not exist: {}", path.display()) };
-        Ok(BackendHealth { status: status.to_string(), backend_state: "open".to_string(), last_error })
+        let last_error = if exists {
+            String::new()
+        } else {
+            format!("path does not exist: {}", path.display())
+        };
+        Ok(BackendHealth {
+            status: status.to_string(),
+            backend_state: "open".to_string(),
+            last_error,
+        })
     }
 
-    async fn resize(&self, volume_id: &str, handle: &str, new_size_bytes: u64) -> Result<(), ChvError> {
+    async fn resize(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        new_size_bytes: u64,
+    ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         if handle != self.expected_handle(volume_id) {
             return Err(ChvError::InvalidArgument {
@@ -129,22 +164,36 @@ impl StorageBackend for LVMBackend {
         }
         let path = self.volume_path(volume_id)?;
         if !path.exists() {
-            return Err(ChvError::NotFound { resource: "path".to_string(), id: path.to_string_lossy().to_string() });
+            return Err(ChvError::NotFound {
+                resource: "path".to_string(),
+                id: path.to_string_lossy().to_string(),
+            });
         }
         let size_mb = new_size_bytes.div_ceil(1024 * 1024).max(1);
         let out = Command::new("lvresize")
             .args(["-L", &format!("{}M", size_mb), &path.to_string_lossy()])
             .output()
             .await
-            .map_err(|e| ChvError::Io { path: "lvresize".to_string(), source: e })?;
+            .map_err(|e| ChvError::Io {
+                path: "lvresize".to_string(),
+                source: e,
+            })?;
         if !out.status.success() {
-            return Err(ChvError::BackendUnavailable { backend: "lvm".to_string(), reason: format!("lvresize failed: {}", String::from_utf8_lossy(&out.stderr)) });
+            return Err(ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!("lvresize failed: {}", String::from_utf8_lossy(&out.stderr)),
+            });
         }
         info!(volume_id, new_size_bytes, "resized LVM volume");
         Ok(())
     }
 
-    async fn prepare_snapshot(&self, volume_id: &str, handle: &str, snapshot_name: &str) -> Result<(), ChvError> {
+    async fn prepare_snapshot(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        snapshot_name: &str,
+    ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         if handle != self.expected_handle(volume_id) {
             return Err(ChvError::InvalidArgument {
@@ -156,18 +205,36 @@ impl StorageBackend for LVMBackend {
         let origin = self.volume_path(volume_id)?;
         let snap = format!("{}-snap-{}", volume_id, snapshot_name);
         let out = Command::new("lvcreate")
-            .args(["-s", "-n", &snap, "-l", "100%FREE", &origin.to_string_lossy()])
+            .args([
+                "-s",
+                "-n",
+                &snap,
+                "-l",
+                "100%FREE",
+                &origin.to_string_lossy(),
+            ])
             .output()
             .await
-            .map_err(|e| ChvError::Io { path: "lvcreate".to_string(), source: e })?;
+            .map_err(|e| ChvError::Io {
+                path: "lvcreate".to_string(),
+                source: e,
+            })?;
         if !out.status.success() {
-            return Err(ChvError::BackendUnavailable { backend: "lvm".to_string(), reason: format!("lvcreate failed: {}", String::from_utf8_lossy(&out.stderr)) });
+            return Err(ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!("lvcreate failed: {}", String::from_utf8_lossy(&out.stderr)),
+            });
         }
         info!(volume_id, snapshot_name, "prepared LVM snapshot");
         Ok(())
     }
 
-    async fn prepare_clone(&self, volume_id: &str, handle: &str, clone_name: &str) -> Result<(), ChvError> {
+    async fn prepare_clone(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        clone_name: &str,
+    ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         if handle != self.expected_handle(volume_id) {
             return Err(ChvError::InvalidArgument {
@@ -179,18 +246,36 @@ impl StorageBackend for LVMBackend {
         let origin = self.volume_path(volume_id)?;
         let clone_lv = format!("{}-clone-{}", volume_id, clone_name);
         let out = Command::new("lvcreate")
-            .args(["-s", "-n", &clone_lv, "-l", "100%FREE", &origin.to_string_lossy()])
+            .args([
+                "-s",
+                "-n",
+                &clone_lv,
+                "-l",
+                "100%FREE",
+                &origin.to_string_lossy(),
+            ])
             .output()
             .await
-            .map_err(|e| ChvError::Io { path: "lvcreate".to_string(), source: e })?;
+            .map_err(|e| ChvError::Io {
+                path: "lvcreate".to_string(),
+                source: e,
+            })?;
         if !out.status.success() {
-            return Err(ChvError::BackendUnavailable { backend: "lvm".to_string(), reason: format!("lvcreate failed: {}", String::from_utf8_lossy(&out.stderr)) });
+            return Err(ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!("lvcreate failed: {}", String::from_utf8_lossy(&out.stderr)),
+            });
         }
         info!(volume_id, clone_name, "prepared LVM clone");
         Ok(())
     }
 
-    async fn set_device_policy(&self, volume_id: &str, handle: &str, _policy: &DevicePolicy) -> Result<(), ChvError> {
+    async fn set_device_policy(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        _policy: &DevicePolicy,
+    ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         if handle != self.expected_handle(volume_id) {
             return Err(ChvError::InvalidArgument {
@@ -198,7 +283,10 @@ impl StorageBackend for LVMBackend {
                 reason: format!("handle {} does not match volume_id {}", handle, volume_id),
             });
         }
-        warn!(volume_id, "device policy ignored by LVMBackend (not yet implemented)");
+        warn!(
+            volume_id,
+            "device policy ignored by LVMBackend (not yet implemented)"
+        );
         Ok(())
     }
 }
@@ -210,16 +298,29 @@ mod tests {
     #[tokio::test]
     async fn lvm_backend_open_rejects_wrong_class() {
         let backend = LVMBackend::new("vg0".to_string()).unwrap();
-        let locator = BackendLocator { backend_class: "local".to_string(), locator: "/dev/vg0/vol1".to_string(), options: Default::default() };
-        let res = backend.open("vol-1", &locator, &DevicePolicy::default()).await;
+        let locator = BackendLocator {
+            backend_class: "local".to_string(),
+            locator: "/dev/vg0/vol1".to_string(),
+            options: Default::default(),
+        };
+        let res = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await;
         assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 
     #[tokio::test]
     async fn lvm_backend_open_returns_lvm_path() {
         let backend = LVMBackend::new("vg0".to_string()).unwrap();
-        let locator = BackendLocator { backend_class: "lvm".to_string(), locator: "vg0/vol1".to_string(), options: Default::default() };
-        let export = backend.open("vol-1", &locator, &DevicePolicy::default()).await.unwrap();
+        let locator = BackendLocator {
+            backend_class: "lvm".to_string(),
+            locator: "vg0/vol1".to_string(),
+            options: Default::default(),
+        };
+        let export = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
         assert_eq!(export.export_kind, "lvm");
         assert!(export.export_path.contains("/dev/vg0/vol-1"));
     }
@@ -227,7 +328,10 @@ mod tests {
     #[tokio::test]
     async fn lvm_backend_attach_valid_handle() {
         let backend = LVMBackend::new("vg0".to_string()).unwrap();
-        let export = backend.attach("vol-1", "lvm-vg0-vol-1", "vm-1").await.unwrap();
+        let export = backend
+            .attach("vol-1", "lvm-vg0-vol-1", "vm-1")
+            .await
+            .unwrap();
         assert_eq!(export.export_kind, "lvm");
         assert_eq!(export.export_path, "/dev/vg0/vol-1");
         assert_eq!(export.attachment_handle, "lvm-vg0-vol-1");
@@ -281,7 +385,10 @@ mod tests {
     #[tokio::test]
     async fn lvm_backend_health_path_not_exists() {
         let backend = LVMBackend::new("vg0".to_string()).unwrap();
-        let health = backend.health("nonexistent-vol-99999", "lvm-vg0-nonexistent-vol-99999").await.unwrap();
+        let health = backend
+            .health("nonexistent-vol-99999", "lvm-vg0-nonexistent-vol-99999")
+            .await
+            .unwrap();
         assert_eq!(health.status, "unhealthy");
         assert!(health.last_error.contains("path does not exist"));
     }
@@ -289,14 +396,18 @@ mod tests {
     #[tokio::test]
     async fn lvm_backend_set_device_policy_returns_ok() {
         let backend = LVMBackend::new("vg0".to_string()).unwrap();
-        let res = backend.set_device_policy("vol-1", "lvm-vg0-vol-1", &DevicePolicy::default()).await;
+        let res = backend
+            .set_device_policy("vol-1", "lvm-vg0-vol-1", &DevicePolicy::default())
+            .await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
     async fn lvm_backend_set_device_policy_rejects_invalid_handle() {
         let backend = LVMBackend::new("vg0".to_string()).unwrap();
-        let res = backend.set_device_policy("vol-1", "lvm-other-vg0-vol-1", &DevicePolicy::default()).await;
+        let res = backend
+            .set_device_policy("vol-1", "lvm-other-vg0-vol-1", &DevicePolicy::default())
+            .await;
         assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
     }
 

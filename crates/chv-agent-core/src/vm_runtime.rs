@@ -55,11 +55,7 @@ impl VmRuntime {
         Ok(())
     }
 
-    pub async fn start_vm(
-        &self,
-        vm_id: &str,
-        operation_id: Option<&str>,
-    ) -> Result<(), ChvError> {
+    pub async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.start_vm(vm_id, operation_id).await?;
         let mut map = self.vms.lock().unwrap();
         let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
@@ -123,7 +119,9 @@ mod tests {
             disk_paths: vec![],
             api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
         };
-        rt.create_vm("vm-1", "5", &config, Some("op-1")).await.unwrap();
+        rt.create_vm("vm-1", "5", &config, Some("op-1"))
+            .await
+            .unwrap();
         let rec = rt.get("vm-1").unwrap();
         assert_eq!(rec.observed_generation, "5");
         assert_eq!(rec.runtime_status, "Created");
@@ -141,7 +139,9 @@ mod tests {
             disk_paths: vec![],
             api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
         };
-        rt.create_vm("vm-1", "5", &config, Some("op-1")).await.unwrap();
+        rt.create_vm("vm-1", "5", &config, Some("op-1"))
+            .await
+            .unwrap();
         rt.start_vm("vm-1", Some("op-2")).await.unwrap();
         assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Running");
         rt.stop_vm("vm-1", false, Some("op-3")).await.unwrap();
@@ -159,7 +159,9 @@ mod tests {
             disk_paths: vec![],
             api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
         };
-        rt.create_vm("vm-1", "5", &config, Some("op-1")).await.unwrap();
+        rt.create_vm("vm-1", "5", &config, Some("op-1"))
+            .await
+            .unwrap();
         rt.delete_vm("vm-1", Some("op-4")).await.unwrap();
         assert!(rt.get("vm-1").is_none());
     }

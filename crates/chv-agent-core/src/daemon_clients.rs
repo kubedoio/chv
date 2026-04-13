@@ -1,13 +1,11 @@
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{
-    network_service_client::NetworkServiceClient, AttachVmNicRequest,
-    EnsureNetworkTopologyRequest, ExposeServiceRequest, ListNamespaceStateRequest,
-    WithdrawServiceExposureRequest,
+    network_service_client::NetworkServiceClient, AttachVmNicRequest, EnsureNetworkTopologyRequest,
+    ExposeServiceRequest, ListNamespaceStateRequest, WithdrawServiceExposureRequest,
 };
 use chv_stord_api::chv_stord_api::{
-    storage_service_client::StorageServiceClient, AttachVolumeToVmRequest,
-    CloseVolumeRequest, DetachVolumeFromVmRequest, ListVolumeSessionsRequest,
-    OpenVolumeRequest,
+    storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
+    DetachVolumeFromVmRequest, ListVolumeSessionsRequest, OpenVolumeRequest,
 };
 use std::path::Path;
 use tokio::net::UnixStream;
@@ -90,11 +88,7 @@ impl StordClient {
                 reason: e.to_string(),
             })?
             .into_inner();
-        Ok((
-            resp.volume_id,
-            resp.attachment_handle,
-            resp.export_path,
-        ))
+        Ok((resp.volume_id, resp.attachment_handle, resp.export_path))
     }
 
     pub async fn attach_volume_to_vm(
@@ -252,13 +246,12 @@ impl NwdClient {
                 options: std::collections::HashMap::new(),
             }),
         };
-        self.inner
-            .ensure_network_topology(req)
-            .await
-            .map_err(|e| ChvError::NetworkUnavailable {
+        self.inner.ensure_network_topology(req).await.map_err(|e| {
+            ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
         Ok(())
     }
 
@@ -300,6 +293,7 @@ impl NwdClient {
         Ok((resp.namespace_handle, resp.tap_handle))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn expose_service(
         &mut self,
         network_id: &str,
@@ -381,11 +375,10 @@ mod tests {
         async fn list_volume_sessions(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::ListVolumeSessionsRequest>,
-        ) -> Result<Response<chv_stord_api::chv_stord_api::ListVolumeSessionsResponse>, Status> {
+        ) -> Result<Response<chv_stord_api::chv_stord_api::ListVolumeSessionsResponse>, Status>
+        {
             Ok(Response::new(
-                chv_stord_api::chv_stord_api::ListVolumeSessionsResponse {
-                    sessions: vec![],
-                },
+                chv_stord_api::chv_stord_api::ListVolumeSessionsResponse { sessions: vec![] },
             ))
         }
         // Stub remaining methods
@@ -410,7 +403,8 @@ mod tests {
         async fn attach_volume_to_vm(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::AttachVolumeToVmRequest>,
-        ) -> Result<Response<chv_stord_api::chv_stord_api::AttachVolumeToVmResponse>, Status> {
+        ) -> Result<Response<chv_stord_api::chv_stord_api::AttachVolumeToVmResponse>, Status>
+        {
             Err(Status::unimplemented(""))
         }
         async fn detach_volume_from_vm(
@@ -451,7 +445,8 @@ mod tests {
         async fn list_namespace_state(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::ListNamespaceStateRequest>,
-        ) -> Result<Response<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse>, Status> {
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse>, Status>
+        {
             Ok(Response::new(
                 chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse { items: vec![] },
             ))
@@ -533,7 +528,11 @@ mod tests {
         let uds = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(MockStord))
+                .add_service(
+                    chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                        MockStord,
+                    ),
+                )
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
                 .await
                 .ok();
@@ -552,7 +551,11 @@ mod tests {
         let uds = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(MockNwd))
+                .add_service(
+                    chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                        MockNwd,
+                    ),
+                )
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
                 .await
                 .ok();

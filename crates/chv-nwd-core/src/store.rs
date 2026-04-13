@@ -11,7 +11,7 @@ impl TopologyStore {
     pub fn new(db_path: &Path) -> Result<Self, ChvError> {
         let conn = Connection::open(db_path).map_err(|e| ChvError::Io {
             path: db_path.to_string_lossy().to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e),
+            source: std::io::Error::other(e),
         })?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS topologies (

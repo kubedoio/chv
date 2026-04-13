@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Child;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::adapter::{CloudHypervisorAdapter, VmConfig};
@@ -52,15 +52,14 @@ impl ProcessCloudHypervisorAdapter {
         path: &str,
         body: Option<&str>,
     ) -> Result<u16, ChvError> {
-        let mut stream = UnixStream::connect(socket).await.map_err(|e| ChvError::Io {
-            path: socket.to_string_lossy().to_string(),
-            source: e,
-        })?;
+        let mut stream = UnixStream::connect(socket)
+            .await
+            .map_err(|e| ChvError::Io {
+                path: socket.to_string_lossy().to_string(),
+                source: e,
+            })?;
 
-        let mut request = format!(
-            "{} {} HTTP/1.1\r\nHost: localhost\r\n",
-            method, path
-        );
+        let mut request = format!("{} {} HTTP/1.1\r\nHost: localhost\r\n", method, path);
         if let Some(b) = body {
             request.push_str(&format!("Content-Length: {}\r\n", b.len()));
             request.push_str("Content-Type: application/json\r\n");
@@ -71,10 +70,13 @@ impl ProcessCloudHypervisorAdapter {
             request.push_str("\r\n");
         }
 
-        stream.write_all(request.as_bytes()).await.map_err(|e| ChvError::Io {
-            path: socket.to_string_lossy().to_string(),
-            source: e,
-        })?;
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| ChvError::Io {
+                path: socket.to_string_lossy().to_string(),
+                source: e,
+            })?;
 
         let mut buf = [0u8; 1024];
         let n = stream.read(&mut buf).await.map_err(|e| ChvError::Io {
@@ -85,7 +87,10 @@ impl ProcessCloudHypervisorAdapter {
         let response = String::from_utf8_lossy(&buf[..n]);
         let status_line = response.lines().next().unwrap_or("");
         let parts: Vec<&str> = status_line.split_whitespace().collect();
-        let status_code = parts.get(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+        let status_code = parts
+            .get(1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
         Ok(status_code)
     }
 }
@@ -100,7 +105,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
         cmd.arg("--api-socket").arg(&config.api_socket_path);
         cmd.arg("--cpus").arg(format!("boot={}", config.cpus));
-        cmd.arg("--memory").arg(format!("size={}", config.memory_bytes));
+        cmd.arg("--memory")
+            .arg(format!("size={}", config.memory_bytes));
         cmd.arg("--kernel").arg(&config.kernel_path);
         for disk in &config.disk_paths {
             cmd.arg("--disk").arg(format!("path={}", disk.display()));
@@ -143,7 +149,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "booting vm via ch api");
 
         // Auto-boot via CLI means VM is already running; send boot API for completeness.
-        let status = Self::ch_api_request(&proc.api_socket, "PUT", "/api/v1/vmm.boot", None).await?;
+        let status =
+            Self::ch_api_request(&proc.api_socket, "PUT", "/api/v1/vmm.boot", None).await?;
         if status != 200 && status != 204 {
             warn!(status = status, "unexpected status from vmm.boot");
         }
@@ -170,7 +177,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             let status =
                 Self::ch_api_request(&proc.api_socket, "PUT", "/api/v1/vmm.shutdown", None).await?;
             if status != 200 && status != 204 {
-                warn!(status = status, "graceful shutdown failed, falling back to kill");
+                warn!(
+                    status = status,
+                    "graceful shutdown failed, falling back to kill"
+                );
                 let _ = proc.child.start_kill();
             }
         }
