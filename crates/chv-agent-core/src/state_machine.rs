@@ -153,4 +153,11 @@ mod tests {
         let mut sm = StateMachine::new(NodeState::TenantReady);
         assert!(sm.transition(NodeState::TenantReady).is_ok());
     }
+
+    #[test]
+    fn degraded_to_failed_transition() {
+        let mut sm = StateMachine::new(NodeState::Degraded);
+        assert!(sm.transition(NodeState::Failed).is_ok());
+        assert_eq!(sm.current(), NodeState::Failed);
+    }
 }

@@ -6,6 +6,7 @@ use tonic::transport::Channel;
 pub struct ControlPlaneClient {
     reconcile: proto::reconcile_service_client::ReconcileServiceClient<Channel>,
     telemetry: proto::telemetry_service_client::TelemetryServiceClient<Channel>,
+    inventory: proto::inventory_service_client::InventoryServiceClient<Channel>,
 }
 
 impl ControlPlaneClient {
@@ -59,7 +60,8 @@ impl ControlPlaneClient {
             reconcile: proto::reconcile_service_client::ReconcileServiceClient::new(
                 channel.clone(),
             ),
-            telemetry: proto::telemetry_service_client::TelemetryServiceClient::new(channel),
+            telemetry: proto::telemetry_service_client::TelemetryServiceClient::new(channel.clone()),
+            inventory: proto::inventory_service_client::InventoryServiceClient::new(channel),
         })
     }
 
@@ -121,12 +123,64 @@ impl ControlPlaneClient {
             })
     }
 
+    pub async fn report_volume_state(
+        &mut self,
+        req: proto::VolumeStateReport,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.telemetry
+            .report_volume_state(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
+    pub async fn report_network_state(
+        &mut self,
+        req: proto::NetworkStateReport,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.telemetry
+            .report_network_state(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
     pub async fn publish_event(
         &mut self,
         req: proto::PublishEventRequest,
     ) -> Result<proto::AckResponse, ChvError> {
         self.telemetry
             .publish_event(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
+    pub async fn report_node_inventory(
+        &mut self,
+        req: proto::ReportNodeInventoryRequest,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.inventory
+            .report_node_inventory(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
+    pub async fn report_service_versions(
+        &mut self,
+        req: proto::ReportServiceVersionsRequest,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.inventory
+            .report_service_versions(req)
             .await
             .map(|r| r.into_inner())
             .map_err(|e| ChvError::ControlPlaneUnavailable {

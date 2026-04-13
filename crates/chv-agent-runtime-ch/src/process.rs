@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::fmt::Write;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Child;
@@ -13,7 +14,6 @@ use tracing::{info, warn};
 use crate::adapter::{CloudHypervisorAdapter, VmConfig};
 
 struct VmProcess {
-    _vm_id: String,
     api_socket: std::path::PathBuf,
     child: Child,
 }
@@ -61,7 +61,7 @@ impl ProcessCloudHypervisorAdapter {
 
         let mut request = format!("{} {} HTTP/1.1\r\nHost: localhost\r\n", method, path);
         if let Some(b) = body {
-            request.push_str(&format!("Content-Length: {}\r\n", b.len()));
+            let _ = write!(&mut request, "Content-Length: {}\r\n", b.len());
             request.push_str("Content-Type: application/json\r\n");
             request.push_str("\r\n");
             request.push_str(b);
@@ -84,15 +84,17 @@ impl ProcessCloudHypervisorAdapter {
             source: e,
         })?;
 
-        let response = String::from_utf8_lossy(&buf[..n]);
-        let status_line = response.lines().next().unwrap_or("");
-        let parts: Vec<&str> = status_line.split_whitespace().collect();
-        let status_code = parts
-            .get(1)
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(0);
+        let status_code = parse_http_status(&buf[..n]).unwrap_or(0);
         Ok(status_code)
     }
+
+}
+
+fn parse_http_status(response_bytes: &[u8]) -> Option<u16> {
+    let response = String::from_utf8_lossy(response_bytes);
+    let status_line = response.lines().next()?;
+    let parts: Vec<&str> = status_line.split_whitespace().collect();
+    parts.get(1)?.parse::<u16>().ok()
 }
 
 #[async_trait]
@@ -108,8 +110,21 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         cmd.arg("--memory")
             .arg(format!("size={}", config.memory_bytes));
         cmd.arg("--kernel").arg(&config.kernel_path);
-        for disk in &config.disk_paths {
-            cmd.arg("--disk").arg(format!("path={}", disk.display()));
+        for disk in &config.disks {
+            let arg = if disk.read_only {
+                format!("path={},readonly=on", disk.path.display())
+            } else {
+                format!("path={}", disk.path.display())
+            };
+            cmd.arg("--disk").arg(arg);
+        }
+        for nic in &config.nics {
+            if nic.tap_name.is_empty() {
+                warn!(mac = %nic.mac_address, "skipping NIC with empty tap_name");
+                continue;
+            }
+            cmd.arg("--net")
+                .arg(format!("mac={},tap={}", nic.mac_address, nic.tap_name));
         }
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
@@ -131,7 +146,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         map.insert(
             config.vm_id.clone(),
             VmProcess {
-                _vm_id: config.vm_id.clone(),
                 api_socket: config.api_socket_path.clone(),
                 child,
             },
@@ -200,5 +214,49 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let _ = proc.child.wait().await;
         let _ = tokio::fs::remove_file(&proc.api_socket).await;
         Ok(())
+    }
+
+    async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let map = self.vms.lock().await;
+        let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+            resource: "vm".to_string(),
+            id: vm_id.to_string(),
+        })?;
+
+        info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
+
+        let status =
+            Self::ch_api_request(&proc.api_socket, "PUT", "/api/v1/vmm.reboot", None).await?;
+        if status != 200 && status != 204 {
+            warn!(status = status, "unexpected status from vmm.reboot");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_http_status;
+
+    #[test]
+    fn parse_http_status_extracts_200() {
+        let bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(parse_http_status(bytes), Some(200));
+    }
+
+    #[test]
+    fn parse_http_status_extracts_204() {
+        let bytes = b"HTTP/1.1 204 No Content\r\n";
+        assert_eq!(parse_http_status(bytes), Some(204));
+    }
+
+    #[test]
+    fn parse_http_status_returns_none_for_garbage() {
+        assert_eq!(parse_http_status(b"garbage"), None);
+    }
+
+    #[test]
+    fn parse_http_status_handles_empty() {
+        assert_eq!(parse_http_status(b""), None);
     }
 }

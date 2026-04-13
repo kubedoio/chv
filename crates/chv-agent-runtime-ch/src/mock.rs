@@ -41,4 +41,8 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
         self.vms.lock().unwrap().remove(vm_id);
         Ok(())
     }
+
+    async fn reboot_vm(&self, _vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
+        Ok(())
+    }
 }

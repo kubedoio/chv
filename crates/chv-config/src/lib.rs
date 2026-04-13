@@ -77,12 +77,15 @@ pub struct AgentConfig {
     pub stord_socket: PathBuf,
     pub nwd_socket: PathBuf,
     pub chv_binary_path: PathBuf,
+    pub stord_binary_path: PathBuf,
+    pub nwd_binary_path: PathBuf,
     pub cache_path: PathBuf,
     pub node_id: String,
     pub metrics_bind: Option<String>,
     pub tls_cert_path: Option<PathBuf>,
     pub tls_key_path: Option<PathBuf>,
     pub ca_cert_path: Option<PathBuf>,
+    pub bootstrap_token_path: Option<PathBuf>,
 }
 
 impl Default for AgentConfig {
@@ -95,12 +98,15 @@ impl Default for AgentConfig {
             stord_socket: PathBuf::from("/run/chv/stord/api.sock"),
             nwd_socket: PathBuf::from("/run/chv/nwd/api.sock"),
             chv_binary_path: PathBuf::from("/usr/bin/cloud-hypervisor"),
+            stord_binary_path: PathBuf::from("/usr/bin/chv-stord"),
+            nwd_binary_path: PathBuf::from("/usr/bin/chv-nwd"),
             cache_path: PathBuf::from("/var/lib/chv/cache/agent-cache.json"),
             node_id: String::new(),
             metrics_bind: None,
             tls_cert_path: None,
             tls_key_path: None,
             ca_cert_path: None,
+            bootstrap_token_path: None,
         }
     }
 }

@@ -88,6 +88,17 @@ impl VmRuntime {
         Ok(())
     }
 
+    pub async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        self.adapter.reboot_vm(vm_id, operation_id).await?;
+        let mut map = self.vms.lock().unwrap();
+        let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
+            resource: "vm".to_string(),
+            id: vm_id.to_string(),
+        })?;
+        rec.runtime_status = "Running".to_string();
+        Ok(())
+    }
+
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
         self.vms.lock().unwrap().get(vm_id).cloned()
     }
@@ -116,7 +127,8 @@ mod tests {
             cpus: 2,
             memory_bytes: 1024,
             kernel_path: PathBuf::from("/dev/null"),
-            disk_paths: vec![],
+            disks: vec![],
+            nics: vec![],
             api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
@@ -136,7 +148,8 @@ mod tests {
             cpus: 2,
             memory_bytes: 1024,
             kernel_path: PathBuf::from("/dev/null"),
-            disk_paths: vec![],
+            disks: vec![],
+            nics: vec![],
             api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
@@ -156,7 +169,8 @@ mod tests {
             cpus: 2,
             memory_bytes: 1024,
             kernel_path: PathBuf::from("/dev/null"),
-            disk_paths: vec![],
+            disks: vec![],
+            nics: vec![],
             api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))

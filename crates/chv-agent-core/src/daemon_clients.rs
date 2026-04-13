@@ -1,7 +1,9 @@
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{
-    network_service_client::NetworkServiceClient, AttachVmNicRequest, EnsureNetworkTopologyRequest,
-    ExposeServiceRequest, ListNamespaceStateRequest, WithdrawServiceExposureRequest,
+    network_service_client::NetworkServiceClient, AttachVmNicRequest, DeleteNetworkTopologyRequest,
+    DetachVmNicRequest, EnsureNetworkTopologyRequest, ExposeServiceRequest,
+    ListNamespaceStateRequest, SetFirewallPolicyRequest, SetNatPolicyRequest,
+    WithdrawServiceExposureRequest,
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
@@ -176,6 +178,17 @@ impl StordClient {
                 reason: e.to_string(),
             })?;
         Ok(())
+    }
+
+    pub async fn resize_volume(
+        &mut self,
+        _volume_id: &str,
+        _new_size_bytes: u64,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        Err(ChvError::Internal {
+            reason: "resize_volume not implemented in Phase 1".to_string(),
+        })
     }
 }
 
@@ -359,6 +372,122 @@ impl NwdClient {
             })?;
         Ok(())
     }
+
+    pub async fn list_namespace_state(
+        &mut self,
+    ) -> Result<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse, ChvError> {
+        let resp = self
+            .inner
+            .list_namespace_state(ListNamespaceStateRequest {})
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        Ok(resp)
+    }
+
+    pub async fn delete_network_topology(
+        &mut self,
+        network_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = DeleteNetworkTopologyRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            network_id: network_id.to_string(),
+        };
+        self.inner.delete_network_topology(req).await.map_err(|e| {
+            ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(())
+    }
+
+    pub async fn set_firewall_policy(
+        &mut self,
+        network_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = SetFirewallPolicyRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            network_id: network_id.to_string(),
+            policy: None,
+        };
+        self.inner.set_firewall_policy(req).await.map_err(|e| {
+            ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(())
+    }
+
+    pub async fn set_nat_policy(
+        &mut self,
+        network_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = SetNatPolicyRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            network_id: network_id.to_string(),
+            policy: None,
+        };
+        self.inner.set_nat_policy(req).await.map_err(|e| {
+            ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(())
+    }
+
+    pub async fn detach_vm_nic(
+        &mut self,
+        nic_id: &str,
+        vm_id: &str,
+        _network_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = DetachVmNicRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            nic_id: nic_id.to_string(),
+            vm_id: vm_id.to_string(),
+        };
+        self.inner.detach_vm_nic(req).await.map_err(|e| {
+            ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -480,7 +609,11 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::DetachVmNicRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn set_firewall_policy(
             &self,
@@ -564,5 +697,53 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let mut client = NwdClient::connect(&socket).await.unwrap();
         assert!(client.health_probe().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stord_resize_volume_stub_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stord.sock");
+
+        let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                        MockStord,
+                    ),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                .await
+                .ok();
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut client = StordClient::connect(&socket).await.unwrap();
+        let result = client.resize_volume("vol-1", 1024, Some("op-1")).await;
+        assert!(matches!(result, Err(ChvError::Internal { .. })));
+    }
+
+    #[tokio::test]
+    async fn nwd_detach_vm_nic_rpc_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nwd.sock");
+
+        let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                        MockNwd,
+                    ),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                .await
+                .ok();
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut client = NwdClient::connect(&socket).await.unwrap();
+        let result = client.detach_vm_nic("nic-1", "vm-1", "net-1", Some("op-1")).await;
+        assert!(result.is_ok());
     }
 }

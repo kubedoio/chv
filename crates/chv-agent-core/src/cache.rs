@@ -22,6 +22,14 @@ pub struct NodeCache {
     pub node_id: String,
     pub observed_generation: String,
     pub node_state: String,
+    #[serde(default)]
+    pub enrollment_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_path: Option<String>,
     pub vm_generations: HashMap<String, String>,
     pub volume_generations: HashMap<String, String>,
     pub network_generations: HashMap<String, String>,
@@ -41,6 +49,10 @@ impl NodeCache {
             node_id: node_id.into(),
             observed_generation: String::new(),
             node_state: "Bootstrapping".to_string(),
+            enrollment_complete: false,
+            certificate_path: None,
+            private_key_path: None,
+            ca_path: None,
             vm_generations: HashMap::new(),
             volume_generations: HashMap::new(),
             network_generations: HashMap::new(),
@@ -181,28 +193,43 @@ impl NodeCache {
     }
 
     pub fn vm_network_ids(&self) -> Vec<String> {
-        self.vm_fragments.values().filter_map(|frag| {
-            match serde_json::from_slice::<serde_json::Value>(&frag.spec_json) {
-                Ok(v) => v.get("network_id")?.as_str().map(String::from),
+        let mut seen = std::collections::HashSet::new();
+        for frag in self.vm_fragments.values() {
+            let raw = match std::str::from_utf8(&frag.spec_json) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(fragment_id = %frag.id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
+                    continue;
+                }
+            };
+            match crate::spec::VmSpec::from_json(raw) {
+                Ok(spec) => {
+                    for nic in &spec.nics {
+                        seen.insert(nic.network_id.clone());
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(fragment_id = %frag.id, error = %e, "failed to parse vm_fragment spec_json");
-                    None
                 }
             }
-        }).collect()
+        }
+        seen.into_iter().collect()
     }
 
     pub fn vm_volume_handles(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for (vm_id, frag) in &self.vm_fragments {
-            match serde_json::from_slice::<serde_json::Value>(&frag.spec_json) {
-                Ok(v) => {
-                    if let Some(arr) = v.get("volumes").and_then(|a| a.as_array()) {
-                        for vol in arr {
-                            if let Some(vid) = vol.get("volume_id").and_then(|s| s.as_str()) {
-                                out.push((vm_id.clone(), vid.to_string()));
-                            }
-                        }
+            let raw = match std::str::from_utf8(&frag.spec_json) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(fragment_id = %frag.id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
+                    continue;
+                }
+            };
+            match crate::spec::VmSpec::from_json(raw) {
+                Ok(spec) => {
+                    for disk in &spec.disks {
+                        out.push((vm_id.clone(), disk.volume_id.clone()));
                     }
                 }
                 Err(e) => {
@@ -298,7 +325,7 @@ mod tests {
             id: "vm-1".to_string(),
             kind: "vm".to_string(),
             generation: "1".to_string(),
-            spec_json: br#"{"network_id":"net-1"}"#.to_vec(),
+            spec_json: br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[{"network_id":"net-1","mac_address":"00:00:00:00:00:01","ip_address":"10.0.0.2"}]}"#.to_vec(),
             policy_json: vec![],
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             updated_by: "cp".to_string(),
@@ -314,7 +341,7 @@ mod tests {
             id: "vm-1".to_string(),
             kind: "vm".to_string(),
             generation: "1".to_string(),
-            spec_json: br#"{"volumes":[{"volume_id":"vol-1"},{"volume_id":"vol-2"}]}"#.to_vec(),
+            spec_json: br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[{"volume_id":"vol-1","read_only":false},{"volume_id":"vol-2","read_only":false}],"nics":[]}"#.to_vec(),
             policy_json: vec![],
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             updated_by: "cp".to_string(),
@@ -332,7 +359,7 @@ mod tests {
                 id: id.to_string(),
                 kind: "vm".to_string(),
                 generation: "1".to_string(),
-                spec_json: br#"{"network_id":"net-1"}"#.to_vec(),
+                spec_json: br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[{"network_id":"net-1","mac_address":"00:00:00:00:00:01","ip_address":"10.0.0.2"}]}"#.to_vec(),
                 policy_json: vec![],
                 updated_at: "2024-01-01T00:00:00Z".to_string(),
                 updated_by: "cp".to_string(),
