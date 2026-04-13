@@ -309,7 +309,7 @@ async fn resize_volume_smoke() {
     let meta = std::fs::metadata(&path).unwrap();
     assert_eq!(meta.len(), 1024);
 
-    let _ = client
+    client
         .close_volume(CloseVolumeRequest {
             meta: None,
             volume_id: "vol-resize".to_string(),
@@ -357,7 +357,7 @@ async fn set_device_policy_smoke() {
         .into_inner();
     assert_eq!(policy_resp.status, "OK");
 
-    let _ = client
+    client
         .close_volume(CloseVolumeRequest {
             meta: None,
             volume_id: "vol-policy".to_string(),
@@ -366,6 +366,29 @@ async fn set_device_policy_smoke() {
         .await
         .unwrap()
         .into_inner();
+}
+
+#[tokio::test]
+async fn set_device_policy_missing_session_returns_not_found() {
+    let (_dir, _socket, mut client) = setup_server().await;
+
+    let policy_resp = client
+        .set_device_policy(SetDevicePolicyRequest {
+            meta: None,
+            volume_id: "vol-missing".to_string(),
+            policy: Some(DevicePolicy {
+                read_bps: 1000,
+                write_bps: 2000,
+                read_iops: 100,
+                write_iops: 100,
+                burst_allowed: false,
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(policy_resp.status, "error");
+    assert_eq!(policy_resp.error_code, "NOT_FOUND");
 }
 
 #[tokio::test]

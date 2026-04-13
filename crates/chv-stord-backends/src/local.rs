@@ -195,7 +195,10 @@ impl StorageBackend for LocalFileBackend {
                 path = %path.display(),
                 "resize called but path does not exist"
             );
-            return Ok(());
+            return Err(ChvError::NotFound {
+                resource: "path".to_string(),
+                id: path.to_string_lossy().to_string(),
+            });
         }
 
         let kind = Self::detect_kind(&path);
@@ -206,7 +209,10 @@ impl StorageBackend for LocalFileBackend {
                 path = %path.display(),
                 "qcow2 resize is not yet implemented"
             );
-            return Ok(());
+            return Err(ChvError::InvalidArgument {
+                field: "new_size_bytes".to_string(),
+                reason: "qcow2 resize not supported".to_string(),
+            });
         }
 
         let file = std::fs::File::options().write(true).open(&path).map_err(|e| {
@@ -402,5 +408,29 @@ mod tests {
 
         let res = backend.resize("vol-1", "iscsi-vol-1-target", 1024).await;
         assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn local_backend_resize_missing_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+
+        let res = backend.resize("vol-1", "local-vol-1-vol.img", 1024).await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn local_backend_resize_qcow2_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vol.qcow2");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(b"QFI\xfb").unwrap();
+            f.write_all(&[0u8; 100]).unwrap();
+        }
+
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let res = backend.resize("vol-1", "local-vol-1-vol.qcow2", 1024).await;
+        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
     }
 }
