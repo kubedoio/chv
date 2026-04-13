@@ -69,7 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.nwd_socket.clone(),
     );
 
-    let mut telemetry = match ControlPlaneClient::new(&config.control_plane_addr).await {
+    let mut telemetry = match ControlPlaneClient::new(
+        &config.control_plane_addr,
+        config.tls_cert_path.as_deref(),
+        config.tls_key_path.as_deref(),
+        config.ca_cert_path.as_deref(),
+    ).await {
         Ok(client) => {
             info!("connected to control plane");
             Some((TelemetryReporter::new(&cache.node_id), client))

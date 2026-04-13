@@ -9,13 +9,44 @@ pub struct ControlPlaneClient {
 }
 
 impl ControlPlaneClient {
-    pub async fn new(endpoint: impl Into<String>) -> Result<Self, ChvError> {
+    pub async fn new(
+        endpoint: impl Into<String>,
+        tls_cert_path: Option<&std::path::Path>,
+        tls_key_path: Option<&std::path::Path>,
+        ca_cert_path: Option<&std::path::Path>,
+    ) -> Result<Self, ChvError> {
         let endpoint = endpoint.into();
-        let channel = tonic::transport::Endpoint::try_from(endpoint)
+        let mut endpoint = tonic::transport::Endpoint::try_from(endpoint)
             .map_err(|e| ChvError::InvalidArgument {
                 field: "control_plane_addr".to_string(),
                 reason: e.to_string(),
-            })?
+            })?;
+
+        if let (Some(cert), Some(key)) = (tls_cert_path, tls_key_path) {
+            let cert_pem = tokio::fs::read(cert).await.map_err(|e| ChvError::Io {
+                path: cert.to_string_lossy().to_string(),
+                source: e,
+            })?;
+            let key_pem = tokio::fs::read(key).await.map_err(|e| ChvError::Io {
+                path: key.to_string_lossy().to_string(),
+                source: e,
+            })?;
+            let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+            let mut tls = tonic::transport::ClientTlsConfig::new().identity(identity);
+            if let Some(ca) = ca_cert_path {
+                let ca_pem = tokio::fs::read(ca).await.map_err(|e| ChvError::Io {
+                    path: ca.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+                tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
+            }
+            endpoint = endpoint.tls_config(tls).map_err(|e| ChvError::InvalidArgument {
+                field: "tls_config".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
+
+        let channel = endpoint
             .connect()
             .await
             .map_err(|e| ChvError::ControlPlaneUnavailable {

@@ -80,6 +80,9 @@ pub struct AgentConfig {
     pub cache_path: PathBuf,
     pub node_id: String,
     pub metrics_bind: Option<String>,
+    pub tls_cert_path: Option<PathBuf>,
+    pub tls_key_path: Option<PathBuf>,
+    pub ca_cert_path: Option<PathBuf>,
 }
 
 impl Default for AgentConfig {
@@ -95,6 +98,9 @@ impl Default for AgentConfig {
             cache_path: PathBuf::from("/var/lib/chv/cache/agent-cache.json"),
             node_id: String::new(),
             metrics_bind: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            ca_cert_path: None,
         }
     }
 }
