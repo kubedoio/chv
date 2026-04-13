@@ -138,6 +138,42 @@ impl NodeCache {
             _ => false,
         }
     }
+
+    pub fn store_fragment(
+        &mut self,
+        kind: &str,
+        id: &str,
+        fragment: DesiredStateFragment,
+    ) {
+        match kind {
+            "vm" => self.vm_fragments.insert(id.to_string(), fragment),
+            "volume" => self.volume_fragments.insert(id.to_string(), fragment),
+            "network" => self.network_fragments.insert(id.to_string(), fragment),
+            _ => None,
+        };
+    }
+
+    pub fn get_fragment(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> Option<&DesiredStateFragment> {
+        match kind {
+            "vm" => self.vm_fragments.get(id),
+            "volume" => self.volume_fragments.get(id),
+            "network" => self.network_fragments.get(id),
+            _ => None,
+        }
+    }
+
+    pub fn remove_fragment(&mut self, kind: &str, id: &str) {
+        match kind {
+            "vm" => { self.vm_fragments.remove(id); }
+            "volume" => { self.volume_fragments.remove(id); }
+            "network" => { self.network_fragments.remove(id); }
+            _ => {}
+        };
+    }
 }
 
 #[cfg(test)]
@@ -197,5 +233,23 @@ mod tests {
             "expected version mismatch error, got {:?}",
             result
         );
+    }
+
+    #[test]
+    fn cache_fragment_roundtrip() {
+        let mut cache = NodeCache::new("node-1");
+        let frag = DesiredStateFragment {
+            id: "vm-1".to_string(),
+            kind: "vm".to_string(),
+            generation: "5".to_string(),
+            spec_json: b"{}".to_vec(),
+            policy_json: vec![],
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_by: "cp".to_string(),
+        };
+        cache.store_fragment("vm", "vm-1", frag.clone());
+        assert_eq!(cache.get_fragment("vm", "vm-1").unwrap().generation, "5");
+        cache.remove_fragment("vm", "vm-1");
+        assert!(cache.get_fragment("vm", "vm-1").is_none());
     }
 }
