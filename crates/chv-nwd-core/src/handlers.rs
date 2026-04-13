@@ -10,18 +10,50 @@ pub struct NetworkServiceImpl<E: NetworkExecutor> {
     executor: Arc<E>,
     topologies: Arc<TopologyTable>,
     metrics: Arc<Metrics>,
+    store: Option<Arc<std::sync::Mutex<crate::store::TopologyStore>>>,
 }
 
 impl<E: NetworkExecutor> NetworkServiceImpl<E> {
-    pub fn new(
-        executor: Arc<E>,
-        topologies: Arc<TopologyTable>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(executor: Arc<E>, topologies: Arc<TopologyTable>, metrics: Arc<Metrics>) -> Self {
         Self {
             executor,
             topologies,
             metrics,
+            store: None,
+        }
+    }
+
+    pub fn topologies(&self) -> Arc<TopologyTable> {
+        self.topologies.clone()
+    }
+
+    pub fn set_store(&mut self, store: crate::store::TopologyStore) {
+        self.store = Some(Arc::new(std::sync::Mutex::new(store)));
+    }
+
+    async fn persist_upsert(&self, state: &TopologyState) {
+        if let Some(store) = &self.store {
+            let store = store.clone();
+            let state = state.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                let store = store.lock().unwrap();
+                store.upsert(&state)
+            }).await {
+                tracing::error!(error = %e, "failed to join persist topology task");
+            }
+        }
+    }
+
+    async fn persist_remove(&self, network_id: &str) {
+        if let Some(store) = &self.store {
+            let store = store.clone();
+            let network_id = network_id.to_string();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                let store = store.lock().unwrap();
+                store.remove(&network_id)
+            }).await {
+                tracing::error!(error = %e, "failed to join remove topology task");
+            }
         }
     }
 
@@ -43,9 +75,7 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
         }
     }
 
-    fn map_topology_spec(
-        t: Option<proto::TopologySpec>,
-    ) -> Result<proto::TopologySpec, ChvError> {
+    fn map_topology_spec(t: Option<proto::TopologySpec>) -> Result<proto::TopologySpec, ChvError> {
         t.ok_or_else(|| ChvError::InvalidArgument {
             field: "topology".to_string(),
             reason: "missing".to_string(),
@@ -54,9 +84,7 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
 }
 
 #[tonic::async_trait]
-impl<E: NetworkExecutor> proto::network_service_server::NetworkService
-    for NetworkServiceImpl<E>
-{
+impl<E: NetworkExecutor> proto::network_service_server::NetworkService for NetworkServiceImpl<E> {
     async fn ensure_network_topology(
         &self,
         request: Request<proto::EnsureNetworkTopologyRequest>,
@@ -102,7 +130,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService
                     gateway_ip: spec.gateway_ip.clone(),
                     runtime_status: "ensured".to_string(),
                 };
-                self.topologies.upsert(state);
+                self.topologies.upsert(state.clone());
+                self.persist_upsert(&state).await;
                 Ok(Response::new(Self::ok_result()))
             }
             Err(e) => Ok(Response::new(Self::err_result(&e))),
@@ -128,6 +157,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService
                 return Ok(Response::new(Self::err_result(&e)));
             }
             self.topologies.remove(&req.network_id);
+            self.persist_remove(&req.network_id).await;
         }
 
         Ok(Response::new(Self::ok_result()))
@@ -139,15 +169,14 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService
     ) -> Result<Response<proto::NetworkHealthResponse>, Status> {
         let req = request.into_inner();
 
-        let (status, last_error) =
-            if let Some(state) = self.topologies.get(&req.network_id) {
-                match self.executor.health(&req.network_id, &state).await {
-                    Ok(s) => (s, String::new()),
-                    Err(e) => ("unhealthy".to_string(), e.to_string()),
-                }
-            } else {
-                ("unknown".to_string(), String::new())
-            };
+        let (status, last_error) = if let Some(state) = self.topologies.get(&req.network_id) {
+            match self.executor.health(&req.network_id, &state).await {
+                Ok(s) => (s, String::new()),
+                Err(e) => ("unhealthy".to_string(), e.to_string()),
+            }
+        } else {
+            ("unknown".to_string(), String::new())
+        };
 
         Ok(Response::new(proto::NetworkHealthResponse {
             result: Some(Self::ok_result()),
@@ -267,7 +296,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService
         &self,
         request: Request<proto::SetFirewallPolicyRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        self.metrics.increment_counter("nwd_set_firewall_policy_total");
+        self.metrics
+            .increment_counter("nwd_set_firewall_policy_total");
         let req = request.into_inner();
         let _span = req
             .meta
@@ -331,7 +361,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService
         &self,
         request: Request<proto::EnsureDhcpScopeRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        self.metrics.increment_counter("nwd_ensure_dhcp_scope_total");
+        self.metrics
+            .increment_counter("nwd_ensure_dhcp_scope_total");
         let req = request.into_inner();
         let _span = req
             .meta
@@ -437,7 +468,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService
         &self,
         request: Request<proto::WithdrawServiceExposureRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        self.metrics.increment_counter("nwd_withdraw_service_exposure_total");
+        self.metrics
+            .increment_counter("nwd_withdraw_service_exposure_total");
         let req = request.into_inner();
         let _span = req
             .meta

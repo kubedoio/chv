@@ -1,6 +1,6 @@
 use chv_config::load_nwd_config;
-use chv_observability::init_logger;
 use chv_nwd_core::NetworkServer;
+use chv_observability::init_logger;
 use std::path::PathBuf;
 use tracing::info;
 
@@ -17,9 +17,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = NetworkServer::new(
         chv_nwd_core::executor::LinuxExecutor::new(config.runtime_dir.clone()),
         chv_observability::Metrics::new(),
+        None,
     );
 
-    server.serve(&config.socket_path).await?;
+    server.serve(&config.socket_path, None).await?;
 
     Ok(())
 }
