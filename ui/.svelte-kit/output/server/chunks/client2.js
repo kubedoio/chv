@@ -595,6 +595,11 @@ function createAPIClient(options) {
         method: "POST",
         body: JSON.stringify(data)
       });
+    },
+    deleteQuota(userId) {
+      return request(`/api/v1/quotas/${userId}`, {
+        method: "DELETE"
+      });
     }
   };
 }
