@@ -2,7 +2,8 @@ use chv_observability::Metrics;
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, BackendLocator,
     CloseVolumeRequest, DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest,
-    OpenVolumeRequest, ResizeVolumeRequest, SetDevicePolicyRequest, VolumeHealthRequest,
+    OpenVolumeRequest, PrepareCloneRequest, PrepareSnapshotRequest, ResizeVolumeRequest,
+    SetDevicePolicyRequest, VolumeHealthRequest,
 };
 use chv_stord_backends::LocalFileBackend;
 use chv_stord_core::StorageServer;
@@ -406,4 +407,125 @@ async fn resize_volume_missing_session_returns_not_found() {
         .into_inner();
     assert_eq!(resize_resp.status, "error");
     assert_eq!(resize_resp.error_code, "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn prepare_snapshot_smoke() {
+    let (dir, _socket, mut client) = setup_server().await;
+
+    let locator = "vol-snap.img".to_string();
+    let path = dir.path().join(&locator);
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&[0u8; 512]).unwrap();
+    }
+
+    let open_resp = client
+        .open_volume(OpenVolumeRequest {
+            meta: None,
+            volume_id: "vol-snap".to_string(),
+            backend: Some(BackendLocator {
+                backend_class: "local".to_string(),
+                locator,
+                options: Default::default(),
+            }),
+            policy: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let handle = open_resp.attachment_handle;
+
+    let resp = client
+        .prepare_snapshot(PrepareSnapshotRequest {
+            meta: None,
+            volume_id: "vol-snap".to_string(),
+            snapshot_name: "snap1".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.status, "OK");
+
+    let snap_path = dir.path().join("vol-snap-snap1.img");
+    assert!(snap_path.exists());
+
+    client
+        .close_volume(CloseVolumeRequest {
+            meta: None,
+            volume_id: "vol-snap".to_string(),
+            attachment_handle: handle,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+}
+
+#[tokio::test]
+async fn prepare_clone_smoke() {
+    let (dir, _socket, mut client) = setup_server().await;
+
+    let locator = "vol-clone.img".to_string();
+    let path = dir.path().join(&locator);
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&[0u8; 512]).unwrap();
+    }
+
+    let open_resp = client
+        .open_volume(OpenVolumeRequest {
+            meta: None,
+            volume_id: "vol-clone".to_string(),
+            backend: Some(BackendLocator {
+                backend_class: "local".to_string(),
+                locator,
+                options: Default::default(),
+            }),
+            policy: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let handle = open_resp.attachment_handle;
+
+    let resp = client
+        .prepare_clone(PrepareCloneRequest {
+            meta: None,
+            volume_id: "vol-clone".to_string(),
+            clone_name: "clone1".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.status, "OK");
+
+    let clone_path = dir.path().join("vol-clone-clone1.img");
+    assert!(clone_path.exists());
+
+    client
+        .close_volume(CloseVolumeRequest {
+            meta: None,
+            volume_id: "vol-clone".to_string(),
+            attachment_handle: handle,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+}
+
+#[tokio::test]
+async fn prepare_snapshot_missing_session_returns_not_found() {
+    let (_dir, _socket, mut client) = setup_server().await;
+
+    let resp = client
+        .prepare_snapshot(PrepareSnapshotRequest {
+            meta: None,
+            volume_id: "vol-missing".to_string(),
+            snapshot_name: "snap1".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.status, "error");
+    assert_eq!(resp.error_code, "NOT_FOUND");
 }

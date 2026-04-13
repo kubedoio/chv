@@ -446,20 +446,72 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
 
     async fn prepare_snapshot(
         &self,
-        _request: Request<proto::PrepareSnapshotRequest>,
+        request: Request<proto::PrepareSnapshotRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "prepare_snapshot not yet implemented",
-        ))
+        self.metrics.increment_counter("stord_prepare_snapshot_total");
+        let req = request.into_inner();
+        let span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = span.enter();
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
+
+        let Some(s) = session else {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: req.volume_id.clone(),
+            };
+            return Ok(Response::new(e.to_proto_result()));
+        };
+
+        if let Err(e) = self
+            .backend
+            .prepare_snapshot(&s.volume_id, &s.attachment_handle, &req.snapshot_name)
+            .await
+        {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
     }
 
     async fn prepare_clone(
         &self,
-        _request: Request<proto::PrepareCloneRequest>,
+        request: Request<proto::PrepareCloneRequest>,
     ) -> Result<Response<proto::Result>, Status> {
-        Err(Status::unimplemented(
-            "prepare_clone not yet implemented",
-        ))
+        self.metrics.increment_counter("stord_prepare_clone_total");
+        let req = request.into_inner();
+        let span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = span.enter();
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
+
+        let Some(s) = session else {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: req.volume_id.clone(),
+            };
+            return Ok(Response::new(e.to_proto_result()));
+        };
+
+        if let Err(e) = self
+            .backend
+            .prepare_clone(&s.volume_id, &s.attachment_handle, &req.clone_name)
+            .await
+        {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
     }
 
     async fn set_device_policy(
