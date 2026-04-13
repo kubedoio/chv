@@ -1,6 +1,8 @@
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{
-    network_service_client::NetworkServiceClient, ListNamespaceStateRequest,
+    network_service_client::NetworkServiceClient, AttachVmNicRequest,
+    EnsureNetworkTopologyRequest, ExposeServiceRequest, ListNamespaceStateRequest,
+    WithdrawServiceExposureRequest,
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest,
@@ -223,6 +225,145 @@ impl NwdClient {
                 reason: e.to_string(),
             })?;
         Ok(true)
+    }
+
+    pub async fn ensure_network_topology(
+        &mut self,
+        network_id: &str,
+        bridge_name: &str,
+        subnet_cidr: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = EnsureNetworkTopologyRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            topology: Some(chv_nwd_api::chv_nwd_api::TopologySpec {
+                network_id: network_id.to_string(),
+                tenant_id: "".to_string(),
+                bridge_name: bridge_name.to_string(),
+                namespace_name: format!("ns-{}", network_id),
+                subnet_cidr: subnet_cidr.to_string(),
+                gateway_ip: "".to_string(),
+                options: std::collections::HashMap::new(),
+            }),
+        };
+        self.inner
+            .ensure_network_topology(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn attach_vm_nic(
+        &mut self,
+        nic_id: &str,
+        vm_id: &str,
+        network_id: &str,
+        mac_address: &str,
+        ip_address: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(String, String), ChvError> {
+        let req = AttachVmNicRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            nic: Some(chv_nwd_api::chv_nwd_api::NicSpec {
+                nic_id: nic_id.to_string(),
+                vm_id: vm_id.to_string(),
+                network_id: network_id.to_string(),
+                mac_address: mac_address.to_string(),
+                tap_name: "".to_string(),
+                ip_address: ip_address.to_string(),
+            }),
+        };
+        let resp = self
+            .inner
+            .attach_vm_nic(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        Ok((resp.namespace_handle, resp.tap_handle))
+    }
+
+    pub async fn expose_service(
+        &mut self,
+        network_id: &str,
+        exposure_id: &str,
+        protocol: &str,
+        external_port: u32,
+        target_ip: &str,
+        target_port: u32,
+        mode: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = ExposeServiceRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            exposure: Some(chv_nwd_api::chv_nwd_api::ExposureSpec {
+                network_id: network_id.to_string(),
+                exposure_id: exposure_id.to_string(),
+                protocol: protocol.to_string(),
+                external_port,
+                target_ip: target_ip.to_string(),
+                target_port,
+                mode: mode.to_string(),
+            }),
+        };
+        self.inner
+            .expose_service(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn withdraw_service_exposure(
+        &mut self,
+        exposure_id: &str,
+        network_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = WithdrawServiceExposureRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            exposure_id: exposure_id.to_string(),
+            network_id: network_id.to_string(),
+        };
+        self.inner
+            .withdraw_service_exposure(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
     }
 }
 

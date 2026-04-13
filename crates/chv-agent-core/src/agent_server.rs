@@ -128,9 +128,61 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
 
     async fn apply_network_desired_state(
         &self,
-        _req: Request<proto::ApplyNetworkDesiredStateRequest>,
+        req: Request<proto::ApplyNetworkDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
-        Err(Status::unimplemented("network desired state in Phase 3"))
+        let inner = req.into_inner();
+        let meta = inner.meta.as_ref().ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let mut cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        if let Some(frag) = inner.fragment {
+            cache.observe_generation("network", &inner.network_id, &frag.generation);
+            cache.store_fragment("network", &inner.network_id, crate::cache::DesiredStateFragment {
+                id: frag.id,
+                kind: frag.kind,
+                generation: frag.generation,
+                spec_json: frag.spec_json.clone(),
+                policy_json: frag.policy_json,
+                updated_at: frag.updated_at,
+                updated_by: frag.updated_by,
+            });
+
+            let spec = serde_json::from_slice::<serde_json::Value>(&frag.spec_json).unwrap_or_default();
+            let bridge = spec.get("bridge_name").and_then(|v| v.as_str()).unwrap_or("br0");
+            let cidr = spec.get("subnet_cidr").and_then(|v| v.as_str()).unwrap_or("10.0.0.0/24");
+
+            let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+                .await
+                .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+            nwd.ensure_network_topology(&inner.network_id, bridge, cidr, Some(&meta.operation_id)
+            ).await.map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
+
+            if let Some(exposures) = spec.get("exposures").and_then(|v| v.as_array()) {
+                for exp in exposures {
+                    let eid = exp.get("exposure_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let proto_str = exp.get("protocol").and_then(|v| v.as_str()).unwrap_or("tcp");
+                    let ext_port = exp.get("external_port").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let tip = exp.get("target_ip").and_then(|v| v.as_str()).unwrap_or("");
+                    let tport = exp.get("target_port").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let mode = exp.get("mode").and_then(|v| v.as_str()).unwrap_or("nat");
+                    if !eid.is_empty() {
+                        let _ = nwd.expose_service(
+                            &inner.network_id, eid, proto_str, ext_port, tip, tport, mode, Some(&meta.operation_id)
+                        ).await;
+                    }
+                }
+            }
+        }
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: cache.observed_generation.clone(),
+                error_code: "".to_string(),
+                human_summary: "network desired state accepted".to_string(),
+            }),
+        }))
     }
 
     async fn acknowledge_desired_state_version(
