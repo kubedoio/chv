@@ -27,8 +27,7 @@ async fn make_client(socket: PathBuf) -> StorageServiceClient<tonic::transport::
     StorageServiceClient::new(channel)
 }
 
-#[tokio::test]
-async fn open_close_health_list_smoke() {
+async fn setup_server() -> (tempfile::TempDir, PathBuf, StorageServiceClient<tonic::transport::Channel>) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("stord.sock");
 
@@ -45,7 +44,13 @@ async fn open_close_health_list_smoke() {
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut client = make_client(socket).await;
+    let client = make_client(socket.clone()).await;
+    (dir, socket, client)
+}
+
+#[tokio::test]
+async fn open_close_health_list_smoke() {
+    let (_dir, _socket, mut client) = setup_server().await;
 
     // OpenVolume
     let open_req = OpenVolumeRequest {
@@ -128,23 +133,7 @@ async fn open_close_health_list_smoke() {
 
 #[tokio::test]
 async fn attach_and_detach_volume_smoke() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("stord.sock");
-
-    let backend = LocalFileBackend::new(dir.path().to_path_buf());
-    let server = StorageServer::new(
-        backend,
-        Metrics::new(),
-        vec!["local".to_string()],
-    );
-
-    let socket_clone = socket.clone();
-    tokio::spawn(async move {
-        server.serve(&socket_clone).await.ok();
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut client = make_client(socket).await;
+    let (_dir, _socket, mut client) = setup_server().await;
 
     // Open volume
     let open_resp = client
@@ -237,23 +226,7 @@ async fn attach_and_detach_volume_smoke() {
 
 #[tokio::test]
 async fn attach_volume_missing_session_returns_not_found() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("stord.sock");
-
-    let backend = LocalFileBackend::new(dir.path().to_path_buf());
-    let server = StorageServer::new(
-        backend,
-        Metrics::new(),
-        vec!["local".to_string()],
-    );
-
-    let socket_clone = socket.clone();
-    tokio::spawn(async move {
-        server.serve(&socket_clone).await.ok();
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut client = make_client(socket).await;
+    let (_dir, _socket, mut client) = setup_server().await;
 
     let attach_resp = client
         .attach_volume_to_vm(AttachVolumeToVmRequest {
@@ -272,23 +245,7 @@ async fn attach_volume_missing_session_returns_not_found() {
 
 #[tokio::test]
 async fn allowlist_rejects_unknown_backend() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("stord.sock");
-
-    let backend = LocalFileBackend::new(dir.path().to_path_buf());
-    let server = StorageServer::new(
-        backend,
-        Metrics::new(),
-        vec!["local".to_string()],
-    );
-
-    let socket_clone = socket.clone();
-    tokio::spawn(async move {
-        server.serve(&socket_clone).await.ok();
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut client = make_client(socket).await;
+    let (_dir, _socket, mut client) = setup_server().await;
 
     let resp = client
         .open_volume(OpenVolumeRequest {

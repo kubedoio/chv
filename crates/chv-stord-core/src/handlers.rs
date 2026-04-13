@@ -273,12 +273,12 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
     ) -> Result<Response<proto::AttachVolumeToVmResponse>, Status> {
         self.metrics.increment_counter("stord_attach_volume_total");
         let req = request.into_inner();
-        let _span = req
+        let span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
+        let _enter = span.enter();
 
         if self.sessions.get(&req.volume_id, &req.attachment_handle).is_none() {
             let e = ChvError::NotFound {
@@ -333,13 +333,14 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
     ) -> Result<Response<proto::Result>, Status> {
         self.metrics.increment_counter("stord_detach_volume_total");
         let req = request.into_inner();
-        let _span = req
+        let span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
+        let _enter = span.enter();
 
+        // TODO: add a secondary index or find_by_volume_and_vm method if this becomes a hot path.
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| {
             s.volume_id == req.volume_id && s.vm_id.as_deref() == Some(&req.vm_id)
@@ -354,6 +355,12 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
                 if !req.force {
                     return Ok(Response::new(e.to_proto_result()));
                 }
+                tracing::warn!(
+                    volume_id = %req.volume_id,
+                    vm_id = %req.vm_id,
+                    error = %e,
+                    "force detach swallowed backend error"
+                );
             }
 
             self.sessions.update_vm_id(
