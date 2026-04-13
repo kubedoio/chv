@@ -157,8 +157,10 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             memory_bytes: 1024,
             kernel_path: std::path::PathBuf::from("/dev/null"),
             disk_paths: vec![],
+            api_socket_path: std::path::PathBuf::from(format!("/run/chv/agent/vm-{}.sock", vm.vm_id)),
         };
-        self.vm_runtime.create_vm(&vm.vm_id, &meta.desired_state_version, &config).await
+        let op_id = meta.operation_id.as_str();
+        self.vm_runtime.create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id)).await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -180,7 +182,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        self.vm_runtime.start_vm(&inner.vm_id).await
+        self.vm_runtime.start_vm(&inner.vm_id, Some(&meta.operation_id)).await
             .map_err(|e| Status::not_found(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -202,7 +204,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        self.vm_runtime.stop_vm(&inner.vm_id, inner.force).await
+        self.vm_runtime.stop_vm(&inner.vm_id, inner.force, Some(&meta.operation_id)).await
             .map_err(|e| Status::not_found(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -236,7 +238,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         let cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        self.vm_runtime.delete_vm(&inner.vm_id).await
+        self.vm_runtime.delete_vm(&inner.vm_id, Some(&meta.operation_id)).await
             .map_err(|e| Status::not_found(e.to_string()))?;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {

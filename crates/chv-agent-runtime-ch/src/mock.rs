@@ -12,20 +12,29 @@ pub struct MockCloudHypervisorAdapter {
 
 #[async_trait]
 impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
-    async fn create_vm(&self, config: &VmConfig) -> Result<String, ChvError> {
+    async fn create_vm(
+        &self,
+        config: &VmConfig,
+        _operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
         self.vms.lock().unwrap().insert(config.vm_id.clone(), config.clone());
         Ok(config.vm_id.clone())
     }
 
-    async fn start_vm(&self, _vm_id: &str) -> Result<(), ChvError> {
+    async fn start_vm(&self, _vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
         Ok(())
     }
 
-    async fn stop_vm(&self, _vm_id: &str, _force: bool) -> Result<(), ChvError> {
+    async fn stop_vm(
+        &self,
+        _vm_id: &str,
+        _force: bool,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
         Ok(())
     }
 
-    async fn delete_vm(&self, vm_id: &str) -> Result<(), ChvError> {
+    async fn delete_vm(&self, vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
         self.vms.lock().unwrap().remove(vm_id);
         Ok(())
     }
