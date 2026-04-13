@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "cmd/chv-stord",
+    "crates/chv-common",
+    "crates/chv-errors",
+    "crates/chv-observability",
+    "crates/chv-config",
+    "crates/chv-stord-core",
+    "crates/chv-stord-backends",
+    "gen/rust/chv-stord-api",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "v7"] }
+metrics = "0.24"
+tokio-stream = "0.1"
+dashmap = "6"
+tempfile = "3"
+tower = "0.5"
+hyper-util = { version = "0.1", features = ["client", "server", "tokio"] }

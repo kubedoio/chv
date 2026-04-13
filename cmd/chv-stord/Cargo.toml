@@ -1,0 +1,16 @@
+[package]
+name = "chv-stord"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "chv-stord"
+path = "src/main.rs"
+
+[dependencies]
+chv-config = { path = "../../crates/chv-config" }
+chv-observability = { path = "../../crates/chv-observability" }
+chv-stord-core = { path = "../../crates/chv-stord-core" }
+chv-stord-backends = { path = "../../crates/chv-stord-backends" }
+tokio = { workspace = true }
+tracing = { workspace = true }

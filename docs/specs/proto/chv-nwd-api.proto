@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package chv.node.nwd.v1;
+
+message Meta {
+  string operation_id = 1;
+  int64 request_unix_ms = 2;
+}
+
+message Result {
+  string status = 1;
+  string error_code = 2;
+  string human_summary = 3;
+}
+
+message TopologySpec {
+  string network_id = 1;
+  string tenant_id = 2;
+  string bridge_name = 3;
+  string namespace_name = 4;
+  string subnet_cidr = 5;
+  string gateway_ip = 6;
+  map<string, string> options = 7;
+}
+
+message NicSpec {
+  string nic_id = 1;
+  string vm_id = 2;
+  string network_id = 3;
+  string mac_address = 4;
+  string tap_name = 5;
+  string ip_address = 6;
+}
+
+message FirewallPolicy {
+  string policy_version = 1;
+  bytes policy_json = 2;
+}
+
+message NatPolicy {
+  string policy_version = 1;
+  bytes policy_json = 2;
+}
+
+message DhcpScope {
+  string network_id = 1;
+  string cidr = 2;
+  string range_start = 3;
+  string range_end = 4;
+  repeated string dns_servers = 5;
+}
+
+message DnsScope {
+  string network_id = 1;
+  repeated string forwarders = 2;
+  map<string, string> static_records = 3;
+}
+
+message ExposureSpec {
+  string network_id = 1;
+  string exposure_id = 2;
+  string protocol = 3;
+  uint32 external_port = 4;
+  string target_ip = 5;
+  uint32 target_port = 6;
+  string mode = 7;
+}
+
+message EnsureNetworkTopologyRequest {
+  Meta meta = 1;
+  TopologySpec topology = 2;
+}
+
+message DeleteNetworkTopologyRequest {
+  Meta meta = 1;
+  string network_id = 2;
+}
+
+message AttachVmNicRequest {
+  Meta meta = 1;
+  NicSpec nic = 2;
+}
+
+message AttachVmNicResponse {
+  Result result = 1;
+  string namespace_handle = 2;
+  string tap_handle = 3;
+}
+
+message DetachVmNicRequest {
+  Meta meta = 1;
+  string vm_id = 2;
+  string nic_id = 3;
+}
+
+message SetFirewallPolicyRequest {
+  Meta meta = 1;
+  string network_id = 2;
+  FirewallPolicy policy = 3;
+}
+
+message SetNatPolicyRequest {
+  Meta meta = 1;
+  string network_id = 2;
+  NatPolicy policy = 3;
+}
+
+message EnsureDhcpScopeRequest {
+  Meta meta = 1;
+  DhcpScope scope = 2;
+}
+
+message EnsureDnsScopeRequest {
+  Meta meta = 1;
+  DnsScope scope = 2;
+}
+
+message ExposeServiceRequest {
+  Meta meta = 1;
+  ExposureSpec exposure = 2;
+}
+
+message WithdrawServiceExposureRequest {
+  Meta meta = 1;
+  string exposure_id = 2;
+  string network_id = 3;
+}
+
+message NetworkHealthRequest {
+  string network_id = 1;
+}
+
+message NetworkHealthResponse {
+  Result result = 1;
+  string network_id = 2;
+  string health_status = 3;
+  string last_error = 4;
+}
+
+message NamespaceState {
+  string network_id = 1;
+  string namespace_name = 2;
+  string bridge_name = 3;
+  string runtime_status = 4;
+}
+
+message ListNamespaceStateRequest {}
+
+message ListNamespaceStateResponse {
+  repeated NamespaceState items = 1;
+}
+
+service NetworkService {
+  rpc EnsureNetworkTopology(EnsureNetworkTopologyRequest) returns (Result);
+  rpc DeleteNetworkTopology(DeleteNetworkTopologyRequest) returns (Result);
+  rpc AttachVmNic(AttachVmNicRequest) returns (AttachVmNicResponse);
+  rpc DetachVmNic(DetachVmNicRequest) returns (Result);
+  rpc SetFirewallPolicy(SetFirewallPolicyRequest) returns (Result);
+  rpc SetNatPolicy(SetNatPolicyRequest) returns (Result);
+  rpc EnsureDhcpScope(EnsureDhcpScopeRequest) returns (Result);
+  rpc EnsureDnsScope(EnsureDnsScopeRequest) returns (Result);
+  rpc ExposeService(ExposeServiceRequest) returns (Result);
+  rpc WithdrawServiceExposure(WithdrawServiceExposureRequest) returns (Result);
+  rpc GetNetworkHealth(NetworkHealthRequest) returns (NetworkHealthResponse);
+  rpc ListNamespaceState(ListNamespaceStateRequest) returns (ListNamespaceStateResponse);
+}

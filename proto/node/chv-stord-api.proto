@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package chv.node.stord.v1;
+
+message Meta {
+  string operation_id = 1;
+  int64 request_unix_ms = 2;
+}
+
+message Result {
+  string status = 1;
+  string error_code = 2;
+  string human_summary = 3;
+}
+
+message DevicePolicy {
+  uint64 read_bps = 1;
+  uint64 write_bps = 2;
+  uint64 read_iops = 3;
+  uint64 write_iops = 4;
+  bool burst_allowed = 5;
+}
+
+message BackendLocator {
+  string backend_class = 1;
+  string locator = 2;
+  map<string, string> options = 3;
+}
+
+message OpenVolumeRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  BackendLocator backend = 3;
+  DevicePolicy policy = 4;
+}
+
+message OpenVolumeResponse {
+  Result result = 1;
+  string volume_id = 2;
+  string attachment_handle = 3;
+  string export_kind = 4;
+  string export_path = 5;
+}
+
+message CloseVolumeRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string attachment_handle = 3;
+}
+
+message AttachVolumeToVmRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string vm_id = 3;
+  string attachment_handle = 4;
+}
+
+message AttachVolumeToVmResponse {
+  Result result = 1;
+  string volume_id = 2;
+  string vm_id = 3;
+  string export_kind = 4;
+  string export_path = 5;
+}
+
+message DetachVolumeFromVmRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string vm_id = 3;
+  bool force = 4;
+}
+
+message ResizeVolumeRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  uint64 new_size_bytes = 3;
+}
+
+message PrepareSnapshotRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string snapshot_name = 3;
+}
+
+message PrepareCloneRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string clone_name = 3;
+}
+
+message SetDevicePolicyRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  DevicePolicy policy = 3;
+}
+
+message VolumeHealthRequest {
+  string volume_id = 1;
+}
+
+message VolumeHealthResponse {
+  Result result = 1;
+  string volume_id = 2;
+  string health_status = 3;
+  string backend_state = 4;
+  string last_error = 5;
+}
+
+message VolumeSession {
+  string volume_id = 1;
+  string vm_id = 2;
+  string attachment_handle = 3;
+  string export_kind = 4;
+  string export_path = 5;
+  string runtime_status = 6;
+}
+
+message ListVolumeSessionsRequest {}
+
+message ListVolumeSessionsResponse {
+  repeated VolumeSession sessions = 1;
+}
+
+service StorageService {
+  rpc OpenVolume(OpenVolumeRequest) returns (OpenVolumeResponse);
+  rpc CloseVolume(CloseVolumeRequest) returns (Result);
+  rpc AttachVolumeToVm(AttachVolumeToVmRequest) returns (AttachVolumeToVmResponse);
+  rpc DetachVolumeFromVm(DetachVolumeFromVmRequest) returns (Result);
+  rpc ResizeVolume(ResizeVolumeRequest) returns (Result);
+  rpc PrepareSnapshot(PrepareSnapshotRequest) returns (Result);
+  rpc PrepareClone(PrepareCloneRequest) returns (Result);
+  rpc SetDevicePolicy(SetDevicePolicyRequest) returns (Result);
+  rpc GetVolumeHealth(VolumeHealthRequest) returns (VolumeHealthResponse);
+  rpc ListVolumeSessions(ListVolumeSessionsRequest) returns (ListVolumeSessionsResponse);
+}
