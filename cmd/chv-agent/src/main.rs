@@ -4,7 +4,7 @@ use chv_agent_core::{
     health::HealthAggregator, reconcile::Reconciler, state_machine::NodeState,
     telemetry::TelemetryReporter, vm_runtime::VmRuntime,
 };
-use chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter;
+use chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter;
 use chv_observability::init_logger;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,12 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     cache.node_state = NodeState::Bootstrapping.as_str().to_string();
 
-    // Phase 2 placeholder: the real CloudHypervisorAdapter is not yet implemented.
-    // We wire the mock adapter so the full control-plane -> agent -> adapter flow
-    // can be tested end-to-end. Replace with the production adapter in Phase 3.
-    warn!("using mock CloudHypervisorAdapter — real VM processes will not be launched");
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
-        Arc::new(MockCloudHypervisorAdapter::default());
+        Arc::new(ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
     let vm_runtime = VmRuntime::new(adapter);
 
     let agent_server = AgentServer::new(
