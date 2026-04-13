@@ -46,3 +46,6 @@ tmp/
 temp/
 *.tmp
 *.bak
+
+# Rust
+target/

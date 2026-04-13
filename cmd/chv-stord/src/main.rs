@@ -15,7 +15,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("chv-stord starting");
 
     let backend = LocalFileBackend::new(config.runtime_dir.clone());
-    let server = StorageServer::new(backend, chv_observability::Metrics::new());
+    let server = StorageServer::new(
+        backend,
+        chv_observability::Metrics::new(),
+        config.backend_allowlist,
+    );
 
     server.serve(&config.socket_path).await?;
 

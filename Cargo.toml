@@ -29,3 +29,4 @@ dashmap = "6"
 tempfile = "3"
 tower = "0.5"
 hyper-util = { version = "0.1", features = ["client", "server", "tokio"] }
+metrics-exporter-prometheus = "0.16"

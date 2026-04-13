@@ -1,4 +1,3 @@
-use chv_common::types::DevicePolicy;
 use chv_observability::Metrics;
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, BackendLocator, CloseVolumeRequest,
@@ -33,7 +32,11 @@ async fn open_close_health_list_smoke() {
     let socket = dir.path().join("stord.sock");
 
     let backend = LocalFileBackend::new(dir.path().to_path_buf());
-    let server = StorageServer::new(backend, Metrics::new());
+    let server = StorageServer::new(
+        backend,
+        Metrics::new(),
+        vec!["local".to_string()],
+    );
 
     let socket_clone = socket.clone();
     tokio::spawn(async move {
@@ -73,7 +76,7 @@ async fn open_close_health_list_smoke() {
         .unwrap()
         .into_inner();
     assert_eq!(health_resp.volume_id, "vol-1");
-    assert_eq!(health_resp.health_status, "healthy");
+    assert_eq!(health_resp.health_status, "unhealthy"); // file does not exist yet
     assert_eq!(health_resp.backend_state, "open");
 
     // ListVolumeSessions
@@ -120,4 +123,44 @@ async fn open_close_health_list_smoke() {
         .into_inner();
     assert_eq!(health_resp2.health_status, "unknown");
     assert_eq!(health_resp2.backend_state, "closed");
+}
+
+#[tokio::test]
+async fn allowlist_rejects_unknown_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("stord.sock");
+
+    let backend = LocalFileBackend::new(dir.path().to_path_buf());
+    let server = StorageServer::new(
+        backend,
+        Metrics::new(),
+        vec!["local".to_string()],
+    );
+
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    let resp = client
+        .open_volume(OpenVolumeRequest {
+            meta: None,
+            volume_id: "vol-1".to_string(),
+            backend: Some(BackendLocator {
+                backend_class: "iscsi".to_string(),
+                locator: "tgt".to_string(),
+                options: Default::default(),
+            }),
+            policy: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let result = resp.result.unwrap();
+    assert_eq!(result.status, "error");
+    assert_eq!(result.error_code, "BACKEND_UNAVAILABLE");
 }

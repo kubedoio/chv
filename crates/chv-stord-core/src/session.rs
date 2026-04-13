@@ -42,6 +42,16 @@ impl SessionTable {
             .map(|r| r.clone())
     }
 
+    pub fn find_by_volume_and_path(
+        &self,
+        volume_id: &str,
+        path: &str,
+    ) -> Option<Session> {
+        self.inner.iter().find(|r| {
+            r.value().volume_id == volume_id && r.value().export_path == path
+        }).map(|r| r.clone())
+    }
+
     pub fn list(&self) -> Vec<Session> {
         self.inner.iter().map(|r| r.clone()).collect()
     }
@@ -94,5 +104,15 @@ mod tests {
             ..dummy_session("vol-1", "h1")
         });
         assert_eq!(table.get("vol-1", "h1").unwrap().runtime_status, "attached");
+    }
+
+    #[test]
+    fn session_find_by_volume_and_path() {
+        let table = SessionTable::new();
+        let mut s = dummy_session("vol-1", "h1");
+        s.export_path = "/data/vol-1.img".to_string();
+        table.upsert(s);
+        assert!(table.find_by_volume_and_path("vol-1", "/data/vol-1.img").is_some());
+        assert!(table.find_by_volume_and_path("vol-1", "/data/other.img").is_none());
     }
 }

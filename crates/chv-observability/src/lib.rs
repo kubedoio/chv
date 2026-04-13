@@ -1,3 +1,4 @@
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing::Span;
 
 pub fn init_logger(filter: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -6,6 +7,11 @@ pub fn init_logger(filter: &str) -> Result<(), Box<dyn std::error::Error>> {
         .with_target(true)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
+
+    PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|e| format!("failed to install metrics recorder: {e}"))?;
+
     Ok(())
 }
 

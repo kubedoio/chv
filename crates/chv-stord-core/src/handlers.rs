@@ -1,7 +1,7 @@
 use crate::session::{Session, SessionTable};
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::{ChvError, ErrorCode};
-use chv_observability::Metrics;
+use chv_observability::{operation_span, Metrics};
 use chv_stord_api::chv_stord_api as proto;
 use chv_stord_backends::StorageBackend;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ pub struct StorageServiceImpl<B: StorageBackend> {
     backend: Arc<B>,
     sessions: Arc<SessionTable>,
     metrics: Arc<Metrics>,
+    backend_allowlist: Vec<String>,
 }
 
 impl<B: StorageBackend> StorageServiceImpl<B> {
@@ -18,11 +19,13 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         backend: Arc<B>,
         sessions: Arc<SessionTable>,
         metrics: Arc<Metrics>,
+        backend_allowlist: Vec<String>,
     ) -> Self {
         Self {
             backend,
             sessions,
             metrics,
+            backend_allowlist,
         }
     }
 
@@ -58,6 +61,22 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             human_summary: String::new(),
         }
     }
+
+    fn check_allowlist(&self, backend_class: &str) -> Result<(), ChvError> {
+        if self.backend_allowlist.is_empty() {
+            return Ok(());
+        }
+        if self.backend_allowlist.iter().any(|b| b == backend_class) {
+            return Ok(());
+        }
+        Err(ChvError::BackendUnavailable {
+            backend: backend_class.to_string(),
+            reason: format!(
+                "backend class '{}' not in allowlist",
+                backend_class
+            ),
+        })
+    }
 }
 
 #[tonic::async_trait]
@@ -70,23 +89,85 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
     ) -> Result<Response<proto::OpenVolumeResponse>, Status> {
         self.metrics.increment_counter("stord_open_volume_total");
         let req = request.into_inner();
-        let locator = Self::map_backend_locator(req.backend)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
+
+        let locator = match Self::map_backend_locator(req.backend) {
+            Ok(l) => l,
+            Err(e) => {
+                return Ok(Response::new(proto::OpenVolumeResponse {
+                    result: Some(e.to_proto_result()),
+                    volume_id: req.volume_id,
+                    attachment_handle: String::new(),
+                    export_kind: String::new(),
+                    export_path: String::new(),
+                }));
+            }
+        };
+
+        if let Err(e) = self.check_allowlist(&locator.backend_class) {
+            return Ok(Response::new(proto::OpenVolumeResponse {
+                result: Some(e.to_proto_result()),
+                volume_id: req.volume_id,
+                attachment_handle: String::new(),
+                export_kind: String::new(),
+                export_path: String::new(),
+            }));
+        }
+
         let policy = Self::map_device_policy(req.policy);
 
-        let export = self
-            .backend
-            .open(&req.volume_id, &locator, &policy)
-            .await
-            .map_err(|e| match &e {
-                ChvError::InvalidArgument { .. } => {
-                    Status::invalid_argument(e.to_string())
-                }
-                ChvError::BackendUnavailable { .. } => {
-                    Status::unavailable(e.to_string())
-                }
-                _ => Status::internal(e.to_string()),
-            })?;
+        // Idempotency: if already open with same volume+path, return existing
+        let precompute_path = if std::path::Path::new(&locator.locator).is_absolute() {
+            locator.locator.clone()
+        } else {
+            // We don't know runtime_dir here; backend handles resolution.
+            // For local backend idempotency we rely on the backend trait eventually.
+            // As a best-effort shortcut, skip pre-check for relative locators.
+            String::new()
+        };
+        if !precompute_path.is_empty() {
+            if let Some(s) = self
+                .sessions
+                .find_by_volume_and_path(&req.volume_id, &precompute_path)
+            {
+                return Ok(Response::new(proto::OpenVolumeResponse {
+                    result: Some(Self::ok_result()),
+                    volume_id: s.volume_id,
+                    attachment_handle: s.attachment_handle,
+                    export_kind: s.export_kind,
+                    export_path: s.export_path,
+                }));
+            }
+        }
+
+        let export = match self.backend.open(&req.volume_id, &locator, &policy).await {
+            Ok(e) => e,
+            Err(e) => {
+                return Ok(Response::new(proto::OpenVolumeResponse {
+                    result: Some(e.to_proto_result()),
+                    volume_id: req.volume_id,
+                    attachment_handle: String::new(),
+                    export_kind: String::new(),
+                    export_path: String::new(),
+                }));
+            }
+        };
+
+        // Post-open idempotency: same handle may already exist
+        if let Some(s) = self.sessions.get(&req.volume_id, &export.attachment_handle) {
+            return Ok(Response::new(proto::OpenVolumeResponse {
+                result: Some(Self::ok_result()),
+                volume_id: s.volume_id,
+                attachment_handle: s.attachment_handle,
+                export_kind: s.export_kind,
+                export_path: s.export_path,
+            }));
+        }
 
         let session = Session {
             volume_id: req.volume_id.clone(),
@@ -113,12 +194,17 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
     ) -> Result<Response<proto::Result>, Status> {
         self.metrics.increment_counter("stord_close_volume_total");
         let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = _span.enter();
 
         if let Some(s) = self.sessions.get(&req.volume_id, &req.attachment_handle) {
-            self.backend
-                .close(&s.volume_id, &s.attachment_handle)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            if let Err(e) = self.backend.close(&s.volume_id, &s.attachment_handle).await {
+                return Ok(Response::new(e.to_proto_result()));
+            }
             self.sessions.remove(&req.volume_id, &req.attachment_handle);
         }
 
@@ -134,24 +220,22 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
 
-        let (status, backend_state, last_error) =
-            if let Some(s) = session {
-                match self.backend.health(&s.volume_id, &s.attachment_handle).await
-                {
-                    Ok(h) => (h.status, h.backend_state, h.last_error),
-                    Err(e) => (
-                        "unhealthy".to_string(),
-                        "error".to_string(),
-                        e.to_string(),
-                    ),
-                }
-            } else {
-                (
-                    "unknown".to_string(),
-                    "closed".to_string(),
-                    String::new(),
-                )
-            };
+        let (status, backend_state, last_error) = if let Some(s) = session {
+            match self.backend.health(&s.volume_id, &s.attachment_handle).await {
+                Ok(h) => (h.status, h.backend_state, h.last_error),
+                Err(e) => (
+                    "unhealthy".to_string(),
+                    "error".to_string(),
+                    e.to_string(),
+                ),
+            }
+        } else {
+            (
+                "unknown".to_string(),
+                "closed".to_string(),
+                String::new(),
+            )
+        };
 
         Ok(Response::new(proto::VolumeHealthResponse {
             result: Some(Self::ok_result()),
@@ -180,9 +264,7 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
             })
             .collect();
 
-        Ok(Response::new(proto::ListVolumeSessionsResponse {
-            sessions,
-        }))
+        Ok(Response::new(proto::ListVolumeSessionsResponse { sessions }))
     }
 
     async fn attach_volume_to_vm(

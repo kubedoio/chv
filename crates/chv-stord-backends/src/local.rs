@@ -73,16 +73,35 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
-    async fn health(&self, _volume_id: &str, handle: &str) -> Result<BackendHealth, ChvError> {
-        let status = if handle.starts_with("local-") {
+    async fn health(&self, volume_id: &str, handle: &str) -> Result<BackendHealth, ChvError> {
+        // Derive expected path from handle: local-{volume_id}-{locator}
+        let prefix = format!("local-{}-", volume_id);
+        let path_str = if handle.starts_with(&prefix) {
+            handle.strip_prefix(&prefix).unwrap_or(handle)
+        } else {
+            handle
+        };
+        let path = std::path::Path::new(path_str);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.runtime_dir.join(path)
+        };
+
+        let status = if path.exists() {
             "healthy"
         } else {
-            "unknown"
+            "unhealthy"
+        };
+        let last_error = if path.exists() {
+            String::new()
+        } else {
+            format!("path does not exist: {}", path.display())
         };
         Ok(BackendHealth {
             status: status.to_string(),
             backend_state: "open".to_string(),
-            last_error: String::new(),
+            last_error,
         })
     }
 }

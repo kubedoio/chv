@@ -4,6 +4,7 @@ use chv_errors::ChvError;
 use chv_observability::Metrics;
 use chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer;
 use chv_stord_backends::StorageBackend;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -16,11 +17,20 @@ pub struct StorageServer<B: StorageBackend> {
 }
 
 impl<B: StorageBackend> StorageServer<B> {
-    pub fn new(backend: B, metrics: Metrics) -> Self {
+    pub fn new(
+        backend: B,
+        metrics: Metrics,
+        backend_allowlist: Vec<String>,
+    ) -> Self {
         let backend = Arc::new(backend);
         let sessions = Arc::new(SessionTable::new());
         Self {
-            inner: StorageServiceImpl::new(backend, sessions, Arc::new(metrics)),
+            inner: StorageServiceImpl::new(
+                backend,
+                sessions,
+                Arc::new(metrics),
+                backend_allowlist,
+            ),
         }
     }
 
@@ -47,6 +57,14 @@ impl<B: StorageBackend> StorageServer<B> {
             path: socket_path.to_string_lossy().to_string(),
             source: e,
         })?;
+
+        tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+            .await
+            .map_err(|e| ChvError::Io {
+                path: socket_path.to_string_lossy().to_string(),
+                source: e,
+            })?;
+
         let uds_stream = UnixListenerStream::new(uds);
 
         info!(socket = %socket_path.display(), "starting chv-stord server");
