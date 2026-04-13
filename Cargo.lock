@@ -194,6 +194,7 @@ dependencies = [
  "chv-config",
  "chv-errors",
  "chv-observability",
+ "control-plane-node-api",
  "tokio",
  "tracing",
 ]
@@ -202,6 +203,7 @@ dependencies = [
 name = "chv-agent-core"
 version = "0.1.0"
 dependencies = [
+ "chv-agent-runtime-ch",
  "chv-common",
  "chv-config",
  "chv-errors",
@@ -1290,7 +1292,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69f9466fb2c14ea04357e91413efb882e2a6d4a406e625449bc0a5d360d53a21"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -1307,6 +1311,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -1704,8 +1717,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-pemfile",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",
