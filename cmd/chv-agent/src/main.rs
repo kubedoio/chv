@@ -1,6 +1,7 @@
 use chv_agent_core::{
-    cache::NodeCache, config::load_agent_config, daemon_clients::{NwdClient, StordClient},
-    health::HealthAggregator, reconcile::Reconciler, state_machine::NodeState,
+    cache::NodeCache, config::load_agent_config, control_plane::ControlPlaneClient,
+    daemon_clients::{NwdClient, StordClient}, health::HealthAggregator, reconcile::Reconciler,
+    state_machine::NodeState,
 };
 use chv_observability::init_logger;
 use std::path::PathBuf;
@@ -43,16 +44,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Transition from whatever cached state to Bootstrapping on startup
-    if cache.node_state.parse::<NodeState>().unwrap_or(NodeState::Bootstrapping) == NodeState::Bootstrapping {
-        cache.node_state = NodeState::Bootstrapping.as_str().to_string();
-    }
+    // Always reset to Bootstrapping on startup so readiness is re-evaluated.
+    cache.node_state = NodeState::Bootstrapping.as_str().to_string();
 
     let mut reconciler = Reconciler::new(
         cache.clone(),
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
     );
+
+    // Instantiate control-plane client skeleton (not yet used in Phase 1 loop)
+    let mut _control_plane = match ControlPlaneClient::new(&config.control_plane_addr).await {
+        Ok(client) => {
+            info!("connected to control plane");
+            Some(client)
+        }
+        Err(e) => {
+            warn!(error = %e, "control plane unavailable; will retry later");
+            None
+        }
+    };
 
     // Simple health probe loop (Phase 1 skeleton)
     let mut interval = tokio::time::interval(Duration::from_secs(5));

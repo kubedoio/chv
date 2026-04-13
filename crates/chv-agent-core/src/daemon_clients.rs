@@ -39,6 +39,7 @@ impl StordClient {
         })
     }
 
+    // TODO: propagate operation_id via gRPC metadata once chv-stord API supports it.
     pub async fn health_probe(&mut self) -> Result<bool, ChvError> {
         let _ = self
             .inner
@@ -81,6 +82,7 @@ impl NwdClient {
         })
     }
 
+    // TODO: propagate operation_id via gRPC metadata once chv-nwd API supports it.
     pub async fn health_probe(&mut self) -> Result<bool, ChvError> {
         let _ = self
             .inner

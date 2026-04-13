@@ -1,4 +1,4 @@
-use crate::state_machine::{NodeState, StateMachine};
+use crate::state_machine::NodeState;
 
 #[derive(Debug, Clone, Default)]
 pub struct HealthAggregator {
@@ -110,6 +110,17 @@ mod tests {
         assert_eq!(
             h.derive_node_state(NodeState::HostReady),
             NodeState::StorageReady
+        );
+    }
+
+    #[test]
+    fn health_from_host_ready_nwd_only() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(false);
+        h.update_nwd(true);
+        assert_eq!(
+            h.derive_node_state(NodeState::HostReady),
+            NodeState::NetworkReady
         );
     }
 }

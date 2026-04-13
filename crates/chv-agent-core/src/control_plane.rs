@@ -98,4 +98,21 @@ mod tests {
         let result = ControlPlaneClient::stale_generation_check(&meta, &cache, "node", "node-1");
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn non_numeric_generation_accepted() {
+        let mut cache = NodeCache::new("node-1");
+        cache.observe_generation("node", "node-1", "v2");
+
+        let meta = proto::RequestMeta {
+            operation_id: "op-1".to_string(),
+            requested_by: "cp".to_string(),
+            target_node_id: "node-1".to_string(),
+            desired_state_version: "v3".to_string(),
+            request_unix_ms: 0,
+        };
+
+        let result = ControlPlaneClient::stale_generation_check(&meta, &cache, "node", "node-1");
+        assert!(result.is_ok(), "non-numeric generations should not be treated as stale");
+    }
 }

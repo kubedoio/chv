@@ -1,6 +1,4 @@
 use crate::cache::NodeCache;
-use crate::control_plane::ControlPlaneClient;
-use crate::daemon_clients::{NwdClient, StordClient};
 use crate::state_machine::{NodeState, StateMachine};
 use chv_errors::ChvError;
 use std::path::PathBuf;

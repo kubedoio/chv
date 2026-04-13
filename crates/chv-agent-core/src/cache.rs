@@ -1,9 +1,20 @@
 use chv_errors::ChvError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DesiredStateFragment {
+    pub id: String,
+    pub kind: String,
+    pub generation: String,
+    pub spec_json: Vec<u8>,
+    pub policy_json: Vec<u8>,
+    pub updated_at: String,
+    pub updated_by: String,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeCache {
@@ -14,6 +25,9 @@ pub struct NodeCache {
     pub vm_generations: HashMap<String, String>,
     pub volume_generations: HashMap<String, String>,
     pub network_generations: HashMap<String, String>,
+    pub vm_fragments: HashMap<String, DesiredStateFragment>,
+    pub volume_fragments: HashMap<String, DesiredStateFragment>,
+    pub network_fragments: HashMap<String, DesiredStateFragment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -28,6 +42,9 @@ impl NodeCache {
             vm_generations: HashMap::new(),
             volume_generations: HashMap::new(),
             network_generations: HashMap::new(),
+            vm_fragments: HashMap::new(),
+            volume_fragments: HashMap::new(),
+            network_fragments: HashMap::new(),
             last_error: None,
         }
     }
@@ -47,6 +64,15 @@ impl NodeCache {
             field: "cache".to_string(),
             reason: format!("parse error: {}", e),
         })?;
+        if cache.cache_version != CACHE_VERSION {
+            return Err(ChvError::InvalidArgument {
+                field: "cache".to_string(),
+                reason: format!(
+                    "cache version mismatch: expected {}, got {}",
+                    CACHE_VERSION, cache.cache_version
+                ),
+            });
+        }
         Ok(cache)
     }
 
@@ -105,10 +131,11 @@ impl NodeCache {
         if incoming.is_empty() {
             return false;
         }
-        // Try numeric comparison first, then fall back to string equality.
+        // Try numeric comparison first. For non-numeric generations we cannot
+        // determine ordering, so we conservatively accept the request.
         match (incoming.parse::<u64>(), current.parse::<u64>()) {
             (Ok(a), Ok(b)) => a < b,
-            _ => incoming != current,
+            _ => false,
         }
     }
 }
@@ -144,5 +171,31 @@ mod tests {
     fn cache_empty_generation_not_stale() {
         let cache = NodeCache::new("node-1");
         assert!(!cache.is_stale("vm", "vm-1", "1"));
+    }
+
+    #[test]
+    fn cache_non_numeric_generation_not_stale() {
+        let mut cache = NodeCache::new("node-1");
+        cache.observe_generation("vm", "vm-1", "v2");
+        // We cannot order arbitrary strings, so newer-looking values are accepted.
+        assert!(!cache.is_stale("vm", "vm-1", "v3"));
+        assert!(!cache.is_stale("vm", "vm-1", "v2"));
+        assert!(!cache.is_stale("vm", "vm-1", "v1"));
+    }
+
+    #[tokio::test]
+    async fn cache_version_mismatch_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let mut cache = NodeCache::new("node-1");
+        cache.cache_version = 999;
+        cache.save(&path).await.unwrap();
+
+        let result = NodeCache::load(&path).await;
+        assert!(
+            matches!(result, Err(ChvError::InvalidArgument { .. })),
+            "expected version mismatch error, got {:?}",
+            result
+        );
     }
 }
