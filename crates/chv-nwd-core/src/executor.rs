@@ -29,6 +29,67 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         network_id: &str,
         state: &crate::state::TopologyState,
     ) -> Result<String, ChvError>;
+
+    async fn attach_vm_nic(
+        &self,
+        network_id: &str,
+        nic_id: &str,
+        vm_id: &str,
+        bridge_name: &str,
+        mac_address: &str,
+        ip_address: &str,
+    ) -> Result<(String, String), ChvError>;
+
+    async fn detach_vm_nic(
+        &self,
+        nic_id: &str,
+        tap_handle: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn set_firewall_policy(
+        &self,
+        network_id: &str,
+        policy_version: &str,
+        policy_json: &[u8],
+    ) -> Result<(), ChvError>;
+
+    async fn set_nat_policy(
+        &self,
+        network_id: &str,
+        policy_version: &str,
+        policy_json: &[u8],
+    ) -> Result<(), ChvError>;
+
+    async fn ensure_dhcp_scope(
+        &self,
+        network_id: &str,
+        cidr: &str,
+        range_start: &str,
+        range_end: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn ensure_dns_scope(
+        &self,
+        network_id: &str,
+        forwarders: &[&str],
+    ) -> Result<(), ChvError>;
+
+    async fn expose_service(
+        &self,
+        network_id: &str,
+        exposure_id: &str,
+        protocol: &str,
+        external_port: u32,
+        target_ip: &str,
+        target_port: u32,
+        mode: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn withdraw_service_exposure(
+        &self,
+        network_id: &str,
+        exposure_id: &str,
+    ) -> Result<(), ChvError>;
 }
 
 pub struct LinuxExecutor {
@@ -172,5 +233,128 @@ impl NetworkExecutor for LinuxExecutor {
             .collect();
             Ok(format!("degraded: missing {}", missing.join(", ")))
         }
+    }
+
+    async fn attach_vm_nic(
+        &self,
+        network_id: &str,
+        nic_id: &str,
+        _vm_id: &str,
+        bridge_name: &str,
+        _mac_address: &str,
+        _ip_address: &str,
+    ) -> Result<(String, String), ChvError> {
+        let tap_name = format!("tap-{}", nic_id);
+
+        Self::run_ip(&["tuntap", "add", "dev", &tap_name, "mode", "tap"]).await?;
+        Self::run_ip(&["link", "set", "dev", &tap_name, "master", bridge_name]).await?;
+        Self::run_ip(&["link", "set", "dev", &tap_name, "up"]).await?;
+
+        info!(network_id = %network_id, nic_id = %nic_id, tap = %tap_name, "attached VM NIC");
+
+        Ok((format!("ns-{}", network_id), tap_name))
+    }
+
+    async fn detach_vm_nic(
+        &self,
+        _nic_id: &str,
+        tap_handle: &str,
+    ) -> Result<(), ChvError> {
+        let out = Command::new("ip")
+            .args(["tuntap", "del", "dev", tap_handle, "mode", "tap"])
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "ip".to_string(),
+                source: e,
+            })?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("cannot find device") || stderr.contains("No such device") {
+                return Ok(());
+            }
+            return Err(ChvError::NetworkUnavailable {
+                resource: "ip".to_string(),
+                reason: format!("ip tuntap del dev {} mode tap failed: {}", tap_handle, stderr),
+            });
+        }
+
+        info!(tap = %tap_handle, "detached VM NIC");
+        Ok(())
+    }
+
+    async fn set_firewall_policy(
+        &self,
+        network_id: &str,
+        _policy_version: &str,
+        _policy_json: &[u8],
+    ) -> Result<(), ChvError> {
+        info!(network_id = %network_id, "firewall policy accepted but not enforced by LinuxExecutor");
+        Ok(())
+    }
+
+    async fn set_nat_policy(
+        &self,
+        network_id: &str,
+        _policy_version: &str,
+        _policy_json: &[u8],
+    ) -> Result<(), ChvError> {
+        info!(network_id = %network_id, "NAT policy accepted but not enforced by LinuxExecutor");
+        Ok(())
+    }
+
+    async fn ensure_dhcp_scope(
+        &self,
+        network_id: &str,
+        _cidr: &str,
+        _range_start: &str,
+        _range_end: &str,
+    ) -> Result<(), ChvError> {
+        info!(network_id = %network_id, "DHCP scope accepted but not enforced by LinuxExecutor");
+        Ok(())
+    }
+
+    async fn ensure_dns_scope(
+        &self,
+        network_id: &str,
+        _forwarders: &[&str],
+    ) -> Result<(), ChvError> {
+        info!(network_id = %network_id, "DNS scope accepted but not enforced by LinuxExecutor");
+        Ok(())
+    }
+
+    async fn expose_service(
+        &self,
+        network_id: &str,
+        exposure_id: &str,
+        _protocol: &str,
+        _external_port: u32,
+        _target_ip: &str,
+        _target_port: u32,
+        _mode: &str,
+    ) -> Result<(), ChvError> {
+        info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure accepted but NAT/port-forwarding rules are not yet enforced by LinuxExecutor");
+        Ok(())
+    }
+
+    async fn withdraw_service_exposure(
+        &self,
+        network_id: &str,
+        exposure_id: &str,
+    ) -> Result<(), ChvError> {
+        info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure withdrawal accepted but NAT rules are not yet removed by LinuxExecutor");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_executor_implements_network_executor() {
+        let _executor = LinuxExecutor::new(std::env::temp_dir());
+        // If this compiles, the trait is fully implemented.
     }
 }

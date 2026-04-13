@@ -43,6 +43,83 @@ impl NetworkExecutor for MockExecutor {
     ) -> Result<String, ChvError> {
         Ok("healthy".to_string())
     }
+
+    async fn attach_vm_nic(
+        &self,
+        network_id: &str,
+        nic_id: &str,
+        _vm_id: &str,
+        _bridge_name: &str,
+        _mac_address: &str,
+        _ip_address: &str,
+    ) -> Result<(String, String), ChvError> {
+        Ok((format!("ns-{}", network_id), format!("tap-{}", nic_id)))
+    }
+
+    async fn detach_vm_nic(
+        &self,
+        _nic_id: &str,
+        _tap_handle: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn set_firewall_policy(
+        &self,
+        _network_id: &str,
+        _policy_version: &str,
+        _policy_json: &[u8],
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn set_nat_policy(
+        &self,
+        _network_id: &str,
+        _policy_version: &str,
+        _policy_json: &[u8],
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn ensure_dhcp_scope(
+        &self,
+        _network_id: &str,
+        _cidr: &str,
+        _range_start: &str,
+        _range_end: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn ensure_dns_scope(
+        &self,
+        _network_id: &str,
+        _forwarders: &[&str],
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn expose_service(
+        &self,
+        _network_id: &str,
+        _exposure_id: &str,
+        _protocol: &str,
+        _external_port: u32,
+        _target_ip: &str,
+        _target_port: u32,
+        _mode: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn withdraw_service_exposure(
+        &self,
+        _network_id: &str,
+        _exposure_id: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
 }
 
 async fn make_client(socket: PathBuf) -> NetworkServiceClient<tonic::transport::Channel> {
