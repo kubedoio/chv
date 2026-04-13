@@ -319,6 +319,19 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
         );
 
         if !updated {
+            if let Err(e) = self
+                .backend
+                .detach(&req.volume_id, &req.attachment_handle, &req.vm_id, false)
+                .await
+            {
+                tracing::warn!(
+                    volume_id = %req.volume_id,
+                    attachment_handle = %req.attachment_handle,
+                    vm_id = %req.vm_id,
+                    error = %e,
+                    "rollback detach failed after concurrent session removal"
+                );
+            }
             let e = ChvError::NotFound {
                 resource: "session".to_string(),
                 id: format!("{}/{}", req.volume_id, req.attachment_handle),
@@ -327,8 +340,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService
                 result: Some(e.to_proto_result()),
                 volume_id: req.volume_id,
                 vm_id: req.vm_id,
-                export_kind: export.export_kind,
-                export_path: export.export_path,
+                export_kind: String::new(),
+                export_path: String::new(),
             }));
         }
 
