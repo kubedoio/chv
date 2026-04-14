@@ -44,10 +44,13 @@ impl BootstrapTokenRepository {
                     return Ok(BootstrapTokenValidation::AlreadyUsed);
                 }
                 if row.one_time_use {
-                    sqlx::query(MARK_USED_SQL)
+                    let result = sqlx::query(MARK_USED_SQL)
                         .bind(&token_hash)
                         .execute(&self.pool)
                         .await?;
+                    if result.rows_affected() == 0 {
+                        return Ok(BootstrapTokenValidation::AlreadyUsed);
+                    }
                 }
                 Ok(BootstrapTokenValidation::Valid)
             }
@@ -70,7 +73,7 @@ struct BootstrapTokenRow {
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapTokenValidation {
     Valid,
     Invalid,
