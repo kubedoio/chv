@@ -166,6 +166,11 @@ impl LifecycleServiceImplementation {
             .map_err(|e| ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e)))
     }
 
+    fn resource_id_from_node_id(node_id: &NodeId) -> Result<ResourceId, ControlPlaneServiceError> {
+        ResourceId::new(node_id.as_str())
+            .map_err(|e| ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e)))
+    }
+
     async fn require_node_exists(&self, node_id: &NodeId) -> Result<(), ControlPlaneServiceError> {
         let row = sqlx::query("SELECT 1 FROM nodes WHERE node_id = $1")
             .bind(node_id.as_str())
@@ -191,11 +196,8 @@ impl LifecycleServiceImplementation {
     ) -> Result<OperationId, ControlPlaneServiceError> {
         self.require_node_exists(&node_id).await?;
         let now = Self::now_ms();
-        let desired_generation_str = if meta.desired_state_version.is_empty() {
-            "0".to_string()
-        } else {
-            meta.desired_state_version.clone()
-        };
+        let desired_generation = Self::desired_generation_from_meta(meta)?;
+        let desired_generation_str = desired_generation.to_string();
         let resource_id_str = resource_id.as_ref().map(|r| r.as_str()).unwrap_or("").to_string();
         let idempotency_key = format!(
             "{}:{}:{}:{}",
@@ -206,8 +208,6 @@ impl LifecycleServiceImplementation {
             OperationId::new(format!("{}-{}", operation_type, uuid::Uuid::new_v4())).map_err(
                 |e| ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e)),
             )?;
-
-        let desired_generation = Self::desired_generation_from_meta(meta)?;
 
         let receipt = self
             .operation_repo
@@ -444,9 +444,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
 
-        let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
-            ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
-        })?;
+        let resource_id = Self::resource_id_from_node_id(&node_id)?;
         let operation_id = self
             .create_operation_and_emit(
                 "PauseNodeScheduling",
@@ -467,9 +465,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
 
-        let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
-            ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
-        })?;
+        let resource_id = Self::resource_id_from_node_id(&node_id)?;
         let operation_id = self
             .create_operation_and_emit(
                 "ResumeNodeScheduling",
@@ -490,9 +486,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
 
-        let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
-            ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
-        })?;
+        let resource_id = Self::resource_id_from_node_id(&node_id)?;
         let operation_id = self
             .create_operation_and_emit(
                 "DrainNode",
@@ -527,9 +521,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
 
-        let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
-            ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
-        })?;
+        let resource_id = Self::resource_id_from_node_id(&node_id)?;
         let operation_id = self
             .create_operation_and_emit(
                 "EnterMaintenance",
@@ -564,9 +556,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
 
-        let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
-            ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
-        })?;
+        let resource_id = Self::resource_id_from_node_id(&node_id)?;
         let operation_id = self
             .create_operation_and_emit(
                 "ExitMaintenance",
