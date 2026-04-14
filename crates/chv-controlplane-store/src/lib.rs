@@ -3,6 +3,7 @@ mod bootstrap_tokens;
 mod db;
 mod desired_state;
 mod events;
+mod network_exposures;
 mod nodes;
 mod observed_state;
 mod operations;
@@ -16,6 +17,7 @@ pub use db::{
 pub use desired_state::{
     DesiredStateRepository, NetworkDesiredStateInput, VmDesiredStateInput, VolumeDesiredStateInput,
 };
+pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
 pub use events::{EventAppendInput, EventRepository};
 pub use nodes::{
     NodeBootstrapResultInput, NodeInventoryInput, NodeRepository, NodeStateInput, NodeUpsertInput,

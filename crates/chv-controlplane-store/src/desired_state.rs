@@ -169,13 +169,6 @@ INSERT INTO network_desired_state (
     desired_status,
     requested_by,
     updated_by,
-    service_name,
-    protocol,
-    listen_address,
-    listen_port,
-    target_address,
-    target_port,
-    exposure_policy,
     requested_at,
     updated_at
 )
@@ -185,28 +178,14 @@ VALUES (
     $3,
     $4,
     $5,
-    $6,
-    $7,
-    $8::inet,
-    $9,
-    $10::inet,
-    $11,
-    $12,
-    to_timestamp($13 / 1000.0),
-    to_timestamp($13 / 1000.0)
+    to_timestamp($6 / 1000.0),
+    to_timestamp($6 / 1000.0)
 )
 ON CONFLICT (network_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
     desired_status = EXCLUDED.desired_status,
     requested_by = EXCLUDED.requested_by,
     updated_by = EXCLUDED.updated_by,
-    service_name = EXCLUDED.service_name,
-    protocol = EXCLUDED.protocol,
-    listen_address = EXCLUDED.listen_address,
-    listen_port = EXCLUDED.listen_port,
-    target_address = EXCLUDED.target_address,
-    target_port = EXCLUDED.target_port,
-    exposure_policy = EXCLUDED.exposure_policy,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -308,13 +287,6 @@ impl DesiredStateRepository {
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
-            .bind(&input.service_name)
-            .bind(&input.protocol)
-            .bind(&input.listen_address)
-            .bind(input.listen_port)
-            .bind(&input.target_address)
-            .bind(input.target_port)
-            .bind(&input.exposure_policy)
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
@@ -373,13 +345,6 @@ pub struct NetworkDesiredStateInput {
     pub desired_status: String,
     pub requested_by: Option<String>,
     pub updated_by: Option<String>,
-    pub service_name: String,
-    pub protocol: String,
-    pub listen_address: Option<String>,
-    pub listen_port: Option<i32>,
-    pub target_address: Option<String>,
-    pub target_port: Option<i32>,
-    pub exposure_policy: Option<String>,
     pub requested_unix_ms: i64,
 }
 

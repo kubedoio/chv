@@ -239,13 +239,6 @@ CREATE TABLE IF NOT EXISTS network_desired_state (
     desired_status text NOT NULL,
     requested_by text,
     updated_by text,
-    service_name text NOT NULL,
-    protocol text NOT NULL,
-    listen_address inet,
-    listen_port integer,
-    target_address inet,
-    target_port integer,
-    exposure_policy text,
     requested_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
