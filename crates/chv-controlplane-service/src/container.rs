@@ -1,6 +1,7 @@
 use crate::enrollment::EnrollmentServiceImplementation;
 use crate::error::ControlPlaneServiceError;
 use crate::inventory::InventoryServiceImplementation;
+use crate::reconcile::ReconcileServiceImplementation;
 use crate::telemetry::TelemetryServiceImplementation;
 use chv_controlplane_store::StorePool;
 use control_plane_node_api::control_plane_node_api as proto;
@@ -38,6 +39,7 @@ pub struct ControlPlaneComponents {
     enrollment_service: EnrollmentServiceImplementation,
     inventory_service: InventoryServiceImplementation,
     telemetry_service: TelemetryServiceImplementation,
+    reconcile_service: ReconcileServiceImplementation,
 }
 
 impl ControlPlaneComponents {
@@ -46,12 +48,14 @@ impl ControlPlaneComponents {
         enrollment_service: EnrollmentServiceImplementation,
         inventory_service: InventoryServiceImplementation,
         telemetry_service: TelemetryServiceImplementation,
+        reconcile_service: ReconcileServiceImplementation,
     ) -> Self {
         Self {
             store_pool,
             enrollment_service,
             inventory_service,
             telemetry_service,
+            reconcile_service,
         }
     }
 
@@ -69,6 +73,10 @@ impl ControlPlaneComponents {
 
     pub fn telemetry_service(&self) -> &TelemetryServiceImplementation {
         &self.telemetry_service
+    }
+
+    pub fn reconcile_service(&self) -> &ReconcileServiceImplementation {
+        &self.reconcile_service
     }
 }
 
@@ -115,12 +123,19 @@ impl ControlPlaneService {
             )),
         );
 
+        let reconcile_server = proto::reconcile_service_server::ReconcileServiceServer::new(
+            crate::server::ReconcileServer::new(Arc::new(
+                self.components.reconcile_service.clone(),
+            )),
+        );
+
         info!(?addr, "starting gRPC server");
 
         tonic::transport::Server::builder()
             .add_service(enrollment_server)
             .add_service(inventory_server)
             .add_service(telemetry_server)
+            .add_service(reconcile_server)
             .serve(addr)
             .await
             .map_err(|e: tonic::transport::Error| {

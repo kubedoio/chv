@@ -1,5 +1,6 @@
 use crate::enrollment::EnrollmentService;
 use crate::inventory::InventoryService;
+use crate::reconcile::ReconcileService;
 use crate::telemetry::TelemetryService;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::sync::Arc;
@@ -170,6 +171,79 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         let resp = self
             .service
             .publish_alert(request.into_inner())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(resp))
+    }
+}
+
+pub struct ReconcileServer {
+    service: Arc<dyn ReconcileService>,
+}
+
+impl ReconcileServer {
+    pub fn new(service: Arc<dyn ReconcileService>) -> Self {
+        Self { service }
+    }
+}
+
+#[tonic::async_trait]
+impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
+    async fn apply_node_desired_state(
+        &self,
+        request: Request<proto::ApplyNodeDesiredStateRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .apply_node_desired_state(request.into_inner())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(resp))
+    }
+
+    async fn apply_vm_desired_state(
+        &self,
+        request: Request<proto::ApplyVmDesiredStateRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .apply_vm_desired_state(request.into_inner())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(resp))
+    }
+
+    async fn apply_volume_desired_state(
+        &self,
+        request: Request<proto::ApplyVolumeDesiredStateRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .apply_volume_desired_state(request.into_inner())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(resp))
+    }
+
+    async fn apply_network_desired_state(
+        &self,
+        request: Request<proto::ApplyNetworkDesiredStateRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .apply_network_desired_state(request.into_inner())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(resp))
+    }
+
+    async fn acknowledge_desired_state_version(
+        &self,
+        request: Request<proto::AcknowledgeDesiredStateVersionRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .acknowledge_desired_state_version(request.into_inner())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(resp))

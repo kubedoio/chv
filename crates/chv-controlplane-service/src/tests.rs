@@ -348,3 +348,176 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
         other => panic!("Expected Unauthorized error for invalid token, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn test_apply_vm_desired_state_persistence() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    // Insert a node to satisfy FK constraints
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-vm-1', 'host-vm-1', 'host-vm-1')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+
+    let service = ReconcileServiceImplementation::new(
+        node_repo,
+        desired_state_repo,
+        network_exposure_repo,
+        event_repo,
+    );
+
+    let spec_json = r#"{"cpu_count": 2, "memory_bytes": 4294967296, "image_ref": "ubuntu-22.04"}"#;
+    let request = proto::ApplyVmDesiredStateRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "".into(),
+            requested_by: "test-user".into(),
+            target_node_id: "node-vm-1".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-vm-1".into(),
+        vm_id: "vm-1".into(),
+        fragment: Some(proto::DesiredStateFragment {
+            id: "vm-1".into(),
+            kind: "Vm".into(),
+            generation: "1".into(),
+            spec_json: spec_json.as_bytes().to_vec(),
+            policy_json: vec![],
+            updated_at: "2024-01-01T00:00:00Z".into(),
+            updated_by: "test-user".into(),
+        }),
+    };
+
+    let result = service.apply_vm_desired_state(request).await;
+    assert!(result.is_ok(), "Expected success, got {:?}", result);
+
+    // Verify persistence in vm_desired_state
+    let row = sqlx::query("SELECT vm_id, desired_generation FROM vm_desired_state WHERE vm_id = $1")
+        .bind("vm-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let vm_id: String = sqlx::Row::get(&row, "vm_id");
+    let desired_generation: i64 = sqlx::Row::get(&row, "desired_generation");
+    assert_eq!(vm_id, "vm-1");
+    assert_eq!(desired_generation, 1);
+}
+
+#[tokio::test]
+async fn test_apply_network_desired_state_with_exposures() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    // Insert a node to satisfy FK constraints
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-net-1', 'host-net-1', 'host-net-1')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+
+    let service = ReconcileServiceImplementation::new(
+        node_repo,
+        desired_state_repo,
+        network_exposure_repo,
+        event_repo,
+    );
+
+    let spec_json = r#"{"network_class": "bridge", "exposures": [{"service_name": "web", "protocol": "tcp", "listen_port": 80, "target_port": 8080}]}"#;
+    let request = proto::ApplyNetworkDesiredStateRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "".into(),
+            requested_by: "test-user".into(),
+            target_node_id: "node-net-1".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-net-1".into(),
+        network_id: "net-1".into(),
+        fragment: Some(proto::DesiredStateFragment {
+            id: "net-1".into(),
+            kind: "Network".into(),
+            generation: "1".into(),
+            spec_json: spec_json.as_bytes().to_vec(),
+            policy_json: vec![],
+            updated_at: "2024-01-01T00:00:00Z".into(),
+            updated_by: "test-user".into(),
+        }),
+    };
+
+    let result = service.apply_network_desired_state(request).await;
+    assert!(result.is_ok(), "Expected success, got {:?}", result);
+
+    // Verify persistence in network_exposures
+    let row =
+        sqlx::query("SELECT network_id, service_name, listen_port FROM network_exposures WHERE network_id = $1")
+            .bind("net-1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let network_id: String = sqlx::Row::get(&row, "network_id");
+    let service_name: String = sqlx::Row::get(&row, "service_name");
+    let listen_port: i32 = sqlx::Row::get(&row, "listen_port");
+    assert_eq!(network_id, "net-1");
+    assert_eq!(service_name, "web");
+    assert_eq!(listen_port, 80);
+}
+
+#[tokio::test]
+async fn test_apply_rejects_non_numeric_generation() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+
+    let service = ReconcileServiceImplementation::new(
+        node_repo,
+        desired_state_repo,
+        network_exposure_repo,
+        event_repo,
+    );
+
+    let request = proto::ApplyVmDesiredStateRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-bad-gen".into(),
+            requested_by: "test-user".into(),
+            target_node_id: "node-bad-gen".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-bad-gen".into(),
+        vm_id: "vm-bad-gen".into(),
+        fragment: Some(proto::DesiredStateFragment {
+            id: "vm-bad-gen".into(),
+            kind: "Vm".into(),
+            generation: "not-a-number".into(),
+            spec_json: b"{}".to_vec(),
+            policy_json: vec![],
+            updated_at: "2024-01-01T00:00:00Z".into(),
+            updated_by: "test-user".into(),
+        }),
+    };
+
+    let result = service.apply_vm_desired_state(request).await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
+            assert!(msg.contains("generation must be numeric"), "Unexpected message: {}", msg);
+        }
+        other => panic!(
+            "Expected InvalidArgument for non-numeric generation, got {:?}",
+            other
+        ),
+    }
+}
