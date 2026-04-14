@@ -197,7 +197,7 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
             .service
             .apply_node_desired_state(request.into_inner())
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
 
@@ -209,7 +209,7 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
             .service
             .apply_vm_desired_state(request.into_inner())
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
 
@@ -221,7 +221,7 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
             .service
             .apply_volume_desired_state(request.into_inner())
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
 
@@ -233,7 +233,7 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
             .service
             .apply_network_desired_state(request.into_inner())
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
 
@@ -245,7 +245,7 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
             .service
             .acknowledge_desired_state_version(request.into_inner())
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
 }

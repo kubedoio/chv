@@ -51,6 +51,38 @@ pub struct ReconcileServiceImplementation {
     event_repo: EventRepository,
 }
 
+struct EventContext {
+    operation_id: Option<OperationId>,
+    node_id: Option<NodeId>,
+    resource_kind: Option<ResourceKind>,
+    resource_id: Option<ResourceId>,
+    severity: EventSeverity,
+    event_type: EventType,
+    message: String,
+    details: Option<String>,
+    occurred_unix_ms: i64,
+    requested_by: Option<String>,
+}
+
+impl EventContext {
+    fn into_input(self) -> EventAppendInput {
+        EventAppendInput {
+            operation_id: self.operation_id,
+            node_id: self.node_id,
+            resource_kind: self.resource_kind,
+            resource_id: self.resource_id,
+            severity: self.severity,
+            event_type: self.event_type,
+            message: self.message,
+            details: self.details,
+            occurred_unix_ms: self.occurred_unix_ms,
+            actor_id: None,
+            requested_by: self.requested_by,
+            correlation_id: None,
+        }
+    }
+}
+
 impl ReconcileServiceImplementation {
     pub fn new(
         node_repo: NodeRepository,
@@ -66,10 +98,10 @@ impl ReconcileServiceImplementation {
         }
     }
 
-    fn now_ms(&self) -> i64 {
+    fn now_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as i64
     }
 
@@ -80,36 +112,27 @@ impl ReconcileServiceImplementation {
         meta.ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))
     }
 
-    async fn emit_event(
-        &self,
-        event_type: EventType,
-        node_id: Option<NodeId>,
-        resource_kind: Option<ResourceKind>,
-        resource_id: Option<ResourceId>,
-        operation_id: Option<OperationId>,
-        message: String,
-        occurred_unix_ms: i64,
-        requested_by: Option<String>,
-    ) -> Result<(), ControlPlaneServiceError> {
+    fn parse_operation_id(meta: &proto::RequestMeta) -> Result<Option<OperationId>, ControlPlaneServiceError> {
+        if meta.operation_id.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
+                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
+            })?))
+        }
+    }
+
+    fn normalize_requested_by(meta: &proto::RequestMeta) -> Option<String> {
+        if meta.requested_by.is_empty() {
+            None
+        } else {
+            Some(meta.requested_by.clone())
+        }
+    }
+
+    async fn emit_event(&self, ctx: EventContext) -> Result<(), ControlPlaneServiceError> {
         self.event_repo
-            .append(&EventAppendInput {
-                occurred_unix_ms,
-                event_type,
-                severity: if event_type == EventType::DesiredStateRejected {
-                    EventSeverity::Warning
-                } else {
-                    EventSeverity::Info
-                },
-                resource_kind,
-                resource_id,
-                node_id,
-                operation_id,
-                actor_id: None,
-                requested_by,
-                correlation_id: None,
-                message,
-                details: None,
-            })
+            .append(&ctx.into_input())
             .await?;
         Ok(())
     }
@@ -145,19 +168,15 @@ impl ReconcileService for ReconcileServiceImplementation {
             ))
         })?;
 
-        let now = self.now_ms();
+        let now = Self::now_ms();
 
-        if let Err(e) = self
+        if self
             .node_repo
             .upsert_state(&NodeStateInput {
                 node_id: node_id.clone(),
                 desired_state,
                 desired_generation: generation,
-                requested_by: if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
+                requested_by: Self::normalize_requested_by(&meta),
                 updated_by: if fragment.updated_by.is_empty() {
                     None
                 } else {
@@ -167,53 +186,38 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_unix_ms: now,
             })
             .await
+            .is_err()
         {
-            let op_id = if meta.operation_id.is_empty() {
-                None
-            } else {
-                Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                    ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-                })?)
-            };
-            self.emit_event(
-                EventType::DesiredStateRejected,
-                Some(node_id.clone()),
-                Some(ResourceKind::Node),
-                Some(ResourceId::new(node_id.as_str()).unwrap()),
-                op_id,
-                format!("failed to apply node desired state: {}", e),
-                now,
-                if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
-            )
+            let op_id = Self::parse_operation_id(&meta)?;
+            self.emit_event(EventContext {
+                operation_id: op_id,
+                node_id: Some(node_id.clone()),
+                resource_kind: Some(ResourceKind::Node),
+                resource_id: Some(ResourceId::new(node_id.as_str()).unwrap()),
+                severity: EventSeverity::Warning,
+                event_type: EventType::DesiredStateRejected,
+                message: "failed to apply node desired state".into(),
+                details: None,
+                occurred_unix_ms: now,
+                requested_by: Self::normalize_requested_by(&meta),
+            })
             .await?;
-            return Err(e.into());
+            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
         }
 
-        let op_id = if meta.operation_id.is_empty() {
-            None
-        } else {
-            Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?)
-        };
-        self.emit_event(
-            EventType::DesiredStateApplied,
-            Some(node_id.clone()),
-            Some(ResourceKind::Node),
-            Some(ResourceId::new(node_id.as_str()).unwrap()),
-            op_id,
-            "node desired state applied".into(),
-            now,
-            if meta.requested_by.is_empty() {
-                None
-            } else {
-                Some(meta.requested_by.clone())
-            },
-        )
+        let op_id = Self::parse_operation_id(&meta)?;
+        self.emit_event(EventContext {
+            operation_id: op_id,
+            node_id: Some(node_id.clone()),
+            resource_kind: Some(ResourceKind::Node),
+            resource_id: Some(ResourceId::new(node_id.as_str()).unwrap()),
+            severity: EventSeverity::Info,
+            event_type: EventType::DesiredStateApplied,
+            message: "node desired state applied".into(),
+            details: None,
+            occurred_unix_ms: now,
+            requested_by: Self::normalize_requested_by(&meta),
+        })
         .await?;
 
         Ok(proto::AckResponse {
@@ -251,9 +255,9 @@ impl ReconcileService for ReconcileServiceImplementation {
             ControlPlaneServiceError::InvalidArgument(format!("invalid spec_json: {}", e))
         })?;
 
-        let now = self.now_ms();
+        let now = Self::now_ms();
 
-        if let Err(e) = self
+        if self
             .desired_state_repo
             .upsert_vm(&VmDesiredStateInput {
                 vm_id: vm_id.clone(),
@@ -263,11 +267,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                 placement_policy: None,
                 desired_generation: generation,
                 desired_status: STATUS_OK.into(),
-                requested_by: if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
+                requested_by: Self::normalize_requested_by(&meta),
                 updated_by: if fragment.updated_by.is_empty() {
                     None
                 } else {
@@ -282,53 +282,38 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_unix_ms: now,
             })
             .await
+            .is_err()
         {
-            let op_id = if meta.operation_id.is_empty() {
-                None
-            } else {
-                Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                    ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-                })?)
-            };
-            self.emit_event(
-                EventType::DesiredStateRejected,
-                Some(node_id.clone()),
-                Some(ResourceKind::Vm),
-                Some(vm_id.clone()),
-                op_id,
-                format!("failed to apply vm desired state: {}", e),
-                now,
-                if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
-            )
+            let op_id = Self::parse_operation_id(&meta)?;
+            self.emit_event(EventContext {
+                operation_id: op_id,
+                node_id: Some(node_id.clone()),
+                resource_kind: Some(ResourceKind::Vm),
+                resource_id: Some(vm_id.clone()),
+                severity: EventSeverity::Warning,
+                event_type: EventType::DesiredStateRejected,
+                message: "failed to apply vm desired state".into(),
+                details: None,
+                occurred_unix_ms: now,
+                requested_by: Self::normalize_requested_by(&meta),
+            })
             .await?;
-            return Err(e.into());
+            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
         }
 
-        let op_id = if meta.operation_id.is_empty() {
-            None
-        } else {
-            Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?)
-        };
-        self.emit_event(
-            EventType::DesiredStateApplied,
-            Some(node_id.clone()),
-            Some(ResourceKind::Vm),
-            Some(vm_id.clone()),
-            op_id,
-            "vm desired state applied".into(),
-            now,
-            if meta.requested_by.is_empty() {
-                None
-            } else {
-                Some(meta.requested_by.clone())
-            },
-        )
+        let op_id = Self::parse_operation_id(&meta)?;
+        self.emit_event(EventContext {
+            operation_id: op_id,
+            node_id: Some(node_id.clone()),
+            resource_kind: Some(ResourceKind::Vm),
+            resource_id: Some(vm_id.clone()),
+            severity: EventSeverity::Info,
+            event_type: EventType::DesiredStateApplied,
+            message: "vm desired state applied".into(),
+            details: None,
+            occurred_unix_ms: now,
+            requested_by: Self::normalize_requested_by(&meta),
+        })
         .await?;
 
         Ok(proto::AckResponse {
@@ -375,9 +360,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 ControlPlaneServiceError::InvalidArgument(format!("invalid attached_vm_id: {}", e))
             })?;
 
-        let now = self.now_ms();
+        let now = Self::now_ms();
 
-        if let Err(e) = self
+        if self
             .desired_state_repo
             .upsert_volume(&VolumeDesiredStateInput {
                 volume_id: volume_id.clone(),
@@ -388,11 +373,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                 storage_class: spec.storage_class,
                 desired_generation: generation,
                 desired_status: STATUS_OK.into(),
-                requested_by: if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
+                requested_by: Self::normalize_requested_by(&meta),
                 updated_by: if fragment.updated_by.is_empty() {
                     None
                 } else {
@@ -405,53 +386,38 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_unix_ms: now,
             })
             .await
+            .is_err()
         {
-            let op_id = if meta.operation_id.is_empty() {
-                None
-            } else {
-                Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                    ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-                })?)
-            };
-            self.emit_event(
-                EventType::DesiredStateRejected,
-                Some(node_id.clone()),
-                Some(ResourceKind::Volume),
-                Some(volume_id.clone()),
-                op_id,
-                format!("failed to apply volume desired state: {}", e),
-                now,
-                if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
-            )
+            let op_id = Self::parse_operation_id(&meta)?;
+            self.emit_event(EventContext {
+                operation_id: op_id,
+                node_id: Some(node_id.clone()),
+                resource_kind: Some(ResourceKind::Volume),
+                resource_id: Some(volume_id.clone()),
+                severity: EventSeverity::Warning,
+                event_type: EventType::DesiredStateRejected,
+                message: "failed to apply volume desired state".into(),
+                details: None,
+                occurred_unix_ms: now,
+                requested_by: Self::normalize_requested_by(&meta),
+            })
             .await?;
-            return Err(e.into());
+            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
         }
 
-        let op_id = if meta.operation_id.is_empty() {
-            None
-        } else {
-            Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?)
-        };
-        self.emit_event(
-            EventType::DesiredStateApplied,
-            Some(node_id.clone()),
-            Some(ResourceKind::Volume),
-            Some(volume_id.clone()),
-            op_id,
-            "volume desired state applied".into(),
-            now,
-            if meta.requested_by.is_empty() {
-                None
-            } else {
-                Some(meta.requested_by.clone())
-            },
-        )
+        let op_id = Self::parse_operation_id(&meta)?;
+        self.emit_event(EventContext {
+            operation_id: op_id,
+            node_id: Some(node_id.clone()),
+            resource_kind: Some(ResourceKind::Volume),
+            resource_id: Some(volume_id.clone()),
+            severity: EventSeverity::Info,
+            event_type: EventType::DesiredStateApplied,
+            message: "volume desired state applied".into(),
+            details: None,
+            occurred_unix_ms: now,
+            requested_by: Self::normalize_requested_by(&meta),
+        })
         .await?;
 
         Ok(proto::AckResponse {
@@ -489,9 +455,9 @@ impl ReconcileService for ReconcileServiceImplementation {
             ControlPlaneServiceError::InvalidArgument(format!("invalid spec_json: {}", e))
         })?;
 
-        let now = self.now_ms();
+        let now = Self::now_ms();
 
-        if let Err(e) = self
+        if self
             .desired_state_repo
             .upsert_network(&NetworkDesiredStateInput {
                 network_id: network_id.clone(),
@@ -500,11 +466,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                 network_class: spec.network_class,
                 desired_generation: generation,
                 desired_status: STATUS_OK.into(),
-                requested_by: if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
+                requested_by: Self::normalize_requested_by(&meta),
                 updated_by: if fragment.updated_by.is_empty() {
                     None
                 } else {
@@ -513,35 +475,28 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_unix_ms: now,
             })
             .await
+            .is_err()
         {
-            let op_id = if meta.operation_id.is_empty() {
-                None
-            } else {
-                Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                    ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-                })?)
-            };
-            self.emit_event(
-                EventType::DesiredStateRejected,
-                Some(node_id.clone()),
-                Some(ResourceKind::Network),
-                Some(network_id.clone()),
-                op_id,
-                format!("failed to apply network desired state: {}", e),
-                now,
-                if meta.requested_by.is_empty() {
-                    None
-                } else {
-                    Some(meta.requested_by.clone())
-                },
-            )
+            let op_id = Self::parse_operation_id(&meta)?;
+            self.emit_event(EventContext {
+                operation_id: op_id,
+                node_id: Some(node_id.clone()),
+                resource_kind: Some(ResourceKind::Network),
+                resource_id: Some(network_id.clone()),
+                severity: EventSeverity::Warning,
+                event_type: EventType::DesiredStateRejected,
+                message: "failed to apply network desired state".into(),
+                details: None,
+                occurred_unix_ms: now,
+                requested_by: Self::normalize_requested_by(&meta),
+            })
             .await?;
-            return Err(e.into());
+            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
         }
 
         if let Some(exposures) = spec.exposures {
             for exposure in exposures {
-                if let Err(e) = self
+                if self
                     .network_exposure_repo
                     .upsert(&NetworkExposureInput {
                         network_id: network_id.clone(),
@@ -555,55 +510,40 @@ impl ReconcileService for ReconcileServiceImplementation {
                         updated_unix_ms: now,
                     })
                     .await
+                    .is_err()
                 {
-                    let op_id = if meta.operation_id.is_empty() {
-                        None
-                    } else {
-                        Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                            ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-                        })?)
-                    };
-                    self.emit_event(
-                        EventType::DesiredStateRejected,
-                        Some(node_id.clone()),
-                        Some(ResourceKind::Network),
-                        Some(network_id.clone()),
-                        op_id,
-                        format!("failed to apply network exposure: {}", e),
-                        now,
-                        if meta.requested_by.is_empty() {
-                            None
-                        } else {
-                            Some(meta.requested_by.clone())
-                        },
-                    )
+                    let op_id = Self::parse_operation_id(&meta)?;
+                    self.emit_event(EventContext {
+                        operation_id: op_id,
+                        node_id: Some(node_id.clone()),
+                        resource_kind: Some(ResourceKind::Network),
+                        resource_id: Some(network_id.clone()),
+                        severity: EventSeverity::Warning,
+                        event_type: EventType::DesiredStateRejected,
+                        message: "failed to apply network exposure".into(),
+                        details: None,
+                        occurred_unix_ms: now,
+                        requested_by: Self::normalize_requested_by(&meta),
+                    })
                     .await?;
-                    return Err(e.into());
+                    return Err(ControlPlaneServiceError::Internal("persistence error".into()));
                 }
             }
         }
 
-        let op_id = if meta.operation_id.is_empty() {
-            None
-        } else {
-            Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?)
-        };
-        self.emit_event(
-            EventType::DesiredStateApplied,
-            Some(node_id.clone()),
-            Some(ResourceKind::Network),
-            Some(network_id.clone()),
-            op_id,
-            "network desired state applied".into(),
-            now,
-            if meta.requested_by.is_empty() {
-                None
-            } else {
-                Some(meta.requested_by.clone())
-            },
-        )
+        let op_id = Self::parse_operation_id(&meta)?;
+        self.emit_event(EventContext {
+            operation_id: op_id,
+            node_id: Some(node_id.clone()),
+            resource_kind: Some(ResourceKind::Network),
+            resource_id: Some(network_id.clone()),
+            severity: EventSeverity::Info,
+            event_type: EventType::DesiredStateApplied,
+            message: "network desired state applied".into(),
+            details: None,
+            occurred_unix_ms: now,
+            requested_by: Self::normalize_requested_by(&meta),
+        })
         .await?;
 
         Ok(proto::AckResponse {
@@ -635,33 +575,24 @@ impl ReconcileService for ReconcileServiceImplementation {
             ))
         })?;
 
-        let now = self.now_ms();
+        let now = Self::now_ms();
+        let op_id = Self::parse_operation_id(&meta)?;
 
-        let op_id = if meta.operation_id.is_empty() {
-            None
-        } else {
-            Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?)
-        };
-
-        self.emit_event(
-            EventType::DesiredStateApplied,
-            Some(node_id.clone()),
-            Some(resource_kind),
-            Some(resource_id),
-            op_id,
-            format!(
+        self.emit_event(EventContext {
+            operation_id: op_id,
+            node_id: Some(node_id.clone()),
+            resource_kind: Some(resource_kind),
+            resource_id: Some(resource_id),
+            severity: EventSeverity::Info,
+            event_type: EventType::DesiredStateAcknowledged,
+            message: format!(
                 "desired state version {} acknowledged",
                 request.observed_generation
             ),
-            now,
-            if meta.requested_by.is_empty() {
-                None
-            } else {
-                Some(meta.requested_by.clone())
-            },
-        )
+            details: None,
+            occurred_unix_ms: now,
+            requested_by: Self::normalize_requested_by(&meta),
+        })
         .await?;
 
         Ok(proto::AckResponse {

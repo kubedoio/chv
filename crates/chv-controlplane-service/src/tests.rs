@@ -521,3 +521,80 @@ async fn test_apply_rejects_non_numeric_generation() {
         ),
     }
 }
+
+#[tokio::test]
+async fn test_apply_node_desired_state_persistence() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    // seed node
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-reconcile', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES ('op-node', 'idem-node', 'node', 'node-reconcile', 'Test', 'Pending', now())")
+        .execute(&pool).await.unwrap();
+    let node_repo = NodeRepository::new(pool.clone());
+    let desired_repo = DesiredStateRepository::new(pool.clone());
+    let net_repo = NetworkExposureRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let service = ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
+
+    let req = proto::ApplyNodeDesiredStateRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-node".into(),
+            requested_by: "test".into(),
+            target_node_id: "node-reconcile".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-reconcile".into(),
+        fragment: Some(proto::DesiredStateFragment {
+            id: "node-reconcile".into(),
+            kind: "Node".into(),
+            generation: "1".into(),
+            spec_json: br#"{"desired_state": "TenantReady"}"#.to_vec(),
+            policy_json: vec![],
+            updated_at: "".into(),
+            updated_by: "".into(),
+        }),
+    };
+
+    let resp = service.apply_node_desired_state(req).await.unwrap();
+    assert_eq!(resp.result.unwrap().status, "ok");
+}
+
+#[tokio::test]
+async fn test_apply_rejects_invalid_spec_json() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let desired_repo = DesiredStateRepository::new(pool.clone());
+    let net_repo = NetworkExposureRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let service = ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
+
+    let req = proto::ApplyVmDesiredStateRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-bad".into(),
+            requested_by: "test".into(),
+            target_node_id: "".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "".into(),
+        vm_id: "vm-1".into(),
+        fragment: Some(proto::DesiredStateFragment {
+            id: "vm-1".into(),
+            kind: "Vm".into(),
+            generation: "1".into(),
+            spec_json: br#"{"unknown_field": true}"#.to_vec(),
+            policy_json: vec![],
+            updated_at: "".into(),
+            updated_by: "".into(),
+        }),
+    };
+
+    let result = service.apply_vm_desired_state(req).await;
+    match result {
+        Err(ControlPlaneServiceError::InvalidArgument(_)) => { /* correct */ }
+        other => panic!("Expected InvalidArgument for unknown field, got {:?}", other),
+    }
+}
