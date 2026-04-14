@@ -10,9 +10,6 @@ CHV is a Rust-first virtualization management repository with a Svelte frontend 
 - Active backend workspace: `/Cargo.toml`, `/cmd`, `/crates`, `/gen/rust`
 - Authoritative contracts: `/proto`
 - Authoritative design and behavior docs: `/docs/specs`, `/docs/chv-llm-handoff-pack`
-- Archived Go prototype: `/legacy/go-controlplane`
-
-Treat `/legacy/go-controlplane` as reference-only historical material. Do not extend it for new implementation work unless the task is explicitly about the legacy archive.
 
 ## Build Commands
 
@@ -30,7 +27,6 @@ cd ui && npm run build
 - New backend/control-plane work belongs in the Rust workspace, not the archived Go tree.
 - Proto contracts in `/proto` are the source of truth for inter-service APIs.
 - ADRs and component specs in `/docs/specs` define the intended system boundaries.
-- If a path under `/legacy/go-controlplane` conflicts with a Rust/spec path, the Rust/spec path wins.
 
 ## Skill routing
 

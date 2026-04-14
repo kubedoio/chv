@@ -9,9 +9,8 @@ CHV is a Cloud Hypervisor management repository with a SvelteKit UI and an activ
 - Authoritative contracts: `/proto`
 - Authoritative architecture and component specs: `/docs/specs`
 - Rust implementation guidance: `/docs/chv-llm-handoff-pack`
-- Legacy Go prototype: `/legacy/go-controlplane` (reference only, non-authoritative)
 
-If you are starting new backend or control-plane work, do not extend archived Go code. Start from the Rust workspace, proto contracts, and tracked spec packs instead.
+If you are starting new backend or control-plane work, start from the Rust workspace, proto contracts, and tracked spec packs instead.
 
 ## Active Paths
 
@@ -52,18 +51,6 @@ Build the Web UI:
 ```bash
 cd ui && npm run build
 ```
-
-## Legacy Go Archive
-
-The previous Go controller/agent prototype has been moved to `/legacy/go-controlplane` so it remains available for reference without appearing to be the current implementation path.
-
-That archive keeps:
-
-- the legacy Go module and source tree
-- Go-specific Docker, compose, systemd, and install assets
-- historical prototype docs that still have reference value
-
-Do not treat anything in `/legacy/go-controlplane` as the current backend source of truth.
 
 ## Direction Reference
 
