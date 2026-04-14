@@ -1,6 +1,11 @@
 use crate::{StoreError, StorePool};
 use chv_controlplane_types::domain::ResourceId;
 
+const DELETE_SQL: &str = r#"
+DELETE FROM network_exposures
+WHERE network_id = $1 AND service_name = $2
+"#;
+
 const UPSERT_SQL: &str = r#"
 INSERT INTO network_exposures (
     network_id, service_name, protocol, listen_address, listen_port,
@@ -27,6 +32,10 @@ impl NetworkExposureRepository {
         Self { pool }
     }
 
+    pub fn pool(&self) -> &StorePool {
+        &self.pool
+    }
+
     pub async fn upsert(&self, input: &NetworkExposureInput) -> Result<(), StoreError> {
         sqlx::query(UPSERT_SQL)
             .bind(input.network_id.as_str())
@@ -38,6 +47,28 @@ impl NetworkExposureRepository {
             .bind(input.target_port)
             .bind(&input.exposure_policy)
             .bind(input.updated_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "network",
+                        id: input.network_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
+        Ok(())
+    }
+
+    pub async fn delete_by_network_id_service_name(
+        &self,
+        network_id: &ResourceId,
+        service_name: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query(DELETE_SQL)
+            .bind(network_id.as_str())
+            .bind(service_name)
             .execute(&self.pool)
             .await?;
         Ok(())

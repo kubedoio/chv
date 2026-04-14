@@ -235,3 +235,58 @@ async fn test_telemetry_missing_attached_vm() {
         ),
     }
 }
+
+#[tokio::test]
+async fn test_network_exposure_upsert_and_fk() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = NetworkExposureRepository::new(pool.clone());
+    let desired_repo = DesiredStateRepository::new(pool.clone());
+
+    let network_id = ResourceId::new("net-1").unwrap();
+
+    // Create network base row via desired repo
+    desired_repo.upsert_network(&NetworkDesiredStateInput {
+        network_id: network_id.clone(),
+        node_id: None,
+        display_name: "net-1".into(),
+        network_class: Some("bridge".into()),
+        desired_generation: Generation::new(1),
+        desired_status: "active".into(),
+        requested_by: None,
+        updated_by: None,
+        requested_unix_ms: 1000,
+    }).await.unwrap();
+
+    // Upsert exposure
+    repo.upsert(&NetworkExposureInput {
+        network_id: network_id.clone(),
+        service_name: "web".into(),
+        protocol: "tcp".into(),
+        listen_address: Some("0.0.0.0".into()),
+        listen_port: Some(80),
+        target_address: Some("10.0.0.1".into()),
+        target_port: Some(8080),
+        exposure_policy: None,
+        updated_unix_ms: 1000,
+    }).await.unwrap();
+
+    // FK violation for missing network
+    let missing = ResourceId::new("net-missing").unwrap();
+    let result = repo.upsert(&NetworkExposureInput {
+        network_id: missing,
+        service_name: "web".into(),
+        protocol: "tcp".into(),
+        listen_address: None,
+        listen_port: None,
+        target_address: None,
+        target_port: None,
+        exposure_policy: None,
+        updated_unix_ms: 1000,
+    }).await;
+
+    match result {
+        Err(StoreError::NotFound { entity, .. }) => assert_eq!(entity, "network"),
+        other => panic!("Expected NotFound(network), got {:?}", other),
+    }
+}
