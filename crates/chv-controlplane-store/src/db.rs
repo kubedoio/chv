@@ -25,6 +25,8 @@ pub enum StoreError {
     Database(#[from] sqlx::Error),
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("resource not found: {entity} (id: {id})")]
+    NotFound { entity: &'static str, id: String },
     #[error("invalid store configuration: {reason}")]
     InvalidConfiguration { reason: String },
 }

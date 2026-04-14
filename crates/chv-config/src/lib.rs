@@ -142,6 +142,10 @@ pub struct ControlPlaneTlsConfig {
     pub server_key_path: Option<PathBuf>,
     #[serde(default)]
     pub client_ca_path: Option<PathBuf>,
+    #[serde(default)]
+    pub ca_cert_path: Option<PathBuf>,
+    #[serde(default)]
+    pub ca_key_path: Option<PathBuf>,
 }
 
 impl Default for ControlPlaneTlsConfig {
@@ -150,6 +154,8 @@ impl Default for ControlPlaneTlsConfig {
             server_cert_path: None,
             server_key_path: None,
             client_ca_path: None,
+            ca_cert_path: None,
+            ca_key_path: None,
         }
     }
 }

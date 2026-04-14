@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 pub mod config;
+pub mod constants;
 pub mod domain;
 pub mod state;
 

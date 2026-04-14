@@ -185,7 +185,24 @@ impl ObservedStateRepository {
             .bind(&input.last_error)
             .bind(input.observed_unix_ms)
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    let (entity, id) = match db_err.constraint() {
+                        Some(c) if c.contains("node_id") => (
+                            "node",
+                            input
+                                .node_id
+                                .as_ref()
+                                .map(|n| n.to_string())
+                                .unwrap_or_default(),
+                        ),
+                        _ => ("vm", input.vm_id.to_string()),
+                    };
+                    StoreError::NotFound { entity, id }
+                }
+                _ => StoreError::from(e),
+            })?;
         Ok(())
     }
 
@@ -201,7 +218,24 @@ impl ObservedStateRepository {
             .bind(input.last_transition_unix_ms)
             .bind(input.observed_unix_ms)
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    let (entity, id) = match db_err.constraint() {
+                        Some(c) if c.contains("attached_vm_id") => (
+                            "vm",
+                            input
+                                .attached_vm_id
+                                .as_ref()
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                        ),
+                        _ => ("volume", input.volume_id.to_string()),
+                    };
+                    StoreError::NotFound { entity, id }
+                }
+                _ => StoreError::from(e),
+            })?;
         Ok(())
     }
 
@@ -218,7 +252,16 @@ impl ObservedStateRepository {
             .bind(input.applied_unix_ms)
             .bind(input.observed_unix_ms)
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "network",
+                        id: input.network_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
         Ok(())
     }
 }

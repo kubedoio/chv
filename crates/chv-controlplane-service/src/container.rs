@@ -1,9 +1,13 @@
+use crate::enrollment::EnrollmentServiceImplementation;
 use crate::error::ControlPlaneServiceError;
+use crate::inventory::InventoryServiceImplementation;
+use crate::telemetry::TelemetryServiceImplementation;
 use chv_controlplane_store::StorePool;
+use control_plane_node_api::control_plane_node_api as proto;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use tokio::net::TcpListener;
-use tracing::info;
+use std::sync::Arc;
+use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub struct ControlPlaneRuntime {
@@ -31,15 +35,40 @@ impl ControlPlaneRuntime {
 #[derive(Clone)]
 pub struct ControlPlaneComponents {
     store_pool: StorePool,
+    enrollment_service: EnrollmentServiceImplementation,
+    inventory_service: InventoryServiceImplementation,
+    telemetry_service: TelemetryServiceImplementation,
 }
 
 impl ControlPlaneComponents {
-    pub fn new(store_pool: StorePool) -> Self {
-        Self { store_pool }
+    pub fn new(
+        store_pool: StorePool,
+        enrollment_service: EnrollmentServiceImplementation,
+        inventory_service: InventoryServiceImplementation,
+        telemetry_service: TelemetryServiceImplementation,
+    ) -> Self {
+        Self {
+            store_pool,
+            enrollment_service,
+            inventory_service,
+            telemetry_service,
+        }
     }
 
     pub fn store_pool(&self) -> &StorePool {
         &self.store_pool
+    }
+
+    pub fn enrollment_service(&self) -> &EnrollmentServiceImplementation {
+        &self.enrollment_service
+    }
+
+    pub fn inventory_service(&self) -> &InventoryServiceImplementation {
+        &self.inventory_service
+    }
+
+    pub fn telemetry_service(&self) -> &TelemetryServiceImplementation {
+        &self.telemetry_service
     }
 }
 
@@ -66,17 +95,39 @@ impl ControlPlaneService {
     }
 
     pub async fn run(&self) -> Result<(), ControlPlaneServiceError> {
-        let _listener = TcpListener::bind(self.runtime.bind_addr()).await?;
+        let addr = self.runtime.bind_addr();
 
-        info!(
-            bind_addr = %self.runtime.bind_addr(),
-            runtime_dir = %self.runtime.runtime_dir().display(),
-            "chv-controlplane foundation started"
+        let enrollment_server = proto::enrollment_service_server::EnrollmentServiceServer::new(
+            crate::server::EnrollmentServer::new(Arc::new(
+                self.components.enrollment_service.clone(),
+            )),
         );
 
-        tokio::signal::ctrl_c().await?;
+        let inventory_server = proto::inventory_service_server::InventoryServiceServer::new(
+            crate::server::InventoryServer::new(Arc::new(
+                self.components.inventory_service.clone(),
+            )),
+        );
 
-        info!("chv-controlplane foundation stopping");
+        let telemetry_server = proto::telemetry_service_server::TelemetryServiceServer::new(
+            crate::server::TelemetryServer::new(Arc::new(
+                self.components.telemetry_service.clone(),
+            )),
+        );
+
+        info!(?addr, "starting gRPC server");
+
+        tonic::transport::Server::builder()
+            .add_service(enrollment_server)
+            .add_service(inventory_server)
+            .add_service(telemetry_server)
+            .serve(addr)
+            .await
+            .map_err(|e: tonic::transport::Error| {
+                error!("gRPC server error: {}", e);
+                ControlPlaneServiceError::Internal(e.to_string())
+            })?;
+
         Ok(())
     }
 }

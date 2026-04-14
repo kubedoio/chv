@@ -50,6 +50,9 @@ INSERT INTO node_inventory (
     chv_nwd_version,
     host_bundle_version,
     inventory_status,
+    storage_classes,
+    network_capabilities,
+    labels,
     last_reported_at,
     updated_at
 )
@@ -67,8 +70,11 @@ VALUES (
     $11,
     $12,
     $13,
-    to_timestamp($14 / 1000.0),
-    to_timestamp($14 / 1000.0)
+    $14,
+    $15,
+    $16,
+    to_timestamp($17 / 1000.0),
+    to_timestamp($17 / 1000.0)
 )
 ON CONFLICT (node_id) DO UPDATE SET
     architecture = EXCLUDED.architecture,
@@ -83,6 +89,9 @@ ON CONFLICT (node_id) DO UPDATE SET
     chv_nwd_version = EXCLUDED.chv_nwd_version,
     host_bundle_version = EXCLUDED.host_bundle_version,
     inventory_status = EXCLUDED.inventory_status,
+    storage_classes = EXCLUDED.storage_classes,
+    network_capabilities = EXCLUDED.network_capabilities,
+    labels = EXCLUDED.labels,
     last_reported_at = EXCLUDED.last_reported_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -135,6 +144,42 @@ ON CONFLICT (node_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 "#;
 
+const UPDATE_NODE_CERTIFICATE_SQL: &str = r#"
+UPDATE nodes SET
+    certificate_serial = $2,
+    updated_at = now()
+WHERE node_id = $1
+"#;
+
+const UPSERT_BOOTSTRAP_RESULT_SQL: &str = r#"
+INSERT INTO node_bootstrap_results (
+    node_id,
+    operation_id,
+    success,
+    error_message,
+    details,
+    started_at,
+    completed_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    to_timestamp($6 / 1000.0),
+    to_timestamp($7 / 1000.0)
+)
+ON CONFLICT (node_id) DO UPDATE SET
+    operation_id = EXCLUDED.operation_id,
+    success = EXCLUDED.success,
+    error_message = EXCLUDED.error_message,
+    details = EXCLUDED.details,
+    started_at = EXCLUDED.started_at,
+    completed_at = EXCLUDED.completed_at,
+    updated_at = now()
+"#;
+
 #[derive(Clone)]
 pub struct NodeRepository {
     pool: StorePool,
@@ -179,6 +224,9 @@ impl NodeRepository {
             .bind(&input.chv_nwd_version)
             .bind(&input.host_bundle_version)
             .bind(&input.inventory_status)
+            .bind(&input.storage_classes)
+            .bind(&input.network_capabilities)
+            .bind(&input.labels)
             .bind(input.reported_unix_ms)
             .execute(&self.pool)
             .await?;
@@ -206,6 +254,44 @@ impl NodeRepository {
             .bind(&input.updated_by)
             .bind(&input.state_reason)
             .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_certificate_serial(
+        &self,
+        node_id: &NodeId,
+        serial: &str,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(UPDATE_NODE_CERTIFICATE_SQL)
+            .bind(node_id.as_str())
+            .bind(serial)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "node",
+                id: node_id.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub async fn upsert_bootstrap_result(
+        &self,
+        input: &NodeBootstrapResultInput,
+    ) -> Result<(), StoreError> {
+        sqlx::query(UPSERT_BOOTSTRAP_RESULT_SQL)
+            .bind(input.node_id.as_str())
+            .bind(&input.operation_id)
+            .bind(input.success)
+            .bind(&input.error_message)
+            .bind(&input.details)
+            .bind(input.started_unix_ms)
+            .bind(input.completed_unix_ms)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -239,6 +325,9 @@ pub struct NodeInventoryInput {
     pub chv_nwd_version: Option<String>,
     pub host_bundle_version: Option<String>,
     pub inventory_status: Option<String>,
+    pub storage_classes: Option<serde_json::Value>,
+    pub network_capabilities: Option<serde_json::Value>,
+    pub labels: Option<serde_json::Value>,
     pub reported_unix_ms: i64,
 }
 
@@ -260,6 +349,17 @@ pub struct NodeStateInput {
     pub updated_by: Option<String>,
     pub state_reason: Option<String>,
     pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct NodeBootstrapResultInput {
+    pub node_id: NodeId,
+    pub operation_id: Option<String>,
+    pub success: bool,
+    pub error_message: Option<String>,
+    pub details: Option<serde_json::Value>,
+    pub started_unix_ms: Option<i64>,
+    pub completed_unix_ms: i64,
 }
 
 fn generation_to_i64(generation: Generation) -> Result<i64, StoreError> {

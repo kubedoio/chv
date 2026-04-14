@@ -5,7 +5,20 @@ edition = "2021"
 publish = false
 
 [dependencies]
+chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
+control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 tokio = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls", "uuid"] }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+x509-parser = "0.16"

@@ -7,5 +7,17 @@ publish = false
 [dependencies]
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 serde = { workspace = true, features = ["derive"] }
-sqlx = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["uuid"] }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+testcontainers = { version = "0.23", optional = true }
+testcontainers-modules = { version = "0.11", features = ["postgres"], optional = true }
+
+[dev-dependencies]
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+
+[features]
+test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
