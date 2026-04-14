@@ -347,7 +347,10 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
     let result = service.enroll_node(request).await;
     match result {
         Err(ControlPlaneServiceError::Unauthorized(_)) => { /* Correct */ }
-        other => panic!("Expected Unauthorized error for invalid token, got {:?}", other),
+        other => panic!(
+            "Expected Unauthorized error for invalid token, got {:?}",
+            other
+        ),
     }
 }
 
@@ -400,11 +403,12 @@ async fn test_apply_vm_desired_state_persistence() {
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
     // Verify persistence in vm_desired_state
-    let row = sqlx::query("SELECT vm_id, desired_generation FROM vm_desired_state WHERE vm_id = $1")
-        .bind("vm-1")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let row =
+        sqlx::query("SELECT vm_id, desired_generation FROM vm_desired_state WHERE vm_id = $1")
+            .bind("vm-1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let vm_id: String = sqlx::Row::get(&row, "vm_id");
     let desired_generation: i64 = sqlx::Row::get(&row, "desired_generation");
     assert_eq!(vm_id, "vm-1");
@@ -460,12 +464,13 @@ async fn test_apply_network_desired_state_with_exposures() {
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
     // Verify persistence in network_exposures
-    let row =
-        sqlx::query("SELECT network_id, service_name, listen_port FROM network_exposures WHERE network_id = $1")
-            .bind("net-1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let row = sqlx::query(
+        "SELECT network_id, service_name, listen_port FROM network_exposures WHERE network_id = $1",
+    )
+    .bind("net-1")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let network_id: String = sqlx::Row::get(&row, "network_id");
     let service_name: String = sqlx::Row::get(&row, "service_name");
     let listen_port: i32 = sqlx::Row::get(&row, "listen_port");
@@ -515,7 +520,11 @@ async fn test_apply_rejects_non_numeric_generation() {
     let result = service.apply_vm_desired_state(request).await;
     match result {
         Err(ControlPlaneServiceError::InvalidArgument(msg)) => {
-            assert!(msg.contains("generation must be numeric"), "Unexpected message: {}", msg);
+            assert!(
+                msg.contains("generation must be numeric"),
+                "Unexpected message: {}",
+                msg
+            );
         }
         other => panic!(
             "Expected InvalidArgument for non-numeric generation, got {:?}",
@@ -537,7 +546,8 @@ async fn test_apply_node_desired_state_persistence() {
     let desired_repo = DesiredStateRepository::new(pool.clone());
     let net_repo = NetworkExposureRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
-    let service = ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
+    let service =
+        ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
 
     let req = proto::ApplyNodeDesiredStateRequest {
         meta: Some(proto::RequestMeta {
@@ -571,7 +581,8 @@ async fn test_apply_rejects_invalid_spec_json() {
     let desired_repo = DesiredStateRepository::new(pool.clone());
     let net_repo = NetworkExposureRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
-    let service = ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
+    let service =
+        ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
 
     let req = proto::ApplyVmDesiredStateRequest {
         meta: Some(proto::RequestMeta {
@@ -597,7 +608,10 @@ async fn test_apply_rejects_invalid_spec_json() {
     let result = service.apply_vm_desired_state(req).await;
     match result {
         Err(ControlPlaneServiceError::InvalidArgument(_)) => { /* correct */ }
-        other => panic!("Expected InvalidArgument for unknown field, got {:?}", other),
+        other => panic!(
+            "Expected InvalidArgument for unknown field, got {:?}",
+            other
+        ),
     }
 }
 
@@ -746,11 +760,13 @@ async fn test_drain_node_updates_desired_state() {
     let result = service.drain_node(request).await;
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
-    let row = sqlx::query("SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1")
-        .bind("node-lifecycle-3")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let row = sqlx::query(
+        "SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1",
+    )
+    .bind("node-lifecycle-3")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let desired_state: String = sqlx::Row::get(&row, "desired_state");
     assert_eq!(desired_state, "Draining");
 }
@@ -759,8 +775,12 @@ async fn test_drain_node_updates_desired_state() {
 async fn test_enter_maintenance_updates_desired_state() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
-    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-maint', 'host', 'host')")
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-maint', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let node_repo = NodeRepository::new(pool.clone());
     let op_repo = OperationRepository::new(pool.clone());
@@ -783,11 +803,13 @@ async fn test_enter_maintenance_updates_desired_state() {
     let resp = service.enter_maintenance(req).await.unwrap();
     assert_eq!(resp.result.unwrap().status, "ok");
 
-    let row = sqlx::query("SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1")
-        .bind("node-maint")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let row = sqlx::query(
+        "SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1",
+    )
+    .bind("node-maint")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let state: String = sqlx::Row::get(&row, "desired_state");
     assert_eq!(state, "Maintenance");
 }
@@ -796,8 +818,12 @@ async fn test_enter_maintenance_updates_desired_state() {
 async fn test_create_vm_writes_desired_state() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
-    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-vm', 'host', 'host')")
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-vm', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let node_repo = NodeRepository::new(pool.clone());
     let op_repo = OperationRepository::new(pool.clone());

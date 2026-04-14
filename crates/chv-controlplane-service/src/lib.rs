@@ -15,9 +15,9 @@ pub use enrollment::{
 pub use error::ControlPlaneServiceError;
 pub use inventory::{InventoryService, InventoryServiceImplementation};
 pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
-pub use server::{EnrollmentServer, InventoryServer, LifecycleServer, ReconcileServer, TelemetryServer};
-pub use reconcile::{
-    ReconcileService, ReconcileServiceImplementation,
+pub use reconcile::{ReconcileService, ReconcileServiceImplementation};
+pub use server::{
+    EnrollmentServer, InventoryServer, LifecycleServer, ReconcileServer, TelemetryServer,
 };
 pub use telemetry::{TelemetryService, TelemetryServiceImplementation};
 

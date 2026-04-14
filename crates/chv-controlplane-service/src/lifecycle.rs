@@ -152,8 +152,9 @@ impl LifecycleServiceImplementation {
     }
 
     fn parse_node_id(s: String) -> Result<NodeId, ControlPlaneServiceError> {
-        NodeId::new(s)
-            .map_err(|e| ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e)))
+        NodeId::new(s).map_err(|e| {
+            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
+        })
     }
 
     fn parse_vm_id(s: String) -> Result<ResourceId, ControlPlaneServiceError> {
@@ -162,8 +163,9 @@ impl LifecycleServiceImplementation {
     }
 
     fn parse_volume_id(s: String) -> Result<ResourceId, ControlPlaneServiceError> {
-        ResourceId::new(s)
-            .map_err(|e| ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e)))
+        ResourceId::new(s).map_err(|e| {
+            ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e))
+        })
     }
 
     fn resource_id_from_node_id(node_id: &NodeId) -> Result<ResourceId, ControlPlaneServiceError> {
@@ -176,7 +178,9 @@ impl LifecycleServiceImplementation {
             .bind(node_id.as_str())
             .fetch_optional(self.node_repo.pool())
             .await
-            .map_err(|e| ControlPlaneServiceError::Internal(format!("failed to check node: {}", e)))?;
+            .map_err(|e| {
+                ControlPlaneServiceError::Internal(format!("failed to check node: {}", e))
+            })?;
         if row.is_none() {
             return Err(ControlPlaneServiceError::NotFound(format!(
                 "node {} not found",
@@ -198,16 +202,20 @@ impl LifecycleServiceImplementation {
         let now = Self::now_ms();
         let desired_generation = Self::desired_generation_from_meta(meta)?;
         let desired_generation_str = desired_generation.to_string();
-        let resource_id_str = resource_id.as_ref().map(|r| r.as_str()).unwrap_or("").to_string();
+        let resource_id_str = resource_id
+            .as_ref()
+            .map(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
         let idempotency_key = format!(
             "{}:{}:{}:{}",
             operation_type, node_id, resource_id_str, desired_generation_str
         );
 
-        let operation_id =
-            OperationId::new(format!("{}-{}", operation_type, uuid::Uuid::new_v4())).map_err(
-                |e| ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e)),
-            )?;
+        let operation_id = OperationId::new(format!("{}-{}", operation_type, uuid::Uuid::new_v4()))
+            .map_err(|e| {
+                ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e))
+            })?;
 
         let receipt = self
             .operation_repo
@@ -455,7 +463,10 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(Self::ok_ack(&operation_id, "pause node scheduling accepted"))
+        Ok(Self::ok_ack(
+            &operation_id,
+            "pause node scheduling accepted",
+        ))
     }
 
     async fn resume_node_scheduling(
@@ -476,7 +487,10 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(Self::ok_ack(&operation_id, "resume node scheduling accepted"))
+        Ok(Self::ok_ack(
+            &operation_id,
+            "resume node scheduling accepted",
+        ))
     }
 
     async fn drain_node(

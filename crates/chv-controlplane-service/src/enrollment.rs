@@ -1,8 +1,8 @@
 use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
-    BootstrapTokenRepository, BootstrapTokenValidation, NodeBootstrapResultInput, NodeInventoryInput,
-    NodeRepository, NodeUpsertInput, NodeVersionInput,
+    BootstrapTokenRepository, BootstrapTokenValidation, NodeBootstrapResultInput,
+    NodeInventoryInput, NodeRepository, NodeUpsertInput, NodeVersionInput,
 };
 use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;

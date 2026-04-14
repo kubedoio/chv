@@ -1,14 +1,13 @@
 use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
-    DesiredStateRepository, EventAppendInput, EventRepository, NetworkExposureInput,
-    NetworkExposureRepository, NodeRepository, NodeStateInput, VmDesiredStateInput,
-    VolumeDesiredStateInput, NetworkDesiredStateInput,
+    DesiredStateRepository, EventAppendInput, EventRepository, NetworkDesiredStateInput,
+    NetworkExposureInput, NetworkExposureRepository, NodeRepository, NodeStateInput,
+    VmDesiredStateInput, VolumeDesiredStateInput,
 };
 use chv_controlplane_types::constants::STATUS_OK;
 use chv_controlplane_types::domain::{
-    EventSeverity, EventType, Generation, NodeId, OperationId, ResourceId, ResourceKind,
-    NodeState,
+    EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, ResourceId, ResourceKind,
 };
 use chv_controlplane_types::fragment::{NetworkSpec, NodeSpec, VmSpec, VolumeSpec};
 use control_plane_node_api::control_plane_node_api as proto;
@@ -112,13 +111,20 @@ impl ReconcileServiceImplementation {
         meta.ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))
     }
 
-    fn parse_operation_id(meta: &proto::RequestMeta) -> Result<Option<OperationId>, ControlPlaneServiceError> {
+    fn parse_operation_id(
+        meta: &proto::RequestMeta,
+    ) -> Result<Option<OperationId>, ControlPlaneServiceError> {
         if meta.operation_id.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?))
+            Ok(Some(OperationId::new(meta.operation_id.clone()).map_err(
+                |e| {
+                    ControlPlaneServiceError::InvalidArgument(format!(
+                        "invalid operation_id: {}",
+                        e
+                    ))
+                },
+            )?))
         }
     }
 
@@ -131,9 +137,7 @@ impl ReconcileServiceImplementation {
     }
 
     async fn emit_event(&self, ctx: EventContext) -> Result<(), ControlPlaneServiceError> {
-        self.event_repo
-            .append(&ctx.into_input())
-            .await?;
+        self.event_repo.append(&ctx.into_input()).await?;
         Ok(())
     }
 }
@@ -202,7 +206,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
+            return Err(ControlPlaneServiceError::Internal(
+                "persistence error".into(),
+            ));
         }
 
         let op_id = Self::parse_operation_id(&meta)?;
@@ -298,7 +304,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
+            return Err(ControlPlaneServiceError::Internal(
+                "persistence error".into(),
+            ));
         }
 
         let op_id = Self::parse_operation_id(&meta)?;
@@ -402,7 +410,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
+            return Err(ControlPlaneServiceError::Internal(
+                "persistence error".into(),
+            ));
         }
 
         let op_id = Self::parse_operation_id(&meta)?;
@@ -491,7 +501,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal("persistence error".into()));
+            return Err(ControlPlaneServiceError::Internal(
+                "persistence error".into(),
+            ));
         }
 
         if let Some(exposures) = spec.exposures {
@@ -526,7 +538,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                         requested_by: Self::normalize_requested_by(&meta),
                     })
                     .await?;
-                    return Err(ControlPlaneServiceError::Internal("persistence error".into()));
+                    return Err(ControlPlaneServiceError::Internal(
+                        "persistence error".into(),
+                    ));
                 }
             }
         }
