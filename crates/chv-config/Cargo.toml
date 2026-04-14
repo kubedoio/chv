@@ -7,3 +7,6 @@ edition = "2021"
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

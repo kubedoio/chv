@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  controller:
+    image: chv-controller:latest
+    container_name: chv-controller
+    ports:
+      - "8080:8080"
+    volumes:
+      - chv-data:/var/lib/chv
+    environment:
+      - CHV_HTTP_ADDR=:8080
+      - CHV_DATA_ROOT=/var/lib/chv
+      - CHV_AGENT_URL=http://localhost:9090
+      - CHV_LOG_LEVEL=info
+      - CHV_LOG_DIR=/var/lib/chv/logs
+    network_mode: host
+    restart: unless-stopped
+
+volumes:
+  chv-data:
+    driver: local

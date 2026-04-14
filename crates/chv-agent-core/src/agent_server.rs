@@ -1,6 +1,7 @@
-use crate::cache::NodeCache;
+use crate::cache::{NodeCache, VmNicAttachment};
 use crate::control_plane::ControlPlaneClient;
-use crate::state_machine::{NodeState, StateMachine};
+use crate::reconcile::cleanup_vm_resources;
+use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
 use chv_agent_runtime_ch::adapter::VmConfig;
 use chv_errors::ChvError;
@@ -220,13 +221,18 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         if let Some(spec_json) = spec_json {
             let spec = serde_json::from_slice::<serde_json::Value>(&spec_json)
                 .map_err(|e| Status::invalid_argument(format!("invalid spec_json: {}", e)))?;
-            if let Some(vm_id) = spec.get("vm_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            if let Some(vm_id) = spec
+                .get("vm_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 let handle = self
                     .open_and_attach_volume(&inner.volume_id, vm_id, &spec_json, &meta.operation_id)
                     .await?;
 
                 let mut cache = self.cache.lock().await;
                 cache.volume_handles.insert(inner.volume_id.clone(), handle);
+                cache.observe_vm_attachment(vm_id, std::slice::from_ref(&inner.volume_id), &[]);
                 self.persist_cache(&cache).await;
             }
         }
@@ -398,10 +404,9 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 )));
             }
         }
-        let vm_spec = crate::spec::VmSpec::from_json(
-            std::str::from_utf8(&vm.vm_spec_json).unwrap_or(""),
-        )
-        .map_err(|e| Status::invalid_argument(format!("invalid vm_spec_json: {}", e)))?;
+        let vm_spec =
+            crate::spec::VmSpec::from_json(std::str::from_utf8(&vm.vm_spec_json).unwrap_or(""))
+                .map_err(|e| Status::invalid_argument(format!("invalid vm_spec_json: {}", e)))?;
         vm_spec
             .validate()
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -413,7 +418,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
             for disk in &vm_spec.disks {
                 let (_, handle, export_path) = stord
-                    .open_volume(&disk.volume_id, "local", &format!("{}.img", disk.volume_id), Some(op_id))
+                    .open_volume(
+                        &disk.volume_id,
+                        "local",
+                        &format!("{}.img", disk.volume_id),
+                        Some(op_id),
+                    )
                     .await
                     .map_err(|e| Status::internal(format!("open_volume failed: {}", e)))?;
                 stord
@@ -439,14 +449,26 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
             for nic in &vm_spec.nics {
                 if let Err(e) = nwd
-                    .ensure_network_topology(&nic.network_id, &format!("br-{}", nic.network_id), "10.0.0.0/24", Some(op_id))
+                    .ensure_network_topology(
+                        &nic.network_id,
+                        &format!("br-{}", nic.network_id),
+                        "10.0.0.0/24",
+                        Some(op_id),
+                    )
                     .await
                 {
                     warn!(network_id = %nic.network_id, error = %e, "failed to ensure network topology in create_vm");
                 }
                 let nic_id = format!("{}-{}", vm.vm_id, nic.network_id);
                 let (_ns, tap_handle) = nwd
-                    .attach_vm_nic(&nic_id, &vm.vm_id, &nic.network_id, &nic.mac_address, &nic.ip_address, Some(op_id))
+                    .attach_vm_nic(
+                        &nic_id,
+                        &vm.vm_id,
+                        &nic.network_id,
+                        &nic.mac_address,
+                        &nic.ip_address,
+                        Some(op_id),
+                    )
                     .await
                     .map_err(|e| Status::internal(format!("attach_vm_nic failed: {}", e)))?;
                 nics.push(chv_agent_runtime_ch::adapter::VmNicConfig {
@@ -456,6 +478,25 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     tap_name: tap_handle,
                 });
             }
+        }
+
+        {
+            let mut cache = self.cache.lock().await;
+            let volume_ids = vm_spec
+                .disks
+                .iter()
+                .map(|disk| disk.volume_id.clone())
+                .collect::<Vec<_>>();
+            let nics = vm_spec
+                .nics
+                .iter()
+                .map(|nic| VmNicAttachment {
+                    nic_id: format!("{}-{}", vm.vm_id, nic.network_id),
+                    network_id: nic.network_id.clone(),
+                })
+                .collect::<Vec<_>>();
+            cache.observe_vm_attachment(&vm.vm_id, &volume_ids, &nics);
+            self.persist_cache(&cache).await;
         }
 
         let config = VmConfig {
@@ -576,18 +617,35 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let cache = self.cache.lock().await;
-        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let observed_generation = {
+            let cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            cache.observed_generation.clone()
+        };
+        cleanup_vm_resources(
+            &self.cache,
+            &self.stord_socket,
+            &self.nwd_socket,
+            &inner.vm_id,
+            Some(&meta.operation_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("vm cleanup failed: {}", e)))?;
         self.vm_runtime
             .delete_vm(&inner.vm_id, Some(&meta.operation_id))
             .await
             .map_err(|e| Status::not_found(e.to_string()))?;
+        {
+            let mut cache = self.cache.lock().await;
+            cache.remove_vm_state(&inner.vm_id);
+            self.persist_cache(&cache).await;
+        }
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "vm deleted".to_string(),
             }),
@@ -615,11 +673,17 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }
 
         let handle = self
-            .open_and_attach_volume(&vol.volume_id, &vol.vm_id, &vol.volume_spec_json, &meta.operation_id)
+            .open_and_attach_volume(
+                &vol.volume_id,
+                &vol.vm_id,
+                &vol.volume_spec_json,
+                &meta.operation_id,
+            )
             .await?;
 
         let mut cache = self.cache.lock().await;
         cache.volume_handles.insert(vol.volume_id.clone(), handle);
+        cache.observe_vm_attachment(&vol.vm_id, std::slice::from_ref(&vol.volume_id), &[]);
         self.persist_cache(&cache).await;
 
         let observed_generation = cache.observed_generation.clone();
@@ -696,12 +760,9 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
-        let current = cache.node_state.parse::<NodeState>().unwrap_or(NodeState::TenantReady);
-        let mut sm = StateMachine::new(current);
-        if let Err(e) = sm.transition(NodeState::Degraded) {
+        if let Err(e) = cache.transition_node_state(NodeState::Degraded) {
             return Err(Status::failed_precondition(e.to_string()));
         }
-        cache.node_state = sm.current().as_str().to_string();
         self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -724,13 +785,9 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
-        let current = cache.node_state.parse::<NodeState>().unwrap_or(NodeState::Degraded);
-        let mut sm = StateMachine::new(current);
-        let target = NodeState::TenantReady;
-        if let Err(e) = sm.transition(target) {
+        if let Err(e) = cache.transition_node_state(NodeState::TenantReady) {
             return Err(Status::failed_precondition(e.to_string()));
         }
-        cache.node_state = sm.current().as_str().to_string();
         self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -753,12 +810,9 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
-        let current = cache.node_state.parse::<NodeState>().unwrap_or(NodeState::TenantReady);
-        let mut sm = StateMachine::new(current);
-        if let Err(e) = sm.transition(NodeState::Draining) {
+        if let Err(e) = cache.transition_node_state(NodeState::Draining) {
             return Err(Status::failed_precondition(e.to_string()));
         }
-        cache.node_state = sm.current().as_str().to_string();
         self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -781,12 +835,9 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
-        let current = cache.node_state.parse::<NodeState>().unwrap_or(NodeState::TenantReady);
-        let mut sm = StateMachine::new(current);
-        if let Err(e) = sm.transition(NodeState::Maintenance) {
+        if let Err(e) = cache.transition_node_state(NodeState::Maintenance) {
             return Err(Status::failed_precondition(e.to_string()));
         }
-        cache.node_state = sm.current().as_str().to_string();
         self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -809,12 +860,9 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
         let mut cache = self.cache.lock().await;
-        let current = cache.node_state.parse::<NodeState>().unwrap_or(NodeState::Maintenance);
-        let mut sm = StateMachine::new(current);
-        if let Err(e) = sm.transition(NodeState::Bootstrapping) {
+        if let Err(e) = cache.transition_node_state(NodeState::Bootstrapping) {
             return Err(Status::failed_precondition(e.to_string()));
         }
-        cache.node_state = sm.current().as_str().to_string();
         self.persist_cache(&cache).await;
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -1073,17 +1121,19 @@ mod tests {
             &self,
             req: Request<chv_stord_api::chv_stord_api::OpenVolumeRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::OpenVolumeResponse>, Status> {
-            Ok(Response::new(chv_stord_api::chv_stord_api::OpenVolumeResponse {
-                result: Some(chv_stord_api::chv_stord_api::Result {
-                    status: "ok".to_string(),
-                    error_code: "".to_string(),
-                    human_summary: "".to_string(),
-                }),
-                volume_id: req.into_inner().volume_id,
-                attachment_handle: "handle-1".to_string(),
-                export_kind: "".to_string(),
-                export_path: "".to_string(),
-            }))
+            Ok(Response::new(
+                chv_stord_api::chv_stord_api::OpenVolumeResponse {
+                    result: Some(chv_stord_api::chv_stord_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                    volume_id: req.into_inner().volume_id,
+                    attachment_handle: "handle-1".to_string(),
+                    export_kind: "".to_string(),
+                    export_path: "".to_string(),
+                },
+            ))
         }
 
         async fn attach_volume_to_vm(
@@ -1157,6 +1207,380 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct CleanupTracker {
+        detached_volumes: Arc<std::sync::Mutex<Vec<String>>>,
+        closed_volumes: Arc<std::sync::Mutex<Vec<String>>>,
+        detached_nics: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    struct MockCleanupStord {
+        tracker: CleanupTracker,
+    }
+
+    #[tonic::async_trait]
+    impl chv_stord_api::chv_stord_api::storage_service_server::StorageService for MockCleanupStord {
+        async fn list_volume_sessions(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::ListVolumeSessionsRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::ListVolumeSessionsResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_stord_api::chv_stord_api::ListVolumeSessionsResponse { sessions: vec![] },
+            ))
+        }
+
+        async fn open_volume(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::OpenVolumeRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::OpenVolumeResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn attach_volume_to_vm(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::AttachVolumeToVmRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::AttachVolumeToVmResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn close_volume(
+            &self,
+            req: Request<chv_stord_api::chv_stord_api::CloseVolumeRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            self.tracker
+                .closed_volumes
+                .lock()
+                .unwrap()
+                .push(req.into_inner().volume_id);
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
+
+        async fn get_volume_health(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::VolumeHealthRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::VolumeHealthResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn detach_volume_from_vm(
+            &self,
+            req: Request<chv_stord_api::chv_stord_api::DetachVolumeFromVmRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            self.tracker
+                .detached_volumes
+                .lock()
+                .unwrap()
+                .push(req.into_inner().volume_id);
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
+
+        async fn resize_volume(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::ResizeVolumeRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn prepare_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::PrepareSnapshotRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn prepare_clone(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::PrepareCloneRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn set_device_policy(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+    }
+
+    struct MockCleanupNwd {
+        tracker: CleanupTracker,
+    }
+
+    #[tonic::async_trait]
+    impl chv_nwd_api::chv_nwd_api::network_service_server::NetworkService for MockCleanupNwd {
+        async fn list_namespace_state(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::ListNamespaceStateRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse { items: vec![] },
+            ))
+        }
+
+        async fn ensure_network_topology(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureNetworkTopologyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn delete_network_topology(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::DeleteNetworkTopologyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_network_health(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::NetworkHealthRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::NetworkHealthResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn attach_vm_nic(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::AttachVmNicRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::AttachVmNicResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn detach_vm_nic(
+            &self,
+            req: Request<chv_nwd_api::chv_nwd_api::DetachVmNicRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            let nic_id = req.into_inner().nic_id;
+            self.tracker.detached_nics.lock().unwrap().push(nic_id);
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
+
+        async fn set_firewall_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SetFirewallPolicyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn set_nat_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SetNatPolicyRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn ensure_dhcp_scope(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureDhcpScopeRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn ensure_dns_scope(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::EnsureDnsScopeRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn expose_service(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::ExposeServiceRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn withdraw_service_exposure(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::WithdrawServiceExposureRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_vm_cleans_up_storage_and_network_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let stord_socket = dir.path().join("cleanup-stord.sock");
+        let nwd_socket = dir.path().join("cleanup-nwd.sock");
+        let tracker = CleanupTracker::default();
+
+        {
+            let tracker = tracker.clone();
+            let uds = tokio::net::UnixListener::bind(&stord_socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer::new(
+                            MockCleanupStord { tracker },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        {
+            let tracker = tracker.clone();
+            let uds = tokio::net::UnixListener::bind(&nwd_socket).unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                            MockCleanupNwd { tracker },
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.observe_generation("vm", "vm-1", "1");
+        cache.observe_vm_attachment(
+            "vm-1",
+            &["vol-1".to_string()],
+            &[VmNicAttachment {
+                nic_id: "vm-1-net-1".to_string(),
+                network_id: "net-1".to_string(),
+            }],
+        );
+        cache
+            .volume_handles
+            .insert("vol-1".to_string(), "handle-1".to_string());
+
+        let runtime = VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default()));
+        let config = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 1,
+            memory_bytes: 1024,
+            kernel_path: std::path::PathBuf::from("/dev/null"),
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: std::path::PathBuf::from("/run/chv/agent/vm-vm-1.sock"),
+        };
+        runtime
+            .create_vm("vm-1", "1", &config, Some("op-1"))
+            .await
+            .unwrap();
+
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            runtime,
+            stord_socket,
+            nwd_socket,
+            None,
+        );
+
+        let req = proto::DeleteVmRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            vm_id: "vm-1".to_string(),
+            force: false,
+        };
+        let resp = proto::lifecycle_service_server::LifecycleService::delete_vm(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok());
+
+        assert_eq!(
+            tracker.detached_volumes.lock().unwrap().as_slice(),
+            ["vol-1"]
+        );
+        assert_eq!(tracker.closed_volumes.lock().unwrap().as_slice(), ["vol-1"]);
+        assert_eq!(
+            tracker.detached_nics.lock().unwrap().as_slice(),
+            ["vm-1-net-1"]
+        );
+        assert!(server.vm_runtime.get("vm-1").is_none());
+        assert!(server
+            .cache
+            .lock()
+            .await
+            .volume_handles
+            .get("vol-1")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_vm_removes_cached_desired_state() {
+        let server = test_server();
+        {
+            let mut cache = server.cache.lock().await;
+            cache.observe_generation("vm", "vm-1", "1");
+            cache.store_fragment(
+                "vm",
+                "vm-1",
+                crate::cache::DesiredStateFragment {
+                    id: "vm-1".to_string(),
+                    kind: "vm".to_string(),
+                    generation: "1".to_string(),
+                    spec_json: vec![],
+                    policy_json: vec![],
+                    updated_at: String::new(),
+                    updated_by: String::new(),
+                },
+            );
+        }
+
+        let config = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 1,
+            memory_bytes: 1024,
+            kernel_path: std::path::PathBuf::from("/dev/null"),
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: std::path::PathBuf::from("/run/chv/agent/vm-vm-1.sock"),
+        };
+        server
+            .vm_runtime
+            .create_vm("vm-1", "1", &config, Some("op-1"))
+            .await
+            .unwrap();
+
+        let req = proto::DeleteVmRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            vm_id: "vm-1".to_string(),
+            force: false,
+        };
+        let resp = proto::lifecycle_service_server::LifecycleService::delete_vm(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok());
+
+        let cache = server.cache.lock().await;
+        assert!(cache.get_generation("vm", "vm-1").is_none());
+        assert!(cache.get_fragment("vm", "vm-1").is_none());
+        assert!(cache.vm_attachment_state("vm-1").is_none());
+    }
+
     #[tokio::test]
     async fn apply_volume_desired_state_attaches_to_vm() {
         let dir = tempfile::tempdir().unwrap();
@@ -1197,7 +1621,9 @@ mod tests {
                 id: "vol-1".to_string(),
                 kind: "volume".to_string(),
                 generation: "1".to_string(),
-                spec_json: r#"{"vm_id":"vm-1","backend_class":"local","locator":"vol-1.img"}"#.as_bytes().to_vec(),
+                spec_json: r#"{"vm_id":"vm-1","backend_class":"local","locator":"vol-1.img"}"#
+                    .as_bytes()
+                    .to_vec(),
                 policy_json: vec![],
                 updated_at: "".to_string(),
                 updated_by: "".to_string(),
@@ -1210,7 +1636,10 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         let cache = server.cache.lock().await;
-        assert_eq!(cache.volume_handles.get("vol-1"), Some(&"handle-1".to_string()));
+        assert_eq!(
+            cache.volume_handles.get("vol-1"),
+            Some(&"handle-1".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1234,12 +1663,11 @@ mod tests {
                 updated_by: "".to_string(),
             }),
         };
-        let resp =
-            proto::reconcile_service_server::ReconcileService::apply_volume_desired_state(
-                &server,
-                Request::new(req),
-            )
-            .await;
+        let resp = proto::reconcile_service_server::ReconcileService::apply_volume_desired_state(
+            &server,
+            Request::new(req),
+        )
+        .await;
         assert_eq!(resp.unwrap_err().code(), tonic::Code::FailedPrecondition);
     }
 

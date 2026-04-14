@@ -1,0 +1,17 @@
+[package]
+name = "chv-controlplane"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "chv-controlplane"
+path = "src/main.rs"
+
+[dependencies]
+chv-config = { path = "../../crates/chv-config" }
+chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
+chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
+chv-observability = { path = "../../crates/chv-observability" }
+tokio = { workspace = true }
+tracing = { workspace = true }

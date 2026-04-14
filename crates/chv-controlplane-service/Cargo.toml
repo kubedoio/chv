@@ -1,0 +1,11 @@
+[package]
+name = "chv-controlplane-service"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chv-controlplane-store = { path = "../chv-controlplane-store" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

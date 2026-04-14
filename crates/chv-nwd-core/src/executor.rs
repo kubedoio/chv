@@ -177,10 +177,7 @@ impl LinuxExecutor {
         for line in stdout.lines() {
             if line.contains(&target) {
                 if let Some(idx) = line.rfind(" handle ") {
-                    let handle = line[idx + 8..]
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("");
+                    let handle = line[idx + 8..].split_whitespace().next().unwrap_or("");
                     if !handle.is_empty() {
                         Self::run_nft(&["delete", "rule", "inet", table, chain, "handle", handle])
                             .await?;
@@ -589,10 +586,7 @@ mod tests {
         for line in sample.lines() {
             if line.contains(&target) {
                 if let Some(idx) = line.rfind(" handle ") {
-                    let handle = line[idx + 8..]
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("");
+                    let handle = line[idx + 8..].split_whitespace().next().unwrap_or("");
                     if !handle.is_empty() {
                         found_handle = Some(handle.to_string());
                     }

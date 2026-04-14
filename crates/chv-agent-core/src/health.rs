@@ -26,30 +26,49 @@ impl HealthAggregator {
         let stord_ok = self.stord.unwrap_or(false);
         let nwd_ok = self.nwd.unwrap_or(false);
 
-        match (stord_ok, nwd_ok) {
-            (true, true) => match current {
-                NodeState::HostReady
-                | NodeState::StorageReady
-                | NodeState::NetworkReady
-                | NodeState::Degraded => NodeState::TenantReady,
-                _ => current,
-            },
-            (false, false) => match current {
-                NodeState::TenantReady | NodeState::StorageReady | NodeState::NetworkReady => {
+        match current {
+            NodeState::Bootstrapping => NodeState::HostReady,
+            NodeState::HostReady => {
+                if stord_ok {
+                    NodeState::StorageReady
+                } else {
+                    NodeState::HostReady
+                }
+            }
+            NodeState::StorageReady => {
+                if !stord_ok {
+                    NodeState::Degraded
+                } else if nwd_ok {
+                    NodeState::NetworkReady
+                } else {
+                    NodeState::StorageReady
+                }
+            }
+            NodeState::NetworkReady => {
+                if stord_ok && nwd_ok {
+                    NodeState::TenantReady
+                } else {
                     NodeState::Degraded
                 }
-                _ => current,
-            },
-            (true, false) => match current {
-                NodeState::TenantReady | NodeState::NetworkReady => NodeState::Degraded,
-                NodeState::HostReady => NodeState::StorageReady,
-                _ => current,
-            },
-            (false, true) => match current {
-                NodeState::TenantReady | NodeState::StorageReady => NodeState::Degraded,
-                NodeState::HostReady => NodeState::NetworkReady,
-                _ => current,
-            },
+            }
+            NodeState::TenantReady => {
+                if stord_ok && nwd_ok {
+                    NodeState::TenantReady
+                } else {
+                    NodeState::Degraded
+                }
+            }
+            NodeState::Degraded => {
+                if stord_ok && nwd_ok {
+                    NodeState::TenantReady
+                } else {
+                    NodeState::Degraded
+                }
+            }
+            NodeState::Draining
+            | NodeState::Maintenance
+            | NodeState::Failed
+            | NodeState::Discovered => current,
         }
     }
 }
@@ -65,7 +84,7 @@ mod tests {
         h.update_nwd(true);
         assert_eq!(
             h.derive_node_state(NodeState::HostReady),
-            NodeState::TenantReady
+            NodeState::StorageReady
         );
     }
 
@@ -120,7 +139,31 @@ mod tests {
         h.update_nwd(true);
         assert_eq!(
             h.derive_node_state(NodeState::HostReady),
+            NodeState::HostReady
+        );
+    }
+
+    #[test]
+    fn health_bootstrap_progresses_one_step_at_a_time() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+
+        assert_eq!(
+            h.derive_node_state(NodeState::Bootstrapping),
+            NodeState::HostReady
+        );
+        assert_eq!(
+            h.derive_node_state(NodeState::HostReady),
+            NodeState::StorageReady
+        );
+        assert_eq!(
+            h.derive_node_state(NodeState::StorageReady),
             NodeState::NetworkReady
+        );
+        assert_eq!(
+            h.derive_node_state(NodeState::NetworkReady),
+            NodeState::TenantReady
         );
     }
 }

@@ -33,6 +33,7 @@
 - no remote Cloud Hypervisor exposure
 - no silent divergence from control-plane desired state
 - stale desired-state generations must be rejected
+- generation values are monotonic decimal strings, non-numeric values are invalid
 
 ## Required capabilities
 - idempotent reconcile loop

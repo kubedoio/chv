@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use chv_errors::ChvError;
+use serde::Deserialize;
 
 fn default_running() -> String {
     "Running".to_string()

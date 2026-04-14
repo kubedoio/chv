@@ -95,7 +95,10 @@ impl DaemonSupervisor {
                     warn!(error = %e, "failed to wait for chv-stord");
                 }
             }
-            let can_restart = self.stord_last_restart.map(|t| t.elapsed() >= MIN_RESTART_INTERVAL).unwrap_or(true);
+            let can_restart = self
+                .stord_last_restart
+                .map(|t| t.elapsed() >= MIN_RESTART_INTERVAL)
+                .unwrap_or(true);
             if can_restart {
                 warn!("chv-stord not healthy, restarting");
                 if let Err(e) = self.start_stord().await {
@@ -115,7 +118,10 @@ impl DaemonSupervisor {
                     warn!(error = %e, "failed to wait for chv-nwd");
                 }
             }
-            let can_restart = self.nwd_last_restart.map(|t| t.elapsed() >= MIN_RESTART_INTERVAL).unwrap_or(true);
+            let can_restart = self
+                .nwd_last_restart
+                .map(|t| t.elapsed() >= MIN_RESTART_INTERVAL)
+                .unwrap_or(true);
             if can_restart {
                 warn!("chv-nwd not healthy, restarting");
                 if let Err(e) = self.start_nwd().await {

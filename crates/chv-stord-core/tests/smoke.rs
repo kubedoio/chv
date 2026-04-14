@@ -1,5 +1,4 @@
 use chv_observability::Metrics;
-use chv_stord_core::store::SessionStore;
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, BackendLocator,
     CloseVolumeRequest, DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest,
@@ -7,6 +6,7 @@ use chv_stord_api::chv_stord_api::{
     SetDevicePolicyRequest, VolumeHealthRequest,
 };
 use chv_stord_backends::LocalFileBackend;
+use chv_stord_core::store::SessionStore;
 use chv_stord_core::StorageServer;
 use std::io::Write;
 use std::path::PathBuf;
@@ -560,7 +560,12 @@ async fn sqlite_persistence_roundtrip() {
 
     let backend = LocalFileBackend::new(dir.path().to_path_buf());
     let store = SessionStore::new(&db_path).unwrap();
-    let server = StorageServer::new(backend, Metrics::new(), vec!["local".to_string()], Some(store));
+    let server = StorageServer::new(
+        backend,
+        Metrics::new(),
+        vec!["local".to_string()],
+        Some(store),
+    );
     let socket_clone = socket.clone();
     let db_path_clone = db_path.clone();
     tokio::spawn(async move {

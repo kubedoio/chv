@@ -1,0 +1,11 @@
+[package]
+name = "chv-controlplane-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chv-controlplane-types = { path = "../chv-controlplane-types" }
+serde = { workspace = true, features = ["derive"] }
+sqlx = { workspace = true }
+thiserror = { workspace = true }

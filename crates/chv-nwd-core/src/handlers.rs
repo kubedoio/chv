@@ -38,7 +38,9 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             if let Err(e) = tokio::task::spawn_blocking(move || {
                 let store = store.lock().unwrap();
                 store.upsert(&state)
-            }).await {
+            })
+            .await
+            {
                 tracing::error!(error = %e, "failed to join persist topology task");
             }
         }
@@ -51,7 +53,9 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             if let Err(e) = tokio::task::spawn_blocking(move || {
                 let store = store.lock().unwrap();
                 store.remove(&network_id)
-            }).await {
+            })
+            .await
+            {
                 tracing::error!(error = %e, "failed to join remove topology task");
             }
         }

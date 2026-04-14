@@ -228,7 +228,8 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                 return Ok(Response::new(e.to_proto_result()));
             }
             self.sessions.remove(&req.volume_id, &req.attachment_handle);
-            self.persist_remove(&req.volume_id, &req.attachment_handle).await;
+            self.persist_remove(&req.volume_id, &req.attachment_handle)
+                .await;
         }
 
         Ok(Response::new(Self::ok_result()))

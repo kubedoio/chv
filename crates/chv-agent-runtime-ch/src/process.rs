@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::fmt::Write;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Child;
@@ -87,7 +87,6 @@ impl ProcessCloudHypervisorAdapter {
         let status_code = parse_http_status(&buf[..n]).unwrap_or(0);
         Ok(status_code)
     }
-
 }
 
 fn parse_http_status(response_bytes: &[u8]) -> Option<u16> {

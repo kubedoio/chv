@@ -24,7 +24,10 @@ impl TopologyStore {
                 runtime_status TEXT NOT NULL
             )",
             [],
-        ).map_err(|e| ChvError::Internal { reason: format!("sqlite init failed: {}", e) })?;
+        )
+        .map_err(|e| ChvError::Internal {
+            reason: format!("sqlite init failed: {}", e),
+        })?;
         Ok(Self { conn })
     }
 
@@ -48,10 +51,14 @@ impl TopologyStore {
     }
 
     pub fn remove(&self, network_id: &str) -> Result<(), ChvError> {
-        self.conn.execute(
-            "DELETE FROM topologies WHERE network_id = ?1",
-            params![network_id],
-        ).map_err(|e| ChvError::Internal { reason: format!("sqlite remove failed: {}", e) })?;
+        self.conn
+            .execute(
+                "DELETE FROM topologies WHERE network_id = ?1",
+                params![network_id],
+            )
+            .map_err(|e| ChvError::Internal {
+                reason: format!("sqlite remove failed: {}", e),
+            })?;
         Ok(())
     }
 
@@ -59,20 +66,26 @@ impl TopologyStore {
         let mut stmt = self.conn.prepare(
             "SELECT network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status FROM topologies"
         ).map_err(|e| ChvError::Internal { reason: format!("sqlite prepare failed: {}", e) })?;
-        let rows = stmt.query_map([], |row| {
-            Ok(TopologyState {
-                network_id: row.get(0)?,
-                tenant_id: row.get(1)?,
-                bridge_name: row.get(2)?,
-                namespace_name: row.get(3)?,
-                subnet_cidr: row.get(4)?,
-                gateway_ip: row.get(5)?,
-                runtime_status: row.get(6)?,
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(TopologyState {
+                    network_id: row.get(0)?,
+                    tenant_id: row.get(1)?,
+                    bridge_name: row.get(2)?,
+                    namespace_name: row.get(3)?,
+                    subnet_cidr: row.get(4)?,
+                    gateway_ip: row.get(5)?,
+                    runtime_status: row.get(6)?,
+                })
             })
-        }).map_err(|e| ChvError::Internal { reason: format!("sqlite query failed: {}", e) })?;
+            .map_err(|e| ChvError::Internal {
+                reason: format!("sqlite query failed: {}", e),
+            })?;
         let mut states = Vec::new();
         for row in rows {
-            states.push(row.map_err(|e| ChvError::Internal { reason: format!("sqlite row failed: {}", e) })?);
+            states.push(row.map_err(|e| ChvError::Internal {
+                reason: format!("sqlite row failed: {}", e),
+            })?);
         }
         Ok(states)
     }

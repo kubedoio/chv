@@ -1,0 +1,18 @@
+[Unit]
+Description=CHV Agent - Cloud Hypervisor Virtualization Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/chv-agent
+Restart=on-failure
+RestartSec=5
+User=root
+Environment="CHV_AGENT_ADDR=:9090"
+Environment="CHV_DATA_ROOT=/var/lib/chv"
+Environment="CHV_LOG_LEVEL=info"
+Environment="CHV_BRIDGE_NAME=chvbr0"
+Environment="CHV_BRIDGE_CIDR=10.0.0.1/24"
+
+[Install]
+WantedBy=multi-user.target
