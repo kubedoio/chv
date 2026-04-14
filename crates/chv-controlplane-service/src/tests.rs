@@ -886,3 +886,55 @@ async fn test_lifecycle_invalid_node_id() {
         other => panic!("Expected NotFound for invalid node, got {:?}", other),
     }
 }
+
+#[test]
+fn test_error_to_status_mapping() {
+    use tonic::Status;
+    let err = ControlPlaneServiceError::NotFound("node-x".into());
+    let status: Status = err.into();
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let err = ControlPlaneServiceError::InvalidArgument("bad arg".into());
+    let status: Status = err.into();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    let err = ControlPlaneServiceError::Unauthorized("no".into());
+    let status: Status = err.into();
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+
+    let err = ControlPlaneServiceError::Conflict("dup".into());
+    let status: Status = err.into();
+    assert_eq!(status.code(), tonic::Code::AlreadyExists);
+
+    let err = ControlPlaneServiceError::StaleGeneration { expected: "5".into(), received: "3".into() };
+    let status: Status = err.into();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn test_rotate_certificate_returns_not_found_status() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool);
+    let cert_issuer = Arc::new(MockCertIssuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+    let server = crate::server::EnrollmentServer::new(Arc::new(service));
+
+    let request = tonic::Request::new(proto::RotateNodeCertificateRequest {
+        node_id: "non-existent-node".into(),
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-1".into(),
+            requested_by: "test".into(),
+            target_node_id: "non-existent-node".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+    });
+
+    let result = proto::enrollment_service_server::EnrollmentService::rotate_node_certificate(&server, request).await;
+    match result {
+        Err(status) => assert_eq!(status.code(), tonic::Code::NotFound),
+        Ok(_) => panic!("Expected NotFound status"),
+    }
+}
