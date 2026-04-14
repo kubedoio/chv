@@ -207,13 +207,7 @@ impl LifecycleServiceImplementation {
                 |e| ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e)),
             )?;
 
-        let desired_generation = if desired_generation_str == "0" {
-            Generation::new(1)
-        } else {
-            Generation::from_str(&desired_generation_str).map_err(|_| {
-                ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
-            })?
-        };
+        let desired_generation = Self::desired_generation_from_meta(meta)?;
 
         let receipt = self
             .operation_repo
@@ -261,15 +255,11 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::CreateVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
         let vm = request
             .vm
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing vm".into()))?;
-        let vm_id = ResourceId::new(vm.vm_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid vm_id: {}", e))
-        })?;
+        let vm_id = Self::parse_vm_id(vm.vm_id)?;
 
         let spec: VmSpec = if vm.vm_spec_json.is_empty() {
             VmSpec {
@@ -386,15 +376,11 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::AttachVolumeRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
         let volume = request
             .volume
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing volume".into()))?;
-        let volume_id = ResourceId::new(volume.volume_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e))
-        })?;
+        let volume_id = Self::parse_volume_id(volume.volume_id)?;
 
         let operation_id = self
             .create_operation_and_emit(
@@ -456,9 +442,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::PauseNodeSchedulingRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
             ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
@@ -481,9 +465,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::ResumeNodeSchedulingRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
             ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
@@ -506,9 +488,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::DrainNodeRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
             ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
@@ -545,9 +525,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::EnterMaintenanceRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
             ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
@@ -584,9 +562,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::ExitMaintenanceRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
             ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e))
