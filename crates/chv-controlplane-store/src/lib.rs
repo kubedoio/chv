@@ -1,4 +1,5 @@
 mod alerts;
+mod bootstrap_tokens;
 mod db;
 mod desired_state;
 mod events;
@@ -7,6 +8,7 @@ mod observed_state;
 mod operations;
 
 pub use alerts::{AlertCreateInput, AlertRepository};
+pub use bootstrap_tokens::{BootstrapTokenRepository, BootstrapTokenValidation};
 pub use db::{
     connect_pool, migrations_path, migrator, run_migrations, ControlPlaneStoreConfig, StoreError,
     StorePool,

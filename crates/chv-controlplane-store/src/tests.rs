@@ -7,6 +7,24 @@ use chv_controlplane_types::domain::{Generation, NodeId, ResourceId};
 use crate::test_util::TestDb;
 
 #[tokio::test]
+async fn test_bootstrap_token_validation() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = BootstrapTokenRepository::new(pool.clone());
+
+    let hash = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"; // sha256("123")
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES ($1, true)")
+        .bind(hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(repo.validate_and_consume("123").await.unwrap(), BootstrapTokenValidation::Valid);
+    assert_eq!(repo.validate_and_consume("123").await.unwrap(), BootstrapTokenValidation::AlreadyUsed);
+    assert_eq!(repo.validate_and_consume("999").await.unwrap(), BootstrapTokenValidation::Invalid);
+}
+
+#[tokio::test]
 async fn test_bootstrap_result_repeatable_upsert() {
     let test_db = TestDb::new().await;
     let pool = test_db.pool.clone();

@@ -6,9 +6,12 @@ publish = false
 
 [dependencies]
 chv-controlplane-types = { path = "../chv-controlplane-types" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+hex = "0.4"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["uuid"] }
+sha2 = "0.10"
+sqlx = { workspace = true, features = ["uuid", "chrono"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
