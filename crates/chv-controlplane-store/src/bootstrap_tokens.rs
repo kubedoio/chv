@@ -67,6 +67,7 @@ fn sha256(input: &str) -> String {
 
 #[derive(sqlx::FromRow)]
 struct BootstrapTokenRow {
+    #[allow(dead_code)]
     token_hash: String,
     one_time_use: bool,
     used_at: Option<chrono::DateTime<chrono::Utc>>,
