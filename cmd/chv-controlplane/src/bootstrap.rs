@@ -5,8 +5,8 @@ use chv_controlplane_service::{
     TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
-    connect_pool, run_migrations, AlertRepository, ControlPlaneStoreConfig, EventRepository,
-    NodeRepository, ObservedStateRepository,
+    connect_pool, run_migrations, AlertRepository, BootstrapTokenRepository, ControlPlaneStoreConfig,
+    EventRepository, NodeRepository, ObservedStateRepository,
 };
 
 pub async fn build_service(
@@ -28,6 +28,7 @@ pub async fn build_service(
     run_migrations(&pool, Some(&store_config)).await?;
 
     let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
     let observed_state_repo = ObservedStateRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
     let alert_repo = AlertRepository::new(pool.clone());
@@ -50,7 +51,8 @@ pub async fn build_service(
         chv_controlplane_service::CaBackedCertificateIssuer::new(&ca_cert_pem, &ca_key_pem)?,
     );
 
-    let enrollment_service = EnrollmentServiceImplementation::new(node_repo.clone(), cert_issuer);
+    let enrollment_service =
+        EnrollmentServiceImplementation::new(node_repo.clone(), token_repo.clone(), cert_issuer);
     let inventory_service = InventoryServiceImplementation::new(node_repo.clone());
     let telemetry_service = TelemetryServiceImplementation::new(
         observed_state_repo.clone(),
@@ -64,6 +66,7 @@ pub async fn build_service(
         runtime,
         ControlPlaneComponents::new(
             pool,
+            token_repo,
             enrollment_service,
             inventory_service,
             telemetry_service,

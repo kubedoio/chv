@@ -111,14 +111,23 @@ async fn test_enrollment_extended_inventory_persistence() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+
+    // Seed a bootstrap token for enrollment (sha256("123"))
+    let hash = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3";
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES ($1, false)")
+        .bind(hash)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut labels = std::collections::HashMap::new();
     labels.insert("env".to_string(), "prod".to_string());
 
     let request = proto::EnrollmentRequest {
-        bootstrap_token: "token-123".into(),
+        bootstrap_token: "123".into(),
         inventory: Some(proto::NodeInventory {
             node_id: "node-new-1".into(),
             hostname: "host-1".into(),
@@ -175,8 +184,9 @@ async fn test_rotate_certificate_missing_node() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     let node_repo = NodeRepository::new(pool);
+    let token_repo = BootstrapTokenRepository::new(test_db.pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
 
     let request = proto::RotateNodeCertificateRequest {
         node_id: "non-existent-node".into(),
@@ -201,8 +211,9 @@ async fn test_report_bootstrap_result_persistence() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
 
     // Node must exist
     sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-b1', 'host-b1', 'host-b1')")

@@ -1,7 +1,8 @@
 use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
-    NodeBootstrapResultInput, NodeInventoryInput, NodeRepository, NodeUpsertInput, NodeVersionInput,
+    BootstrapTokenRepository, BootstrapTokenValidation, NodeBootstrapResultInput, NodeInventoryInput,
+    NodeRepository, NodeUpsertInput, NodeVersionInput,
 };
 use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
@@ -44,13 +45,19 @@ pub trait EnrollmentService: Send + Sync {
 #[derive(Clone)]
 pub struct EnrollmentServiceImplementation {
     node_repo: NodeRepository,
+    token_repo: BootstrapTokenRepository,
     cert_issuer: Arc<dyn CertificateIssuer>,
 }
 
 impl EnrollmentServiceImplementation {
-    pub fn new(node_repo: NodeRepository, cert_issuer: Arc<dyn CertificateIssuer>) -> Self {
+    pub fn new(
+        node_repo: NodeRepository,
+        token_repo: BootstrapTokenRepository,
+        cert_issuer: Arc<dyn CertificateIssuer>,
+    ) -> Self {
         Self {
             node_repo,
+            token_repo,
             cert_issuer,
         }
     }
@@ -74,10 +81,17 @@ impl EnrollmentService for EnrollmentServiceImplementation {
         &self,
         request: proto::EnrollmentRequest,
     ) -> Result<proto::EnrollmentResponse, ControlPlaneServiceError> {
-        if request.bootstrap_token.is_empty() {
-            return Err(ControlPlaneServiceError::Unauthorized(
-                "bootstrap token is required".into(),
-            ));
+        match self
+            .token_repo
+            .validate_and_consume(&request.bootstrap_token)
+            .await?
+        {
+            BootstrapTokenValidation::Valid => {}
+            _ => {
+                return Err(ControlPlaneServiceError::Unauthorized(
+                    "invalid bootstrap token".into(),
+                ))
+            }
         }
 
         let inventory = request
