@@ -119,19 +119,6 @@ impl LifecycleServiceImplementation {
         meta.ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))
     }
 
-    #[allow(dead_code)]
-    fn parse_operation_id(
-        meta: &proto::RequestMeta,
-    ) -> Result<Option<OperationId>, ControlPlaneServiceError> {
-        if meta.operation_id.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(OperationId::new(meta.operation_id.clone()).map_err(
-                |e| ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e)),
-            )?))
-        }
-    }
-
     fn normalize_requested_by(meta: &proto::RequestMeta) -> Option<String> {
         if meta.requested_by.is_empty() {
             None
@@ -152,6 +139,48 @@ impl LifecycleServiceImplementation {
         }
     }
 
+    fn ok_ack(operation_id: &OperationId, summary: &str) -> proto::AckResponse {
+        proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: operation_id.to_string(),
+                status: STATUS_OK.into(),
+                node_observed_generation: "".into(),
+                error_code: "".into(),
+                human_summary: summary.into(),
+            }),
+        }
+    }
+
+    fn parse_node_id(s: String) -> Result<NodeId, ControlPlaneServiceError> {
+        NodeId::new(s)
+            .map_err(|e| ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e)))
+    }
+
+    fn parse_vm_id(s: String) -> Result<ResourceId, ControlPlaneServiceError> {
+        ResourceId::new(s)
+            .map_err(|e| ControlPlaneServiceError::InvalidArgument(format!("invalid vm_id: {}", e)))
+    }
+
+    fn parse_volume_id(s: String) -> Result<ResourceId, ControlPlaneServiceError> {
+        ResourceId::new(s)
+            .map_err(|e| ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e)))
+    }
+
+    async fn require_node_exists(&self, node_id: &NodeId) -> Result<(), ControlPlaneServiceError> {
+        let row = sqlx::query("SELECT 1 FROM nodes WHERE node_id = $1")
+            .bind(node_id.as_str())
+            .fetch_optional(self.node_repo.pool())
+            .await
+            .map_err(|e| ControlPlaneServiceError::Internal(format!("failed to check node: {}", e)))?;
+        if row.is_none() {
+            return Err(ControlPlaneServiceError::NotFound(format!(
+                "node {} not found",
+                node_id
+            )));
+        }
+        Ok(())
+    }
+
     async fn create_operation_and_emit(
         &self,
         operation_type: &str,
@@ -160,6 +189,7 @@ impl LifecycleServiceImplementation {
         resource_id: Option<ResourceId>,
         meta: &proto::RequestMeta,
     ) -> Result<OperationId, ControlPlaneServiceError> {
+        self.require_node_exists(&node_id).await?;
         let now = Self::now_ms();
         let desired_generation_str = if meta.desired_state_version.is_empty() {
             "0".to_string()
@@ -178,11 +208,11 @@ impl LifecycleServiceImplementation {
             )?;
 
         let desired_generation = if desired_generation_str == "0" {
-            None
+            Generation::new(1)
         } else {
-            Some(Generation::from_str(&desired_generation_str).map_err(|_| {
+            Generation::from_str(&desired_generation_str).map_err(|_| {
                 ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
-            })?)
+            })?
         };
 
         let receipt = self
@@ -196,7 +226,7 @@ impl LifecycleServiceImplementation {
                 status: OperationStatus::Pending,
                 requested_by: Self::normalize_requested_by(meta),
                 updated_by: None,
-                desired_generation,
+                desired_generation: Some(desired_generation),
                 observed_generation: None,
                 correlation_id: None,
                 requested_unix_ms: now,
@@ -288,15 +318,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             })
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "create vm accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "create vm accepted"))
     }
 
     async fn start_vm(
@@ -304,26 +326,14 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::StartVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
-        let vm_id = ResourceId::new(request.vm_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid vm_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
             .create_operation_and_emit("StartVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "start vm accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "start vm accepted"))
     }
 
     async fn stop_vm(
@@ -331,26 +341,14 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::StopVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
-        let vm_id = ResourceId::new(request.vm_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid vm_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
             .create_operation_and_emit("StopVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "stop vm accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "stop vm accepted"))
     }
 
     async fn reboot_vm(
@@ -358,26 +356,14 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::RebootVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
-        let vm_id = ResourceId::new(request.vm_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid vm_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
             .create_operation_and_emit("RebootVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "reboot vm accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "reboot vm accepted"))
     }
 
     async fn delete_vm(
@@ -385,26 +371,14 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::DeleteVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
-        let vm_id = ResourceId::new(request.vm_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid vm_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
             .create_operation_and_emit("DeleteVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "delete vm accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "delete vm accepted"))
     }
 
     async fn attach_volume(
@@ -432,15 +406,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "attach volume accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "attach volume accepted"))
     }
 
     async fn detach_volume(
@@ -448,12 +414,8 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::DetachVolumeRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
-        let volume_id = ResourceId::new(request.volume_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let volume_id = Self::parse_volume_id(request.volume_id)?;
 
         let operation_id = self
             .create_operation_and_emit(
@@ -465,15 +427,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "detach volume accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "detach volume accepted"))
     }
 
     async fn resize_volume(
@@ -481,12 +435,8 @@ impl LifecycleService for LifecycleServiceImplementation {
         request: proto::ResizeVolumeRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
-        let node_id = NodeId::new(request.node_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
-        })?;
-        let volume_id = ResourceId::new(request.volume_id).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e))
-        })?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let volume_id = Self::parse_volume_id(request.volume_id)?;
 
         let operation_id = self
             .create_operation_and_emit(
@@ -498,15 +448,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "resize volume accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "resize volume accepted"))
     }
 
     async fn pause_node_scheduling(
@@ -531,15 +473,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "pause node scheduling accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "pause node scheduling accepted"))
     }
 
     async fn resume_node_scheduling(
@@ -564,15 +498,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "resume node scheduling accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "resume node scheduling accepted"))
     }
 
     async fn drain_node(
@@ -611,15 +537,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             })
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "drain node accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "drain node accepted"))
     }
 
     async fn enter_maintenance(
@@ -658,15 +576,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             })
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "enter maintenance accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "enter maintenance accepted"))
     }
 
     async fn exit_maintenance(
@@ -691,14 +601,6 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        Ok(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
-                node_observed_generation: "".into(),
-                error_code: "".into(),
-                human_summary: "exit maintenance accepted".into(),
-            }),
-        })
+        Ok(Self::ok_ack(&operation_id, "exit maintenance accepted"))
     }
 }

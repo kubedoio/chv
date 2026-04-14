@@ -4,6 +4,8 @@ use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::sync::Arc;
 
+use crate::lifecycle::LifecycleService;
+
 // Mock CertificateIssuer for enrollment tests
 struct MockCertIssuer;
 #[async_trait::async_trait]
@@ -751,4 +753,110 @@ async fn test_drain_node_updates_desired_state() {
         .unwrap();
     let desired_state: String = sqlx::Row::get(&row, "desired_state");
     assert_eq!(desired_state, "Draining");
+}
+
+#[tokio::test]
+async fn test_enter_maintenance_updates_desired_state() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-maint', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let op_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let desired_repo = DesiredStateRepository::new(pool.clone());
+    let service = LifecycleServiceImplementation::new(node_repo, op_repo, event_repo, desired_repo);
+
+    let req = proto::EnterMaintenanceRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-maint".into(),
+            requested_by: "test".into(),
+            target_node_id: "node-maint".into(),
+            desired_state_version: "2".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-maint".into(),
+        reason: "upgrade".into(),
+    };
+
+    let resp = service.enter_maintenance(req).await.unwrap();
+    assert_eq!(resp.result.unwrap().status, "ok");
+
+    let row = sqlx::query("SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1")
+        .bind("node-maint")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let state: String = sqlx::Row::get(&row, "desired_state");
+    assert_eq!(state, "Maintenance");
+}
+
+#[tokio::test]
+async fn test_create_vm_writes_desired_state() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-vm', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let op_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let desired_repo = DesiredStateRepository::new(pool.clone());
+    let service = LifecycleServiceImplementation::new(node_repo, op_repo, event_repo, desired_repo);
+
+    let req = proto::CreateVmRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-vm".into(),
+            requested_by: "test".into(),
+            target_node_id: "node-vm".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-vm".into(),
+        vm: Some(proto::VmMutationSpec {
+            vm_id: "vm-1".into(),
+            vm_spec_json: br#"{"cpu_count": 2}"#.to_vec(),
+        }),
+    };
+
+    let resp = service.create_vm(req).await.unwrap();
+    assert_eq!(resp.result.unwrap().status, "ok");
+
+    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = $1")
+        .bind("vm-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let power: String = sqlx::Row::get(&row, "desired_power_state");
+    assert_eq!(power, "Created");
+}
+
+#[tokio::test]
+async fn test_lifecycle_invalid_node_id() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let op_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let desired_repo = DesiredStateRepository::new(pool.clone());
+    let service = LifecycleServiceImplementation::new(node_repo, op_repo, event_repo, desired_repo);
+
+    let req = proto::DrainNodeRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "op-drain".into(),
+            requested_by: "test".into(),
+            target_node_id: "non-existent-node".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "non-existent-node".into(),
+        allow_workload_stop: false,
+    };
+
+    let result = service.drain_node(req).await;
+    match result {
+        Err(ControlPlaneServiceError::NotFound(_)) => { /* correct */ }
+        other => panic!("Expected NotFound for invalid node, got {:?}", other),
+    }
 }
