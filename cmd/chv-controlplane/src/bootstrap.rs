@@ -66,7 +66,6 @@ pub async fn build_service(
         runtime,
         ControlPlaneComponents::new(
             pool,
-            token_repo,
             enrollment_service,
             inventory_service,
             telemetry_service,

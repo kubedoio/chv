@@ -310,3 +310,41 @@ async fn test_ca_backed_issuer_issuance() {
     leaf.verify_signature(Some(ca.public_key()))
         .expect("Certificate signature verification failed");
 }
+
+#[tokio::test]
+async fn test_enrollment_rejects_invalid_bootstrap_token() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = chv_controlplane_store::BootstrapTokenRepository::new(pool);
+    let cert_issuer = Arc::new(MockCertIssuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+
+    let request = proto::EnrollmentRequest {
+        bootstrap_token: "invalid-token".into(),
+        inventory: Some(proto::NodeInventory {
+            node_id: "node-invalid".into(),
+            hostname: "host".into(),
+            architecture: "x86_64".into(),
+            cpu_threads: 1,
+            memory_bytes: 1024,
+            storage_classes: vec![],
+            network_capabilities: vec![],
+            labels: Default::default(),
+        }),
+        versions: Some(proto::ServiceVersions {
+            node_id: "node-invalid".into(),
+            chv_agent_version: "1.0.0".into(),
+            chv_stord_version: "1.0.0".into(),
+            chv_nwd_version: "1.0.0".into(),
+            cloud_hypervisor_version: "1.0.0".into(),
+            host_bundle_version: "1.0.0".into(),
+        }),
+    };
+
+    let result = service.enroll_node(request).await;
+    match result {
+        Err(ControlPlaneServiceError::Unauthorized(_)) => { /* Correct */ }
+        other => panic!("Expected Unauthorized error for invalid token, got {:?}", other),
+    }
+}

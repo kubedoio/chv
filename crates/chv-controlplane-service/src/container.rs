@@ -2,7 +2,7 @@ use crate::enrollment::EnrollmentServiceImplementation;
 use crate::error::ControlPlaneServiceError;
 use crate::inventory::InventoryServiceImplementation;
 use crate::telemetry::TelemetryServiceImplementation;
-use chv_controlplane_store::{BootstrapTokenRepository, StorePool};
+use chv_controlplane_store::StorePool;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,6 @@ impl ControlPlaneRuntime {
 #[derive(Clone)]
 pub struct ControlPlaneComponents {
     store_pool: StorePool,
-    token_repo: BootstrapTokenRepository,
     enrollment_service: EnrollmentServiceImplementation,
     inventory_service: InventoryServiceImplementation,
     telemetry_service: TelemetryServiceImplementation,
@@ -44,14 +43,12 @@ pub struct ControlPlaneComponents {
 impl ControlPlaneComponents {
     pub fn new(
         store_pool: StorePool,
-        token_repo: BootstrapTokenRepository,
         enrollment_service: EnrollmentServiceImplementation,
         inventory_service: InventoryServiceImplementation,
         telemetry_service: TelemetryServiceImplementation,
     ) -> Self {
         Self {
             store_pool,
-            token_repo,
             enrollment_service,
             inventory_service,
             telemetry_service,
