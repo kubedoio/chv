@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VmSpec {
     pub cpu_count: Option<i32>,
     pub memory_bytes: Option<i64>,
@@ -10,6 +11,7 @@ pub struct VmSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VolumeSpec {
     pub capacity_bytes: i64,
     pub volume_kind: Option<String>,
@@ -17,16 +19,19 @@ pub struct VolumeSpec {
     pub attached_vm_id: Option<String>,
     pub attachment_mode: Option<String>,
     pub device_name: Option<String>,
-    pub read_only: Option<bool>,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkSpec {
     pub network_class: Option<String>,
     pub exposures: Option<Vec<NetworkExposureSpec>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkExposureSpec {
     pub service_name: String,
     pub protocol: String,
@@ -38,6 +43,7 @@ pub struct NetworkExposureSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeSpec {
     pub desired_state: String,
     pub state_reason: Option<String>,
@@ -56,6 +62,26 @@ mod tests {
     }
 
     #[test]
+    fn vm_spec_rejects_unknown_field() {
+        let json = r#"{"cpu_count": 2, "unknown": true}"#;
+        assert!(serde_json::from_str::<VmSpec>(json).is_err());
+    }
+
+    #[test]
+    fn volume_spec_parses_and_defaults_read_only() {
+        let json = r#"{"capacity_bytes": 10737418240}"#;
+        let spec: VolumeSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.capacity_bytes, 10737418240);
+        assert!(!spec.read_only);
+    }
+
+    #[test]
+    fn volume_spec_rejects_missing_required_field() {
+        let json = r#"{"volume_kind": "ssd"}"#;
+        assert!(serde_json::from_str::<VolumeSpec>(json).is_err());
+    }
+
+    #[test]
     fn network_spec_parses_with_exposures() {
         let json = r#"{"network_class": "bridge", "exposures": [{"service_name": "web", "protocol": "tcp"}]}"#;
         let spec: NetworkSpec = serde_json::from_str(json).unwrap();
@@ -64,10 +90,22 @@ mod tests {
     }
 
     #[test]
+    fn network_exposure_spec_rejects_unknown_field() {
+        let json = r#"{"service_name": "web", "protocol": "tcp", "extra": 1}"#;
+        assert!(serde_json::from_str::<NetworkExposureSpec>(json).is_err());
+    }
+
+    #[test]
     fn node_spec_parses() {
         let json = r#"{"desired_state": "TenantReady", "state_reason": "initial bootstrap"}"#;
         let spec: NodeSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.desired_state, "TenantReady");
         assert_eq!(spec.state_reason.as_deref(), Some("initial bootstrap"));
+    }
+
+    #[test]
+    fn node_spec_rejects_missing_required_field() {
+        let json = r#"{"state_reason": "reason"}"#;
+        assert!(serde_json::from_str::<NodeSpec>(json).is_err());
     }
 }
