@@ -2,12 +2,12 @@ use chv_config::ControlPlaneConfig;
 use chv_controlplane_service::{
     ControlPlaneComponents, ControlPlaneRuntime, ControlPlaneService, ControlPlaneServiceError,
     EnrollmentServiceImplementation, InventoryServiceImplementation,
-    ReconcileServiceImplementation, TelemetryServiceImplementation,
+    LifecycleServiceImplementation, ReconcileServiceImplementation, TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
     connect_pool, run_migrations, AlertRepository, BootstrapTokenRepository, ControlPlaneStoreConfig,
     DesiredStateRepository, EventRepository, NetworkExposureRepository, NodeRepository,
-    ObservedStateRepository,
+    ObservedStateRepository, OperationRepository,
 };
 
 pub async fn build_service(
@@ -35,6 +35,7 @@ pub async fn build_service(
     let alert_repo = AlertRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
     let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
 
     let ca_cert_path = config.tls.ca_cert_path.as_ref().ok_or_else(|| {
         ControlPlaneServiceError::Internal("missing ca_cert_path in config".into())
@@ -64,9 +65,15 @@ pub async fn build_service(
     );
     let reconcile_service = ReconcileServiceImplementation::new(
         node_repo.clone(),
-        desired_state_repo,
+        desired_state_repo.clone(),
         network_exposure_repo,
         event_repo.clone(),
+    );
+    let lifecycle_service = LifecycleServiceImplementation::new(
+        node_repo.clone(),
+        operation_repo,
+        event_repo.clone(),
+        desired_state_repo,
     );
 
     let runtime = ControlPlaneRuntime::new(config.grpc_bind, config.runtime_dir.clone());
@@ -79,6 +86,7 @@ pub async fn build_service(
             inventory_service,
             telemetry_service,
             reconcile_service,
+            lifecycle_service,
         ),
     ))
 }

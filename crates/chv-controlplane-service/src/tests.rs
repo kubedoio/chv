@@ -598,3 +598,157 @@ async fn test_apply_rejects_invalid_spec_json() {
         other => panic!("Expected InvalidArgument for unknown field, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn test_create_vm_creates_operation() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-lifecycle-1', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+
+    let service = LifecycleServiceImplementation::new(
+        node_repo,
+        operation_repo,
+        event_repo,
+        desired_state_repo,
+    );
+
+    let request = proto::CreateVmRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "".into(),
+            requested_by: "test-user".into(),
+            target_node_id: "node-lifecycle-1".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-lifecycle-1".into(),
+        vm: Some(proto::VmMutationSpec {
+            vm_id: "vm-lifecycle-1".into(),
+            vm_spec_json: b"{}".to_vec(),
+        }),
+    };
+
+    let result = service.create_vm(request).await;
+    assert!(result.is_ok(), "Expected success, got {:?}", result);
+
+    let row =
+        sqlx::query("SELECT operation_id, status::text as status FROM operations WHERE operation_type = 'CreateVm'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let status: String = sqlx::Row::get(&row, "status");
+    assert_eq!(status, "Pending");
+}
+
+#[tokio::test]
+async fn test_duplicate_idempotency_returns_same_operation() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-lifecycle-2', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+
+    let service = LifecycleServiceImplementation::new(
+        node_repo,
+        operation_repo,
+        event_repo,
+        desired_state_repo,
+    );
+
+    let request = proto::CreateVmRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "".into(),
+            requested_by: "test-user".into(),
+            target_node_id: "node-lifecycle-2".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-lifecycle-2".into(),
+        vm: Some(proto::VmMutationSpec {
+            vm_id: "vm-lifecycle-2".into(),
+            vm_spec_json: b"{}".to_vec(),
+        }),
+    };
+
+    let result1 = service.create_vm(request.clone()).await.unwrap();
+    let result2 = service.create_vm(request).await.unwrap();
+
+    assert_eq!(
+        result1.result.unwrap().operation_id,
+        result2.result.unwrap().operation_id
+    );
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE operation_type = 'CreateVm'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn test_drain_node_updates_desired_state() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-lifecycle-3', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let node_repo = NodeRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+
+    let service = LifecycleServiceImplementation::new(
+        node_repo,
+        operation_repo,
+        event_repo,
+        desired_state_repo,
+    );
+
+    let request = proto::DrainNodeRequest {
+        meta: Some(proto::RequestMeta {
+            operation_id: "".into(),
+            requested_by: "test-user".into(),
+            target_node_id: "node-lifecycle-3".into(),
+            desired_state_version: "1".into(),
+            request_unix_ms: 1000,
+        }),
+        node_id: "node-lifecycle-3".into(),
+        allow_workload_stop: false,
+    };
+
+    let result = service.drain_node(request).await;
+    assert!(result.is_ok(), "Expected success, got {:?}", result);
+
+    let row = sqlx::query("SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1")
+        .bind("node-lifecycle-3")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let desired_state: String = sqlx::Row::get(&row, "desired_state");
+    assert_eq!(desired_state, "Draining");
+}

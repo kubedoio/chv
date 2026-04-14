@@ -40,7 +40,7 @@ ON CONFLICT (idempotency_key) DO NOTHING
 const SELECT_OPERATION_SQL: &str = r#"
 SELECT
     operation_id,
-    status
+    status::text
 FROM operations
 WHERE idempotency_key = $1
 "#;

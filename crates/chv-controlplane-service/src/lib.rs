@@ -2,6 +2,7 @@ mod container;
 mod enrollment;
 mod error;
 mod inventory;
+mod lifecycle;
 mod reconcile;
 mod server;
 mod telemetry;
@@ -13,7 +14,8 @@ pub use enrollment::{
 };
 pub use error::ControlPlaneServiceError;
 pub use inventory::{InventoryService, InventoryServiceImplementation};
-pub use server::{EnrollmentServer, InventoryServer, ReconcileServer, TelemetryServer};
+pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
+pub use server::{EnrollmentServer, InventoryServer, LifecycleServer, ReconcileServer, TelemetryServer};
 pub use reconcile::{
     ReconcileService, ReconcileServiceImplementation,
 };

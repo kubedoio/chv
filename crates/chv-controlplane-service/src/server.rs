@@ -1,5 +1,6 @@
 use crate::enrollment::EnrollmentService;
 use crate::inventory::InventoryService;
+use crate::lifecycle::LifecycleService;
 use crate::reconcile::ReconcileService;
 use crate::telemetry::TelemetryService;
 use control_plane_node_api::control_plane_node_api as proto;
@@ -173,6 +174,175 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             .publish_alert(request.into_inner())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(resp))
+    }
+}
+
+pub struct LifecycleServer {
+    service: Arc<dyn LifecycleService>,
+}
+
+impl LifecycleServer {
+    pub fn new(service: Arc<dyn LifecycleService>) -> Self {
+        Self { service }
+    }
+}
+
+#[tonic::async_trait]
+impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
+    async fn create_vm(
+        &self,
+        request: Request<proto::CreateVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .create_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn start_vm(
+        &self,
+        request: Request<proto::StartVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .start_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn stop_vm(
+        &self,
+        request: Request<proto::StopVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .stop_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn reboot_vm(
+        &self,
+        request: Request<proto::RebootVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .reboot_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn delete_vm(
+        &self,
+        request: Request<proto::DeleteVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .delete_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn attach_volume(
+        &self,
+        request: Request<proto::AttachVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .attach_volume(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn detach_volume(
+        &self,
+        request: Request<proto::DetachVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .detach_volume(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn resize_volume(
+        &self,
+        request: Request<proto::ResizeVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .resize_volume(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn pause_node_scheduling(
+        &self,
+        request: Request<proto::PauseNodeSchedulingRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .pause_node_scheduling(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn resume_node_scheduling(
+        &self,
+        request: Request<proto::ResumeNodeSchedulingRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .resume_node_scheduling(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn drain_node(
+        &self,
+        request: Request<proto::DrainNodeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .drain_node(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn enter_maintenance(
+        &self,
+        request: Request<proto::EnterMaintenanceRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .enter_maintenance(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn exit_maintenance(
+        &self,
+        request: Request<proto::ExitMaintenanceRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .exit_maintenance(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
 }
