@@ -15,12 +15,14 @@ pub use db::{
     StorePool,
 };
 pub use desired_state::{
-    DesiredStateRepository, NetworkDesiredStateInput, VmDesiredStateInput, VolumeDesiredStateInput,
+    DesiredStateRepository, NetworkDesiredStateInput, VmDesiredStateInput, VmPowerStatePatchInput,
+    VolumeAttachmentPatchInput, VolumeDesiredStateInput, VolumeResizePatchInput,
 };
 pub use events::{EventAppendInput, EventRepository};
 pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
 pub use nodes::{
-    NodeBootstrapResultInput, NodeInventoryInput, NodeRepository, NodeStateInput, NodeUpsertInput,
+    NodeBootstrapResultInput, NodeDrainIntentInput, NodeInventoryInput, NodeRepository,
+    NodeSchedulingPatchInput, NodeStateInput, NodeStatePatchInput, NodeUpsertInput,
     NodeVersionInput,
 };
 pub use observed_state::{

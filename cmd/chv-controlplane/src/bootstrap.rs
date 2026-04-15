@@ -89,6 +89,8 @@ pub async fn build_service(
         node_repo.clone(),
         desired_state_repo.clone(),
         event_repo.clone(),
+        observed_state_repo.clone(),
+        operation_repo.clone(),
     );
     let lifecycle_service = LifecycleServiceImplementation::new(
         node_repo.clone(),

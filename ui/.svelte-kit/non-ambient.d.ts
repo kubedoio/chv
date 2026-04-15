@@ -29,7 +29,7 @@ declare module "$app/types" {
 	type MatcherParam<M> = M extends (param : string) => param is (infer U extends string) ? U : string;
 
 	export interface AppTypes {
-		RouteId(): "/" | "/backup-jobs" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | "/networks/[id]" | "/nodes" | "/nodes/[id]" | "/nodes/[id]/images" | "/nodes/[id]/networks" | "/nodes/[id]/storage" | "/nodes/[id]/vms" | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/vms" | "/vms/[id]";
+		RouteId(): "/" | "/backup-jobs" | "/clusters" | "/events" | "/images" | "/install" | "/login" | "/maintenance" | "/metrics" | "/networks" | "/networks/[id]" | "/nodes" | "/nodes/[id]" | "/nodes/[id]/images" | "/nodes/[id]/networks" | "/nodes/[id]/storage" | "/nodes/[id]/vms" | "/operations" | "/quotas" | "/settings" | "/storage" | "/tasks" | "/templates" | "/vms" | "/vms/[id]" | "/volumes";
 		RouteParams(): {
 			"/networks/[id]": { id: string };
 			"/nodes/[id]": { id: string };
@@ -42,10 +42,12 @@ declare module "$app/types" {
 		LayoutParams(): {
 			"/": { id?: string };
 			"/backup-jobs": Record<string, never>;
+			"/clusters": Record<string, never>;
 			"/events": Record<string, never>;
 			"/images": Record<string, never>;
 			"/install": Record<string, never>;
 			"/login": Record<string, never>;
+			"/maintenance": Record<string, never>;
 			"/metrics": Record<string, never>;
 			"/networks": { id?: string };
 			"/networks/[id]": { id: string };
@@ -59,11 +61,13 @@ declare module "$app/types" {
 			"/quotas": Record<string, never>;
 			"/settings": Record<string, never>;
 			"/storage": Record<string, never>;
+			"/tasks": Record<string, never>;
 			"/templates": Record<string, never>;
 			"/vms": { id?: string };
-			"/vms/[id]": { id: string }
+			"/vms/[id]": { id: string };
+			"/volumes": Record<string, never>
 		};
-		Pathname(): "/" | "/backup-jobs" | "/events" | "/images" | "/install" | "/login" | "/metrics" | "/networks" | `/networks/${string}` & {} | "/nodes" | `/nodes/${string}` & {} | `/nodes/${string}/images` & {} | `/nodes/${string}/networks` & {} | `/nodes/${string}/storage` & {} | `/nodes/${string}/vms` & {} | "/operations" | "/quotas" | "/settings" | "/storage" | "/templates" | "/vms" | `/vms/${string}` & {};
+		Pathname(): "/" | "/backup-jobs" | "/clusters" | "/events" | "/images" | "/install" | "/login" | "/maintenance" | "/metrics" | "/networks" | `/networks/${string}` & {} | "/nodes" | `/nodes/${string}` & {} | `/nodes/${string}/images` & {} | `/nodes/${string}/networks` & {} | `/nodes/${string}/storage` & {} | `/nodes/${string}/vms` & {} | "/operations" | "/quotas" | "/settings" | "/storage" | "/tasks" | "/templates" | "/vms" | `/vms/${string}` & {} | "/volumes";
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
 		Asset(): string & {};
 	}

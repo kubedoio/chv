@@ -143,6 +143,77 @@ ON CONFLICT (network_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 "#;
 
+const ACK_NODE_OBSERVED_GENERATION_SQL: &str = r#"
+UPDATE node_observed_state SET
+    observed_generation = $2,
+    observed_at = to_timestamp($3 / 1000.0),
+    updated_at = to_timestamp($3 / 1000.0)
+WHERE node_id = $1
+"#;
+
+const ACK_VM_OBSERVED_GENERATION_SQL: &str = r#"
+INSERT INTO vm_observed_state (
+    vm_id,
+    observed_generation,
+    runtime_status,
+    observed_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    COALESCE((SELECT runtime_status FROM vm_observed_state WHERE vm_id = $1), ''),
+    to_timestamp($3 / 1000.0),
+    to_timestamp($3 / 1000.0)
+)
+ON CONFLICT (vm_id) DO UPDATE SET
+    observed_generation = EXCLUDED.observed_generation,
+    observed_at = EXCLUDED.observed_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
+const ACK_VOLUME_OBSERVED_GENERATION_SQL: &str = r#"
+INSERT INTO volume_observed_state (
+    volume_id,
+    observed_generation,
+    runtime_status,
+    observed_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    COALESCE((SELECT runtime_status FROM volume_observed_state WHERE volume_id = $1), ''),
+    to_timestamp($3 / 1000.0),
+    to_timestamp($3 / 1000.0)
+)
+ON CONFLICT (volume_id) DO UPDATE SET
+    observed_generation = EXCLUDED.observed_generation,
+    observed_at = EXCLUDED.observed_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
+const ACK_NETWORK_OBSERVED_GENERATION_SQL: &str = r#"
+INSERT INTO network_observed_state (
+    network_id,
+    observed_generation,
+    runtime_status,
+    observed_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    COALESCE((SELECT runtime_status FROM network_observed_state WHERE network_id = $1), ''),
+    to_timestamp($3 / 1000.0),
+    to_timestamp($3 / 1000.0)
+)
+ON CONFLICT (network_id) DO UPDATE SET
+    observed_generation = EXCLUDED.observed_generation,
+    observed_at = EXCLUDED.observed_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
 #[derive(Clone)]
 pub struct ObservedStateRepository {
     pool: StorePool,
@@ -169,6 +240,29 @@ impl ObservedStateRepository {
             .bind(input.observed_unix_ms)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    pub async fn acknowledge_node_generation(
+        &self,
+        node_id: &NodeId,
+        observed_generation: Generation,
+        observed_unix_ms: i64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(ACK_NODE_OBSERVED_GENERATION_SQL)
+            .bind(node_id.as_str())
+            .bind(generation_to_i64(observed_generation)?)
+            .bind(observed_unix_ms)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "node_observed_state",
+                id: node_id.to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -200,6 +294,30 @@ impl ObservedStateRepository {
                         _ => ("vm", input.vm_id.to_string()),
                     };
                     StoreError::NotFound { entity, id }
+                }
+                _ => StoreError::from(e),
+            })?;
+        Ok(())
+    }
+
+    pub async fn acknowledge_vm_generation(
+        &self,
+        vm_id: &ResourceId,
+        observed_generation: Generation,
+        observed_unix_ms: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(ACK_VM_OBSERVED_GENERATION_SQL)
+            .bind(vm_id.as_str())
+            .bind(generation_to_i64(observed_generation)?)
+            .bind(observed_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "vm",
+                        id: vm_id.to_string(),
+                    }
                 }
                 _ => StoreError::from(e),
             })?;
@@ -239,6 +357,30 @@ impl ObservedStateRepository {
         Ok(())
     }
 
+    pub async fn acknowledge_volume_generation(
+        &self,
+        volume_id: &ResourceId,
+        observed_generation: Generation,
+        observed_unix_ms: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(ACK_VOLUME_OBSERVED_GENERATION_SQL)
+            .bind(volume_id.as_str())
+            .bind(generation_to_i64(observed_generation)?)
+            .bind(observed_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "volume",
+                        id: volume_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
+        Ok(())
+    }
+
     pub async fn upsert_network(
         &self,
         input: &NetworkObservedStateInput,
@@ -258,6 +400,30 @@ impl ObservedStateRepository {
                     StoreError::NotFound {
                         entity: "network",
                         id: input.network_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
+        Ok(())
+    }
+
+    pub async fn acknowledge_network_generation(
+        &self,
+        network_id: &ResourceId,
+        observed_generation: Generation,
+        observed_unix_ms: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(ACK_NETWORK_OBSERVED_GENERATION_SQL)
+            .bind(network_id.as_str())
+            .bind(generation_to_i64(observed_generation)?)
+            .bind(observed_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "network",
+                        id: network_id.to_string(),
                     }
                 }
                 _ => StoreError::from(e),

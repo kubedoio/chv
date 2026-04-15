@@ -271,7 +271,7 @@ async fn test_network_exposure_upsert_and_fk() {
             display_name: "net-1".into(),
             network_class: Some("bridge".into()),
             desired_generation: Generation::new(1),
-            desired_status: "active".into(),
+            desired_status: Some("active".into()),
             requested_by: None,
             updated_by: None,
             requested_unix_ms: 1000,
@@ -314,4 +314,90 @@ async fn test_network_exposure_upsert_and_fk() {
         Err(StoreError::NotFound { entity, .. }) => assert_eq!(entity, "network"),
         other => panic!("Expected NotFound(network), got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn test_ack_node_generation_preserves_observed_state() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = ObservedStateRepository::new(pool.clone());
+    let node_id = NodeId::new("test-node-ack-preserve").unwrap();
+
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ($1, 'host', 'host')")
+        .bind(node_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO node_observed_state (node_id, observed_generation, observed_state, observed_at, updated_at) VALUES ($1, 1, 'Discovered', now(), now())",
+    )
+    .bind(node_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    repo.acknowledge_node_generation(&node_id, Generation::new(5), 2000)
+        .await
+        .expect("ack should succeed when observed row exists");
+
+    let row = sqlx::query(
+        "SELECT observed_generation, observed_state::text as observed_state FROM node_observed_state WHERE node_id = $1",
+    )
+    .bind(node_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let generation: i64 = sqlx::Row::get(&row, "observed_generation");
+    let state: String = sqlx::Row::get(&row, "observed_state");
+    assert_eq!(generation, 5);
+    assert_eq!(state, "Discovered");
+}
+
+#[tokio::test]
+async fn test_ack_node_generation_rejects_missing_observed_row() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = ObservedStateRepository::new(pool.clone());
+    let node_id = NodeId::new("test-node-ack-missing").unwrap();
+
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ($1, 'host', 'host')")
+        .bind(node_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Seed desired state but no observed state
+    sqlx::query(
+        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused) VALUES ($1, 1, 'TenantReady', now(), now(), false)",
+    )
+    .bind(node_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let result = repo
+        .acknowledge_node_generation(&node_id, Generation::new(5), 2000)
+        .await;
+
+    match result {
+        Err(StoreError::NotFound { entity, id }) => {
+            assert_eq!(entity, "node_observed_state");
+            assert_eq!(id, node_id.to_string());
+        }
+        other => panic!(
+            "Expected NotFound for missing observed row, got {:?}",
+            other
+        ),
+    }
+
+    // Verify no observed row was fabricated from desired state
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM node_observed_state WHERE node_id = $1")
+            .bind(node_id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
 }

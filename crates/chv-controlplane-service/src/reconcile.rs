@@ -2,12 +2,13 @@ use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
     DesiredStateRepository, EventAppendInput, EventRepository, NetworkDesiredStateInput,
-    NetworkExposureInput, NodeRepository, NodeStateInput, VmDesiredStateInput,
-    VolumeDesiredStateInput,
+    NetworkExposureInput, NodeRepository, NodeStatePatchInput, ObservedStateRepository,
+    OperationRepository, OperationStatusUpdateInput, VmDesiredStateInput, VolumeDesiredStateInput,
 };
 use chv_controlplane_types::constants::STATUS_OK;
 use chv_controlplane_types::domain::{
-    EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, ResourceId, ResourceKind,
+    EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, OperationStatus,
+    ResourceId, ResourceKind,
 };
 use chv_controlplane_types::fragment::{NetworkSpec, NodeSpec, VmSpec, VolumeSpec};
 use control_plane_node_api::control_plane_node_api as proto;
@@ -47,6 +48,8 @@ pub struct ReconcileServiceImplementation {
     node_repo: NodeRepository,
     desired_state_repo: DesiredStateRepository,
     event_repo: EventRepository,
+    observed_state_repo: ObservedStateRepository,
+    operation_repo: OperationRepository,
 }
 
 struct EventContext {
@@ -86,11 +89,15 @@ impl ReconcileServiceImplementation {
         node_repo: NodeRepository,
         desired_state_repo: DesiredStateRepository,
         event_repo: EventRepository,
+        observed_state_repo: ObservedStateRepository,
+        operation_repo: OperationRepository,
     ) -> Self {
         Self {
             node_repo,
             desired_state_repo,
             event_repo,
+            observed_state_repo,
+            operation_repo,
         }
     }
 
@@ -133,6 +140,54 @@ impl ReconcileServiceImplementation {
         }
     }
 
+    fn parse_apply_status(apply_status: &str) -> Result<OperationStatus, ControlPlaneServiceError> {
+        match apply_status.trim().to_ascii_lowercase().as_str() {
+            "" | "ok" => Ok(OperationStatus::Succeeded),
+            "stale" => Ok(OperationStatus::Stale),
+            "conflict" => Ok(OperationStatus::Conflict),
+            "rejected" => Ok(OperationStatus::Rejected),
+            "failed" => Ok(OperationStatus::Failed),
+            _ => Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "invalid apply_status: {}",
+                apply_status
+            ))),
+        }
+    }
+
+    fn validate_fragment(
+        meta: &proto::RequestMeta,
+        fragment: &proto::DesiredStateFragment,
+        node_id: &NodeId,
+        expected_resource_id: &ResourceId,
+        expected_kind: ResourceKind,
+    ) -> Result<(), ControlPlaneServiceError> {
+        if meta.target_node_id != node_id.as_str() {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "target_node_id mismatch: expected {}",
+                node_id.as_str()
+            )));
+        }
+        if fragment.id != expected_resource_id.as_str() {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "fragment.id mismatch: expected {}",
+                expected_resource_id.as_str()
+            )));
+        }
+        let fragment_kind = ResourceKind::from_str(&fragment.kind).map_err(|_| {
+            ControlPlaneServiceError::InvalidArgument(format!(
+                "invalid fragment.kind: {}",
+                fragment.kind
+            ))
+        })?;
+        if fragment_kind != expected_kind {
+            return Err(ControlPlaneServiceError::InvalidArgument(format!(
+                "fragment.kind mismatch: expected {}",
+                expected_kind.as_str()
+            )));
+        }
+        Ok(())
+    }
+
     async fn emit_event(&self, ctx: EventContext) -> Result<(), ControlPlaneServiceError> {
         self.event_repo.append(&ctx.into_input()).await?;
         Ok(())
@@ -149,10 +204,15 @@ impl ReconcileService for ReconcileServiceImplementation {
         let node_id = NodeId::new(request.node_id).map_err(|e| {
             ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
         })?;
+        let resource_id = ResourceId::new(node_id.as_str()).map_err(|e| {
+            ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
+        })?;
 
         let fragment = request
             .fragment
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing fragment".into()))?;
+
+        Self::validate_fragment(&meta, &fragment, &node_id, &resource_id, ResourceKind::Node)?;
 
         let generation = Generation::from_str(&fragment.generation).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
@@ -173,7 +233,7 @@ impl ReconcileService for ReconcileServiceImplementation {
 
         if let Err(e) = self
             .node_repo
-            .upsert_state(&NodeStateInput {
+            .set_state_preserving_policy(&NodeStatePatchInput {
                 node_id: node_id.clone(),
                 desired_state,
                 desired_generation: generation,
@@ -249,6 +309,8 @@ impl ReconcileService for ReconcileServiceImplementation {
             .fragment
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing fragment".into()))?;
 
+        Self::validate_fragment(&meta, &fragment, &node_id, &vm_id, ResourceKind::Vm)?;
+
         let generation = Generation::from_str(&fragment.generation).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
         })?;
@@ -268,7 +330,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                 tenant_id: None,
                 placement_policy: None,
                 desired_generation: generation,
-                desired_status: STATUS_OK.into(),
+                desired_status: None,
                 requested_by: Self::normalize_requested_by(&meta),
                 updated_by: if fragment.updated_by.is_empty() {
                     None
@@ -346,6 +408,8 @@ impl ReconcileService for ReconcileServiceImplementation {
             .fragment
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing fragment".into()))?;
 
+        Self::validate_fragment(&meta, &fragment, &node_id, &volume_id, ResourceKind::Volume)?;
+
         let generation = Generation::from_str(&fragment.generation).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
         })?;
@@ -375,7 +439,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                 volume_kind: spec.volume_kind,
                 storage_class: spec.storage_class,
                 desired_generation: generation,
-                desired_status: STATUS_OK.into(),
+                desired_status: None,
                 requested_by: Self::normalize_requested_by(&meta),
                 updated_by: if fragment.updated_by.is_empty() {
                     None
@@ -386,6 +450,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                 attachment_mode: spec.attachment_mode,
                 device_name: spec.device_name,
                 read_only: spec.read_only,
+                resize_to_bytes: None,
                 requested_unix_ms: now,
             })
             .await
@@ -451,6 +516,14 @@ impl ReconcileService for ReconcileServiceImplementation {
             .fragment
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing fragment".into()))?;
 
+        Self::validate_fragment(
+            &meta,
+            &fragment,
+            &node_id,
+            &network_id,
+            ResourceKind::Network,
+        )?;
+
         let generation = Generation::from_str(&fragment.generation).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
         })?;
@@ -487,7 +560,7 @@ impl ReconcileService for ReconcileServiceImplementation {
                     display_name: fragment.id.clone(),
                     network_class: spec.network_class,
                     desired_generation: generation,
-                    desired_status: STATUS_OK.into(),
+                    desired_status: None,
                     requested_by: Self::normalize_requested_by(&meta),
                     updated_by: if fragment.updated_by.is_empty() {
                         None
@@ -563,8 +636,54 @@ impl ReconcileService for ReconcileServiceImplementation {
             ))
         })?;
 
+        let observed_generation =
+            Generation::from_str(&request.observed_generation).map_err(|_| {
+                ControlPlaneServiceError::InvalidArgument(
+                    "observed_generation must be numeric".into(),
+                )
+            })?;
+
+        let parsed_status = Self::parse_apply_status(&request.apply_status)?;
+
         let now = Self::now_ms();
         let op_id = Self::parse_operation_id(&meta)?;
+
+        match resource_kind {
+            ResourceKind::Node => {
+                self.observed_state_repo
+                    .acknowledge_node_generation(&node_id, observed_generation, now)
+                    .await?;
+            }
+            ResourceKind::Vm => {
+                self.observed_state_repo
+                    .acknowledge_vm_generation(&resource_id, observed_generation, now)
+                    .await?;
+            }
+            ResourceKind::Volume => {
+                self.observed_state_repo
+                    .acknowledge_volume_generation(&resource_id, observed_generation, now)
+                    .await?;
+            }
+            ResourceKind::Network => {
+                self.observed_state_repo
+                    .acknowledge_network_generation(&resource_id, observed_generation, now)
+                    .await?;
+            }
+        }
+
+        if let Some(ref operation_id) = op_id {
+            self.operation_repo
+                .update_status(&OperationStatusUpdateInput {
+                    operation_id: operation_id.clone(),
+                    status: parsed_status,
+                    observed_generation: Some(observed_generation),
+                    updated_unix_ms: now,
+                    error_code: None,
+                    error_message: None,
+                    updated_by: None,
+                })
+                .await?;
+        }
 
         self.emit_event(EventContext {
             operation_id: op_id,

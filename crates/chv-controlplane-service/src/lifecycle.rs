@@ -1,10 +1,11 @@
 use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
-    DesiredStateRepository, EventAppendInput, EventRepository, NodeRepository, NodeStateInput,
-    OperationCreateInput, OperationRepository, VmDesiredStateInput,
+    DesiredStateRepository, EventAppendInput, EventRepository, NodeDrainIntentInput,
+    NodeRepository, NodeSchedulingPatchInput, NodeStatePatchInput, OperationCreateInput,
+    OperationRepository, OperationStatusUpdateInput, VmDesiredStateInput, VmPowerStatePatchInput,
+    VolumeAttachmentPatchInput, VolumeResizePatchInput,
 };
-use chv_controlplane_types::constants::STATUS_OK;
 use chv_controlplane_types::domain::{
     EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, OperationStatus,
     ResourceId, ResourceKind,
@@ -131,19 +132,20 @@ impl LifecycleServiceImplementation {
         meta: &proto::RequestMeta,
     ) -> Result<Generation, ControlPlaneServiceError> {
         if meta.desired_state_version.is_empty() {
-            Ok(Generation::new(1))
-        } else {
-            Generation::from_str(&meta.desired_state_version).map_err(|_| {
-                ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
-            })
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "desired_state_version is required".into(),
+            ));
         }
+        Generation::from_str(&meta.desired_state_version).map_err(|_| {
+            ControlPlaneServiceError::InvalidArgument("generation must be numeric".into())
+        })
     }
 
     fn ok_ack(operation_id: &OperationId, summary: &str) -> proto::AckResponse {
         proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: operation_id.to_string(),
-                status: STATUS_OK.into(),
+                status: "OK".into(),
                 node_observed_generation: "".into(),
                 error_code: "".into(),
                 human_summary: summary.into(),
@@ -197,6 +199,7 @@ impl LifecycleServiceImplementation {
         resource_kind: ResourceKind,
         resource_id: Option<ResourceId>,
         meta: &proto::RequestMeta,
+        idempotency_discriminator: Option<String>,
     ) -> Result<OperationId, ControlPlaneServiceError> {
         self.require_node_exists(&node_id).await?;
         let now = Self::now_ms();
@@ -207,10 +210,20 @@ impl LifecycleServiceImplementation {
             .map(|r| r.as_str())
             .unwrap_or("")
             .to_string();
-        let idempotency_key = format!(
-            "{}:{}:{}:{}",
-            operation_type, node_id, resource_id_str, desired_generation_str
-        );
+        let idempotency_key = if meta.operation_id.trim().is_empty() {
+            match idempotency_discriminator {
+                Some(discriminator) => format!(
+                    "{}:{}:{}:{}:{}",
+                    operation_type, node_id, resource_id_str, desired_generation_str, discriminator
+                ),
+                None => format!(
+                    "{}:{}:{}:{}",
+                    operation_type, node_id, resource_id_str, desired_generation_str
+                ),
+            }
+        } else {
+            format!("request:{}", meta.operation_id.trim())
+        };
 
         let operation_id = OperationId::new(format!("{}-{}", operation_type, uuid::Uuid::new_v4()))
             .map_err(|e| {
@@ -254,6 +267,92 @@ impl LifecycleServiceImplementation {
 
         Ok(receipt.operation_id)
     }
+
+    async fn accept_operation(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<(), ControlPlaneServiceError> {
+        self.operation_repo
+            .update_status(&OperationStatusUpdateInput {
+                operation_id: operation_id.clone(),
+                status: OperationStatus::Accepted,
+                error_code: None,
+                error_message: None,
+                observed_generation: None,
+                updated_by: None,
+                updated_unix_ms: Self::now_ms(),
+            })
+            .await
+            .map_err(|e| {
+                ControlPlaneServiceError::Internal(format!(
+                    "failed to update operation status: {}",
+                    e
+                ))
+            })
+    }
+
+    async fn fail_operation(
+        &self,
+        operation_id: &OperationId,
+        original_error: &ControlPlaneServiceError,
+    ) -> Result<(), ControlPlaneServiceError> {
+        self.operation_repo
+            .update_status(&OperationStatusUpdateInput {
+                operation_id: operation_id.clone(),
+                status: OperationStatus::Failed,
+                error_code: Some("INTENT_PERSISTENCE_FAILED".into()),
+                error_message: Some(original_error.to_string()),
+                observed_generation: None,
+                updated_by: None,
+                updated_unix_ms: Self::now_ms(),
+            })
+            .await
+            .map_err(|e| {
+                ControlPlaneServiceError::Internal(format!(
+                    "failed to update operation status: {}",
+                    e
+                ))
+            })?;
+
+        self.event_repo
+            .append(&EventAppendInput {
+                occurred_unix_ms: Self::now_ms(),
+                event_type: EventType::OperationFailed,
+                severity: EventSeverity::Error,
+                resource_kind: None,
+                resource_id: None,
+                node_id: None,
+                operation_id: Some(operation_id.clone()),
+                actor_id: None,
+                requested_by: None,
+                correlation_id: None,
+                message: format!("operation failed: {}", original_error),
+                details: None,
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    async fn persist_intent_and_accept<F, Fut, E>(
+        &self,
+        operation_id: &OperationId,
+        persist: F,
+    ) -> Result<(), ControlPlaneServiceError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+        E: Into<ControlPlaneServiceError>,
+    {
+        match persist().await {
+            Ok(()) => self.accept_operation(operation_id).await,
+            Err(e) => {
+                let err = e.into();
+                self.fail_operation(operation_id, &err).await?;
+                Err(err)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -290,31 +389,35 @@ impl LifecycleService for LifecycleServiceImplementation {
                 ResourceKind::Vm,
                 Some(vm_id.clone()),
                 &meta,
+                Some(String::from_utf8_lossy(&vm.vm_spec_json).into_owned()),
             )
             .await?;
 
         let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
-        self.desired_state_repo
-            .upsert_vm(&VmDesiredStateInput {
-                vm_id: vm_id.clone(),
-                node_id: Some(node_id.clone()),
-                display_name: vm_id.as_str().into(),
-                tenant_id: None,
-                placement_policy: None,
-                desired_generation,
-                desired_status: STATUS_OK.into(),
-                requested_by: Self::normalize_requested_by(&meta),
-                updated_by: None,
-                target_node_id: Some(node_id.clone()),
-                cpu_count: spec.cpu_count,
-                memory_bytes: spec.memory_bytes,
-                image_ref: spec.image_ref,
-                boot_mode: spec.boot_mode,
-                desired_power_state: Some("Created".into()),
-                requested_unix_ms: Self::now_ms(),
-            })
-            .await?;
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .upsert_vm(&VmDesiredStateInput {
+                    vm_id: vm_id.clone(),
+                    node_id: Some(node_id.clone()),
+                    display_name: vm_id.as_str().into(),
+                    tenant_id: None,
+                    placement_policy: None,
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    cpu_count: spec.cpu_count,
+                    memory_bytes: spec.memory_bytes,
+                    image_ref: spec.image_ref,
+                    boot_mode: spec.boot_mode,
+                    desired_power_state: Some("Created".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "create vm accepted"))
     }
@@ -328,8 +431,33 @@ impl LifecycleService for LifecycleServiceImplementation {
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
-            .create_operation_and_emit("StartVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
+            .create_operation_and_emit(
+                "StartVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                None,
+            )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_power_state(&VmPowerStatePatchInput {
+                    vm_id: vm_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    desired_power_state: Some("Running".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "start vm accepted"))
     }
@@ -343,8 +471,33 @@ impl LifecycleService for LifecycleServiceImplementation {
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
-            .create_operation_and_emit("StopVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
+            .create_operation_and_emit(
+                "StopVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("force={}", request.force)),
+            )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_power_state(&VmPowerStatePatchInput {
+                    vm_id: vm_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    desired_power_state: Some("Stopped".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "stop vm accepted"))
     }
@@ -358,8 +511,33 @@ impl LifecycleService for LifecycleServiceImplementation {
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
-            .create_operation_and_emit("RebootVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
+            .create_operation_and_emit(
+                "RebootVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("force={}", request.force)),
+            )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_power_state(&VmPowerStatePatchInput {
+                    vm_id: vm_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    desired_power_state: Some("Rebooting".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "reboot vm accepted"))
     }
@@ -373,8 +551,33 @@ impl LifecycleService for LifecycleServiceImplementation {
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
         let operation_id = self
-            .create_operation_and_emit("DeleteVm", node_id, ResourceKind::Vm, Some(vm_id), &meta)
+            .create_operation_and_emit(
+                "DeleteVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("force={}", request.force)),
+            )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_power_state(&VmPowerStatePatchInput {
+                    vm_id: vm_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    desired_power_state: Some("Deleted".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "delete vm accepted"))
     }
@@ -389,16 +592,35 @@ impl LifecycleService for LifecycleServiceImplementation {
             .volume
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing volume".into()))?;
         let volume_id = Self::parse_volume_id(volume.volume_id)?;
+        let vm_id = Self::parse_vm_id(volume.vm_id)?;
 
         let operation_id = self
             .create_operation_and_emit(
                 "AttachVolume",
-                node_id,
+                node_id.clone(),
                 ResourceKind::Volume,
-                Some(volume_id),
+                Some(volume_id.clone()),
                 &meta,
+                Some(format!("vm={}", vm_id)),
             )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_volume_attachment(&VolumeAttachmentPatchInput {
+                    volume_id: volume_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    attached_vm_id: Some(vm_id),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "attach volume accepted"))
     }
@@ -409,17 +631,36 @@ impl LifecycleService for LifecycleServiceImplementation {
     ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
         let meta = self.meta_from_request(request.meta)?;
         let node_id = Self::parse_node_id(request.node_id)?;
+        let attached_vm_id = Self::parse_vm_id(request.vm_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
         let operation_id = self
             .create_operation_and_emit(
                 "DetachVolume",
-                node_id,
+                node_id.clone(),
                 ResourceKind::Volume,
-                Some(volume_id),
+                Some(volume_id.clone()),
                 &meta,
+                Some(format!("vm={}:force={}", attached_vm_id, request.force)),
             )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_volume_attachment(&VolumeAttachmentPatchInput {
+                    volume_id: volume_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    attached_vm_id: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "detach volume accepted"))
     }
@@ -435,12 +676,30 @@ impl LifecycleService for LifecycleServiceImplementation {
         let operation_id = self
             .create_operation_and_emit(
                 "ResizeVolume",
-                node_id,
+                node_id.clone(),
                 ResourceKind::Volume,
-                Some(volume_id),
+                Some(volume_id.clone()),
                 &meta,
+                Some(format!("size={}", request.new_size_bytes)),
             )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_volume_resize(&VolumeResizePatchInput {
+                    volume_id: volume_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    resize_to_bytes: Some(request.new_size_bytes as i64),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "resize volume accepted"))
     }
@@ -456,12 +715,29 @@ impl LifecycleService for LifecycleServiceImplementation {
         let operation_id = self
             .create_operation_and_emit(
                 "PauseNodeScheduling",
-                node_id,
+                node_id.clone(),
                 ResourceKind::Node,
                 Some(resource_id),
                 &meta,
+                Some("paused=true".into()),
             )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.node_repo
+                .set_scheduling_paused(&NodeSchedulingPatchInput {
+                    node_id: node_id.clone(),
+                    desired_generation,
+                    scheduling_paused: true,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(
             &operation_id,
@@ -480,12 +756,29 @@ impl LifecycleService for LifecycleServiceImplementation {
         let operation_id = self
             .create_operation_and_emit(
                 "ResumeNodeScheduling",
-                node_id,
+                node_id.clone(),
                 ResourceKind::Node,
                 Some(resource_id),
                 &meta,
+                Some("paused=false".into()),
             )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.node_repo
+                .set_scheduling_paused(&NodeSchedulingPatchInput {
+                    node_id: node_id.clone(),
+                    desired_generation,
+                    scheduling_paused: false,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(
             &operation_id,
@@ -508,22 +801,28 @@ impl LifecycleService for LifecycleServiceImplementation {
                 ResourceKind::Node,
                 Some(resource_id),
                 &meta,
+                Some(format!(
+                    "allow_workload_stop={}",
+                    request.allow_workload_stop
+                )),
             )
             .await?;
 
         let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
-        self.node_repo
-            .upsert_state(&NodeStateInput {
-                node_id: node_id.clone(),
-                desired_state: NodeState::Draining,
-                desired_generation,
-                requested_by: Self::normalize_requested_by(&meta),
-                updated_by: None,
-                state_reason: None,
-                requested_unix_ms: Self::now_ms(),
-            })
-            .await?;
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.node_repo
+                .set_drain_intent(&NodeDrainIntentInput {
+                    node_id: node_id.clone(),
+                    desired_generation,
+                    allow_workload_stop: Some(request.allow_workload_stop),
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "drain node accepted"))
     }
@@ -543,22 +842,26 @@ impl LifecycleService for LifecycleServiceImplementation {
                 ResourceKind::Node,
                 Some(resource_id),
                 &meta,
+                Some(request.reason.clone()),
             )
             .await?;
 
         let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
-        self.node_repo
-            .upsert_state(&NodeStateInput {
-                node_id: node_id.clone(),
-                desired_state: NodeState::Maintenance,
-                desired_generation,
-                requested_by: Self::normalize_requested_by(&meta),
-                updated_by: None,
-                state_reason: Some(request.reason),
-                requested_unix_ms: Self::now_ms(),
-            })
-            .await?;
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.node_repo
+                .set_state_preserving_policy(&NodeStatePatchInput {
+                    node_id: node_id.clone(),
+                    desired_state: NodeState::Maintenance,
+                    desired_generation,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    state_reason: Some(request.reason),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "enter maintenance accepted"))
     }
@@ -574,12 +877,30 @@ impl LifecycleService for LifecycleServiceImplementation {
         let operation_id = self
             .create_operation_and_emit(
                 "ExitMaintenance",
-                node_id,
+                node_id.clone(),
                 ResourceKind::Node,
                 Some(resource_id),
                 &meta,
+                None,
             )
             .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.node_repo
+                .set_state_preserving_policy(&NodeStatePatchInput {
+                    node_id: node_id.clone(),
+                    desired_state: NodeState::TenantReady,
+                    desired_generation,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    state_reason: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
 
         Ok(Self::ok_ack(&operation_id, "exit maintenance accepted"))
     }

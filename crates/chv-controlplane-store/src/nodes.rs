@@ -121,6 +121,8 @@ INSERT INTO node_desired_state (
     requested_by,
     updated_by,
     state_reason,
+    scheduling_paused,
+    allow_workload_stop,
     requested_at,
     updated_at
 )
@@ -131,8 +133,10 @@ VALUES (
     $4,
     $5,
     $6,
-    to_timestamp($7 / 1000.0),
-    to_timestamp($7 / 1000.0)
+    $7,
+    $8,
+    to_timestamp($9 / 1000.0),
+    to_timestamp($9 / 1000.0)
 )
 ON CONFLICT (node_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -140,6 +144,8 @@ ON CONFLICT (node_id) DO UPDATE SET
     requested_by = EXCLUDED.requested_by,
     updated_by = EXCLUDED.updated_by,
     state_reason = EXCLUDED.state_reason,
+    scheduling_paused = EXCLUDED.scheduling_paused,
+    allow_workload_stop = EXCLUDED.allow_workload_stop,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -178,6 +184,87 @@ ON CONFLICT (node_id) DO UPDATE SET
     started_at = EXCLUDED.started_at,
     completed_at = EXCLUDED.completed_at,
     updated_at = now()
+"#;
+
+const PATCH_NODE_STATE_PRESERVING_POLICY_SQL: &str = r#"
+INSERT INTO node_desired_state (
+    node_id,
+    desired_generation,
+    desired_state,
+    requested_by,
+    updated_by,
+    state_reason,
+    scheduling_paused,
+    allow_workload_stop,
+    requested_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3::node_state,
+    $4,
+    $5,
+    $6,
+    false,
+    NULL,
+    to_timestamp($7 / 1000.0),
+    to_timestamp($7 / 1000.0)
+)
+ON CONFLICT (node_id) DO UPDATE SET
+    desired_generation = EXCLUDED.desired_generation,
+    desired_state = EXCLUDED.desired_state,
+    requested_by = EXCLUDED.requested_by,
+    updated_by = EXCLUDED.updated_by,
+    state_reason = EXCLUDED.state_reason,
+    requested_at = EXCLUDED.requested_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
+const PATCH_NODE_SCHEDULING_SQL: &str = r#"
+UPDATE node_desired_state SET
+    desired_generation = $2,
+    requested_by = $3,
+    updated_by = $4,
+    scheduling_paused = $5,
+    requested_at = to_timestamp($6 / 1000.0),
+    updated_at = to_timestamp($6 / 1000.0)
+WHERE node_id = $1
+"#;
+
+const PATCH_NODE_DRAIN_INTENT_SQL: &str = r#"
+INSERT INTO node_desired_state (
+    node_id,
+    desired_generation,
+    desired_state,
+    requested_by,
+    updated_by,
+    state_reason,
+    scheduling_paused,
+    allow_workload_stop,
+    requested_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    'Draining'::node_state,
+    $3,
+    $4,
+    NULL,
+    false,
+    $5,
+    to_timestamp($6 / 1000.0),
+    to_timestamp($6 / 1000.0)
+)
+ON CONFLICT (node_id) DO UPDATE SET
+    desired_generation = EXCLUDED.desired_generation,
+    desired_state = EXCLUDED.desired_state,
+    requested_by = EXCLUDED.requested_by,
+    updated_by = EXCLUDED.updated_by,
+    allow_workload_stop = EXCLUDED.allow_workload_stop,
+    requested_at = EXCLUDED.requested_at,
+    updated_at = EXCLUDED.updated_at
 "#;
 
 #[derive(Clone)]
@@ -253,6 +340,62 @@ impl NodeRepository {
             .bind(&input.requested_by)
             .bind(&input.updated_by)
             .bind(&input.state_reason)
+            .bind(input.scheduling_paused)
+            .bind(input.allow_workload_stop)
+            .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_state_preserving_policy(
+        &self,
+        input: &NodeStatePatchInput,
+    ) -> Result<(), StoreError> {
+        sqlx::query(PATCH_NODE_STATE_PRESERVING_POLICY_SQL)
+            .bind(input.node_id.as_str())
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(input.desired_state.as_str())
+            .bind(&input.requested_by)
+            .bind(&input.updated_by)
+            .bind(&input.state_reason)
+            .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_scheduling_paused(
+        &self,
+        input: &NodeSchedulingPatchInput,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(PATCH_NODE_SCHEDULING_SQL)
+            .bind(input.node_id.as_str())
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(&input.requested_by)
+            .bind(&input.updated_by)
+            .bind(input.scheduling_paused)
+            .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "node_desired_state",
+                id: input.node_id.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub async fn set_drain_intent(&self, input: &NodeDrainIntentInput) -> Result<(), StoreError> {
+        sqlx::query(PATCH_NODE_DRAIN_INTENT_SQL)
+            .bind(input.node_id.as_str())
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(&input.requested_by)
+            .bind(&input.updated_by)
+            .bind(input.allow_workload_stop)
             .bind(input.requested_unix_ms)
             .execute(&self.pool)
             .await?;
@@ -348,6 +491,39 @@ pub struct NodeStateInput {
     pub requested_by: Option<String>,
     pub updated_by: Option<String>,
     pub state_reason: Option<String>,
+    pub scheduling_paused: bool,
+    pub allow_workload_stop: Option<bool>,
+    pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct NodeStatePatchInput {
+    pub node_id: NodeId,
+    pub desired_state: NodeState,
+    pub desired_generation: Generation,
+    pub requested_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub state_reason: Option<String>,
+    pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct NodeSchedulingPatchInput {
+    pub node_id: NodeId,
+    pub desired_generation: Generation,
+    pub scheduling_paused: bool,
+    pub requested_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct NodeDrainIntentInput {
+    pub node_id: NodeId,
+    pub desired_generation: Generation,
+    pub allow_workload_stop: Option<bool>,
+    pub requested_by: Option<String>,
+    pub updated_by: Option<String>,
     pub requested_unix_ms: i64,
 }
 

@@ -19,7 +19,7 @@
     Download
   } from 'lucide-svelte';
   import Fuse from 'fuse.js';
-  import { getModifierKey } from '$lib/stores/keyboard.svelte.ts';
+  import { getModifierKey } from '$lib/stores/keyboard.svelte';
   
   // Props
   interface Props {
@@ -67,11 +67,11 @@
     },
     {
       id: 'go-dashboard',
-      title: 'Go to Dashboard',
-      description: 'View system overview',
+      title: 'Go to Overview',
+      description: 'View fleet overview',
       icon: Home,
       shortcut: ['g', 'd'],
-      keywords: ['dashboard', 'home', 'overview', 'main'],
+      keywords: ['overview', 'dashboard', 'home', 'main'],
       section: 'Navigation',
       action: () => goto('/')
     },
@@ -96,14 +96,14 @@
       action: () => goto('/images')
     },
     {
-      id: 'go-storage',
-      title: 'Go to Storage',
-      description: 'Manage storage pools',
+      id: 'go-volumes',
+      title: 'Go to Volumes',
+      description: 'View volume inventory',
       icon: HardDrive,
       shortcut: ['g', 's'],
-      keywords: ['storage', 'pools', 'disks', 'volumes'],
+      keywords: ['volumes', 'storage', 'pools', 'disks'],
       section: 'Navigation',
-      action: () => goto('/storage')
+      action: () => goto('/volumes')
     },
     {
       id: 'go-networks',
@@ -482,5 +482,3 @@
     </div>
   </div>
 {/if}
-
-

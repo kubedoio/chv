@@ -1,392 +1,389 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { page } from '$app/stores';
-  import { goto } from '$app/navigation';
-  import {
-    Server,
-    Cpu,
-    MemoryStick,
-    HardDrive,
-    Activity,
-    CheckCircle,
-    AlertCircle,
-    Clock,
-    TrendingUp,
-    ArrowLeft,
-    RefreshCw
-  } from 'lucide-svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import StateBadge from '$lib/components/StateBadge.svelte';
-  import type { VM, Image, StoragePool, Network as NetworkType } from '$lib/api/types';
-  import { getDefaultNode } from '$lib/api/nodes';
+	import { invalidate } from '$app/navigation';
+	import { onMount } from 'svelte';
+	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
+	import SectionHeader from '$lib/components/shell/SectionHeader.svelte';
+	import StatePanel from '$lib/components/shell/StatePanel.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import TaskTimelineItem from '$lib/components/webui/TaskTimelineItem.svelte';
+	import { getStoredToken } from '$lib/api/client';
+	import { getPageDefinition } from '$lib/shell/app-shell';
+	import type { PageData } from './$types';
 
-  const token = getStoredToken();
-  const client = createAPIClient({ token: token ?? undefined });
-  const nodeId = $derived($page.params.id);
+	let { data }: { data: PageData } = $props();
 
-  // Resources
-  let vms = $state<VM[]>([]);
-  let images = $state<Image[]>([]);
-  let pools = $state<StoragePool[]>([]);
-  let networks = $state<NetworkType[]>([]);
-  let loading = $state(true);
-  let pollInterval: ReturnType<typeof setInterval> | null = $state(null);
-  
-  // Active tab
-  let activeTab = $state<'vms' | 'images' | 'storage' | 'networks'>('vms');
+	const page = getPageDefinition('/nodes');
+	const detail = $derived(data.detail);
 
-  // Node info
-  let node = $state<Node | null>(null);
-
-  // Derived stats
-  const runningVMs = $derived(vms.filter(v => v.actual_state === 'running').length);
-  const totalStorageGB = $derived(
-    pools.reduce((acc, p) => acc + (p.capacity_bytes || 0), 0) / (1024 ** 3)
-  );
-  const usedStorageGB = $derived(
-    pools.reduce((acc, p) => acc + ((p.capacity_bytes || 0) - (p.allocatable_bytes || 0)), 0) / (1024 ** 3)
-  );
-
-  async function loadData() {
-    try {
-      // Fetch node details and resources for this node
-      const [nodeData, vmsResponse, imagesResponse, storageResponse, networksResponse] = await Promise.all([
-        client.getNode(nodeId),
-        client.listNodeVMs(nodeId),
-        client.listNodeImages(nodeId),
-        client.listNodeStoragePools(nodeId),
-        client.listNodeNetworks(nodeId)
-      ]);
-      node = nodeData;
-      vms = vmsResponse.resources;
-      images = imagesResponse.resources;
-      pools = storageResponse.resources;
-      networks = networksResponse.resources;
-    } catch (e) {
-      console.error('Failed to load node data:', e);
-    } finally {
-      loading = false;
-    }
-  }
-
-  function startPolling() {
-    pollInterval = setInterval(loadData, 10000);
-  }
-
-  function stopPolling() {
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
-  }
-
-  onMount(() => {
-    if (!token) {
-      goto('/login');
-      return;
-    }
-    loadData();
-    startPolling();
-  });
-
-  onDestroy(() => {
-    stopPolling();
-  });
-
-  const tabs = [
-    { id: 'vms', label: 'Virtual Machines', count: () => vms.length, icon: Server },
-    { id: 'images', label: 'Images', count: () => images.length, icon: CheckCircle },
-    { id: 'storage', label: 'Storage', count: () => pools.length, icon: HardDrive },
-    { id: 'networks', label: 'Networks', count: () => networks.length, icon: Activity }
-  ] as const;
+	onMount(() => {
+		if (data.meta.clientRefreshRecommended && getStoredToken()) {
+			invalidate(`webui:node:${detail.summary.nodeId}`);
+		}
+	});
 </script>
 
-<svelte:head>
-  <title>{node?.name ?? 'Node'} | Node Details</title>
-</svelte:head>
+<div class="detail-page">
+	<SectionHeader {page} />
 
-{#if loading}
-  <div class="flex items-center justify-center h-96">
-    <div class="flex items-center gap-3 text-slate-500">
-      <RefreshCw class="animate-spin" size={24} />
-      <span>Loading node information...</span>
-    </div>
-  </div>
-{:else}
-  <div class="space-y-6">
-    <!-- Node Header -->
-    <div class="flex items-center justify-between">
-      <div class="flex items-center gap-4">
-        <div class="w-12 h-12 rounded-lg bg-gradient-to-br from-orange-500 to-red-600 flex items-center justify-center">
-          <Server class="text-white" size={24} />
-        </div>
-        <div>
-          <h1 class="text-2xl font-bold text-slate-900">{node?.name ?? 'Node'}</h1>
-          <div class="flex items-center gap-3 mt-1">
-            <span class="flex items-center gap-1.5 text-sm text-slate-500">
-              <span class="w-2 h-2 rounded-full bg-green-500"></span>
-              {node.status}
-            </span>
-            <span class="text-slate-300">|</span>
-            <span class="text-sm text-slate-500">{node?.hostname ?? ''}</span>
-            {#if node?.hostname}
-              <span class="text-slate-300">|</span>
-            {/if}
-            <span class="text-sm text-slate-500">{node?.ip_address ?? ''}</span>
-          </div>
-        </div>
-      </div>
-      <button 
-        onclick={loadData}
-        class="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
-      >
-        <RefreshCw size={16} />
-        Refresh
-      </button>
-    </div>
+	{#if data.meta.deferred}
+		<StatePanel
+			variant="loading"
+			title="Loading node detail"
+			description="This route waits for the client-authenticated pass before loading protected node detail data."
+			hint="The node page keeps its structure visible while the browser rehydrates."
+		/>
+	{:else if detail.state !== 'ready'}
+		<StatePanel
+			variant={detail.state === 'error' ? 'error' : 'empty'}
+			title={detail.state === 'error' ? 'Node detail unavailable' : 'Node not found'}
+			description="The node summary, related resources, and task context could not be assembled from the current API responses."
+			hint="Keep the shell active and retry once the control-plane view model becomes available."
+		/>
+	{:else}
+		<article class="detail-page__hero">
+			<div>
+				<div class="detail-page__eyebrow">{detail.summary.cluster}</div>
+				<h1>{detail.summary.name}</h1>
+				<p>{detail.summary.hostname} · {detail.summary.ipAddress}</p>
+			</div>
+			<div class="detail-page__hero-badges">
+				<StatusBadge label={detail.summary.stateLabel} tone={detail.summary.stateTone} />
+				<StatusBadge label={detail.summary.healthLabel} tone={detail.summary.healthTone} />
+				<StatusBadge label={detail.summary.maintenanceLabel} tone={detail.summary.maintenanceTone} />
+			</div>
+		</article>
 
-    <!-- Node Stats Cards -->
-    <div class="grid gap-4 lg:grid-cols-4">
-      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-        <div class="flex items-center gap-3">
-          <div class="p-2 bg-blue-50 rounded-lg">
-            <Cpu size={20} class="text-blue-600" />
-          </div>
-          <div>
-            <p class="text-xs text-slate-500 uppercase">Virtual Machines</p>
-            <p class="text-xl font-bold text-slate-900">{vms.length}</p>
-          </div>
-        </div>
-        <div class="mt-3 flex items-center gap-2 text-sm">
-          <span class="w-2 h-2 rounded-full bg-green-500"></span>
-          <span class="text-slate-600">{runningVMs} running</span>
-        </div>
-      </div>
+		<div class="detail-page__summary-grid">
+			{#each detail.summaryCards as card}
+				<article class="detail-page__summary-card">
+					<div class="detail-page__eyebrow">{card.label}</div>
+					<div class="detail-page__summary-value">{card.value}</div>
+					<p>{card.note}</p>
+					{#if card.tone}
+						<StatusBadge label={card.tone} tone={card.tone} />
+					{/if}
+				</article>
+			{/each}
+		</div>
 
-      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-        <div class="flex items-center gap-3">
-          <div class="p-2 bg-purple-50 rounded-lg">
-            <CheckCircle size={20} class="text-purple-600" />
-          </div>
-          <div>
-            <p class="text-xs text-slate-500 uppercase">Images</p>
-            <p class="text-xl font-bold text-slate-900">{images.length}</p>
-          </div>
-        </div>
-      </div>
+		<DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
 
-      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-        <div class="flex items-center gap-3">
-          <div class="p-2 bg-amber-50 rounded-lg">
-            <HardDrive size={20} class="text-amber-600" />
-          </div>
-          <div>
-            <p class="text-xs text-slate-500 uppercase">Storage Pools</p>
-            <p class="text-xl font-bold text-slate-900">{pools.length}</p>
-          </div>
-        </div>
-        <div class="mt-3">
-          <div class="w-full bg-slate-200 rounded-full h-1.5">
-            <div 
-              class="bg-amber-500 h-1.5 rounded-full" 
-              style="width: {totalStorageGB > 0 ? (usedStorageGB / totalStorageGB * 100) : 0}%"
-            ></div>
-          </div>
-          <p class="text-xs text-slate-500 mt-1">{usedStorageGB.toFixed(1)} / {totalStorageGB.toFixed(1)} GB</p>
-        </div>
-      </div>
+		{#if detail.currentTab === 'summary'}
+			<div class="detail-page__panel-grid">
+				<article class="detail-page__panel">
+					<div class="detail-page__eyebrow">Alerts</div>
+					<h2>Current operator signals</h2>
+					{#if detail.alerts.length > 0}
+						<div class="detail-page__stack">
+							{#each detail.alerts as alert}
+								<div class="detail-page__notice-row">
+									<StatusBadge label="attention" tone="failed" />
+									<p>{alert}</p>
+								</div>
+							{/each}
+						</div>
+					{:else}
+						<StatePanel
+							variant="empty"
+							title="No active node alerts"
+							description="Warnings and failures tied directly to this node appear here."
+							hint="Hosted VM issues remain visible in their own resource scopes."
+						/>
+					{/if}
+				</article>
+				<article class="detail-page__panel">
+					<div class="detail-page__eyebrow">Configuration</div>
+					<h2>Host-facing identifiers</h2>
+					<div class="detail-page__kv-list">
+						{#each detail.configuration as item}
+							<div class="detail-page__kv-row">
+								<div>{item.label}</div>
+								<div>{item.value}</div>
+							</div>
+						{/each}
+					</div>
+				</article>
+			</div>
+		{:else if detail.currentTab === 'vms'}
+			<div class="detail-page__table-shell">
+				<table class="detail-page__table">
+					<thead>
+						<tr>
+							<th>VM</th>
+							<th>Power</th>
+							<th>Health</th>
+							<th>CPU</th>
+							<th>Memory</th>
+							<th>Last task</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each detail.hostedVms as vm}
+							<tr>
+								<td><a href={vm.href} class="detail-page__primary-link">{vm.name}</a></td>
+								<td><StatusBadge label={vm.powerStateLabel} tone={vm.powerStateTone} /></td>
+								<td><StatusBadge label={vm.healthLabel} tone={vm.healthTone} /></td>
+								<td>{vm.cpuLabel}</td>
+								<td>{vm.memoryLabel}</td>
+								<td><StatusBadge label={vm.lastTaskLabel} tone={vm.lastTaskTone} /></td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{:else if detail.currentTab === 'volumes'}
+			<div class="detail-page__table-shell">
+				<table class="detail-page__table">
+					<thead><tr><th>Volume</th><th>Status</th><th>Capacity</th><th>Path</th></tr></thead>
+					<tbody>
+						{#each detail.storagePools as pool}
+							<tr>
+								<td>{pool.name}</td>
+								<td><StatusBadge label={pool.statusLabel} tone={pool.statusTone} /></td>
+								<td>{pool.capacityLabel}</td>
+								<td>{pool.path}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{:else if detail.currentTab === 'networks'}
+			<div class="detail-page__table-shell">
+				<table class="detail-page__table">
+					<thead><tr><th>Network</th><th>Status</th><th>Scope</th><th>CIDR</th></tr></thead>
+					<tbody>
+						{#each detail.networks as network}
+							<tr>
+								<td>{network.name}</td>
+								<td><StatusBadge label={network.statusLabel} tone={network.statusTone} /></td>
+								<td>{network.scopeLabel}</td>
+								<td>{network.cidr}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{:else if detail.currentTab === 'tasks'}
+			<div class="detail-page__stack">
+				{#if detail.recentTasks.length > 0}
+					{#each detail.recentTasks as task}
+						<TaskTimelineItem {task} compact />
+					{/each}
+				{:else}
+					<StatePanel
+						variant="empty"
+						title="No related node tasks"
+						description="Direct maintenance, scheduling, and node-scoped actions will appear here."
+						hint="VM-specific work continues to live on each VM detail page and in the global task center."
+					/>
+				{/if}
+			</div>
+		{:else if detail.currentTab === 'events'}
+			<div class="detail-page__stack">
+				{#if detail.events.length > 0}
+					{#each detail.events as event}
+						<article class="detail-page__event-card">
+							<div class="detail-page__event-topline">
+								<StatusBadge label={event.label} tone={event.tone} />
+								<span>{event.timestampLabel}</span>
+							</div>
+							<p>{event.message}</p>
+						</article>
+					{/each}
+				{:else}
+					<StatePanel
+						variant="empty"
+						title="No node events"
+						description="Failed maintenance runs, degraded discovery, and related warnings show up here."
+						hint="This tab stays scoped to the node rather than every hosted VM."
+					/>
+				{/if}
+			</div>
+		{:else}
+			<article class="detail-page__panel">
+				<div class="detail-page__eyebrow">Configuration</div>
+				<h2>Node configuration</h2>
+				<div class="detail-page__kv-list">
+					{#each detail.configuration as item}
+						<div class="detail-page__kv-row">
+							<div>{item.label}</div>
+							<div>{item.value}</div>
+						</div>
+					{/each}
+				</div>
+			</article>
+		{/if}
+	{/if}
+</div>
 
-      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-        <div class="flex items-center gap-3">
-          <div class="p-2 bg-green-50 rounded-lg">
-            <Activity size={20} class="text-green-600" />
-          </div>
-          <div>
-            <p class="text-xs text-slate-500 uppercase">Networks</p>
-            <p class="text-xl font-bold text-slate-900">{networks.length}</p>
-          </div>
-        </div>
-      </div>
-    </div>
+<style>
+	.detail-page {
+		display: grid;
+		gap: 1.2rem;
+	}
 
-    <!-- Tabs -->
-    <div class="bg-white rounded-lg shadow-sm border border-slate-200">
-      <div class="border-b border-slate-200">
-        <nav class="flex -mb-px">
-          {#each tabs as tab}
-            {@const Icon = tab.icon}
-            <button
-              onclick={() => activeTab = tab.id}
-              class="px-6 py-4 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 {activeTab === tab.id 
-                ? 'border-orange-500 text-orange-600' 
-                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}"
-            >
-              <Icon size={16} />
-              {tab.label}
-              <span class="ml-2 px-2 py-0.5 text-xs rounded-full bg-slate-100 text-slate-600">
-                {tab.count()}
-              </span>
-            </button>
-          {/each}
-        </nav>
-      </div>
+	.detail-page__hero,
+	.detail-page__summary-card,
+	.detail-page__panel,
+	.detail-page__table-shell,
+	.detail-page__event-card {
+		border: 1px solid var(--shell-line);
+		border-radius: 1.15rem;
+		background: var(--shell-surface);
+	}
 
-      <!-- Tab Content -->
-      <div class="p-6">
-        {#if activeTab === 'vms'}
-          {#if vms.length === 0}
-            <div class="text-center py-12 text-slate-500">
-              <Server size={48} class="mx-auto mb-4 opacity-40" />
-              <p class="text-lg font-medium">No virtual machines</p>
-              <p class="text-sm mt-1">Create your first VM to get started</p>
-            </div>
-          {:else}
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Status</th>
-                    <th>vCPUs</th>
-                    <th>Memory</th>
-                    <th>IP Address</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each vms as vm}
-                    <tr>
-                      <td class="font-medium">{vm.name}</td>
-                      <td><StateBadge label={vm.actual_state} /></td>
-                      <td>{vm.vcpu}</td>
-                      <td>{vm.memory_mb} MB</td>
-                      <td>{vm.ip_address || '—'}</td>
-                      <td>
-                        <a href="/vms/{vm.id}" class="text-orange-600 hover:text-orange-700 text-sm font-medium">
-                          View
-                        </a>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-        {:else if activeTab === 'images'}
-          {#if images.length === 0}
-            <div class="text-center py-12 text-slate-500">
-              <CheckCircle size={48} class="mx-auto mb-4 opacity-40" />
-              <p class="text-lg font-medium">No images</p>
-              <p class="text-sm mt-1">Import images to use as VM templates</p>
-            </div>
-          {:else}
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>OS Family</th>
-                    <th>Architecture</th>
-                    <th>Status</th>
-                    <th>Cloud-Init</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each images as image}
-                    <tr>
-                      <td class="font-medium">{image.name}</td>
-                      <td class="capitalize">{image.os_family}</td>
-                      <td>{image.architecture}</td>
-                      <td><StateBadge label={image.status} /></td>
-                      <td>
-                        {#if image.cloud_init_supported}
-                          <span class="badge badge-success">Supported</span>
-                        {:else}
-                          <span class="badge badge-warning">Not Supported</span>
-                        {/if}
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-        {:else if activeTab === 'storage'}
-          {#if pools.length === 0}
-            <div class="text-center py-12 text-slate-500">
-              <HardDrive size={48} class="mx-auto mb-4 opacity-40" />
-              <p class="text-lg font-medium">No storage pools</p>
-              <p class="text-sm mt-1">Configure storage pools for VM disks</p>
-            </div>
-          {:else}
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Type</th>
-                    <th>Path</th>
-                    <th>Capacity</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each pools as pool}
-                    <tr>
-                      <td class="font-medium">{pool.name}</td>
-                      <td class="uppercase text-xs">{pool.pool_type}</td>
-                      <td class="mono text-xs">{pool.path}</td>
-                      <td>
-                        {#if pool.capacity_bytes}
-                          {(pool.capacity_bytes / (1024 ** 3)).toFixed(1)} GB
-                        {:else}
-                          —
-                        {/if}
-                      </td>
-                      <td><StateBadge label={pool.status} /></td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-        {:else if activeTab === 'networks'}
-          {#if networks.length === 0}
-            <div class="text-center py-12 text-slate-500">
-              <Activity size={48} class="mx-auto mb-4 opacity-40" />
-              <p class="text-lg font-medium">No networks</p>
-              <p class="text-sm mt-1">Configure networks for VM connectivity</p>
-            </div>
-          {:else}
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Mode</th>
-                    <th>Bridge</th>
-                    <th>CIDR</th>
-                    <th>Gateway</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each networks as network}
-                    <tr>
-                      <td class="font-medium">{network.name}</td>
-                      <td class="capitalize">{network.mode}</td>
-                      <td>{network.bridge_name}</td>
-                      <td>{network.cidr}</td>
-                      <td>{network.gateway_ip}</td>
-                      <td><StateBadge label={network.status} /></td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-        {/if}
-      </div>
-    </div>
-  </div>
-{/if}
+	.detail-page__hero,
+	.detail-page__summary-card,
+	.detail-page__panel,
+	.detail-page__event-card {
+		padding: 1rem;
+	}
+
+	.detail-page__hero {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+	}
+
+	.detail-page__eyebrow {
+		font-size: 0.74rem;
+		font-weight: 700;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--shell-text-muted);
+	}
+
+	h1 {
+		margin-top: 0.25rem;
+		font-size: 2rem;
+		color: var(--shell-text);
+	}
+
+	h2 {
+		font-size: 1.2rem;
+		color: var(--shell-text);
+	}
+
+	.detail-page__hero p,
+	.detail-page__summary-card p,
+	.detail-page__event-card p {
+		margin-top: 0.35rem;
+		color: var(--shell-text-secondary);
+		line-height: 1.5;
+	}
+
+	.detail-page__hero-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.55rem;
+	}
+
+	.detail-page__summary-grid,
+	.detail-page__panel-grid {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 1rem;
+	}
+
+	.detail-page__panel-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.detail-page__summary-value {
+		margin-top: 0.8rem;
+		font-size: 1.5rem;
+		font-weight: 700;
+		color: var(--shell-text);
+	}
+
+	.detail-page__stack {
+		display: grid;
+		gap: 0.8rem;
+	}
+
+	.detail-page__notice-row {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 0.7rem;
+		padding: 0.85rem;
+		border-radius: 0.9rem;
+		background: var(--shell-surface-muted);
+		border: 1px solid var(--shell-line);
+	}
+
+	.detail-page__notice-row p {
+		margin: 0;
+	}
+
+	.detail-page__kv-list {
+		display: grid;
+		gap: 0.65rem;
+		margin-top: 0.9rem;
+	}
+
+	.detail-page__kv-row {
+		display: grid;
+		grid-template-columns: minmax(10rem, 0.75fr) minmax(0, 1fr);
+		gap: 0.9rem;
+		padding-bottom: 0.65rem;
+		border-bottom: 1px solid var(--shell-line);
+		font-size: 0.92rem;
+	}
+
+	.detail-page__kv-row div:first-child {
+		color: var(--shell-text-muted);
+	}
+
+	.detail-page__table-shell {
+		overflow-x: auto;
+	}
+
+	.detail-page__table {
+		width: 100%;
+		min-width: 780px;
+		border-collapse: collapse;
+	}
+
+	.detail-page__table th,
+	.detail-page__table td {
+		padding: 0.95rem 1rem;
+		border-bottom: 1px solid var(--shell-line);
+		font-size: 0.92rem;
+		color: var(--shell-text-secondary);
+		text-align: left;
+	}
+
+	.detail-page__table th {
+		font-size: 0.74rem;
+		font-weight: 700;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--shell-text-muted);
+		background: rgba(247, 242, 234, 0.75);
+	}
+
+	.detail-page__primary-link {
+		color: var(--shell-text);
+		font-weight: 700;
+		text-decoration: none;
+	}
+
+	.detail-page__event-topline {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.7rem;
+		font-size: 0.82rem;
+		color: var(--shell-text-muted);
+	}
+
+	@media (max-width: 1100px) {
+		.detail-page__summary-grid,
+		.detail-page__panel-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>
