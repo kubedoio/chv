@@ -9,7 +9,7 @@ use control_plane_node_api::control_plane_node_api as proto;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct ControlPlaneRuntime {
     bind_addr: SocketAddr,
@@ -165,9 +165,19 @@ impl ControlPlaneService {
 
         let mut server = tonic::transport::Server::builder();
         if let Some(tls_config) = &self.runtime.tls_config {
-            server = server.tls_config(tls_config.clone()).map_err(|e| {
-                ControlPlaneServiceError::Internal(format!("tls config error: {}", e))
-            })?;
+            server = match server.tls_config(tls_config.clone()) {
+                Ok(s) => {
+                    info!("gRPC TLS configured successfully");
+                    s
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to configure gRPC TLS; falling back to plaintext"
+                    );
+                    tonic::transport::Server::builder()
+                }
+            };
         }
 
         let grpc_result = server

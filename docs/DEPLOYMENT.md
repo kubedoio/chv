@@ -281,9 +281,10 @@ min_connections = 1
 [tls]
 ca_cert_path = "/etc/chv/certs/ca.crt"
 ca_key_path = "/etc/chv/certs/ca.key"
-server_cert_path = "/etc/chv/certs/server.crt"
-server_key_path = "/etc/chv/certs/server.key"
-client_ca_path = "/etc/chv/certs/ca.crt"
+# gRPC server TLS is optional; disabled by default for all-in-one loopback deployments
+# server_cert_path = "/etc/chv/certs/server.crt"
+# server_key_path = "/etc/chv/certs/server.key"
+# client_ca_path = "/etc/chv/certs/ca.crt"
 ```
 
 **`/etc/chv/agent.toml`**
@@ -291,7 +292,7 @@ client_ca_path = "/etc/chv/certs/ca.crt"
 socket_path = "/run/chv/agent/api.sock"
 runtime_dir = "/run/chv/agent"
 log_level = "info"
-control_plane_addr = "https://127.0.0.1:8443"
+control_plane_addr = "http://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"

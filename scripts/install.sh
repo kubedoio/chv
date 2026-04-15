@@ -277,9 +277,10 @@ max_lifetime_secs = 1800
 [tls]
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 ca_key_path = "${CHV_CONFIG_DIR}/certs/ca.key"
-server_cert_path = "${CHV_CONFIG_DIR}/certs/server.crt"
-server_key_path = "${CHV_CONFIG_DIR}/certs/server.key"
-client_ca_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
+# gRPC server TLS is optional; disabled by default for all-in-one loopback deployments
+# server_cert_path = "${CHV_CONFIG_DIR}/certs/server.crt"
+# server_key_path = "${CHV_CONFIG_DIR}/certs/server.key"
+# client_ca_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/controlplane.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/controlplane.toml"
@@ -288,7 +289,7 @@ EOF
 socket_path = "/run/chv/agent/api.sock"
 runtime_dir = "/run/chv/agent"
 log_level = "info"
-control_plane_addr = "https://127.0.0.1:8443"
+control_plane_addr = "http://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"
