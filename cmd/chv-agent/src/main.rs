@@ -190,6 +190,10 @@ fn certificate_rotation_due(cache: &NodeCache, now_unix_ms: i64) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls ring crypto provider");
+
     let config_path = std::env::args().nth(1).map(PathBuf::from);
     let config = load_agent_config(config_path.as_deref())?;
 

@@ -17,3 +17,4 @@ tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

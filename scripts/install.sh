@@ -197,7 +197,7 @@ install_cloud_hypervisor() {
 
     local chv_version="51.1"
     info "Downloading Cloud Hypervisor v${chv_version}..."
-    curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${chv_version}/cloud-hypervisor-v${chv_version}-x64" \
+    curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${chv_version}/cloud-hypervisor-static" \
         -o /usr/local/bin/cloud-hypervisor
     chmod +x /usr/local/bin/cloud-hypervisor
     ln -sf /usr/local/bin/cloud-hypervisor /usr/bin/cloud-hypervisor
@@ -437,7 +437,29 @@ start_services() {
     info "Starting CHV services..."
 
     systemctl enable --now chv-controlplane
-    sleep 2
+    
+    info "Waiting for control plane to run database migrations..."
+    
+    # Poll the database for up to 30 seconds until the table appears
+    local max_attempts=30
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        # Check if the table exists in PostgreSQL
+        if sudo -u postgres psql -d chv_controlplane -tAc "SELECT 1 FROM information_schema.tables WHERE table_name='bootstrap_tokens';" | grep -q 1; then
+            info "Database migrations confirmed."
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+
+    if [ $attempt -gt $max_attempts ]; then
+        fatal "Control plane failed to create database tables within 30 seconds. Check logs with: journalctl -u chv-controlplane --no-pager -n 50"
+    fi
+    
+    # Now it is safe to insert the token
+    create_bootstrap_token
+    
     systemctl enable --now chv-agent
 }
 
@@ -465,7 +487,6 @@ generate_certs
 setup_database
 install_configs
 install_systemd_services
-create_bootstrap_token
 install_nginx
 start_services
 
