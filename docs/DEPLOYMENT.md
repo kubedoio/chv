@@ -418,10 +418,27 @@ sudo journalctl -u chv-agent -f
 - Verify the database URL in `controlplane.toml`
 - Confirm the `chv` DB user has sufficient privileges
 
+### Web UI Shows JSON Parse Error (`<!doctype html>` is not valid JSON)
+This happens when the Web UI calls `/api/v1/...` endpoints that the current Rust control plane does not yet implement.
+
+**Root cause:** The SvelteKit frontend expects a full REST API (e.g., `/api/v1/nodes`, `/api/v1/vms`), but the active Rust backend currently only exposes `/health`, `/ready`, `/metrics`, `/admin/nodes`, and `/admin/operations`.
+
+**Immediate fixes:**
+1. **Fix nginx proxy path stripping:** Ensure `proxy_pass` does NOT have a trailing slash:
+   ```nginx
+   location /api/ {
+       proxy_pass http://127.0.0.1:8080;   # NO trailing slash
+       proxy_intercept_errors off;
+   }
+   ```
+2. **Rebuild and restart the control plane** so that unmatched API routes return a clean JSON 404 instead of an empty body or HTML fallback.
+
+**Long-term fix:** Implement the missing `/api/v1/*` REST routes in `crates/chv-controlplane-service/src/api/` (or bridge them to the gRPC services).
+
 ### Web UI Blank Page
 - Verify `npm run build` succeeded and `index.html` exists in `/opt/chv/ui/`
 - Check nginx `root` directive points to `/opt/chv/ui/`
-- Ensure the `/api/` proxy location forwards to `http://127.0.0.1:8080/`
+- Ensure the `/api/` proxy location forwards to `http://127.0.0.1:8080` (no trailing slash)
 
 ### Permission Denied on `/dev/kvm`
 - Ensure the `chv` user is in the `kvm` group
