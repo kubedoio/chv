@@ -16,10 +16,13 @@ pub async fn list_operations(State(pool): State<Arc<StorePool>>) -> impl IntoRes
 
     match rows {
         Ok(rows) => (StatusCode::OK, Json(serde_json::json!({"operations": rows}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => {
+            tracing::error!("list_operations failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal server error"})),
+            )
+        }
     }
 }
 
@@ -40,10 +43,13 @@ pub async fn get_operation(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not found"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => {
+            tracing::error!("get_operation failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal server error"})),
+            )
+        }
     }
 }
 

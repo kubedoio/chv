@@ -16,10 +16,13 @@ pub async fn list_nodes(State(pool): State<Arc<StorePool>>) -> impl IntoResponse
 
     match rows {
         Ok(rows) => (StatusCode::OK, Json(serde_json::json!({"nodes": rows}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => {
+            tracing::error!("list_nodes failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal server error"})),
+            )
+        }
     }
 }
 
@@ -40,10 +43,13 @@ pub async fn get_node(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not found"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => {
+            tracing::error!("get_node failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal server error"})),
+            )
+        }
     }
 }
 
