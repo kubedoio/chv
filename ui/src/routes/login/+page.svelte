@@ -35,8 +35,17 @@
       });
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error?.message || 'Login failed');
+        let message = `Login failed (${response.status})`;
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          try {
+            const data = await response.json();
+            message = data.error?.message || data.message || message;
+          } catch {
+            // ignore JSON parse error
+          }
+        }
+        throw new Error(message);
       }
 
       const data = await response.json();

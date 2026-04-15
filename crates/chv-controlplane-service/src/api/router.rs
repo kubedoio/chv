@@ -1,5 +1,5 @@
-use crate::api::{health, nodes, operations};
-use axum::{http::StatusCode, response::Json, routing::get, Router};
+use crate::api::{health, nodes, operations, stub};
+use axum::{http::StatusCode, response::Json, routing::{get, post}, Router};
 use chv_controlplane_store::StorePool;
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
 
 pub fn admin_router(pool: StorePool) -> Router {
     Router::new()
+        // Health & admin
         .route("/health", get(health::health_handler))
         .route("/ready", get(health::ready_handler))
         .route("/metrics", get(health::metrics_handler))
@@ -22,6 +23,28 @@ pub fn admin_router(pool: StorePool) -> Router {
         .route("/admin/nodes/{id}", get(nodes::get_node))
         .route("/admin/operations", get(operations::list_operations))
         .route("/admin/operations/{id}", get(operations::get_operation))
+        // Auth stubs
+        .route("/api/v1/auth/login", post(stub::login_handler))
+        .route("/api/v1/auth/me", get(stub::me_handler))
+        .route("/api/v1/auth/logout", post(stub::logout_handler))
+        // Resource list stubs (return empty arrays so the UI renders empty states)
+        .route("/api/v1/nodes", get(stub::list_nodes_stub))
+        .route("/api/v1/vms", get(stub::list_vms_stub))
+        .route("/api/v1/networks", get(stub::list_networks_stub))
+        .route("/api/v1/storage-pools", get(stub::list_storage_pools_stub))
+        .route("/api/v1/operations", get(stub::list_operations_stub))
+        .route("/api/v1/events", get(stub::list_events_stub))
+        .route("/api/v1/images", get(stub::list_images_stub))
+        .route("/api/v1/vm-templates", get(stub::list_vm_templates_stub))
+        .route("/api/v1/cloud-init-templates", get(stub::list_cloud_init_templates_stub))
+        .route("/api/v1/backup-jobs", get(stub::list_backup_jobs_stub))
+        .route("/api/v1/backup-history", get(stub::list_backup_history_stub))
+        .route("/api/v1/quotas", get(stub::list_quotas_stub))
+        .route("/api/v1/usage", get(stub::get_usage_stub))
+        // Install stubs
+        .route("/api/v1/install/status", get(stub::get_install_status_stub))
+        .route("/api/v1/install/bootstrap", post(stub::bootstrap_install_stub))
+        .route("/api/v1/install/repair", post(stub::repair_install_stub))
         .fallback(not_found_handler)
         .with_state(Arc::new(pool))
 }

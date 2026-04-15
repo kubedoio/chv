@@ -6,12 +6,17 @@
 	import Toast from './Toast.svelte';
 	import { announceToast } from '$lib/stores/a11y.svelte';
 
+	let lastAnnouncedId = $state<string | null>(null);
+
 	// Announce toast changes for screen readers
 	$effect(() => {
 		const toasts = $toast.toasts;
 		if (toasts.length > 0) {
 			const latest = toasts[toasts.length - 1];
-			announceToast(latest.type, latest.message);
+			if (latest.id !== lastAnnouncedId) {
+				lastAnnouncedId = latest.id;
+				announceToast(latest.type, latest.message);
+			}
 		}
 	});
 </script>
