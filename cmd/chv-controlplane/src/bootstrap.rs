@@ -15,6 +15,12 @@ pub async fn build_service(
 ) -> Result<ControlPlaneService, ControlPlaneServiceError> {
     tokio::fs::create_dir_all(&config.runtime_dir).await?;
 
+    if config.tls.server_cert_path.is_some() != config.tls.server_key_path.is_some() {
+        return Err(ControlPlaneServiceError::Internal(
+            "both server_cert_path and server_key_path must be set to enable TLS".into(),
+        ));
+    }
+
     let store_config = ControlPlaneStoreConfig {
         database_url: config.database.url.clone(),
         migrations_dir: config.database.migrations_dir.clone(),

@@ -38,6 +38,10 @@ impl ControlPlaneRuntime {
     pub fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
     }
+
+    pub fn tls_config(&self) -> &Option<tonic::transport::ServerTlsConfig> {
+        &self.tls_config
+    }
 }
 
 #[derive(Clone)]
@@ -149,7 +153,11 @@ impl ControlPlaneService {
             )),
         );
 
-        info!(?addr, "starting gRPC server");
+        if self.runtime.tls_config().is_some() {
+            info!(?addr, "starting gRPC server with TLS");
+        } else {
+            info!(?addr, "starting gRPC server without TLS (plaintext)");
+        }
 
         let mut server = tonic::transport::Server::builder();
         if let Some(tls_config) = &self.runtime.tls_config {
