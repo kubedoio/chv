@@ -189,7 +189,7 @@ impl ObservedStateRepository {
             .map_err(|e| match &e {
                 sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
                     let (entity, id) = match db_err.constraint() {
-                        Some(c) if c.contains("node_id") => (
+                        Some(c) if c.ends_with("_node_id_fkey") => (
                             "node",
                             input
                                 .node_id
@@ -222,7 +222,7 @@ impl ObservedStateRepository {
             .map_err(|e| match &e {
                 sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
                     let (entity, id) = match db_err.constraint() {
-                        Some(c) if c.contains("attached_vm_id") => (
+                        Some(c) if c.ends_with("_attached_vm_id_fkey") => (
                             "vm",
                             input
                                 .attached_vm_id

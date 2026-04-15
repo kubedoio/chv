@@ -2,8 +2,8 @@ use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
     DesiredStateRepository, EventAppendInput, EventRepository, NetworkDesiredStateInput,
-    NetworkExposureInput, NetworkExposureRepository, NodeRepository, NodeStateInput,
-    VmDesiredStateInput, VolumeDesiredStateInput,
+    NetworkExposureInput, NodeRepository, NodeStateInput, VmDesiredStateInput,
+    VolumeDesiredStateInput,
 };
 use chv_controlplane_types::constants::STATUS_OK;
 use chv_controlplane_types::domain::{
@@ -46,7 +46,6 @@ pub trait ReconcileService: Send + Sync {
 pub struct ReconcileServiceImplementation {
     node_repo: NodeRepository,
     desired_state_repo: DesiredStateRepository,
-    network_exposure_repo: NetworkExposureRepository,
     event_repo: EventRepository,
 }
 
@@ -86,13 +85,11 @@ impl ReconcileServiceImplementation {
     pub fn new(
         node_repo: NodeRepository,
         desired_state_repo: DesiredStateRepository,
-        network_exposure_repo: NetworkExposureRepository,
         event_repo: EventRepository,
     ) -> Self {
         Self {
             node_repo,
             desired_state_repo,
-            network_exposure_repo,
             event_repo,
         }
     }
@@ -174,7 +171,7 @@ impl ReconcileService for ReconcileServiceImplementation {
 
         let now = Self::now_ms();
 
-        if self
+        if let Err(e) = self
             .node_repo
             .upsert_state(&NodeStateInput {
                 node_id: node_id.clone(),
@@ -190,7 +187,6 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_unix_ms: now,
             })
             .await
-            .is_err()
         {
             let op_id = Self::parse_operation_id(&meta)?;
             self.emit_event(EventContext {
@@ -206,9 +202,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal(
-                "persistence error".into(),
-            ));
+            return Err(ControlPlaneServiceError::Internal(format!(
+                "persistence error: {e}"
+            )));
         }
 
         let op_id = Self::parse_operation_id(&meta)?;
@@ -263,7 +259,7 @@ impl ReconcileService for ReconcileServiceImplementation {
 
         let now = Self::now_ms();
 
-        if self
+        if let Err(e) = self
             .desired_state_repo
             .upsert_vm(&VmDesiredStateInput {
                 vm_id: vm_id.clone(),
@@ -288,7 +284,6 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_unix_ms: now,
             })
             .await
-            .is_err()
         {
             let op_id = Self::parse_operation_id(&meta)?;
             self.emit_event(EventContext {
@@ -304,9 +299,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal(
-                "persistence error".into(),
-            ));
+            return Err(ControlPlaneServiceError::Internal(format!(
+                "persistence error: {e}"
+            )));
         }
 
         let op_id = Self::parse_operation_id(&meta)?;
@@ -370,7 +365,7 @@ impl ReconcileService for ReconcileServiceImplementation {
 
         let now = Self::now_ms();
 
-        if self
+        if let Err(e) = self
             .desired_state_repo
             .upsert_volume(&VolumeDesiredStateInput {
                 volume_id: volume_id.clone(),
@@ -394,7 +389,6 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_unix_ms: now,
             })
             .await
-            .is_err()
         {
             let op_id = Self::parse_operation_id(&meta)?;
             self.emit_event(EventContext {
@@ -410,9 +404,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal(
-                "persistence error".into(),
-            ));
+            return Err(ControlPlaneServiceError::Internal(format!(
+                "persistence error: {e}"
+            )));
         }
 
         let op_id = Self::parse_operation_id(&meta)?;
@@ -467,25 +461,44 @@ impl ReconcileService for ReconcileServiceImplementation {
 
         let now = Self::now_ms();
 
-        if self
-            .desired_state_repo
-            .upsert_network(&NetworkDesiredStateInput {
+        let exposures: Vec<NetworkExposureInput> = spec
+            .exposures
+            .unwrap_or_default()
+            .into_iter()
+            .map(|exposure| NetworkExposureInput {
                 network_id: network_id.clone(),
-                node_id: Some(node_id.clone()),
-                display_name: fragment.id.clone(),
-                network_class: spec.network_class,
-                desired_generation: generation,
-                desired_status: STATUS_OK.into(),
-                requested_by: Self::normalize_requested_by(&meta),
-                updated_by: if fragment.updated_by.is_empty() {
-                    None
-                } else {
-                    Some(fragment.updated_by)
-                },
-                requested_unix_ms: now,
+                service_name: exposure.service_name,
+                protocol: exposure.protocol,
+                listen_address: exposure.listen_address,
+                listen_port: exposure.listen_port,
+                target_address: exposure.target_address,
+                target_port: exposure.target_port,
+                exposure_policy: exposure.exposure_policy,
+                updated_unix_ms: now,
             })
+            .collect();
+
+        if let Err(e) = self
+            .desired_state_repo
+            .upsert_network_with_exposures(
+                &NetworkDesiredStateInput {
+                    network_id: network_id.clone(),
+                    node_id: Some(node_id.clone()),
+                    display_name: fragment.id.clone(),
+                    network_class: spec.network_class,
+                    desired_generation: generation,
+                    desired_status: STATUS_OK.into(),
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: if fragment.updated_by.is_empty() {
+                        None
+                    } else {
+                        Some(fragment.updated_by)
+                    },
+                    requested_unix_ms: now,
+                },
+                &exposures,
+            )
             .await
-            .is_err()
         {
             let op_id = Self::parse_operation_id(&meta)?;
             self.emit_event(EventContext {
@@ -501,48 +514,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
-            return Err(ControlPlaneServiceError::Internal(
-                "persistence error".into(),
-            ));
-        }
-
-        if let Some(exposures) = spec.exposures {
-            for exposure in exposures {
-                if self
-                    .network_exposure_repo
-                    .upsert(&NetworkExposureInput {
-                        network_id: network_id.clone(),
-                        service_name: exposure.service_name,
-                        protocol: exposure.protocol,
-                        listen_address: exposure.listen_address,
-                        listen_port: exposure.listen_port,
-                        target_address: exposure.target_address,
-                        target_port: exposure.target_port,
-                        exposure_policy: exposure.exposure_policy,
-                        updated_unix_ms: now,
-                    })
-                    .await
-                    .is_err()
-                {
-                    let op_id = Self::parse_operation_id(&meta)?;
-                    self.emit_event(EventContext {
-                        operation_id: op_id,
-                        node_id: Some(node_id.clone()),
-                        resource_kind: Some(ResourceKind::Network),
-                        resource_id: Some(network_id.clone()),
-                        severity: EventSeverity::Warning,
-                        event_type: EventType::DesiredStateRejected,
-                        message: "failed to apply network exposure".into(),
-                        details: None,
-                        occurred_unix_ms: now,
-                        requested_by: Self::normalize_requested_by(&meta),
-                    })
-                    .await?;
-                    return Err(ControlPlaneServiceError::Internal(
-                        "persistence error".into(),
-                    ));
-                }
-            }
+            return Err(ControlPlaneServiceError::Internal(format!(
+                "persistence error: {e}"
+            )));
         }
 
         let op_id = Self::parse_operation_id(&meta)?;

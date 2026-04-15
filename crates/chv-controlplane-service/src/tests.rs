@@ -204,7 +204,7 @@ async fn test_enrollment_extended_inventory_persistence() {
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
 
     // Seed a bootstrap token for enrollment (sha256("123"))
     let hash = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3";
@@ -277,7 +277,7 @@ async fn test_rotate_certificate_missing_node() {
     let node_repo = NodeRepository::new(pool);
     let token_repo = BootstrapTokenRepository::new(test_db.pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
 
     let request = proto::RotateNodeCertificateRequest {
         node_id: "non-existent-node".into(),
@@ -304,7 +304,7 @@ async fn test_report_bootstrap_result_persistence() {
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
 
     // Node must exist
     sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-b1', 'host-b1', 'host-b1')")
@@ -409,7 +409,7 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = chv_controlplane_store::BootstrapTokenRepository::new(pool);
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
 
     let request = proto::EnrollmentRequest {
         bootstrap_token: "invalid-token".into(),
@@ -456,15 +456,9 @@ async fn test_apply_vm_desired_state_persistence() {
 
     let node_repo = NodeRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
-    let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
 
-    let service = ReconcileServiceImplementation::new(
-        node_repo,
-        desired_state_repo,
-        network_exposure_repo,
-        event_repo,
-    );
+    let service = ReconcileServiceImplementation::new(node_repo, desired_state_repo, event_repo);
 
     let spec_json = r#"{"cpu_count": 2, "memory_bytes": 4294967296, "image_ref": "ubuntu-22.04"}"#;
     let request = proto::ApplyVmDesiredStateRequest {
@@ -517,15 +511,9 @@ async fn test_apply_network_desired_state_with_exposures() {
 
     let node_repo = NodeRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
-    let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
 
-    let service = ReconcileServiceImplementation::new(
-        node_repo,
-        desired_state_repo,
-        network_exposure_repo,
-        event_repo,
-    );
+    let service = ReconcileServiceImplementation::new(node_repo, desired_state_repo, event_repo);
 
     let spec_json = r#"{"network_class": "bridge", "exposures": [{"service_name": "web", "protocol": "tcp", "listen_port": 80, "target_port": 8080}]}"#;
     let request = proto::ApplyNetworkDesiredStateRequest {
@@ -575,15 +563,9 @@ async fn test_apply_rejects_non_numeric_generation() {
 
     let node_repo = NodeRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
-    let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
 
-    let service = ReconcileServiceImplementation::new(
-        node_repo,
-        desired_state_repo,
-        network_exposure_repo,
-        event_repo,
-    );
+    let service = ReconcileServiceImplementation::new(node_repo, desired_state_repo, event_repo);
 
     let request = proto::ApplyVmDesiredStateRequest {
         meta: Some(proto::RequestMeta {
@@ -633,10 +615,8 @@ async fn test_apply_node_desired_state_persistence() {
         .execute(&pool).await.unwrap();
     let node_repo = NodeRepository::new(pool.clone());
     let desired_repo = DesiredStateRepository::new(pool.clone());
-    let net_repo = NetworkExposureRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
-    let service =
-        ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
+    let service = ReconcileServiceImplementation::new(node_repo, desired_repo, event_repo);
 
     let req = proto::ApplyNodeDesiredStateRequest {
         meta: Some(proto::RequestMeta {
@@ -668,10 +648,8 @@ async fn test_apply_rejects_invalid_spec_json() {
     let pool = test_db.pool.clone();
     let node_repo = NodeRepository::new(pool.clone());
     let desired_repo = DesiredStateRepository::new(pool.clone());
-    let net_repo = NetworkExposureRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
-    let service =
-        ReconcileServiceImplementation::new(node_repo, desired_repo, net_repo, event_repo);
+    let service = ReconcileServiceImplementation::new(node_repo, desired_repo, event_repo);
 
     let req = proto::ApplyVmDesiredStateRequest {
         meta: Some(proto::RequestMeta {
@@ -1010,7 +988,7 @@ async fn test_rotate_certificate_returns_not_found_status() {
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = BootstrapTokenRepository::new(pool);
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, cert_issuer);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
     let server = crate::server::EnrollmentServer::new(Arc::new(service));
 
     let request = tonic::Request::new(proto::RotateNodeCertificateRequest {

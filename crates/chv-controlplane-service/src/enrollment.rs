@@ -46,14 +46,14 @@ pub trait EnrollmentService: Send + Sync {
 pub struct EnrollmentServiceImplementation {
     node_repo: NodeRepository,
     token_repo: BootstrapTokenRepository,
-    cert_issuer: Arc<dyn CertificateIssuer>,
+    cert_issuer: Option<Arc<dyn CertificateIssuer>>,
 }
 
 impl EnrollmentServiceImplementation {
     pub fn new(
         node_repo: NodeRepository,
         token_repo: BootstrapTokenRepository,
-        cert_issuer: Arc<dyn CertificateIssuer>,
+        cert_issuer: Option<Arc<dyn CertificateIssuer>>,
     ) -> Self {
         Self {
             node_repo,
@@ -65,7 +65,7 @@ impl EnrollmentServiceImplementation {
     fn now_ms(&self) -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as i64
     }
 }
@@ -106,7 +106,11 @@ impl EnrollmentService for EnrollmentServiceImplementation {
         })?;
 
         // Issue certificates
-        let cert = self.cert_issuer.issue_node_certificate(&node_id).await?;
+        let cert_issuer = self
+            .cert_issuer
+            .as_ref()
+            .ok_or_else(|| ControlPlaneServiceError::Internal("CA not configured".into()))?;
+        let cert = cert_issuer.issue_node_certificate(&node_id).await?;
 
         let now = self.now_ms();
 
@@ -217,7 +221,11 @@ impl EnrollmentService for EnrollmentServiceImplementation {
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))?;
 
         // Issue new certificates
-        let cert = self.cert_issuer.issue_node_certificate(&node_id).await?;
+        let cert_issuer = self
+            .cert_issuer
+            .as_ref()
+            .ok_or_else(|| ControlPlaneServiceError::Internal("CA not configured".into()))?;
+        let cert = cert_issuer.issue_node_certificate(&node_id).await?;
 
         // UPDATE STORE FIRST
         self.node_repo
@@ -250,8 +258,8 @@ impl EnrollmentService for EnrollmentServiceImplementation {
             .meta
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))?;
 
-        let success = request.bootstrap_status.to_lowercase().contains("success")
-            || request.bootstrap_status.to_lowercase() == "ok";
+        let status_lower = request.bootstrap_status.to_lowercase();
+        let success = status_lower == "success" || status_lower == "ok";
 
         // PERSIST BOOTSTRAP RESULT
         self.node_repo
@@ -351,7 +359,7 @@ impl CertificateIssuer for CaBackedCertificateIssuer {
                 .serial_number
                 .as_ref()
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| "0".into()),
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         })
     }
 }

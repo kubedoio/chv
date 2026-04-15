@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{error, info};
 
-#[derive(Debug, Clone)]
 pub struct ControlPlaneRuntime {
     bind_addr: SocketAddr,
     runtime_dir: PathBuf,
     tls_config: Option<tonic::transport::ServerTlsConfig>,
+    http_shutdown_tx: tokio::sync::watch::Sender<()>,
+    http_join_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>>,
 }
 
 impl ControlPlaneRuntime {
@@ -23,11 +24,15 @@ impl ControlPlaneRuntime {
         bind_addr: SocketAddr,
         runtime_dir: PathBuf,
         tls_config: Option<tonic::transport::ServerTlsConfig>,
+        http_shutdown_tx: tokio::sync::watch::Sender<()>,
+        http_join_handle: tokio::task::JoinHandle<Result<(), std::io::Error>>,
     ) -> Self {
         Self {
             bind_addr,
             runtime_dir,
             tls_config,
+            http_shutdown_tx,
+            http_join_handle: std::sync::Mutex::new(Some(http_join_handle)),
         }
     }
 
@@ -98,7 +103,6 @@ impl ControlPlaneComponents {
     }
 }
 
-#[derive(Clone)]
 pub struct ControlPlaneService {
     runtime: ControlPlaneRuntime,
     components: ControlPlaneComponents,
@@ -166,18 +170,28 @@ impl ControlPlaneService {
             })?;
         }
 
-        server
+        let grpc_result = server
             .add_service(enrollment_server)
             .add_service(inventory_server)
             .add_service(telemetry_server)
             .add_service(reconcile_server)
             .add_service(lifecycle_server)
             .serve(addr)
-            .await
-            .map_err(|e: tonic::transport::Error| {
-                error!("gRPC server error: {}", e);
-                ControlPlaneServiceError::Internal(e.to_string())
-            })?;
+            .await;
+
+        let _ = self.runtime.http_shutdown_tx.send(());
+
+        let handle = self.runtime.http_join_handle.lock().unwrap().take();
+        if let Some(handle) = handle {
+            if let Err(e) = handle.await {
+                error!("HTTP admin server join error: {}", e);
+            }
+        }
+
+        grpc_result.map_err(|e: tonic::transport::Error| {
+            error!("gRPC server error: {}", e);
+            ControlPlaneServiceError::Internal(e.to_string())
+        })?;
 
         Ok(())
     }

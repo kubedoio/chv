@@ -1,4 +1,4 @@
-use crate::{StoreError, StorePool};
+use crate::{NetworkExposureInput, StoreError, StorePool};
 use chv_controlplane_types::domain::{Generation, NodeId, ResourceId};
 
 const UPSERT_VM_SQL: &str = r#"
@@ -290,6 +290,60 @@ impl DesiredStateRepository {
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn upsert_network_with_exposures(
+        &self,
+        input: &NetworkDesiredStateInput,
+        exposures: &[NetworkExposureInput],
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(UPSERT_NETWORK_SQL)
+            .bind(input.network_id.as_str())
+            .bind(input.node_id.as_ref().map(NodeId::as_str))
+            .bind(&input.display_name)
+            .bind(&input.network_class)
+            .bind(input.requested_unix_ms)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query(UPSERT_NETWORK_DESIRED_STATE_SQL)
+            .bind(input.network_id.as_str())
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(&input.desired_status)
+            .bind(&input.requested_by)
+            .bind(&input.updated_by)
+            .bind(input.requested_unix_ms)
+            .execute(&mut *tx)
+            .await?;
+
+        for exposure in exposures {
+            sqlx::query(crate::network_exposures::UPSERT_SQL)
+                .bind(exposure.network_id.as_str())
+                .bind(&exposure.service_name)
+                .bind(&exposure.protocol)
+                .bind(&exposure.listen_address)
+                .bind(exposure.listen_port)
+                .bind(&exposure.target_address)
+                .bind(exposure.target_port)
+                .bind(&exposure.exposure_policy)
+                .bind(exposure.updated_unix_ms)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| match &e {
+                    sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                        StoreError::NotFound {
+                            entity: "network",
+                            id: exposure.network_id.to_string(),
+                        }
+                    }
+                    _ => StoreError::from(e),
+                })?;
+        }
 
         tx.commit().await?;
         Ok(())

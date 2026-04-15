@@ -6,8 +6,8 @@ use chv_controlplane_service::{
 };
 use chv_controlplane_store::{
     connect_pool, run_migrations, AlertRepository, BootstrapTokenRepository,
-    ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NetworkExposureRepository,
-    NodeRepository, ObservedStateRepository, OperationRepository,
+    ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NodeRepository,
+    ObservedStateRepository, OperationRepository,
 };
 
 pub async fn build_service(
@@ -40,10 +40,13 @@ pub async fn build_service(
         .map_err(|e| {
             ControlPlaneServiceError::Internal(format!("failed to bind HTTP listener: {}", e))
         })?;
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(http_listener, router).await {
-            tracing::error!("HTTP admin server error: {}", e);
-        }
+    let (http_shutdown_tx, mut http_shutdown_rx) = tokio::sync::watch::channel(());
+    let http_join_handle = tokio::spawn(async move {
+        axum::serve(http_listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = http_shutdown_rx.changed().await;
+            })
+            .await
     });
 
     let node_repo = NodeRepository::new(pool.clone());
@@ -52,26 +55,27 @@ pub async fn build_service(
     let event_repo = EventRepository::new(pool.clone());
     let alert_repo = AlertRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
-    let network_exposure_repo = NetworkExposureRepository::new(pool.clone());
     let operation_repo = OperationRepository::new(pool.clone());
 
-    let ca_cert_path = config.tls.ca_cert_path.as_ref().ok_or_else(|| {
-        ControlPlaneServiceError::Internal("missing ca_cert_path in config".into())
-    })?;
-    let ca_key_path = config.tls.ca_key_path.as_ref().ok_or_else(|| {
-        ControlPlaneServiceError::Internal("missing ca_key_path in config".into())
-    })?;
+    let cert_issuer = if let (Some(ca_cert_path), Some(ca_key_path)) =
+        (&config.tls.ca_cert_path, &config.tls.ca_key_path)
+    {
+        let ca_cert_pem = tokio::fs::read_to_string(ca_cert_path).await.map_err(|e| {
+            ControlPlaneServiceError::Internal(format!("failed to read CA certificate: {}", e))
+        })?;
+        let ca_key_pem = tokio::fs::read_to_string(ca_key_path).await.map_err(|e| {
+            ControlPlaneServiceError::Internal(format!("failed to read CA key: {}", e))
+        })?;
 
-    let ca_cert_pem = tokio::fs::read_to_string(ca_cert_path).await.map_err(|e| {
-        ControlPlaneServiceError::Internal(format!("failed to read CA certificate: {}", e))
-    })?;
-    let ca_key_pem = tokio::fs::read_to_string(ca_key_path)
-        .await
-        .map_err(|e| ControlPlaneServiceError::Internal(format!("failed to read CA key: {}", e)))?;
-
-    let cert_issuer = std::sync::Arc::new(
-        chv_controlplane_service::CaBackedCertificateIssuer::new(&ca_cert_pem, &ca_key_pem)?,
-    );
+        Some(
+            std::sync::Arc::new(chv_controlplane_service::CaBackedCertificateIssuer::new(
+                &ca_cert_pem,
+                &ca_key_pem,
+            )?) as std::sync::Arc<dyn chv_controlplane_service::CertificateIssuer>,
+        )
+    } else {
+        None
+    };
 
     let enrollment_service =
         EnrollmentServiceImplementation::new(node_repo.clone(), token_repo.clone(), cert_issuer);
@@ -84,7 +88,6 @@ pub async fn build_service(
     let reconcile_service = ReconcileServiceImplementation::new(
         node_repo.clone(),
         desired_state_repo.clone(),
-        network_exposure_repo,
         event_repo.clone(),
     );
     let lifecycle_service = LifecycleServiceImplementation::new(
@@ -119,8 +122,13 @@ pub async fn build_service(
         tls_config = Some(server_tls);
     }
 
-    let runtime =
-        ControlPlaneRuntime::new(config.grpc_bind, config.runtime_dir.clone(), tls_config);
+    let runtime = ControlPlaneRuntime::new(
+        config.grpc_bind,
+        config.runtime_dir.clone(),
+        tls_config,
+        http_shutdown_tx,
+        http_join_handle,
+    );
 
     Ok(ControlPlaneService::new(
         runtime,

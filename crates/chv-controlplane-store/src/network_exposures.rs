@@ -6,7 +6,7 @@ DELETE FROM network_exposures
 WHERE network_id = $1 AND service_name = $2
 "#;
 
-const UPSERT_SQL: &str = r#"
+pub(crate) const UPSERT_SQL: &str = r#"
 INSERT INTO network_exposures (
     network_id, service_name, protocol, listen_address, listen_port,
     target_address, target_port, exposure_policy, updated_at

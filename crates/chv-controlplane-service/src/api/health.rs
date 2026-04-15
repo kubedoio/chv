@@ -17,13 +17,22 @@ pub async fn ready_handler(State(pool): State<Arc<StorePool>>) -> impl IntoRespo
     }
 }
 
-static PROMETHEUS: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+static PROMETHEUS: OnceLock<Result<metrics_exporter_prometheus::PrometheusHandle, String>> =
+    OnceLock::new();
 
 pub async fn metrics_handler() -> impl IntoResponse {
-    let handle = PROMETHEUS.get_or_init(|| {
+    let handle = match PROMETHEUS.get_or_init(|| {
         metrics_exporter_prometheus::PrometheusBuilder::new()
             .install_recorder()
-            .expect("failed to install prometheus recorder")
-    });
+            .map_err(|e| format!("{e}"))
+    }) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("metrics recorder error: {e}"),
+            );
+        }
+    };
     (StatusCode::OK, handle.render())
 }

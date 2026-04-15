@@ -292,7 +292,11 @@ impl TelemetryService for TelemetryServiceImplementation {
                 details: if request.details_json.is_empty() {
                     None
                 } else {
-                    Some(String::from_utf8_lossy(&request.details_json).to_string())
+                    Some(String::from_utf8(request.details_json).map_err(|_| {
+                        ControlPlaneServiceError::InvalidArgument(
+                            "details_json is not valid UTF-8".into(),
+                        )
+                    })?)
                 },
                 occurred_unix_ms: meta.request_unix_ms,
                 actor_id: None,
@@ -367,7 +371,13 @@ impl TelemetryService for TelemetryServiceImplementation {
                 details: if request.details_json.is_empty() {
                     None
                 } else {
-                    Some(String::from_utf8_lossy(&request.details_json).to_string())
+                    Some(
+                        String::from_utf8(request.details_json.clone()).map_err(|_| {
+                            ControlPlaneServiceError::InvalidArgument(
+                                "details_json is not valid UTF-8".into(),
+                            )
+                        })?,
+                    )
                 },
                 occurred_unix_ms: meta.request_unix_ms,
                 actor_id: None,

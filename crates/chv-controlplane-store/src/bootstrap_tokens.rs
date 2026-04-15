@@ -40,9 +40,6 @@ impl BootstrapTokenRepository {
                         return Ok(BootstrapTokenValidation::Expired);
                     }
                 }
-                if row.one_time_use && row.used_at.is_some() {
-                    return Ok(BootstrapTokenValidation::AlreadyUsed);
-                }
                 if row.one_time_use {
                     let result = sqlx::query(MARK_USED_SQL)
                         .bind(&token_hash)
@@ -70,6 +67,7 @@ struct BootstrapTokenRow {
     #[allow(dead_code)]
     token_hash: String,
     one_time_use: bool,
+    #[allow(dead_code)]
     used_at: Option<chrono::DateTime<chrono::Utc>>,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
