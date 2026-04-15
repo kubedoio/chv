@@ -1,97 +1,110 @@
 <script lang="ts">
-	import { invalidate } from '$app/navigation';
-	import { onMount } from 'svelte';
+	import { enhance } from '$app/forms';
 	import { Play, RotateCcw, Square } from 'lucide-svelte';
-	import { createAPIClient, getStoredToken } from '$lib/api/client';
+	import { PageShell, StateBanner, Badge } from '$lib/components/system';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import TaskReferenceCallout from '$lib/components/webui/TaskReferenceCallout.svelte';
 	import TaskTimelineItem from '$lib/components/webui/TaskTimelineItem.svelte';
 	import Button from '$lib/components/primitives/Button.svelte';
-	import SectionHeader from '$lib/components/shell/SectionHeader.svelte';
-	import StatePanel from '$lib/components/shell/StatePanel.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
-	import { toast } from '$lib/stores/toast';
-	import { runVmLifecycleAction, type VmLifecycleAction, type VmLifecycleActionResult } from '$lib/webui/vm-actions';
-	import type { PageData } from './$types';
+	import type { PageData, ActionData } from './$types';
+	import type { VmLifecycleAction, VmLifecycleActionResult } from '$lib/bff/types';
+	import { getTaskStatusMeta } from '$lib/webui/tasks';
+	import { mapRelatedTask } from '$lib/webui/task-helpers';
+	import type { ShellTone } from '$lib/shell/app-shell';
 
-	let { data }: { data: PageData } = $props();
+	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	const page = getPageDefinition('/vms');
 	const detail = $derived(data.detail);
-	let actionLoading = $state<VmLifecycleAction | null>(null);
-	let mutationResult = $state<VmLifecycleActionResult | null>(null);
+	let pendingAction = $state<VmLifecycleAction | null>(null);
+	let confirmingAction = $state<VmLifecycleAction | null>(null);
+	let actionInput = $state<HTMLInputElement | null>(null);
 
-	onMount(() => {
-		if (data.meta.clientRefreshRecommended && getStoredToken() && data.requestedVmId) {
-			invalidate(`webui:vm:${data.requestedVmId}`);
-		}
-	});
-
-	async function handleLifecycleAction(action: VmLifecycleAction) {
-		const token = getStoredToken();
-		if (!token || !detail.summary.vmId) {
-			toast.error('Session token unavailable for lifecycle action');
-			return;
-		}
-
-		const client = createAPIClient({ token });
-		actionLoading = action;
-
-		try {
-			const perform =
-				action === 'start'
-					? () => client.startVM(detail.summary.vmId)
-					: action === 'stop'
-						? () => client.stopVM(detail.summary.vmId)
-						: () => client.restartVM(detail.summary.vmId);
-
-				mutationResult = await runVmLifecycleAction({
-					vmId: data.requestedVmId,
-					vmName: detail.summary.name,
-					action,
-					perform,
-				listOperations: () => client.listOperations(),
-				now: new Date()
-			});
-
-				toast.success(mutationResult.summary);
-				await invalidate(`webui:vm:${data.requestedVmId}`);
-				await invalidate('webui:vms');
-				await invalidate('webui:tasks');
-				await invalidate('webui:overview');
-		} catch (error) {
-			toast.error(error instanceof Error ? error.message : `Failed to ${action} virtual machine`);
-		} finally {
-			actionLoading = null;
-		}
+	function toPowerStateTone(state: string): ShellTone {
+		const s = state.toLowerCase();
+		if (s === 'running') return 'healthy';
+		if (s === 'starting' || s === 'stopping') return 'warning';
+		if (s === 'rebooting' || s === 'deleting') return 'degraded';
+		if (s === 'failed' || s === 'error') return 'failed';
+		return 'unknown';
 	}
 
+	function toHealthTone(health: string): ShellTone {
+		const h = health.toLowerCase();
+		if (h === 'healthy') return 'healthy';
+		if (h === 'degraded') return 'degraded';
+		if (h === 'warning') return 'warning';
+		if (h === 'failed') return 'failed';
+		return 'unknown';
+	}
+
+	const mutationResult = $derived<VmLifecycleActionResult | null>(
+		form && typeof form === 'object' && 'accepted' in form && form.accepted === true
+			? {
+					accepted: true,
+					action: (form as unknown as { action: string }).action as VmLifecycleAction,
+					summary: (form as unknown as { summary: string }).summary,
+					taskId: (form as unknown as { task_id: string | undefined }).task_id ?? null,
+					taskLabel: (form as unknown as { task_id: string | undefined }).task_id
+						? getTaskStatusMeta('queued').label
+						: getTaskStatusMeta('failed').label,
+					taskTone: (form as unknown as { task_id: string | undefined }).task_id
+						? getTaskStatusMeta('queued').tone
+						: getTaskStatusMeta('failed').tone,
+					taskHref: (form as unknown as { task_id: string | undefined }).task_id
+						? `/tasks?query=${(form as unknown as { task_id: string }).task_id}`
+						: null
+				}
+			: null
+	);
+
 	function canStart() {
-		return !['running', 'starting', 'deleting'].includes(detail.summary.powerStateLabel.toLowerCase());
+		return !['running', 'starting', 'deleting'].includes(detail.summary.powerState.toLowerCase());
 	}
 
 	function canStop() {
-		return ['running', 'starting', 'rebooting'].includes(detail.summary.powerStateLabel.toLowerCase());
+		return ['running', 'starting', 'rebooting'].includes(detail.summary.powerState.toLowerCase())
+			&& detail.summary.powerState.toLowerCase() !== 'deleting';
 	}
 
 	function canRestart() {
-		return detail.summary.powerStateLabel.toLowerCase() === 'running';
+		return detail.summary.powerState.toLowerCase() === 'running'
+			&& detail.summary.powerState.toLowerCase() !== 'deleting';
+	}
+
+	function isDestructive(action: VmLifecycleAction): boolean {
+		return action === 'stop' || action === 'restart';
+	}
+
+	function handleActionClick(action: VmLifecycleAction) {
+		if (isDestructive(action)) {
+			confirmingAction = action;
+			pendingAction = null;
+		} else {
+			confirmingAction = null;
+			pendingAction = action;
+			submitAction(action);
+		}
+	}
+
+	function submitAction(action: VmLifecycleAction) {
+		confirmingAction = null;
+		if (actionInput) {
+			actionInput.value = action;
+		}
+		actionInput?.form?.requestSubmit();
+	}
+
+	function cancelConfirmation() {
+		confirmingAction = null;
+		pendingAction = null;
 	}
 </script>
 
-<div class="detail-page">
-	<SectionHeader {page} />
-
-	{#if data.meta.deferred}
-		<StatePanel
-			variant="loading"
-			title="Loading virtual machine detail"
-			description="This route waits for the client-authenticated pass before loading protected VM data."
-			hint="Summary, tabs, and lifecycle controls stay shell-first while the browser rehydrates."
-		/>
-	{:else if detail.state !== 'ready'}
-		<StatePanel
+<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
+	{#if detail.state !== 'ready'}
+		<StateBanner
 			variant={detail.state === 'error' ? 'error' : 'empty'}
 			title={detail.state === 'error' ? 'VM detail unavailable' : 'Virtual machine not found'}
 			description="The VM summary, configuration, and task context could not be assembled from the current control-plane responses."
@@ -100,29 +113,76 @@
 	{:else}
 		<article class="detail-page__hero">
 			<div>
-				<div class="detail-page__eyebrow">{detail.summary.nodeName}</div>
+				<div class="detail-page__eyebrow">{detail.summary.nodeId}</div>
 				<h1>{detail.summary.name}</h1>
-				<p>{detail.summary.ipAddress} · {detail.summary.consoleLabel}</p>
+				<p>VM ID: {detail.summary.vmId}</p>
 			</div>
 			<div class="detail-page__hero-side">
 				<div class="detail-page__hero-badges">
-					<StatusBadge label={detail.summary.powerStateLabel} tone={detail.summary.powerStateTone} />
-					<StatusBadge label={detail.summary.healthLabel} tone={detail.summary.healthTone} />
+					<Badge label={detail.summary.powerState} tone={toPowerStateTone(detail.summary.powerState)} />
+					<Badge label={detail.summary.health} tone={toHealthTone(detail.summary.health)} />
 				</div>
-				<div class="detail-page__action-row">
-					<Button variant="primary" size="sm" disabled={!canStart()} loading={actionLoading === 'start'} onclick={() => handleLifecycleAction('start')}>
+				<form
+					method="POST"
+					use:enhance={() => {
+						return async ({ update }) => {
+							pendingAction = null;
+							confirmingAction = null;
+							await update();
+						};
+					}}
+					class="detail-page__action-row"
+				>
+					<input type="hidden" name="vm_id" value={detail.summary.vmId} />
+					<input type="hidden" name="action" bind:this={actionInput} value="" />
+					<Button
+						variant="primary"
+						size="sm"
+						disabled={!canStart()}
+						loading={pendingAction === 'start'}
+						onclick={() => handleActionClick('start')}
+						type="button"
+					>
 						<Play size={14} />
 						Start
 					</Button>
-					<Button variant="secondary" size="sm" disabled={!canStop()} loading={actionLoading === 'stop'} onclick={() => handleLifecycleAction('stop')}>
+					<Button
+						variant="secondary"
+						size="sm"
+						disabled={!canStop()}
+						loading={pendingAction === 'stop'}
+						onclick={() => handleActionClick('stop')}
+						type="button"
+					>
 						<Square size={14} />
 						Stop
 					</Button>
-					<Button variant="secondary" size="sm" disabled={!canRestart()} loading={actionLoading === 'restart'} onclick={() => handleLifecycleAction('restart')}>
+					<Button
+						variant="secondary"
+						size="sm"
+						disabled={!canRestart()}
+						loading={pendingAction === 'restart'}
+						onclick={() => handleActionClick('restart')}
+						type="button"
+					>
 						<RotateCcw size={14} />
 						Restart
 					</Button>
-				</div>
+				</form>
+				{#if confirmingAction}
+					{@const action = confirmingAction}
+					<div class="detail-page__confirm-bar">
+						<span>
+							Are you sure you want to <strong>{confirmingAction}</strong> {detail.summary.name}?
+						</span>
+						<div class="detail-page__confirm-actions">
+							<Button variant="danger" size="sm" onclick={() => submitAction(action)}>
+								Confirm {action}
+							</Button>
+							<Button variant="ghost" size="sm" onclick={cancelConfirmation}>Cancel</Button>
+						</div>
+					</div>
+				{/if}
 			</div>
 		</article>
 
@@ -131,16 +191,22 @@
 		{/if}
 
 		<div class="detail-page__summary-grid">
-			{#each detail.summaryCards as card}
-				<article class="detail-page__summary-card">
-					<div class="detail-page__eyebrow">{card.label}</div>
-					<div class="detail-page__summary-value">{card.value}</div>
-					<p>{card.note}</p>
-					{#if card.tone}
-						<StatusBadge label={card.tone} tone={card.tone} />
-					{/if}
-				</article>
-			{/each}
+			<article class="detail-page__summary-card">
+				<div class="detail-page__eyebrow">CPU</div>
+				<div class="detail-page__summary-value">{detail.summary.cpu}</div>
+				<p>Allocated processors</p>
+			</article>
+			<article class="detail-page__summary-card">
+				<div class="detail-page__eyebrow">Memory</div>
+				<div class="detail-page__summary-value">{detail.summary.memory}</div>
+				<p>Allocated memory</p>
+			</article>
+			<article class="detail-page__summary-card">
+				<div class="detail-page__eyebrow">Power State</div>
+				<div class="detail-page__summary-value">{detail.summary.powerState}</div>
+				<p>Current power state</p>
+				<Badge label={detail.summary.powerState} tone={toPowerStateTone(detail.summary.powerState)} />
+			</article>
 		</div>
 
 		<DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
@@ -150,23 +216,12 @@
 				<article class="detail-page__panel">
 					<div class="detail-page__eyebrow">Alerts</div>
 					<h2>Current operator signals</h2>
-					{#if detail.alerts.length > 0}
-						<div class="detail-page__stack">
-							{#each detail.alerts as alert}
-								<div class="detail-page__notice-row">
-									<StatusBadge label="attention" tone="failed" />
-									<p>{alert}</p>
-								</div>
-							{/each}
-						</div>
-					{:else}
-						<StatePanel
-							variant="empty"
-							title="No VM alerts"
-							description="Lifecycle failures and guest-state issues tied to this VM appear here."
-							hint="Every mutation still emits a task even when the alert surface is quiet."
-						/>
-					{/if}
+					<StateBanner
+						variant="empty"
+						title="No VM alerts"
+						description="Lifecycle failures and guest-state issues tied to this VM appear here."
+						hint="Every mutation still emits a task even when the alert surface is quiet."
+					/>
 				</article>
 				<article class="detail-page__panel">
 					<div class="detail-page__eyebrow">Configuration</div>
@@ -186,52 +241,33 @@
 				<div class="detail-page__eyebrow">Console / Access</div>
 				<h2>Access surface</h2>
 				<div class="detail-page__kv-list">
-					<div class="detail-page__kv-row"><div>Console</div><div>{detail.summary.consoleLabel}</div></div>
-					<div class="detail-page__kv-row"><div>Guest IP</div><div>{detail.summary.ipAddress}</div></div>
-					<div class="detail-page__kv-row"><div>Node</div><div>{detail.summary.nodeName}</div></div>
+					<div class="detail-page__kv-row"><div>VM ID</div><div>{detail.summary.vmId}</div></div>
+					<div class="detail-page__kv-row"><div>Name</div><div>{detail.summary.name}</div></div>
+					<div class="detail-page__kv-row"><div>Node</div><div>{detail.summary.nodeId}</div></div>
 				</div>
 			</article>
 		{:else if detail.currentTab === 'volumes'}
-			<div class="detail-page__table-shell">
-				<table class="detail-page__table">
-					<thead><tr><th>Volume</th><th>Status</th><th>Size</th><th>Path</th></tr></thead>
-					<tbody>
-						{#each detail.storageItems as item}
-							<tr>
-								<td>{item.name}</td>
-								<td><StatusBadge label={item.statusLabel} tone={item.statusTone} /></td>
-								<td>{item.sizeLabel}</td>
-								<td>{item.path}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
+			<StateBanner
+				variant="empty"
+				title="Volume details not yet available"
+				description="The BFF does not yet expose volume details for this VM."
+				hint="This tab will populate once the volume endpoint is implemented."
+			/>
 		{:else if detail.currentTab === 'networks'}
-			<div class="detail-page__table-shell">
-				<table class="detail-page__table">
-					<thead><tr><th>Network</th><th>Status</th><th>Scope</th><th>CIDR</th><th>Gateway</th></tr></thead>
-					<tbody>
-						{#each detail.networkItems as item}
-							<tr>
-								<td>{item.name}</td>
-								<td><StatusBadge label={item.statusLabel} tone={item.statusTone} /></td>
-								<td>{item.scopeLabel}</td>
-								<td>{item.cidr}</td>
-								<td>{item.gateway}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
+			<StateBanner
+				variant="empty"
+				title="Network details not yet available"
+				description="The BFF does not yet expose network details for this VM."
+				hint="This tab will populate once the network endpoint is implemented."
+			/>
 		{:else if detail.currentTab === 'tasks'}
 			<div class="detail-page__stack">
 				{#if detail.recentTasks.length > 0}
 					{#each detail.recentTasks as task}
-						<TaskTimelineItem {task} compact />
+						<TaskTimelineItem task={mapRelatedTask(task, detail.summary.vmId, 'vm')} compact />
 					{/each}
 				{:else}
-					<StatePanel
+					<StateBanner
 						variant="empty"
 						title="No related VM tasks"
 						description="Start, stop, restart, and other VM actions will appear here once the control plane persists them."
@@ -240,26 +276,12 @@
 				{/if}
 			</div>
 		{:else if detail.currentTab === 'events'}
-			<div class="detail-page__stack">
-				{#if detail.events.length > 0}
-					{#each detail.events as event}
-						<article class="detail-page__event-card">
-							<div class="detail-page__event-topline">
-								<StatusBadge label={event.label} tone={event.tone} />
-								<span>{event.timestampLabel}</span>
-							</div>
-							<p>{event.message}</p>
-						</article>
-					{/each}
-				{:else}
-					<StatePanel
-						variant="empty"
-						title="No VM events"
-						description="Guest failures, lifecycle warnings, and event rollups scoped to this VM land here."
-						hint="Task history remains the primary audit surface after operator mutations."
-					/>
-				{/if}
-			</div>
+			<StateBanner
+				variant="empty"
+				title="Event history not yet available"
+				description="The BFF does not yet expose event history for this VM."
+				hint="This tab will populate once the events endpoint is implemented."
+			/>
 		{:else}
 			<article class="detail-page__panel">
 				<div class="detail-page__eyebrow">Configuration</div>
@@ -275,28 +297,15 @@
 			</article>
 		{/if}
 	{/if}
-</div>
+</PageShell>
 
 <style>
-	.detail-page {
-		display: grid;
-		gap: 1.2rem;
-	}
-
 	.detail-page__hero,
 	.detail-page__summary-card,
-	.detail-page__panel,
-	.detail-page__table-shell,
-	.detail-page__event-card {
+	.detail-page__panel {
 		border: 1px solid var(--shell-line);
 		border-radius: 1.15rem;
 		background: var(--shell-surface);
-	}
-
-	.detail-page__hero,
-	.detail-page__summary-card,
-	.detail-page__panel,
-	.detail-page__event-card {
 		padding: 1rem;
 	}
 
@@ -340,8 +349,7 @@
 	}
 
 	.detail-page__hero p,
-	.detail-page__summary-card p,
-	.detail-page__event-card p {
+	.detail-page__summary-card p {
 		margin-top: 0.35rem;
 		color: var(--shell-text-secondary);
 		line-height: 1.5;
@@ -370,20 +378,6 @@
 		gap: 0.8rem;
 	}
 
-	.detail-page__notice-row {
-		display: grid;
-		grid-template-columns: auto 1fr;
-		gap: 0.7rem;
-		padding: 0.85rem;
-		border-radius: 0.9rem;
-		background: var(--shell-surface-muted);
-		border: 1px solid var(--shell-line);
-	}
-
-	.detail-page__notice-row p {
-		margin: 0;
-	}
-
 	.detail-page__kv-list {
 		display: grid;
 		gap: 0.65rem;
@@ -403,42 +397,22 @@
 		color: var(--shell-text-muted);
 	}
 
-	.detail-page__table-shell {
-		overflow-x: auto;
-	}
-
-	.detail-page__table {
-		width: 100%;
-		min-width: 780px;
-		border-collapse: collapse;
-	}
-
-	.detail-page__table th,
-	.detail-page__table td {
-		padding: 0.95rem 1rem;
-		border-bottom: 1px solid var(--shell-line);
-		font-size: 0.92rem;
-		color: var(--shell-text-secondary);
-		text-align: left;
-	}
-
-	.detail-page__table th {
-		font-size: 0.74rem;
-		font-weight: 700;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-		background: rgba(247, 242, 234, 0.75);
-	}
-
-	.detail-page__event-topline {
+	.detail-page__confirm-bar {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.7rem;
-		font-size: 0.82rem;
-		color: var(--shell-text-muted);
+		gap: 0.75rem;
+		padding: 0.85rem 1rem;
+		border: 1px solid var(--shell-line);
+		border-radius: 1rem;
+		background: var(--shell-surface-muted);
+	}
+
+	.detail-page__confirm-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
 	}
 
 	@media (max-width: 1100px) {

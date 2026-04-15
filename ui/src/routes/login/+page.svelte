@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
+  import { syncAuthCookieFromLocalStorage } from '$lib/bff/auth-cookie';
   import { toast } from '$lib/stores/toast';
 
   let username = '';
@@ -40,8 +41,9 @@
 
       const data = await response.json();
       
-      // Store token
+      // Store token and sync to cookie for server-side loads
       client.setToken(data.token);
+      syncAuthCookieFromLocalStorage();
       
       toast.success(`Welcome, ${data.user.username}!`);
       await goto('/');

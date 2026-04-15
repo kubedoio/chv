@@ -1,0 +1,23 @@
+# CHV Node Agent Configuration
+# Place this file at /etc/chv/agent.toml
+
+socket_path = "/run/chv/agent/api.sock"
+runtime_dir = "/run/chv/agent"
+log_level = "info"
+control_plane_addr = "https://127.0.0.1:8443"
+stord_socket = "/run/chv/stord/api.sock"
+nwd_socket = "/run/chv/nwd/api.sock"
+chv_binary_path = "/usr/bin/cloud-hypervisor"
+stord_binary_path = "/usr/local/bin/chv-stord"
+nwd_binary_path = "/usr/local/bin/chv-nwd"
+cache_path = "/var/lib/chv/cache/agent-cache.json"
+node_id = ""                  # assigned automatically during enrollment
+metrics_bind = "127.0.0.1:9901"
+
+# One-time bootstrap token for initial enrollment
+bootstrap_token_path = "/etc/chv/bootstrap.token"
+
+# Steady-state TLS paths (populated by the agent after enrollment)
+tls_cert_path = "/run/chv/agent/agent.crt"
+tls_key_path = "/run/chv/agent/agent.key"
+ca_cert_path = "/etc/chv/certs/ca.crt"

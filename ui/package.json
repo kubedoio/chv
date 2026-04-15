@@ -13,7 +13,7 @@
   "devDependencies": {
     "@sveltejs/adapter-node": "^5.2.9",
     "@sveltejs/adapter-static": "^3.0.10",
-    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/kit": "^2.56.1",
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "@testing-library/svelte": "^5.2.0",
     "autoprefixer": "^10.4.20",

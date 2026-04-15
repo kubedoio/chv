@@ -1,146 +1,150 @@
 <script lang="ts">
-	import { invalidate } from '$app/navigation';
-	import { onMount } from 'svelte';
-	import TaskTimelineItem from '$lib/components/webui/TaskTimelineItem.svelte';
-	import SectionHeader from '$lib/components/shell/SectionHeader.svelte';
-	import StatePanel from '$lib/components/shell/StatePanel.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import { getStoredToken } from '$lib/api/client';
-	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
+	import { getPageDefinition } from '$lib/shell/app-shell';
+	import { PageShell, StateBanner, Badge } from '$lib/components/system';
+	import TaskTimelineItem from '$lib/components/webui/TaskTimelineItem.svelte';
+	import type { TaskTimelineItemModel } from '$lib/webui/tasks';
+	import type { RecentTask, HealthTile, CapacityTile } from '$lib/bff/types';
+	import { normalizeTone, formatDateTimeLabel, formatDurationLabel } from '$lib/webui/formatters';
+	import { mapRecentTask } from '$lib/webui/task-helpers';
 
 	let { data }: { data: PageData } = $props();
 
 	const page = getPageDefinition('/');
-	const overview = $derived(data.overview);
 
-	onMount(() => {
-		if (data.meta.clientRefreshRecommended && getStoredToken()) {
-			invalidate('webui:overview');
-		}
-	});
+	const overview = $derived(data.overview);
+	const isEmpty = $derived(
+		!!overview &&
+		overview.health_tiles.length === 0 &&
+		overview.capacity_tiles.length === 0 &&
+		overview.recent_tasks.length === 0
+	);
+
+	type HealthTileVM = HealthTile & { detail?: string };
+	type CapacityTileVM = CapacityTile & { detail?: string; status?: string };
 </script>
 
-<div class="overview-page">
-	<SectionHeader {page} />
-
-	{#if data.meta.deferred}
-		<StatePanel
-			variant="loading"
-			title="Loading fleet overview"
-			description="This route waits for the client-authenticated pass before shaping protected dashboard data."
-			hint="Overview stays shell-first while the browser rehydrates with the stored session token."
-		/>
-	{:else}
-		{#if data.meta.partial}
-			<article class="overview-page__notice">
-				<div class="overview-page__notice-label">Partial dashboard data</div>
-				<p>Some overview queries did not return, so the page is showing the best available rollup.</p>
-			</article>
-		{/if}
-
-	{#if overview.state === 'error'}
-		<StatePanel
-			variant="error"
-			title="Overview data is unavailable"
-			description="The dashboard could not assemble its browser-safe view model from the current API surface."
-			hint="The shell stays usable while the page waits for a successful refresh."
-		/>
-	{:else if overview.state === 'empty'}
-		<StatePanel
-			variant="empty"
-			title="No fleet data yet"
-			description="Health, capacity, alerts, and task summaries will appear here once the control plane has inventory to shape."
-			hint="This page is ready for live BFF data, but the environment does not expose any infrastructure records yet."
-		/>
-	{:else}
-		<section class="overview-page__grid" aria-label="Overview health">
-			{#each overview.healthTiles as tile}
-				<article class="overview-page__metric-card">
-					<div class="overview-page__metric-topline">
-						<div class="overview-page__metric-label">{tile.label}</div>
-						<StatusBadge label={tile.status} tone={tile.status} />
-					</div>
-					<div class="overview-page__metric-value">{tile.value}</div>
-					<p>{tile.detail}</p>
-				</article>
-			{/each}
-		</section>
-
-		<section class="overview-page__grid overview-page__grid--capacity" aria-label="Overview capacity">
-			{#each overview.capacityTiles as tile}
-				<article class="overview-page__capacity-card">
-					<div class="overview-page__metric-topline">
-						<div class="overview-page__metric-label">{tile.label}</div>
-						<StatusBadge label={tile.status} tone={tile.status} />
-					</div>
-					<div class="overview-page__capacity-values">
-						<div>
-							<div class="overview-page__capacity-number">{tile.used}</div>
-							<div class="overview-page__capacity-caption">Used</div>
+<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
+	<div class="overview-page">
+		{#if data.meta.error}
+			<StateBanner
+				variant="error"
+				title="Overview data is unavailable"
+				description={data.meta.message ??
+					'The dashboard could not assemble its browser-safe view model from the current API surface.'}
+				hint="The shell stays usable while the page waits for a successful refresh."
+			/>
+		{:else if !overview}
+			<StateBanner
+				variant="loading"
+				title="Loading fleet overview"
+				description="This route waits for the server-side pass before shaping protected dashboard data."
+				hint="Overview stays shell-first while the server rehydrates with the latest session state."
+			/>
+		{:else if isEmpty}
+			<StateBanner
+				variant="empty"
+				title="No fleet data yet"
+				description="Health, capacity, alerts, and task summaries will appear here once the control plane has inventory to shape."
+				hint="This page is ready for live BFF data, but the environment does not expose any infrastructure records yet."
+			/>
+		{:else}
+			<section class="overview-page__grid" aria-label="Overview health">
+				{#each overview.health_tiles as tile}
+					<article class="overview-page__metric-card">
+						<div class="overview-page__metric-topline">
+							<div class="overview-page__metric-label">{tile.label}</div>
+							<Badge label={tile.status} tone={normalizeTone(tile.status)} />
 						</div>
-						<div class="overview-page__capacity-divider" aria-hidden="true"></div>
-						<div>
-							<div class="overview-page__capacity-number">{tile.total}</div>
-							<div class="overview-page__capacity-caption">Total</div>
-						</div>
-					</div>
-					<p>{tile.detail}</p>
-				</article>
-			{/each}
-		</section>
+						<div class="overview-page__metric-value">{tile.value}</div>
+						{#if (tile as HealthTileVM).detail}
+							<p>{(tile as HealthTileVM).detail}</p>
+						{/if}
+					</article>
+				{/each}
+			</section>
 
-		<section class="overview-page__detail-grid">
-			<article class="overview-page__panel">
-				<div class="overview-page__panel-label">Active alerts</div>
-				<h2>Operator-visible degradations and failures</h2>
-				{#if overview.activeAlerts.length > 0}
-					<div class="overview-page__alert-list">
-						{#each overview.activeAlerts as alert}
-							<div class="overview-page__alert-item">
-								<StatusBadge label="attention" tone="failed" />
-								<p>{alert}</p>
+			<section class="overview-page__grid overview-page__grid--capacity" aria-label="Overview capacity">
+				{#each overview.capacity_tiles as tile}
+					<article class="overview-page__capacity-card">
+						<div class="overview-page__metric-topline">
+							<div class="overview-page__metric-label">{tile.label}</div>
+							{#if (tile as CapacityTileVM).status}
+								<Badge
+									label={(tile as CapacityTileVM).status!}
+									tone={normalizeTone((tile as CapacityTileVM).status!)}
+								/>
+							{/if}
+						</div>
+						<div class="overview-page__capacity-values">
+							<div>
+								<div class="overview-page__capacity-number">{tile.used}</div>
+								<div class="overview-page__capacity-caption">Used</div>
 							</div>
-						{/each}
-					</div>
-				{:else}
-					<StatePanel
-						variant="empty"
-						title="No active alerts"
-						description="Recent failures, degraded services, and important warnings will land here."
-						hint="Overview keeps alerting separate from the task feed so operators can scan incidents first."
-					/>
-				{/if}
-			</article>
+							<div class="overview-page__capacity-divider" aria-hidden="true"></div>
+							<div>
+								<div class="overview-page__capacity-number">{tile.total}</div>
+								<div class="overview-page__capacity-caption">Total</div>
+							</div>
+						</div>
+						{#if (tile as CapacityTileVM).detail}
+							<p>{(tile as CapacityTileVM).detail}</p>
+						{/if}
+					</article>
+				{/each}
+			</section>
 
-			<article class="overview-page__panel">
-				<div class="overview-page__panel-header">
-					<div>
-						<div class="overview-page__panel-label">Recent tasks</div>
-						<h2>Accepted, running, and completed work</h2>
-					</div>
-					<a class="overview-page__panel-link" href="/tasks">Open task center</a>
-				</div>
+			<section class="overview-page__detail-grid">
+				<article class="overview-page__panel">
+					<div class="overview-page__panel-label">Active alerts</div>
+					<h2>Operator-visible degradations and failures</h2>
+					{#if overview.active_alerts.length > 0}
+						<div class="overview-page__alert-list">
+							{#each overview.active_alerts as alert}
+								<div class="overview-page__alert-item">
+									<Badge label="attention" tone="failed" />
+									<p>{alert}</p>
+								</div>
+							{/each}
+						</div>
+					{:else}
+						<StateBanner
+							variant="empty"
+							title="No active alerts"
+							description="Recent failures, degraded services, and important warnings will land here."
+							hint="Overview keeps alerting separate from the task feed so operators can scan incidents first."
+						/>
+					{/if}
+				</article>
 
-				{#if overview.recentTasks.length > 0}
-					<div class="overview-page__task-list">
-						{#each overview.recentTasks as task}
-							<TaskTimelineItem {task} compact />
-						{/each}
+				<article class="overview-page__panel">
+					<div class="overview-page__panel-header">
+						<div>
+							<div class="overview-page__panel-label">Recent tasks</div>
+							<h2>Accepted, running, and completed work</h2>
+						</div>
+						<a class="overview-page__panel-link" href="/tasks">Open task center</a>
 					</div>
-				{:else}
-					<StatePanel
-						variant="empty"
-						title="No recent tasks"
-						description="Accepted work, active operations, and completed runs will appear here once task records exist."
-						hint="The overview task strip is intentionally short so it stays scannable."
-					/>
-				{/if}
-			</article>
-		</section>
-	{/if}
-	{/if}
-</div>
+
+					{#if overview.recent_tasks.length > 0}
+						<div class="overview-page__task-list">
+							{#each overview.recent_tasks as task}
+								<TaskTimelineItem task={mapRecentTask(task)} compact />
+							{/each}
+						</div>
+					{:else}
+						<StateBanner
+							variant="empty"
+							title="No recent tasks"
+							description="Accepted work, active operations, and completed runs will appear here once task records exist."
+							hint="The overview task strip is intentionally short so it stays scannable."
+						/>
+					{/if}
+				</article>
+			</section>
+		{/if}
+	</div>
+</PageShell>
 
 <style>
 	.overview-page {

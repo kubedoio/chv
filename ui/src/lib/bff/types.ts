@@ -1,0 +1,189 @@
+export type PageMeta = {
+	page: number;
+	page_size: number;
+	total_items: number;
+};
+
+export type FilterMeta = {
+	applied: Record<string, string>;
+};
+
+export type HealthTile = {
+	key: string;
+	label: string;
+	status: string;
+	value: string;
+};
+
+export type CapacityTile = {
+	key: string;
+	label: string;
+	used: string;
+	total: string;
+};
+
+export type RecentTask = {
+	task_id: string;
+	status: string;
+	summary: string;
+	resource_kind: string;
+	resource_id: string;
+	operation: string;
+	started_unix_ms: number;
+};
+
+export type OverviewResponse = {
+	health_tiles: HealthTile[];
+	capacity_tiles: CapacityTile[];
+	recent_tasks: RecentTask[];
+	active_alerts: string[];
+};
+
+export type ListNodesRequest = {
+	page: number;
+	page_size: number;
+	filters: Record<string, string>;
+};
+
+export type NodeListItem = {
+	node_id: string;
+	name: string;
+	cluster: string;
+	state: string;
+	health: string;
+	cpu: string;
+	memory: string;
+	storage: string;
+	network: string;
+	version: string;
+	maintenance: boolean;
+};
+
+export type ListNodesResponse = {
+	items: NodeListItem[];
+	page: PageMeta;
+	filters: FilterMeta;
+};
+
+export type GetNodeRequest = {
+	node_id: string;
+};
+
+export type RelatedTask = {
+	task_id: string;
+	status: string;
+	summary: string;
+	operation: string;
+	started_unix_ms: number;
+};
+
+export type NodeSummary = {
+	node_id: string;
+	name: string;
+	cluster: string;
+	state: string;
+	health: string;
+	version: string;
+	cpu: string;
+	memory: string;
+	storage: string;
+	network: string;
+	recent_tasks: RelatedTask[];
+};
+
+export type GetNodeResponse = {
+	summary: NodeSummary;
+};
+
+export type ListVmsRequest = {
+	page: number;
+	page_size: number;
+	filters: Record<string, string>;
+};
+
+export type VmListItem = {
+	vm_id: string;
+	name: string;
+	node_id: string;
+	power_state: string;
+	health: string;
+	cpu: string;
+	memory: string;
+	volume_count: number;
+	nic_count: number;
+	last_task: string;
+};
+
+export type ListVmsResponse = {
+	items: VmListItem[];
+	page: PageMeta;
+	filters: FilterMeta;
+};
+
+export type GetVmRequest = {
+	vm_id: string;
+};
+
+export type VmSummary = {
+	vm_id: string;
+	name: string;
+	node_id: string;
+	power_state: string;
+	health: string;
+	cpu: string;
+	memory: string;
+	recent_tasks: RelatedTask[];
+};
+
+export type GetVmResponse = {
+	summary: VmSummary;
+};
+
+export type MutateVmRequest = {
+	vm_id: string;
+	action: string;
+	force: boolean;
+};
+
+export type MutateVmResponse = {
+	accepted: boolean;
+	task_id: string;
+	vm_id: string;
+	summary: string;
+};
+
+export type ListTasksRequest = {
+	page: number;
+	page_size: number;
+	filters: Record<string, string>;
+};
+
+export type TaskListItem = {
+	task_id: string;
+	status: string;
+	operation: string;
+	resource_kind: string;
+	resource_id: string;
+	actor: string;
+	started_unix_ms: number;
+	finished_unix_ms: number;
+};
+
+export type ListTasksResponse = {
+	items: TaskListItem[];
+	page: PageMeta;
+	filters: FilterMeta;
+};
+
+// View-model types used by the UI
+export type VmLifecycleAction = 'start' | 'stop' | 'restart';
+
+export type VmLifecycleActionResult = {
+	accepted: boolean;
+	action: VmLifecycleAction;
+	summary: string;
+	taskId: string | null;
+	taskLabel: string;
+	taskTone: 'healthy' | 'warning' | 'degraded' | 'failed' | 'unknown';
+	taskHref: string | null;
+};

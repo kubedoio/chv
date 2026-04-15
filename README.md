@@ -1,57 +1,90 @@
 # CHV
 
-CHV is a Cloud Hypervisor management repository with a SvelteKit UI and an active Rust backend/control-plane direction.
+CHV is a Linux-first, cloud-image-first virtualization platform for sovereign private cloud and edge cloud environments. It provides API-driven VM lifecycle management built on [Cloud Hypervisor](https://www.cloudhypervisor.org/).
 
-## Repository Direction
+## Architecture
 
-- Active backend/control-plane language: Rust
-- Active implementation paths: `/Cargo.toml`, `/cmd`, `/crates`, `/gen/rust`
-- Authoritative contracts: `/proto`
-- Authoritative architecture and component specs: `/docs/specs`
-- Rust implementation guidance: `/docs/chv-llm-handoff-pack`
+- **Backend / Control Plane**: Rust (active)
+- **Frontend**: SvelteKit Web UI
+- **Contracts**: gRPC/protobuf
 
-If you are starting new backend or control-plane work, start from the Rust workspace, proto contracts, and tracked spec packs instead.
+## Repository Structure
 
-## Active Paths
-
-### Rust workspace
-
-- `/cmd/chv-agent`
-- `/cmd/chv-stord`
-- `/cmd/chv-nwd`
-- `/crates`
-- `/gen/rust`
-
-### Specs and contracts
-
-- `/proto/controlplane/control-plane-node.proto`
-- `/proto/node/chv-stord-api.proto`
-- `/proto/node/chv-nwd-api.proto`
-- `/docs/specs/adr`
-- `/docs/specs/component`
-- `/docs/specs/ops`
-- `/docs/specs/proto`
+```
+.
+├── cmd/                    # Rust binaries
+│   ├── chv-agent/          # Node agent (VM lifecycle, CHV runtime)
+│   ├── chv-controlplane/   # Control plane (orchestration, node mgmt)
+│   ├── chv-nwd/            # Network daemon
+│   └── chv-stord/          # Storage daemon
+├── crates/                 # Rust library crates
+│   ├── chv-common/
+│   ├── chv-config/
+│   ├── chv-controlplane-*
+│   ├── chv-agent-*
+│   ├── chv-nwd-core/
+│   ├── chv-stord-*
+│   ├── chv-errors/
+│   └── chv-observability/
+├── gen/rust/               # Generated Rust code from proto contracts
+├── proto/                  # Authoritative gRPC/protobuf contracts
+│   ├── controlplane/
+│   ├── node/
+│   └── webui/
+├── ui/                     # SvelteKit Web UI
+│   └── src/
+│       ├── routes/         # Page routes
+│       └── lib/            # Components, stores, API clients
+└── docs/                   # Specs, ADRs, and design docs
+    ├── specs/
+    └── webui-spec-pack/
+```
 
 ## Development
 
-Build the active backend workspace:
+### Prerequisites
+
+- [Rust](https://rustup.rs/)
+- [Node.js + npm](https://nodejs.org/) (for the Web UI)
+
+### Build the Rust workspace
 
 ```bash
 cargo build --workspace
 ```
 
-Run the active backend test suite:
+### Run Rust tests
 
 ```bash
 cargo test --workspace
 ```
 
-Build the Web UI:
+### Build the Web UI
 
 ```bash
-cd ui && npm run build
+cd ui && npm install && npm run build
 ```
 
-## Direction Reference
+### Run the Web UI in development mode
 
-See `/REPOSITORY_DIRECTION.md` for the short repository-direction statement intended for both humans and LLM-guided implementation.
+```bash
+cd ui && npm run dev
+```
+
+## Key Documentation
+
+- **Deployment Guide**: [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) — how to deploy CHV on a combined control-plane + hypervisor host
+- **Repository Direction**: [`REPOSITORY_DIRECTION.md`](./REPOSITORY_DIRECTION.md)
+- **Design System**: [`DESIGN.md`](./DESIGN.md)
+- **Architecture Decision Records**: [`docs/specs/adr/`](./docs/specs/adr)
+- **Component Specs**: [`docs/specs/component/`](./docs/specs/component)
+- **WebUI Spec Pack**: [`docs/webui-spec-pack/`](./docs/webui-spec-pack)
+- **Changelog**: [`CHANGELOG.md`](./CHANGELOG.md)
+
+## Version
+
+Current version: `0.0.0.2` (see [`VERSION`](./VERSION))
+
+## Direction
+
+> Rust is the active backend and control-plane language for CHV. New backend work belongs in the Rust workspace (`/cmd`, `/crates`, `/gen/rust`), driven by the proto contracts in `/proto` and the specs in `/docs/specs`.

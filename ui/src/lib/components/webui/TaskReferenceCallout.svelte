@@ -1,6 +1,6 @@
 <script lang="ts">
 	import TaskStatusBadge from '$lib/components/webui/TaskStatusBadge.svelte';
-	import type { VmLifecycleActionResult } from '$lib/webui/vm-actions';
+	import type { VmLifecycleActionResult } from '$lib/bff/types';
 
 	interface Props {
 		result: VmLifecycleActionResult;

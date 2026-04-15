@@ -1,5 +1,24 @@
-import type { Event, Operation } from '$lib/api/types';
 import type { ShellTone } from '$lib/shell/app-shell';
+
+interface Operation {
+	id: string;
+	resource_type: string;
+	resource_id: string;
+	operation_type: string;
+	state: string;
+	created_at: string;
+}
+
+interface Event {
+	id: string;
+	timestamp: string;
+	operation: string;
+	status: 'pending' | 'success' | 'failed';
+	resource: string;
+	resource_id?: string;
+	message?: string;
+	details?: Record<string, unknown>;
+}
 
 export type TaskStatusKey =
 	| 'queued'
@@ -222,9 +241,13 @@ function mapOperationToTask(
 	const finishedAt = getFinishedTimestamp(statusMeta.key, latestEvent);
 	const operationLabel = titleize(operation.operation_type);
 	const resourceKind = normalizeResourceKind(operation.resource_type);
+	const detailsReason =
+		typeof latestEvent?.details === 'object' && latestEvent?.details !== null
+			? (latestEvent.details.reason as string | undefined)
+			: undefined;
 	const failureReason =
 		statusMeta.key === 'failed'
-			? latestEvent?.message ?? latestEvent?.details?.reason ?? `Last ${operation.operation_type} attempt failed`
+			? latestEvent?.message ?? detailsReason ?? `Last ${operation.operation_type} attempt failed`
 			: undefined;
 
 	return {

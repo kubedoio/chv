@@ -1,0 +1,26 @@
+# CHV Control Plane Configuration
+# Place this file at /etc/chv/controlplane.toml
+
+grpc_bind = "127.0.0.1:8443"
+http_bind = "127.0.0.1:8080"
+log_level = "info"
+runtime_dir = "/run/chv/controlplane"
+
+[database]
+url = "postgres://chv:change-me-strong-password@127.0.0.1:5432/chv_controlplane"
+migrations_dir = "/usr/local/share/chv/migrations"
+max_connections = 16
+min_connections = 1
+acquire_timeout_secs = 5
+idle_timeout_secs = 300
+max_lifetime_secs = 1800
+
+[tls]
+# CA certificate and key used to issue node certificates during enrollment
+ca_cert_path = "/etc/chv/certs/ca.crt"
+ca_key_path = "/etc/chv/certs/ca.key"
+
+# gRPC server TLS (recommended even on loopback for production)
+server_cert_path = "/etc/chv/certs/server.crt"
+server_key_path = "/etc/chv/certs/server.key"
+client_ca_path = "/etc/chv/certs/ca.crt"

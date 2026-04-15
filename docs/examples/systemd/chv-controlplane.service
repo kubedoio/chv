@@ -1,0 +1,25 @@
+[Unit]
+Description=CHV Control Plane
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=chv
+Group=chv
+ExecStart=/usr/local/bin/chv-controlplane /etc/chv/controlplane.toml
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=chv/controlplane
+StateDirectory=chv
+LogsDirectory=chv
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/chv/controlplane /var/lib/chv
+ReadOnlyPaths=/etc/chv /usr/local/share/chv
+
+[Install]
+WantedBy=multi-user.target

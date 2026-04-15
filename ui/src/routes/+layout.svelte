@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import { createAPIClient, getStoredToken } from '$lib/api/client';
+	import { getStoredToken } from '$lib/api/client';
+	import { syncAuthCookieFromLocalStorage } from '$lib/bff/auth-cookie';
 	import KeyboardShortcutsHelp from '$lib/components/KeyboardShortcutsHelp.svelte';
 	import QuickActions from '$lib/components/QuickActions.svelte';
 	import SearchModal from '$lib/components/SearchModal.svelte';
@@ -39,6 +40,7 @@
 
 	onMount(() => {
 		const token = getStoredToken();
+		syncAuthCookieFromLocalStorage();
 
 		if (!isPublicRoute && !getStoredToken()) {
 			goto('/login');
@@ -55,36 +57,11 @@
 			)
 		);
 
-		if (token) {
-			loadSearchIndex(token);
-		}
-
 		return () => {
 			cleanupKeyboard?.();
 			unregisterGlobals();
 		};
 	});
-
-	async function loadSearchIndex(token: string) {
-		try {
-			const client = createAPIClient({ token });
-			const [vms, images, networks, storagePools] = await Promise.all([
-				client.listVMs().catch(() => []),
-				client.listImages().catch(() => []),
-				client.listNetworks().catch(() => []),
-				client.listStoragePools().catch(() => [])
-			]);
-
-			buildSearchIndex({
-				vms: vms ?? [],
-				images: images ?? [],
-				networks: networks ?? [],
-				storagePools: storagePools ?? []
-			});
-		} catch {
-			buildSearchIndex({});
-		}
-	}
 </script>
 
 <ToastContainer />
