@@ -19,9 +19,18 @@ async fn test_bootstrap_token_validation() {
         .await
         .unwrap();
 
-    assert_eq!(repo.validate_and_consume("123").await.unwrap(), BootstrapTokenValidation::Valid);
-    assert_eq!(repo.validate_and_consume("123").await.unwrap(), BootstrapTokenValidation::AlreadyUsed);
-    assert_eq!(repo.validate_and_consume("999").await.unwrap(), BootstrapTokenValidation::Invalid);
+    assert_eq!(
+        repo.validate_and_consume("123").await.unwrap(),
+        BootstrapTokenValidation::Valid
+    );
+    assert_eq!(
+        repo.validate_and_consume("123").await.unwrap(),
+        BootstrapTokenValidation::AlreadyUsed
+    );
+    assert_eq!(
+        repo.validate_and_consume("999").await.unwrap(),
+        BootstrapTokenValidation::Invalid
+    );
 }
 
 #[tokio::test]
@@ -37,7 +46,10 @@ async fn test_expired_bootstrap_token() {
         .await
         .unwrap();
 
-    assert_eq!(repo.validate_and_consume("123").await.unwrap(), BootstrapTokenValidation::Expired);
+    assert_eq!(
+        repo.validate_and_consume("123").await.unwrap(),
+        BootstrapTokenValidation::Expired
+    );
 }
 
 #[tokio::test]
@@ -53,8 +65,14 @@ async fn test_reusable_bootstrap_token() {
         .await
         .unwrap();
 
-    assert_eq!(repo.validate_and_consume("123").await.unwrap(), BootstrapTokenValidation::Valid);
-    assert_eq!(repo.validate_and_consume("123").await.unwrap(), BootstrapTokenValidation::Valid);
+    assert_eq!(
+        repo.validate_and_consume("123").await.unwrap(),
+        BootstrapTokenValidation::Valid
+    );
+    assert_eq!(
+        repo.validate_and_consume("123").await.unwrap(),
+        BootstrapTokenValidation::Valid
+    );
 }
 
 #[tokio::test]
@@ -246,17 +264,20 @@ async fn test_network_exposure_upsert_and_fk() {
     let network_id = ResourceId::new("net-1").unwrap();
 
     // Create network base row via desired repo
-    desired_repo.upsert_network(&NetworkDesiredStateInput {
-        network_id: network_id.clone(),
-        node_id: None,
-        display_name: "net-1".into(),
-        network_class: Some("bridge".into()),
-        desired_generation: Generation::new(1),
-        desired_status: "active".into(),
-        requested_by: None,
-        updated_by: None,
-        requested_unix_ms: 1000,
-    }).await.unwrap();
+    desired_repo
+        .upsert_network(&NetworkDesiredStateInput {
+            network_id: network_id.clone(),
+            node_id: None,
+            display_name: "net-1".into(),
+            network_class: Some("bridge".into()),
+            desired_generation: Generation::new(1),
+            desired_status: "active".into(),
+            requested_by: None,
+            updated_by: None,
+            requested_unix_ms: 1000,
+        })
+        .await
+        .unwrap();
 
     // Upsert exposure
     repo.upsert(&NetworkExposureInput {
@@ -269,21 +290,25 @@ async fn test_network_exposure_upsert_and_fk() {
         target_port: Some(8080),
         exposure_policy: None,
         updated_unix_ms: 1000,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     // FK violation for missing network
     let missing = ResourceId::new("net-missing").unwrap();
-    let result = repo.upsert(&NetworkExposureInput {
-        network_id: missing,
-        service_name: "web".into(),
-        protocol: "tcp".into(),
-        listen_address: None,
-        listen_port: None,
-        target_address: None,
-        target_port: None,
-        exposure_policy: None,
-        updated_unix_ms: 1000,
-    }).await;
+    let result = repo
+        .upsert(&NetworkExposureInput {
+            network_id: missing,
+            service_name: "web".into(),
+            protocol: "tcp".into(),
+            listen_address: None,
+            listen_port: None,
+            target_address: None,
+            target_port: None,
+            exposure_policy: None,
+            updated_unix_ms: 1000,
+        })
+        .await;
 
     match result {
         Err(StoreError::NotFound { entity, .. }) => assert_eq!(entity, "network"),

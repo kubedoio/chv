@@ -17,8 +17,8 @@ pub use db::{
 pub use desired_state::{
     DesiredStateRepository, NetworkDesiredStateInput, VmDesiredStateInput, VolumeDesiredStateInput,
 };
-pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
 pub use events::{EventAppendInput, EventRepository};
+pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
 pub use nodes::{
     NodeBootstrapResultInput, NodeInventoryInput, NodeRepository, NodeStateInput, NodeUpsertInput,
     NodeVersionInput,

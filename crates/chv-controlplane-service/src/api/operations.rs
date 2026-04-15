@@ -15,7 +15,10 @@ pub async fn list_operations(State(pool): State<Arc<StorePool>>) -> impl IntoRes
     .await;
 
     match rows {
-        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({"operations": rows}))),
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"operations": rows})),
+        ),
         Err(e) => {
             tracing::error!("list_operations failed: {}", e);
             (

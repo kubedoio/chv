@@ -1517,13 +1517,12 @@ mod tests {
             ["vm-1-net-1"]
         );
         assert!(server.vm_runtime.get("vm-1").is_none());
-        assert!(server
+        assert!(!server
             .cache
             .lock()
             .await
             .volume_handles
-            .get("vol-1")
-            .is_none());
+            .contains_key("vol-1"));
     }
 
     #[tokio::test]

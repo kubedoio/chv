@@ -134,7 +134,7 @@ const DEFAULT_CONTROLPLANE_DB_ACQUIRE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_CONTROLPLANE_DB_IDLE_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_CONTROLPLANE_DB_MAX_LIFETIME_SECS: u64 = 1800;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ControlPlaneTlsConfig {
     #[serde(default)]
     pub server_cert_path: Option<PathBuf>,
@@ -146,18 +146,6 @@ pub struct ControlPlaneTlsConfig {
     pub ca_cert_path: Option<PathBuf>,
     #[serde(default)]
     pub ca_key_path: Option<PathBuf>,
-}
-
-impl Default for ControlPlaneTlsConfig {
-    fn default() -> Self {
-        Self {
-            server_cert_path: None,
-            server_key_path: None,
-            client_ca_path: None,
-            ca_cert_path: None,
-            ca_key_path: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

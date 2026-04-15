@@ -32,7 +32,11 @@ async fn test_health_endpoint() {
     let app = crate::api::router::admin_router(test_db.pool.clone());
 
     let response = app
-        .oneshot(axum::http::Request::get("/health").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            axum::http::Request::get("/health")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -47,7 +51,11 @@ async fn test_ready_endpoint() {
     let app = crate::api::router::admin_router(test_db.pool.clone());
 
     let response = app
-        .oneshot(axum::http::Request::get("/ready").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            axum::http::Request::get("/ready")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -60,17 +68,27 @@ async fn test_admin_nodes_endpoint() {
 
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
-    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-http', 'host', 'host')")
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-http', 'host', 'host')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let app = crate::api::router::admin_router(pool);
 
     let response = app
-        .oneshot(axum::http::Request::get("/admin/nodes").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            axum::http::Request::get("/admin/nodes")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(!json["nodes"].as_array().unwrap().is_empty());
 }
@@ -84,7 +102,11 @@ async fn test_admin_node_not_found() {
     let app = crate::api::router::admin_router(test_db.pool.clone());
 
     let response = app
-        .oneshot(axum::http::Request::get("/admin/nodes/missing-node").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            axum::http::Request::get("/admin/nodes/missing-node")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -973,7 +995,10 @@ fn test_error_to_status_mapping() {
     let status: Status = err.into();
     assert_eq!(status.code(), tonic::Code::AlreadyExists);
 
-    let err = ControlPlaneServiceError::StaleGeneration { expected: "5".into(), received: "3".into() };
+    let err = ControlPlaneServiceError::StaleGeneration {
+        expected: "5".into(),
+        received: "3".into(),
+    };
     let status: Status = err.into();
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 }
@@ -999,7 +1024,10 @@ async fn test_rotate_certificate_returns_not_found_status() {
         }),
     });
 
-    let result = proto::enrollment_service_server::EnrollmentService::rotate_node_certificate(&server, request).await;
+    let result = proto::enrollment_service_server::EnrollmentService::rotate_node_certificate(
+        &server, request,
+    )
+    .await;
     match result {
         Err(status) => assert_eq!(status.code(), tonic::Code::NotFound),
         Ok(_) => panic!("Expected NotFound status"),

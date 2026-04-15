@@ -535,6 +535,7 @@ mod tests {
     use chv_stord_api::chv_stord_api::storage_service_server::StorageService;
     use tonic::{Request, Response, Status};
 
+    #[allow(clippy::result_large_err)]
     fn stord_operation_id(
         meta: Option<chv_stord_api::chv_stord_api::Meta>,
     ) -> Result<String, Status> {
@@ -546,6 +547,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn nwd_operation_id(meta: Option<chv_nwd_api::chv_nwd_api::Meta>) -> Result<String, Status> {
         let operation_id = meta.map(|m| m.operation_id).unwrap_or_default();
         if operation_id.is_empty() {

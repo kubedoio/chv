@@ -5,9 +5,9 @@ use chv_controlplane_service::{
     LifecycleServiceImplementation, ReconcileServiceImplementation, TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
-    connect_pool, run_migrations, AlertRepository, BootstrapTokenRepository, ControlPlaneStoreConfig,
-    DesiredStateRepository, EventRepository, NetworkExposureRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository,
+    connect_pool, run_migrations, AlertRepository, BootstrapTokenRepository,
+    ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NetworkExposureRepository,
+    NodeRepository, ObservedStateRepository, OperationRepository,
 };
 
 pub async fn build_service(
@@ -35,9 +35,11 @@ pub async fn build_service(
     run_migrations(&pool, Some(&store_config)).await?;
 
     let router = chv_controlplane_service::api::router::admin_router(pool.clone());
-    let http_listener = tokio::net::TcpListener::bind(config.http_bind).await.map_err(|e| {
-        ControlPlaneServiceError::Internal(format!("failed to bind HTTP listener: {}", e))
-    })?;
+    let http_listener = tokio::net::TcpListener::bind(config.http_bind)
+        .await
+        .map_err(|e| {
+            ControlPlaneServiceError::Internal(format!("failed to bind HTTP listener: {}", e))
+        })?;
     tokio::spawn(async move {
         if let Err(e) = axum::serve(http_listener, router).await {
             tracing::error!("HTTP admin server error: {}", e);
@@ -111,14 +113,14 @@ pub async fn build_service(
                     e
                 ))
             })?;
-            server_tls = server_tls.client_ca_root(tonic::transport::Certificate::from_pem(
-                client_ca_pem,
-            ));
+            server_tls =
+                server_tls.client_ca_root(tonic::transport::Certificate::from_pem(client_ca_pem));
         }
         tls_config = Some(server_tls);
     }
 
-    let runtime = ControlPlaneRuntime::new(config.grpc_bind, config.runtime_dir.clone(), tls_config);
+    let runtime =
+        ControlPlaneRuntime::new(config.grpc_bind, config.runtime_dir.clone(), tls_config);
 
     Ok(ControlPlaneService::new(
         runtime,
