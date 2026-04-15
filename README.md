@@ -1,152 +1,57 @@
-# CHV MVP-1
+# CHV
 
-CHV is a Linux-first, cloud-image-first virtualization platform built on Cloud Hypervisor.
+CHV is a Cloud Hypervisor management repository with a SvelteKit UI and an active Rust backend/control-plane direction.
 
-This repository is being normalized around one active product direction only:
+## Repository Direction
 
-- Frontend: SvelteKit + TypeScript
-- Backend: Go
-- Database: SQLite
-- Hypervisor: Cloud Hypervisor
-- Host networking: Linux bridge
-- Default bridge: `chvbr0`
-- Default bridge IP: `10.0.0.1/24`
-- Default data root: `/var/lib/chv/`
-- Default storage backend: `localdisk`
-- Default image format: `qcow2`
-- Cloud-init delivery: seed ISO generated before boot
+- Active backend/control-plane language: Rust
+- Active implementation paths: `/Cargo.toml`, `/cmd`, `/crates`, `/gen/rust`
+- Authoritative contracts: `/proto`
+- Authoritative architecture and component specs: `/docs/specs`
+- Rust implementation guidance: `/docs/chv-llm-handoff-pack`
 
-## Scope
+If you are starting new backend or control-plane work, start from the Rust workspace, proto contracts, and tracked spec packs instead.
 
-Included in MVP-1:
+## Active Paths
 
-- Linux VMs only
-- explicit install/bootstrap subsystem
-- SQLite-backed control-plane state
-- localdisk storage
-- qcow2 image import
-- cloud-init seed ISO preparation
-- VM create/start/stop/delete
-- operator web UI
-- opaque bearer API tokens
-- multi-node resource scoping (database and API support)
+### Rust workspace
 
-Excluded from MVP-1:
+- `/cmd/chv-agent`
+- `/cmd/chv-stord`
+- `/cmd/chv-nwd`
+- `/crates`
+- `/gen/rust`
 
-- PostgreSQL
-- Vue / PrimeVue
-- node scheduler / reconciliation / quota subsystems
-- NFS, Ceph, DRBD, distributed storage
-- raw-runtime-disk-first provisioning
-- JWT auth assumptions
-- advanced SDN or overlay networking
-- remote node management (all resources created on local node)
+### Specs and contracts
 
-## Current Rebuild Status
-
-The repository is mid-normalization toward the consolidated MVP-1 spec. The active slices currently focus on:
-
-- SQLite schema and repository foundation
-- token authentication with hashed opaque bearer tokens
-- install status inspection
-- bootstrap and repair actions for `/var/lib/chv/`, `chvbr0`, and `localdisk`
-- SvelteKit operator console prepared for container deployment
+- `/proto/controlplane/control-plane-node.proto`
+- `/proto/node/chv-stord-api.proto`
+- `/proto/node/chv-nwd-api.proto`
+- `/docs/specs/adr`
+- `/docs/specs/component`
+- `/docs/specs/ops`
+- `/docs/specs/proto`
 
 ## Development
 
-Controller:
+Build the active backend workspace:
 
 ```bash
-/usr/local/go/bin/go run ./cmd/chv-controller
+cargo build --workspace
 ```
 
-Agent:
+Run the active backend test suite:
 
 ```bash
-/usr/local/go/bin/go run ./cmd/chv-agent
+cargo test --workspace
 ```
 
-Install status API:
+Build the Web UI:
 
 ```bash
-curl http://localhost:8080/api/v1/install/status
+cd ui && npm run build
 ```
 
-Create a token:
+## Direction Reference
 
-```bash
-curl -X POST http://localhost:8080/api/v1/tokens \
-  -H "Content-Type: application/json" \
-  -d '{"name":"admin"}'
-```
-
-## Web UI Container
-
-The web UI can run as a standalone container when you want to point it at an already-running controller. The agent still stays host-native on the hypervisor node.
-
-Build:
-
-```bash
-docker build -t chv-ui:latest ./ui
-```
-
-Run:
-
-```bash
-docker run --rm -p 3000:3000 \
-  -e PUBLIC_CHV_API_BASE_URL=http://10.5.199.83:8080/api/v1 \
-  chv-ui:latest
-```
-
-`PUBLIC_CHV_API_BASE_URL` should point at the host-native controller API that the browser can actually reach.
-
-## Compose Stack
-
-For a simpler control-plane deployment, the repository includes [docker-compose.yml](/Users/scolak/Projects/chv/docker-compose.yml) for:
-
-- `chv-controller` in a container
-- `chv-webui` in a container
-
-`chv-agent` is intentionally not part of this compose stack. It must run host-native on the hypervisor node that provides Cloud Hypervisor and bridge/TAP access.
-
-Start the stack:
-
-```bash
-PUBLIC_CHV_API_BASE_URL=http://10.5.199.83:8080/api/v1 \
-CHV_WEBUI_PORT=3100 \
-docker compose up -d --build
-```
-
-Useful overrides:
-
-- `CHV_CONTROLLER_PORT` defaults to `8080`
-- `CHV_WEBUI_PORT` defaults to `3000`
-- `PUBLIC_CHV_API_BASE_URL` defaults to `http://localhost:8080/api/v1`
-
-On a remote server, set `PUBLIC_CHV_API_BASE_URL` to the server IP or DNS name the browser will use, not the internal Compose service name. The default `localhost` value is only suitable when the browser is running on the same machine as the compose stack.
-
-## API
-
-The CHV API is documented in [docs/API_SPEC.md](docs/API_SPEC.md).
-
-### Node-Scoped Resources
-
-Resources (VMs, images, storage pools, networks) are scoped to nodes. Access them via:
-
-```
-GET /api/v1/nodes/{node_id}/vms
-GET /api/v1/nodes/{node_id}/images
-GET /api/v1/nodes/{node_id}/storage
-GET /api/v1/nodes/{node_id}/networks
-```
-
-For backward compatibility, global endpoints still work:
-
-```
-GET /api/v1/vms
-GET /api/v1/images
-```
-
-## Design
-
-The intended UI language is defined in [DESIGN.md](/Users/scolak/Projects/chv/DESIGN.md). The console remains light-first, restrained, border-heavy, and operator-oriented.
+See `/REPOSITORY_DIRECTION.md` for the short repository-direction statement intended for both humans and LLM-guided implementation.

@@ -2,25 +2,31 @@
 
 ## Project Overview
 
-CHV is a Go-based virtualization management platform with a Svelte frontend for managing VMs, networks, storage, and images.
+CHV is a Rust-first virtualization management repository with a Svelte frontend and proto/spec-driven backend direction.
 
-## Architecture
+## Repository Direction
 
-- **Backend:** Go (chi router, SQLite, WebSocket)
-- **Frontend:** SvelteKit with Svelte 5 runes
-- **Agent:** Go binary running on compute nodes
-- **Controller:** Go binary serving API + static UI
+- Active backend/control-plane language: Rust
+- Active backend workspace: `/Cargo.toml`, `/cmd`, `/crates`, `/gen/rust`
+- Authoritative contracts: `/proto`
+- Authoritative design and behavior docs: `/docs/specs`, `/docs/chv-llm-handoff-pack`
 
 ## Build Commands
 
 ```bash
-# Backend
-go build -o chv-controller ./cmd/chv-controller
-go build -o chv-agent ./cmd/chv-agent
+# Active backend workspace
+cargo build --workspace
+cargo test --workspace
 
 # Frontend
 cd ui && npm run build
 ```
+
+## Backend Implementation Rules
+
+- New backend/control-plane work belongs in the Rust workspace, not the archived Go tree.
+- Proto contracts in `/proto` are the source of truth for inter-service APIs.
+- ADRs and component specs in `/docs/specs` define the intended system boundaries.
 
 ## Skill routing
 

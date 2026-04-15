@@ -1,537 +1,247 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { Server, Play, Square, AlertCircle, Plus, Trash2, Settings } from 'lucide-svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
-  import DataTable from '$lib/components/DataTable.svelte';
-  import Pagination from '$lib/components/Pagination.svelte';
-  import FilterBar from '$lib/components/FilterBar.svelte';
-  import StateBadge from '$lib/components/StateBadge.svelte';
-  import StatsCard from '$lib/components/StatsCard.svelte';
-  import CreateVMModal from '$lib/components/CreateVMModal.svelte';
-  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
-  import { useTable, formatBytes } from '$lib/utils/table.svelte';
-  import type { VM, Image, StoragePool, Network } from '$lib/api/types';
+	import { invalidate } from '$app/navigation';
+	import { onMount } from 'svelte';
+	import SectionHeader from '$lib/components/shell/SectionHeader.svelte';
+	import StatePanel from '$lib/components/shell/StatePanel.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import { getStoredToken } from '$lib/api/client';
+	import { getPageDefinition } from '$lib/shell/app-shell';
+	import type { PageData } from './$types';
 
-  const token = getStoredToken();
-  const client = createAPIClient({ token: token ?? undefined });
-  
-  let items: VM[] = $state([]);
-  let loading = $state(true);
-  let error = $state('');
-  let createModalOpen = $state(false);
-  let images = $state<Image[]>([]);
-  let pools = $state<StoragePool[]>([]);
-  let networks = $state<Network[]>([]);
-  
-  // Confirm dialog state
-  let confirmDialog = $state<{
-    open: boolean;
-    title: string;
-    description: string;
-    action: () => Promise<void>;
-  }>({
-    open: false,
-    title: '',
-    description: '',
-    action: async () => {}
-  });
+	let { data }: { data: PageData } = $props();
 
-  // Table state management - create once and sync data separately
-  let table = useTable<VM>({
-    data: [],
-    pageSize: 10
-  });
-  
-  // Summary counts and helpers
-  const totalCount = $derived(items.length);
-  
-  // Helper function instead of derived to avoid array creation
-  function getSelectedIdsArray(): string[] {
-    return Array.from(table.selectedIds);
-  }
+	const page = getPageDefinition('/vms');
+	const model = $derived(data.vms);
 
-  // Helper functions for lookup (not derived to avoid object creation)
-  function getImage(id: string) {
-    return images.find(i => i.id === id);
-  }
-  function getPool(id: string) {
-    return pools.find(p => p.id === id);
-  }
-  function getNetwork(id: string) {
-    return networks.find(n => n.id === id);
-  }
-
-  // Computed stats (primitives only)
-  const runningCount = $derived.by(() => {
-    let count = 0;
-    for (const vm of items) {
-      if (vm.actual_state === 'running') count++;
-    }
-    return count;
-  });
-  const stoppedCount = $derived.by(() => {
-    let count = 0;
-    for (const vm of items) {
-      if (vm.actual_state === 'stopped') count++;
-    }
-    return count;
-  });
-  const otherCount = $derived.by(() => {
-    let count = 0;
-    for (const vm of items) {
-      if (vm.actual_state !== 'running' && vm.actual_state !== 'stopped') count++;
-    }
-    return count;
-  });
-
-  // Filter options
-  const filterOptions = [
-    {
-      key: 'actual_state',
-      label: 'State',
-      type: 'select' as const,
-      options: [
-        { value: 'running', label: 'Running' },
-        { value: 'stopped', label: 'Stopped' },
-        { value: 'creating', label: 'Creating' },
-        { value: 'error', label: 'Error' }
-      ]
-    }
-  ];
-
-  // Table columns definition - defined once outside component to maintain stable reference
-  const columns = [
-    {
-      key: 'name',
-      title: 'Name',
-      sortable: true,
-      render: (vm: VM) => vm.name
-    },
-    {
-      key: 'actual_state',
-      title: 'State',
-      sortable: true,
-      width: '140px',
-      render: (vm: VM) => {
-        if (vm.desired_state === vm.actual_state) {
-          return vm.actual_state;
-        }
-        return `${vm.actual_state} → ${vm.desired_state}`;
-      }
-    },
-    {
-      key: 'image_id',
-      title: 'Image',
-      render: (vm: VM) => {
-        const img = getImage(vm.image_id);
-        return img?.name ?? vm.image_id;
-      }
-    },
-    {
-      key: 'storage_pool_id',
-      title: 'Pool',
-      render: (vm: VM) => {
-        const pool = getPool(vm.storage_pool_id);
-        return pool?.name ?? vm.storage_pool_id;
-      }
-    },
-    {
-      key: 'network_id',
-      title: 'Network',
-      render: (vm: VM) => {
-        const net = getNetwork(vm.network_id);
-        return net?.name ?? vm.network_id;
-      }
-    },
-    {
-      key: 'vcpu',
-      title: 'vCPU',
-      sortable: true,
-      align: 'center' as const,
-      width: '80px'
-    },
-    {
-      key: 'memory_mb',
-      title: 'Memory',
-      sortable: true,
-      align: 'right' as const,
-      width: '100px',
-      render: (vm: VM) => `${vm.memory_mb} MB`
-    },
-    {
-      key: 'ip_address',
-      title: 'IP Address',
-      width: '130px',
-      render: (vm: VM) => vm.ip_address || '—'
-    }
-  ];
-
-  async function loadVMs() {
-    loading = true;
-    error = '';
-    try {
-      const vms = await client.listVMs();
-      items = vms ?? [];
-      table.data = items;
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Failed to load VMs';
-      toast.error(error);
-      items = [];
-    } finally {
-      loading = false;
-    }
-  }
-
-  async function loadDependencies() {
-    try {
-      const [imgs, ps, nets] = await Promise.all([
-        client.listImages(),
-        client.listStoragePools(),
-        client.listNetworks()
-      ]);
-      images = imgs ?? [];
-      pools = ps ?? [];
-      networks = nets ?? [];
-    } catch (e) {
-      console.error('Failed to load dependencies:', e);
-    }
-  }
-
-  onMount(() => {
-    if (!token) {
-      goto('/login');
-      return;
-    }
-    loadVMs();
-    loadDependencies();
-  });
-
-  function handleSort(column: string, direction: 'asc' | 'desc' | null) {
-    if (direction) {
-      table.setSort(column, direction);
-    } else {
-      table.clearSort();
-    }
-  }
-
-  function handleSelect(ids: string[]) {
-    const newSet = new Set(ids);
-    table.selectedIds.forEach(id => {
-      if (!newSet.has(id)) table.deselect(id);
-    });
-    ids.forEach(id => {
-      if (!table.selectedIds.has(id)) table.select(id);
-    });
-  }
-
-  async function startVM(vm: VM) {
-    try {
-      await client.startVM(vm.id);
-      toast.success(`VM "${vm.name}" started`);
-      loadVMs();
-    } catch (err) {
-      toast.error(`Failed to start VM: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    }
-  }
-
-  async function stopVM(vm: VM) {
-    try {
-      await client.stopVM(vm.id);
-      toast.success(`VM "${vm.name}" stopped`);
-      loadVMs();
-    } catch (err) {
-      toast.error(`Failed to stop VM: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    }
-  }
-
-  async function deleteVM(vm: VM) {
-    confirmDialog = {
-      open: true,
-      title: 'Delete VM',
-      description: `Are you sure you want to delete "${vm.name}"? This action cannot be undone.`,
-      action: async () => {
-        try {
-          await client.deleteVM(vm.id);
-          toast.success(`VM "${vm.name}" deleted`);
-          loadVMs();
-        } catch (err) {
-          toast.error(`Failed to delete VM: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        }
-      }
-    };
-  }
-
-  async function handleBulkAction(action: 'start' | 'stop' | 'delete') {
-    const selectedIds = Array.from(table.selectedIds);
-    if (selectedIds.length === 0) return;
-    
-    const count = selectedIds.length;
-    
-    if (action === 'delete') {
-      confirmDialog = {
-        open: true,
-        title: 'Delete VMs',
-        description: `Are you sure you want to delete ${count} VM${count > 1 ? 's' : ''}? This action cannot be undone.`,
-        action: async () => {
-          try {
-            await client.bulkDeleteVMs(selectedIds);
-            toast.success(`${count} VM${count > 1 ? 's' : ''} deleted`);
-            table.selectNone();
-            loadVMs();
-          } catch (err) {
-            toast.error(`Bulk delete failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-          }
-        }
-      };
-    } else if (action === 'start') {
-      try {
-        await client.bulkStartVMs(selectedIds);
-        toast.success(`${count} VM${count > 1 ? 's' : ''} started`);
-        table.selectNone();
-        loadVMs();
-      } catch (err) {
-        toast.error(`Bulk start failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      }
-    } else if (action === 'stop') {
-      try {
-        await client.bulkStopVMs(selectedIds);
-        toast.success(`${count} VM${count > 1 ? 's' : ''} stopped`);
-        table.selectNone();
-        loadVMs();
-      } catch (err) {
-        toast.error(`Bulk stop failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      }
-    }
-  }
-
-  function navigateToVM(vm: VM) {
-    goto(`/vms/${vm.id}`);
-  }
+	onMount(() => {
+		if (data.meta.clientRefreshRecommended && getStoredToken()) {
+			invalidate('webui:vms');
+		}
+	});
 </script>
 
-<!-- Header with stats cards and create button -->
-<div class="flex justify-between items-start mb-6">
-  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1">
-    <StatsCard title="Total VMs" value={totalCount} icon={Server} />
-    <StatsCard title="Running" value={runningCount} icon={Play} trend="up" />
-    <StatsCard title="Stopped" value={stoppedCount} icon={Square} />
-    <StatsCard title="Other" value={otherCount} icon={AlertCircle} />
-  </div>
-  <button 
-    onclick={() => createModalOpen = true} 
-    class="ml-4 button-primary flex items-center gap-2"
-  >
-    <Plus size={16} />
-    Create VM
-  </button>
+<div class="resource-page">
+	<SectionHeader {page} />
+
+	{#if data.meta.deferred}
+		<StatePanel
+			variant="loading"
+			title="Loading virtual machines"
+			description="This route waits for the client-authenticated pass before loading protected VM data."
+			hint="VM inventory stays shell-first while the browser rehydrates with the stored session token."
+		/>
+	{:else}
+		{#if data.meta.partial}
+			<article class="resource-page__notice">
+				<div class="resource-page__eyebrow">Partial VM data</div>
+				<p>Some placement or task queries did not return, so node and task context may be incomplete.</p>
+			</article>
+		{/if}
+
+		<form class="resource-page__filters" method="GET">
+			<label class="resource-page__field">
+				<span>Search</span>
+				<input type="search" name="query" value={model.filters.current.query} placeholder="VM name or node" />
+			</label>
+			<label class="resource-page__field">
+				<span>Power state</span>
+				<select name="powerState">
+					<option value="all" selected={model.filters.current.powerState === 'all'}>All states</option>
+					<option value="running" selected={model.filters.current.powerState === 'running'}>Running</option>
+					<option value="stopped" selected={model.filters.current.powerState === 'stopped'}>Stopped</option>
+					<option value="failed" selected={model.filters.current.powerState === 'failed'}>Failed</option>
+				</select>
+			</label>
+			<label class="resource-page__field">
+				<span>Health</span>
+				<select name="health">
+					<option value="all" selected={model.filters.current.health === 'all'}>All health</option>
+					<option value="healthy" selected={model.filters.current.health === 'healthy'}>Healthy</option>
+					<option value="degraded" selected={model.filters.current.health === 'degraded'}>Degraded</option>
+					<option value="failed" selected={model.filters.current.health === 'failed'}>Failed</option>
+					<option value="unknown" selected={model.filters.current.health === 'unknown'}>Unknown</option>
+				</select>
+			</label>
+			<div class="resource-page__actions">
+				<button type="submit">Apply filters</button>
+				<a href="/vms">Reset</a>
+			</div>
+		</form>
+
+		{#if model.state === 'error'}
+			<StatePanel
+				variant="error"
+				title="VM inventory unavailable"
+				description="The VM roster could not be shaped from the current control-plane responses."
+				hint="The UI keeps power state, health, and task transparency ready for the next healthy refresh."
+			/>
+		{:else if model.state === 'empty'}
+			<StatePanel
+				variant="empty"
+				title="No virtual machines match the current view"
+				description="Widen the filters or create a VM to populate this page."
+				hint="The list remains URL-backed so a filtered VM view can be shared between operators."
+			/>
+		{:else}
+			<div class="resource-page__table-shell">
+				<table class="resource-page__table">
+					<thead>
+						<tr>
+							<th>Virtual machine</th>
+							<th>Node</th>
+							<th>Power state</th>
+							<th>Health</th>
+							<th>CPU</th>
+							<th>Memory</th>
+							<th>Storage</th>
+							<th>Networks</th>
+							<th>Tags</th>
+							<th>Last task</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each model.items as item}
+							<tr>
+								<td><a href={item.href} class="resource-page__primary-link">{item.name}</a></td>
+								<td>{item.nodeName}</td>
+								<td><StatusBadge label={item.powerStateLabel} tone={item.powerStateTone} /></td>
+								<td><StatusBadge label={item.healthLabel} tone={item.healthTone} /></td>
+								<td>{item.cpuLabel}</td>
+								<td>{item.memoryLabel}</td>
+								<td>{item.storageCount}</td>
+								<td>{item.networkCount}</td>
+								<td>{item.tagsLabel}</td>
+								<td><StatusBadge label={item.lastTaskLabel} tone={item.lastTaskTone} /></td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	{/if}
 </div>
 
-{#if error}
-  <div class="mb-4 border border-danger bg-red-50 px-4 py-3 text-danger">
-    {error}
-  </div>
-{/if}
-
-<section class="table-card">
-  <!-- Filter bar -->
-  <FilterBar
-    filters={filterOptions}
-    activeFilters={table.filters}
-    onFilterChange={table.setFilter}
-    onClearAll={table.clearAllFilters}
-  />
-
-  <!-- Data table -->
-  <DataTable
-    data={table.paginatedData}
-    {columns}
-    {loading}
-    selectable={true}
-    selectedIds={getSelectedIdsArray()}
-    sortColumn={table.sortColumn ?? undefined}
-    sortDirection={table.sortDirection}
-    emptyIcon={Server as unknown as typeof import('svelte').SvelteComponent}
-    emptyTitle="No VMs yet"
-    emptyDescription="Create a virtual machine to get started"
-    onSort={handleSort}
-    onSelect={handleSelect}
-    onRowClick={navigateToVM}
-    rowId={(vm: VM) => vm.id}
-  >
-    {#snippet children(vm: VM)}
-      <div class="flex items-center gap-1">
-        {#if vm.actual_state === 'stopped'}
-          <button
-            type="button"
-            class="action-btn start"
-            onclick={(e) => { e.stopPropagation(); startVM(vm); }}
-            title="Start VM"
-          >
-            <Play size={14} />
-          </button>
-        {:else if vm.actual_state === 'running'}
-          <button
-            type="button"
-            class="action-btn stop"
-            onclick={(e) => { e.stopPropagation(); stopVM(vm); }}
-            title="Stop VM"
-          >
-            <Square size={14} />
-          </button>
-        {/if}
-        <a
-          href={`/vms/${vm.id}`}
-          class="action-btn"
-          onclick={(e) => e.stopPropagation()}
-          title="Settings"
-        >
-          <Settings size={14} />
-        </a>
-        <button
-          type="button"
-          class="action-btn danger"
-          onclick={(e) => { e.stopPropagation(); deleteVM(vm); }}
-          title="Delete VM"
-        >
-          <Trash2 size={14} />
-        </button>
-      </div>
-    {/snippet}
-  </DataTable>
-
-  <!-- Pagination -->
-  {#if !loading && table.totalItems > 0}
-    <Pagination
-      page={table.page}
-      pageSize={table.pageSize}
-      totalItems={table.totalItems}
-      onPageChange={table.setPage}
-      onPageSizeChange={table.setPageSize}
-    />
-  {/if}
-</section>
-
-<!-- Bulk action bar -->
-{#if table.selectedCount > 0}
-  <div class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-ink text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300">
-    <div class="flex items-center gap-2 border-r border-white/20 pr-6">
-      <span class="bg-primary text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">{table.selectedCount}</span>
-      <span class="text-sm font-medium">Selected</span>
-    </div>
-    
-    <div class="flex items-center gap-4">
-      <button 
-        onclick={() => handleBulkAction('start')}
-        class="flex items-center gap-2 text-sm hover:text-primary transition-colors font-medium"
-      >
-        <Play size={14} fill="currentColor" />
-        Start
-      </button>
-      
-      <button 
-        onclick={() => handleBulkAction('stop')}
-        class="flex items-center gap-2 text-sm hover:text-primary transition-colors font-medium"
-      >
-        <Square size={14} fill="currentColor" />
-        Stop
-      </button>
-      
-      <button 
-        onclick={() => handleBulkAction('delete')}
-        class="flex items-center gap-2 text-sm text-danger hover:text-red-400 transition-colors font-medium"
-      >
-        <Trash2 size={14} />
-        Delete
-      </button>
-    </div>
-    
-    <button 
-      onclick={() => table.selectNone()}
-      class="ml-2 text-white/50 hover:text-white transition-colors"
-    >
-      Cancel
-    </button>
-  </div>
-{/if}
-
-<CreateVMModal 
-  bind:open={createModalOpen} 
-  {images} 
-  {pools} 
-  {networks}
-  onSuccess={loadVMs}
-/>
-
-<ConfirmDialog
-  bind:open={confirmDialog.open}
-  title={confirmDialog.title}
-  description={confirmDialog.description}
-  confirmText="Delete"
-  variant="danger"
-  onConfirm={() => { confirmDialog.action(); confirmDialog.open = false; }}
-  onCancel={() => confirmDialog.open = false}
-/>
-
 <style>
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-sm);
-    color: var(--color-neutral-500);
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    transition: all var(--duration-fast);
-  }
+	.resource-page {
+		display: grid;
+		gap: 1.2rem;
+	}
 
-  .action-btn:hover {
-    background: var(--color-neutral-100);
-    color: var(--color-neutral-700);
-  }
+	.resource-page__notice,
+	.resource-page__filters,
+	.resource-page__table-shell {
+		border: 1px solid var(--shell-line);
+		border-radius: 1.15rem;
+		background: var(--shell-surface);
+	}
 
-  .action-btn.start:hover {
-    color: var(--color-success);
-    background: var(--color-success-light);
-  }
+	.resource-page__notice,
+	.resource-page__filters {
+		padding: 1rem;
+	}
 
-  .action-btn.stop:hover {
-    color: var(--color-warning);
-    background: var(--color-warning-light);
-  }
+	.resource-page__filters {
+		display: grid;
+		grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(0, 0.9fr)) auto;
+		gap: 0.85rem;
+		align-items: end;
+	}
 
-  .action-btn.danger:hover {
-    color: var(--color-danger);
-    background: var(--color-danger-light);
-  }
+	.resource-page__field {
+		display: grid;
+		gap: 0.35rem;
+	}
 
-  @keyframes fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
+	.resource-page__eyebrow,
+	.resource-page__field span {
+		font-size: 0.74rem;
+		font-weight: 700;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--shell-text-muted);
+	}
 
-  @keyframes slide-in-from-bottom-4 {
-    from { transform: translate(-50%, 1rem); }
-    to { transform: translate(-50%, 0); }
-  }
+	.resource-page__field input,
+	.resource-page__field select {
+		min-height: 2.75rem;
+		border-radius: 0.85rem;
+		border: 1px solid var(--shell-line-strong);
+		background: var(--shell-surface-muted);
+		padding: 0.7rem 0.8rem;
+		color: var(--shell-text);
+	}
 
-  .animate-in {
-    animation-fill-mode: both;
-  }
+	.resource-page__actions {
+		display: flex;
+		align-items: center;
+		gap: 0.7rem;
+	}
 
-  .fade-in {
-    animation-name: fade-in;
-  }
+	.resource-page__actions button,
+	.resource-page__actions a {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 2.75rem;
+		padding: 0 1rem;
+		border-radius: 999px;
+		font-size: 0.9rem;
+		font-weight: 600;
+		text-decoration: none;
+	}
 
-  .slide-in-from-bottom-4 {
-    animation-name: slide-in-from-bottom-4;
-  }
+	.resource-page__actions button {
+		border: 1px solid transparent;
+		background: var(--shell-accent);
+		color: #fff9f2;
+		cursor: pointer;
+	}
 
-  .duration-300 {
-    animation-duration: 300ms;
-  }
+	.resource-page__actions a {
+		color: var(--shell-text-secondary);
+	}
+
+	.resource-page__table-shell {
+		overflow-x: auto;
+	}
+
+	.resource-page__table {
+		width: 100%;
+		min-width: 1100px;
+		border-collapse: collapse;
+	}
+
+	.resource-page__table th,
+	.resource-page__table td {
+		padding: 0.95rem 1rem;
+		border-bottom: 1px solid var(--shell-line);
+		font-size: 0.92rem;
+		text-align: left;
+		color: var(--shell-text-secondary);
+	}
+
+	.resource-page__table th {
+		font-size: 0.74rem;
+		font-weight: 700;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--shell-text-muted);
+		background: rgba(247, 242, 234, 0.75);
+	}
+
+	.resource-page__primary-link {
+		color: var(--shell-text);
+		font-weight: 700;
+		text-decoration: none;
+	}
+
+	@media (max-width: 980px) {
+		.resource-page__filters {
+			grid-template-columns: 1fr;
+		}
+
+		.resource-page__actions {
+			justify-content: flex-start;
+		}
+	}
 </style>

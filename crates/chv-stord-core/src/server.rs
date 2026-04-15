@@ -26,12 +26,8 @@ impl<B: StorageBackend> StorageServer<B> {
     ) -> Self {
         let backend = Arc::new(backend);
         let sessions = Arc::new(SessionTable::new());
-        let mut inner = StorageServiceImpl::new(
-            backend,
-            sessions,
-            Arc::new(metrics),
-            backend_allowlist,
-        );
+        let mut inner =
+            StorageServiceImpl::new(backend, sessions, Arc::new(metrics), backend_allowlist);
         if let Some(store) = store {
             inner.set_store(store);
         }
@@ -43,21 +39,23 @@ impl<B: StorageBackend> StorageServer<B> {
         if let Some(db) = db_path {
             let db = db.to_path_buf();
             match tokio::task::spawn_blocking(move || SessionStore::new(&db)).await {
-                Ok(Ok(store)) => {
-                    match tokio::task::spawn_blocking(move || store.list()).await {
-                        Ok(Ok(sessions)) => {
-                            let table = self.inner.sessions();
-                            for s in sessions {
-                                table.upsert(s);
-                            }
-                            info!(count = table.list().len(), "hydrated sessions from SQLite");
+                Ok(Ok(store)) => match tokio::task::spawn_blocking(move || store.list()).await {
+                    Ok(Ok(sessions)) => {
+                        let table = self.inner.sessions();
+                        for s in sessions {
+                            table.upsert(s);
                         }
-                        Ok(Err(e)) => tracing::warn!(error = %e, "failed to list sessions from SQLite"),
-                        Err(e) => tracing::warn!(error = %e, "failed to list sessions from SQLite"),
+                        info!(count = table.list().len(), "hydrated sessions from SQLite");
                     }
+                    Ok(Err(e)) => tracing::warn!(error = %e, "failed to list sessions from SQLite"),
+                    Err(e) => tracing::warn!(error = %e, "failed to list sessions from SQLite"),
+                },
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "failed to open SQLite store; continuing with empty session table")
                 }
-                Ok(Err(e)) => tracing::warn!(error = %e, "failed to open SQLite store; continuing with empty session table"),
-                Err(e) => tracing::warn!(error = %e, "failed to open SQLite store; continuing with empty session table"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to open SQLite store; continuing with empty session table")
+                }
             }
         }
 

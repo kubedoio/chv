@@ -1,0 +1,193 @@
+syntax = "proto3";
+
+package chv.webui.bff.v1;
+
+message PageMeta {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  uint64 total_items = 3;
+}
+
+message FilterMeta {
+  map<string, string> applied = 1;
+}
+
+message OverviewRequest {}
+
+message HealthTile {
+  string key = 1;
+  string label = 2;
+  string status = 3;
+  string value = 4;
+}
+
+message CapacityTile {
+  string key = 1;
+  string label = 2;
+  string used = 3;
+  string total = 4;
+}
+
+message RecentTask {
+  string task_id = 1;
+  string status = 2;
+  string summary = 3;
+  string resource_kind = 4;
+  string resource_id = 5;
+  int64 started_unix_ms = 6;
+}
+
+message OverviewResponse {
+  repeated HealthTile health_tiles = 1;
+  repeated CapacityTile capacity_tiles = 2;
+  repeated RecentTask recent_tasks = 3;
+  repeated string active_alerts = 4;
+}
+
+message ListNodesRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message NodeListItem {
+  string node_id = 1;
+  string name = 2;
+  string cluster = 3;
+  string state = 4;
+  string health = 5;
+  string cpu = 6;
+  string memory = 7;
+  string storage = 8;
+  string network = 9;
+  string version = 10;
+  bool maintenance = 11;
+}
+
+message ListNodesResponse {
+  repeated NodeListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message GetNodeRequest {
+  string node_id = 1;
+}
+
+message RelatedTask {
+  string task_id = 1;
+  string status = 2;
+  string summary = 3;
+  int64 started_unix_ms = 4;
+}
+
+message NodeSummary {
+  string node_id = 1;
+  string name = 2;
+  string cluster = 3;
+  string state = 4;
+  string health = 5;
+  string version = 6;
+  string cpu = 7;
+  string memory = 8;
+  string storage = 9;
+  string network = 10;
+  repeated RelatedTask recent_tasks = 11;
+}
+
+message GetNodeResponse {
+  NodeSummary summary = 1;
+}
+
+message ListVmsRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message VmListItem {
+  string vm_id = 1;
+  string name = 2;
+  string node_id = 3;
+  string power_state = 4;
+  string health = 5;
+  string cpu = 6;
+  string memory = 7;
+  uint32 volume_count = 8;
+  uint32 nic_count = 9;
+  string last_task = 10;
+}
+
+message ListVmsResponse {
+  repeated VmListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message GetVmRequest {
+  string vm_id = 1;
+}
+
+message VmSummary {
+  string vm_id = 1;
+  string name = 2;
+  string node_id = 3;
+  string power_state = 4;
+  string health = 5;
+  string cpu = 6;
+  string memory = 7;
+  repeated RelatedTask recent_tasks = 8;
+}
+
+message GetVmResponse {
+  VmSummary summary = 1;
+}
+
+message MutateVmRequest {
+  string vm_id = 1;
+  string action = 2;
+  bool force = 3;
+}
+
+message MutateVmResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string vm_id = 3;
+  string summary = 4;
+}
+
+message ListTasksRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message TaskListItem {
+  string task_id = 1;
+  string status = 2;
+  string operation = 3;
+  string resource_kind = 4;
+  string resource_id = 5;
+  string actor = 6;
+  int64 started_unix_ms = 7;
+  int64 finished_unix_ms = 8;
+}
+
+message ListTasksResponse {
+  repeated TaskListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+service WebUiQueryService {
+  rpc GetOverview(OverviewRequest) returns (OverviewResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
+  rpc GetVm(GetVmRequest) returns (GetVmResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+}
+
+service WebUiMutationService {
+  rpc MutateVm(MutateVmRequest) returns (MutateVmResponse);
+}

@@ -18,7 +18,7 @@ impl InventoryReporter {
             node_id: self.node_id.clone(),
             hostname: self.hostname.clone(),
             architecture: std::env::consts::ARCH.to_string(),
-            cpu_threads: 0, // TODO: probe host
+            cpu_threads: 0,  // TODO: probe host
             memory_bytes: 0, // TODO: probe host
             storage_classes: vec![],
             network_capabilities: vec![],

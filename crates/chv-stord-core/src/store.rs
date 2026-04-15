@@ -24,7 +24,10 @@ impl SessionStore {
                 PRIMARY KEY (volume_id, attachment_handle)
             )",
             [],
-        ).map_err(|e| ChvError::Internal { reason: format!("sqlite init failed: {}", e) })?;
+        )
+        .map_err(|e| ChvError::Internal {
+            reason: format!("sqlite init failed: {}", e),
+        })?;
         Ok(Self { conn })
     }
 
@@ -50,10 +53,14 @@ impl SessionStore {
     }
 
     pub fn remove(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        self.conn.execute(
-            "DELETE FROM sessions WHERE volume_id = ?1 AND attachment_handle = ?2",
-            params![volume_id, handle],
-        ).map_err(|e| ChvError::Internal { reason: format!("sqlite remove failed: {}", e) })?;
+        self.conn
+            .execute(
+                "DELETE FROM sessions WHERE volume_id = ?1 AND attachment_handle = ?2",
+                params![volume_id, handle],
+            )
+            .map_err(|e| ChvError::Internal {
+                reason: format!("sqlite remove failed: {}", e),
+            })?;
         Ok(())
     }
 
@@ -61,20 +68,26 @@ impl SessionStore {
         let mut stmt = self.conn.prepare(
             "SELECT volume_id, attachment_handle, vm_id, export_kind, export_path, runtime_status FROM sessions"
         ).map_err(|e| ChvError::Internal { reason: format!("sqlite prepare failed: {}", e) })?;
-        let rows = stmt.query_map([], |row| {
-            let vm_id: String = row.get(2)?;
-            Ok(Session {
-                volume_id: row.get(0)?,
-                attachment_handle: row.get(1)?,
-                vm_id: if vm_id.is_empty() { None } else { Some(vm_id) },
-                export_kind: row.get(3)?,
-                export_path: row.get(4)?,
-                runtime_status: row.get(5)?,
+        let rows = stmt
+            .query_map([], |row| {
+                let vm_id: String = row.get(2)?;
+                Ok(Session {
+                    volume_id: row.get(0)?,
+                    attachment_handle: row.get(1)?,
+                    vm_id: if vm_id.is_empty() { None } else { Some(vm_id) },
+                    export_kind: row.get(3)?,
+                    export_path: row.get(4)?,
+                    runtime_status: row.get(5)?,
+                })
             })
-        }).map_err(|e| ChvError::Internal { reason: format!("sqlite query failed: {}", e) })?;
+            .map_err(|e| ChvError::Internal {
+                reason: format!("sqlite query failed: {}", e),
+            })?;
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row.map_err(|e| ChvError::Internal { reason: format!("sqlite row failed: {}", e) })?);
+            sessions.push(row.map_err(|e| ChvError::Internal {
+                reason: format!("sqlite row failed: {}", e),
+            })?);
         }
         Ok(sessions)
     }

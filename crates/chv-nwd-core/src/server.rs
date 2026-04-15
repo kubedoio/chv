@@ -33,20 +33,25 @@ impl<E: NetworkExecutor> NetworkServer<E> {
         if let Some(db) = db_path {
             let db = db.to_path_buf();
             match tokio::task::spawn_blocking(move || TopologyStore::new(&db)).await {
-                Ok(Ok(store)) => {
-                    match tokio::task::spawn_blocking(move || store.list()).await {
-                        Ok(Ok(states)) => {
-                            let table = self.inner.topologies();
-                            for s in states {
-                                table.upsert(s);
-                            }
-                            info!(count = table.list().len(), "hydrated topologies from SQLite");
+                Ok(Ok(store)) => match tokio::task::spawn_blocking(move || store.list()).await {
+                    Ok(Ok(states)) => {
+                        let table = self.inner.topologies();
+                        for s in states {
+                            table.upsert(s);
                         }
-                        Ok(Err(e)) => tracing::warn!(error = %e, "failed to list topologies from SQLite; continuing with empty topology table"),
-                        Err(e) => tracing::warn!(error = %e, "failed to join list topologies task"),
+                        info!(
+                            count = table.list().len(),
+                            "hydrated topologies from SQLite"
+                        );
                     }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "failed to list topologies from SQLite; continuing with empty topology table")
+                    }
+                    Err(e) => tracing::warn!(error = %e, "failed to join list topologies task"),
+                },
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "failed to open SQLite store; continuing with empty topology table")
                 }
-                Ok(Err(e)) => tracing::warn!(error = %e, "failed to open SQLite store; continuing with empty topology table"),
                 Err(e) => tracing::warn!(error = %e, "failed to join open SQLite store task"),
             }
         }

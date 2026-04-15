@@ -35,12 +35,16 @@ const DEBOUNCE_MS = 300;
 
 // Page definitions for search
 const pages: SearchItem[] = [
-  { id: 'dashboard', type: 'page', name: 'Dashboard', description: 'Overview and system status', route: '/' },
+  { id: 'overview', type: 'page', name: 'Overview', description: 'Fleet health and recent activity', route: '/' },
+  { id: 'clusters', type: 'page', name: 'Clusters', description: 'Datacenters and clusters', route: '/clusters' },
+  { id: 'nodes', type: 'page', name: 'Nodes', description: 'Compute inventory', route: '/nodes' },
   { id: 'vms', type: 'page', name: 'Virtual Machines', description: 'Manage VMs', route: '/vms' },
+  { id: 'volumes', type: 'page', name: 'Volumes', description: 'Storage inventory', route: '/volumes' },
   { id: 'images', type: 'page', name: 'Images', description: 'OS images and templates', route: '/images' },
   { id: 'networks', type: 'page', name: 'Networks', description: 'Network configuration', route: '/networks' },
-  { id: 'storage', type: 'page', name: 'Storage', description: 'Storage pools', route: '/storage' },
+  { id: 'tasks', type: 'page', name: 'Tasks', description: 'Task center and operation history', route: '/tasks' },
   { id: 'events', type: 'page', name: 'Events', description: 'System events and logs', route: '/events' },
+  { id: 'maintenance', type: 'page', name: 'Maintenance', description: 'Maintenance and upgrades', route: '/maintenance' },
   { id: 'settings', type: 'page', name: 'Settings', description: 'System settings', route: '/settings' }
 ];
 

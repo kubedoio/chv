@@ -16,3 +16,6 @@ chv-errors = { path = "../../crates/chv-errors" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

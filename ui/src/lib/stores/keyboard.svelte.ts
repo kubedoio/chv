@@ -306,13 +306,13 @@ export function createGlobalShortcuts(
       handler: onQuickActionsOpen,
       preventDefault: true
     },
-    {
-      id: 'go-dashboard',
-      key: 'gd',
-      context: 'global',
-      description: 'Go to Dashboard',
-      handler: () => goto('/')
-    },
+	    {
+	      id: 'go-dashboard',
+	      key: 'gd',
+	      context: 'global',
+	      description: 'Go to Overview',
+	      handler: () => goto('/')
+	    },
     {
       id: 'go-vms',
       key: 'gv',
@@ -327,13 +327,13 @@ export function createGlobalShortcuts(
       description: 'Go to Images',
       handler: () => goto('/images')
     },
-    {
-      id: 'go-storage',
-      key: 'gs',
-      context: 'global',
-      description: 'Go to Storage',
-      handler: () => goto('/storage')
-    },
+	    {
+	      id: 'go-volumes',
+	      key: 'gs',
+	      context: 'global',
+	      description: 'Go to Volumes',
+	      handler: () => goto('/volumes')
+	    },
     {
       id: 'go-networks',
       key: 'gn',

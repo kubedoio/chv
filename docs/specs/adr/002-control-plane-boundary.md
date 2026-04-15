@@ -37,5 +37,7 @@ Cons:
 
 ## Rules
 - all remote mutations flow through `chv-agent`
+- desired-state generations are monotonic decimal strings
 - stale desired-state generations must be rejected cleanly
+- non-numeric generation values must be rejected as invalid contract input
 - retries should be safe and idempotent where possible

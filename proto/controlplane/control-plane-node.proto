@@ -6,6 +6,8 @@ message RequestMeta {
   string operation_id = 1;
   string requested_by = 2;
   string target_node_id = 3;
+  // Monotonic decimal generation string issued by control plane.
+  // Nodes reject non-numeric values and older generations.
   string desired_state_version = 4;
   int64 request_unix_ms = 5;
 }
@@ -13,6 +15,7 @@ message RequestMeta {
 message ResultMeta {
   string operation_id = 1;
   string status = 2;
+  // Last numeric generation accepted and observed by node for this resource.
   string node_observed_generation = 3;
   string error_code = 4;
   string human_summary = 5;
@@ -88,6 +91,7 @@ message ReportServiceVersionsRequest {
 message DesiredStateFragment {
   string id = 1;
   string kind = 2;
+  // Monotonic decimal generation string for this fragment.
   string generation = 3;
   bytes spec_json = 4;
   bytes policy_json = 5;
@@ -127,6 +131,7 @@ message AcknowledgeDesiredStateVersionRequest {
   string node_id = 2;
   string fragment_kind = 3;
   string fragment_id = 4;
+  // Numeric generation string the node actually applied.
   string observed_generation = 5;
   string apply_status = 6;
 }

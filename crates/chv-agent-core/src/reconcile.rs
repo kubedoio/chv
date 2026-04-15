@@ -1,17 +1,17 @@
-use crate::cache::NodeCache;
+use crate::cache::{NodeCache, VmNicAttachment};
 use crate::daemon_clients::{NwdClient, StordClient};
-use crate::state_machine::{NodeState, StateMachine};
+use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
 use chv_agent_runtime_ch::adapter::{VmConfig, VmDiskConfig, VmNicConfig};
 use chv_errors::ChvError;
 use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
-    pub state_machine: StateMachine,
     pub vm_runtime: VmRuntime,
     pub stord_socket: PathBuf,
     pub nwd_socket: PathBuf,
@@ -24,27 +24,31 @@ impl Reconciler {
         stord_socket: PathBuf,
         nwd_socket: PathBuf,
     ) -> Self {
-        let initial = {
-            let c = cache.lock().await;
-            c.node_state.parse().unwrap_or(NodeState::Bootstrapping)
-        };
         Self {
             cache,
-            state_machine: StateMachine::new(initial),
             vm_runtime,
             stord_socket,
             nwd_socket,
         }
     }
 
+    pub async fn current_state(&self) -> NodeState {
+        self.cache.lock().await.current_node_state()
+    }
+
+    pub async fn transition_state(&self, to: NodeState) -> Result<NodeState, ChvError> {
+        let mut cache = self.cache.lock().await;
+        cache.transition_node_state(to)
+    }
+
     pub async fn run_once(&mut self) -> Result<(), ChvError> {
         info!(
-            state = %self.state_machine.current().as_str(),
+            state = %self.current_state().await.as_str(),
             "reconcile tick"
         );
 
         // Only act when tenant-ready
-        if !matches!(self.state_machine.current(), NodeState::TenantReady) {
+        if !matches!(self.current_state().await, NodeState::TenantReady) {
             return Ok(());
         }
 
@@ -56,15 +60,18 @@ impl Reconciler {
 
     async fn reconcile_networks(&mut self) -> Result<(), ChvError> {
         let cache = self.cache.lock().await;
-        let mut desired_networks: BTreeSet<String> =
-            cache.vm_network_ids().into_iter().collect();
+        let mut desired_networks: BTreeSet<String> = cache.vm_network_ids().into_iter().collect();
         desired_networks.extend(cache.network_fragments.keys().cloned());
 
         let mut nwd = NwdClient::connect(&self.nwd_socket).await?;
         for net_id in &desired_networks {
             let bridge = format!("br-{}", net_id);
             let cidr = "10.0.0.0/24"; // TODO: derive from fragment when available
-            if let Err(e) = nwd.ensure_network_topology(net_id, &bridge, cidr, None).await {
+            let op_id = format!("reconcile-network-ensure-{}", net_id);
+            if let Err(e) = nwd
+                .ensure_network_topology(net_id, &bridge, cidr, Some(&op_id))
+                .await
+            {
                 warn!(network_id = %net_id, error = %e, "failed to ensure network topology");
             }
         }
@@ -72,7 +79,11 @@ impl Reconciler {
         let actual = nwd.list_namespace_state().await?;
         for state in actual.items {
             if !desired_networks.contains(&state.network_id) {
-                if let Err(e) = nwd.delete_network_topology(&state.network_id, None).await {
+                let op_id = format!("reconcile-network-delete-{}", state.network_id);
+                if let Err(e) = nwd
+                    .delete_network_topology(&state.network_id, Some(&op_id))
+                    .await
+                {
                     warn!(network_id = %state.network_id, error = %e, "failed to delete orphan network topology");
                 }
             }
@@ -90,9 +101,16 @@ impl Reconciler {
         for (vm_id, volume_id) in pairs {
             // Open volume if not already open (best-effort)
             let locator = format!("{}.img", volume_id);
-            match stord.open_volume(&volume_id, "local", &locator, None).await {
+            let op_id = format!("reconcile-volume-attach-{}-{}", vm_id, volume_id);
+            match stord
+                .open_volume(&volume_id, "local", &locator, Some(&op_id))
+                .await
+            {
                 Ok((_, handle, _)) => {
-                    if let Err(e) = stord.attach_volume_to_vm(&volume_id, &vm_id, &handle, None).await {
+                    if let Err(e) = stord
+                        .attach_volume_to_vm(&volume_id, &vm_id, &handle, Some(&op_id))
+                        .await
+                    {
                         warn!(volume_id = %volume_id, vm_id = %vm_id, error = %e, "failed to attach volume");
                     }
                 }
@@ -104,39 +122,16 @@ impl Reconciler {
         Ok(())
     }
 
-    async fn cleanup_vm(
-        &mut self,
-        stord: &mut StordClient,
-        nwd: &mut NwdClient,
-        vm_id: &str,
-    ) -> Result<(), ChvError> {
-        let mut cache = self.cache.lock().await;
-        // Detach volumes
-        for (cached_vm_id, volume_id) in cache.vm_volume_handles() {
-            if cached_vm_id == vm_id {
-                if let Err(e) = stord.detach_volume_from_vm(&volume_id, vm_id, false, None).await {
-                    warn!(vm_id = %vm_id, volume_id = %volume_id, error = %e, "failed to detach volume");
-                }
-                if let Some(handle) = cache.volume_handles.remove(&volume_id) {
-                    if let Err(e) = stord.close_volume(&volume_id, &handle, None).await {
-                        warn!(vm_id = %vm_id, volume_id = %volume_id, error = %e, "failed to close volume");
-                    }
-                }
-            }
-        }
-
-        // Detach NICs
-        if let Some(fragment) = cache.vm_fragments.get(vm_id) {
-            if let Ok(spec) = crate::spec::VmSpec::from_json(std::str::from_utf8(&fragment.spec_json).unwrap_or("")) {
-                for nic in &spec.nics {
-                    let nic_id = format!("{}-{}", vm_id, nic.network_id);
-                    if let Err(e) = nwd.detach_vm_nic(&nic_id, vm_id, &nic.network_id, None).await {
-                        warn!(vm_id = %vm_id, nic_id = %nic_id, error = %e, "failed to detach nic");
-                    }
-                }
-            }
-        }
-        Ok(())
+    async fn cleanup_vm(&mut self, vm_id: &str) -> Result<(), ChvError> {
+        let op_id = format!("reconcile-vm-cleanup-{}", vm_id);
+        cleanup_vm_resources(
+            &self.cache,
+            &self.stord_socket,
+            &self.nwd_socket,
+            vm_id,
+            Some(&op_id),
+        )
+        .await
     }
 
     async fn prepare_vm(
@@ -145,32 +140,57 @@ impl Reconciler {
         nwd: &mut NwdClient,
         vm_id: &str,
         vm_spec: &crate::spec::VmSpec,
+        operation_id: &str,
     ) -> Result<VmConfig, ChvError> {
         let mut disks = Vec::new();
+        let mut volume_ids = Vec::new();
         for disk in &vm_spec.disks {
+            let open_op_id = format!("{}-open-volume-{}", operation_id, disk.volume_id);
             let (_volume_id, handle, export_path) = stord
-                .open_volume(&disk.volume_id, "local", &format!("{}.img", disk.volume_id), None)
+                .open_volume(
+                    &disk.volume_id,
+                    "local",
+                    &format!("{}.img", disk.volume_id),
+                    Some(&open_op_id),
+                )
                 .await?;
             stord
-                .attach_volume_to_vm(&disk.volume_id, vm_id, &handle, None)
+                .attach_volume_to_vm(&disk.volume_id, vm_id, &handle, Some(&open_op_id))
                 .await?;
             disks.push(VmDiskConfig {
                 path: PathBuf::from(export_path),
                 read_only: disk.read_only,
             });
+            volume_ids.push(disk.volume_id.clone());
+            let mut cache = self.cache.lock().await;
+            cache.volume_handles.insert(disk.volume_id.clone(), handle);
         }
 
         let mut nics = Vec::new();
+        let mut nic_attachments = Vec::new();
         for nic in &vm_spec.nics {
             let nic_id = format!("{}-{}", vm_id, nic.network_id);
+            let nic_op_id = format!("{}-attach-nic-{}", operation_id, nic_id);
             if let Err(e) = nwd
-                .ensure_network_topology(&nic.network_id, &format!("br-{}", nic.network_id), "10.0.0.0/24", None)
+                .ensure_network_topology(
+                    &nic.network_id,
+                    &format!("br-{}", nic.network_id),
+                    "10.0.0.0/24",
+                    Some(&nic_op_id),
+                )
                 .await
             {
                 warn!(network_id = %nic.network_id, error = %e, "failed to ensure network topology");
             }
             let (_namespace_handle, tap_handle) = nwd
-                .attach_vm_nic(&nic_id, vm_id, &nic.network_id, &nic.mac_address, &nic.ip_address, None)
+                .attach_vm_nic(
+                    &nic_id,
+                    vm_id,
+                    &nic.network_id,
+                    &nic.mac_address,
+                    &nic.ip_address,
+                    Some(&nic_op_id),
+                )
                 .await?;
             nics.push(VmNicConfig {
                 network_id: nic.network_id.clone(),
@@ -178,6 +198,15 @@ impl Reconciler {
                 ip_address: nic.ip_address.clone(),
                 tap_name: tap_handle,
             });
+            nic_attachments.push(VmNicAttachment {
+                nic_id,
+                network_id: nic.network_id.clone(),
+            });
+        }
+
+        if !volume_ids.is_empty() || !nic_attachments.is_empty() {
+            let mut cache = self.cache.lock().await;
+            cache.observe_vm_attachment(vm_id, &volume_ids, &nic_attachments);
         }
 
         Ok(VmConfig {
@@ -195,7 +224,12 @@ impl Reconciler {
         let (desired, actual) = {
             let cache = self.cache.lock().await;
             let desired: BTreeSet<String> = cache.vm_fragments.keys().cloned().collect();
-            let actual: BTreeSet<String> = self.vm_runtime.list().into_iter().map(|r| r.vm_id).collect();
+            let actual: BTreeSet<String> = self
+                .vm_runtime
+                .list()
+                .into_iter()
+                .map(|r| r.vm_id)
+                .collect();
             (desired, actual)
         };
 
@@ -216,6 +250,7 @@ impl Reconciler {
 
         // Create missing VMs
         for vm_id in desired.difference(&actual) {
+            let op_id = format!("reconcile-vm-create-{}", vm_id);
             let (generation, raw) = {
                 let cache = self.cache.lock().await;
                 let Some(fragment) = cache.vm_fragments.get(vm_id) else {
@@ -238,19 +273,27 @@ impl Reconciler {
                     continue;
                 }
             };
-            let config = match self.prepare_vm(&mut stord, &mut nwd, vm_id, &spec).await {
+            let config = match self
+                .prepare_vm(&mut stord, &mut nwd, vm_id, &spec, &op_id)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to prepare vm");
                     continue;
                 }
             };
-            if let Err(e) = self.vm_runtime.create_vm(vm_id, &generation, &config, None).await {
+            if let Err(e) = self
+                .vm_runtime
+                .create_vm(vm_id, &generation, &config, Some(&op_id))
+                .await
+            {
                 warn!(vm_id = %vm_id, error = %e, "failed to create vm");
                 continue;
             }
             if spec.desired_state == "Running" {
-                if let Err(e) = self.vm_runtime.start_vm(vm_id, None).await {
+                let start_op_id = format!("{}-start", op_id);
+                if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to start vm");
                     continue;
                 }
@@ -259,16 +302,19 @@ impl Reconciler {
 
         // Delete extra VMs
         for vm_id in actual.difference(&desired) {
-            if let Err(e) = self.cleanup_vm(&mut stord, &mut nwd, vm_id).await {
+            let op_id = format!("reconcile-vm-delete-{}", vm_id);
+            if let Err(e) = self.cleanup_vm(vm_id).await {
                 warn!(vm_id = %vm_id, error = %e, "cleanup vm failed");
             }
-            if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, None).await {
+            if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, Some(&op_id)).await {
                 warn!(vm_id = %vm_id, error = %e, "failed to stop vm before delete");
             }
-            if let Err(e) = self.vm_runtime.delete_vm(vm_id, None).await {
+            if let Err(e) = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await {
                 warn!(vm_id = %vm_id, error = %e, "failed to delete vm");
                 continue;
             }
+            let mut cache = self.cache.lock().await;
+            cache.remove_vm_state(vm_id);
         }
 
         // Reconcile existing VMs
@@ -300,12 +346,14 @@ impl Reconciler {
                 continue;
             };
             if spec.desired_state == "Running" && record.runtime_status != "Running" {
-                if let Err(e) = self.vm_runtime.start_vm(vm_id, None).await {
+                let op_id = format!("reconcile-vm-start-{}", vm_id);
+                if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to start vm");
                     continue;
                 }
             } else if spec.desired_state == "Stopped" && record.runtime_status == "Running" {
-                if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, None).await {
+                let op_id = format!("reconcile-vm-stop-{}", vm_id);
+                if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, Some(&op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to stop vm");
                     continue;
                 }
@@ -314,6 +362,98 @@ impl Reconciler {
 
         Ok(())
     }
+}
+
+pub(crate) async fn cleanup_vm_resources(
+    cache: &Arc<tokio::sync::Mutex<NodeCache>>,
+    stord_socket: &Path,
+    nwd_socket: &Path,
+    vm_id: &str,
+    operation_id: Option<&str>,
+) -> Result<(), ChvError> {
+    let (volumes, nics) = {
+        let cache = cache.lock().await;
+        let derived_attachments = cache
+            .vm_fragments
+            .get(vm_id)
+            .and_then(|fragment| std::str::from_utf8(&fragment.spec_json).ok())
+            .and_then(|raw| crate::spec::VmSpec::from_json(raw).ok())
+            .map(|spec| {
+                let volume_ids = spec
+                    .disks
+                    .into_iter()
+                    .map(|disk| disk.volume_id)
+                    .collect::<Vec<_>>();
+                let nics = spec
+                    .nics
+                    .into_iter()
+                    .map(|nic| VmNicAttachment {
+                        nic_id: format!("{}-{}", vm_id, nic.network_id),
+                        network_id: nic.network_id,
+                    })
+                    .collect::<Vec<_>>();
+                (volume_ids, nics)
+            })
+            .unwrap_or_default();
+
+        let volume_ids = cache
+            .vm_attachment_state(vm_id)
+            .map(|state| state.volume_ids.clone())
+            .unwrap_or(derived_attachments.0);
+        let nics = cache
+            .vm_attachment_state(vm_id)
+            .map(|state| {
+                state
+                    .nics
+                    .iter()
+                    .map(|nic| (nic.nic_id.clone(), nic.network_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                derived_attachments
+                    .1
+                    .into_iter()
+                    .map(|nic| (nic.nic_id, nic.network_id))
+                    .collect::<Vec<_>>()
+            });
+
+        let volumes = volume_ids
+            .into_iter()
+            .map(|volume_id| {
+                let handle = cache.volume_handles.get(&volume_id).cloned();
+                (volume_id, handle)
+            })
+            .collect::<Vec<_>>();
+
+        (volumes, nics)
+    };
+
+    if !volumes.is_empty() {
+        let mut stord = StordClient::connect(stord_socket).await?;
+        for (volume_id, handle) in &volumes {
+            stord
+                .detach_volume_from_vm(volume_id, vm_id, false, operation_id)
+                .await?;
+            if let Some(handle) = handle {
+                stord.close_volume(volume_id, handle, operation_id).await?;
+            }
+        }
+    }
+
+    if !nics.is_empty() {
+        let mut nwd = NwdClient::connect(nwd_socket).await?;
+        for (nic_id, network_id) in &nics {
+            nwd.detach_vm_nic(nic_id, vm_id, network_id, operation_id)
+                .await?;
+        }
+    }
+
+    let mut cache = cache.lock().await;
+    for (volume_id, _) in volumes {
+        cache.volume_handles.remove(&volume_id);
+    }
+    cache.vm_attachments.remove(vm_id);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -356,11 +496,36 @@ mod tests {
         cache.node_state = "Bootstrapping".to_string();
         let mut rec = Reconciler::new(
             Arc::new(tokio::sync::Mutex::new(cache)),
-            VmRuntime::new(std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default())),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
-        ).await;
+        )
+        .await;
         assert!(rec.run_once().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reconciler_uses_latest_cached_node_state() {
+        let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let mut rec = Reconciler::new(
+            cache.clone(),
+            VmRuntime::new(mock.clone()),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+        )
+        .await;
+
+        {
+            let mut cache = cache.lock().await;
+            cache.transition_node_state(NodeState::Draining).unwrap();
+        }
+
+        assert!(rec.run_once().await.is_ok());
+        assert!(mock.vms.lock().unwrap().is_empty());
     }
 
     // ------------------------------------------------------------------
@@ -370,13 +535,36 @@ mod tests {
     use chv_stord_api::chv_stord_api::storage_service_server::StorageService;
     use tonic::{Request, Response, Status};
 
+    #[allow(clippy::result_large_err)]
+    fn stord_operation_id(
+        meta: Option<chv_stord_api::chv_stord_api::Meta>,
+    ) -> Result<String, Status> {
+        let operation_id = meta.map(|m| m.operation_id).unwrap_or_default();
+        if operation_id.is_empty() {
+            Err(Status::invalid_argument("missing operation_id"))
+        } else {
+            Ok(operation_id)
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn nwd_operation_id(meta: Option<chv_nwd_api::chv_nwd_api::Meta>) -> Result<String, Status> {
+        let operation_id = meta.map(|m| m.operation_id).unwrap_or_default();
+        if operation_id.is_empty() {
+            Err(Status::invalid_argument("missing operation_id"))
+        } else {
+            Ok(operation_id)
+        }
+    }
+
     struct MockStordOk;
     #[tonic::async_trait]
     impl StorageService for MockStordOk {
         async fn list_volume_sessions(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::ListVolumeSessionsRequest>,
-        ) -> Result<Response<chv_stord_api::chv_stord_api::ListVolumeSessionsResponse>, Status> {
+        ) -> Result<Response<chv_stord_api::chv_stord_api::ListVolumeSessionsResponse>, Status>
+        {
             Ok(Response::new(
                 chv_stord_api::chv_stord_api::ListVolumeSessionsResponse { sessions: vec![] },
             ))
@@ -386,6 +574,7 @@ mod tests {
             req: Request<chv_stord_api::chv_stord_api::OpenVolumeRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::OpenVolumeResponse>, Status> {
             let inner = req.into_inner();
+            stord_operation_id(inner.meta.clone())?;
             Ok(Response::new(
                 chv_stord_api::chv_stord_api::OpenVolumeResponse {
                     result: Some(chv_stord_api::chv_stord_api::Result {
@@ -402,8 +591,9 @@ mod tests {
         }
         async fn close_volume(
             &self,
-            _req: Request<chv_stord_api::chv_stord_api::CloseVolumeRequest>,
+            req: Request<chv_stord_api::chv_stord_api::CloseVolumeRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            stord_operation_id(req.into_inner().meta)?;
             Ok(Response::new(chv_stord_api::chv_stord_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -419,8 +609,10 @@ mod tests {
         async fn attach_volume_to_vm(
             &self,
             req: Request<chv_stord_api::chv_stord_api::AttachVolumeToVmRequest>,
-        ) -> Result<Response<chv_stord_api::chv_stord_api::AttachVolumeToVmResponse>, Status> {
+        ) -> Result<Response<chv_stord_api::chv_stord_api::AttachVolumeToVmResponse>, Status>
+        {
             let inner = req.into_inner();
+            stord_operation_id(inner.meta.clone())?;
             Ok(Response::new(
                 chv_stord_api::chv_stord_api::AttachVolumeToVmResponse {
                     result: Some(chv_stord_api::chv_stord_api::Result {
@@ -437,8 +629,9 @@ mod tests {
         }
         async fn detach_volume_from_vm(
             &self,
-            _req: Request<chv_stord_api::chv_stord_api::DetachVolumeFromVmRequest>,
+            req: Request<chv_stord_api::chv_stord_api::DetachVolumeFromVmRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            stord_operation_id(req.into_inner().meta)?;
             Ok(Response::new(chv_stord_api::chv_stord_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -477,15 +670,17 @@ mod tests {
         async fn list_namespace_state(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::ListNamespaceStateRequest>,
-        ) -> Result<Response<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse>, Status> {
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse>, Status>
+        {
             Ok(Response::new(
                 chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse { items: vec![] },
             ))
         }
         async fn ensure_network_topology(
             &self,
-            _req: Request<chv_nwd_api::chv_nwd_api::EnsureNetworkTopologyRequest>,
+            req: Request<chv_nwd_api::chv_nwd_api::EnsureNetworkTopologyRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            nwd_operation_id(req.into_inner().meta)?;
             Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -494,8 +689,9 @@ mod tests {
         }
         async fn delete_network_topology(
             &self,
-            _req: Request<chv_nwd_api::chv_nwd_api::DeleteNetworkTopologyRequest>,
+            req: Request<chv_nwd_api::chv_nwd_api::DeleteNetworkTopologyRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            nwd_operation_id(req.into_inner().meta)?;
             Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -513,6 +709,7 @@ mod tests {
             req: Request<chv_nwd_api::chv_nwd_api::AttachVmNicRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::AttachVmNicResponse>, Status> {
             let inner = req.into_inner();
+            nwd_operation_id(inner.meta.clone())?;
             let nic = inner.nic.unwrap();
             Ok(Response::new(
                 chv_nwd_api::chv_nwd_api::AttachVmNicResponse {
@@ -528,8 +725,9 @@ mod tests {
         }
         async fn detach_vm_nic(
             &self,
-            _req: Request<chv_nwd_api::chv_nwd_api::DetachVmNicRequest>,
+            req: Request<chv_nwd_api::chv_nwd_api::DetachVmNicRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            nwd_operation_id(req.into_inner().meta)?;
             Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
                 status: "ok".to_string(),
                 error_code: "".to_string(),
@@ -624,13 +822,15 @@ mod tests {
         start_mock_stord(&stord_socket).await;
         start_mock_nwd(&nwd_socket).await;
 
-        let mock = std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
         let mut rec = Reconciler::new(
             Arc::new(tokio::sync::Mutex::new(test_cache())),
             VmRuntime::new(mock.clone()),
             stord_socket,
             nwd_socket,
-        ).await;
+        )
+        .await;
         rec.reconcile_vms().await.unwrap();
 
         let vms = mock.vms.lock().unwrap();
@@ -648,7 +848,8 @@ mod tests {
         start_mock_stord(&stord_socket).await;
         start_mock_nwd(&nwd_socket).await;
 
-        let mock = std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
         let runtime = VmRuntime::new(mock.clone());
         let config = VmConfig {
             vm_id: "vm-orphan".to_string(),
@@ -659,14 +860,18 @@ mod tests {
             nics: vec![],
             api_socket_path: PathBuf::from("/run/chv/vm-orphan.sock"),
         };
-        runtime.create_vm("vm-orphan", "1", &config, None).await.unwrap();
+        runtime
+            .create_vm("vm-orphan", "1", &config, None)
+            .await
+            .unwrap();
 
         let mut rec = Reconciler::new(
             Arc::new(tokio::sync::Mutex::new(empty_cache())),
             runtime,
             stord_socket,
             nwd_socket,
-        ).await;
+        )
+        .await;
         rec.reconcile_vms().await.unwrap();
 
         assert!(mock.vms.lock().unwrap().get("vm-orphan").is_none());
@@ -680,7 +885,8 @@ mod tests {
         start_mock_stord(&stord_socket).await;
         start_mock_nwd(&nwd_socket).await;
 
-        let mock = std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
         let runtime = VmRuntime::new(mock.clone());
         let config = VmConfig {
             vm_id: "vm-1".to_string(),
@@ -700,9 +906,13 @@ mod tests {
             runtime,
             stord_socket,
             nwd_socket,
-        ).await;
+        )
+        .await;
         rec.reconcile_vms().await.unwrap();
 
-        assert_eq!(rec.vm_runtime.get("vm-1").unwrap().runtime_status, "Running");
+        assert_eq!(
+            rec.vm_runtime.get("vm-1").unwrap().runtime_status,
+            "Running"
+        );
     }
 }

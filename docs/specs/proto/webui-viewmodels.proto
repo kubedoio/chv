@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package chv.webui.viewmodels.v1;
+
+message StatusBadge {
+  string code = 1;
+  string label = 2;
+  string tone = 3;
+}
+
+message EmptyState {
+  string title = 1;
+  string message = 2;
+  string action_label = 3;
+  string action_path = 4;
+}
+
+message Banner {
+  string tone = 1;
+  string title = 2;
+  string message = 3;
+}
+
+message MetricTile {
+  string label = 1;
+  string value = 2;
+  string secondary = 3;
+}
+
+message TableColumn {
+  string key = 1;
+  string label = 2;
+  bool sortable = 3;
+}
+
+message TableDefinition {
+  repeated TableColumn columns = 1;
+}

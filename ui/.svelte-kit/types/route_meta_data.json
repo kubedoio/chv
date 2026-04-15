@@ -1,15 +1,23 @@
 {
-	"/": [],
+	"/": [
+		"src/routes/+page.ts"
+	],
 	"/backup-jobs": [],
+	"/clusters": [],
 	"/events": [],
 	"/images": [],
 	"/install": [],
 	"/login": [],
+	"/maintenance": [],
 	"/metrics": [],
 	"/networks": [],
 	"/networks/[id]": [],
-	"/nodes": [],
-	"/nodes/[id]": [],
+	"/nodes": [
+		"src/routes/nodes/+page.ts"
+	],
+	"/nodes/[id]": [
+		"src/routes/nodes/[id]/+page.ts"
+	],
 	"/nodes/[id]/images": [],
 	"/nodes/[id]/networks": [],
 	"/nodes/[id]/storage": [],
@@ -18,7 +26,15 @@
 	"/quotas": [],
 	"/settings": [],
 	"/storage": [],
+	"/tasks": [
+		"src/routes/tasks/+page.ts"
+	],
 	"/templates": [],
-	"/vms": [],
-	"/vms/[id]": []
+	"/vms": [
+		"src/routes/vms/+page.ts"
+	],
+	"/vms/[id]": [
+		"src/routes/vms/[id]/+page.ts"
+	],
+	"/volumes": []
 }

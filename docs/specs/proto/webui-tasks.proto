@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package chv.webui.tasks.v1;
+
+message TaskStreamRequest {
+  repeated string resource_ids = 1;
+  repeated string resource_kinds = 2;
+}
+
+message TaskUpdate {
+  string task_id = 1;
+  string status = 2;
+  string summary = 3;
+  string resource_kind = 4;
+  string resource_id = 5;
+  int64 event_unix_ms = 6;
+}
+
+service WebUiTaskStreamService {
+  rpc StreamTaskUpdates(TaskStreamRequest) returns (stream TaskUpdate);
+}

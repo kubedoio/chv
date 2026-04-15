@@ -1,0 +1,26 @@
+[package]
+name = "chv-controlplane-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chv-controlplane-types = { path = "../chv-controlplane-types" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+hex = "0.4"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
+sqlx = { workspace = true, features = ["uuid", "chrono"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+testcontainers = { version = "0.23", optional = true }
+testcontainers-modules = { version = "0.11", features = ["postgres"], optional = true }
+
+[dev-dependencies]
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+
+[features]
+test-util = ["dep:testcontainers", "dep:testcontainers-modules"]

@@ -428,12 +428,13 @@ impl NwdClient {
             network_id: network_id.to_string(),
             policy: None,
         };
-        self.inner.set_firewall_policy(req).await.map_err(|e| {
-            ChvError::NetworkUnavailable {
+        self.inner
+            .set_firewall_policy(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         Ok(())
     }
 
@@ -453,12 +454,13 @@ impl NwdClient {
             network_id: network_id.to_string(),
             policy: None,
         };
-        self.inner.set_nat_policy(req).await.map_err(|e| {
-            ChvError::NetworkUnavailable {
+        self.inner
+            .set_nat_policy(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         Ok(())
     }
 
@@ -480,12 +482,13 @@ impl NwdClient {
             nic_id: nic_id.to_string(),
             vm_id: vm_id.to_string(),
         };
-        self.inner.detach_vm_nic(req).await.map_err(|e| {
-            ChvError::NetworkUnavailable {
+        self.inner
+            .detach_vm_nic(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         Ok(())
     }
 }
@@ -743,7 +746,9 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let mut client = NwdClient::connect(&socket).await.unwrap();
-        let result = client.detach_vm_nic("nic-1", "vm-1", "net-1", Some("op-1")).await;
+        let result = client
+            .detach_vm_nic("nic-1", "vm-1", "net-1", Some("op-1"))
+            .await;
         assert!(result.is_ok());
     }
 }

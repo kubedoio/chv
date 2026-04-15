@@ -1,4 +1,7 @@
+use crate::state_machine::{NodeState, StateMachine};
 use chv_errors::ChvError;
+use control_plane_node_api::control_plane_node_api as proto;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,6 +19,121 @@ pub struct DesiredStateFragment {
     pub updated_by: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmNicAttachment {
+    pub nic_id: String,
+    pub network_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmAttachmentState {
+    #[serde(default)]
+    pub volume_ids: Vec<String>,
+    #[serde(default)]
+    pub nics: Vec<VmNicAttachment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingControlPlaneMessageKind {
+    NodeStateReport,
+    VmStateReport,
+    VolumeStateReport,
+    NetworkStateReport,
+    PublishEvent,
+    PublishAlert,
+    ReportNodeInventory,
+    ReportServiceVersions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingControlPlaneMessage {
+    pub kind: PendingControlPlaneMessageKind,
+    pub payload: Vec<u8>,
+}
+
+impl PendingControlPlaneMessage {
+    fn encode<T: Message>(kind: PendingControlPlaneMessageKind, message: T) -> Self {
+        Self {
+            kind,
+            payload: message.encode_to_vec(),
+        }
+    }
+
+    fn decode<T: Message + Default>(&self) -> Result<T, ChvError> {
+        T::decode(self.payload.as_slice()).map_err(|e| ChvError::InvalidArgument {
+            field: "pending_control_plane_message".to_string(),
+            reason: e.to_string(),
+        })
+    }
+
+    pub fn node_state(message: proto::NodeStateReport) -> Self {
+        Self::encode(PendingControlPlaneMessageKind::NodeStateReport, message)
+    }
+
+    pub fn vm_state(message: proto::VmStateReport) -> Self {
+        Self::encode(PendingControlPlaneMessageKind::VmStateReport, message)
+    }
+
+    pub fn volume_state(message: proto::VolumeStateReport) -> Self {
+        Self::encode(PendingControlPlaneMessageKind::VolumeStateReport, message)
+    }
+
+    pub fn network_state(message: proto::NetworkStateReport) -> Self {
+        Self::encode(PendingControlPlaneMessageKind::NetworkStateReport, message)
+    }
+
+    pub fn event(message: proto::PublishEventRequest) -> Self {
+        Self::encode(PendingControlPlaneMessageKind::PublishEvent, message)
+    }
+
+    pub fn alert(message: proto::PublishAlertRequest) -> Self {
+        Self::encode(PendingControlPlaneMessageKind::PublishAlert, message)
+    }
+
+    pub fn node_inventory(message: proto::ReportNodeInventoryRequest) -> Self {
+        Self::encode(PendingControlPlaneMessageKind::ReportNodeInventory, message)
+    }
+
+    pub fn service_versions(message: proto::ReportServiceVersionsRequest) -> Self {
+        Self::encode(
+            PendingControlPlaneMessageKind::ReportServiceVersions,
+            message,
+        )
+    }
+
+    pub fn decode_node_state(&self) -> Result<proto::NodeStateReport, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_vm_state(&self) -> Result<proto::VmStateReport, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_volume_state(&self) -> Result<proto::VolumeStateReport, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_network_state(&self) -> Result<proto::NetworkStateReport, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_event(&self) -> Result<proto::PublishEventRequest, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_alert(&self) -> Result<proto::PublishAlertRequest, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_node_inventory(&self) -> Result<proto::ReportNodeInventoryRequest, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_service_versions(&self) -> Result<proto::ReportServiceVersionsRequest, ChvError> {
+        self.decode()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeCache {
     pub cache_version: u32,
@@ -30,6 +148,8 @@ pub struct NodeCache {
     pub private_key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_certificate_rotation_unix_ms: Option<i64>,
     pub vm_generations: HashMap<String, String>,
     pub volume_generations: HashMap<String, String>,
     pub network_generations: HashMap<String, String>,
@@ -37,7 +157,11 @@ pub struct NodeCache {
     pub volume_fragments: HashMap<String, DesiredStateFragment>,
     pub network_fragments: HashMap<String, DesiredStateFragment>,
     #[serde(default)]
+    pub vm_attachments: HashMap<String, VmAttachmentState>,
+    #[serde(default)]
     pub volume_handles: HashMap<String, String>,
+    #[serde(default)]
+    pub pending_control_plane: Vec<PendingControlPlaneMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -53,13 +177,16 @@ impl NodeCache {
             certificate_path: None,
             private_key_path: None,
             ca_path: None,
+            last_certificate_rotation_unix_ms: None,
             vm_generations: HashMap::new(),
             volume_generations: HashMap::new(),
             network_generations: HashMap::new(),
             vm_fragments: HashMap::new(),
             volume_fragments: HashMap::new(),
             network_fragments: HashMap::new(),
+            vm_attachments: HashMap::new(),
             volume_handles: HashMap::new(),
+            pending_control_plane: Vec::new(),
             last_error: None,
         }
     }
@@ -138,24 +265,38 @@ impl NodeCache {
         }
     }
 
-    pub fn is_stale(&self, kind: &str, id: &str, incoming: &str) -> bool {
+    pub fn current_node_state(&self) -> NodeState {
+        self.node_state.parse().unwrap_or(NodeState::Bootstrapping)
+    }
+
+    pub fn transition_node_state(&mut self, to: NodeState) -> Result<NodeState, ChvError> {
+        let mut state_machine = StateMachine::new(self.current_node_state());
+        state_machine.transition(to)?;
+        let current = state_machine.current();
+        self.node_state = current.as_str().to_string();
+        Ok(current)
+    }
+
+    pub fn is_stale(&self, kind: &str, id: &str, incoming: &str) -> Result<bool, ChvError> {
         let current = self
             .get_generation(kind, id)
             .map(|s| s.as_str())
             .unwrap_or("");
-        // Treat empty current as "new" (not stale)
         if current.is_empty() {
-            return false;
+            return Ok(false);
         }
-        // Empty incoming means missing generation header: don't treat as stale.
         if incoming.is_empty() {
-            return false;
+            return Ok(false);
         }
-        // Try numeric comparison first. For non-numeric generations we cannot
-        // determine ordering, so we conservatively accept the request.
         match (incoming.parse::<u64>(), current.parse::<u64>()) {
-            (Ok(a), Ok(b)) => a < b,
-            _ => false,
+            (Ok(a), Ok(b)) => Ok(a < b),
+            _ => Err(ChvError::InvalidArgument {
+                field: "desired_state_version".to_string(),
+                reason: format!(
+                    "generation must be numeric, current={}, incoming={}",
+                    current, incoming
+                ),
+            }),
         }
     }
 
@@ -190,6 +331,54 @@ impl NodeCache {
             }
             _ => {}
         };
+    }
+
+    pub fn observe_vm_attachment(
+        &mut self,
+        vm_id: &str,
+        volume_ids: &[String],
+        nics: &[VmNicAttachment],
+    ) {
+        let state = self.vm_attachments.entry(vm_id.to_string()).or_default();
+        for volume_id in volume_ids {
+            if !state.volume_ids.contains(volume_id) {
+                state.volume_ids.push(volume_id.clone());
+            }
+        }
+        for nic in nics {
+            if !state
+                .nics
+                .iter()
+                .any(|existing| existing.nic_id == nic.nic_id)
+            {
+                state.nics.push(nic.clone());
+            }
+        }
+    }
+
+    pub fn remove_vm_state(&mut self, vm_id: &str) {
+        self.vm_generations.remove(vm_id);
+        self.vm_fragments.remove(vm_id);
+        self.vm_attachments.remove(vm_id);
+    }
+
+    pub fn vm_attachment_state(&self, vm_id: &str) -> Option<&VmAttachmentState> {
+        self.vm_attachments.get(vm_id)
+    }
+
+    pub fn enqueue_pending_message(&mut self, message: PendingControlPlaneMessage) {
+        self.pending_control_plane.push(message);
+    }
+
+    pub fn pending_control_plane_messages(&self) -> &[PendingControlPlaneMessage] {
+        &self.pending_control_plane
+    }
+
+    pub fn replace_pending_control_plane_messages(
+        &mut self,
+        messages: Vec<PendingControlPlaneMessage>,
+    ) {
+        self.pending_control_plane = messages;
     }
 
     pub fn vm_network_ids(&self) -> Vec<String> {
@@ -244,6 +433,7 @@ impl NodeCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use control_plane_node_api::control_plane_node_api as proto;
 
     #[tokio::test]
     async fn cache_roundtrip() {
@@ -262,26 +452,74 @@ mod tests {
     fn cache_stale_generation() {
         let mut cache = NodeCache::new("node-1");
         cache.observe_generation("vm", "vm-1", "10");
-        assert!(cache.is_stale("vm", "vm-1", "9"));
-        assert!(!cache.is_stale("vm", "vm-1", "10"));
-        assert!(!cache.is_stale("vm", "vm-1", "11"));
-        assert!(!cache.is_stale("vm", "vm-1", ""));
+        assert!(cache.is_stale("vm", "vm-1", "9").unwrap());
+        assert!(!cache.is_stale("vm", "vm-1", "10").unwrap());
+        assert!(!cache.is_stale("vm", "vm-1", "11").unwrap());
+        assert!(!cache.is_stale("vm", "vm-1", "").unwrap());
     }
 
     #[test]
     fn cache_empty_generation_not_stale() {
         let cache = NodeCache::new("node-1");
-        assert!(!cache.is_stale("vm", "vm-1", "1"));
+        assert!(!cache.is_stale("vm", "vm-1", "1").unwrap());
     }
 
     #[test]
-    fn cache_non_numeric_generation_not_stale() {
+    fn cache_non_numeric_generation_rejected() {
         let mut cache = NodeCache::new("node-1");
         cache.observe_generation("vm", "vm-1", "v2");
-        // We cannot order arbitrary strings, so newer-looking values are accepted.
-        assert!(!cache.is_stale("vm", "vm-1", "v3"));
-        assert!(!cache.is_stale("vm", "vm-1", "v2"));
-        assert!(!cache.is_stale("vm", "vm-1", "v1"));
+        let err = cache.is_stale("vm", "vm-1", "v1").unwrap_err();
+        assert!(matches!(err, ChvError::InvalidArgument { .. }));
+    }
+
+    #[test]
+    fn cache_transition_node_state_uses_persisted_state() {
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = NodeState::TenantReady.as_str().to_string();
+        let current = cache.transition_node_state(NodeState::Draining).unwrap();
+        assert_eq!(current, NodeState::Draining);
+        assert_eq!(cache.node_state, "Draining");
+    }
+
+    #[test]
+    fn cache_tracks_and_removes_vm_attachment_state() {
+        let mut cache = NodeCache::new("node-1");
+        cache.observe_vm_attachment(
+            "vm-1",
+            &["vol-1".to_string()],
+            &[VmNicAttachment {
+                nic_id: "vm-1-net-1".to_string(),
+                network_id: "net-1".to_string(),
+            }],
+        );
+        let attachments = cache.vm_attachment_state("vm-1").unwrap();
+        assert_eq!(attachments.volume_ids, vec!["vol-1".to_string()]);
+        assert_eq!(
+            attachments.nics,
+            vec![VmNicAttachment {
+                nic_id: "vm-1-net-1".to_string(),
+                network_id: "net-1".to_string(),
+            }]
+        );
+
+        cache.observe_generation("vm", "vm-1", "2");
+        cache.store_fragment(
+            "vm",
+            "vm-1",
+            DesiredStateFragment {
+                id: "vm-1".to_string(),
+                kind: "vm".to_string(),
+                generation: "2".to_string(),
+                spec_json: vec![],
+                policy_json: vec![],
+                updated_at: String::new(),
+                updated_by: String::new(),
+            },
+        );
+        cache.remove_vm_state("vm-1");
+        assert!(cache.vm_attachment_state("vm-1").is_none());
+        assert!(cache.get_generation("vm", "vm-1").is_none());
+        assert!(cache.get_fragment("vm", "vm-1").is_none());
     }
 
     #[tokio::test]
@@ -348,7 +586,13 @@ mod tests {
         });
         let mut handles = cache.vm_volume_handles();
         handles.sort();
-        assert_eq!(handles, vec![("vm-1".to_string(), "vol-1".to_string()), ("vm-1".to_string(), "vol-2".to_string())]);
+        assert_eq!(
+            handles,
+            vec![
+                ("vm-1".to_string(), "vol-1".to_string()),
+                ("vm-1".to_string(), "vol-2".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -368,5 +612,27 @@ mod tests {
         let ids: std::collections::HashSet<String> = cache.vm_network_ids().into_iter().collect();
         assert_eq!(ids.len(), 1);
         assert!(ids.contains("net-1"));
+    }
+
+    #[test]
+    fn cache_tracks_pending_control_plane_messages() {
+        let mut cache = NodeCache::new("node-1");
+        let report = proto::NodeStateReport {
+            node_id: "node-1".to_string(),
+            state: "TenantReady".to_string(),
+            observed_generation: "5".to_string(),
+            health_status: "Healthy".to_string(),
+            last_error: String::new(),
+            reported_unix_ms: 0,
+        };
+
+        cache.enqueue_pending_message(PendingControlPlaneMessage::node_state(report.clone()));
+
+        assert_eq!(cache.pending_control_plane_messages().len(), 1);
+        let decoded = cache.pending_control_plane_messages()[0]
+            .decode_node_state()
+            .unwrap();
+        assert_eq!(decoded.node_id, report.node_id);
+        assert_eq!(decoded.state, report.state);
     }
 }
