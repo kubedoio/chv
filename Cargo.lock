@@ -424,6 +424,7 @@ dependencies = [
  "chv-controlplane-store",
  "chv-observability",
  "tokio",
+ "tonic",
  "tracing",
 ]
 

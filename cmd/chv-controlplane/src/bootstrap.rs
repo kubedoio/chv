@@ -76,7 +76,33 @@ pub async fn build_service(
         desired_state_repo,
     );
 
-    let runtime = ControlPlaneRuntime::new(config.grpc_bind, config.runtime_dir.clone());
+    let mut tls_config = None;
+    if let (Some(cert_path), Some(key_path)) =
+        (&config.tls.server_cert_path, &config.tls.server_key_path)
+    {
+        let cert_pem = tokio::fs::read(cert_path).await.map_err(|e| {
+            ControlPlaneServiceError::Internal(format!("failed to read TLS certificate: {}", e))
+        })?;
+        let key_pem = tokio::fs::read(key_path).await.map_err(|e| {
+            ControlPlaneServiceError::Internal(format!("failed to read TLS key: {}", e))
+        })?;
+        let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+        let mut server_tls = tonic::transport::ServerTlsConfig::new().identity(identity);
+        if let Some(client_ca_path) = &config.tls.client_ca_path {
+            let client_ca_pem = tokio::fs::read(client_ca_path).await.map_err(|e| {
+                ControlPlaneServiceError::Internal(format!(
+                    "failed to read client CA certificate: {}",
+                    e
+                ))
+            })?;
+            server_tls = server_tls.client_ca_root(tonic::transport::Certificate::from_pem(
+                client_ca_pem,
+            ));
+        }
+        tls_config = Some(server_tls);
+    }
+
+    let runtime = ControlPlaneRuntime::new(config.grpc_bind, config.runtime_dir.clone(), tls_config);
 
     Ok(ControlPlaneService::new(
         runtime,

@@ -15,13 +15,19 @@ use tracing::{error, info};
 pub struct ControlPlaneRuntime {
     bind_addr: SocketAddr,
     runtime_dir: PathBuf,
+    tls_config: Option<tonic::transport::ServerTlsConfig>,
 }
 
 impl ControlPlaneRuntime {
-    pub fn new(bind_addr: SocketAddr, runtime_dir: PathBuf) -> Self {
+    pub fn new(
+        bind_addr: SocketAddr,
+        runtime_dir: PathBuf,
+        tls_config: Option<tonic::transport::ServerTlsConfig>,
+    ) -> Self {
         Self {
             bind_addr,
             runtime_dir,
+            tls_config,
         }
     }
 
@@ -145,7 +151,14 @@ impl ControlPlaneService {
 
         info!(?addr, "starting gRPC server");
 
-        tonic::transport::Server::builder()
+        let mut server = tonic::transport::Server::builder();
+        if let Some(tls_config) = &self.runtime.tls_config {
+            server = server.tls_config(tls_config.clone()).map_err(|e| {
+                ControlPlaneServiceError::Internal(format!("tls config error: {}", e))
+            })?;
+        }
+
+        server
             .add_service(enrollment_server)
             .add_service(inventory_server)
             .add_service(telemetry_server)

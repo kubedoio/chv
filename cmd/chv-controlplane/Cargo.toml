@@ -14,4 +14,5 @@ chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
 chv-observability = { path = "../../crates/chv-observability" }
 tokio = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
