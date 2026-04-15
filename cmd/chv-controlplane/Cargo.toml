@@ -16,3 +16,4 @@ chv-observability = { path = "../../crates/chv-observability" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
+axum = { workspace = true }

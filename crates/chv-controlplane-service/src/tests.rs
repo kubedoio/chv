@@ -24,6 +24,21 @@ impl CertificateIssuer for MockCertIssuer {
 }
 
 #[tokio::test]
+async fn test_health_endpoint() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(test_db.pool.clone());
+
+    let response = app
+        .oneshot(axum::http::Request::get("/health").body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_publish_alert_persistence() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();

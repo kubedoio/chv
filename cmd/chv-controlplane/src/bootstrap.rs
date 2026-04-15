@@ -34,6 +34,16 @@ pub async fn build_service(
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
 
+    let router = chv_controlplane_service::api::router::admin_router(pool.clone());
+    let http_listener = tokio::net::TcpListener::bind(config.http_bind).await.map_err(|e| {
+        ControlPlaneServiceError::Internal(format!("failed to bind HTTP listener: {}", e))
+    })?;
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(http_listener, router).await {
+            tracing::error!("HTTP admin server error: {}", e);
+        }
+    });
+
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = BootstrapTokenRepository::new(pool.clone());
     let observed_state_repo = ObservedStateRepository::new(pool.clone());
