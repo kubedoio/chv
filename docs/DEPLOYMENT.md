@@ -403,6 +403,13 @@ sudo journalctl -u chv-controlplane -f
 sudo journalctl -u chv-agent -f
 ```
 
+### Post-deploy Web UI smoke test
+After restarting nginx/control plane, verify login and legacy route compatibility:
+
+```bash
+./scripts/smoke-webui-auth.sh http://<host-or-ip>
+```
+
 ### Agent Fails to Enroll
 - Ensure the bootstrap token file exists and is readable by the `chv` user
 - Verify the control plane is listening on `127.0.0.1:8443`
