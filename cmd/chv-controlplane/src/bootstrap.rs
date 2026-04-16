@@ -62,6 +62,7 @@ pub async fn build_service(
             pool.clone(),
             lifecycle_service.clone(),
         )),
+        jwt_secret: config.jwt_secret.clone(),
     };
 
     let router = chv_controlplane_service::api::router::admin_router(bff_state);

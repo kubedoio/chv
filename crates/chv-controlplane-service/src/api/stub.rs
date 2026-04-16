@@ -1,15 +1,19 @@
 use axum::{
-    extract::Query,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
     Json as AxumJson,
 };
-use chv_webui_bff::auth::{Claims, jwt_secret};
+use chv_webui_bff::auth::Claims;
+use chv_webui_bff::AppState;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::response::IntoResponse {
+pub async fn login_handler(
+    State(state): State<AppState>,
+    AxumJson(payload): AxumJson<Value>,
+) -> impl axum::response::IntoResponse {
     let username = payload
         .get("username")
         .and_then(|v| v.as_str())
@@ -45,7 +49,7 @@ pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::res
     let token = match jsonwebtoken::encode(
         &header,
         &claims,
-        &jsonwebtoken::EncodingKey::from_secret(jwt_secret().as_bytes()),
+        &jsonwebtoken::EncodingKey::from_secret(state.jwt_secret.as_bytes()),
     ) {
         Ok(t) => t,
         Err(e) => {

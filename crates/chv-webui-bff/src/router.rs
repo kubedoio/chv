@@ -21,6 +21,7 @@ pub struct AppState {
     pub desired_state_repo: DesiredStateRepository,
     pub observed_state_repo: ObservedStateRepository,
     pub mutations: Arc<dyn MutationService>,
+    pub jwt_secret: String,
 }
 
 pub fn bff_router() -> Router<AppState> {

@@ -247,6 +247,7 @@ setup_database() {
     fi
 
     DB_PASSWORD=$(openssl rand -base64 32 | tr -d '=+/')
+    JWT_SECRET=$(openssl rand -base64 32 | tr -d '=+/')
 
     # Create user and database idempotently
     sudo -u postgres psql -c "CREATE USER $CHV_USER WITH PASSWORD '$DB_PASSWORD';" >/dev/null 2>&1 || true
@@ -264,6 +265,7 @@ grpc_bind = "127.0.0.1:8443"
 http_bind = "127.0.0.1:8080"
 log_level = "info"
 runtime_dir = "/run/chv/controlplane"
+jwt_secret = "${JWT_SECRET}"
 
 [database]
 url = "postgres://${CHV_USER}:${DB_PASSWORD}@127.0.0.1:5432/chv_controlplane"

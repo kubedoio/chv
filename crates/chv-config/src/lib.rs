@@ -154,10 +154,16 @@ pub struct ControlPlaneConfig {
     pub http_bind: SocketAddr,
     pub log_level: String,
     pub runtime_dir: PathBuf,
+    #[serde(default = "default_jwt_secret")]
+    pub jwt_secret: String,
     #[serde(default)]
     pub database: ControlPlaneDatabaseConfig,
     #[serde(default)]
     pub tls: ControlPlaneTlsConfig,
+}
+
+fn default_jwt_secret() -> String {
+    "chv-dev-secret-change-in-production".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -201,6 +207,7 @@ impl Default for ControlPlaneConfig {
                 .expect("valid default http bind"),
             log_level: DEFAULT_CONTROLPLANE_LOG_LEVEL.to_string(),
             runtime_dir: PathBuf::from(DEFAULT_CONTROLPLANE_RUNTIME_DIR),
+            jwt_secret: default_jwt_secret(),
             database: ControlPlaneDatabaseConfig::default(),
             tls: ControlPlaneTlsConfig::default(),
         }

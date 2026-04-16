@@ -23,13 +23,43 @@ impl CertificateIssuer for MockCertIssuer {
     }
 }
 
+fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
+    let pool_for_mutations = pool.clone();
+    let node_repo = NodeRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let alert_repo = AlertRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let observed_state_repo = ObservedStateRepository::new(pool.clone());
+    let lifecycle_service = Arc::new(crate::lifecycle::LifecycleServiceImplementation::new(
+        node_repo.clone(),
+        operation_repo.clone(),
+        event_repo.clone(),
+        desired_state_repo.clone(),
+    ));
+    chv_webui_bff::AppState {
+        pool,
+        node_repo,
+        operation_repo,
+        event_repo,
+        alert_repo,
+        desired_state_repo,
+        observed_state_repo,
+        mutations: Arc::new(crate::ControlPlaneMutationService::new(
+            pool_for_mutations,
+            lifecycle_service,
+        )),
+        jwt_secret: "test-secret".to_string(),
+    }
+}
+
 #[tokio::test]
 async fn test_health_endpoint() {
     use axum::http::StatusCode;
     use tower::ServiceExt;
 
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
-    let app = crate::api::router::admin_router(test_db.pool.clone());
+    let app = crate::api::router::admin_router(test_app_state(test_db.pool.clone()));
 
     let response = app
         .oneshot(
@@ -48,7 +78,7 @@ async fn test_ready_endpoint() {
     use tower::ServiceExt;
 
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
-    let app = crate::api::router::admin_router(test_db.pool.clone());
+    let app = crate::api::router::admin_router(test_app_state(test_db.pool.clone()));
 
     let response = app
         .oneshot(
@@ -75,7 +105,7 @@ async fn test_admin_nodes_endpoint() {
     .await
     .unwrap();
 
-    let app = crate::api::router::admin_router(pool);
+    let app = crate::api::router::admin_router(test_app_state(pool));
 
     let response = app
         .oneshot(
@@ -99,7 +129,7 @@ async fn test_admin_node_not_found() {
     use tower::ServiceExt;
 
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
-    let app = crate::api::router::admin_router(test_db.pool.clone());
+    let app = crate::api::router::admin_router(test_app_state(test_db.pool.clone()));
 
     let response = app
         .oneshot(
