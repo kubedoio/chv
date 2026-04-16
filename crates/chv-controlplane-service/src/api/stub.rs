@@ -1,13 +1,18 @@
 use axum::{
     extract::Query,
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json},
     Json as AxumJson,
 };
-use chv_webui_bff::auth::{Claims, JWT_SECRET};
+use chv_webui_bff::auth::Claims;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn jwt_secret() -> String {
+    std::env::var("CHV_JWT_SECRET")
+        .unwrap_or_else(|_| "chv-dev-secret-change-in-production".to_string())
+}
 
 pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::response::IntoResponse {
     let username = payload
@@ -17,8 +22,8 @@ pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::res
 
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as usize
+        .unwrap_or_default()
+        .as_secs()
         + 7 * 24 * 60 * 60; // 7 days
 
     let claims = Claims {
@@ -29,8 +34,21 @@ pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::res
     };
 
     let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
-    let token = jsonwebtoken::encode(&header, &claims, &jsonwebtoken::EncodingKey::from_secret(JWT_SECRET.as_bytes()))
-        .unwrap_or_else(|_| "mock-token-chv-all-in-one".to_string());
+    let token = match jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(jwt_secret().as_bytes()),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to encode jwt token");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to generate token"})),
+            )
+                .into_response();
+        }
+    };
 
     (
         StatusCode::OK,
@@ -43,6 +61,7 @@ pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::res
             }
         })),
     )
+        .into_response()
 }
 
 pub async fn me_handler() -> impl axum::response::IntoResponse {

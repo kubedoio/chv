@@ -5,18 +5,22 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const JWT_SECRET: &str = "chv-dev-secret-change-in-production";
+pub fn jwt_secret() -> String {
+    std::env::var("CHV_JWT_SECRET")
+        .unwrap_or_else(|_| "chv-dev-secret-change-in-production".to_string())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub username: String,
     pub role: String,
-    pub exp: usize,
+    pub exp: u64,
 }
 
 pub fn validate_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let decoding_key = jsonwebtoken::DecodingKey::from_secret(JWT_SECRET.as_bytes());
+    let secret = jwt_secret();
+    let decoding_key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
     let token_data = jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation)?;
@@ -39,13 +43,104 @@ where
             .and_then(|v| v.to_str().ok())
             .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?;
 
-        let token = auth
-            .strip_prefix("Bearer ")
+        let auth_lower = auth.to_ascii_lowercase();
+        let token = auth_lower
+            .strip_prefix("bearer ")
+            .map(|_| &auth[7..])
             .ok_or((StatusCode::UNAUTHORIZED, "invalid authorization scheme"))?;
 
         let claims = validate_token(token)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "token validation failed");
+                (StatusCode::UNAUTHORIZED, "invalid or expired token")
+            })?;
 
         Ok(BearerToken(claims))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn dev_secret() -> String {
+        "chv-dev-secret-change-in-production".to_string()
+    }
+
+    fn encode_claims(claims: &Claims, secret: &str) -> String {
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        jsonwebtoken::encode(
+            &header,
+            claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encoding should succeed in tests")
+    }
+
+    #[test]
+    fn valid_token_passes_validation() {
+        let exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let claims = Claims {
+            sub: "user-1".to_string(),
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            exp,
+        };
+        let token = encode_claims(&claims, &dev_secret());
+        let result = validate_token(&token);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(validated.sub, "user-1");
+        assert_eq!(validated.username, "admin");
+        assert_eq!(validated.role, "admin");
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        let claims = Claims {
+            sub: "user-1".to_string(),
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            exp: 1, // expired in 1970
+        };
+        let token = encode_claims(&claims, &dev_secret());
+        let result = validate_token(&token);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_authorization_header_is_rejected() {
+        // We test validate_token directly with an empty string to simulate missing logic.
+        let result = validate_token("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn wrong_secret_is_rejected() {
+        let exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let claims = Claims {
+            sub: "user-1".to_string(),
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            exp,
+        };
+        let token = encode_claims(&claims, "wrong-secret");
+        let result = validate_token(&token);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_token_is_rejected() {
+        let result = validate_token("not-a-valid-jwt");
+        assert!(result.is_err());
     }
 }
