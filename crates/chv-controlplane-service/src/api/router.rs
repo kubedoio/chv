@@ -1,7 +1,6 @@
 use crate::api::{health, nodes, operations, stub};
 use axum::{http::StatusCode, response::Json, routing::{get, post}, Router};
-use chv_controlplane_store::StorePool;
-use std::sync::Arc;
+use chv_webui_bff::AppState;
 
 async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -13,8 +12,11 @@ async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-pub fn admin_router(pool: StorePool) -> Router {
+pub fn admin_router(bff_state: AppState) -> Router {
+    let bff_router = chv_webui_bff::bff_router();
+
     Router::new()
+        .merge(bff_router)
         // Health & admin
         .route("/health", get(health::health_handler))
         .route("/ready", get(health::ready_handler))
@@ -46,5 +48,5 @@ pub fn admin_router(pool: StorePool) -> Router {
         .route("/api/v1/install/bootstrap", post(stub::bootstrap_install_stub))
         .route("/api/v1/install/repair", post(stub::repair_install_stub))
         .fallback(not_found_handler)
-        .with_state(Arc::new(pool))
+        .with_state(bff_state)
 }

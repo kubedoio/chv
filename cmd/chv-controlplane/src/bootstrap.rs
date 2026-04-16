@@ -1,7 +1,7 @@
 use chv_config::ControlPlaneConfig;
 use chv_controlplane_service::{
-    ControlPlaneComponents, ControlPlaneRuntime, ControlPlaneService, ControlPlaneServiceError,
-    EnrollmentServiceImplementation, InventoryServiceImplementation,
+    ControlPlaneComponents, ControlPlaneMutationService, ControlPlaneRuntime, ControlPlaneService,
+    ControlPlaneServiceError, EnrollmentServiceImplementation, InventoryServiceImplementation,
     LifecycleServiceImplementation, ReconcileServiceImplementation, TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
@@ -34,7 +34,26 @@ pub async fn build_service(
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
 
-    let router = chv_controlplane_service::api::router::admin_router(pool.clone());
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
+    let observed_state_repo = ObservedStateRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let alert_repo = AlertRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
+
+    let bff_state = chv_webui_bff::AppState {
+        pool: pool.clone(),
+        node_repo: node_repo.clone(),
+        operation_repo: operation_repo.clone(),
+        event_repo: event_repo.clone(),
+        alert_repo: alert_repo.clone(),
+        desired_state_repo: desired_state_repo.clone(),
+        observed_state_repo: observed_state_repo.clone(),
+        mutations: std::sync::Arc::new(ControlPlaneMutationService::new()),
+    };
+
+    let router = chv_controlplane_service::api::router::admin_router(bff_state);
     let http_listener = tokio::net::TcpListener::bind(config.http_bind)
         .await
         .map_err(|e| {
@@ -48,14 +67,6 @@ pub async fn build_service(
             })
             .await
     });
-
-    let node_repo = NodeRepository::new(pool.clone());
-    let token_repo = BootstrapTokenRepository::new(pool.clone());
-    let observed_state_repo = ObservedStateRepository::new(pool.clone());
-    let event_repo = EventRepository::new(pool.clone());
-    let alert_repo = AlertRepository::new(pool.clone());
-    let desired_state_repo = DesiredStateRepository::new(pool.clone());
-    let operation_repo = OperationRepository::new(pool.clone());
 
     let cert_issuer = if let (Some(ca_cert_path), Some(ca_key_path)) =
         (&config.tls.ca_cert_path, &config.tls.ca_key_path)

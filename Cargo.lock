@@ -433,6 +433,7 @@ dependencies = [
  "chv-controlplane-service",
  "chv-controlplane-store",
  "chv-observability",
+ "chv-webui-bff",
  "rustls",
  "tokio",
  "tonic",
@@ -447,6 +448,8 @@ dependencies = [
  "axum",
  "chv-controlplane-store",
  "chv-controlplane-types",
+ "chv-webui-bff",
+ "chv-webui-bff-api",
  "control-plane-node-api",
  "metrics-exporter-prometheus",
  "rcgen",
@@ -604,6 +607,32 @@ dependencies = [
  "tonic",
  "tower 0.5.3",
  "tracing",
+]
+
+[[package]]
+name = "chv-webui-bff"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chv-controlplane-store",
+ "chv-controlplane-types",
+ "chv-webui-bff-api",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "chv-webui-bff-api"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]

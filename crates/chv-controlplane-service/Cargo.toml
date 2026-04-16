@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
+chv-webui-bff = { path = "../chv-webui-bff" }
+chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 tokio = { workspace = true }
 tonic = { workspace = true }

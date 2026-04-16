@@ -94,15 +94,15 @@ const pageDefinitions: PageDefinition[] = [
 		navLabel: 'Overview',
 		shortLabel: 'Overview',
 		title: 'Overview',
-		eyebrow: 'Fleet control surface',
+		eyebrow: 'Fleet overview',
 		description:
-			'Cluster-first summary of health, capacity, recent failures, and operator work in progress.',
+			'Fleet health, capacity pressure, active tasks, and alerts requiring attention.',
 		icon: House,
 		aliases: ['/metrics'],
 		previewState: 'loading',
 		badges: [
-			{ label: 'Cluster-first', tone: 'healthy' },
-			{ label: 'Task-visible', tone: 'unknown' }
+			{ label: 'Operational', tone: 'healthy' },
+			{ label: 'Task-linked', tone: 'unknown' }
 		],
 		summary: [
 			{
@@ -136,20 +136,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading fleet overview',
 				description:
-					'The BFF is shaping health, capacity, and recent activity into an operator-first summary.',
-				hint: 'Keep summary cards visible while data loads so the shell never feels blank.'
+					'Assembling fleet health, capacity, and recent activity from the control plane.',
+				hint: 'Summary cards remain visible while data refreshes.'
 			},
 			empty: {
-				title: 'No infrastructure enrolled yet',
+				title: 'No fleet data yet',
 				description:
-					'Once clusters and nodes are connected, overview cards should populate with fleet status and active work.',
-				hint: 'Primary empty CTA should guide operators to cluster or node enrollment.'
+					'Fleet posture, alerts, and task summaries will appear once clusters and nodes are enrolled.',
+				hint: 'Begin by enrolling a datacenter and cluster.'
 			},
 			error: {
-				title: 'Overview data is unavailable',
+				title: 'Fleet overview unavailable',
 				description:
-					'If the summary cannot be shaped, preserve shell navigation and show clear retry and task context.',
-				hint: 'Failure messaging should mention the BFF boundary rather than leaking backend topology.'
+					'The control plane could not assemble the current fleet summary.',
+				hint: 'Navigation remains available while the overview recovers.'
 			}
 		}
 	},
@@ -158,31 +158,31 @@ const pageDefinitions: PageDefinition[] = [
 		navLabel: 'Datacenters / Clusters',
 		shortLabel: 'Clusters',
 		title: 'Datacenters / Clusters',
-		eyebrow: 'Infrastructure topology',
+		eyebrow: 'Fleet topology',
 		description:
-			'Organize fleet inventory by datacenter and cluster before drilling into node-level operations.',
+			'Cluster inventory, readiness posture, and active work across datacenters.',
 		icon: Blocks,
 		badges: [
-			{ label: 'Topology-first', tone: 'healthy' },
-			{ label: 'Reusable shell', tone: 'unknown' }
+			{ label: 'Operational', tone: 'healthy' },
+			{ label: 'Task-linked', tone: 'unknown' }
 		],
 		summary: [
 			{
-				label: 'Primary list',
+				label: 'Primary view',
 				value: 'Cluster roster',
 				note: 'Datacenter, capacity posture, maintenance windows, and node counts.',
 				tone: 'healthy'
 			},
 			{
-				label: 'Operator question',
-				value: 'Where is pressure?',
-				note: 'The first slice should make imbalance obvious before detail navigation.',
+				label: 'Operator focus',
+				value: 'Pressure and imbalance',
+				note: 'Surface degraded clusters, capacity hotspots, and active alerts first.',
 				tone: 'warning'
 			},
 			{
-				label: 'Related resources',
+				label: 'Related context',
 				value: 'Nodes, tasks, events',
-				note: 'Cluster detail should cross-link directly into work and incident context.',
+				note: 'Cross-link cluster detail into work history and incident context.',
 				tone: 'unknown'
 			}
 		],
@@ -197,20 +197,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading cluster inventory',
 				description:
-					'The BFF is assembling cluster rollups from control-plane state, readiness, and capacity signals.',
-				hint: 'Cluster cards should feel like operational summaries, not raw tree nodes.'
+					'Cluster rollups are being assembled from control-plane state, readiness, and capacity signals.',
+				hint: 'Summary cards remain visible while the inventory refreshes.'
 			},
 			empty: {
-				title: 'No clusters defined',
+				title: 'No clusters registered yet',
 				description:
-					'Use this state before the first datacenter or cluster is registered with the control plane.',
-				hint: 'Future CTA can point to cluster import or node enrollment workflows.'
+					'Register a datacenter and cluster with the control plane to populate this view.',
+				hint: 'Cluster enrollment workflows will be available from the fleet setup page.'
 			},
 			error: {
-				title: 'Cluster topology could not be shaped',
+				title: 'Cluster inventory unavailable',
 				description:
-					'Keep the navigation stable and show a bounded failure when cluster rollups fail to load.',
-				hint: 'Avoid leaking internal graph assembly details into the browser.'
+					'The cluster rollups could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -224,7 +224,7 @@ const pageDefinitions: PageDefinition[] = [
 			'Monitor node readiness, maintenance state, version skew, and infrastructure pressure across the fleet.',
 		icon: Server,
 		badges: [
-			{ label: 'Readiness visible', tone: 'healthy' },
+			{ label: 'Operational', tone: 'healthy' },
 			{ label: 'Maintenance-aware', tone: 'warning' }
 		],
 		summary: [
@@ -258,20 +258,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading node roster',
 				description:
-					'The BFF is shaping node readiness, capacity, and maintenance signals into a list view.',
-				hint: 'Skeleton rows should hint at table density without becoming visually noisy.'
+					'Node readiness, capacity, and maintenance signals are being assembled.',
+				hint: 'Table structure remains visible while data refreshes.'
 			},
 			empty: {
-				title: 'No nodes enrolled',
+				title: 'No nodes enrolled yet',
 				description:
-					'This state appears before any compute hosts register with the control plane.',
-				hint: 'The empty state should guide enrollment, not dump technical prerequisites.'
+					'Compute hosts must register with the control plane to populate this view.',
+				hint: 'Node enrollment workflows will be available from the fleet setup page.'
 			},
 			error: {
 				title: 'Node inventory unavailable',
 				description:
-					'When node view models fail, preserve filters and routing so operators can recover quickly.',
-				hint: 'Show retry context and the last successful sync when real data lands.'
+					'The node roster could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -285,7 +285,7 @@ const pageDefinitions: PageDefinition[] = [
 			'Give operators a fast path into power state, health, placement, and the last task touching each VM.',
 		icon: Box,
 		badges: [
-			{ label: 'Lifecycle first', tone: 'healthy' },
+			{ label: 'Operational', tone: 'healthy' },
 			{ label: 'Task-linked', tone: 'unknown' }
 		],
 		summary: [
@@ -319,20 +319,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading virtual machine inventory',
 				description:
-					'The BFF is shaping VM state, health, and placement details into a workload-first table.',
-				hint: 'Keep lifecycle actions visible but disabled while data is still arriving.'
+					'VM state, health, and placement details are being assembled.',
+				hint: 'Lifecycle actions remain visible while data refreshes.'
 			},
 			empty: {
 				title: 'No virtual machines found',
 				description:
-					'When no workloads exist yet, the page should still explain the expected next operator action.',
-				hint: 'Use realistic copy about creating or importing the first VM.'
+					'Create or import a VM to populate this page.',
+				hint: 'VM creation workflows will be available from the provisioning page.'
 			},
 			error: {
-				title: 'VM inventory could not be loaded',
+				title: 'VM inventory unavailable',
 				description:
-					'If workload view models fail, preserve surrounding context so operators can pivot to tasks or events.',
-				hint: 'Pair retry affordances with a short explanation of what data is missing.'
+					'The VM roster could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -347,7 +347,7 @@ const pageDefinitions: PageDefinition[] = [
 		icon: HardDrive,
 		aliases: ['/storage'],
 		badges: [
-			{ label: 'Health legible', tone: 'healthy' },
+			{ label: 'Operational', tone: 'healthy' },
 			{ label: 'Policy-aware', tone: 'unknown' }
 		],
 		summary: [
@@ -381,20 +381,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading volume inventory',
 				description:
-					'The BFF is shaping storage records into operator-friendly volume summaries.',
-				hint: 'Table skeletons should keep the high-density storage workflow legible.'
+					'Storage records are being assembled into operator-friendly volume summaries.',
+				hint: 'Table structure remains visible while data refreshes.'
 			},
 			empty: {
-				title: 'No volumes discovered',
+				title: 'No volumes found',
 				description:
-					'Use this state when storage backends exist but no managed volumes are currently visible.',
-				hint: 'Future CTA can route to volume creation or import flows.'
+					'Create or import a volume to populate this page.',
+				hint: 'Volume creation workflows will be available from the storage page.'
 			},
 			error: {
-				title: 'Volume data is unavailable',
+				title: 'Volume inventory unavailable',
 				description:
-					'If storage view models fail, keep navigation and task context visible while offering a retry.',
-				hint: 'Storage failures should remain concise and action-oriented.'
+					'The volume roster could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -410,7 +410,7 @@ const pageDefinitions: PageDefinition[] = [
 		previewState: 'error',
 		badges: [
 			{ label: 'Exposure visible', tone: 'warning' },
-			{ label: 'Control-plane shaped', tone: 'healthy' }
+			{ label: 'Operational', tone: 'healthy' }
 		],
 		summary: [
 			{
@@ -443,20 +443,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading network inventory',
 				description:
-					'The BFF is shaping network health and exposure details into a concise operator view.',
-				hint: 'Keep lists stable while filters and count chips load.'
+					'Network health and exposure details are being assembled.',
+				hint: 'List structure remains visible while data refreshes.'
 			},
 			empty: {
-				title: 'No managed networks found',
+				title: 'No networks found',
 				description:
-					'This state should explain what kinds of networks appear here once configured.',
-				hint: 'Future CTA can route to safe network creation flows.'
+					'Create a network to populate this page.',
+				hint: 'Network creation workflows will be available from the connectivity page.'
 			},
 			error: {
-				title: 'Network view models failed to load',
+				title: 'Network inventory unavailable',
 				description:
-					'When connectivity inventory is unavailable, hold the shell steady and provide recovery context.',
-				hint: 'Show retry context, last refresh time, and task/event escape hatches.'
+					'The network roster could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -471,7 +471,7 @@ const pageDefinitions: PageDefinition[] = [
 		icon: Image,
 		aliases: ['/templates'],
 		badges: [
-			{ label: 'Provisioning source', tone: 'healthy' },
+			{ label: 'Operational', tone: 'healthy' },
 			{ label: 'Template-ready', tone: 'unknown' }
 		],
 		summary: [
@@ -504,20 +504,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading images and templates',
 				description:
-					'The BFF is shaping image metadata and template summaries for VM provisioning workflows.',
-				hint: 'Use dense list skeletons rather than oversized cards.'
+					'Image metadata and template summaries are being assembled.',
+				hint: 'Table structure remains visible while data refreshes.'
 			},
 			empty: {
-				title: 'No reusable sources available',
+				title: 'No images found',
 				description:
-					'This state should guide operators toward importing a base image or defining the first template.',
-				hint: 'Keep the copy grounded in provisioning workflows, not generic asset language.'
+					'Import a base image or define a template to populate this page.',
+				hint: 'Image import workflows will be available from the provisioning page.'
 			},
 			error: {
-				title: 'Provisioning sources are unavailable',
+				title: 'Image inventory unavailable',
 				description:
-					'If image or template summaries fail, preserve the page frame and explain what data is missing.',
-				hint: 'Failure copy should stay product-facing and operationally trustworthy.'
+					'The image roster could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -532,7 +532,7 @@ const pageDefinitions: PageDefinition[] = [
 		icon: Activity,
 		aliases: ['/operations'],
 		badges: [
-			{ label: 'First-class tasks', tone: 'healthy' },
+			{ label: 'Operational', tone: 'healthy' },
 			{ label: 'Async visible', tone: 'warning' }
 		],
 		summary: [
@@ -566,20 +566,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading task center',
 				description:
-					'The BFF is shaping long-running operations into operator-readable status and timeline rows.',
-				hint: 'Filters should remain visible during loading to reinforce task-centric workflows.'
+					'Long-running operations are being assembled into operator-readable status rows.',
+				hint: 'Filters remain visible while data refreshes.'
 			},
 			empty: {
-				title: 'No tasks in the selected window',
+				title: 'No tasks match the current view',
 				description:
-					'When there is no recent work, keep the timeline frame stable and explain what will show up here.',
-				hint: 'This state should feel calm, not alarming.'
+					'Try widening the status, resource, or time window filters.',
+				hint: 'The task center keeps filter state even when the result set is empty.'
 			},
 			error: {
-				title: 'Task history is unavailable',
+				title: 'Task center unavailable',
 				description:
-					'If task shaping fails, tell the operator that mutation context cannot be displayed right now.',
-				hint: 'Offer retry plus a path into events for adjacent context.'
+					'The task list could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -594,7 +594,7 @@ const pageDefinitions: PageDefinition[] = [
 		icon: Activity,
 		badges: [
 			{ label: 'Severity-aware', tone: 'warning' },
-			{ label: 'Alert-linked', tone: 'healthy' }
+			{ label: 'Operational', tone: 'healthy' }
 		],
 		summary: [
 			{
@@ -627,20 +627,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading events and alerts',
 				description:
-					'The BFF is shaping event streams and alert state into a scannable operator feed.',
-				hint: 'Keep filters and table structure stable while new records arrive.'
+					'Event streams and alert state are being assembled into a scannable feed.',
+				hint: 'Filters and table structure remain visible while data refreshes.'
 			},
 			empty: {
-				title: 'No active alerts in this view',
+				title: 'No events match the current view',
 				description:
-					'This state should reassure operators while still explaining how filters affect the timeline.',
-				hint: 'Acknowledge the selected severity or time window when data is absent.'
+					'Try widening the severity or state filters.',
+				hint: 'Filters are URL-backed so a filtered view can be shared between operators.'
 			},
 			error: {
-				title: 'Event history is temporarily unavailable',
+				title: 'Event history unavailable',
 				description:
-					'If event shaping fails, maintain the page frame and explain how operators can retry safely.',
-				hint: 'Failure copy should not expose internal streaming or storage details.'
+					'The event feed could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the tasks page for related context.'
 			}
 		}
 	},
@@ -656,7 +656,7 @@ const pageDefinitions: PageDefinition[] = [
 		aliases: ['/backup-jobs'],
 		badges: [
 			{ label: 'Change-aware', tone: 'warning' },
-			{ label: 'Planned work', tone: 'unknown' }
+			{ label: 'Operational', tone: 'healthy' }
 		],
 		summary: [
 			{
@@ -689,20 +689,20 @@ const pageDefinitions: PageDefinition[] = [
 			loading: {
 				title: 'Loading maintenance context',
 				description:
-					'The BFF is shaping planned work, impact, and upgrade metadata into operator-friendly views.',
-				hint: 'Keep planned-change context legible even when details are still loading.'
+					'Planned work, impact, and upgrade metadata are being assembled.',
+				hint: 'Maintenance context remains visible while data refreshes.'
 			},
 			empty: {
 				title: 'No maintenance windows scheduled',
 				description:
-					'Use this state when there is no planned work or upgrade campaign in the selected scope.',
-				hint: 'The copy should feel operational and calm, not like an error.'
+					'There are no active or planned maintenance windows in the fleet.',
+				hint: 'Scheduled maintenance and draining operations will appear here.'
 			},
 			error: {
-				title: 'Maintenance status could not be loaded',
+				title: 'Maintenance status unavailable',
 				description:
-					'If planned-work data is unavailable, preserve surrounding shell context and explain the impact clearly.',
-				hint: 'Operators should understand whether scheduling or just visibility is affected.'
+					'The maintenance schedule could not be loaded. Navigation remains available.',
+				hint: 'Retry the request or check the events page for related alerts.'
 			}
 		}
 	},
@@ -718,7 +718,7 @@ const pageDefinitions: PageDefinition[] = [
 		aliases: ['/quotas'],
 		badges: [
 			{ label: 'Auditable', tone: 'healthy' },
-			{ label: 'Low surface area', tone: 'unknown' }
+			{ label: 'Intentionally scoped', tone: 'unknown' }
 		],
 		summary: [
 			{
@@ -748,22 +748,22 @@ const pageDefinitions: PageDefinition[] = [
 		],
 		states: {
 			loading: {
-				title: 'Loading settings context',
+				title: 'Loading settings',
 				description:
-					'The BFF is shaping operator-facing configuration and access metadata for safe presentation.',
-				hint: 'Keep settings lists structured so future forms can slot in without shell changes.'
+					'Operator-facing configuration and access metadata are being assembled.',
+				hint: 'Settings structure remains visible while data refreshes.'
 			},
 			empty: {
-				title: 'No configurable preferences yet',
+				title: 'No settings to display',
 				description:
-					'This state is expected early in MVP while access and preference surfaces stay intentionally narrow.',
-				hint: 'Explain the limited surface area as a product decision, not missing work.'
+					'Settings will appear here as the control plane surface expands.',
+				hint: 'Current settings are intentionally scoped to essential operational information.'
 			},
 			error: {
-				title: 'Settings could not be loaded',
+				title: 'Settings unavailable',
 				description:
-					'If access or preference data fails, preserve the shell and keep failure messaging bounded.',
-				hint: 'Settings errors should stay precise and avoid backend implementation details.'
+					'The settings view could not be loaded. Navigation remains available.',
+				hint: 'Retry the request once the control plane is reachable.'
 			}
 		}
 	}

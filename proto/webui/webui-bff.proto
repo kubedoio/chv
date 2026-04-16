@@ -62,6 +62,8 @@ message NodeListItem {
   string network = 9;
   string version = 10;
   bool maintenance = 11;
+  uint32 active_tasks = 12;
+  uint32 alerts = 13;
 }
 
 message ListNodesResponse {

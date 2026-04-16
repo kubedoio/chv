@@ -1,4 +1,5 @@
 pub mod api;
+mod bff_mutations;
 mod container;
 mod enrollment;
 mod error;
@@ -8,6 +9,7 @@ mod reconcile;
 mod server;
 mod telemetry;
 
+pub use bff_mutations::ControlPlaneMutationService;
 pub use container::{ControlPlaneComponents, ControlPlaneRuntime, ControlPlaneService};
 pub use enrollment::{
     CaBackedCertificateIssuer, CertificateIssuer, EnrollmentService,

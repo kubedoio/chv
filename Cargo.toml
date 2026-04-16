@@ -19,6 +19,8 @@ members = [
     "crates/chv-agent-core",
     "crates/chv-agent-runtime-ch",
     "gen/rust/control-plane-node-api",
+    "gen/rust/chv-webui-bff-api",
+    "crates/chv-webui-bff",
 ]
 resolver = "2"
 
