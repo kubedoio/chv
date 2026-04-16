@@ -4,15 +4,10 @@ use axum::{
     response::{IntoResponse, Json},
     Json as AxumJson,
 };
-use chv_webui_bff::auth::Claims;
+use chv_webui_bff::auth::{Claims, jwt_secret};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-fn jwt_secret() -> String {
-    std::env::var("CHV_JWT_SECRET")
-        .unwrap_or_else(|_| "chv-dev-secret-change-in-production".to_string())
-}
 
 pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::response::IntoResponse {
     let username = payload

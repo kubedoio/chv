@@ -5,9 +5,18 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use std::sync::LazyLock;
+
+static JWT_SECRET: LazyLock<String> = LazyLock::new(jwt_secret);
+
 pub fn jwt_secret() -> String {
-    std::env::var("CHV_JWT_SECRET")
-        .unwrap_or_else(|_| "chv-dev-secret-change-in-production".to_string())
+    std::env::var("CHV_JWT_SECRET").unwrap_or_else(|_| {
+        if cfg!(debug_assertions) {
+            "chv-dev-secret-change-in-production".to_string()
+        } else {
+            panic!("CHV_JWT_SECRET environment variable must be set")
+        }
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,7 +28,7 @@ pub struct Claims {
 }
 
 pub fn validate_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let secret = jwt_secret();
+    let secret = JWT_SECRET.as_str();
     let decoding_key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
@@ -43,11 +52,10 @@ where
             .and_then(|v| v.to_str().ok())
             .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?;
 
-        let auth_lower = auth.to_ascii_lowercase();
-        let token = auth_lower
-            .strip_prefix("bearer ")
-            .map(|_| &auth[7..])
-            .ok_or((StatusCode::UNAUTHORIZED, "invalid authorization scheme"))?;
+        if !auth.to_ascii_lowercase().starts_with("bearer ") {
+            return Err((StatusCode::UNAUTHORIZED, "invalid authorization scheme"));
+        }
+        let token = &auth[7..];
 
         let claims = validate_token(token)
             .map_err(|e| {
@@ -114,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_authorization_header_is_rejected() {
+    fn empty_token_is_rejected() {
         // We test validate_token directly with an empty string to simulate missing logic.
         let result = validate_token("");
         assert!(result.is_err());
