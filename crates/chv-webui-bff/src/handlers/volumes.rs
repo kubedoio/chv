@@ -118,6 +118,7 @@ pub async fn get_volume(
                     operation_id AS task_id,
                     status::text AS status,
                     operation_type AS summary,
+                    operation_type AS operation,
                     EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS started_unix_ms
                 FROM operations
                 WHERE resource_kind = 'volume' AND resource_id = $1
@@ -137,6 +138,7 @@ pub async fn get_volume(
                         "task_id": t.task_id,
                         "status": t.status,
                         "summary": t.summary,
+                        "operation": t.operation,
                         "started_unix_ms": t.started_unix_ms,
                     })
                 })
@@ -233,5 +235,6 @@ struct RecentTaskRow {
     task_id: String,
     status: String,
     summary: String,
+    operation: String,
     started_unix_ms: i64,
 }
