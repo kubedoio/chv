@@ -170,6 +170,7 @@ install_binaries_and_assets() {
     chmod 755 /usr/local/bin/chv-*
 
     info "Installing Web UI assets..."
+    rm -rf "$CHV_UI_DIR"/*
     cp -r "${EXTRACT_DIR}/ui/"* "$CHV_UI_DIR/"
     chown -R www-data:www-data "$CHV_UI_DIR"
 
@@ -407,7 +408,25 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+
+    location /_app/immutable/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
     location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_intercept_errors off;
+    }
+
+    location /v1/ {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
