@@ -183,6 +183,55 @@ message MutateVolumeResponse {
   string summary = 4;
 }
 
+message ListVolumesRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message VolumeListItem {
+  string volume_id = 1;
+  string name = 2;
+  string node_id = 3;
+  string health = 4;
+  string size = 5;
+  string attached_vm_id = 6;
+  string attached_vm_name = 7;
+  string status = 8;
+  string last_task = 9;
+}
+
+message ListVolumesResponse {
+  repeated VolumeListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message GetVolumeRequest {
+  string volume_id = 1;
+}
+
+message VolumeSummary {
+  string volume_id = 1;
+  string name = 2;
+  string node_id = 3;
+  string health = 4;
+  string size = 5;
+  string status = 6;
+  string attached_vm_id = 7;
+  string attached_vm_name = 8;
+  string device_name = 9;
+  bool read_only = 10;
+  string volume_kind = 11;
+  string storage_class = 12;
+  string last_task = 13;
+  repeated RelatedTask recent_tasks = 14;
+}
+
+message GetVolumeResponse {
+  VolumeSummary summary = 1;
+}
+
 message ListTasksRequest {
   uint32 page = 1;
   uint32 page_size = 2;
@@ -379,6 +428,8 @@ service WebUiQueryService {
   rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
   rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
   rpc GetVm(GetVmRequest) returns (GetVmResponse);
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+  rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
   rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);

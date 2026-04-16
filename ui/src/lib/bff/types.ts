@@ -188,6 +188,55 @@ export type MutateVmResponse = {
 	summary: string;
 };
 
+export type VolumeListItem = {
+	volume_id: string;
+	name: string;
+	node_id: string;
+	health: string;
+	size: string;
+	attached_vm_id: string;
+	attached_vm_name: string;
+	status: string;
+	last_task: string;
+};
+
+export type ListVolumesRequest = {
+	page: number;
+	page_size: number;
+	filters: Record<string, string>;
+};
+
+export type ListVolumesResponse = {
+	items: VolumeListItem[];
+	page: PageMeta;
+	filters: FilterMeta;
+};
+
+export type GetVolumeRequest = {
+	volume_id: string;
+};
+
+export type VolumeSummary = {
+	volume_id: string;
+	name: string;
+	node_id: string;
+	health: string;
+	size: string;
+	status: string;
+	attached_vm_id: string;
+	attached_vm_name: string;
+	device_name: string;
+	read_only: boolean;
+	volume_kind: string;
+	storage_class: string;
+	last_task: string;
+	recent_tasks: RelatedTask[];
+};
+
+export type GetVolumeResponse = {
+	summary: VolumeSummary;
+};
+
 export type MutateNodeRequest = {
 	node_id: string;
 	action: string;

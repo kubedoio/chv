@@ -41,5 +41,7 @@ pub fn bff_router() -> Router<AppState> {
         .route("/v1/images", post(crate::handlers::images::list_images))
         .route("/v1/maintenance", post(crate::handlers::maintenance::get_maintenance))
         .route("/v1/settings", post(crate::handlers::settings::get_settings))
-        .route("/v1/volumes/mutate", post(crate::handlers::volumes::mutate_volume))
+        .route("/v1/volumes", post(crate::handlers::volumes::list_volumes))
+    .route("/v1/volumes/get", post(crate::handlers::volumes::get_volume))
+    .route("/v1/volumes/mutate", post(crate::handlers::volumes::mutate_volume))
 }
