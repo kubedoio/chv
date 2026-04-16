@@ -1,21 +1,67 @@
 use axum::{
     extract::Query,
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json},
     Json as AxumJson,
 };
+use chv_webui_bff::auth::{Claims, jwt_secret};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::response::IntoResponse {
     let username = payload
         .get("username")
         .and_then(|v| v.as_str())
         .unwrap_or("admin");
+
+    let password = payload
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if username != "admin" || password != "admin" {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid credentials"})),
+        )
+            .into_response();
+    }
+
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + 7 * 24 * 60 * 60; // 7 days
+
+    let claims = Claims {
+        sub: username.to_string(),
+        username: username.to_string(),
+        role: "admin".to_string(),
+        exp,
+    };
+
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    let token = match jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(jwt_secret().as_bytes()),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to encode jwt token");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to generate token"})),
+            )
+                .into_response();
+        }
+    };
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "token": "mock-token-chv-all-in-one",
+            "token": token,
             "user": {
                 "id": "00000000-0000-0000-0000-000000000001",
                 "username": username,
@@ -23,6 +69,7 @@ pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::res
             }
         })),
     )
+        .into_response()
 }
 
 pub async fn me_handler() -> impl axum::response::IntoResponse {

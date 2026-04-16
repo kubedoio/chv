@@ -62,6 +62,8 @@ message NodeListItem {
   string network = 9;
   string version = 10;
   bool maintenance = 11;
+  uint32 active_tasks = 12;
+  uint32 alerts = 13;
 }
 
 message ListNodesResponse {
@@ -156,6 +158,80 @@ message MutateVmResponse {
   string summary = 4;
 }
 
+message MutateNodeRequest {
+  string node_id = 1;
+  string action = 2;
+}
+
+message MutateNodeResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string node_id = 3;
+  string summary = 4;
+}
+
+message MutateVolumeRequest {
+  string volume_id = 1;
+  string action = 2;
+  bool force = 3;
+}
+
+message MutateVolumeResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string volume_id = 3;
+  string summary = 4;
+}
+
+message ListVolumesRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message VolumeListItem {
+  string volume_id = 1;
+  string name = 2;
+  string node_id = 3;
+  string health = 4;
+  string size = 5;
+  string attached_vm_id = 6;
+  string attached_vm_name = 7;
+  string status = 8;
+  string last_task = 9;
+}
+
+message ListVolumesResponse {
+  repeated VolumeListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message GetVolumeRequest {
+  string volume_id = 1;
+}
+
+message VolumeSummary {
+  string volume_id = 1;
+  string name = 2;
+  string node_id = 3;
+  string health = 4;
+  string size = 5;
+  string status = 6;
+  string attached_vm_id = 7;
+  string attached_vm_name = 8;
+  string device_name = 9;
+  bool read_only = 10;
+  string volume_kind = 11;
+  string storage_class = 12;
+  string last_task = 13;
+  repeated RelatedTask recent_tasks = 14;
+}
+
+message GetVolumeResponse {
+  VolumeSummary summary = 1;
+}
+
 message ListTasksRequest {
   uint32 page = 1;
   uint32 page_size = 2;
@@ -179,15 +255,193 @@ message ListTasksResponse {
   FilterMeta filters = 3;
 }
 
+message ClusterListItem {
+  string cluster_id = 1;
+  string name = 2;
+  string datacenter = 3;
+  uint32 node_count = 4;
+  string state = 5;
+  bool maintenance = 6;
+  string version = 7;
+  bool version_skew = 8;
+  uint32 cpu_percent = 9;
+  uint32 memory_percent = 10;
+  uint32 storage_percent = 11;
+  uint32 active_tasks = 12;
+  uint32 alerts = 13;
+  string top_issue = 14;
+}
+
+message ListClustersRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message ListClustersResponse {
+  repeated ClusterListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message NetworkListItem {
+  string network_id = 1;
+  string name = 2;
+  string scope = 3;
+  string health = 4;
+  uint32 attached_vms = 5;
+  string exposure = 6;
+  string policy = 7;
+  string last_task = 8;
+  uint32 alerts = 9;
+}
+
+message ListNetworksRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message ListNetworksResponse {
+  repeated NetworkListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message GetNetworkRequest {
+  string network_id = 1;
+}
+
+message AttachedVm {
+  string vm_id = 1;
+  string name = 2;
+  string ip = 3;
+}
+
+message NetworkDetail {
+  string network_id = 1;
+  string name = 2;
+  string scope = 3;
+  string health = 4;
+  string exposure = 5;
+  string policy = 6;
+  string cidr = 7;
+  string gateway = 8;
+  repeated AttachedVm attached_vms = 9;
+  string created_at = 10;
+  string last_task = 11;
+  uint32 alerts = 12;
+}
+
+message GetNetworkResponse {
+  NetworkDetail detail = 1;
+}
+
+message EventListItem {
+  string event_id = 1;
+  string severity = 2;
+  string type = 3;
+  string resource_kind = 4;
+  string resource_id = 5;
+  string resource_name = 6;
+  string summary = 7;
+  string state = 8;
+  string occurred_at = 9;
+}
+
+message ListEventsRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message ListEventsResponse {
+  repeated EventListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message ImageListItem {
+  string image_id = 1;
+  string name = 2;
+  string os = 3;
+  string version = 4;
+  string status = 5;
+  string last_updated = 6;
+  uint32 usage_count = 7;
+  string size = 8;
+}
+
+message ListImagesRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+  map<string, string> filters = 3;
+}
+
+message ListImagesResponse {
+  repeated ImageListItem items = 1;
+  PageMeta page = 2;
+  FilterMeta filters = 3;
+}
+
+message MaintenanceWindow {
+  string window_id = 1;
+  string name = 2;
+  string cluster = 3;
+  string status = 4;
+  string start_time = 5;
+  string end_time = 6;
+  uint32 affected_nodes = 7;
+}
+
+message MaintenanceNode {
+  string node_id = 1;
+  string name = 2;
+  string cluster = 3;
+  string state = 4;
+  string task_id = 5;
+  string window_start = 6;
+  string window_end = 7;
+}
+
+message MaintenanceSummaryRequest {}
+
+message MaintenanceSummaryResponse {
+  repeated MaintenanceWindow windows = 1;
+  repeated MaintenanceNode nodes = 2;
+  uint32 pending_actions = 3;
+}
+
+message SettingsRequest {}
+
+message SettingsResponse {
+  string version = 1;
+  string build = 2;
+  string environment = 3;
+  string api_endpoint = 4;
+  uint32 session_ttl_hours = 5;
+}
+
 service WebUiQueryService {
   rpc GetOverview(OverviewRequest) returns (OverviewResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
   rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
   rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
   rpc GetVm(GetVmRequest) returns (GetVmResponse);
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+  rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
+  rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);
+  rpc GetNetwork(GetNetworkRequest) returns (GetNetworkResponse);
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc GetMaintenanceSummary(MaintenanceSummaryRequest) returns (MaintenanceSummaryResponse);
+  rpc GetSettings(SettingsRequest) returns (SettingsResponse);
 }
 
 service WebUiMutationService {
   rpc MutateVm(MutateVmRequest) returns (MutateVmResponse);
+  rpc MutateNode(MutateNodeRequest) returns (MutateNodeResponse);
+  rpc MutateVolume(MutateVolumeRequest) returns (MutateVolumeResponse);
 }

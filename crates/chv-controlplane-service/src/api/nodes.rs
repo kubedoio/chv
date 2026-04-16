@@ -4,14 +4,13 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chv_controlplane_store::StorePool;
-use std::sync::Arc;
+use chv_webui_bff::AppState;
 
-pub async fn list_nodes(State(pool): State<Arc<StorePool>>) -> impl IntoResponse {
+pub async fn list_nodes(State(state): State<AppState>) -> impl IntoResponse {
     let rows = sqlx::query_as::<_, NodeRow>(
         r#"SELECT node_id, hostname, display_name FROM nodes ORDER BY node_id"#,
     )
-    .fetch_all(pool.as_ref())
+    .fetch_all(&state.pool)
     .await;
 
     match rows {
@@ -28,13 +27,13 @@ pub async fn list_nodes(State(pool): State<Arc<StorePool>>) -> impl IntoResponse
 
 pub async fn get_node(
     Path(id): Path<String>,
-    State(pool): State<Arc<StorePool>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
     let row = sqlx::query_as::<_, NodeRow>(
         r#"SELECT node_id, hostname, display_name FROM nodes WHERE node_id = $1"#,
     )
     .bind(&id)
-    .fetch_optional(pool.as_ref())
+    .fetch_optional(&state.pool)
     .await;
 
     match row {

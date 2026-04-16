@@ -12,8 +12,19 @@ export const BFFEndpoints = {
 	overview: '/v1/overview',
 	listNodes: '/v1/nodes',
 	getNode: '/v1/nodes/get',
+	mutateNode: '/v1/nodes/mutate',
 	listVms: '/v1/vms',
 	getVm: '/v1/vms/get',
 	mutateVm: '/v1/vms/mutate',
-	listTasks: '/v1/tasks'
+	listTasks: '/v1/tasks',
+	listClusters: '/v1/clusters',
+	listNetworks: '/v1/networks',
+	getNetwork: '/v1/networks/get',
+	listVolumes: '/v1/volumes',
+	getVolume: '/v1/volumes/get',
+	mutateVolume: '/v1/volumes/mutate',
+	listEvents: '/v1/events',
+	listImages: '/v1/images',
+	getMaintenance: '/v1/maintenance',
+	getSettings: '/v1/settings'
 } as const;

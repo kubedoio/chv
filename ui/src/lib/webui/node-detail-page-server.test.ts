@@ -5,17 +5,25 @@ vi.mock('$lib/bff/nodes', () => ({
 	getNode: vi.fn()
 }));
 
-vi.mock('$lib/bff/vms', () => ({
-	listVms: vi.fn()
-}));
-
 import { getNode } from '$lib/bff/nodes';
-import { listVms } from '$lib/bff/vms';
+
+function createCookies(token?: string) {
+	return {
+		get: vi.fn().mockReturnValue(token)
+	} as unknown as import('@sveltejs/kit').Cookies;
+}
+
+function createUrl(tab?: string) {
+	const url = new URL('http://localhost/nodes/node-1');
+	if (tab) url.searchParams.set('tab', tab);
+	return url;
+}
 
 describe('node detail page server load', () => {
-	it('returns ready state with hosted VMs when both BFF calls succeed', async () => {
+	it('returns ready state when getNode succeeds', async () => {
 		const mockedGetNode = vi.mocked(getNode);
 		mockedGetNode.mockResolvedValue({
+			state: 'ready',
 			summary: {
 				node_id: 'node-1',
 				name: 'node-one',
@@ -26,67 +34,72 @@ describe('node detail page server load', () => {
 				cpu: '8',
 				memory: '32 GiB',
 				storage: '1 TiB',
-				network: '10 Gbps',
-				recent_tasks: []
-			}
-		});
-
-		const mockedListVms = vi.mocked(listVms);
-		mockedListVms.mockResolvedValue({
-			items: [
+				network: '10 Gbps'
+			},
+			sections: [
+				{ id: 'summary', label: 'Summary' },
+				{ id: 'vms', label: 'VMs', count: 2 },
+				{ id: 'tasks', label: 'Tasks', count: 1 },
+				{ id: 'configuration', label: 'Configuration' }
+			],
+			hostedVms: [
 				{
 					vm_id: 'vm-1',
 					name: 'vm-one',
-					node_id: 'node-1',
 					power_state: 'running',
 					health: 'healthy',
 					cpu: '2',
-					memory: '4 GiB',
-					volume_count: 1,
-					nic_count: 1,
-					last_task: 'created'
+					memory: '4 GiB'
 				}
 			],
-			page: { page: 1, page_size: 1000, total_items: 1 },
-			filters: { applied: { nodeId: 'node-1' } }
-		});
+			recentTasks: [
+				{
+					task_id: 'task-1',
+					status: 'succeeded',
+					summary: 'Health check',
+					operation: 'health_check',
+					started_unix_ms: 1713000000000
+				}
+			],
+			configuration: [
+				{ label: 'Node ID', value: 'node-1' },
+				{ label: 'Version', value: '1.0.0' }
+			]
+		} as import('$lib/bff/types').GetNodeResponse);
 
 		const result = await load({
 			params: { id: 'node-1' },
-			url: new URL('http://localhost/nodes/node-1'),
-			cookies: { get: () => 'token-123' }
-		} as Parameters<typeof load>[0]);
+			url: createUrl('vms'),
+			cookies: createCookies('token-123')
+		} as unknown as import('./$types').PageServerLoadEvent);
 
+		expect(mockedGetNode).toHaveBeenCalledWith({ node_id: 'node-1' }, 'token-123');
 		expect(result.detail.state).toBe('ready');
+		expect(result.detail.currentTab).toBe('vms');
 		expect(result.detail.summary.nodeId).toBe('node-1');
 		expect(result.detail.hostedVms).toHaveLength(1);
-		expect(result.detail.sections.find((s) => s.id === 'vms')?.count).toBe(1);
+		expect(result.requestedNodeId).toBe('node-1');
 	});
 
 	it('returns error state when getNode throws', async () => {
 		const mockedGetNode = vi.mocked(getNode);
 		mockedGetNode.mockRejectedValue(new Error('BFF down'));
 
-		const mockedListVms = vi.mocked(listVms);
-		mockedListVms.mockResolvedValue({
-			items: [],
-			page: { page: 1, page_size: 1000, total_items: 0 },
-			filters: { applied: {} }
-		});
-
 		const result = await load({
 			params: { id: 'node-1' },
-			url: new URL('http://localhost/nodes/node-1'),
-			cookies: { get: () => 'token-123' }
-		} as Parameters<typeof load>[0]);
+			url: createUrl(),
+			cookies: createCookies('token-123')
+		} as unknown as import('./$types').PageServerLoadEvent);
 
 		expect(result.detail.state).toBe('error');
-		expect(result.detail.hostedVms).toHaveLength(0);
+		expect(result.detail.summary.nodeId).toBe('node-1');
+		expect(result.requestedNodeId).toBe('node-1');
 	});
 
-	it('returns error state when listVms throws', async () => {
+	it('defaults tab to summary when not provided', async () => {
 		const mockedGetNode = vi.mocked(getNode);
 		mockedGetNode.mockResolvedValue({
+			state: 'ready',
 			summary: {
 				node_id: 'node-1',
 				name: 'node-one',
@@ -97,21 +110,16 @@ describe('node detail page server load', () => {
 				cpu: '8',
 				memory: '32 GiB',
 				storage: '1 TiB',
-				network: '10 Gbps',
-				recent_tasks: []
+				network: '10 Gbps'
 			}
-		});
-
-		const mockedListVms = vi.mocked(listVms);
-		mockedListVms.mockRejectedValue(new Error('BFF down'));
+		} as import('$lib/bff/types').GetNodeResponse);
 
 		const result = await load({
 			params: { id: 'node-1' },
-			url: new URL('http://localhost/nodes/node-1'),
-			cookies: { get: () => 'token-123' }
-		} as Parameters<typeof load>[0]);
+			url: createUrl(),
+			cookies: createCookies()
+		} as unknown as import('./$types').PageServerLoadEvent);
 
-		expect(result.detail.state).toBe('error');
-		expect(result.detail.hostedVms).toHaveLength(0);
+		expect(result.detail.currentTab).toBe('summary');
 	});
 });

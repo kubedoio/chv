@@ -33,10 +33,19 @@ export type RecentTask = {
 };
 
 export type OverviewResponse = {
-	health_tiles: HealthTile[];
-	capacity_tiles: CapacityTile[];
-	recent_tasks: RecentTask[];
-	active_alerts: string[];
+	clusters_total?: number;
+	clusters_healthy?: number;
+	clusters_degraded?: number;
+	nodes_total?: number;
+	nodes_degraded?: number;
+	vms_running?: number;
+	vms_total?: number;
+	active_tasks?: number;
+	unresolved_alerts?: number;
+	maintenance_nodes?: number;
+	capacity_hotspots?: number;
+	alerts?: { summary: string; scope: string; severity: string }[];
+	recent_tasks?: RecentTask[];
 };
 
 export type ListNodesRequest = {
@@ -57,6 +66,8 @@ export type NodeListItem = {
 	network: string;
 	version: string;
 	maintenance: boolean;
+	active_tasks: number;
+	alerts: number;
 };
 
 export type ListNodesResponse = {
@@ -91,8 +102,33 @@ export type NodeSummary = {
 	recent_tasks: RelatedTask[];
 };
 
+export type NodeHostedVm = {
+	vm_id: string;
+	name: string;
+	power_state: string;
+	health: string;
+	cpu: string;
+	memory: string;
+};
+
+export type NodeConfigurationItem = {
+	label: string;
+	value: string;
+};
+
+export type NodeSection = {
+	id: string;
+	label: string;
+	count?: number;
+};
+
 export type GetNodeResponse = {
+	state: 'ready' | 'empty' | 'error';
 	summary: NodeSummary;
+	sections: NodeSection[];
+	hostedVms: NodeHostedVm[];
+	recentTasks: RelatedTask[];
+	configuration: NodeConfigurationItem[];
 };
 
 export type ListVmsRequest = {
@@ -152,6 +188,81 @@ export type MutateVmResponse = {
 	summary: string;
 };
 
+export type MutateVolumeRequest = {
+	volume_id: string;
+	action: string;
+	force: boolean;
+	resize_bytes?: number;
+};
+
+export type MutateVolumeResponse = {
+	accepted: boolean;
+	task_id: string;
+	volume_id: string;
+	summary: string;
+};
+
+export type VolumeListItem = {
+	volume_id: string;
+	name: string;
+	node_id: string;
+	health: string;
+	size: string;
+	attached_vm_id: string;
+	attached_vm_name: string;
+	status: string;
+	last_task: string;
+};
+
+export type ListVolumesRequest = {
+	page: number;
+	page_size: number;
+	filters: Record<string, string>;
+};
+
+export type ListVolumesResponse = {
+	items: VolumeListItem[];
+	page: PageMeta;
+	filters: FilterMeta;
+};
+
+export type GetVolumeRequest = {
+	volume_id: string;
+};
+
+export type VolumeSummary = {
+	volume_id: string;
+	name: string;
+	node_id: string;
+	health: string;
+	size: string;
+	status: string;
+	attached_vm_id: string;
+	attached_vm_name: string;
+	device_name: string;
+	read_only: boolean;
+	volume_kind: string;
+	storage_class: string;
+	last_task: string;
+	recent_tasks: RelatedTask[];
+};
+
+export type GetVolumeResponse = {
+	summary: VolumeSummary;
+};
+
+export type MutateNodeRequest = {
+	node_id: string;
+	action: string;
+};
+
+export type MutateNodeResponse = {
+	accepted: boolean;
+	task_id: string;
+	node_id: string;
+	summary: string;
+};
+
 export type ListTasksRequest = {
 	page: number;
 	page_size: number;
@@ -181,6 +292,16 @@ export type VmLifecycleAction = 'start' | 'stop' | 'restart';
 export type VmLifecycleActionResult = {
 	accepted: boolean;
 	action: VmLifecycleAction;
+	summary: string;
+	taskId: string | null;
+	taskLabel: string;
+	taskTone: 'healthy' | 'warning' | 'degraded' | 'failed' | 'unknown';
+	taskHref: string | null;
+};
+
+export type MutationActionResult = {
+	accepted: boolean;
+	action: string;
 	summary: string;
 	taskId: string | null;
 	taskLabel: string;

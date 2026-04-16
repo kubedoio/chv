@@ -1,7 +1,8 @@
 import type { PageServerLoad } from './$types';
 import { listNodes } from '$lib/bff/nodes';
-import { BFFError } from '$lib/bff/client';
-import type { NodeListItem } from '$lib/bff/types';
+import type { ListNodesRequest, NodeListItem } from '$lib/bff/types';
+
+export type { NodeListItem };
 
 type NodesListModel = {
 	items: NodeListItem[];
@@ -9,6 +10,25 @@ type NodesListModel = {
 	filters: { current: Record<string, string>; applied: Record<string, string> };
 	page: { page: number; pageSize: number; totalItems: number };
 };
+
+function filterNodes(items: NodeListItem[], current: Record<string, string>): NodeListItem[] {
+	let result = [...items];
+	const query = (current.query ?? '').toLowerCase();
+	if (query) {
+		result = result.filter(
+			(n) => n.name.toLowerCase().includes(query) || n.cluster.toLowerCase().includes(query)
+		);
+	}
+	const state = current.state;
+	if (state && state !== 'all') {
+		result = result.filter((n) => n.state.toLowerCase() === state.toLowerCase());
+	}
+	const maintenance = current.maintenance;
+	if (maintenance && maintenance !== 'all') {
+		result = result.filter((n) => (n.maintenance ? 'true' : 'false') === maintenance);
+	}
+	return result;
+}
 
 export const load: PageServerLoad = async ({ url, cookies }) => {
 	const token = cookies.get('chv_session') ?? undefined;
@@ -24,24 +44,27 @@ export const load: PageServerLoad = async ({ url, cookies }) => {
 	if (state) current.state = state;
 	if (maintenance) current.maintenance = maintenance;
 
-	const req = { page, page_size: pageSize, filters: current };
+	const req: ListNodesRequest = {
+		page,
+		page_size: pageSize,
+		filters: current
+	};
 
 	try {
 		const res = await listNodes(req, token);
-		const items = res.items ?? [];
+		const filtered = filterNodes(res.items, current);
+
 		const model: NodesListModel = {
-			items,
-			state: items.length === 0 ? 'empty' : 'ready',
-			filters: {
-				current,
-				applied: res.filters?.applied ?? {}
-			},
+			items: filtered,
+			state: filtered.length === 0 ? 'empty' : 'ready',
+			filters: { current, applied: res.filters?.applied ?? current },
 			page: {
-				page: res.page?.page ?? page,
-				pageSize: res.page?.page_size ?? pageSize,
-				totalItems: res.page?.total_items ?? items.length
+				page,
+				pageSize,
+				totalItems: res.page.total_items
 			}
 		};
+
 		return { nodes: model };
 	} catch (err) {
 		// eslint-disable-next-line no-console
@@ -49,10 +72,7 @@ export const load: PageServerLoad = async ({ url, cookies }) => {
 		const model: NodesListModel = {
 			items: [],
 			state: 'error',
-			filters: {
-				current,
-				applied: {}
-			},
+			filters: { current, applied: {} },
 			page: { page, pageSize, totalItems: 0 }
 		};
 		return { nodes: model };

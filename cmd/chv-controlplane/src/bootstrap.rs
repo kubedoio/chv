@@ -1,7 +1,7 @@
 use chv_config::ControlPlaneConfig;
 use chv_controlplane_service::{
-    ControlPlaneComponents, ControlPlaneRuntime, ControlPlaneService, ControlPlaneServiceError,
-    EnrollmentServiceImplementation, InventoryServiceImplementation,
+    ControlPlaneComponents, ControlPlaneMutationService, ControlPlaneRuntime, ControlPlaneService,
+    ControlPlaneServiceError, EnrollmentServiceImplementation, InventoryServiceImplementation,
     LifecycleServiceImplementation, ReconcileServiceImplementation, TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
@@ -9,6 +9,7 @@ use chv_controlplane_store::{
     ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NodeRepository,
     ObservedStateRepository, OperationRepository,
 };
+use std::sync::Arc;
 
 pub async fn build_service(
     config: &ControlPlaneConfig,
@@ -34,7 +35,36 @@ pub async fn build_service(
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
 
-    let router = chv_controlplane_service::api::router::admin_router(pool.clone());
+    let node_repo = NodeRepository::new(pool.clone());
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
+    let observed_state_repo = ObservedStateRepository::new(pool.clone());
+    let event_repo = EventRepository::new(pool.clone());
+    let alert_repo = AlertRepository::new(pool.clone());
+    let desired_state_repo = DesiredStateRepository::new(pool.clone());
+    let operation_repo = OperationRepository::new(pool.clone());
+
+    let lifecycle_service = Arc::new(LifecycleServiceImplementation::new(
+        node_repo.clone(),
+        operation_repo.clone(),
+        event_repo.clone(),
+        desired_state_repo.clone(),
+    ));
+
+    let bff_state = chv_webui_bff::AppState {
+        pool: pool.clone(),
+        node_repo: node_repo.clone(),
+        operation_repo: operation_repo.clone(),
+        event_repo: event_repo.clone(),
+        alert_repo: alert_repo.clone(),
+        desired_state_repo: desired_state_repo.clone(),
+        observed_state_repo: observed_state_repo.clone(),
+        mutations: Arc::new(ControlPlaneMutationService::new(
+            pool.clone(),
+            lifecycle_service.clone(),
+        )),
+    };
+
+    let router = chv_controlplane_service::api::router::admin_router(bff_state);
     let http_listener = tokio::net::TcpListener::bind(config.http_bind)
         .await
         .map_err(|e| {
@@ -49,14 +79,6 @@ pub async fn build_service(
             .await
     });
 
-    let node_repo = NodeRepository::new(pool.clone());
-    let token_repo = BootstrapTokenRepository::new(pool.clone());
-    let observed_state_repo = ObservedStateRepository::new(pool.clone());
-    let event_repo = EventRepository::new(pool.clone());
-    let alert_repo = AlertRepository::new(pool.clone());
-    let desired_state_repo = DesiredStateRepository::new(pool.clone());
-    let operation_repo = OperationRepository::new(pool.clone());
-
     let cert_issuer = if let (Some(ca_cert_path), Some(ca_key_path)) =
         (&config.tls.ca_cert_path, &config.tls.ca_key_path)
     {
@@ -68,10 +90,10 @@ pub async fn build_service(
         })?;
 
         Some(
-            std::sync::Arc::new(chv_controlplane_service::CaBackedCertificateIssuer::new(
+            Arc::new(chv_controlplane_service::CaBackedCertificateIssuer::new(
                 &ca_cert_pem,
                 &ca_key_pem,
-            )?) as std::sync::Arc<dyn chv_controlplane_service::CertificateIssuer>,
+            )?) as Arc<dyn chv_controlplane_service::CertificateIssuer>,
         )
     } else {
         None
@@ -91,12 +113,6 @@ pub async fn build_service(
         event_repo.clone(),
         observed_state_repo.clone(),
         operation_repo.clone(),
-    );
-    let lifecycle_service = LifecycleServiceImplementation::new(
-        node_repo.clone(),
-        operation_repo,
-        event_repo.clone(),
-        desired_state_repo,
     );
 
     let mut tls_config = None;
@@ -140,7 +156,7 @@ pub async fn build_service(
             inventory_service,
             telemetry_service,
             reconcile_service,
-            lifecycle_service,
+            (*lifecycle_service).clone(),
         ),
     ))
 }

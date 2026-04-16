@@ -1,0 +1,11 @@
+pub mod clusters;
+pub mod events;
+pub mod images;
+pub mod maintenance;
+pub mod networks;
+pub mod nodes;
+pub mod overview;
+pub mod settings;
+pub mod tasks;
+pub mod volumes;
+pub mod vms;

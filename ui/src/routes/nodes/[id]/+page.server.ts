@@ -1,10 +1,9 @@
-import type { PageServerLoad } from './$types';
+import type { PageServerLoad, Actions } from './$types';
 import { getNode } from '$lib/bff/nodes';
-import { listVms } from '$lib/bff/vms';
-import { BFFError } from '$lib/bff/client';
-import type { NodeSummary, VmListItem, RelatedTask } from '$lib/bff/types';
+import { handleNodeMutation } from '$lib/webui/node-server-actions';
+import type { GetNodeResponse } from '$lib/bff/types';
 
-type NodeDetailModel = {
+export type NodeDetailModel = {
 	state: 'ready' | 'empty' | 'error';
 	currentTab: string;
 	summary: {
@@ -18,94 +17,30 @@ type NodeDetailModel = {
 		memory: string;
 		storage: string;
 		network: string;
+		maintenance: boolean;
+		scheduling: boolean;
 	};
 	sections: { id: string; label: string; count?: number }[];
-	hostedVms: VmListItem[];
-	hasMoreVms: boolean;
-	recentTasks: RelatedTask[];
+	hostedVms: {
+		vm_id: string;
+		name: string;
+		power_state: string;
+		health: string;
+		cpu: string;
+		memory: string;
+	}[];
+	recentTasks: { task_id: string; status: string; summary: string; operation: string; started_unix_ms: number }[];
 	configuration: Array<{ label: string; value: string }>;
 };
 
-function buildConfiguration(summary: NodeSummary): Array<{ label: string; value: string }> {
-	return [
-		{ label: 'Node ID', value: summary.node_id },
-		{ label: 'Name', value: summary.name },
-		{ label: 'Cluster', value: summary.cluster },
-		{ label: 'State', value: summary.state },
-		{ label: 'Health', value: summary.health },
-		{ label: 'Version', value: summary.version },
-		{ label: 'CPU', value: summary.cpu },
-		{ label: 'Memory', value: summary.memory },
-		{ label: 'Storage', value: summary.storage },
-		{ label: 'Network', value: summary.network }
-	];
-}
-
-function buildSections(
-	hostedVms: VmListItem[],
-	recentTasks: RelatedTask[]
-): { id: string; label: string; count?: number }[] {
-	return [
-		{ id: 'summary', label: 'Summary' },
-		{ id: 'vms', label: 'VMs', count: hostedVms.length },
-		{ id: 'volumes', label: 'Volumes' },
-		{ id: 'networks', label: 'Networks' },
-		{ id: 'tasks', label: 'Tasks', count: recentTasks.length },
-		{ id: 'events', label: 'Events' },
-		{ id: 'configuration', label: 'Configuration' }
-	];
-}
-
-export const load: PageServerLoad = async ({ params, url, cookies }) => {
-	const token = cookies.get('chv_session') ?? undefined;
-	const currentTab = url.searchParams.get('tab') ?? 'summary';
-
-	try {
-		const [nodeRes, vmsRes] = await Promise.all([
-			getNode({ node_id: params.id }, token),
-			listVms({ page: 1, page_size: 1000, filters: { nodeId: params.id } }, token)
-		]);
-
-		const summary = nodeRes.summary;
-		const hostedVms = vmsRes.items ?? [];
-		const hasMoreVms =
-			hostedVms.length === 1000 || (vmsRes.page?.total_items ?? 0) > 1000;
-		const recentTasks = summary.recent_tasks ?? [];
-		const configuration = buildConfiguration(summary);
-		const sections = buildSections(hostedVms, recentTasks);
-
-		const detail: NodeDetailModel = {
-			state: 'ready',
-			currentTab,
-			summary: {
-				nodeId: summary.node_id,
-				name: summary.name,
-				cluster: summary.cluster,
-				state: summary.state,
-				health: summary.health,
-				version: summary.version,
-				cpu: summary.cpu,
-				memory: summary.memory,
-				storage: summary.storage,
-				network: summary.network
-			},
-			sections,
-			hostedVms,
-			hasMoreVms,
-			recentTasks,
-			configuration
-		};
-
-		return { detail };
-	} catch (err) {
-		// eslint-disable-next-line no-console
-		console.error('BFF node detail error:', err);
-		const detail: NodeDetailModel = {
+function mapDetail(res: GetNodeResponse | null, currentTab: string, fallbackId: string): NodeDetailModel {
+	if (!res || !res.summary) {
+		return {
 			state: 'error',
 			currentTab,
 			summary: {
-				nodeId: params.id,
-				name: '',
+				nodeId: fallbackId,
+				name: fallbackId,
 				cluster: '',
 				state: '',
 				health: '',
@@ -113,22 +48,75 @@ export const load: PageServerLoad = async ({ params, url, cookies }) => {
 				cpu: '',
 				memory: '',
 				storage: '',
-				network: ''
+				network: '',
+				maintenance: false,
+				scheduling: false
 			},
 			sections: [
 				{ id: 'summary', label: 'Summary' },
-				{ id: 'vms', label: 'VMs' },
-				{ id: 'volumes', label: 'Volumes' },
-				{ id: 'networks', label: 'Networks' },
-				{ id: 'tasks', label: 'Tasks' },
-				{ id: 'events', label: 'Events' },
+				{ id: 'vms', label: 'VMs', count: 0 },
+				{ id: 'tasks', label: 'Tasks', count: 0 },
 				{ id: 'configuration', label: 'Configuration' }
 			],
 			hostedVms: [],
-			hasMoreVms: false,
 			recentTasks: [],
-			configuration: []
+			configuration: [{ label: 'Node ID', value: fallbackId }]
 		};
-		return { detail };
+	}
+
+	const summary = res.summary;
+	return {
+		state: res.state ?? 'ready',
+		currentTab,
+		summary: {
+			nodeId: summary.node_id,
+			name: summary.name,
+			cluster: summary.cluster,
+			state: summary.state,
+			health: summary.health,
+			version: summary.version,
+			cpu: summary.cpu,
+			memory: summary.memory,
+			storage: summary.storage,
+			network: summary.network,
+			maintenance: (summary as unknown as { maintenance?: boolean }).maintenance ?? false,
+			scheduling: (summary as unknown as { scheduling?: boolean }).scheduling ?? false
+		},
+		sections: res.sections ?? [
+			{ id: 'summary', label: 'Summary' },
+			{ id: 'vms', label: 'VMs', count: res.hostedVms?.length ?? 0 },
+			{ id: 'tasks', label: 'Tasks', count: res.recentTasks?.length ?? 0 },
+			{ id: 'configuration', label: 'Configuration' }
+		],
+		hostedVms: res.hostedVms ?? [],
+		recentTasks: res.recentTasks ?? [],
+		configuration: res.configuration ?? [
+			{ label: 'Node ID', value: summary.node_id },
+			{ label: 'Version', value: summary.version },
+			{ label: 'CPU', value: summary.cpu },
+			{ label: 'Memory', value: summary.memory },
+			{ label: 'Storage backend', value: 'zfs' }
+		]
+	};
+}
+
+export const load: PageServerLoad = async ({ params, url, cookies }) => {
+	const token = cookies.get('chv_session') ?? undefined;
+	const currentTab = url.searchParams.get('tab') ?? 'summary';
+	try {
+		const res = await getNode({ node_id: params.id }, token);
+		const detail = mapDetail(res, currentTab, params.id);
+		return { detail, requestedNodeId: params.id };
+	} catch {
+		const detail = mapDetail(null, currentTab, params.id);
+		return { detail, requestedNodeId: params.id };
+	}
+};
+
+export const actions: Actions = {
+	default: async ({ request, cookies }) => {
+		const token = cookies.get('chv_session') ?? undefined;
+		const formData = await request.formData();
+		return handleNodeMutation(formData, token);
 	}
 };
