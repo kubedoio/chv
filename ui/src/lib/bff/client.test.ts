@@ -5,6 +5,10 @@ import { listNodes, getNode } from './nodes';
 import { listVms, getVm, mutateVm } from './vms';
 import { listTasks } from './tasks';
 
+function jsonHeaders(): Headers {
+	return new Headers({ 'content-type': 'application/json' });
+}
+
 describe('bffFetch', () => {
 	beforeEach(() => {
 		vi.restoreAllMocks();
@@ -18,6 +22,8 @@ describe('bffFetch', () => {
 	it('returns parsed JSON on happy path', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ data: 'ok' })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -37,6 +43,8 @@ describe('bffFetch', () => {
 	it('injects Authorization header when token is provided', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ data: 'ok' })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -53,6 +61,7 @@ describe('bffFetch', () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: false,
 			status: 401,
+			headers: jsonHeaders(),
 			json: async () => ({ message: 'Unauthorized', code: 'UNAUTHORIZED' })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -69,6 +78,7 @@ describe('bffFetch', () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: false,
 			status: 500,
+			headers: new Headers({ 'content-type': 'text/html' }),
 			json: async () => {
 				throw new Error('bad json');
 			}
@@ -80,6 +90,24 @@ describe('bffFetch', () => {
 			status: 500,
 			code: 'UNKNOWN_ERROR',
 			message: 'Request failed with status 500'
+		});
+	});
+
+	it('throws BFFError on 200 when body is HTML', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			headers: new Headers({ 'content-type': 'text/html' }),
+			text: async () => '<!doctype html><html><body>fallback</body></html>',
+			json: async () => {
+				throw new Error('bad json');
+			}
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(bffFetch('/v1/test', { method: 'POST' })).rejects.toMatchObject({
+			status: 200,
+			code: 'INVALID_RESPONSE'
 		});
 	});
 
@@ -102,6 +130,8 @@ describe('bffFetch', () => {
 		g.process.env.BFF_BASE_URL = 'http://bff.example';
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ data: 'ok' })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -117,6 +147,8 @@ describe('bffFetch', () => {
 		g.process.env.CHV_BFF_BASE_URL = 'http://chv.example';
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ data: 'ok' })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -130,6 +162,8 @@ describe('overview', () => {
 	it('loadOverview calls the correct endpoint', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({
 				health_tiles: [],
 				capacity_tiles: [],
@@ -159,6 +193,8 @@ describe('nodes', () => {
 	it('listNodes sends the request body', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ items: [], page: { page: 1, page_size: 10, total_items: 0 }, filters: { applied: {} } })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -173,6 +209,8 @@ describe('nodes', () => {
 	it('getNode sends the node_id', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ summary: { node_id: 'n1', name: 'Node 1', cluster: '', state: '', health: '', version: '', cpu: '', memory: '', storage: '', network: '', recent_tasks: [] } })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -188,6 +226,8 @@ describe('vms', () => {
 	it('listVms sends the request body', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ items: [], page: { page: 1, page_size: 10, total_items: 0 }, filters: { applied: {} } })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -201,6 +241,8 @@ describe('vms', () => {
 	it('mutateVm sends action and force', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ accepted: true, task_id: 't1', vm_id: 'v1', summary: 'started' })
 		});
 		vi.stubGlobal('fetch', fetchMock);
@@ -216,6 +258,8 @@ describe('tasks', () => {
 	it('listTasks sends the request body', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
+			status: 200,
+			headers: jsonHeaders(),
 			json: async () => ({ items: [], page: { page: 1, page_size: 10, total_items: 0 }, filters: { applied: {} } })
 		});
 		vi.stubGlobal('fetch', fetchMock);

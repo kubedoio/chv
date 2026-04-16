@@ -48,6 +48,11 @@
         throw new Error(message);
       }
 
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Login endpoint returned an unexpected response format.');
+      }
+
       const data = await response.json();
       
       // Store token and sync to cookie for server-side loads

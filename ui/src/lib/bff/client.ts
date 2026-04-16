@@ -15,6 +15,44 @@ function getBaseUrl(): string {
 	return g.process?.env?.BFF_BASE_URL || g.process?.env?.CHV_BFF_BASE_URL || 'http://localhost:8080';
 }
 
+function getHeader(response: Response, name: string): string | null {
+	return response.headers?.get?.(name) ?? null;
+}
+
+function isJsonResponse(response: Response): boolean {
+	const contentType = getHeader(response, 'content-type');
+	return contentType?.toLowerCase().includes('application/json') ?? false;
+}
+
+async function parseSuccessPayload<T>(response: Response): Promise<T> {
+	if (response.status === 204 || getHeader(response, 'content-length') === '0') {
+		return undefined as T;
+	}
+
+	if (!isJsonResponse(response)) {
+		let bodyPrefix = '';
+		try {
+			bodyPrefix = (await response.text()).trim().slice(0, 64);
+		} catch {
+			bodyPrefix = '';
+		}
+
+		const contentType = getHeader(response, 'content-type') ?? 'unknown content-type';
+		const suffix = bodyPrefix ? ` (response starts with "${bodyPrefix}")` : '';
+		throw new BFFError(
+			`Expected JSON response but received ${contentType}${suffix}`,
+			response.status,
+			'INVALID_RESPONSE'
+		);
+	}
+
+	try {
+		return (await response.json()) as T;
+	} catch {
+		throw new BFFError('Failed to parse JSON response', response.status, 'INVALID_RESPONSE');
+	}
+}
+
 export async function bffFetch<T>(
 	path: string,
 	init?: RequestInit & { token?: string }
@@ -49,6 +87,9 @@ export async function bffFetch<T>(
 	if (!response.ok) {
 		let payload: { message?: string; code?: string } | undefined;
 		try {
+			if (!isJsonResponse(response)) {
+				throw new Error('non-json response');
+			}
 			payload = (await response.json()) as { message?: string; code?: string };
 		} catch {
 			payload = undefined;
@@ -59,5 +100,5 @@ export async function bffFetch<T>(
 		throw new BFFError(message, response.status, code);
 	}
 
-	return (await response.json()) as T;
+	return parseSuccessPayload<T>(response);
 }

@@ -130,6 +130,49 @@ function getUserFriendlyMessage(error: unknown): string {
   return 'An unexpected error occurred. Please try again.';
 }
 
+function getHeader(response: Response, name: string): string | null {
+  return response.headers?.get?.(name) ?? null;
+}
+
+function isJsonResponse(response: Response): boolean {
+  const contentType = getHeader(response, 'content-type');
+  return contentType?.toLowerCase().includes('application/json') ?? false;
+}
+
+async function parseJSONResponse<T>(response: Response, path: string): Promise<T> {
+  if (response.status === 204 || getHeader(response, 'content-length') === '0') {
+    return undefined as T;
+  }
+
+  if (!isJsonResponse(response)) {
+    let bodyPrefix = '';
+    try {
+      bodyPrefix = (await response.text()).trim().slice(0, 64);
+    } catch {
+      bodyPrefix = '';
+    }
+
+    const contentType = getHeader(response, 'content-type') ?? 'unknown content-type';
+    throw new APIError(
+      `Expected JSON response from ${path} but received ${contentType}.`,
+      response.status,
+      'INVALID_RESPONSE',
+      false,
+      bodyPrefix ? `Response starts with "${bodyPrefix}"` : undefined
+    );
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new APIError(
+      `Failed to parse JSON response from ${path}.`,
+      response.status,
+      'INVALID_RESPONSE'
+    );
+  }
+}
+
 export function createAPIClient(options?: { baseUrl?: string; token?: string }) {
   const baseUrl = options?.baseUrl ?? DEFAULT_BASE_URL;
   let token = options?.token ?? getStoredToken() ?? '';
@@ -168,6 +211,9 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     if (!response.ok) {
       let payload: APIErrorEnvelope | undefined;
       try {
+        if (!isJsonResponse(response)) {
+          throw new Error('non-json error response');
+        }
         payload = (await response.json()) as APIErrorEnvelope;
       } catch {
         payload = undefined;
@@ -226,7 +272,7 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       throw error;
     }
 
-    return (await response.json()) as T;
+    return parseJSONResponse<T>(response, path);
   }
 
   async function upload<T>(path: string, formData: FormData): Promise<T> {
@@ -258,7 +304,7 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       throw new Error(`Upload failed with status ${response.status}`);
     }
 
-    return (await response.json()) as T;
+    return parseJSONResponse<T>(response, path);
   }
 
   return {
