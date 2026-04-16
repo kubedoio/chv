@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    routing::{get, post},
+    routing::post,
     Router,
 };
 use chv_controlplane_store::{
@@ -32,4 +32,11 @@ pub fn bff_router() -> Router<AppState> {
         .route("/v1/vms/get", post(crate::handlers::vms::get_vm))
         .route("/v1/vms/mutate", post(crate::handlers::vms::mutate_vm))
         .route("/v1/tasks", post(crate::handlers::tasks::list_tasks))
+        .route("/v1/clusters", post(crate::handlers::clusters::list_clusters))
+        .route("/v1/networks", post(crate::handlers::networks::list_networks))
+        .route("/v1/networks/get", post(crate::handlers::networks::get_network))
+        .route("/v1/events", post(crate::handlers::events::list_events))
+        .route("/v1/images", post(crate::handlers::images::list_images))
+        .route("/v1/maintenance", post(crate::handlers::maintenance::get_maintenance))
+        .route("/v1/settings", post(crate::handlers::settings::get_settings))
 }
