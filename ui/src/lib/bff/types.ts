@@ -188,6 +188,20 @@ export type MutateVmResponse = {
 	summary: string;
 };
 
+export type MutateVolumeRequest = {
+	volume_id: string;
+	action: string;
+	force: boolean;
+	resize_bytes?: number;
+};
+
+export type MutateVolumeResponse = {
+	accepted: boolean;
+	task_id: string;
+	volume_id: string;
+	summary: string;
+};
+
 export type VolumeListItem = {
 	volume_id: string;
 	name: string;

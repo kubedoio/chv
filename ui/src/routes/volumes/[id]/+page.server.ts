@@ -1,5 +1,6 @@
-import type { PageServerLoad } from './$types';
+import type { PageServerLoad, Actions } from './$types';
 import { getVolume } from '$lib/bff/volumes';
+import { handleVolumeMutation } from '$lib/webui/volume-server-actions';
 import type { VolumeSummary, RelatedTask } from '$lib/bff/types';
 
 export type VolumeDetailModel = {
@@ -41,7 +42,7 @@ function buildConfiguration(summary: VolumeSummary): Array<{ label: string; valu
 		{ label: 'Storage Class', value: summary.storage_class },
 		{ label: 'Device Name', value: summary.device_name },
 		{ label: 'Read Only', value: summary.read_only ? 'Yes' : 'No' },
-		{ label: 'Attached VM', value: summary.attached_vm_id || '-' }
+		{ label: 'Attached VM', value: summary.attached_vm_name || summary.attached_vm_id || '-' }
 	];
 }
 
@@ -111,5 +112,13 @@ export const load: PageServerLoad = async ({ params, url, cookies }) => {
 			configuration: []
 		};
 		return { detail, requestedVolumeId: params.id };
+	}
+};
+
+export const actions: Actions = {
+	default: async ({ request, cookies }) => {
+		const token = cookies.get('chv_session') ?? undefined;
+		const formData = await request.formData();
+		return handleVolumeMutation(formData, token);
 	}
 };

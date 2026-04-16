@@ -18,9 +18,11 @@ pub async fn list_volumes(
             COALESCE(vds.desired_status, vos.runtime_status, 'Unknown') AS status,
             COALESCE(pg_size_pretty(v.capacity_bytes), '') AS size,
             COALESCE(vds.attached_vm_id, '') AS attached_vm_id,
+            COALESCE(vms.display_name, '') AS attached_vm_name,
             COALESCE(last_task.operation_type, '') AS last_task
         FROM volumes v
         LEFT JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
+        LEFT JOIN vms ON vds.attached_vm_id = vms.vm_id
         LEFT JOIN volume_observed_state vos ON v.volume_id = vos.volume_id
         LEFT JOIN LATERAL (
             SELECT operation_type
@@ -46,7 +48,7 @@ pub async fn list_volumes(
                 "health": r.health,
                 "size": r.size,
                 "attached_vm_id": r.attached_vm_id,
-                "attached_vm_name": "",
+                "attached_vm_name": r.attached_vm_name,
                 "status": r.status,
                 "last_task": r.last_task,
             })
@@ -83,6 +85,7 @@ pub async fn get_volume(
             COALESCE(pg_size_pretty(v.capacity_bytes), '') AS size,
             COALESCE(vds.desired_status, vos.runtime_status, 'Unknown') AS status,
             COALESCE(vds.attached_vm_id, '') AS attached_vm_id,
+            COALESCE(vms.display_name, '') AS attached_vm_name,
             COALESCE(vds.device_name, '') AS device_name,
             COALESCE(vds.read_only, false) AS read_only,
             COALESCE(v.volume_kind, '') AS volume_kind,
@@ -90,6 +93,7 @@ pub async fn get_volume(
             COALESCE(last_task.operation_type, '') AS last_task
         FROM volumes v
         LEFT JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
+        LEFT JOIN vms ON vds.attached_vm_id = vms.vm_id
         LEFT JOIN volume_observed_state vos ON v.volume_id = vos.volume_id
         LEFT JOIN LATERAL (
             SELECT operation_type
@@ -147,7 +151,7 @@ pub async fn get_volume(
                     "size": r.size,
                     "status": r.status,
                     "attached_vm_id": r.attached_vm_id,
-                    "attached_vm_name": "",
+                    "attached_vm_name": r.attached_vm_name,
                     "device_name": r.device_name,
                     "read_only": r.read_only,
                     "volume_kind": r.volume_kind,
@@ -202,6 +206,7 @@ struct VolumeRow {
     health: String,
     size: String,
     attached_vm_id: String,
+    attached_vm_name: String,
     status: String,
     last_task: String,
 }
@@ -215,6 +220,7 @@ struct VolumeSummaryRow {
     size: String,
     status: String,
     attached_vm_id: String,
+    attached_vm_name: String,
     device_name: String,
     read_only: bool,
     volume_kind: String,
