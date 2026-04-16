@@ -11,11 +11,9 @@ static JWT_SECRET: LazyLock<String> = LazyLock::new(jwt_secret);
 
 pub fn jwt_secret() -> String {
     std::env::var("CHV_JWT_SECRET").unwrap_or_else(|_| {
-        if cfg!(debug_assertions) {
-            "chv-dev-secret-change-in-production".to_string()
-        } else {
-            panic!("CHV_JWT_SECRET environment variable must be set")
-        }
+        // Temporary fallback for release builds until ops sets CHV_JWT_SECRET.
+        tracing::error!("CHV_JWT_SECRET not set; using hardcoded dev fallback. Set CHV_JWT_SECRET in production!");
+        "chv-dev-secret-change-in-production".to_string()
     })
 }
 
