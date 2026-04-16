@@ -60,6 +60,14 @@
       syncAuthCookieFromLocalStorage();
       
       toast.success(`Welcome, ${data.user.username}!`);
+
+      // Force a full navigation after login so stale client-router state
+      // cannot trap users on /login after successful auth.
+      if (typeof window !== 'undefined') {
+        window.location.assign('/');
+        return;
+      }
+
       await goto('/');
     } catch (err) {
       error = err instanceof Error ? err.message : 'Login failed';
