@@ -1,4 +1,5 @@
-import type { PageServerLoad } from './$types';
+import type { PageLoad } from './$types';
+import { getStoredToken } from '$lib/api/client';
 import { getSettings } from '$lib/bff/settings';
 
 export type SettingsModel = {
@@ -11,8 +12,8 @@ export type SettingsModel = {
 	state: 'ready' | 'error';
 };
 
-export const load: PageServerLoad = async ({ cookies }) => {
-	const token = cookies.get('chv_session') ?? undefined;
+export const load: PageLoad = async () => {
+	const token = getStoredToken() ?? undefined;
 
 	try {
 		const res = await getSettings(token);

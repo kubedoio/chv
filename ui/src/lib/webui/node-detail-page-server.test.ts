@@ -1,17 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { load } from '../../routes/nodes/[id]/+page.server';
+import { load } from '../../routes/nodes/[id]/+page';
 
 vi.mock('$lib/bff/nodes', () => ({
 	getNode: vi.fn()
 }));
 
-import { getNode } from '$lib/bff/nodes';
+vi.mock('$lib/api/client', () => ({
+	getStoredToken: vi.fn().mockReturnValue('token-123')
+}));
 
-function createCookies(token?: string) {
-	return {
-		get: vi.fn().mockReturnValue(token)
-	} as unknown as import('@sveltejs/kit').Cookies;
-}
+import { getNode } from '$lib/bff/nodes';
 
 function createUrl(tab?: string) {
 	const url = new URL('http://localhost/nodes/node-1');
@@ -69,9 +67,8 @@ describe('node detail page server load', () => {
 
 		const result = await load({
 			params: { id: 'node-1' },
-			url: createUrl('vms'),
-			cookies: createCookies('token-123')
-		} as unknown as import('./$types').PageServerLoadEvent);
+			url: createUrl('vms')
+		} as Parameters<typeof load>[0]);
 
 		expect(mockedGetNode).toHaveBeenCalledWith({ node_id: 'node-1' }, 'token-123');
 		expect(result.detail.state).toBe('ready');
@@ -87,9 +84,8 @@ describe('node detail page server load', () => {
 
 		const result = await load({
 			params: { id: 'node-1' },
-			url: createUrl(),
-			cookies: createCookies('token-123')
-		} as unknown as import('./$types').PageServerLoadEvent);
+			url: createUrl()
+		} as Parameters<typeof load>[0]);
 
 		expect(result.detail.state).toBe('error');
 		expect(result.detail.summary.nodeId).toBe('node-1');
@@ -116,9 +112,8 @@ describe('node detail page server load', () => {
 
 		const result = await load({
 			params: { id: 'node-1' },
-			url: createUrl(),
-			cookies: createCookies()
-		} as unknown as import('./$types').PageServerLoadEvent);
+			url: createUrl()
+		} as Parameters<typeof load>[0]);
 
 		expect(result.detail.currentTab).toBe('summary');
 	});

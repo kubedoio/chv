@@ -1,4 +1,5 @@
-import type { PageServerLoad } from './$types';
+import type { PageLoad } from './$types';
+import { getStoredToken } from '$lib/api/client';
 import { listEvents } from '$lib/bff/events';
 
 export type EventListItem = {
@@ -42,8 +43,8 @@ function filterEvents(items: EventListItem[], current: Record<string, string>): 
 	return result;
 }
 
-export const load: PageServerLoad = async ({ url, cookies }) => {
-	const token = cookies.get('chv_session') ?? undefined;
+export const load: PageLoad = async ({ url }) => {
+	const token = getStoredToken() ?? undefined;
 	const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
 	const pageSize = 50;
 

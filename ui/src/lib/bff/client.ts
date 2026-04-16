@@ -12,6 +12,9 @@ export class BFFError extends Error {
 
 function getBaseUrl(): string {
 	const g = globalThis as typeof globalThis & { process?: { env?: Record<string, string> } };
+	if (typeof window !== 'undefined') {
+		return '';
+	}
 	return g.process?.env?.BFF_BASE_URL || g.process?.env?.CHV_BFF_BASE_URL || 'http://localhost:8080';
 }
 

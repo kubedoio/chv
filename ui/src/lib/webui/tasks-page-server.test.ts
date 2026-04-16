@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { load } from '../../routes/tasks/+page.server';
+import { load } from '../../routes/tasks/+page';
 
 vi.mock('$lib/bff/tasks', () => ({
 	listTasks: vi.fn()
+}));
+
+vi.mock('$lib/api/client', () => ({
+	getStoredToken: vi.fn().mockReturnValue('token-123')
 }));
 
 import { listTasks } from '$lib/bff/tasks';
@@ -28,8 +32,7 @@ describe('tasks page server load', () => {
 		});
 
 		const result = await load({
-			url: new URL('http://localhost/tasks'),
-			cookies: { get: () => 'token-123' }
+			url: new URL('http://localhost/tasks')
 		} as Parameters<typeof load>[0]);
 
 		expect(result.tasks.state).toBe('ready');
@@ -42,8 +45,7 @@ describe('tasks page server load', () => {
 		mockedListTasks.mockRejectedValue(new Error('BFF down'));
 
 		const result = await load({
-			url: new URL('http://localhost/tasks'),
-			cookies: { get: () => 'token-123' }
+			url: new URL('http://localhost/tasks')
 		} as Parameters<typeof load>[0]);
 
 		expect(result.tasks.state).toBe('error');

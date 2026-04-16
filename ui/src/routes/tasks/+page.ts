@@ -1,12 +1,13 @@
-import type { PageServerLoad } from './$types';
+import type { PageLoad } from './$types';
+import { getStoredToken } from '$lib/api/client';
 import { listTasks } from '$lib/bff/tasks';
 import type { ListTasksRequest, TaskListItem } from '$lib/bff/types';
 
 const PAGE_SIZE = 50;
 const DEFAULT_WINDOW = '7d';
 
-export const load: PageServerLoad = async ({ url, cookies }) => {
-	const token = cookies.get('chv_session') ?? undefined;
+export const load: PageLoad = async ({ url }) => {
+	const token = getStoredToken() ?? undefined;
 	const page = Math.max(Number(url.searchParams.get('page') ?? '1') || 1, 1);
 
 	const current: Record<string, string> = {

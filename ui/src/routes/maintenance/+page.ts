@@ -1,4 +1,5 @@
-import type { PageServerLoad } from './$types';
+import type { PageLoad } from './$types';
+import { getStoredToken } from '$lib/api/client';
 import { getMaintenance } from '$lib/bff/maintenance';
 
 export type MaintenanceNode = {
@@ -44,8 +45,8 @@ function filterNodes(items: MaintenanceNode[], current: Record<string, string>):
 	return result;
 }
 
-export const load: PageServerLoad = async ({ url, cookies }) => {
-	const token = cookies.get('chv_session') ?? undefined;
+export const load: PageLoad = async ({ url }) => {
+	const token = getStoredToken() ?? undefined;
 
 	const current: Record<string, string> = {};
 	const query = url.searchParams.get('query');

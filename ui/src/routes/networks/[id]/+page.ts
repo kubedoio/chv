@@ -1,4 +1,5 @@
-import type { PageServerLoad } from './$types';
+import type { PageLoad } from './$types';
+import { getStoredToken } from '$lib/api/client';
 import { error } from '@sveltejs/kit';
 import { getNetwork } from '$lib/bff/networks';
 
@@ -18,8 +19,8 @@ export type NetworkDetailModel = {
 	state: 'ready' | 'error';
 };
 
-export const load: PageServerLoad = async ({ params, cookies }) => {
-	const token = cookies.get('chv_session') ?? undefined;
+export const load: PageLoad = async ({ params }) => {
+	const token = getStoredToken() ?? undefined;
 
 	try {
 		const res = await getNetwork(params.id, token);

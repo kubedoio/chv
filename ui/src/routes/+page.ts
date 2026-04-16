@@ -1,5 +1,6 @@
 import { browser } from '$app/environment';
 import { getStoredToken } from '$lib/api/client';
+import { loadOverview } from '$lib/bff/overview';
 import type { OverviewResponse } from '$lib/bff/types';
 import type { PageLoad } from './$types';
 
@@ -105,37 +106,16 @@ function toOverviewModel(res: OverviewResponse): OverviewModel {
 	return model;
 }
 
-export const load: PageLoad = async ({ fetch }) => {
+export const load: PageLoad = async () => {
 	// In static builds, avoid server-pass data fetches that can become HTML fallback responses.
 	if (!browser) {
 		return { overview: createOverview('loading') };
 	}
 
 	const token = getStoredToken();
-	const headers = new Headers();
-	headers.set('Content-Type', 'application/json');
-	if (token) {
-		headers.set('Authorization', `Bearer ${token}`);
-	}
 
 	try {
-		const response = await fetch('/api/v1/overview', {
-			method: 'POST',
-			headers,
-			body: JSON.stringify({}),
-			cache: 'no-store'
-		});
-
-		if (!response.ok) {
-			return { overview: createOverview('error') };
-		}
-
-		const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
-		if (!contentType.includes('application/json')) {
-			return { overview: createOverview('error') };
-		}
-
-		const payload = (await response.json()) as OverviewResponse;
+		const payload = await loadOverview(token ?? undefined);
 		return { overview: toOverviewModel(payload) };
 	} catch {
 		return { overview: createOverview('error') };
