@@ -25,11 +25,11 @@ pub struct AppState {
 
 pub fn bff_router() -> Router<AppState> {
     Router::new()
-        .route("/v1/overview", get(crate::handlers::overview::get_overview))
-        .route("/v1/nodes", get(crate::handlers::nodes::list_nodes))
+        .route("/v1/overview", post(crate::handlers::overview::get_overview))
+        .route("/v1/nodes", post(crate::handlers::nodes::list_nodes))
         .route("/v1/nodes/get", post(crate::handlers::nodes::get_node))
-        .route("/v1/vms", get(crate::handlers::vms::list_vms))
+        .route("/v1/vms", post(crate::handlers::vms::list_vms))
         .route("/v1/vms/get", post(crate::handlers::vms::get_vm))
         .route("/v1/vms/mutate", post(crate::handlers::vms::mutate_vm))
-        .route("/v1/tasks", get(crate::handlers::tasks::list_tasks))
+        .route("/v1/tasks", post(crate::handlers::tasks::list_tasks))
 }

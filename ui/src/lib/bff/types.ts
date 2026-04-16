@@ -33,10 +33,19 @@ export type RecentTask = {
 };
 
 export type OverviewResponse = {
-	health_tiles: HealthTile[];
-	capacity_tiles: CapacityTile[];
-	recent_tasks: RecentTask[];
-	active_alerts: string[];
+	clusters_total?: number;
+	clusters_healthy?: number;
+	clusters_degraded?: number;
+	nodes_total?: number;
+	nodes_degraded?: number;
+	vms_running?: number;
+	vms_total?: number;
+	active_tasks?: number;
+	unresolved_alerts?: number;
+	maintenance_nodes?: number;
+	capacity_hotspots?: number;
+	alerts?: { summary: string; scope: string; severity: string }[];
+	recent_tasks?: RecentTask[];
 };
 
 export type ListNodesRequest = {
@@ -57,6 +66,8 @@ export type NodeListItem = {
 	network: string;
 	version: string;
 	maintenance: boolean;
+	active_tasks: number;
+	alerts: number;
 };
 
 export type ListNodesResponse = {
