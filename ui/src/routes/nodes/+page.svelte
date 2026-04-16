@@ -216,10 +216,10 @@
 									{/if}
 								</div>
 							</div>
-							<a href="/nodes/{node.node_id}" class="attention-item__cta">
-								View node
-								<ArrowRight size={14} aria-hidden="true" />
-							</a>
+								<a href={`/nodes/${node.node_id}`} class="attention-item__cta">
+									View node
+									<ArrowRight size={14} aria-hidden="true" />
+								</a>
 						</li>
 					{/each}
 				</ul>

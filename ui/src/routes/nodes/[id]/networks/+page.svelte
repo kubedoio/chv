@@ -113,7 +113,7 @@
   <div class="flex items-center justify-between">
     <div class="flex items-center gap-4">
       <a 
-        href="/nodes/{nodeId}" 
+        href={`/nodes/${nodeId}`} 
         class="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
         aria-label="Back to node"
       >

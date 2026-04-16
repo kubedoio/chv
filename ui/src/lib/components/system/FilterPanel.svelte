@@ -57,7 +57,7 @@
 	{/each}
 	<div class="filter-panel__actions">
 		<button type="submit">Apply</button>
-		<a href="?{otherParams}">Reset</a>
+		<a href={otherParams ? `?${otherParams}` : '?'}>Reset</a>
 	</div>
 </form>
 

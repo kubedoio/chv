@@ -236,7 +236,7 @@
 											<span>{formatTimeAgo(task.started_unix_ms)}</span>
 										</div>
 									</div>
-									<a href="/tasks?query={task.task_id}" class="task-item__link">
+									<a href={`/tasks?query=${task.task_id}`} class="task-item__link">
 										<ArrowRight size={14} aria-hidden="true" />
 									</a>
 								</li>

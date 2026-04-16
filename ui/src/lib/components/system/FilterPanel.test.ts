@@ -55,4 +55,10 @@ describe('FilterPanel', () => {
 		expect(search.value).toBe('node-1');
 		expect(select.value).toBe('online');
 	});
+
+	it('renders reset link with preserved non-filter params', () => {
+		const { container } = render(FilterPanel, { props: { filters, values: {} } });
+		const reset = container.querySelector('.filter-panel__actions a');
+		expect(reset?.getAttribute('href')).toBe('?sort=name');
+	});
 });

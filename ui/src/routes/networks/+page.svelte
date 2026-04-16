@@ -186,10 +186,10 @@
 									{/if}
 								</div>
 							</div>
-							<a href="/networks/{net.network_id}" class="attention-item__cta">
-								View network
-								<ArrowRight size={14} aria-hidden="true" />
-							</a>
+								<a href={`/networks/${net.network_id}`} class="attention-item__cta">
+									View network
+									<ArrowRight size={14} aria-hidden="true" />
+								</a>
 						</li>
 					{/each}
 				</ul>

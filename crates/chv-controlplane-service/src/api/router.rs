@@ -6,8 +6,12 @@ async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::NOT_FOUND,
         Json(serde_json::json!({
-            "error": "not_found",
-            "message": "This endpoint is not implemented in the current control plane build."
+            "error": {
+                "code": "NOT_IMPLEMENTED",
+                "message": "This endpoint is not implemented in the current control plane build.",
+                "retryable": false,
+                "hint": "Use the BFF-backed /v1 routes for supported UI workflows."
+            }
         })),
     )
 }

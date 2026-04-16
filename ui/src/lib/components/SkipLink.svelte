@@ -17,7 +17,7 @@
 </script>
 
 <a
-	href="#{target}"
+	href={`#${target}`}
 	class="skip-link"
 	onclick={handleClick}
 >

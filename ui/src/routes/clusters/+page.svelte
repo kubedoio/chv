@@ -250,10 +250,10 @@
 									</span>
 								{/if}
 							</div>
-							<a href="/clusters/{cluster.cluster_id}" class="attention-item__cta">
-								View cluster
-								<ArrowRight size={14} aria-hidden="true" />
-							</a>
+								<a href={`/clusters/${cluster.cluster_id}`} class="attention-item__cta">
+									View cluster
+									<ArrowRight size={14} aria-hidden="true" />
+								</a>
 						</li>
 					{/each}
 				</ul>

@@ -247,7 +247,7 @@
 										<span>{task.operation}</span>
 									</div>
 								</div>
-								<a href="/tasks?query={task.task_id}" class="task-item__link">View task</a>
+									<a href={`/tasks?query=${task.task_id}`} class="task-item__link">View task</a>
 							</div>
 						{/each}
 					{:else}

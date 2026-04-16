@@ -58,12 +58,12 @@
     {
       id: 'create-vm',
       title: 'Create Virtual Machine',
-      description: 'Launch a new VM wizard',
+      description: 'Open virtual machine inventory',
       icon: Plus,
       shortcut: ['c'],
       keywords: ['vm', 'create', 'new', 'virtual machine', 'launch'],
       section: 'VMs',
-      action: () => goto('/vms?create=true')
+      action: () => goto('/vms')
     },
     {
       id: 'go-dashboard',
@@ -118,29 +118,20 @@
     {
       id: 'import-image',
       title: 'Import Image',
-      description: 'Download an OS image from URL',
+      description: 'Open images inventory',
       icon: Download,
       keywords: ['import', 'download', 'image', 'os'],
       section: 'Images',
-      action: () => goto('/images?import=true')
+      action: () => goto('/images')
     },
     {
       id: 'create-network',
-      title: 'Create Network',
-      description: 'Add a new network bridge',
+      title: 'Open Networks',
+      description: 'Open network inventory',
       icon: Network,
       keywords: ['network', 'create', 'bridge', 'vlan'],
       section: 'Networks',
-      action: () => goto('/networks?create=true')
-    },
-    {
-      id: 'create-storage',
-      title: 'Create Storage Pool',
-      description: 'Add a new storage pool',
-      icon: HardDrive,
-      keywords: ['storage', 'pool', 'create', 'disk'],
-      section: 'Storage',
-      action: () => goto('/storage?create=true')
+      action: () => goto('/networks')
     },
     {
       id: 'refresh-data',

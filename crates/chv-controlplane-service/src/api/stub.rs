@@ -92,51 +92,51 @@ pub async fn logout_handler() -> impl axum::response::IntoResponse {
 }
 
 pub async fn list_nodes_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"nodes": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_vms_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"vms": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_networks_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"networks": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_storage_pools_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"storage_pools": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_operations_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"operations": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_events_stub(Query(_params): Query<HashMap<String, String>>) -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"events": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_images_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"images": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_vm_templates_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"vm_templates": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_cloud_init_templates_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"cloud_init_templates": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_backup_jobs_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"backup_jobs": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_backup_history_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"backup_history": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn list_quotas_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"quotas": []})))
+    (StatusCode::OK, Json(serde_json::json!([])))
 }
 
 pub async fn get_usage_stub() -> impl axum::response::IntoResponse {
