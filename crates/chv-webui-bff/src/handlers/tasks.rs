@@ -1,5 +1,11 @@
 use axum::{extract::State, response::Json};
+use axum::response::sse::{Event, Sse};
 use serde_json::{json, Value};
+use std::convert::Infallible;
+use std::time::Duration;
+use tokio::time::interval;
+use tokio_stream::wrappers::IntervalStream;
+use tokio_stream::StreamExt;
 
 use crate::router::AppState;
 use crate::BffError;
@@ -38,21 +44,19 @@ pub async fn list_tasks(
         "#,
     );
 
+    let mut bindings: Vec<String> = Vec::new();
+
     if let Some(status) = filters.get("status").and_then(|v| v.as_str()) {
         if status != "all" {
-            query_sql.push_str(" AND status::text = ");
-            query_sql.push('\'');
-            query_sql.push_str(status);
-            query_sql.push('\'');
+            bindings.push(status.to_string());
+            query_sql.push_str(&format!(" AND status::text = ${}", bindings.len()));
         }
     }
 
     if let Some(resource_kind) = filters.get("resource_kind").and_then(|v| v.as_str()) {
         if resource_kind != "all" {
-            query_sql.push_str(" AND resource_kind::text = ");
-            query_sql.push('\'');
-            query_sql.push_str(resource_kind);
-            query_sql.push('\'');
+            bindings.push(resource_kind.to_string());
+            query_sql.push_str(&format!(" AND resource_kind::text = ${}", bindings.len()));
         }
     }
 
@@ -69,8 +73,14 @@ pub async fn list_tasks(
     }
 
     query_sql.push_str(" ORDER BY requested_at DESC");
+    query_sql.push_str(&format!(" LIMIT {} OFFSET {}", page_size, (page - 1) * page_size));
 
-    let rows = sqlx::query_as::<_, TaskRow>(&query_sql)
+    let mut query = sqlx::query_as::<_, TaskRow>(&query_sql);
+    for b in bindings {
+        query = query.bind(b);
+    }
+
+    let rows = query
         .fetch_all(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to list tasks: {}", e)))?;
@@ -104,6 +114,114 @@ pub async fn list_tasks(
             "applied": {}
         },
     })))
+}
+
+pub async fn stream_tasks(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let pool = state.pool.clone();
+    let resource_ids_filter: Vec<String> = params
+        .get("resource_ids")
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    let resource_kinds_filter: Vec<String> = params
+        .get("resource_kinds")
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+
+    let tick_interval = interval(Duration::from_secs(3));
+    let stream = IntervalStream::new(tick_interval).then(move |_tick| {
+        let pool = pool.clone();
+        let ids = resource_ids_filter.clone();
+        let kinds = resource_kinds_filter.clone();
+
+        async move {
+            let mut sql = String::from(
+                r#"
+                SELECT
+                    operation_id AS task_id,
+                    status::text AS status,
+                    operation_type AS summary,
+                    resource_kind::text AS resource_kind,
+                    resource_id,
+                    EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS event_unix_ms
+                FROM operations
+                WHERE requested_at > now() - interval '30 seconds'
+                "#,
+            );
+
+            if !ids.is_empty() {
+                sql.push_str(" AND resource_id IN (");
+                for (i, _id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        sql.push(',');
+                    }
+                    sql.push_str(&format!("${}", i + 1));
+                }
+                sql.push(')');
+            }
+
+            if !kinds.is_empty() {
+                let offset = ids.len();
+                sql.push_str(" AND resource_kind::text IN (");
+                for (i, _kind) in kinds.iter().enumerate() {
+                    if i > 0 {
+                        sql.push(',');
+                    }
+                    sql.push_str(&format!("${}", i + 1 + offset));
+                }
+                sql.push(')');
+            }
+
+            sql.push_str(" ORDER BY requested_at DESC LIMIT 100");
+
+            let mut query = sqlx::query_as::<_, TaskStreamRow>(&sql);
+            for id in &ids {
+                query = query.bind(id);
+            }
+            for kind in &kinds {
+                query = query.bind(kind);
+            }
+
+            let rows = match query.fetch_all(&pool).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("stream_tasks db query failed: {}", e);
+                    vec![]
+                }
+            };
+
+            let payload = json!({
+                "items": rows.into_iter().map(|r| json!({
+                    "task_id": r.task_id,
+                    "status": r.status,
+                    "summary": r.summary,
+                    "resource_kind": r.resource_kind,
+                    "resource_id": r.resource_id.unwrap_or_default(),
+                    "event_unix_ms": r.event_unix_ms,
+                })).collect::<Vec<Value>>()
+            });
+
+            Ok::<Event, Infallible>(Event::default().data(payload.to_string()))
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct TaskStreamRow {
+    task_id: String,
+    status: String,
+    summary: String,
+    resource_kind: String,
+    resource_id: Option<String>,
+    event_unix_ms: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]

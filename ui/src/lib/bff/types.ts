@@ -102,8 +102,33 @@ export type NodeSummary = {
 	recent_tasks: RelatedTask[];
 };
 
+export type NodeHostedVm = {
+	vm_id: string;
+	name: string;
+	power_state: string;
+	health: string;
+	cpu: string;
+	memory: string;
+};
+
+export type NodeConfigurationItem = {
+	label: string;
+	value: string;
+};
+
+export type NodeSection = {
+	id: string;
+	label: string;
+	count?: number;
+};
+
 export type GetNodeResponse = {
+	state: 'ready' | 'empty' | 'error';
 	summary: NodeSummary;
+	sections: NodeSection[];
+	hostedVms: NodeHostedVm[];
+	recentTasks: RelatedTask[];
+	configuration: NodeConfigurationItem[];
 };
 
 export type ListVmsRequest = {
@@ -163,6 +188,18 @@ export type MutateVmResponse = {
 	summary: string;
 };
 
+export type MutateNodeRequest = {
+	node_id: string;
+	action: string;
+};
+
+export type MutateNodeResponse = {
+	accepted: boolean;
+	task_id: string;
+	node_id: string;
+	summary: string;
+};
+
 export type ListTasksRequest = {
 	page: number;
 	page_size: number;
@@ -192,6 +229,16 @@ export type VmLifecycleAction = 'start' | 'stop' | 'restart';
 export type VmLifecycleActionResult = {
 	accepted: boolean;
 	action: VmLifecycleAction;
+	summary: string;
+	taskId: string | null;
+	taskLabel: string;
+	taskTone: 'healthy' | 'warning' | 'degraded' | 'failed' | 'unknown';
+	taskHref: string | null;
+};
+
+export type MutationActionResult = {
+	accepted: boolean;
+	action: string;
 	summary: string;
 	taskId: string | null;
 	taskLabel: string;

@@ -158,6 +158,31 @@ message MutateVmResponse {
   string summary = 4;
 }
 
+message MutateNodeRequest {
+  string node_id = 1;
+  string action = 2;
+}
+
+message MutateNodeResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string node_id = 3;
+  string summary = 4;
+}
+
+message MutateVolumeRequest {
+  string volume_id = 1;
+  string action = 2;
+  bool force = 3;
+}
+
+message MutateVolumeResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string volume_id = 3;
+  string summary = 4;
+}
+
 message ListTasksRequest {
   uint32 page = 1;
   uint32 page_size = 2;
@@ -366,4 +391,6 @@ service WebUiQueryService {
 
 service WebUiMutationService {
   rpc MutateVm(MutateVmRequest) returns (MutateVmResponse);
+  rpc MutateNode(MutateNodeRequest) returns (MutateNodeResponse);
+  rpc MutateVolume(MutateVolumeRequest) returns (MutateVolumeResponse);
 }

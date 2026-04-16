@@ -12,6 +12,7 @@ export const BFFEndpoints = {
 	overview: '/v1/overview',
 	listNodes: '/v1/nodes',
 	getNode: '/v1/nodes/get',
+	mutateNode: '/v1/nodes/mutate',
 	listVms: '/v1/vms',
 	getVm: '/v1/vms/get',
 	mutateVm: '/v1/vms/mutate',

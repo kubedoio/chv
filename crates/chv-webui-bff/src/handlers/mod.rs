@@ -7,4 +7,5 @@ pub mod nodes;
 pub mod overview;
 pub mod settings;
 pub mod tasks;
+pub mod volumes;
 pub mod vms;

@@ -12,6 +12,7 @@ chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tracing = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
 async-trait = { workspace = true }

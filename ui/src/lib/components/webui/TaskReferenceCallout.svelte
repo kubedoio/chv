@@ -1,9 +1,9 @@
 <script lang="ts">
 	import TaskStatusBadge from '$lib/components/webui/TaskStatusBadge.svelte';
-	import type { VmLifecycleActionResult } from '$lib/bff/types';
+	import type { MutationActionResult } from '$lib/bff/types';
 
 	interface Props {
-		result: VmLifecycleActionResult;
+		result: MutationActionResult;
 	}
 
 	let { result }: Props = $props();

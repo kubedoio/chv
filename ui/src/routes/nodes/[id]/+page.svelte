@@ -1,16 +1,21 @@
 <script lang="ts">
-	import type { PageData } from './$types';
+	import { enhance } from '$app/forms';
+	import type { PageData, ActionData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import { PageShell, StateBanner, Badge, ResourceTable, KvList } from '$lib/components/system';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
+	import TaskReferenceCallout from '$lib/components/webui/TaskReferenceCallout.svelte';
 	import Button from '$lib/components/primitives/Button.svelte';
 	import { Pause, Play, Wrench, ArrowUpFromLine } from 'lucide-svelte';
+	import { getTaskStatusMeta } from '$lib/webui/tasks';
 
-	let { data }: { data: PageData } = $props();
+	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	const page = getPageDefinition('/nodes');
 	const detail = $derived(data.detail);
+	let pendingAction = $state<string | null>(null);
+	let actionInput = $state<HTMLInputElement | null>(null);
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
@@ -52,6 +57,33 @@
 		const id = row.vm_id;
 		return typeof id === 'string' ? `/vms/${id}` : null;
 	}
+
+	function submitAction(action: string) {
+		if (actionInput) {
+			actionInput.value = action;
+		}
+		actionInput?.form?.requestSubmit();
+	}
+
+	const mutationResult = $derived(
+		form && typeof form === 'object' && 'accepted' in form && form.accepted === true
+			? {
+					accepted: true,
+					action: (form as unknown as { action: string }).action,
+					summary: (form as unknown as { summary: string }).summary,
+					taskId: (form as unknown as { task_id: string | undefined }).task_id ?? null,
+					taskLabel: (form as unknown as { task_id: string | undefined }).task_id
+						? getTaskStatusMeta('queued').label
+						: getTaskStatusMeta('failed').label,
+					taskTone: (form as unknown as { task_id: string | undefined }).task_id
+						? getTaskStatusMeta('queued').tone
+						: getTaskStatusMeta('failed').tone,
+					taskHref: (form as unknown as { task_id: string | undefined }).task_id
+						? `/tasks?query=${(form as unknown as { task_id: string }).task_id}`
+						: null
+				}
+			: null
+	);
 </script>
 
 <PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
@@ -74,39 +106,81 @@
 						<Badge label={detail.summary.state} tone={normalizeTone(detail.summary.state)} />
 						<Badge label={detail.summary.health} tone={normalizeTone(detail.summary.health)} />
 					</div>
-					<div class="detail-page__action-row">
+					<form
+						method="POST"
+						use:enhance={() => {
+							return async ({ update }) => {
+								pendingAction = null;
+								await update();
+							};
+						}}
+						class="detail-page__action-row"
+					>
+						<input type="hidden" name="node_id" value={detail.summary.nodeId} />
+						<input type="hidden" name="action" bind:this={actionInput} value="" />
 						{#if detail.summary.maintenance}
-							<Button variant="secondary" size="sm" disabled>
+							<Button
+								variant="secondary"
+								size="sm"
+								loading={pendingAction === 'exit_maintenance'}
+								onclick={() => { pendingAction = 'exit_maintenance'; submitAction('exit_maintenance'); }}
+								type="button"
+							>
 								<Wrench size={14} />
 								Exit maintenance
 							</Button>
 						{:else}
-							<Button variant="secondary" size="sm" disabled>
+							<Button
+								variant="secondary"
+								size="sm"
+								loading={pendingAction === 'enter_maintenance'}
+								onclick={() => { pendingAction = 'enter_maintenance'; submitAction('enter_maintenance'); }}
+								type="button"
+							>
 								<Wrench size={14} />
 								Enter maintenance
 							</Button>
 						{/if}
 						{#if detail.summary.scheduling}
-							<Button variant="secondary" size="sm" disabled>
+							<Button
+								variant="secondary"
+								size="sm"
+								loading={pendingAction === 'pause_scheduling'}
+								onclick={() => { pendingAction = 'pause_scheduling'; submitAction('pause_scheduling'); }}
+								type="button"
+							>
 								<Pause size={14} />
 								Pause scheduling
 							</Button>
 						{:else}
-							<Button variant="primary" size="sm" disabled>
+							<Button
+								variant="primary"
+								size="sm"
+								loading={pendingAction === 'resume_scheduling'}
+								onclick={() => { pendingAction = 'resume_scheduling'; submitAction('resume_scheduling'); }}
+								type="button"
+							>
 								<Play size={14} />
 								Resume scheduling
 							</Button>
 						{/if}
-						<Button variant="secondary" size="sm" disabled>
+						<Button
+							variant="secondary"
+							size="sm"
+							loading={pendingAction === 'drain'}
+							onclick={() => { pendingAction = 'drain'; submitAction('drain'); }}
+							type="button"
+						>
 							<ArrowUpFromLine size={14} />
 							Drain
 						</Button>
-					</div>
-					<p class="action-hint">
-						Node actions are disabled in this build. In production, scheduling and maintenance changes create tasks.
-					</p>
+					</form>
 				</div>
 			</article>
+
+			{#if mutationResult}
+				<TaskReferenceCallout result={mutationResult} />
+			{/if}
 
 			<div class="detail-page__summary-grid">
 				{#each summaryCards as card}

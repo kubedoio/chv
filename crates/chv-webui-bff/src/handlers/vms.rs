@@ -153,6 +153,7 @@ pub async fn get_vm(
 }
 
 pub async fn mutate_vm(
+    crate::auth::BearerToken(token): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -172,7 +173,7 @@ pub async fn mutate_vm(
 
     let response = state
         .mutations
-        .mutate_vm(vm_id, action, force)
+        .mutate_vm(vm_id, action, force, token)
         .await?;
 
     Ok(Json(json!({
