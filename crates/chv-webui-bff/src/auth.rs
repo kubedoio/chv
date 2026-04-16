@@ -72,10 +72,6 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn dev_secret() -> String {
-        "chv-dev-secret-change-in-production".to_string()
-    }
-
     fn encode_claims(claims: &Claims, secret: &str) -> String {
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
         jsonwebtoken::encode(
@@ -99,7 +95,7 @@ mod tests {
             role: "admin".to_string(),
             exp,
         };
-        let token = encode_claims(&claims, &dev_secret());
+        let token = encode_claims(&claims, &jwt_secret());
         let result = validate_token(&token);
         assert!(result.is_ok());
         let validated = result.unwrap();
@@ -116,7 +112,7 @@ mod tests {
             role: "admin".to_string(),
             exp: 1, // expired in 1970
         };
-        let token = encode_claims(&claims, &dev_secret());
+        let token = encode_claims(&claims, &jwt_secret());
         let result = validate_token(&token);
         assert!(result.is_err());
     }
