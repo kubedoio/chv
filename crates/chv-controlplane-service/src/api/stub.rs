@@ -4,18 +4,38 @@ use axum::{
     response::Json,
     Json as AxumJson,
 };
+use chv_webui_bff::auth::{Claims, JWT_SECRET};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::response::IntoResponse {
     let username = payload
         .get("username")
         .and_then(|v| v.as_str())
         .unwrap_or("admin");
+
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as usize
+        + 7 * 24 * 60 * 60; // 7 days
+
+    let claims = Claims {
+        sub: username.to_string(),
+        username: username.to_string(),
+        role: "admin".to_string(),
+        exp,
+    };
+
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    let token = jsonwebtoken::encode(&header, &claims, &jsonwebtoken::EncodingKey::from_secret(JWT_SECRET.as_bytes()))
+        .unwrap_or_else(|_| "mock-token-chv-all-in-one".to_string());
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "token": "mock-token-chv-all-in-one",
+            "token": token,
             "user": {
                 "id": "00000000-0000-0000-0000-000000000001",
                 "username": username,

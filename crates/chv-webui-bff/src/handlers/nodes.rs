@@ -238,7 +238,7 @@ pub async fn get_node(
 }
 
 pub async fn mutate_node(
-    crate::auth::BearerToken(token): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -254,7 +254,7 @@ pub async fn mutate_node(
         .ok_or_else(|| BffError::BadRequest("missing action".into()))?
         .to_string();
 
-    let response = state.mutations.mutate_node(node_id, action, token).await?;
+    let response = state.mutations.mutate_node(node_id, action, claims.username).await?;
 
     Ok(Json(json!({
         "accepted": response.accepted,

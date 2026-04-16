@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }
