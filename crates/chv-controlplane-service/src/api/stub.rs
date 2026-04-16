@@ -15,6 +15,19 @@ pub async fn login_handler(AxumJson(payload): AxumJson<Value>) -> impl axum::res
         .and_then(|v| v.as_str())
         .unwrap_or("admin");
 
+    let password = payload
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if username != "admin" || password != "admin" {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid credentials"})),
+        )
+            .into_response();
+    }
+
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
