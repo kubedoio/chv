@@ -13,15 +13,12 @@ pub async fn list_images(
         SELECT
             image_id,
             display_name AS name,
-            image_type,
-            format,
             CASE WHEN size_bytes IS NULL THEN ''
                  WHEN size_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(size_bytes AS REAL)/1073741824.0)
                  WHEN size_bytes >= 1048576 THEN printf('%.1f MiB', CAST(size_bytes AS REAL)/1048576.0)
                  WHEN size_bytes >= 1024 THEN printf('%.1f KiB', CAST(size_bytes AS REAL)/1024.0)
                  ELSE printf('%d B', size_bytes) END AS size,
             status,
-            node_id,
             COALESCE(os, '') AS os,
             COALESCE(version, '') AS version,
             usage_count,
@@ -40,11 +37,8 @@ pub async fn list_images(
             json!({
                 "image_id": r.image_id,
                 "name": r.name,
-                "image_type": r.image_type,
-                "format": r.format,
                 "size": r.size,
                 "status": r.status,
-                "node_id": r.node_id,
                 "os": r.os,
                 "version": r.version,
                 "usage_count": r.usage_count,
@@ -68,11 +62,8 @@ pub async fn list_images(
 struct ImageRow {
     image_id: String,
     name: String,
-    image_type: String,
-    format: String,
     size: String,
     status: String,
-    node_id: Option<String>,
     os: String,
     version: String,
     usage_count: i64,
