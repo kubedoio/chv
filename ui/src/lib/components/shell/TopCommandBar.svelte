@@ -1,6 +1,5 @@
 <script lang="ts">
 	import type { PageDefinition } from '$lib/shell/app-shell';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 
 	interface Props {
 		page: PageDefinition;
@@ -25,24 +24,20 @@
 		/>
 		<kbd>⌘K</kbd>
 	</label>
-
-	<div class="command-bar__badges" aria-label="Shell status">
-		<StatusBadge label="BFF only" tone="healthy" />
-		<StatusBadge label="Light mode" tone="unknown" />
-		<StatusBadge label="Starter shell" tone="warning" />
-	</div>
 </div>
 
 <style>
 	.command-bar {
 		display: grid;
-		grid-template-columns: auto minmax(16rem, 1fr) auto;
+		grid-template-columns: auto minmax(16rem, 24rem);
 		align-items: center;
+		justify-content: space-between;
 		gap: 0.9rem;
 		border: 1px solid var(--shell-line);
-		border-radius: 1rem;
+		border-radius: 0.5rem;
 		background: var(--shell-surface);
-		padding: 0.85rem 1rem;
+		padding: 0.5rem 0.75rem;
+		min-height: var(--header-height);
 	}
 
 	.command-bar__scope {
@@ -69,11 +64,11 @@
 		grid-template-columns: auto 1fr auto;
 		align-items: center;
 		gap: 0.75rem;
-		min-height: 2.8rem;
+		height: 2rem;
 		border: 1px solid var(--shell-line);
-		border-radius: 0.9rem;
+		border-radius: 0.35rem;
 		background: var(--shell-surface-muted);
-		padding: 0 0.9rem;
+		padding: 0 0.5rem;
 	}
 
 	.command-bar__search span,
@@ -109,10 +104,6 @@
 	@media (max-width: 960px) {
 		.command-bar {
 			grid-template-columns: 1fr;
-		}
-
-		.command-bar__badges {
-			justify-content: flex-start;
 		}
 	}
 </style>

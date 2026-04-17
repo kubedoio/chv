@@ -37,18 +37,18 @@
 	.state-panel {
 		display: grid;
 		grid-template-columns: auto 1fr;
-		gap: 0.9rem;
+		gap: 0.75rem;
 		border: 1px solid var(--shell-line);
-		border-radius: 1rem;
+		border-radius: 0.5rem;
 		background: var(--shell-surface-muted);
-		padding: 1rem;
+		padding: 0.75rem;
 	}
 
 	.state-panel__icon {
 		display: grid;
 		place-items: center;
-		width: 2rem;
-		height: 2rem;
+		width: 1.5rem;
+		height: 1.5rem;
 		border-radius: 999px;
 		background: var(--shell-surface);
 		border: 1px solid var(--shell-line);
@@ -76,7 +76,7 @@
 	}
 
 	.state-panel__title {
-		font-size: 0.95rem;
+		font-size: var(--text-base);
 		font-weight: 600;
 		color: var(--shell-text);
 	}
@@ -84,7 +84,7 @@
 	.state-panel__description,
 	.state-panel__hint {
 		margin-top: 0.3rem;
-		font-size: 0.88rem;
+		font-size: var(--text-sm);
 		line-height: 1.45;
 	}
 

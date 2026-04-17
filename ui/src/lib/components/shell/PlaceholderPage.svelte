@@ -1,8 +1,8 @@
 <script lang="ts">
 	import type { PageDefinition } from '$lib/shell/app-shell';
 	import { getPrimaryStateDefinition } from '$lib/shell/app-shell';
-	import SectionHeader from '$lib/components/shell/SectionHeader.svelte';
-	import StatePanel from '$lib/components/shell/StatePanel.svelte';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import InfrastructureState from '$lib/components/shell/InfrastructureState.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 
 	interface Props {
@@ -16,7 +16,7 @@
 </script>
 
 <div class="placeholder-page">
-	<SectionHeader {page} />
+	<PageHeaderWithAction {page} />
 
 	<section class="placeholder-page__summary-grid" aria-label="Planned page surfaces">
 		{#each page.summary as item}
@@ -49,7 +49,7 @@
 
 		<article class="placeholder-page__panel">
 			<div class="placeholder-page__panel-label">Primary placeholder</div>
-			<StatePanel variant={primaryStateVariant} {...primaryState} />
+			<InfrastructureState variant={primaryStateVariant} {...primaryState} />
 			<p>
 				This starter route focuses on the most believable first-load condition for the section while
 				retaining support for the full loading, empty, and error state set.

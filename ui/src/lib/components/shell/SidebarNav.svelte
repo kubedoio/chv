@@ -30,7 +30,6 @@
 		<div class="app-nav__brand-mark">CHV</div>
 		<div>
 			<div class="app-nav__brand-title">Control Plane</div>
-			<div class="app-nav__brand-subtitle">Starter bundle shell</div>
 		</div>
 	</div>
 
@@ -49,8 +48,6 @@
 	</div>
 
 	<div class="app-nav__footer">
-		<div class="app-nav__footer-label">Design intent</div>
-		<p>Restraint, legibility, and task transparency before density or decoration.</p>
 		<button type="button" class="app-nav__logout" onclick={handleLogout} aria-label="Log out">
 			<LogOut size={15}></LogOut>
 			<span>Log out</span>
@@ -93,7 +90,6 @@
 		color: var(--shell-text);
 	}
 
-	.app-nav__brand-subtitle,
 	.app-nav__footer-label {
 		font-size: 0.74rem;
 		letter-spacing: 0.1em;
@@ -103,17 +99,17 @@
 
 	.app-nav__links {
 		display: grid;
-		gap: 0.35rem;
+		gap: 0.15rem;
 	}
 
 	.app-nav__link {
 		display: flex;
 		align-items: center;
-		gap: 0.8rem;
+		gap: 0.6rem;
 		border: 1px solid transparent;
-		border-radius: 0.95rem;
-		padding: 0.8rem 0.9rem;
-		font-size: 0.95rem;
+		border-radius: 0.5rem;
+		padding: 0.5rem 0.65rem;
+		font-size: 0.85rem;
 		font-weight: 500;
 		color: var(--shell-text-secondary);
 		text-decoration: none;
@@ -139,19 +135,11 @@
 
 	.app-nav__footer {
 		display: grid;
-		gap: 0.35rem;
 		border-top: 1px solid var(--shell-line);
-		padding-top: 1rem;
-	}
-
-	.app-nav__footer p {
-		font-size: 0.88rem;
-		line-height: 1.5;
-		color: var(--shell-text-muted);
+		padding-top: 0.75rem;
 	}
 
 	.app-nav__logout {
-		margin-top: 0.7rem;
 		display: inline-flex;
 		align-items: center;
 		gap: 0.45rem;

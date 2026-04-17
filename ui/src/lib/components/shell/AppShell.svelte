@@ -1,8 +1,8 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { page } from '$app/stores';
-	import AppNav from '$lib/components/shell/AppNav.svelte';
-	import CommandBar from '$lib/components/shell/CommandBar.svelte';
+	import SidebarNav from '$lib/components/shell/SidebarNav.svelte';
+	import TopCommandBar from '$lib/components/shell/TopCommandBar.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 
 	let { children }: { children?: Snippet } = $props();
@@ -14,11 +14,11 @@
 
 <div class="app-shell">
 	<aside class="app-shell__nav">
-		<AppNav />
+		<SidebarNav />
 	</aside>
 
 	<div class="app-shell__main">
-		<CommandBar page={currentPage} />
+		<TopCommandBar page={currentPage} />
 		<main id="shell-main" class="app-shell__content">
 			{@render children?.()}
 		</main>
@@ -28,7 +28,7 @@
 <style>
 	.app-shell {
 		display: grid;
-		grid-template-columns: minmax(17rem, 18.5rem) minmax(0, 1fr);
+		grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 		min-height: 100vh;
 		background:
 			radial-gradient(circle at top left, rgba(143, 90, 42, 0.06), transparent 22%),
