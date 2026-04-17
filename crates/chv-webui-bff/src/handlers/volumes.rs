@@ -9,13 +9,13 @@ pub async fn list_volumes(
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).min(200).max(1);
+    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * page_size;
     let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM volumes")
         .fetch_one(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to count volumes: {}", e)))?;
-    let total_pages = (total_count as u64 + page_size - 1) / page_size;
+    let total_pages = (total_count as u64).div_ceil(page_size);
 
     let rows = sqlx::query_as::<_, VolumeRow>(
         r#"

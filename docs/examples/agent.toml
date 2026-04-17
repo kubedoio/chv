@@ -4,7 +4,7 @@
 socket_path = "/run/chv/agent/api.sock"
 runtime_dir = "/run/chv/agent"
 log_level = "info"
-control_plane_addr = "http://127.0.0.1:8443"
+control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"

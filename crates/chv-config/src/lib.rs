@@ -8,6 +8,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("invalid config: {0}")]
+    Invalid(String),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +249,16 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
     }
+    if cfg.jwt_secret == "chv-dev-secret-change-in-production" {
+        return Err(ConfigError::Invalid(
+            "jwt_secret is set to the insecure default; generate one with: openssl rand -base64 32 | tr -d '=+/'".to_string()
+        ));
+    }
+    if cfg.jwt_secret.len() < 32 {
+        return Err(ConfigError::Invalid(
+            "jwt_secret must be at least 32 characters".to_string()
+        ));
+    }
     Ok(cfg)
 }
 
@@ -255,29 +267,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_controlplane_config_uses_defaults_without_file() {
-        let config = load_controlplane_config(None).expect("config should load");
-        assert_eq!(
-            config.grpc_bind,
-            DEFAULT_CONTROLPLANE_GRPC_BIND
-                .parse::<SocketAddr>()
-                .unwrap()
-        );
-        assert_eq!(
-            config.http_bind,
-            DEFAULT_CONTROLPLANE_HTTP_BIND
-                .parse::<SocketAddr>()
-                .unwrap()
-        );
-        assert_eq!(config.log_level, DEFAULT_CONTROLPLANE_LOG_LEVEL);
-        assert_eq!(
-            config.database.migrations_dir,
-            PathBuf::from(DEFAULT_CONTROLPLANE_MIGRATIONS_DIR)
-        );
-        assert_eq!(
-            config.database.max_connections,
-            DEFAULT_CONTROLPLANE_DB_MAX_CONNECTIONS
-        );
+    fn load_controlplane_config_rejects_insecure_default_without_file() {
+        let err = load_controlplane_config(None).unwrap_err();
+        assert!(err.to_string().contains("insecure default"));
     }
 
     #[test]
@@ -291,6 +283,7 @@ grpc_bind = "0.0.0.0:9443"
 http_bind = "0.0.0.0:9080"
 log_level = "debug"
 runtime_dir = "/tmp/chv-controlplane"
+jwt_secret = "a]Kx8v2mN!pR7qYsW3dF6gH9jL0nBcTe"
 
 [tls]
 server_cert_path = "/tmp/server.crt"
@@ -298,7 +291,7 @@ server_key_path = "/tmp/server.key"
 client_ca_path = "/tmp/ca.crt"
 
 [database]
-url = "postgres://example/chv"
+url = "sqlite:///tmp/test.db"
 migrations_dir = "custom/migrations"
 max_connections = 32
 min_connections = 2
@@ -320,7 +313,7 @@ max_lifetime_secs = 1200
         );
         assert_eq!(config.log_level, "debug");
         assert_eq!(config.runtime_dir, PathBuf::from("/tmp/chv-controlplane"));
-        assert_eq!(config.database.url, "postgres://example/chv");
+        assert_eq!(config.database.url, "sqlite:///tmp/test.db");
         assert_eq!(
             config.database.migrations_dir,
             PathBuf::from("custom/migrations")

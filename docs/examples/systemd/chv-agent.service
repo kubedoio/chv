@@ -1,7 +1,7 @@
 [Unit]
 Description=CHV Node Agent
-After=network.target chv-controlplane.service
-Wants=chv-controlplane.service
+After=network.target chv-controlplane.service chv-stord.service chv-nwd.service
+Wants=chv-controlplane.service chv-stord.service chv-nwd.service
 
 [Service]
 Type=simple

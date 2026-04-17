@@ -9,7 +9,7 @@ pub async fn list_events(
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).min(200).max(1);
+    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * page_size;
 
     let total_count: i64 = sqlx::query_scalar(
@@ -19,7 +19,7 @@ pub async fn list_events(
     .await
     .map_err(|e| BffError::Internal(format!("failed to count events: {}", e)))?;
 
-    let total_pages = (total_count as u64 + page_size - 1) / page_size;
+    let total_pages = (total_count as u64).div_ceil(page_size);
 
     let items_raw = sqlx::query_as::<_, UnifiedEventRow>(
         r#"
@@ -55,7 +55,7 @@ pub async fn list_events(
             FROM alerts a
             LEFT JOIN nodes n ON a.node_id = n.node_id
         ) combined
-        ORDER BY occurred_at DESC
+        ORDER BY occurred_at DESC, event_id DESC
         LIMIT ? OFFSET ?
         "#,
     )

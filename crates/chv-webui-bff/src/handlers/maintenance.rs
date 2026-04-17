@@ -102,6 +102,7 @@ struct MaintenanceNodeRow {
     name: String,
     observed_state: String,
     desired_state: String,
+    #[allow(dead_code)]
     reason: String,
     task_id: String,
 }

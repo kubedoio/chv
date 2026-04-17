@@ -11,10 +11,11 @@ macro_rules! string_id_newtype {
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
                 let value = value.into();
-                if value.trim().is_empty() {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
                     return Err(IdentifierError::empty($field_name));
                 }
-                Ok(Self(value))
+                Ok(Self(trimmed.to_string()))
             }
 
             pub fn as_str(&self) -> &str {
@@ -115,6 +116,9 @@ impl FromStr for Generation {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit()) {
+            return Err(ParseGenerationError);
+        }
+        if value.len() > 1 && value.starts_with('0') {
             return Err(ParseGenerationError);
         }
 

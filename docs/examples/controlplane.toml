@@ -6,6 +6,9 @@ http_bind = "127.0.0.1:8080"
 log_level = "info"
 runtime_dir = "/run/chv/controlplane"
 
+# REQUIRED: generate with: openssl rand -base64 32 | tr -d '=+/'
+jwt_secret = "<replace-me>"
+
 [database]
 url = "sqlite:///var/lib/chv/controlplane.db"
 migrations_dir = "/usr/local/share/chv/migrations"

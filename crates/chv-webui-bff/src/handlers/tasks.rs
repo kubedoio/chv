@@ -73,19 +73,37 @@ pub async fn list_tasks(
     }
 
     query_sql.push_str(" ORDER BY requested_at DESC");
-    query_sql.push_str(&format!(" LIMIT {} OFFSET {}", page_size, (page - 1) * page_size));
+    query_sql.push_str(" LIMIT ? OFFSET ?");
+
+    let offset = (page - 1) * page_size;
+
+    let count_sql = query_sql
+        .replace("SELECT\n            operation_id AS task_id,\n            status,\n            operation_type AS operation,\n            resource_kind,\n            resource_id,\n            requested_by AS actor,\n            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,\n            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms",
+                 "SELECT COUNT(*)")
+        .replace(" ORDER BY requested_at DESC LIMIT ? OFFSET ?", "");
+
+    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+    for b in &bindings {
+        count_query = count_query.bind(b.clone());
+    }
+    let total_count = count_query
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to count tasks: {}", e)))?;
 
     let mut query = sqlx::query_as::<_, TaskRow>(&query_sql);
     for b in bindings {
         query = query.bind(b);
     }
+    query = query.bind(page_size as i64).bind(offset as i64);
 
     let rows = query
         .fetch_all(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to list tasks: {}", e)))?;
 
-    let total = rows.len() as u64;
+    let total = total_count as u64;
+    let total_pages = total.div_ceil(page_size as u64);
 
     let items: Vec<Value> = rows
         .into_iter()
@@ -109,6 +127,7 @@ pub async fn list_tasks(
             "page": page,
             "page_size": page_size,
             "total_items": total,
+            "total_pages": total_pages,
         },
         "filters": {
             "applied": {}
