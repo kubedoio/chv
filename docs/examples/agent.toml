@@ -13,6 +13,7 @@ nwd_binary_path = "/usr/local/bin/chv-nwd"
 cache_path = "/var/lib/chv/cache/agent-cache.json"
 node_id = ""                  # assigned automatically during enrollment
 metrics_bind = "127.0.0.1:9901"
+storage_base_dir = "/var/lib/chv/storage"  # agent probes subdirs for storage classes
 
 # One-time bootstrap token for initial enrollment
 bootstrap_token_path = "/etc/chv/bootstrap.token"

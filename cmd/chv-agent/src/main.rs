@@ -213,7 +213,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_else(|_| "unknown".to_string())
                         .trim()
                         .to_string();
-                    let reporter = InventoryReporter::new(&cache.node_id, &hostname);
+                    let reporter = InventoryReporter::with_storage_base_dir(
+                        &cache.node_id,
+                        &hostname,
+                        &config.storage_base_dir,
+                    );
                     let inventory = reporter.build_inventory();
                     let versions = reporter.build_versions();
                     match EnrollmentClient::connect(&config.control_plane_addr).await {
@@ -386,7 +390,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .trim()
         .to_string();
     let node_id = cache.lock().await.node_id.clone();
-    let inventory_reporter = InventoryReporter::new(&node_id, hostname);
+    let inventory_reporter = InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir);
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
 

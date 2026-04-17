@@ -87,6 +87,8 @@ pub struct AgentConfig {
     pub tls_key_path: Option<PathBuf>,
     pub ca_cert_path: Option<PathBuf>,
     pub bootstrap_token_path: Option<PathBuf>,
+    #[serde(default = "default_storage_base_dir")]
+    pub storage_base_dir: PathBuf,
 }
 
 impl Default for AgentConfig {
@@ -108,8 +110,13 @@ impl Default for AgentConfig {
             tls_key_path: None,
             ca_cert_path: None,
             bootstrap_token_path: None,
+            storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
         }
     }
+}
+
+fn default_storage_base_dir() -> PathBuf {
+    PathBuf::from("/var/lib/chv/storage")
 }
 
 pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError> {
