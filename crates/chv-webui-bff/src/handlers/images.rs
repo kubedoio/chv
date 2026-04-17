@@ -22,9 +22,12 @@ pub async fn list_images(
                  ELSE printf('%d B', size_bytes) END AS size,
             status,
             node_id,
-            created_at
+            COALESCE(os, '') AS os,
+            COALESCE(version, '') AS version,
+            usage_count,
+            updated_at AS last_updated
         FROM images
-        ORDER BY created_at DESC
+        ORDER BY updated_at DESC
         "#,
     )
     .fetch_all(&state.pool)
@@ -42,7 +45,10 @@ pub async fn list_images(
                 "size": r.size,
                 "status": r.status,
                 "node_id": r.node_id,
-                "created_at": r.created_at,
+                "os": r.os,
+                "version": r.version,
+                "usage_count": r.usage_count,
+                "last_updated": r.last_updated,
             })
         })
         .collect();
@@ -67,5 +73,8 @@ struct ImageRow {
     size: String,
     status: String,
     node_id: Option<String>,
-    created_at: String,
+    os: String,
+    version: String,
+    usage_count: i64,
+    last_updated: String,
 }
