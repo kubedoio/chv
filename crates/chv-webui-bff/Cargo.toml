@@ -17,3 +17,4 @@ tracing = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
 async-trait = { workspace = true }
 jsonwebtoken = { workspace = true }
+uuid = { workspace = true }

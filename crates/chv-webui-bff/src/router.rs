@@ -32,6 +32,8 @@ pub fn bff_router() -> Router<AppState> {
         .route("/v1/nodes/mutate", post(crate::handlers::nodes::mutate_node))
         .route("/v1/vms", post(crate::handlers::vms::list_vms))
         .route("/v1/vms/get", post(crate::handlers::vms::get_vm))
+        .route("/v1/vms/create", post(crate::handlers::vms::create_vm))
+        .route("/v1/vms/delete", post(crate::handlers::vms::delete_vm))
         .route("/v1/vms/mutate", post(crate::handlers::vms::mutate_vm))
         .route("/v1/vms/events", post(crate::handlers::events::list_events_for_vm))
         .route("/v1/tasks", post(crate::handlers::tasks::list_tasks))

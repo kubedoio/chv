@@ -236,6 +236,164 @@ pub async fn get_vm(
     }
 }
 
+pub async fn create_vm(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let display_name = payload
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing display_name".into()))?
+        .to_string();
+
+    let node_id = payload
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing node_id".into()))?
+        .to_string();
+
+    let cpu_count = payload
+        .get("cpu_count")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| BffError::BadRequest("missing cpu_count".into()))?;
+
+    let memory_bytes = payload
+        .get("memory_bytes")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| BffError::BadRequest("missing memory_bytes".into()))?;
+
+    let image_ref = payload
+        .get("image_ref")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing image_ref".into()))?
+        .to_string();
+
+    let requested_by = payload
+        .get("requested_by")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing requested_by".into()))?
+        .to_string();
+
+    let vm_id = uuid::Uuid::new_v4().to_string();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query(
+        r#"
+        INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&vm_id)
+    .bind(&node_id)
+    .bind(&display_name)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, cpu_count, memory_bytes, image_ref, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&vm_id)
+    .bind(&requested_by)
+    .bind(cpu_count)
+    .bind(memory_bytes)
+    .bind(&image_ref)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
+
+    let idempotency_key = format!("create-vm-{}", vm_id);
+    sqlx::query(
+        r#"
+        INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
+        VALUES (?, ?, 'vm', ?, 'create', 'Accepted', ?, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&operation_id)
+    .bind(&idempotency_key)
+    .bind(&vm_id)
+    .bind(&requested_by)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+
+    Ok(Json(json!({
+        "vm_id": vm_id,
+        "operation_id": operation_id,
+        "status": "Accepted",
+    })))
+}
+
+pub async fn delete_vm(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let vm_id = payload
+        .get("vm_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?
+        .to_string();
+
+    let requested_by = payload
+        .get("requested_by")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing requested_by".into()))?
+        .to_string();
+
+    // Check vm exists
+    let exists = sqlx::query_scalar::<_, String>(
+        "SELECT vm_id FROM vms WHERE vm_id = ?",
+    )
+    .bind(&vm_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check vm existence: {}", e)))?;
+
+    if exists.is_none() {
+        return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE vm_desired_state
+        SET desired_status = 'Deleting', desired_generation = desired_generation + 1, updated_by = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        WHERE vm_id = ?
+        "#,
+    )
+    .bind(&requested_by)
+    .bind(&vm_id)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to update vm_desired_state: {}", e)))?;
+
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let idempotency_key = format!("delete-vm-{}", vm_id);
+    sqlx::query(
+        r#"
+        INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
+        VALUES (?, ?, 'vm', ?, 'delete', 'Accepted', ?, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&operation_id)
+    .bind(&idempotency_key)
+    .bind(&vm_id)
+    .bind(&requested_by)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+
+    Ok(Json(json!({
+        "vm_id": vm_id,
+        "operation_id": operation_id,
+        "status": "Accepted",
+    })))
+}
+
 pub async fn mutate_vm(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
