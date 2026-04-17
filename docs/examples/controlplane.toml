@@ -7,13 +7,11 @@ log_level = "info"
 runtime_dir = "/run/chv/controlplane"
 
 [database]
-url = "postgres://chv:change-me-strong-password@127.0.0.1:5432/chv_controlplane"
+url = "sqlite:///var/lib/chv/controlplane.db"
 migrations_dir = "/usr/local/share/chv/migrations"
-max_connections = 16
+max_connections = 4
 min_connections = 1
 acquire_timeout_secs = 5
-idle_timeout_secs = 300
-max_lifetime_secs = 1800
 
 [tls]
 # CA certificate and key used to issue node certificates during enrollment

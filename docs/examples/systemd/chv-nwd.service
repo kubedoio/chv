@@ -1,0 +1,22 @@
+[Unit]
+Description=CHV Network Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=chv
+Group=chv
+ExecStartPre=/bin/mkdir -p /run/chv/nwd
+ExecStart=/usr/local/bin/chv-nwd /etc/chv/nwd.toml
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=chv/nwd
+StateDirectory=chv
+LogsDirectory=chv
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/chv/nwd
+
+[Install]
+WantedBy=multi-user.target

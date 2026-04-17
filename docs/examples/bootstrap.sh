@@ -1,6 +1,10 @@
 #!/bin/bash
 # CHV Combined Host Bootstrap Script
-# Run as root on the target deployment server
+# Manual bootstrap helper for building from source on the target host.
+# For automated all-in-one deployment, use scripts/install.sh instead.
+#
+# Run as root on the target deployment server:
+#   sudo ./docs/examples/bootstrap.sh <path-to-chv-repo>
 
 set -euo pipefail
 
@@ -11,6 +15,12 @@ CHV_RUN_DIR="/run/chv"
 CHV_LOG_DIR="/var/log/chv"
 CHV_UI_DIR="/opt/chv/ui"
 CHV_MIGRATIONS_DIR="/usr/local/share/chv/migrations"
+CHV_DB_PATH="${CHV_DATA_DIR}/controlplane.db"
+
+# Bridge/network defaults (match installer defaults)
+BRIDGE_NAME="${INSTALL_CHV_BRIDGE_NAME:-chvbr0}"
+BRIDGE_CIDR="${INSTALL_CHV_BRIDGE_CIDR:-10.200.0.1/24}"
+BRIDGE_IFACE="${INSTALL_CHV_BRIDGE_IFACE:-ens19}"
 
 REPO_DIR="${1:-}"
 
@@ -33,9 +43,9 @@ fi
 usermod -aG kvm "$CHV_USER" 2>/dev/null || true
 
 mkdir -p "$CHV_CONFIG_DIR"/certs
-mkdir -p "$CHV_DATA_DIR"/{cache,images,storage}
+mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk}
 mkdir -p "$CHV_LOG_DIR"
-mkdir -p "$CHV_RUN_DIR"
+mkdir -p "$CHV_RUN_DIR"/{controlplane,agent,stord,nwd}
 mkdir -p "$CHV_UI_DIR"
 mkdir -p "$CHV_MIGRATIONS_DIR"
 
@@ -47,13 +57,11 @@ chmod 750 "$CHV_DATA_DIR" "$CHV_LOG_DIR"
 # -----------------------------------------------------------------------------
 echo "[2/8] Installing binaries..."
 
-cp "$REPO_DIR/target/release/chv-controlplane" /usr/local/bin/
-cp "$REPO_DIR/target/release/chv-agent" /usr/local/bin/
-cp "$REPO_DIR/target/release/chv-stord" /usr/local/bin/
-cp "$REPO_DIR/target/release/chv-nwd" /usr/local/bin/
-chmod 755 /usr/local/bin/chv-*
+install -m 755 "$REPO_DIR/target/release/chv-controlplane" /usr/local/bin/
+install -m 755 "$REPO_DIR/target/release/chv-agent"        /usr/local/bin/
+install -m 755 "$REPO_DIR/target/release/chv-stord"        /usr/local/bin/
+install -m 755 "$REPO_DIR/target/release/chv-nwd"          /usr/local/bin/
 
-# Link cloud-hypervisor if present locally
 if [[ -f /usr/local/bin/cloud-hypervisor ]] && [[ ! -f /usr/bin/cloud-hypervisor ]]; then
     ln -sf /usr/local/bin/cloud-hypervisor /usr/bin/cloud-hypervisor
 fi
@@ -70,7 +78,7 @@ cp -r "$REPO_DIR/cmd/chv-controlplane/migrations/"* "$CHV_MIGRATIONS_DIR/"
 chown -R "$CHV_USER:$CHV_USER" "$CHV_MIGRATIONS_DIR"
 
 # -----------------------------------------------------------------------------
-# 4. Generate TLS CA and server certificate
+# 4. Generate TLS CA
 # -----------------------------------------------------------------------------
 echo "[4/8] Generating TLS certificates..."
 
@@ -78,24 +86,13 @@ chown root:"$CHV_USER" "$CHV_CONFIG_DIR"/certs
 chmod 750 "$CHV_CONFIG_DIR"/certs
 
 if [[ ! -f "$CHV_CONFIG_DIR/certs/ca.key" ]]; then
-    openssl genrsa -out "$CHV_CONFIG_DIR/certs/ca.key" 4096
+    openssl genrsa -out "$CHV_CONFIG_DIR/certs/ca.key" 4096 2>/dev/null
     openssl req -x509 -new -nodes -key "$CHV_CONFIG_DIR/certs/ca.key" \
         -sha256 -days 3650 -out "$CHV_CONFIG_DIR/certs/ca.crt" \
-        -subj "/O=CHV/CN=chv-ca"
+        -subj "/O=CHV/CN=chv-ca" 2>/dev/null
     chmod 640 "$CHV_CONFIG_DIR/certs/ca.key"
     chmod 644 "$CHV_CONFIG_DIR/certs/ca.crt"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/ca.key" "$CHV_CONFIG_DIR/certs/ca.crt"
-fi
-
-if [[ ! -f "$CHV_CONFIG_DIR/certs/server.key" ]]; then
-    openssl req -new -newkey rsa:4096 -nodes -keyout "$CHV_CONFIG_DIR/certs/server.key" \
-        -out "$CHV_CONFIG_DIR/certs/server.csr" -subj "/O=CHV/CN=localhost"
-    openssl x509 -req -in "$CHV_CONFIG_DIR/certs/server.csr" \
-        -CA "$CHV_CONFIG_DIR/certs/ca.crt" -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
-        -CAcreateserial -out "$CHV_CONFIG_DIR/certs/server.crt" -days 365 -sha256
-    rm -f "$CHV_CONFIG_DIR/certs/server.csr"
-    chmod 640 "$CHV_CONFIG_DIR/certs/server.key"
-    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/server.key"
 fi
 
 # -----------------------------------------------------------------------------
@@ -103,12 +100,43 @@ fi
 # -----------------------------------------------------------------------------
 echo "[5/8] Installing configuration files..."
 
-cp "$REPO_DIR/docs/examples/controlplane.toml" "$CHV_CONFIG_DIR/controlplane.toml"
-cp "$REPO_DIR/docs/examples/agent.toml" "$CHV_CONFIG_DIR/agent.toml"
+JWT_SECRET=$(openssl rand -base64 32 | tr -d '=+/')
 
-# Replace placeholder DB password with a random one
-DB_PASSWORD=$(openssl rand -base64 32 | tr -d '=+/')
-sed -i "s/change-me-strong-password/${DB_PASSWORD}/g" "$CHV_CONFIG_DIR/controlplane.toml"
+cat > "$CHV_CONFIG_DIR/controlplane.toml" <<EOF
+grpc_bind = "127.0.0.1:8443"
+http_bind = "127.0.0.1:8080"
+log_level = "info"
+runtime_dir = "/run/chv/controlplane"
+jwt_secret = "${JWT_SECRET}"
+
+[database]
+url = "sqlite://${CHV_DB_PATH}"
+migrations_dir = "${CHV_MIGRATIONS_DIR}"
+max_connections = 4
+min_connections = 1
+acquire_timeout_secs = 5
+
+[tls]
+ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
+ca_key_path = "${CHV_CONFIG_DIR}/certs/ca.key"
+EOF
+chmod 640 "$CHV_CONFIG_DIR/controlplane.toml"
+chown root:"$CHV_USER" "$CHV_CONFIG_DIR/controlplane.toml"
+
+cp "$REPO_DIR/docs/examples/agent.toml"  "$CHV_CONFIG_DIR/agent.toml"
+cp "$REPO_DIR/docs/examples/stord.toml"  "$CHV_CONFIG_DIR/stord.toml"
+
+cat > "$CHV_CONFIG_DIR/nwd.toml" <<EOF
+socket_path = "/run/chv/nwd/api.sock"
+runtime_dir = "/run/chv/nwd"
+log_level = "info"
+bridge_name = "${BRIDGE_NAME}"
+bridge_cidr = "${BRIDGE_CIDR}"
+upstream_iface = "${BRIDGE_IFACE}"
+EOF
+
+chmod 640 "$CHV_CONFIG_DIR/agent.toml" "$CHV_CONFIG_DIR/stord.toml" "$CHV_CONFIG_DIR/nwd.toml"
+chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml" "$CHV_CONFIG_DIR/stord.toml" "$CHV_CONFIG_DIR/nwd.toml"
 
 # -----------------------------------------------------------------------------
 # 6. Install systemd services
@@ -116,7 +144,9 @@ sed -i "s/change-me-strong-password/${DB_PASSWORD}/g" "$CHV_CONFIG_DIR/controlpl
 echo "[6/8] Installing systemd services..."
 
 cp "$REPO_DIR/docs/examples/systemd/chv-controlplane.service" /etc/systemd/system/
-cp "$REPO_DIR/docs/examples/systemd/chv-agent.service" /etc/systemd/system/
+cp "$REPO_DIR/docs/examples/systemd/chv-agent.service"        /etc/systemd/system/
+cp "$REPO_DIR/docs/examples/systemd/chv-stord.service"        /etc/systemd/system/
+cp "$REPO_DIR/docs/examples/systemd/chv-nwd.service"          /etc/systemd/system/
 systemctl daemon-reload
 
 # -----------------------------------------------------------------------------
@@ -125,13 +155,14 @@ systemctl daemon-reload
 echo "[7/8] Creating bootstrap token..."
 
 BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
-echo "$BOOTSTRAP_TOKEN" > "$CHV_CONFIG_DIR/bootstrap.token"
+printf '%s' "$BOOTSTRAP_TOKEN" > "$CHV_CONFIG_DIR/bootstrap.token"
 chmod 640 "$CHV_CONFIG_DIR/bootstrap.token"
 chown root:"$CHV_USER" "$CHV_CONFIG_DIR/bootstrap.token"
 
 echo ""
 echo "Bootstrap token: $BOOTSTRAP_TOKEN"
 echo "Token saved to:  $CHV_CONFIG_DIR/bootstrap.token"
+echo "(The agent reads this file automatically at startup.)"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -139,26 +170,21 @@ echo ""
 # -----------------------------------------------------------------------------
 echo "[8/8] Bootstrap complete!"
 echo ""
+echo "Database: SQLite at ${CHV_DB_PATH}"
+echo "  (created automatically by chv-controlplane on first start)"
+echo ""
 echo "Next steps:"
-echo "  1. Ensure PostgreSQL is installed and running."
-echo "     Create the database with:"
-echo "       sudo -u postgres psql -c \"CREATE USER chv WITH PASSWORD '${DB_PASSWORD}';\""
-echo "       sudo -u postgres psql -c \"CREATE DATABASE chv_controlplane OWNER chv;\""
+echo "  1. Start services:"
+echo "       systemctl enable --now chv-controlplane chv-stord chv-nwd"
+echo "       systemctl enable --now chv-agent"
 echo ""
-echo "  2. Insert the bootstrap token into the database:"
-echo "       sudo -u postgres psql -d chv_controlplane -c \"CREATE EXTENSION IF NOT EXISTS pgcrypto;\""
-echo "       sudo -u postgres psql -d chv_controlplane -c \"INSERT INTO bootstrap_tokens (token_hash, description, one_time_use, expires_at, created_at) VALUES (encode(digest('${BOOTSTRAP_TOKEN}', 'sha256'), 'hex'), 'Initial deployment', true, now() + interval '1 hour', now());\""
-echo ""
-echo "  3. Install nginx config and restart nginx:"
+echo "  2. Install nginx and configure proxy:"
 echo "       cp docs/examples/nginx/chv-ui.conf /etc/nginx/sites-available/chv"
 echo "       ln -sf /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv"
 echo "       systemctl restart nginx"
 echo ""
-echo "  4. Start CHV services:"
-echo "       systemctl enable --now chv-controlplane"
-echo "       systemctl enable --now chv-agent"
-echo ""
-echo "  5. Verify deployment:"
+echo "  3. Verify deployment:"
 echo "       curl http://127.0.0.1:8080/health"
-echo "       curl http://127.0.0.1:8080/admin/nodes"
+echo ""
+echo "  For a fully automated install, run: sudo ./scripts/install.sh"
 echo ""

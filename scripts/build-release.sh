@@ -61,11 +61,15 @@ cp -r ui/build/* "${RELEASE_DIR}/ui/"
 cp -r cmd/chv-controlplane/migrations/* "${RELEASE_DIR}/migrations/"
 
 cp docs/examples/systemd/chv-controlplane.service "${RELEASE_DIR}/systemd/"
-cp docs/examples/systemd/chv-agent.service       "${RELEASE_DIR}/systemd/"
+cp docs/examples/systemd/chv-agent.service        "${RELEASE_DIR}/systemd/"
+cp docs/examples/systemd/chv-stord.service        "${RELEASE_DIR}/systemd/"
+cp docs/examples/systemd/chv-nwd.service          "${RELEASE_DIR}/systemd/"
 cp docs/examples/nginx/chv-ui.conf               "${RELEASE_DIR}/nginx/"
 
 cp docs/examples/controlplane.toml "${RELEASE_DIR}/controlplane.toml.example"
 cp docs/examples/agent.toml        "${RELEASE_DIR}/agent.toml.example"
+cp docs/examples/stord.toml        "${RELEASE_DIR}/stord.toml.example"
+cp docs/examples/nwd.toml          "${RELEASE_DIR}/nwd.toml.example"
 cp scripts/install.sh              "${RELEASE_DIR}/install.sh"
 
 # -----------------------------------------------------------------------------

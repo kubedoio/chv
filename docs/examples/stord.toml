@@ -1,0 +1,6 @@
+# CHV Storage Daemon Configuration
+# Place this file at /etc/chv/stord.toml
+
+socket_path = "/run/chv/stord/api.sock"
+runtime_dir = "/run/chv/stord"
+log_level = "info"

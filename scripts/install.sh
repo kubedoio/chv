@@ -9,6 +9,9 @@
 #   INSTALL_CHV_TARBALL_PATH    - Path to local release tarball (dev mode)
 #   INSTALL_CHV_SKIP_DEPS       - Set to "1" to skip apt dependency installation
 #   INSTALL_CHV_SKIP_CLOUD_HV   - Set to "1" to skip cloud-hypervisor download
+#   INSTALL_CHV_BRIDGE_IFACE    - Host interface to attach to bridge (default: ens19)
+#   INSTALL_CHV_BRIDGE_NAME     - Bridge name (default: chvbr0)
+#   INSTALL_CHV_BRIDGE_CIDR     - Bridge CIDR (default: 10.200.0.1/24)
 
 set -euo pipefail
 
@@ -20,6 +23,11 @@ INSTALL_CHV_TARBALL_PATH="${INSTALL_CHV_TARBALL_PATH:-}"
 INSTALL_CHV_SKIP_DEPS="${INSTALL_CHV_SKIP_DEPS:-0}"
 INSTALL_CHV_SKIP_CLOUD_HV="${INSTALL_CHV_SKIP_CLOUD_HV:-0}"
 
+# Network defaults
+INSTALL_CHV_BRIDGE_IFACE="${INSTALL_CHV_BRIDGE_IFACE:-ens19}"
+INSTALL_CHV_BRIDGE_NAME="${INSTALL_CHV_BRIDGE_NAME:-chvbr0}"
+INSTALL_CHV_BRIDGE_CIDR="${INSTALL_CHV_BRIDGE_CIDR:-10.200.0.1/24}"
+
 CHV_USER="chv"
 CHV_CONFIG_DIR="/etc/chv"
 CHV_DATA_DIR="/var/lib/chv"
@@ -27,8 +35,15 @@ CHV_LOG_DIR="/var/log/chv"
 CHV_RUN_DIR="/run/chv"
 CHV_UI_DIR="/opt/chv/ui"
 CHV_MIGRATIONS_DIR="/usr/local/share/chv/migrations"
+CHV_DB_PATH="${CHV_DATA_DIR}/controlplane.db"
 
-GITHUB_REPO="${GITHUB_REPO:-cellhv/chv}"  # Update when repo is published
+GITHUB_REPO="${GITHUB_REPO:-cellhv/chv}"
+
+# Populated later
+EXTRACT_DIR=""
+CLEANUP_TMPDIR=""
+JWT_SECRET=""
+BOOTSTRAP_TOKEN=""
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -36,7 +51,6 @@ GITHUB_REPO="${GITHUB_REPO:-cellhv/chv}"  # Update when repo is published
 info() { echo "[INFO] $*"; }
 warn() { echo "[WARN] $*" >&2; }
 fatal() { echo "[ERROR] $*" >&2; exit 1; }
-
 cmd_exists() { command -v "$1" &>/dev/null; }
 
 get_local_ip() {
@@ -47,18 +61,18 @@ get_local_ip() {
 # Pre-flight checks
 # -----------------------------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
-    fatal "This installer must be run as root. Try: sudo curl -sfL https://get.cellhv.com/ | sh -"
+    fatal "This installer must be run as root. Try: sudo ./scripts/install.sh"
 fi
 
 ARCH=$(uname -m)
 if [ "$ARCH" != "x86_64" ]; then
-    fatal "Unsupported architecture: $ARCH. Only x86_64 is supported for now."
+    fatal "Unsupported architecture: $ARCH. Only x86_64 is supported."
 fi
 
-# Detect if we are inside a release tarball
+# Detect if we are running from inside a release tarball directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "${SCRIPT_DIR}/bin/chv-controlplane" ] && [ -z "$INSTALL_CHV_TARBALL_PATH" ]; then
-    info "Detected local release tarball mode (binaries next to install.sh)"
+    info "Detected local release directory mode (binaries next to install.sh)"
     INSTALL_CHV_TARBALL_PATH="${SCRIPT_DIR}"
 fi
 
@@ -75,8 +89,8 @@ install_dependencies() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq \
-        postgresql postgresql-client nginx \
-        qemu-kvm bridge-utils curl openssl \
+        nginx \
+        qemu-kvm bridge-utils iproute2 iptables curl openssl \
         coreutils tar gzip
 }
 
@@ -93,9 +107,9 @@ setup_user_and_dirs() {
     usermod -aG kvm "$CHV_USER" 2>/dev/null || true
 
     mkdir -p "$CHV_CONFIG_DIR"/certs
-    mkdir -p "$CHV_DATA_DIR"/{cache,images,storage}
+    mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk}
     mkdir -p "$CHV_LOG_DIR"
-    mkdir -p "$CHV_RUN_DIR"
+    mkdir -p "$CHV_RUN_DIR"/{controlplane,agent,stord,nwd}
     mkdir -p "$CHV_UI_DIR"
     mkdir -p "$CHV_MIGRATIONS_DIR"
 
@@ -104,14 +118,14 @@ setup_user_and_dirs() {
 }
 
 # -----------------------------------------------------------------------------
-# Resolve version and download release
+# Resolve version and download/locate release
 # -----------------------------------------------------------------------------
 resolve_version() {
     if [ "$INSTALL_CHV_VERSION" = "latest" ]; then
         if cmd_exists curl; then
-            # Query GitHub releases API for latest tag name
             local latest
-            latest=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -E 's/.*"v([^"]+)".*/\1/') || true
+            latest=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
+                | grep '"tag_name":' | head -n1 | sed -E 's/.*"v([^"]+)".*/\1/') || true
             if [ -n "$latest" ]; then
                 INSTALL_CHV_VERSION="$latest"
             else
@@ -136,6 +150,7 @@ download_release() {
             tmpdir=$(mktemp -d)
             tar -xzf "$INSTALL_CHV_TARBALL_PATH" -C "$tmpdir"
             EXTRACT_DIR="$tmpdir/chv-${INSTALL_CHV_VERSION}-linux-amd64"
+            CLEANUP_TMPDIR="$tmpdir"
         else
             fatal "Local tarball path not found: $INSTALL_CHV_TARBALL_PATH"
         fi
@@ -146,15 +161,14 @@ download_release() {
     local tmpdir
     tmpdir=$(mktemp -d)
     local tarball="$tmpdir/chv-release.tar.gz"
+    CLEANUP_TMPDIR="$tmpdir"
 
     info "Downloading release tarball..."
     curl -fsSL "$tarball_url" -o "$tarball" || fatal "Failed to download release from $tarball_url"
 
     info "Extracting release tarball..."
     tar -xzf "$tarball" -C "$tmpdir"
-
     EXTRACT_DIR="$tmpdir/chv-${INSTALL_CHV_VERSION}-linux-amd64"
-    CLEANUP_TMPDIR="$tmpdir"
 }
 
 # -----------------------------------------------------------------------------
@@ -163,11 +177,10 @@ download_release() {
 install_binaries_and_assets() {
     info "Installing CHV binaries..."
 
-    cp "${EXTRACT_DIR}/bin/chv-controlplane" /usr/local/bin/
-    cp "${EXTRACT_DIR}/bin/chv-agent" /usr/local/bin/
-    cp "${EXTRACT_DIR}/bin/chv-stord" /usr/local/bin/
-    cp "${EXTRACT_DIR}/bin/chv-nwd" /usr/local/bin/
-    chmod 755 /usr/local/bin/chv-*
+    install -m 755 "${EXTRACT_DIR}/bin/chv-controlplane" /usr/local/bin/
+    install -m 755 "${EXTRACT_DIR}/bin/chv-agent"        /usr/local/bin/
+    install -m 755 "${EXTRACT_DIR}/bin/chv-stord"        /usr/local/bin/
+    install -m 755 "${EXTRACT_DIR}/bin/chv-nwd"          /usr/local/bin/
 
     info "Installing Web UI assets..."
     rm -rf "$CHV_UI_DIR"/*
@@ -215,44 +228,103 @@ generate_certs() {
     chmod 750 "$CHV_CONFIG_DIR"/certs
 
     if [ ! -f "$CHV_CONFIG_DIR/certs/ca.key" ]; then
-        openssl genrsa -out "$CHV_CONFIG_DIR/certs/ca.key" 4096
+        openssl genrsa -out "$CHV_CONFIG_DIR/certs/ca.key" 4096 2>/dev/null
         openssl req -x509 -new -nodes -key "$CHV_CONFIG_DIR/certs/ca.key" \
             -sha256 -days 3650 -out "$CHV_CONFIG_DIR/certs/ca.crt" \
-            -subj "/O=CHV/CN=chv-ca"
+            -subj "/O=CHV/CN=chv-ca" 2>/dev/null
         chmod 640 "$CHV_CONFIG_DIR/certs/ca.key"
         chmod 644 "$CHV_CONFIG_DIR/certs/ca.crt"
         chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/ca.key" "$CHV_CONFIG_DIR/certs/ca.crt"
     fi
-
-    if [ ! -f "$CHV_CONFIG_DIR/certs/server.key" ]; then
-        openssl req -new -newkey rsa:4096 -nodes -keyout "$CHV_CONFIG_DIR/certs/server.key" \
-            -out "$CHV_CONFIG_DIR/certs/server.csr" -subj "/O=CHV/CN=localhost"
-        openssl x509 -req -in "$CHV_CONFIG_DIR/certs/server.csr" \
-            -CA "$CHV_CONFIG_DIR/certs/ca.crt" -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
-            -CAcreateserial -out "$CHV_CONFIG_DIR/certs/server.crt" -days 365 -sha256
-        rm -f "$CHV_CONFIG_DIR/certs/server.csr"
-        chmod 640 "$CHV_CONFIG_DIR/certs/server.key"
-        chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/server.key"
-    fi
 }
 
 # -----------------------------------------------------------------------------
-# Database Setup
+# Bridge and NAT network setup
 # -----------------------------------------------------------------------------
-setup_database() {
-    info "Setting up PostgreSQL database..."
+setup_network() {
+    info "Setting up bridge network ${INSTALL_CHV_BRIDGE_NAME} (${INSTALL_CHV_BRIDGE_CIDR}) on ${INSTALL_CHV_BRIDGE_IFACE}..."
 
-    # Ensure PostgreSQL is running
-    if ! pg_isready -q 2>/dev/null; then
-        systemctl start postgresql || true
+    # Create bridge if absent
+    if ! ip link show "${INSTALL_CHV_BRIDGE_NAME}" &>/dev/null; then
+        ip link add name "${INSTALL_CHV_BRIDGE_NAME}" type bridge
+    fi
+    ip link set "${INSTALL_CHV_BRIDGE_NAME}" up
+
+    # Assign gateway IP to the bridge (idempotent)
+    local bridge_ip="${INSTALL_CHV_BRIDGE_CIDR%/*}"
+    local bridge_prefix="${INSTALL_CHV_BRIDGE_CIDR#*/}"
+    if ! ip addr show "${INSTALL_CHV_BRIDGE_NAME}" | grep -q "${bridge_ip}"; then
+        ip addr add "${INSTALL_CHV_BRIDGE_CIDR}" dev "${INSTALL_CHV_BRIDGE_NAME}"
     fi
 
-    DB_PASSWORD=$(openssl rand -base64 32 | tr -d '=+/')
-    JWT_SECRET=$(openssl rand -base64 32 | tr -d '=+/')
+    # Attach host interface to the bridge if it exists and is not already a member
+    if ip link show "${INSTALL_CHV_BRIDGE_IFACE}" &>/dev/null; then
+        local current_master
+        current_master=$(ip link show "${INSTALL_CHV_BRIDGE_IFACE}" | grep -o "master [^ ]*" | awk '{print $2}' || true)
+        if [ "$current_master" != "${INSTALL_CHV_BRIDGE_NAME}" ]; then
+            ip link set "${INSTALL_CHV_BRIDGE_IFACE}" master "${INSTALL_CHV_BRIDGE_NAME}"
+            ip link set "${INSTALL_CHV_BRIDGE_IFACE}" up
+        fi
+    else
+        warn "Interface ${INSTALL_CHV_BRIDGE_IFACE} not found — bridge created without upstream port."
+        warn "Set INSTALL_CHV_BRIDGE_IFACE to an existing interface if you need external connectivity."
+    fi
 
-    # Create user and database idempotently
-    sudo -u postgres psql -c "CREATE USER $CHV_USER WITH PASSWORD '$DB_PASSWORD';" >/dev/null 2>&1 || true
-    sudo -u postgres psql -c "CREATE DATABASE chv_controlplane OWNER $CHV_USER;" >/dev/null 2>&1 || true
+    # Enable IP forwarding
+    sysctl -qw net.ipv4.ip_forward=1
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-chv-forward.conf
+
+    # NAT outbound traffic from bridge subnet
+    local bridge_net="${bridge_ip%.*}.0/${bridge_prefix}"
+    if ! iptables -t nat -C POSTROUTING -s "${bridge_net}" ! -d "${bridge_net}" -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -s "${bridge_net}" ! -d "${bridge_net}" -j MASQUERADE
+    fi
+
+    # Persist iptables rules (iptables-persistent / netfilter-persistent)
+    if cmd_exists netfilter-persistent; then
+        netfilter-persistent save 2>/dev/null || true
+    elif cmd_exists iptables-save; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4
+    fi
+
+    # Persist bridge via systemd-networkd or a simple netplan/ifupdown snippet
+    # We use a drop-in under /etc/network/interfaces.d (ifupdown) if available,
+    # otherwise write a systemd.network unit (networkd).
+    if [ -d /etc/network/interfaces.d ]; then
+        cat > "/etc/network/interfaces.d/chvbr0" <<EOF
+auto ${INSTALL_CHV_BRIDGE_NAME}
+iface ${INSTALL_CHV_BRIDGE_NAME} inet static
+    address ${INSTALL_CHV_BRIDGE_CIDR}
+    bridge_ports ${INSTALL_CHV_BRIDGE_IFACE}
+    bridge_stp off
+    bridge_fd 0
+EOF
+    else
+        mkdir -p /etc/systemd/network
+        cat > "/etc/systemd/network/10-${INSTALL_CHV_BRIDGE_NAME}.netdev" <<EOF
+[NetDev]
+Name=${INSTALL_CHV_BRIDGE_NAME}
+Kind=bridge
+EOF
+        cat > "/etc/systemd/network/11-${INSTALL_CHV_BRIDGE_NAME}.network" <<EOF
+[Match]
+Name=${INSTALL_CHV_BRIDGE_NAME}
+
+[Network]
+Address=${INSTALL_CHV_BRIDGE_CIDR}
+IPForward=yes
+EOF
+        cat > "/etc/systemd/network/12-${INSTALL_CHV_BRIDGE_IFACE}.network" <<EOF
+[Match]
+Name=${INSTALL_CHV_BRIDGE_IFACE}
+
+[Network]
+Bridge=${INSTALL_CHV_BRIDGE_NAME}
+EOF
+    fi
+
+    info "Bridge ${INSTALL_CHV_BRIDGE_NAME} ready (${INSTALL_CHV_BRIDGE_CIDR}), NAT via ${INSTALL_CHV_BRIDGE_IFACE}."
 }
 
 # -----------------------------------------------------------------------------
@@ -260,6 +332,8 @@ setup_database() {
 # -----------------------------------------------------------------------------
 install_configs() {
     info "Installing configuration files..."
+
+    JWT_SECRET=$(openssl rand -base64 32 | tr -d '=+/')
 
     cat > "$CHV_CONFIG_DIR/controlplane.toml" <<EOF
 grpc_bind = "127.0.0.1:8443"
@@ -269,21 +343,15 @@ runtime_dir = "/run/chv/controlplane"
 jwt_secret = "${JWT_SECRET}"
 
 [database]
-url = "postgres://${CHV_USER}:${DB_PASSWORD}@127.0.0.1:5432/chv_controlplane"
+url = "sqlite://${CHV_DB_PATH}"
 migrations_dir = "${CHV_MIGRATIONS_DIR}"
-max_connections = 16
+max_connections = 4
 min_connections = 1
 acquire_timeout_secs = 5
-idle_timeout_secs = 300
-max_lifetime_secs = 1800
 
 [tls]
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 ca_key_path = "${CHV_CONFIG_DIR}/certs/ca.key"
-# gRPC server TLS is optional; disabled by default for all-in-one loopback deployments
-# server_cert_path = "${CHV_CONFIG_DIR}/certs/server.crt"
-# server_key_path = "${CHV_CONFIG_DIR}/certs/server.key"
-# client_ca_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/controlplane.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/controlplane.toml"
@@ -308,6 +376,37 @@ ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/agent.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml"
+
+    cat > "$CHV_CONFIG_DIR/stord.toml" <<EOF
+socket_path = "/run/chv/stord/api.sock"
+runtime_dir = "/run/chv/stord"
+log_level = "info"
+EOF
+    chmod 640 "$CHV_CONFIG_DIR/stord.toml"
+    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/stord.toml"
+
+    cat > "$CHV_CONFIG_DIR/nwd.toml" <<EOF
+socket_path = "/run/chv/nwd/api.sock"
+runtime_dir = "/run/chv/nwd"
+log_level = "info"
+bridge_name = "${INSTALL_CHV_BRIDGE_NAME}"
+bridge_cidr = "${INSTALL_CHV_BRIDGE_CIDR}"
+upstream_iface = "${INSTALL_CHV_BRIDGE_IFACE}"
+EOF
+    chmod 640 "$CHV_CONFIG_DIR/nwd.toml"
+    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/nwd.toml"
+}
+
+# -----------------------------------------------------------------------------
+# Bootstrap Token (written to file; control plane reads it on startup)
+# -----------------------------------------------------------------------------
+create_bootstrap_token() {
+    info "Creating bootstrap token..."
+
+    BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
+    printf '%s' "$BOOTSTRAP_TOKEN" > "$CHV_CONFIG_DIR/bootstrap.token"
+    chmod 640 "$CHV_CONFIG_DIR/bootstrap.token"
+    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/bootstrap.token"
 }
 
 # -----------------------------------------------------------------------------
@@ -319,8 +418,7 @@ install_systemd_services() {
     cat > /etc/systemd/system/chv-controlplane.service <<'EOF'
 [Unit]
 Description=CHV Control Plane
-After=network.target postgresql.service
-Wants=postgresql.service
+After=network.target
 
 [Service]
 Type=simple
@@ -342,11 +440,61 @@ ReadOnlyPaths=/etc/chv /usr/local/share/chv
 WantedBy=multi-user.target
 EOF
 
+    cat > /etc/systemd/system/chv-stord.service <<'EOF'
+[Unit]
+Description=CHV Storage Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=chv
+Group=chv
+ExecStartPre=/bin/mkdir -p /run/chv/stord
+ExecStart=/usr/local/bin/chv-stord /etc/chv/stord.toml
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=chv/stord
+StateDirectory=chv
+LogsDirectory=chv
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/chv/stord /var/lib/chv/storage
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    cat > /etc/systemd/system/chv-nwd.service <<'EOF'
+[Unit]
+Description=CHV Network Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=chv
+Group=chv
+ExecStartPre=/bin/mkdir -p /run/chv/nwd
+ExecStart=/usr/local/bin/chv-nwd /etc/chv/nwd.toml
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=chv/nwd
+StateDirectory=chv
+LogsDirectory=chv
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/chv/nwd
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     cat > /etc/systemd/system/chv-agent.service <<'EOF'
 [Unit]
 Description=CHV Node Agent
-After=network.target chv-controlplane.service
-Wants=chv-controlplane.service
+After=network.target chv-controlplane.service chv-stord.service chv-nwd.service
+Wants=chv-controlplane.service chv-stord.service chv-nwd.service
 
 [Service]
 Type=simple
@@ -375,26 +523,10 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# Bootstrap Token
-# -----------------------------------------------------------------------------
-create_bootstrap_token() {
-    info "Creating bootstrap token for agent enrollment..."
-
-    BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
-    printf '%s' "$BOOTSTRAP_TOKEN" > "$CHV_CONFIG_DIR/bootstrap.token"
-    chmod 640 "$CHV_CONFIG_DIR/bootstrap.token"
-    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/bootstrap.token"
-
-    sudo -u postgres psql -d chv_controlplane -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" >/dev/null
-    sudo -u postgres psql -d chv_controlplane -c \
-        "INSERT INTO bootstrap_tokens (token_hash, description, one_time_use, expires_at, created_at) VALUES (encode(digest('${BOOTSTRAP_TOKEN}', 'sha256'), 'hex'), 'All-in-one installer', true, now() + interval '1 hour', now()) ON CONFLICT DO NOTHING;" >/dev/null
-}
-
-# -----------------------------------------------------------------------------
-# nginx Setup
+# nginx Setup (serves UI + proxies API)
 # -----------------------------------------------------------------------------
 install_nginx() {
-    info "Configuring nginx for CHV Web UI..."
+    info "Configuring nginx..."
 
     cat > /etc/nginx/sites-available/chv <<'EOF'
 server {
@@ -423,7 +555,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_intercept_errors off;
     }
 
     location /v1/ {
@@ -433,7 +564,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_intercept_errors off;
     }
 
     gzip on;
@@ -441,49 +571,97 @@ server {
 }
 EOF
 
-    if [ -f /etc/nginx/sites-enabled/default ]; then
-        rm -f /etc/nginx/sites-enabled/default
-    fi
-
-    if [ ! -f /etc/nginx/sites-enabled/chv ]; then
-        ln -sf /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
-    fi
+    rm -f /etc/nginx/sites-enabled/default
+    ln -sf /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
 
     nginx -t || fatal "nginx configuration test failed"
     systemctl restart nginx
 }
 
 # -----------------------------------------------------------------------------
-# Start Services
+# Start Services and Wait for Enrollment
 # -----------------------------------------------------------------------------
 start_services() {
-    info "Starting CHV services..."
+    info "Enabling and starting CHV services..."
 
     systemctl enable --now chv-controlplane
-    
-    info "Waiting for control plane to run database migrations..."
-    
-    # Poll the database for up to 30 seconds until the table appears
-    local max_attempts=30
+    systemctl enable --now chv-stord
+    systemctl enable --now chv-nwd
+
+    info "Waiting for control plane to apply database migrations (up to 30s)..."
     local attempt=1
-    while [ $attempt -le $max_attempts ]; do
-        # Check if the table exists in PostgreSQL
-        if sudo -u postgres psql -d chv_controlplane -tAc "SELECT 1 FROM information_schema.tables WHERE table_name='bootstrap_tokens';" | grep -q 1; then
-            info "Database migrations confirmed."
+    while [ $attempt -le 30 ]; do
+        if [ -f "${CHV_DB_PATH}" ] && \
+           /usr/local/bin/chv-controlplane --check-db "${CHV_DB_PATH}" 2>/dev/null \
+           || sqlite3 "${CHV_DB_PATH}" "SELECT 1 FROM bootstrap_tokens LIMIT 1;" &>/dev/null 2>&1; then
+            info "Database ready."
             break
         fi
         sleep 1
         ((attempt++))
     done
-
-    if [ $attempt -gt $max_attempts ]; then
-        fatal "Control plane failed to create database tables within 30 seconds. Check logs with: journalctl -u chv-controlplane --no-pager -n 50"
+    # Fallback: wait for HTTP health endpoint (doesn't require sqlite3 on host)
+    attempt=1
+    while [ $attempt -le 30 ]; do
+        if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
+            info "Control plane API is up."
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+    if [ $attempt -gt 30 ]; then
+        fatal "Control plane did not become healthy within 30s. Check: journalctl -u chv-controlplane -n 50"
     fi
-    
-    # Now it is safe to insert the token
-    create_bootstrap_token
-    
+
+    # Insert bootstrap token directly into the SQLite database
+    info "Inserting bootstrap token into database..."
+    local token_hash
+    token_hash=$(printf '%s' "$BOOTSTRAP_TOKEN" | sha256sum | awk '{print $1}')
+    local expires
+    expires=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+              || date -u -v+1H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+              || echo "")
+
+    if cmd_exists sqlite3; then
+        sqlite3 "${CHV_DB_PATH}" \
+            "INSERT OR IGNORE INTO bootstrap_tokens
+             (token_hash, description, one_time_use, expires_at, created_at)
+             VALUES ('${token_hash}', 'All-in-one installer', 1,
+                     '${expires}',
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+    else
+        warn "sqlite3 not available — bootstrap token file is in place."
+        warn "The agent will present the raw token to the control plane for enrollment."
+    fi
+
     systemctl enable --now chv-agent
+
+    info "Waiting for agent enrollment (up to 60s)..."
+    attempt=1
+    while [ $attempt -le 60 ]; do
+        local node_count
+        node_count=0
+        if cmd_exists sqlite3; then
+            node_count=$(sqlite3 "${CHV_DB_PATH}" \
+                "SELECT COUNT(*) FROM nodes WHERE status='Ready';" 2>/dev/null || echo "0")
+        else
+            # Fall back to HTTP API poll
+            node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
+                -X POST -H "Content-Type: application/json" -d '{}' 2>/dev/null \
+                | grep -o '"total_items":[0-9]*' | grep -o '[0-9]*' || echo "0")
+        fi
+        if [ "${node_count}" -gt 0 ] 2>/dev/null; then
+            info "Node enrolled successfully."
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+    if [ $attempt -gt 60 ]; then
+        warn "Node enrollment did not complete within 60s."
+        warn "Check enrollment status: journalctl -u chv-agent -n 50"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -507,8 +685,9 @@ download_release
 install_binaries_and_assets
 install_cloud_hypervisor
 generate_certs
-setup_database
+setup_network
 install_configs
+create_bootstrap_token
 install_systemd_services
 install_nginx
 start_services
@@ -523,23 +702,24 @@ cat <<EOF
 
 Version:        ${INSTALL_CHV_VERSION}
 Web UI:         http://${LOCAL_IP}/
-Admin API:      http://127.0.0.1:8080/
-Health:         curl http://127.0.0.1:8080/health
-Nodes:          curl http://127.0.0.1:8080/admin/nodes
+API:            http://127.0.0.1:8080/
+Database:       ${CHV_DB_PATH}
+Bridge:         ${INSTALL_CHV_BRIDGE_NAME} (${INSTALL_CHV_BRIDGE_CIDR})
+Upstream iface: ${INSTALL_CHV_BRIDGE_IFACE} (NAT enabled)
 
 Services:
   systemctl status chv-controlplane
   systemctl status chv-agent
+  systemctl status chv-stord
+  systemctl status chv-nwd
   systemctl status nginx
 
 Logs:
   journalctl -u chv-controlplane -f
   journalctl -u chv-agent -f
 
-Next steps:
-  1. Open http://${LOCAL_IP}/ in your browser.
-  2. The local agent will auto-enroll using the
-     bootstrap token (valid for 1 hour).
-  3. Create VMs through the Web UI or gRPC API.
+Defaults:
+  Admin login:   admin / admin
+  Bootstrap token valid for 1 hour from installation.
 
 EOF

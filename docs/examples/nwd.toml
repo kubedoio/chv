@@ -1,0 +1,11 @@
+# CHV Network Daemon Configuration
+# Place this file at /etc/chv/nwd.toml
+
+socket_path = "/run/chv/nwd/api.sock"
+runtime_dir = "/run/chv/nwd"
+log_level = "info"
+
+# Bridge and NAT network configuration
+bridge_name = "chvbr0"
+bridge_cidr = "10.200.0.1/24"
+upstream_iface = "ens19"
