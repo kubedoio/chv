@@ -136,18 +136,18 @@
 	.btn-primary {
 		background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-active) 100%);
 		color: white;
-		box-shadow: 0 2px 8px rgba(229, 112, 53, 0.3);
+		box-shadow: 0 2px 8px var(--color-primary-glow);
 	}
 
 	.btn-primary:hover:not(:disabled) {
-		background: linear-gradient(135deg, var(--color-primary-hover) 0%, #e05a35 100%);
-		box-shadow: 0 4px 12px rgba(229, 112, 53, 0.4);
+		background: linear-gradient(135deg, var(--color-primary-hover) 0%, var(--color-primary-hover) 100%);
+		box-shadow: 0 4px 12px rgba(143, 90, 42, 0.35);
 		transform: translateY(-1px);
 	}
 
 	.btn-primary:active:not(:disabled) {
 		transform: translateY(0);
-		box-shadow: 0 1px 4px rgba(229, 112, 53, 0.3);
+		box-shadow: 0 1px 4px var(--color-primary-glow);
 	}
 
 	.btn-secondary {
