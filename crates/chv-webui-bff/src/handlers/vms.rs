@@ -278,6 +278,9 @@ pub async fn create_vm(
     let vm_id = uuid::Uuid::new_v4().to_string();
     let operation_id = uuid::Uuid::new_v4().to_string();
 
+    let mut tx = state.pool.begin().await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
     sqlx::query(
         r#"
         INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
@@ -287,7 +290,7 @@ pub async fn create_vm(
     .bind(&vm_id)
     .bind(&node_id)
     .bind(&display_name)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
 
@@ -302,7 +305,7 @@ pub async fn create_vm(
     .bind(cpu_count)
     .bind(memory_bytes)
     .bind(&image_ref)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
 
@@ -317,9 +320,12 @@ pub async fn create_vm(
     .bind(&idempotency_key)
     .bind(&vm_id)
     .bind(&requested_by)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+
+    tx.commit().await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
     Ok(Json(json!({
         "vm_id": vm_id,
@@ -358,6 +364,9 @@ pub async fn delete_vm(
         return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
     }
 
+    let mut tx = state.pool.begin().await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
     sqlx::query(
         r#"
         UPDATE vm_desired_state
@@ -367,25 +376,37 @@ pub async fn delete_vm(
     )
     .bind(&requested_by)
     .bind(&vm_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to update vm_desired_state: {}", e)))?;
+
+    let new_generation: i64 = sqlx::query_scalar(
+        "SELECT desired_generation FROM vm_desired_state WHERE vm_id = ?"
+    )
+    .bind(&vm_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
 
     let operation_id = uuid::Uuid::new_v4().to_string();
     let idempotency_key = format!("delete-vm-{}", vm_id);
     sqlx::query(
         r#"
         INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
-        VALUES (?, ?, 'vm', ?, 'delete', 'Accepted', ?, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        VALUES (?, ?, 'vm', ?, 'delete', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&operation_id)
     .bind(&idempotency_key)
     .bind(&vm_id)
     .bind(&requested_by)
-    .execute(&state.pool)
+    .bind(new_generation)
+    .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+
+    tx.commit().await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
     Ok(Json(json!({
         "vm_id": vm_id,
