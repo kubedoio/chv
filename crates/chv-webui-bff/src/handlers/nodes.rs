@@ -4,7 +4,19 @@ use serde_json::{json, Value};
 use crate::router::AppState;
 use crate::BffError;
 
-pub async fn list_nodes(State(state): State<AppState>) -> Result<Json<serde_json::Value>, BffError> {
+pub async fn list_nodes(
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, BffError> {
+    let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).min(200).max(1);
+    let offset = (page - 1) * page_size;
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to count nodes: {}", e)))?;
+    let total_pages = (total_count as u64 + page_size - 1) / page_size;
+
     let rows = sqlx::query_as::<_, NodeRow>(
         r#"
         SELECT
@@ -47,8 +59,11 @@ pub async fn list_nodes(State(state): State<AppState>) -> Result<Json<serde_json
             GROUP BY node_id
         ) alert_counts ON n.node_id = alert_counts.node_id
         ORDER BY n.node_id
+        LIMIT ? OFFSET ?
         "#,
     )
+    .bind(page_size as i64)
+    .bind(offset as i64)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to list nodes: {}", e)))?;
@@ -77,9 +92,10 @@ pub async fn list_nodes(State(state): State<AppState>) -> Result<Json<serde_json
     Ok(Json(json!({
         "items": items,
         "page": {
-            "page": 1,
-            "page_size": 50,
-            "total_items": items.len() as u64,
+            "page": page,
+            "page_size": page_size,
+            "total_items": total_count,
+            "total_pages": total_pages,
         },
         "filters": null,
     })))

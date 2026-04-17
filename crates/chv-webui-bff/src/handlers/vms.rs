@@ -6,8 +6,17 @@ use crate::BffError;
 
 pub async fn list_vms(
     State(state): State<AppState>,
-    _payload: axum::Json<Value>,
+    axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).min(200).max(1);
+    let offset = (page - 1) * page_size;
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to count vms: {}", e)))?;
+    let total_pages = (total_count as u64 + page_size - 1) / page_size;
+
     let rows = sqlx::query_as::<_, VmRow>(
         r#"
         SELECT
@@ -45,8 +54,11 @@ pub async fn list_vms(
             GROUP BY vm_id
         ) nic_counts ON v.vm_id = nic_counts.vm_id
         ORDER BY v.vm_id
+        LIMIT ? OFFSET ?
         "#,
     )
+    .bind(page_size as i64)
+    .bind(offset as i64)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to list vms: {}", e)))?;
@@ -72,9 +84,10 @@ pub async fn list_vms(
     Ok(Json(json!({
         "items": items,
         "page": {
-            "page": 1,
-            "page_size": 50,
-            "total_items": items.len() as u64,
+            "page": page,
+            "page_size": page_size,
+            "total_items": total_count,
+            "total_pages": total_pages,
         },
         "filters": null,
     })))

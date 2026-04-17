@@ -6,8 +6,17 @@ use crate::BffError;
 
 pub async fn list_events(
     State(state): State<AppState>,
-    _payload: axum::Json<Value>,
+    axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).min(200).max(1);
+    let offset = (page - 1) * page_size;
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to count events: {}", e)))?;
+    let total_pages = (total_count as u64 + page_size - 1) / page_size;
+
     let events = sqlx::query_as::<_, EventRow>(
         r#"
         SELECT
@@ -23,9 +32,11 @@ pub async fn list_events(
         FROM events e
         LEFT JOIN nodes n ON e.node_id = n.node_id
         ORDER BY occurred_at DESC
-        LIMIT 100
+        LIMIT ? OFFSET ?
         "#,
     )
+    .bind(page_size as i64)
+    .bind(offset as i64)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to list events: {}", e)))?;
@@ -49,9 +60,11 @@ pub async fn list_events(
         FROM alerts a
         LEFT JOIN nodes n ON a.node_id = n.node_id
         ORDER BY opened_at DESC
-        LIMIT 100
+        LIMIT ? OFFSET ?
         "#,
     )
+    .bind(page_size as i64)
+    .bind(offset as i64)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to list alerts: {}", e)))?;
@@ -90,14 +103,13 @@ pub async fn list_events(
         b_ts.cmp(a_ts)
     });
 
-    let total = items.len() as u64;
-
     Ok(Json(json!({
         "items": items,
         "page": {
-            "page": 1,
-            "page_size": 50,
-            "total_items": total,
+            "page": page,
+            "page_size": page_size,
+            "total_items": total_count,
+            "total_pages": total_pages,
         },
         "filters": null,
     })))
