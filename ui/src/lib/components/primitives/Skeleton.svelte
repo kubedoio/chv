@@ -18,7 +18,7 @@
 
 <div
 	class="skeleton"
-	class:animate={animate}
+	class:skeleton-animate={animate}
 	style="width: {width}; height: {height}; border-radius: {borderRadius};"
 	aria-hidden="true"
 ></div>
@@ -34,7 +34,7 @@
 		background-size: 200% 100%;
 	}
 
-	.skeleton.animate {
+	.skeleton-animate {
 		animation: skeleton-loading 1.5s ease-in-out infinite;
 	}
 

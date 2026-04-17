@@ -161,17 +161,17 @@ A comprehensive design system for the CHV (Cloud Hypervisor Virtualization) plat
 .element-gap { gap: var(--space-3); }
 
 /* Tight Gap */
-tight-gap { gap: var(--space-2); }
+.tight-gap { gap: var(--space-2); }
 ```
 
 ## Shadows & Elevation
 
 | Token | Value | Usage |
 |-------|-------|-------|
-| `--shadow-sm` | 0 1px 2px rgba(0,0,0,0.05) | Subtle depth, inputs |
-| `--shadow-md` | 0 4px 6px -1px rgba(0,0,0,0.1) | Cards, dropdowns |
-| `--shadow-lg` | 0 10px 15px -3px rgba(0,0,0,0.1) | Modals, popovers |
-| `--shadow-xl` | 0 20px 25px -5px rgba(0,0,0,0.1) | Full-screen overlays |
+| `--shadow-sm` | 0 1px 2px 0 rgba(0, 0, 0, 0.05) | Subtle depth, inputs |
+| `--shadow-md` | 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1) | Cards, dropdowns |
+| `--shadow-lg` | 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1) | Modals, popovers |
+| `--shadow-xl` | 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1) | Full-screen overlays |
 | `--shadow-glow-primary` | 0 0 14px rgba(143, 90, 42, 0.1) | Primary focus states |
 | `--shadow-glow-success` | 0 0 8px rgba(63, 107, 69, 0.12) | Success focus states |
 
@@ -349,7 +349,7 @@ tight-gap { gap: var(--space-2); }
 
 .badge-success {
   background: rgba(34, 197, 94, 0.15);
-  color: #15803d;
+  color: var(--color-success-dark);
   border: 1px solid rgba(34, 197, 94, 0.2);
 }
 ```

@@ -28,14 +28,23 @@
 	let errorId = $derived(error ? `${inputId}-error` : undefined);
 	let hintId = $derived(hint ? `${inputId}-hint` : undefined);
 	let describedBy = $derived([errorId, hintId].filter(Boolean).join(' ') || undefined);
+
+	const baseClasses =
+		'w-full py-2.5 px-3.5 text-sm rounded-sm bg-white text-[var(--color-neutral-900)] transition-all duration-150 ease-in-out focus:outline-none disabled:bg-[var(--color-neutral-100)] disabled:text-[var(--color-neutral-400)] disabled:cursor-not-allowed placeholder:text-[var(--color-neutral-400)]';
+
+	const errorClasses =
+		'border-[var(--color-danger)] shadow-[0_0_0_3px_var(--color-danger-glow)] hover:border-[var(--color-danger)] focus:border-[var(--color-danger)] focus:shadow-[0_0_0_3px_var(--color-danger-glow)]';
+
+	const normalClasses =
+		'border-[var(--color-neutral-300)] hover:border-[var(--color-neutral-400)] focus:border-[var(--color-primary)] focus:shadow-[0_0_0_3px_var(--color-primary-glow)]';
 </script>
 
-<div class="input-wrapper">
+<div class="flex flex-col gap-2">
 	{#if label}
-		<label for={inputId} class="label">
+		<label for={inputId} class="text-sm font-medium text-[var(--color-neutral-700)] flex items-center gap-1">
 			{label}
 			{#if required}
-				<span class="required-indicator" aria-hidden="true">*</span>
+				<span class="text-[var(--color-danger)]" aria-hidden="true">*</span>
 				<VisuallyHidden>(required)</VisuallyHidden>
 			{/if}
 		</label>
@@ -46,109 +55,19 @@
 		{placeholder}
 		{disabled}
 		id={inputId}
-		class="input"
-		class:error
+		class="{baseClasses} {error ? errorClasses : normalClasses}"
 		aria-invalid={error ? 'true' : 'false'}
 		aria-describedby={describedBy}
 		aria-required={required}
 		{...rest}
 	/>
 	{#if error}
-		<span id={errorId} class="error-message" role="alert" aria-live="assertive">
+		<span id={errorId} class="text-xs text-[var(--color-danger)]" role="alert" aria-live="assertive">
 			{error}
 		</span>
 	{:else if hint}
-		<span id={hintId} class="hint-text">
+		<span id={hintId} class="text-xs text-[var(--color-neutral-500)]">
 			{hint}
 		</span>
 	{/if}
 </div>
-
-<style>
-	.input-wrapper {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-
-	.label {
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--color-neutral-700);
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-	}
-
-	.required-indicator {
-		color: var(--color-danger);
-	}
-
-	.input {
-		width: 100%;
-		padding: 0.625rem var(--space-3);
-		font-size: var(--text-sm);
-		border: 1px solid var(--color-neutral-300);
-		border-radius: var(--radius-sm);
-		background: white;
-		color: var(--color-neutral-900);
-		transition:
-			border-color var(--duration-fast) var(--ease-default),
-			box-shadow var(--duration-fast) var(--ease-default);
-	}
-
-	.input:hover:not(:disabled):not(.error) {
-		border-color: var(--color-neutral-400);
-	}
-
-	.input:focus {
-		outline: none;
-		border-color: var(--color-primary);
-		box-shadow: 0 0 0 3px rgba(229, 112, 53, 0.15);
-	}
-
-	.input::placeholder {
-		color: var(--color-neutral-400);
-	}
-
-	.input:disabled {
-		background: var(--color-neutral-100);
-		color: var(--color-neutral-400);
-		cursor: not-allowed;
-	}
-
-	.input.error {
-		border-color: var(--color-danger);
-		box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
-	}
-
-	.input.error:focus {
-		border-color: var(--color-danger);
-		box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
-	}
-
-	.error-message {
-		font-size: var(--text-xs);
-		color: var(--color-danger);
-	}
-
-	.hint-text {
-		font-size: var(--text-xs);
-		color: var(--color-neutral-500);
-	}
-
-	/* High contrast mode */
-	@media (prefers-contrast: high) {
-		.input:focus {
-			outline: 3px solid currentColor;
-			box-shadow: none;
-		}
-	}
-
-	/* Reduced motion */
-	@media (prefers-reduced-motion: reduce) {
-		.input {
-			transition: none;
-		}
-	}
-</style>

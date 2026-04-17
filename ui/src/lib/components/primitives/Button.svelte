@@ -25,35 +25,45 @@
 	const isDisabled = $derived(disabled || loading);
 
 	const variantClasses = {
-		primary: 'btn-primary',
-		secondary: 'btn-secondary',
-		ghost: 'btn-ghost',
-		danger: 'btn-danger'
+		primary:
+			'bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-active)] text-white shadow-[0_2px_8px_var(--color-primary-glow)] hover:shadow-[0_4px_12px_rgba(143,90,42,0.35)] hover:-translate-y-px active:translate-y-0',
+		secondary:
+			'bg-white text-[var(--color-neutral-700)] border border-[var(--color-neutral-300)] hover:bg-[var(--color-neutral-50)] hover:border-[var(--color-neutral-400)]',
+		ghost:
+			'bg-transparent text-[var(--color-neutral-600)] hover:bg-[var(--color-neutral-100)] hover:text-[var(--color-neutral-900)]',
+		danger: 'bg-[var(--color-danger)] text-white hover:bg-[#b93d20]'
 	};
 
 	const sizeClasses = {
-		sm: 'btn-sm',
-		md: 'btn-md',
-		lg: 'btn-lg'
+		sm: 'h-8 px-3 text-sm',
+		md: 'h-10 px-4 text-sm',
+		lg: 'h-12 px-5 text-base'
 	};
 
-	// Check if button has only icon (no text content)
 	let buttonRef = $state<HTMLButtonElement | null>(null);
 	let isIconOnly = $state(false);
 
 	$effect(() => {
 		if (buttonRef && !children) {
-			// If no children slot is provided, it's likely an icon-only button
 			isIconOnly = true;
 		}
 	});
+
+	const iconOnlyClasses = $derived(
+		isIconOnly
+			? size === 'sm'
+				? 'w-8 h-8 p-0'
+				: size === 'lg'
+					? 'w-12 h-12 p-0'
+					: 'w-10 h-10 p-0'
+			: ''
+	);
 </script>
 
 <button
 	bind:this={buttonRef}
 	type="button"
-	class="btn {variantClasses[variant]} {sizeClasses[size]}"
-	class:icon-only={isIconOnly}
+	class="btn inline-flex items-center justify-center gap-2 rounded-sm border-none font-medium text-sm cursor-pointer transition-all duration-150 ease-in-out focus-visible:outline-2 focus-visible:outline-[var(--color-primary)] focus-visible:outline-offset-2 disabled:opacity-50 disabled:cursor-not-allowed {variantClasses[variant]} {sizeClasses[size]} {iconOnlyClasses}"
 	disabled={isDisabled}
 	aria-disabled={isDisabled}
 	aria-busy={loading}
@@ -68,118 +78,6 @@
 </button>
 
 <style>
-	.btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-2);
-		font-size: var(--text-sm);
-		font-weight: 500;
-		border-radius: var(--radius-sm);
-		border: none;
-		cursor: pointer;
-		transition:
-			background-color var(--duration-fast) var(--ease-default),
-			border-color var(--duration-fast) var(--ease-default),
-			box-shadow var(--duration-fast) var(--ease-default),
-			transform var(--duration-fast) var(--ease-default);
-	}
-
-	.btn:focus-visible {
-		outline: 2px solid var(--color-primary);
-		outline-offset: 2px;
-	}
-
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	/* Icon-only button styles */
-	.btn.icon-only {
-		padding: var(--space-2);
-	}
-
-	.btn.icon-only.btn-sm {
-		width: 2rem;
-		padding: 0;
-	}
-
-	.btn.icon-only.btn-md {
-		width: 2.5rem;
-		padding: 0;
-	}
-
-	.btn.icon-only.btn-lg {
-		width: 3rem;
-		padding: 0;
-	}
-
-	/* Button Sizes */
-	.btn-sm {
-		padding: var(--space-1) var(--space-3);
-		height: 2rem;
-	}
-
-	.btn-md {
-		padding: 0.625rem var(--space-4);
-		height: 2.5rem;
-	}
-
-	.btn-lg {
-		padding: var(--space-3) var(--space-5);
-		height: 3rem;
-		font-size: var(--text-base);
-	}
-
-	/* Button Variants */
-	.btn-primary {
-		background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-active) 100%);
-		color: white;
-		box-shadow: 0 2px 8px var(--color-primary-glow);
-	}
-
-	.btn-primary:hover:not(:disabled) {
-		background: linear-gradient(135deg, var(--color-primary-hover) 0%, var(--color-primary-hover) 100%);
-		box-shadow: 0 4px 12px rgba(143, 90, 42, 0.35);
-		transform: translateY(-1px);
-	}
-
-	.btn-primary:active:not(:disabled) {
-		transform: translateY(0);
-		box-shadow: 0 1px 4px var(--color-primary-glow);
-	}
-
-	.btn-secondary {
-		background: white;
-		color: var(--color-neutral-700);
-		border: 1px solid var(--color-neutral-300);
-	}
-
-	.btn-secondary:hover:not(:disabled) {
-		background: var(--color-neutral-50);
-		border-color: var(--color-neutral-400);
-	}
-
-	.btn-ghost {
-		background: transparent;
-		color: var(--color-neutral-600);
-	}
-
-	.btn-ghost:hover:not(:disabled) {
-		background: var(--color-neutral-100);
-		color: var(--color-neutral-900);
-	}
-
-	.btn-danger {
-		background: var(--color-danger);
-		color: white;
-	}
-
-	.btn-danger:hover:not(:disabled) {
-		background: #dc2626;
-	}
-
 	@keyframes spin {
 		from {
 			transform: rotate(0deg);
@@ -189,28 +87,22 @@
 		}
 	}
 
-	.animate-spin {
-		animation: spin 1s linear infinite;
-	}
-
-	/* High contrast mode */
 	@media (prefers-contrast: high) {
 		.btn {
 			border: 1px solid currentColor;
 		}
-		
+
 		.btn:focus-visible {
 			outline: 3px solid currentColor;
 			outline-offset: 2px;
 		}
 	}
 
-	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
 		.btn {
 			transition: none;
 		}
-		
+
 		.btn:hover:not(:disabled) {
 			transform: none;
 		}

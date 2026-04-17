@@ -10,74 +10,32 @@
 		children,
 		header,
 		footer
-	}: Props & { children?: import('svelte').Snippet; header?: import('svelte').Snippet; footer?: import('svelte').Snippet } = $props();
+	}: Props & { children?: import('svelte').Snippet; header?: import('svelte').Snippet; footer?: import('svelte').Snippet } =
+		$props();
 
 	const paddingClasses = {
 		none: '',
-		sm: 'padding-sm',
-		md: 'padding-md',
-		lg: 'padding-lg'
+		sm: 'p-3',
+		md: 'p-4',
+		lg: 'p-6'
 	};
 </script>
 
-<div class="card {interactive ? 'card-interactive' : ''}" role="article">
+<div
+	class="bg-white border border-[var(--color-neutral-200)] rounded-md shadow-sm overflow-hidden transition-all duration-300 ease-in-out {interactive ? 'cursor-pointer hover:shadow-lg hover:border-[var(--color-primary)]/30 hover:-translate-y-0.5' : ''}"
+	role="article"
+>
 	{#if header}
-		<div class="card-header {paddingClasses[padding]}">
+		<div class="border-b border-[var(--color-neutral-100)] bg-[var(--color-neutral-50)] {paddingClasses[padding]}">
 			{@render header()}
 		</div>
 	{/if}
-	<div class="card-body {paddingClasses[padding]}">
+	<div class="{paddingClasses[padding]}">
 		{@render children?.()}
 	</div>
 	{#if footer}
-		<div class="card-footer {paddingClasses[padding]}">
+		<div class="border-t border-[var(--color-neutral-100)] bg-[var(--color-neutral-50)] {paddingClasses[padding]}">
 			{@render footer()}
 		</div>
 	{/if}
 </div>
-
-<style>
-	.card {
-		background: white;
-		border: 1px solid var(--color-neutral-200);
-		border-radius: var(--radius-md);
-		box-shadow: var(--shadow-sm);
-		overflow: hidden;
-		transition:
-			box-shadow var(--duration-normal) var(--ease-default),
-			border-color var(--duration-normal) var(--ease-default),
-			transform var(--duration-normal) var(--ease-default);
-	}
-
-	.card-interactive {
-		cursor: pointer;
-	}
-
-	.card-interactive:hover {
-		box-shadow: var(--shadow-lg);
-		border-color: rgba(229, 112, 53, 0.3);
-		transform: translateY(-2px);
-	}
-
-	.card-header {
-		border-bottom: 1px solid var(--color-neutral-100);
-		background: var(--color-neutral-50);
-	}
-
-	.card-footer {
-		border-top: 1px solid var(--color-neutral-100);
-		background: var(--color-neutral-50);
-	}
-
-	.padding-sm {
-		padding: var(--space-3);
-	}
-
-	.padding-md {
-		padding: var(--space-4);
-	}
-
-	.padding-lg {
-		padding: var(--space-6);
-	}
-</style>
