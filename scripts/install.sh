@@ -91,7 +91,7 @@ install_dependencies() {
     apt-get install -y -qq \
         nginx \
         qemu-kvm bridge-utils iproute2 iptables curl openssl \
-        coreutils tar gzip
+        coreutils tar gzip sqlite3
 }
 
 # -----------------------------------------------------------------------------
@@ -593,8 +593,8 @@ start_services() {
     local attempt=1
     while [ $attempt -le 30 ]; do
         if [ -f "${CHV_DB_PATH}" ] && \
-           /usr/local/bin/chv-controlplane --check-db "${CHV_DB_PATH}" 2>/dev/null \
-           || sqlite3 "${CHV_DB_PATH}" "SELECT 1 FROM bootstrap_tokens LIMIT 1;" &>/dev/null 2>&1; then
+           ( /usr/local/bin/chv-controlplane --check-db "${CHV_DB_PATH}" 2>/dev/null \
+             || ( cmd_exists sqlite3 && sqlite3 "${CHV_DB_PATH}" "SELECT 1 FROM bootstrap_tokens LIMIT 1;" &>/dev/null 2>&1 ) ); then
             info "Database ready."
             break
         fi
@@ -623,17 +623,26 @@ start_services() {
     expires=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
               || date -u -v+1H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
               || echo "")
+    if ! cmd_exists sqlite3; then
+        fatal "sqlite3 is required to seed bootstrap tokens. Install sqlite3 or rerun without INSTALL_CHV_SKIP_DEPS=1."
+    fi
+    local expires_sql="NULL"
+    if [ -n "$expires" ]; then
+        expires_sql="'${expires}'"
+    fi
+    sqlite3 "${CHV_DB_PATH}" \
+        "INSERT OR REPLACE INTO bootstrap_tokens
+         (token_hash, description, one_time_use, used_at, expires_at, created_at, updated_at)
+         VALUES ('${token_hash}', 'All-in-one installer', 1, NULL,
+                 ${expires_sql},
+                 strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                 strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
 
-    if cmd_exists sqlite3; then
-        sqlite3 "${CHV_DB_PATH}" \
-            "INSERT OR IGNORE INTO bootstrap_tokens
-             (token_hash, description, one_time_use, expires_at, created_at)
-             VALUES ('${token_hash}', 'All-in-one installer', 1,
-                     '${expires}',
-                     strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
-    else
-        warn "sqlite3 not available — bootstrap token file is in place."
-        warn "The agent will present the raw token to the control plane for enrollment."
+    local seeded_tokens
+    seeded_tokens=$(sqlite3 "${CHV_DB_PATH}" \
+        "SELECT COUNT(*) FROM bootstrap_tokens WHERE token_hash='${token_hash}';" 2>/dev/null || echo "0")
+    if [ "${seeded_tokens}" -lt 1 ] 2>/dev/null; then
+        fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
     fi
 
     systemctl enable --now chv-agent
@@ -645,7 +654,7 @@ start_services() {
         node_count=0
         if cmd_exists sqlite3; then
             node_count=$(sqlite3 "${CHV_DB_PATH}" \
-                "SELECT COUNT(*) FROM nodes WHERE status='Ready';" 2>/dev/null || echo "0")
+                "SELECT COUNT(*) FROM nodes;" 2>/dev/null || echo "0")
         else
             # Fall back to HTTP API poll
             node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \

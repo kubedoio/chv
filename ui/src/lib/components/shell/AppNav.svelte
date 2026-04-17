@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
+	import { LogOut } from 'lucide-svelte';
 	import { navigationItems } from '$lib/shell/app-shell';
+	import { clearToken, createAPIClient } from '$lib/api/client';
 
 	function isActive(href: string, pathname: string): boolean {
 		if (href === '/') {
@@ -8,6 +11,17 @@
 		}
 
 		return pathname === href || pathname.startsWith(`${href}/`);
+	}
+
+	async function handleLogout() {
+		try {
+			await createAPIClient().logout();
+		} catch {
+			// Best-effort remote logout; local token removal is authoritative for WebUI.
+		} finally {
+			clearToken();
+			goto('/login');
+		}
 	}
 </script>
 
@@ -37,6 +51,10 @@
 	<div class="app-nav__footer">
 		<div class="app-nav__footer-label">Design intent</div>
 		<p>Restraint, legibility, and task transparency before density or decoration.</p>
+		<button type="button" class="app-nav__logout" onclick={handleLogout} aria-label="Log out">
+			<LogOut size={15}></LogOut>
+			<span>Log out</span>
+		</button>
 	</div>
 </nav>
 
@@ -130,6 +148,32 @@
 		font-size: 0.88rem;
 		line-height: 1.5;
 		color: var(--shell-text-muted);
+	}
+
+	.app-nav__logout {
+		margin-top: 0.7rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		width: fit-content;
+		border: 1px solid var(--shell-line);
+		border-radius: 0.75rem;
+		padding: 0.5rem 0.65rem;
+		background: var(--shell-surface);
+		color: var(--shell-text-secondary);
+		font-size: 0.82rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			background-color 140ms ease,
+			border-color 140ms ease,
+			color 140ms ease;
+	}
+
+	.app-nav__logout:hover {
+		background: color-mix(in srgb, var(--shell-surface) 72%, var(--status-failed-bg) 28%);
+		border-color: color-mix(in srgb, var(--shell-line) 60%, var(--status-failed-border) 40%);
+		color: color-mix(in srgb, var(--shell-text) 62%, var(--status-failed-text) 38%);
 	}
 
 	@media (max-width: 960px) {

@@ -166,6 +166,7 @@
 				}
 			]}
 		/>
+		<a href="/install" class="nodes-header__action">Enroll node</a>
 	</div>
 
 	{#if model.state === 'error'}
@@ -271,6 +272,27 @@
 		justify-content: space-between;
 		gap: 1rem;
 		flex-wrap: wrap;
+	}
+
+	.nodes-header__action {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border: 1px solid color-mix(in srgb, var(--shell-line-strong) 75%, var(--shell-accent) 25%);
+		border-radius: 0.85rem;
+		padding: 0.55rem 0.8rem;
+		background: color-mix(in srgb, var(--shell-surface) 70%, var(--shell-accent) 30%);
+		color: var(--shell-text);
+		text-decoration: none;
+		font-size: 0.84rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+	}
+
+	.nodes-header__action:hover {
+		border-color: color-mix(in srgb, var(--shell-line-strong) 58%, var(--shell-accent) 42%);
+		background: color-mix(in srgb, var(--shell-surface) 58%, var(--shell-accent) 42%);
 	}
 
 	.attention-panel {
