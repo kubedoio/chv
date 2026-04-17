@@ -12,61 +12,70 @@ A comprehensive design system for the CHV (Cloud Hypervisor Virtualization) plat
 
 ## Color System
 
-### Primary Colors (Proxmox Orange)
+### Primary Colors (Warm Brown/Amber)
 
-| Token | Hex | HSL | Usage |
-|-------|-----|-----|-------|
-| `--color-primary` | #e57035 | 17 75% 55% | Primary buttons, links, accents |
-| `--color-primary-hover` | #ec7d45 | 20 76% 59% | Hover states |
-| `--color-primary-active` | #d14a28 | 15 70% 48% | Active/pressed states |
-| `--color-primary-light` | #fff5f0 | 25 100% 97% | Background tints |
-| `--color-primary-dark` | #b93d20 | 12 70% 43% | Dark accents |
+| Token | Hex | Usage |
+|-------|-----|-------|
+| `--color-primary` | #8f5a2a | Primary buttons, links, accents |
+| `--color-primary-hover` | #9f6837 | Hover states |
+| `--color-primary-active` | #76471f | Active/pressed states |
+| `--color-primary-light` | #f5eadc | Background tints |
+| `--color-primary-dark` | #5e3513 | Dark accents |
+| `--color-primary-glow` | rgba(143, 90, 42, 0.12) | Subtle glow effects |
 
 ### Semantic Colors
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `--color-success` | #22c55e | Running, ready, success states |
-| `--color-success-light` | #dcfce7 | Success backgrounds |
-| `--color-warning` | #eab308 | Warning, transitioning states |
-| `--color-warning-light` | #fef9c3 | Warning backgrounds |
-| `--color-danger` | #ef4444 | Error, stopped, failed states |
-| `--color-danger-light` | #fee2e2 | Error backgrounds |
-| `--color-info` | #3b82f6 | Information, neutral states |
-| `--color-info-light` | #dbeafe | Info backgrounds |
+| `--color-success` | #3f6b45 | Running, ready, success states |
+| `--color-success-light` | #edf4ee | Success backgrounds |
+| `--color-success-dark` | #27462d | Success text/icons |
+| `--color-success-glow` | rgba(63, 107, 69, 0.12) | Success glow effects |
+| `--color-warning` | #9a6a1f | Warning, transitioning states |
+| `--color-warning-light` | #f8efd9 | Warning backgrounds |
+| `--color-warning-dark` | #744d0f | Warning text/icons |
+| `--color-warning-glow` | rgba(154, 106, 31, 0.12) | Warning glow effects |
+| `--color-danger` | #9b4338 | Error, stopped, failed states |
+| `--color-danger-light` | #faece8 | Error backgrounds |
+| `--color-danger-dark` | #6e2d25 | Error text/icons |
+| `--color-danger-glow` | rgba(155, 67, 56, 0.12) | Error glow effects |
+| `--color-info` | #49627d | Information, neutral states |
+| `--color-info-light` | #edf1f6 | Info backgrounds |
+| `--color-info-dark` | #304255 | Info text/icons |
+| `--color-info-glow` | rgba(73, 98, 125, 0.12) | Info glow effects |
 
 ### Neutral Scale
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `--color-neutral-50` | #f8fafc | Page backgrounds |
-| `--color-neutral-100` | #f1f5f9 | Card backgrounds |
-| `--color-neutral-200` | #e2e8f0 | Borders, dividers |
-| `--color-neutral-300` | #cbd5e1 | Disabled states |
-| `--color-neutral-400` | #94a3b8 | Placeholder text |
-| `--color-neutral-500` | #64748b | Secondary text |
-| `--color-neutral-600` | #475569 | Body text |
-| `--color-neutral-700` | #334155 | Headings |
-| `--color-neutral-800` | #1e293b | Strong emphasis |
-| `--color-neutral-900` | #0f172a | Primary text |
+| `--color-neutral-50` | #f7f3ec | Page backgrounds |
+| `--color-neutral-100` | #efe9df | Card backgrounds |
+| `--color-neutral-200` | #ddd5c8 | Borders, dividers |
+| `--color-neutral-300` | #c7bcac | Disabled states |
+| `--color-neutral-400` | #9d917f | Placeholder text |
+| `--color-neutral-500` | #75695b | Secondary text |
+| `--color-neutral-600` | #5e5449 | Body text |
+| `--color-neutral-700` | #423b33 | Headings |
+| `--color-neutral-800` | #29241f | Strong emphasis |
+| `--color-neutral-900` | #191612 | Primary text |
 
 ### Dark Theme (Sidebar)
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `--color-sidebar-bg` | #252532 | Sidebar background |
-| `--color-sidebar-dark` | #1e1e28 | Header/footer sections |
-| `--color-sidebar-border` | #2a2a38 | Borders in sidebar |
-| `--color-sidebar-text` | #94a3b8 | Inactive menu items |
-| `--color-sidebar-text-active` | #ffffff | Active menu items |
+| `--color-sidebar-bg` | #f9f5ee | Sidebar background |
+| `--color-sidebar-dark` | #f1eadf | Header/footer sections |
+| `--color-sidebar-border` | #ddd5c8 | Borders in sidebar |
+| `--color-sidebar-text` | #75695b | Inactive menu items |
+| `--color-sidebar-text-active` | #191612 | Active menu items |
 
 ## Typography
 
 ### Font Families
 
 ```css
---font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
---font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+--font-sans: 'IBM Plex Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+--font-mono: 'IBM Plex Mono', 'SFMono-Regular', 'Consolas', monospace;
 ```
 
 ### Type Scale
@@ -163,7 +172,8 @@ tight-gap { gap: var(--space-2); }
 | `--shadow-md` | 0 4px 6px -1px rgba(0,0,0,0.1) | Cards, dropdowns |
 | `--shadow-lg` | 0 10px 15px -3px rgba(0,0,0,0.1) | Modals, popovers |
 | `--shadow-xl` | 0 20px 25px -5px rgba(0,0,0,0.1) | Full-screen overlays |
-| `--shadow-glow` | 0 0 20px rgba(229,112,53,0.3) | Primary focus states |
+| `--shadow-glow-primary` | 0 0 14px rgba(143, 90, 42, 0.1) | Primary focus states |
+| `--shadow-glow-success` | 0 0 8px rgba(63, 107, 69, 0.12) | Success focus states |
 
 ## Border Radius
 
@@ -251,12 +261,12 @@ tight-gap { gap: var(--space-2); }
   padding: 0.625rem 1.25rem;
   font-weight: 500;
   transition: all var(--duration-fast) var(--ease-default);
-  box-shadow: 0 2px 8px rgba(229, 112, 53, 0.3);
+  box-shadow: 0 2px 8px rgba(143, 90, 42, 0.3);
 }
 
 .button-primary:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(229, 112, 53, 0.4);
+  box-shadow: 0 4px 12px rgba(143, 90, 42, 0.4);
 }
 
 .button-primary:active {
@@ -282,7 +292,7 @@ tight-gap { gap: var(--space-2); }
 
 .card:hover {
   box-shadow: var(--shadow-md);
-  border-color: rgba(229, 112, 53, 0.3);
+  border-color: rgba(143, 90, 42, 0.3);
 }
 ```
 
@@ -306,7 +316,7 @@ tight-gap { gap: var(--space-2); }
 .input:focus {
   outline: none;
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(229, 112, 53, 0.15);
+  box-shadow: 0 0 0 3px rgba(143, 90, 42, 0.15);
 }
 
 .input:disabled {
@@ -474,7 +484,7 @@ All text must meet WCAG 2.1 AA standards:
 
 ### v1.0.0 (Current)
 - Initial design system
-- Proxmox-inspired color palette
+- Warm brown/amber color palette
 - 4px base spacing grid
-- Inter + JetBrains Mono typography
+- IBM Plex Sans + IBM Plex Mono typography
 
