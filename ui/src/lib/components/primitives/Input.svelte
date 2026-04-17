@@ -3,7 +3,7 @@
 	import VisuallyHidden from '../shared/VisuallyHidden.svelte';
 
 	interface Props extends HTMLInputAttributes {
-		value?: string;
+		value?: string | number;
 		label?: string;
 		error?: string;
 		hint?: string;

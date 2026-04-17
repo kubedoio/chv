@@ -54,8 +54,9 @@
 
   // Functions instead of derived to avoid array creation
   function getFilteredEvents() {
-    return currentFilter 
-      ? events.filter(e => e.resource.toLowerCase().includes(currentFilter.toLowerCase())) 
+    const filter = currentFilter;
+    return filter 
+      ? events.filter(e => e.resource.toLowerCase().includes(filter.toLowerCase())) 
       : events;
   }
 

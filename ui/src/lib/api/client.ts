@@ -494,6 +494,9 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     getNode(nodeId: string) {
       return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`);
     },
+    getNodeMetrics(nodeId: string) {
+      return request<any>(`/api/v1/nodes/${nodeId}/metrics`);
+    },
     updateNode(nodeId: string, data: UpdateNodeInput) {
       return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`, {
         method: 'PATCH',

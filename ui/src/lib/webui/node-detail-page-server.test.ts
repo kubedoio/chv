@@ -65,10 +65,10 @@ describe('node detail page server load', () => {
 			]
 		} as import('$lib/bff/types').GetNodeResponse);
 
-		const result = await load({
+		const result = (await load({
 			params: { id: 'node-1' },
 			url: createUrl('vms')
-		} as Parameters<typeof load>[0]);
+		} as Parameters<typeof load>[0])) as any;
 
 		expect(mockedGetNode).toHaveBeenCalledWith({ node_id: 'node-1' }, 'token-123');
 		expect(result.detail.state).toBe('ready');
@@ -82,10 +82,10 @@ describe('node detail page server load', () => {
 		const mockedGetNode = vi.mocked(getNode);
 		mockedGetNode.mockRejectedValue(new Error('BFF down'));
 
-		const result = await load({
+		const result = (await load({
 			params: { id: 'node-1' },
 			url: createUrl()
-		} as Parameters<typeof load>[0]);
+		} as Parameters<typeof load>[0])) as any;
 
 		expect(result.detail.state).toBe('error');
 		expect(result.detail.summary.nodeId).toBe('node-1');
@@ -110,10 +110,10 @@ describe('node detail page server load', () => {
 			}
 		} as import('$lib/bff/types').GetNodeResponse);
 
-		const result = await load({
+		const result = (await load({
 			params: { id: 'node-1' },
 			url: createUrl()
-		} as Parameters<typeof load>[0]);
+		} as Parameters<typeof load>[0])) as any;
 
 		expect(result.detail.currentTab).toBe('summary');
 	});

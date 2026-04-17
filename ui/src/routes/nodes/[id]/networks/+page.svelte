@@ -15,7 +15,7 @@
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });
-  const nodeId = $derived($page.params.id);
+  const nodeId = $derived($page.params.id as string);
   const node = $derived(getDefaultNode());
   
   let items: NetworkType[] = $state([]);

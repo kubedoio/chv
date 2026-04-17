@@ -118,7 +118,7 @@
           intersect: false
         },
         ...options
-      }
+      } as any
     });
   });
 

@@ -83,6 +83,7 @@ export interface Image {
   local_path: string;
   cloud_init_supported: boolean;
   status: string;
+  created_at?: string;
 }
 
 export interface ImportProgress {
@@ -253,6 +254,34 @@ export interface NodeWithResources extends Node {
     storage_pools: number;
     networks: number;
   };
+}
+
+export interface NodeHealthMetrics {
+  cpu_percent: number;
+  memory_used_mb: number;
+  memory_total_mb: number;
+  disk_used_gb: number;
+  disk_total_gb: number;
+  timestamp?: string;
+}
+
+export interface NodeHealth {
+  node_id: string;
+  node_name: string;
+  status: 'online' | 'offline' | 'maintenance' | 'error';
+  last_seen_at?: string;
+  metrics?: NodeHealthMetrics;
+}
+
+export interface HealthAlert {
+  id?: string;
+  node_id: string;
+  node_name: string;
+  type: string;
+  severity: 'info' | 'warning' | 'critical';
+  message: string;
+  timestamp: string;
+  dismissed?: boolean;
 }
 
 export interface CreateNodeInput {

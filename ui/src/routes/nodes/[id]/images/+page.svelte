@@ -15,7 +15,7 @@
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });
-  const nodeId = $derived($page.params.id);
+  const nodeId = $derived($page.params.id as string);
   const node = $derived(getDefaultNode());
   
   let items: Image[] = $state([]);
@@ -71,7 +71,7 @@
       title: 'Created',
       sortable: true,
       width: '150px',
-      render: (img: Image) => new Date(img.created_at).toLocaleDateString()
+      render: (img: Image) => img.created_at ? new Date(img.created_at).toLocaleDateString() : 'N/A'
     }
   ];
 

@@ -2,7 +2,7 @@
 	import type { HTMLInputAttributes } from 'svelte/elements';
 
 	interface Props extends HTMLInputAttributes {
-		value?: string;
+		value?: string | number;
 		error?: string;
 	}
 

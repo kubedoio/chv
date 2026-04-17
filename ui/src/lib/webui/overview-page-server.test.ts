@@ -22,7 +22,7 @@ async function importRootLoad(options: {
 describe('overview page load', () => {
 	it('returns loading state during the server-side pass', async () => {
 		const { load } = await importRootLoad({ browser: false });
-		const result = await load({} as unknown as import('../../routes/$types').PageLoadEvent);
+		const result = (await load({} as unknown as import('../../routes/$types').PageLoadEvent)) as any;
 		expect(result.overview.state).toBe('loading');
 	});
 
@@ -54,7 +54,7 @@ describe('overview page load', () => {
 			}
 		});
 
-		const result = await load({} as unknown as import('../../routes/$types').PageLoadEvent);
+		const result = (await load({} as unknown as import('../../routes/$types').PageLoadEvent)) as any;
 		expect(result.overview.state).toBe('ready');
 		expect(result.overview.nodes_total).toBe(5);
 		expect(result.overview.alerts).toHaveLength(1);
@@ -67,7 +67,7 @@ describe('overview page load', () => {
 			token: 'token-123',
 			overviewError: new Error('BFF down')
 		});
-		const result = await load({} as unknown as import('../../routes/$types').PageLoadEvent);
+		const result = (await load({} as unknown as import('../../routes/$types').PageLoadEvent)) as any;
 
 		expect(result.overview.state).toBe('error');
 		expect(result.overview.nodes_total).toBe(0);

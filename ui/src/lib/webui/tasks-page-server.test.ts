@@ -31,9 +31,9 @@ describe('tasks page server load', () => {
 			filters: { applied: {} }
 		});
 
-		const result = await load({
+		const result = (await load({
 			url: new URL('http://localhost/tasks')
-		} as Parameters<typeof load>[0]);
+		} as Parameters<typeof load>[0])) as any;
 
 		expect(result.tasks.state).toBe('ready');
 		expect(result.tasks.items).toHaveLength(1);
@@ -44,9 +44,9 @@ describe('tasks page server load', () => {
 		const mockedListTasks = vi.mocked(listTasks);
 		mockedListTasks.mockRejectedValue(new Error('BFF down'));
 
-		const result = await load({
+		const result = (await load({
 			url: new URL('http://localhost/tasks')
-		} as Parameters<typeof load>[0]);
+		} as Parameters<typeof load>[0])) as any;
 
 		expect(result.tasks.state).toBe('error');
 		expect(result.tasks.items).toHaveLength(0);

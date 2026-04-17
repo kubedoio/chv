@@ -12,6 +12,7 @@ function jsonHeaders(): Headers {
 describe('bffFetch', () => {
 	beforeEach(() => {
 		vi.restoreAllMocks();
+		vi.stubGlobal('window', undefined);
 		const g = globalThis as typeof globalThis & { process?: { env?: Record<string, string> } };
 		if (g.process?.env) {
 			delete g.process.env.BFF_BASE_URL;

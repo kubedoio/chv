@@ -16,7 +16,7 @@
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });
-  const nodeId = $derived($page.params.id);
+  const nodeId = $derived($page.params.id as string);
   
   let node = $state<Node | null>(null);
   
@@ -309,7 +309,7 @@
         ids.forEach(id => table.select(id));
       }}
       rowId={vm => vm.id}
-      getRowHref={vm => `/vms/${vm.id}`}
+      onRowClick={vm => goto(`/vms/${vm.id}`)}
     />
     
     <Pagination
@@ -334,6 +334,6 @@
   bind:open={confirmDialog.open}
   title={confirmDialog.title}
   description={confirmDialog.description}
-  confirmLabel="Delete"
+  confirmText="Delete"
   onConfirm={confirmDialog.action}
 />

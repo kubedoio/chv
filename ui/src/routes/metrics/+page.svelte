@@ -200,32 +200,32 @@
           title="Total VMs"
           value={vmStats.total}
           icon={Server}
-          trend={vmStats.running > 0 ? `${vmStats.running} running` : 'None running'}
-          trendUp={vmStats.running > 0}
+          subtitle={vmStats.running > 0 ? `${vmStats.running} running` : 'None running'}
+          trend={vmStats.running > 0 ? 'up' : 'neutral'}
         />
         
         <StatsCard
           title="Running VMs"
           value={vmStats.running}
           icon={Activity}
-          trend={vmStats.total > 0 ? `${Math.round((vmStats.running / vmStats.total) * 100)}% of total` : 'No VMs'}
-          trendUp={vmStats.running > 0}
+          subtitle={vmStats.total > 0 ? `${Math.round((vmStats.running / vmStats.total) * 100)}% of total` : 'No VMs'}
+          trend={vmStats.running > 0 ? 'up' : 'neutral'}
         />
         
         <StatsCard
           title="Stopped VMs"
           value={vmStats.stopped}
           icon={Cpu}
-          trend={vmStats.stopped > 0 ? 'Ready to start' : 'All running'}
-          trendUp={false}
+          subtitle={vmStats.stopped > 0 ? 'Ready to start' : 'All running'}
+          trend="neutral"
         />
         
         <StatsCard
           title="Nodes"
           value={nodeHealth.length}
           icon={Globe}
-          trend={`${nodeHealth.filter(n => n.status === 'online').length} online`}
-          trendUp={nodeHealth.every(n => n.status === 'online')}
+          subtitle={`${nodeHealth.filter(n => n.status === 'online').length} online`}
+          trend={nodeHealth.every(n => n.status === 'online') ? 'up' : 'down'}
         />
       </div>
 

@@ -109,9 +109,9 @@
     onclick={toggleMenu}
     disabled={disabled || isTransitioning()}
     class="flex items-center gap-2 px-3 py-2 rounded border transition-colors
-      {isRunning 
+      {isRunning() 
         ? 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100' 
-        : isStopped 
+        : isStopped() 
           ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
           : 'bg-gray-50 border-gray-200 text-gray-500'}
       disabled:opacity-50 disabled:cursor-not-allowed"

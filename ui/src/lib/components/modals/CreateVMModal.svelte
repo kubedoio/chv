@@ -140,7 +140,7 @@
 		networkId = '';
 		vcpu = 2;
 		memoryMb = 2048;
-		consoleType = 'pty';
+		consoleType = 'serial';
 		userData = '#cloud-config\n';
 		username = 'admin';
 		sshKey = '';
@@ -195,7 +195,7 @@
 			user_data: userData,
 			username,
 			ssh_authorized_keys: sshKey ? [sshKey] : [],
-			console_type: 'serial'
+			console_type: 'serial' as const
 		};
 
 		try {

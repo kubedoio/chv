@@ -37,7 +37,7 @@
           try {
             const [metrics, vms] = await Promise.all([
               client.getNodeMetrics(node.id).catch(() => null),
-              client.listNodeVMs(node.id).catch(() => [])
+              client.listNodeVMs(node.id).catch(() => ({ resources: [], count: 0 }))
             ]);
 
             // Generate some sample history for sparklines (in real implementation, this would come from API)
@@ -46,7 +46,7 @@
             return {
               ...node,
               metrics: metrics || undefined,
-              vmCount: vms.length,
+              vmCount: vms.count || 0,
               cpuHistory
             };
           } catch (e) {
@@ -128,7 +128,7 @@
 
   let onlineNodes = $derived(nodes.filter(n => n.status === 'online').length);
   let offlineNodes = $derived(nodes.filter(n => n.status === 'offline').length);
-  let warningNodes = $derived(nodes.filter(n => n.status === 'warning').length);
+  let warningNodes = $derived(nodes.filter(n => (n.status as string) === 'warning').length);
   let totalVMs = $derived(nodes.reduce((sum, n) => sum + (n.vmCount || 0), 0));
 
   function formatBytes(mb: number): string {

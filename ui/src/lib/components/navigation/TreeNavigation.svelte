@@ -21,7 +21,7 @@
   
   // Props
   interface Props {
-    nodes?: import('$lib/api/nodes').Node[];
+    nodes?: any[];
   }
   
   let { nodes = [] }: Props = $props();

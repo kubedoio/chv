@@ -40,7 +40,7 @@
                 cpuUsage: metrics?.current?.cpu?.usage_percent || 0,
                 memoryUsage: metrics?.current?.memory?.usage_percent || 0,
                 diskUsage: metrics?.current?.disk?.read_bytes || 0,
-                nodeName: nodeMap.get(vm.node_id) || 'Unknown'
+                nodeName: nodeMap.get((vm as any).node_id) || 'Unknown'
               };
             } catch (e) {
               return {
@@ -48,7 +48,7 @@
                 cpuUsage: 0,
                 memoryUsage: 0,
                 diskUsage: 0,
-                nodeName: nodeMap.get(vm.node_id) || 'Unknown'
+                nodeName: nodeMap.get((vm as any).node_id) || 'Unknown'
               };
             }
           })

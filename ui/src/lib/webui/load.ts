@@ -62,6 +62,10 @@ export async function loadTasksPageData(
 	};
 }
 
+const SNAPSHOT_CACHE_TTL = 30000; // 30 seconds
+let cachedSnapshot: any = null;
+let lastSnapshotFetch = 0;
+
 async function loadDashboardSnapshot(fetcher: Fetcher) {
 	if (!browser) {
 		return {
@@ -90,6 +94,19 @@ async function loadDashboardSnapshot(fetcher: Fetcher) {
 		};
 	}
 
+	const now = Date.now();
+	if (cachedSnapshot && now - lastSnapshotFetch < SNAPSHOT_CACHE_TTL) {
+		// Use cached snapshot, but with fresh meta (cache hit)
+		return {
+			snapshot: cachedSnapshot.snapshot,
+			meta: {
+				...cachedSnapshot.meta,
+				clientRefreshRecommended: false,
+				deferred: false
+			}
+		};
+	}
+
 	const token = browser ? getStoredToken() : null;
 	const requests = await Promise.all([
 		loadJson<NodeWithResources[]>(fetcher, '/api/v1/nodes', token),
@@ -108,7 +125,7 @@ async function loadDashboardSnapshot(fetcher: Fetcher) {
 	const failed = requests.filter((request) => request === null).length;
 	const attempted = requests.length;
 
-	return {
+	const result = {
 		snapshot: {
 			nodes: requests[0] ?? [],
 			vms: requests[1] ?? [],
@@ -126,6 +143,13 @@ async function loadDashboardSnapshot(fetcher: Fetcher) {
 			failures
 		}
 	};
+
+	if (!result.meta.fetchFailed) {
+		cachedSnapshot = result;
+		lastSnapshotFetch = Date.now();
+	}
+
+	return result;
 }
 
 async function loadJson<T>(

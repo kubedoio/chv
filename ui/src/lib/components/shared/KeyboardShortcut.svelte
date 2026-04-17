@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getModifierKey } from '$lib/stores/keyboard.svelte.ts';
+  import { getModifierKey } from '$lib/stores/keyboard.svelte';
   
   interface Props {
     keys: string[];

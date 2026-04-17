@@ -24,7 +24,9 @@ export function addHealthAlert(alert: HealthAlert): void {
   // Limit the size of processed changes
   if (processedChanges.size > 100) {
     const firstKey = processedChanges.values().next().value;
-    processedChanges.delete(firstKey);
+    if (firstKey !== undefined) {
+      processedChanges.delete(firstKey);
+    }
   }
   
   const newAlert: HealthAlert = {
@@ -43,7 +45,7 @@ export function addHealthAlert(alert: HealthAlert): void {
   // Auto-dismiss after 30 seconds for non-critical alerts
   if (alert.severity !== 'critical') {
     setTimeout(() => {
-      dismissHealthAlert(newAlert.id);
+      if (newAlert.id) dismissHealthAlert(newAlert.id);
     }, 30000);
   }
 }
@@ -143,10 +145,15 @@ export function checkNodeHealthChange(
     
     // Check for high resource usage
     if (health.metrics && previous.metrics) {
-      const cpuPercent = health.metrics.cpu?.usage_percent ?? 0;
-      const memPercent = health.metrics.memory?.usage_percent ?? 0;
+      const cpuPercent = health.metrics.cpu_percent ?? 0;
+      const memTotal = health.metrics.memory_total_mb || 1; // prevent div by zero
+      const memPercent = (health.metrics.memory_used_mb / memTotal) * 100;
       
-      if (cpuPercent >= 95 && (previous.metrics.cpu?.usage_percent ?? 0) < 95) {
+      const prevCpuPercent = previous.metrics.cpu_percent ?? 0;
+      const prevMemTotal = previous.metrics.memory_total_mb || 1;
+      const prevMemPercent = (previous.metrics.memory_used_mb / prevMemTotal) * 100;
+      
+      if (cpuPercent >= 95 && prevCpuPercent < 95) {
         addHealthAlert({
           node_id: health.node_id,
           node_name: health.node_name,
@@ -157,7 +164,7 @@ export function checkNodeHealthChange(
         });
       }
       
-      if (memPercent >= 95 && (previous.metrics.memory?.usage_percent ?? 0) < 95) {
+      if (memPercent >= 95 && prevMemPercent < 95) {
         addHealthAlert({
           node_id: health.node_id,
           node_name: health.node_name,

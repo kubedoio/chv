@@ -233,7 +233,16 @@ export async function loadVmDetailPageData(
 	};
 }
 
+const RESOURCE_CACHE_TTL = 30000;
+const requestCache = new Map<string, { value: any; failed: boolean; timestamp: number }>();
+
 async function loadJson<T>(fetcher: Fetcher, path: string, explicitToken?: string | null) {
+	const now = Date.now();
+	const cached = requestCache.get(path);
+	if (cached && now - cached.timestamp < RESOURCE_CACHE_TTL) {
+		return { value: cached.value as T, failed: cached.failed };
+	}
+
 	const token = explicitToken === undefined ? getStoredToken() : explicitToken;
 	try {
 		const headers = new Headers();
@@ -243,10 +252,14 @@ async function loadJson<T>(fetcher: Fetcher, path: string, explicitToken?: strin
 
 		const response = await fetcher(path, { headers, cache: 'no-store' });
 		if (!response.ok) {
-			return { value: null as T | null, failed: true };
+			const failedResult = { value: null as T | null, failed: true };
+			// We only want to cache successful requests really, but let's cache failures for a short duration too to prevent hammering
+			return failedResult;
 		}
 
-		return { value: (await response.json()) as T, failed: false };
+		const value = (await response.json()) as T;
+		requestCache.set(path, { value, failed: false, timestamp: now });
+		return { value, failed: false };
 	} catch {
 		return { value: null as T | null, failed: true };
 	}

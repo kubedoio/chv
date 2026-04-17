@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('$env/dynamic/public', () => ({
 	env: {}
 }));
+vi.mock('$app/environment', () => ({
+	browser: false
+}));
 
 import { loadOverviewPageData, loadTasksPageData } from '$lib/webui/load';
 
