@@ -3,7 +3,7 @@
   import { Activity, Server, Cpu, HardDrive, AlertCircle, CheckCircle, Clock } from 'lucide-svelte';
   import { createAPIClient } from '$lib/api/client';
   import type { Node } from '$lib/api/types';
-  import Sparkline from './Sparkline.svelte';
+  import Sparkline from './charts/Sparkline.svelte';
 
   interface NodeMetrics {
     cpu_percent: number;

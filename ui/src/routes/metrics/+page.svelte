@@ -2,11 +2,11 @@
   import { onMount, onDestroy } from 'svelte';
   import { Activity, Server, Cpu, HardDrive, Globe, Clock, BarChart3, LineChart, PieChart } from 'lucide-svelte';
   import { createAPIClient } from '$lib/api/client';
-  import StatsCard from '$lib/components/StatsCard.svelte';
-  import VMMetricsWidget from '$lib/components/VMMetricsWidget.svelte';
+  import StatsCard from '$lib/components/shared/StatsCard.svelte';
+  import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
   import NodeHealthDashboard from '$lib/components/NodeHealthDashboard.svelte';
   import TopResourceConsumers from '$lib/components/TopResourceConsumers.svelte';
-  import ChartJS from '$lib/components/ChartJS.svelte';
+  import ChartJS from '$lib/components/charts/ChartJS.svelte';
   import type { ChartData } from 'chart.js';
   import type { VM, Node } from '$lib/api/types';
   

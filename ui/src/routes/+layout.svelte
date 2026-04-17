@@ -2,11 +2,11 @@
 	import type { Snippet } from 'svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { syncAuthCookieFromLocalStorage } from '$lib/bff/auth-cookie';
-	import KeyboardShortcutsHelp from '$lib/components/KeyboardShortcutsHelp.svelte';
-	import QuickActions from '$lib/components/QuickActions.svelte';
-	import SearchModal from '$lib/components/SearchModal.svelte';
+	import KeyboardShortcutsHelp from '$lib/components/shared/KeyboardShortcutsHelp.svelte';
+	import QuickActions from '$lib/components/shared/QuickActions.svelte';
+	import SearchModal from '$lib/components/modals/SearchModal.svelte';
 	import AppShell from '$lib/components/shell/AppShell.svelte';
-	import ToastContainer from '$lib/components/ToastContainer.svelte';
+	import ToastContainer from '$lib/components/feedback/ToastContainer.svelte';
 	import {
 		createGlobalShortcuts,
 		initKeyboardShortcuts,

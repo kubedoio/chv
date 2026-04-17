@@ -4,11 +4,11 @@
   import { HardDrive, Plus } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import DataTable from '$lib/components/DataTable.svelte';
+  import DataTable from '$lib/components/data-display/DataTable.svelte';
   import Pagination from '$lib/components/Pagination.svelte';
   import FilterBar from '$lib/components/FilterBar.svelte';
   import StateBadge from '$lib/components/StateBadge.svelte';
-  import CreateStoragePoolModal from '$lib/components/CreateStoragePoolModal.svelte';
+  import CreateStoragePoolModal from '$lib/components/modals/CreateStoragePoolModal.svelte';
   import { useTable, formatBytes } from '$lib/utils/table.svelte';
   import type { StoragePool } from '$lib/api/types';
 

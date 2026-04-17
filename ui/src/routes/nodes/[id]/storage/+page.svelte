@@ -5,7 +5,7 @@
   import { HardDrive, ArrowLeft, Plus } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import DataTable from '$lib/components/DataTable.svelte';
+  import DataTable from '$lib/components/data-display/DataTable.svelte';
   import Pagination from '$lib/components/Pagination.svelte';
   import StateBadge from '$lib/components/StateBadge.svelte';
   import { useTable, formatBytes } from '$lib/utils/table.svelte';

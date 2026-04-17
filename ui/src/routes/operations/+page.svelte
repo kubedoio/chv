@@ -5,8 +5,8 @@
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import StateBadge from '$lib/components/StateBadge.svelte';
-  import SkeletonRow from '$lib/components/SkeletonRow.svelte';
-  import EmptyState from '$lib/components/EmptyState.svelte';
+  import SkeletonRow from '$lib/components/data-display/SkeletonRow.svelte';
+  import EmptyState from '$lib/components/feedback/EmptyState.svelte';
   import type { Operation } from '$lib/api/types';
 
   const token = getStoredToken();

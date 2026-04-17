@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { createAPIClient, getStoredToken } from '$lib/api/client';
 	import Modal from './Modal.svelte';
-	import FormField from './FormField.svelte';
-	import Input from './Input.svelte';
+	import FormField from '../forms/FormField.svelte';
+	import Input from '../primitives/Input.svelte';
 	import { toast } from '$lib/stores/toast';
 
 	interface Props {

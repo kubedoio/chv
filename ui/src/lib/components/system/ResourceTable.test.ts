@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render } from '@testing-library/svelte';
-import ResourceTable from './ResourceTable.svelte';
+import ResourceTable from '../data-display/ResourceTable.svelte';
 
 describe('ResourceTable', () => {
 	const columns = [

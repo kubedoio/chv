@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import InstallStatusPanel from '$lib/components/InstallStatusPanel.svelte';
+  import InstallStatusPanel from '$lib/components/feedback/InstallStatusPanel.svelte';
   import { toast } from '$lib/stores/toast';
   import type { InstallStatusResponse, InstallActionResponse } from '$lib/api/types';
 

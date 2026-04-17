@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import Badge from './Badge.svelte';
+	import Badge from '../system/Badge.svelte';
 
 	interface Column {
 		key: string;

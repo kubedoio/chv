@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Modal from '$lib/components/Modal.svelte';
-	import FormField from '$lib/components/FormField.svelte';
+	import Modal from '$lib/components/modals/Modal.svelte';
+	import FormField from '$lib/components/forms/FormField.svelte';
 	import Input from '$lib/components/Input.svelte';
 	import { createAPIClient, getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';

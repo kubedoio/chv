@@ -1,7 +1,7 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
-  import FormField from './FormField.svelte';
-  import Input from './Input.svelte';
+  import FormField from '../forms/FormField.svelte';
+  import Input from '../primitives/Input.svelte';
   import { createAPIClient } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import type { Quota, UserInfo } from '$lib/api/types';

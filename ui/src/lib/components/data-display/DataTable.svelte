@@ -25,7 +25,7 @@
 	} from 'lucide-svelte';
 	import { slide } from 'svelte/transition';
 	import SkeletonRow from './SkeletonRow.svelte';
-	import EmptyState from './EmptyState.svelte';
+	import EmptyState from '../feedback/EmptyState.svelte';
 
 	interface Props {
 		data: T[];

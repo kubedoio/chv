@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import VisuallyHidden from './VisuallyHidden.svelte';
+	import VisuallyHidden from '../shared/VisuallyHidden.svelte';
 
 	interface Props {
 		label: string;

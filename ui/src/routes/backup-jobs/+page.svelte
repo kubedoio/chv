@@ -20,7 +20,7 @@
   } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import DataTable from '$lib/components/DataTable.svelte';
+  import DataTable from '$lib/components/data-display/DataTable.svelte';
   import StateBadge from '$lib/components/StateBadge.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import type { BackupJob, BackupJobResponse, BackupHistory, VM } from '$lib/api/types';

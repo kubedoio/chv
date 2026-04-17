@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { HTMLInputAttributes } from 'svelte/elements';
-	import VisuallyHidden from '../VisuallyHidden.svelte';
+	import VisuallyHidden from '../shared/VisuallyHidden.svelte';
 
 	interface Props extends HTMLInputAttributes {
 		value?: string;

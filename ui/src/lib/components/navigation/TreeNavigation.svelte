@@ -16,8 +16,8 @@
   } from 'lucide-svelte';
   import { createAPIClient, clearToken, getStoredToken } from '$lib/api/client';
   import type { VM } from '$lib/api/types';
-  import UserMenu from './UserMenu.svelte';
-  import VisuallyHidden from './VisuallyHidden.svelte';
+  import UserMenu from '../UserMenu.svelte';
+  import VisuallyHidden from '../shared/VisuallyHidden.svelte';
   
   // Props
   interface Props {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import ChartJS from './ChartJS.svelte';
+  import ChartJS from '../charts/ChartJS.svelte';
   import type { ChartData } from 'chart.js';
   import { Activity, Cpu, MemoryStick, HardDrive, Network } from 'lucide-svelte';
   import { createAPIClient } from '$lib/api/client';

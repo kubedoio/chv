@@ -10,7 +10,7 @@
     type ShortcutGroup 
   } from '$lib/stores/keyboard.svelte.ts';
   import KeyboardShortcut from './KeyboardShortcut.svelte';
-  import Input from './primitives/Input.svelte';
+  import Input from '../primitives/Input.svelte';
   
   // Local state
   let isVisible = $state(false);

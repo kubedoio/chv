@@ -3,7 +3,7 @@
   import { Cpu, HardDrive, Network, Server, Settings, AlertTriangle } from 'lucide-svelte';
   import { createAPIClient, APIError } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import QuotaSettingsModal from '$lib/components/QuotaSettingsModal.svelte';
+  import QuotaSettingsModal from '$lib/components/modals/QuotaSettingsModal.svelte';
   import type { UsageWithQuota, Quota, UserInfo } from '$lib/api/types';
 
   // State

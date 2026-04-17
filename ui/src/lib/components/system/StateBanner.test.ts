@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render } from '@testing-library/svelte';
-import StateBanner from './StateBanner.svelte';
+import StateBanner from '../feedback/StateBanner.svelte';
 
 describe('StateBanner', () => {
 	it('renders title and description', () => {

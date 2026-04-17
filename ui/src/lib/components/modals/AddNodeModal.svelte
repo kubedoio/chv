@@ -1,8 +1,8 @@
 <script lang="ts">
   import { Plus, Copy, Check, Server, ExternalLink } from 'lucide-svelte';
   import Modal from './Modal.svelte';
-  import Input from './Input.svelte';
-  import FormField from './FormField.svelte';
+  import Input from '../primitives/Input.svelte';
+  import FormField from '../forms/FormField.svelte';
   import type { CreateNodeInput, CreateNodeResponse } from '$lib/api/types';
 
   interface Props {

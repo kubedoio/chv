@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Modal from '$lib/components/Modal.svelte';
+  import Modal from '$lib/components/modals/Modal.svelte';
   import Badge from '$lib/components/primitives/Badge.svelte';
   import { AlertTriangle, AlertCircle, Info, Trash2, Power, Play, Square, RotateCcw } from 'lucide-svelte';
 

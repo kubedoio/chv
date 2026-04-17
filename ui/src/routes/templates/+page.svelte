@@ -4,11 +4,11 @@
   import { Server, Copy, Trash2, Plus, FileCode, Box, LayoutTemplate } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import DataTable from '$lib/components/DataTable.svelte';
+  import DataTable from '$lib/components/data-display/DataTable.svelte';
   import StateBadge from '$lib/components/StateBadge.svelte';
   import CreateFromTemplate from '$lib/components/CreateFromTemplate.svelte';
-  import CloudInitViewer from '$lib/components/CloudInitViewer.svelte';
-  import CloudInitEditor from '$lib/components/CloudInitEditor.svelte';
+  import CloudInitViewer from '$lib/components/forms/CloudInitViewer.svelte';
+  import CloudInitEditor from '$lib/components/forms/CloudInitEditor.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
 

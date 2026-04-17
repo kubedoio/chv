@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Modal from '$lib/components/Modal.svelte';
+  import Modal from '$lib/components/modals/Modal.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import type { CloudInitTemplate } from '$lib/api/types';

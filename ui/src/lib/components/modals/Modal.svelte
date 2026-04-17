@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import FocusTrap from './FocusTrap.svelte';
+	import FocusTrap from '../shared/FocusTrap.svelte';
 
 	interface Props {
 		open: boolean;

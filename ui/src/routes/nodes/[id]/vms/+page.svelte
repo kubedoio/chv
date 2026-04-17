@@ -5,11 +5,11 @@
   import { Server, ArrowLeft, Plus } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import DataTable from '$lib/components/DataTable.svelte';
+  import DataTable from '$lib/components/data-display/DataTable.svelte';
   import Pagination from '$lib/components/Pagination.svelte';
   import FilterBar from '$lib/components/FilterBar.svelte';
   import StateBadge from '$lib/components/StateBadge.svelte';
-  import CreateVMModal from '$lib/components/CreateVMModal.svelte';
+  import CreateVMModal from '$lib/components/modals/CreateVMModal.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import { useTable, formatBytes } from '$lib/utils/table.svelte';
   import type { VM, Image, StoragePool, Network, Node } from '$lib/api/types';
