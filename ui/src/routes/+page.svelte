@@ -1,438 +1,499 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
-	import { PageShell, StateBanner, Badge, PostureStrip, PostureCard } from '$lib/components/system';
-	import { ArrowRight, Activity, AlertTriangle, Server, Box, Blocks } from 'lucide-svelte';
-	import { severityTone, statusTone, formatTimeAgo } from '$lib/webui/overview-helpers';
-	import { buildPostureChips, buildAttentionItems } from '$lib/webui/overview-derive';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
+	import SeverityShield from '$lib/components/shell/SeverityShield.svelte';
+	import ResourceLink from '$lib/components/shell/ResourceLink.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import LoadingState from '$lib/components/shell/LoadingState.svelte';
+	import { 
+		Activity, 
+		AlertCircle, 
+		Box, 
+		Blocks, 
+		Server, 
+		ShieldAlert, 
+		Zap,
+		ChevronRight,
+		ArrowUpRight
+	} from 'lucide-svelte';
+	import { getTaskStatusMeta } from '$lib/webui/tasks';
 
 	let { data }: { data: PageData } = $props();
 
 	const page = getPageDefinition('/');
 	const overview = $derived(data.overview);
-	const postureChips = $derived(buildPostureChips(overview));
-	const attentionItems = $derived(buildAttentionItems(overview));
+
+	const stats = $derived([
+		{ label: 'Total Clusters', value: overview.clusters_total },
+		{ label: 'Active Nodes', value: overview.nodes_total, status: overview.nodes_degraded > 0 ? 'warning' : 'healthy' as any },
+		{ label: 'Running VMs', value: overview.vms_running },
+		{ label: 'Unresolved Alerts', value: overview.unresolved_alerts, status: overview.unresolved_alerts > 0 ? 'critical' : 'neutral' as any },
+		{ label: 'Active Tasks', value: overview.active_tasks, status: overview.active_tasks > 0 ? 'warning' : 'neutral' as any }
+	]);
+
+	const recentTasks = $derived(overview.recent_tasks.map(t => {
+		const meta = getTaskStatusMeta(t.status);
+		return {
+			task_id: t.task_id,
+			operation: t.operation,
+			summary: t.summary,
+			status: t.status,
+			started_at: new Date(t.started_unix_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+			tone: meta.tone as any
+		};
+	}));
+
+	const criticalAlerts = $derived(overview.alerts.filter(a => a.severity === 'critical'));
+	const warningAlerts = $derived(overview.alerts.filter(a => a.severity === 'warning'));
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
+<div class="dashboard-page">
 	{#if overview.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Fleet overview unavailable"
-			description="The control plane could not assemble the current fleet summary."
-			hint="Navigation remains available while the overview recovers."
-		/>
+		<ErrorState title="Global Posture Unavailable" description="Failed to retrieve fleet-wide health signals." />
 	{:else if overview.state === 'loading'}
-		<StateBanner
-			variant="loading"
-			title="Loading fleet overview"
-			description="Assembling cluster, node, and workload posture from the control plane."
-			hint="Summary cards remain visible while data refreshes."
-		/>
+		<LoadingState title="Assembling fleet signals..." />
 	{:else if overview.state === 'empty'}
-		<StateBanner
-			variant="empty"
-			title="No fleet data yet"
-			description="Fleet posture, alerts, and task summaries will appear once clusters and nodes are enrolled."
-			hint="Begin by enrolling a datacenter and cluster."
+		<EmptyInfrastructureState 
+			title="No resources enrolled" 
+			description="This fleet is currently empty. Head to Clusters to enroll your first provider."
+			hint="Operational indicators will appear here once compute capacity is added."
 		/>
 	{:else}
-		<div class="overview-page">
-			<div class="overview-header">
-				<PostureStrip chips={postureChips} />
-			</div>
-
-			<section class="attention-panel" aria-labelledby="attention-title">
-				<div class="attention-panel__header">
-					<h2 id="attention-title" class="attention-panel__title">Needs attention now</h2>
-					{#if attentionItems.length === 0}
-						<Badge label="All healthy" tone="healthy" />
-					{:else}
-						<Badge label="{attentionItems.length} open" tone="warning" />
-					{/if}
+		<PageHeaderWithAction page={page}>
+			{#snippet actions()}
+				<div class="header-activity-hint">
+					<Activity size={12} class="pulse" />
+					<span>BFF Stream Active</span>
 				</div>
+			{/snippet}
+		</PageHeaderWithAction>
 
-				{#if attentionItems.length === 0}
-					<div class="attention-panel__empty">
-						<div class="attention-panel__empty-icon" aria-hidden="true">
-							<Server size={24} />
+		<div class="posture-strip-wrapper">
+			<CompactStatStrip {stats} />
+		</div>
+
+		<main class="dashboard-grid">
+			<!-- TOP WIDE: CRITICAL SIGNALS -->
+			{#if criticalAlerts.length > 0}
+				<div class="span-full">
+					<div class="incident-banner">
+						<ShieldAlert size={18} />
+						<div class="incident-content">
+							<strong>{criticalAlerts.length} Critical Faults Detected</strong>
+							<span>Infrastructure posture is currently degraded. immediate attention required.</span>
 						</div>
-						<p class="attention-panel__empty-text">Fleet is operating normally. No immediate action required.</p>
+						<a href="/events?severity=critical" class="btn-critical-link">
+							View Incident Log <ArrowUpRight size={14} />
+						</a>
 					</div>
-				{:else}
-					<ul class="attention-list" role="list">
-						{#each attentionItems as item}
-							<li class="attention-item">
-								<div class="attention-item__main">
-									<div class="attention-item__title">{item.title}</div>
-									<p class="attention-item__detail">{item.detail}</p>
-								</div>
-								<a href={item.href} class="attention-item__cta">
-									Inspect
-									<ArrowRight size={14} aria-hidden="true" />
-								</a>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</section>
+				</div>
+			{/if}
 
-			<div class="posture-grid">
-				<PostureCard
-					label="Capacity pressure"
-					value="{overview.capacity_hotspots} hotspots"
-					note={overview.capacity_hotspots > 0 ? 'Clusters or nodes above 70% utilization.' : 'No capacity pressure detected.'}
-				/>
-				<PostureCard
-					label="Maintenance in effect"
-					value="{overview.maintenance_nodes} node{overview.maintenance_nodes === 1 ? '' : 's'}"
-					note={overview.maintenance_nodes > 0 ? 'Scheduling is paused on affected nodes.' : 'No active maintenance windows.'}
-				/>
-				<PostureCard
-					label="Recent failures"
-					value="{overview.alerts.filter((a) => a.severity === 'critical').length} critical"
-					note="Critical alerts from the last 24 hours."
-				/>
-				<PostureCard
-					label="Active work"
-					value="{overview.active_tasks} task{overview.active_tasks === 1 ? '' : 's'}"
-					note="Currently running or recently queued tasks."
-				/>
+			<!-- LEFT COL: HEALTH & CAPACITY -->
+			<div class="dashboard-main">
+				<SectionCard title="Infrastructure Posture" icon={Blocks} badgeLabel="{overview.clusters_total} Clusters">
+					<div class="posture-grid">
+						<div class="res-summary">
+							<Server size={14} />
+							<div class="res-details">
+								<span class="res-label">Compute Nodes</span>
+								<div class="res-stats">
+									<span class="val">{overview.nodes_total}</span>
+									<span class="sep">/</span>
+									<span class="failed" class:is-zero={overview.nodes_degraded === 0}>{overview.nodes_degraded} degraded</span>
+								</div>
+							</div>
+						</div>
+						<div class="res-summary">
+							<Box size={14} />
+							<div class="res-details">
+								<span class="res-label">Workloads</span>
+								<div class="res-stats">
+									<span class="val">{overview.vms_running}</span>
+									<span class="sep">/</span>
+									<span class="total">{overview.vms_total} total</span>
+								</div>
+							</div>
+						</div>
+					</div>
+				</SectionCard>
+
+				<SectionCard title="Capacity Pressure" icon={Zap} badgeLabel="{overview.capacity_hotspots} Hotspots" badgeTone={overview.capacity_hotspots > 0 ? 'warning' : 'neutral'}>
+					{#if overview.capacity_hotspots === 0}
+						<div class="all-clear">
+							<ShieldAlert size={16} class="all-clear-icon" />
+							<span>No resource bottlenecks detected across the fleet.</span>
+						</div>
+					{:else}
+						<p class="hotspot-hint">Multiple clusters are reporting resource saturation above 85%.</p>
+					{/if}
+					
+					<div class="capacity-preview">
+						<!-- Placeholder for upcoming cluster capacity bars -->
+						<div class="cap-item">
+							<div class="cap-header">
+								<span>Fleet CPU Allocation</span>
+								<span>72%</span>
+							</div>
+							<div class="cap-bar"><div class="cap-fill" style="width: 72%"></div></div>
+						</div>
+						<div class="cap-item">
+							<div class="cap-header">
+								<span>Fleet Memory Reservation</span>
+								<span>54%</span>
+							</div>
+							<div class="cap-bar"><div class="cap-fill" style="width: 54%"></div></div>
+						</div>
+					</div>
+				</SectionCard>
+
+				<SectionCard title="Recent Activity" icon={Activity}>
+					<TaskTimeline tasks={recentTasks.slice(0, 5)} />
+					<div class="section-footer">
+						<a href="/tasks" class="view-more">
+							Open Task Center <ChevronRight size={12} />
+						</a>
+					</div>
+				</SectionCard>
 			</div>
 
-			<div class="overview-detail-grid">
-				<article class="overview-panel">
-					<div class="overview-panel__header">
-						<div>
-							<div class="overview-panel__eyebrow">Recent alerts</div>
-							<h2>Unresolved operator signals</h2>
-						</div>
-						<a class="overview-panel__link" href="/events">Open alerts</a>
-					</div>
-					{#if overview.alerts.length > 0}
-						<ul class="alert-list" role="list">
-							{#each overview.alerts.slice(0, 5) as alert}
-								<li class="alert-item">
-									<Badge label={alert.severity} tone={severityTone(alert.severity)} />
-									<div class="alert-item__content">
-										<p>{alert.summary}</p>
-										<span class="alert-item__scope">{alert.scope}</span>
-									</div>
-								</li>
-							{/each}
-						</ul>
+			<!-- RIGHT COL: ALERTS & MAINTENANCE -->
+			<aside class="dashboard-side">
+				<SectionCard title="Priority Alerts" icon={AlertCircle} badgeLabel={String(overview.unresolved_alerts)} badgeTone={overview.unresolved_alerts > 0 ? 'warning' : 'neutral'}>
+					{#if overview.alerts.length === 0}
+						<p class="empty-hint">Signals Nominal. No active alerts.</p>
 					{:else}
-						<StateBanner
-							variant="empty"
-							title="No active alerts"
-							description="Degradations and failures will appear here when they occur."
-						/>
-					{/if}
-				</article>
-
-				<article class="overview-panel">
-					<div class="overview-panel__header">
-						<div>
-							<div class="overview-panel__eyebrow">Recent tasks</div>
-							<h2>Accepted and running work</h2>
-						</div>
-						<a class="overview-panel__link" href="/tasks">Open task center</a>
-					</div>
-					{#if overview.recent_tasks.length > 0}
-						<ul class="task-list" role="list">
-							{#each overview.recent_tasks.slice(0, 5) as task}
-								<li class="task-item">
-									<div class="task-item__main">
-										<div class="task-item__title">{task.summary}</div>
-										<div class="task-item__meta">
-											<Badge label={task.status} tone={statusTone(task.status)} />
-											<span>{formatTimeAgo(task.started_unix_ms)}</span>
+						<ul class="micro-alert-list">
+							{#each overview.alerts.slice(0, 6) as alert}
+								<li>
+									<div class="micro-alert">
+										<SeverityShield severity={alert.severity} />
+										<div class="alert-content">
+											<span class="alert-txt">{alert.summary}</span>
+											<span class="alert-scope">{alert.scope}</span>
 										</div>
 									</div>
-									<a href={`/tasks?query=${task.task_id}`} class="task-item__link">
-										<ArrowRight size={14} aria-hidden="true" />
-									</a>
 								</li>
 							{/each}
 						</ul>
-					{:else}
-						<StateBanner
-							variant="empty"
-							title="No recent tasks"
-							description="Active operations and completed work will appear here."
-						/>
 					{/if}
-				</article>
-			</div>
+					<div class="section-footer">
+						<a href="/events" class="view-more">
+							Open Incident Log <ChevronRight size={12} />
+						</a>
+					</div>
+				</SectionCard>
 
-			<div class="quick-links" role="region" aria-label="Quick navigation">
-				<a href="/nodes" class="quick-link">
-					<Server size={18} aria-hidden="true" />
-					<span>Nodes</span>
-				</a>
-				<a href="/vms" class="quick-link">
-					<Box size={18} aria-hidden="true" />
-					<span>Virtual Machines</span>
-				</a>
-				<a href="/tasks" class="quick-link">
-					<Activity size={18} aria-hidden="true" />
-					<span>Tasks</span>
-				</a>
-				<a href="/maintenance" class="quick-link">
-					<Blocks size={18} aria-hidden="true" />
-					<span>Maintenance</span>
-				</a>
-			</div>
-		</div>
+				<SectionCard title="Maintenance" icon={Blocks} badgeLabel={String(overview.maintenance_nodes)} badgeTone={overview.maintenance_nodes > 0 ? 'warning' : 'neutral'}>
+					{#if overview.maintenance_nodes === 0}
+						<p class="empty-hint">No maintenance windows active.</p>
+					{:else}
+						<div class="maintenance-summary">
+							<strong>{overview.maintenance_nodes} Nodes in Maintenance</strong>
+							<p>Compute scheduling is currently paused on these hosts.</p>
+						</div>
+					{/if}
+					<div class="section-footer">
+						<a href="/maintenance" class="view-more">
+							Maintenance Hub <ChevronRight size={12} />
+						</a>
+					</div>
+				</SectionCard>
+			</aside>
+		</main>
 	{/if}
-</PageShell>
+</div>
 
 <style>
-	.overview-page {
-		display: grid;
-		gap: 1.3rem;
+	.dashboard-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
 	}
 
-	.overview-header {
+	.header-activity-hint {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		flex-wrap: wrap;
-	}
-
-	.attention-panel {
-		border: 1px solid var(--shell-line-strong);
-		border-radius: 1.15rem;
-		background: var(--shell-surface);
-		padding: 1.25rem;
-	}
-
-	.attention-panel__header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		margin-bottom: 1rem;
-	}
-
-	.attention-panel__title {
-		font-size: 1.1rem;
+		gap: 0.35rem;
+		font-size: 10px;
 		font-weight: 700;
-		color: var(--shell-text);
+		text-transform: uppercase;
+		color: var(--color-success);
+		letter-spacing: 0.05em;
 	}
 
-	.attention-panel__empty {
-		display: flex;
-		align-items: center;
-		gap: 0.85rem;
-		padding: 1.5rem 0.5rem;
+	.pulse {
+		animation: pulse 2s infinite;
 	}
 
-	.attention-panel__empty-icon {
+	@keyframes pulse {
+		0% { opacity: 0.4; }
+		50% { opacity: 1; }
+		100% { opacity: 0.4; }
+	}
+
+	.posture-strip-wrapper {
+		margin-top: -0.25rem;
+	}
+
+	.dashboard-grid {
 		display: grid;
-		place-items: center;
-		width: 2.5rem;
-		height: 2.5rem;
-		border-radius: 999px;
-		background: var(--status-healthy-bg);
-		color: var(--status-healthy-text);
-	}
-
-	.attention-panel__empty-text {
-		font-size: 0.95rem;
-		color: var(--shell-text-secondary);
-	}
-
-	.attention-list {
-		display: grid;
-		gap: 0.6rem;
-		list-style: none;
-		margin: 0;
-		padding: 0;
-	}
-
-	.attention-item {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
+		grid-template-columns: 1fr 340px;
 		gap: 1rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.9rem;
-		background: var(--shell-surface-muted);
-		padding: 0.9rem 1rem;
+		align-items: start;
 	}
 
-	.attention-item__title {
-		font-weight: 700;
-		color: var(--shell-text);
+	.span-full {
+		grid-column: 1 / -1;
 	}
 
-	.attention-item__detail {
-		margin: 0.2rem 0 0 0;
-		font-size: 0.85rem;
-		color: var(--shell-text-secondary);
+	.dashboard-main {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
 	}
 
-	.attention-item__cta {
+	.dashboard-side {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	/* Incident Banner */
+	.incident-banner {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		padding: 0.75rem 1rem;
+		background: var(--color-danger-light);
+		border: 1px solid var(--color-danger);
+		border-radius: 0.35rem;
+		color: var(--color-danger);
+	}
+
+	.incident-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+
+	.incident-content strong { font-size: var(--text-sm); }
+	.incident-content span { font-size: 11px; color: var(--color-danger-dark); }
+
+	.btn-critical-link {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.35rem;
-		font-size: 0.85rem;
-		font-weight: 600;
-		color: var(--shell-accent);
+		font-size: 11px;
+		font-weight: 700;
 		text-decoration: none;
-		white-space: nowrap;
+		color: var(--color-danger);
+		padding: 0.35rem 0.75rem;
+		background: rgba(239, 68, 68, 0.1);
+		border-radius: 0.25rem;
+		transition: background 0.15s ease;
 	}
 
-	.attention-item__cta:hover {
-		text-decoration: underline;
+	.btn-critical-link:hover {
+		background: rgba(239, 68, 68, 0.2);
 	}
 
+	/* Posture Grid */
 	.posture-grid {
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-columns: 1fr 1fr;
 		gap: 1rem;
 	}
 
-	.overview-detail-grid {
-		display: grid;
-		grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
-		gap: 1rem;
-	}
-
-	.overview-panel {
-		border: 1px solid var(--shell-line);
-		border-radius: 1.15rem;
-		background: var(--shell-surface);
-		padding: 1.05rem;
-		display: grid;
-		gap: 0.95rem;
-	}
-
-	.overview-panel__header {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 0.8rem;
-	}
-
-	.overview-panel__eyebrow {
-		font-size: 0.74rem;
-		font-weight: 700;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-	}
-
-	.overview-panel h2 {
-		font-size: 1.25rem;
-		color: var(--shell-text);
-		margin: 0;
-	}
-
-	.overview-panel__link {
-		color: var(--shell-accent);
-		font-size: 0.9rem;
-		font-weight: 600;
-		text-decoration: none;
-	}
-
-	.overview-panel__link:hover {
-		text-decoration: underline;
-	}
-
-	.alert-list,
-	.task-list {
-		display: grid;
-		gap: 0.7rem;
-		list-style: none;
-		margin: 0;
-		padding: 0;
-	}
-
-	.alert-item,
-	.task-item {
+	.res-summary {
 		display: flex;
 		align-items: flex-start;
 		gap: 0.75rem;
-		padding: 0.8rem;
-		border-radius: 0.85rem;
+		padding: 0.75rem;
 		background: var(--shell-surface-muted);
-		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
 	}
 
-	.alert-item__content p,
-	.task-item__title {
-		font-size: 0.92rem;
-		color: var(--shell-text);
-		margin: 0;
+	.res-details {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
 	}
 
-	.alert-item__scope,
-	.task-item__meta span {
-		font-size: 0.8rem;
+	.res-label {
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
 		color: var(--shell-text-muted);
+		letter-spacing: 0.05em;
 	}
 
-	.task-item {
+	.res-stats {
+		display: flex;
+		align-items: baseline;
+		gap: 0.35rem;
+		font-size: var(--text-lg);
+		font-weight: 700;
+	}
+
+	.res-stats .sep {
+		font-size: var(--text-sm);
+		color: var(--shell-line-strong);
+	}
+
+	.res-stats .failed {
+		font-size: var(--text-xs);
+		color: var(--color-danger);
+	}
+
+	.res-stats .failed.is-zero {
+		color: var(--shell-text-muted);
+		font-weight: 400;
+	}
+
+	.res-stats .total {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		font-weight: 400;
+	}
+
+	/* Capacity */
+	.all-clear {
+		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		gap: 0.5rem;
+		color: var(--color-success);
+		font-size: var(--text-xs);
+		font-weight: 500;
+		padding: 0.5rem 0;
 	}
 
-	.task-item__main {
-		display: grid;
+	.all-clear-icon { color: var(--color-success); }
+
+	.hotspot-hint {
+		font-size: var(--text-xs);
+		color: var(--color-warning-dark);
+		margin-bottom: 0.75rem;
+	}
+
+	.capacity-preview {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.cap-item {
+		display: flex;
+		flex-direction: column;
 		gap: 0.25rem;
 	}
 
-	.task-item__meta {
+	.cap-header {
 		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.task-item__link {
-		color: var(--shell-accent);
-	}
-
-	.quick-links {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-	}
-
-	.quick-link {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.5rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.75rem;
-		background: var(--shell-surface);
-		padding: 0.65rem 1rem;
-		color: var(--shell-text);
-		font-size: 0.9rem;
+		justify-content: space-between;
+		font-size: 10px;
 		font-weight: 500;
-		text-decoration: none;
+		color: var(--shell-text-muted);
 	}
 
-	.quick-link:hover {
-		border-color: var(--shell-line-strong);
+	.cap-bar {
+		height: 4px;
+		background: var(--shell-line);
+		border-radius: 999px;
+		overflow: hidden;
+	}
+
+	.cap-fill {
+		height: 100%;
+		background: var(--shell-accent);
+		border-radius: 999px;
+	}
+
+	/* Alerts Sidebar */
+	.micro-alert-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.micro-alert {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.75rem;
+		padding: 0.5rem;
 		background: var(--shell-surface-muted);
+		border-radius: 0.25rem;
 	}
 
-	@media (max-width: 1200px) {
-		.posture-grid {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
-		.overview-detail-grid {
-			grid-template-columns: 1fr;
-		}
+	.alert-content {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
 	}
 
-	@media (max-width: 720px) {
-		.posture-grid {
+	.alert-txt {
+		font-size: var(--text-xs);
+		font-weight: 500;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.alert-scope {
+		font-size: 10px;
+		color: var(--shell-text-muted);
+	}
+
+	/* Maintenance */
+	.maintenance-summary {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		padding: 0.5rem;
+		background: var(--color-warning-light);
+		border: 1px solid var(--color-warning);
+		border-radius: 0.25rem;
+	}
+
+	.maintenance-summary strong { font-size: var(--text-xs); color: var(--color-warning-dark); }
+	.maintenance-summary p { font-size: 10px; color: var(--color-warning-dark); margin: 0; }
+
+	.empty-hint {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		text-align: center;
+		padding: 1rem 0;
+	}
+
+	.section-footer {
+		margin-top: 0.75rem;
+		padding-top: 0.5rem;
+		border-top: 1px solid var(--shell-line);
+	}
+
+	.view-more {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		text-decoration: none;
+		color: var(--shell-accent);
+		letter-spacing: 0.05em;
+	}
+
+	@media (max-width: 1100px) {
+		.dashboard-grid {
 			grid-template-columns: 1fr;
 		}
 	}

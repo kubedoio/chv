@@ -1,258 +1,247 @@
 <script lang="ts">
-	import { Badge, PageShell, StateBanner } from '$lib/components/system';
+	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
+	import ProgressBar from '$lib/components/shell/ProgressBar.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import LoadingState from '$lib/components/shell/LoadingState.svelte';
+	import { 
+		Blocks, 
+		Activity, 
+		AlertTriangle, 
+		Zap, 
+		Server,
+		History,
+		ExternalLink
+	} from 'lucide-svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import type { ShellTone } from '$lib/shell/app-shell';
 
 	let { data }: { data: PageData } = $props();
 
 	const page = getPageDefinition('/clusters');
 	const detail = $derived(data.detail);
+	const summary = $derived(detail.summary);
 
-	function mapTone(state: string): ShellTone {
-		switch (state.toLowerCase()) {
-			case 'healthy':
-				return 'healthy';
-			case 'warning':
-			case 'maintenance':
-				return 'warning';
-			case 'degraded':
-				return 'degraded';
-			case 'failed':
-				return 'failed';
-			default:
-				return 'unknown';
-		}
-	}
+	const basicProps = $derived([
+		{ label: 'Datacenter', value: summary.datacenter },
+		{ label: 'Cluster ID', value: summary.clusterId, isMono: true },
+		{ label: 'Node Count', value: String(summary.nodeCount) },
+		{ label: 'Version', value: summary.version + (summary.versionSkew ? ' (skew)' : '') }
+	]);
 
-	function capacityTone(value: number): ShellTone {
-		if (value >= 85) return 'failed';
-		if (value >= 70) return 'degraded';
-		if (value >= 55) return 'warning';
+	function capacityTone(val: number): 'healthy' | 'warning' | 'failed' {
+		if (val >= 85) return 'failed';
+		if (val >= 70) return 'failed';
+		if (val >= 55) return 'warning';
 		return 'healthy';
 	}
 </script>
 
-<PageShell title="Cluster Detail" eyebrow={page.eyebrow} description={page.description}>
+<div class="detail-page">
 	{#if detail.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Cluster detail unavailable"
-			description="The cluster detail view could not be loaded from the BFF."
-			hint="Return to the cluster list and retry once the control plane is reachable."
-		/>
-	{:else if detail.state === 'not_found'}
-		<StateBanner
-			variant="empty"
-			title="Cluster not found"
-			description={`Cluster ${detail.summary.clusterId} was not found in the current fleet.`}
-			hint="Return to the cluster list to pick an available cluster."
-		/>
+		<ErrorState title="Cluster Detail Unavailable" description="Failed to retrieve cluster metrics from the control plane." />
 	{:else}
-		<header class="detail-header">
-			<div>
-				<div class="detail-header__eyebrow">{detail.summary.datacenter}</div>
-				<h1>{detail.summary.name}</h1>
-				<p>Cluster ID: {detail.summary.clusterId}</p>
-			</div>
-			<div class="detail-header__badges">
-				<Badge label={detail.summary.state} tone={mapTone(detail.summary.state)} />
-				{#if detail.summary.maintenance}
-					<Badge label="Maintenance" tone="warning" />
-				{/if}
-			</div>
-		</header>
+		<ResourceDetailHeader
+			eyebrow={summary.datacenter}
+			title={summary.name}
+			description="Compute cluster governing {summary.nodeCount} nodes"
+			statusLabel={summary.state}
+			tone={summary.state === 'healthy' ? 'healthy' : 'degraded'}
+		>
+			{#snippet actions()}
+				<button class="btn-secondary">
+					<ExternalLink size={14} />
+					Provider Console
+				</button>
+			{/snippet}
+		</ResourceDetailHeader>
 
-		<div class="detail-grid">
-			<article class="detail-card">
-				<div class="detail-card__label">Nodes</div>
-				<div class="detail-card__value">{detail.summary.nodeCount}</div>
-				<p>Total registered nodes in this cluster.</p>
-			</article>
-			<article class="detail-card">
-				<div class="detail-card__label">Version</div>
-				<div class="detail-card__value">
-					{detail.summary.version}
-					{#if detail.summary.versionSkew}
-						<span class="detail-card__inline"> (skew)</span>
+		<main class="detail-grid">
+			<div class="detail-main-span">
+				<SectionCard title="Cluster Summary" icon={Blocks}>
+					<PropertyGrid properties={basicProps} columns={2} />
+				</SectionCard>
+
+				<SectionCard title="Compute & Storage Capacity" icon={Zap}>
+					<div class="capacity-segments">
+						<div class="cap-segment">
+							<div class="cap-info">
+								<span class="cap-label">Aggregate CPU</span>
+								<span class="cap-val">{summary.cpuPercent}%</span>
+							</div>
+							<ProgressBar progress={summary.cpuPercent} tone={capacityTone(summary.cpuPercent)} />
+						</div>
+						<div class="cap-segment">
+							<div class="cap-info">
+								<span class="cap-label">Aggregate Memory</span>
+								<span class="cap-val">{summary.memoryPercent}%</span>
+							</div>
+							<ProgressBar progress={summary.memoryPercent} tone={capacityTone(summary.memoryPercent)} />
+						</div>
+						<div class="cap-segment">
+							<div class="cap-info">
+								<span class="cap-label">Distributed Storage</span>
+								<span class="cap-val">{summary.storagePercent}%</span>
+							</div>
+							<ProgressBar progress={summary.storagePercent} tone={capacityTone(summary.storagePercent)} />
+						</div>
+					</div>
+				</SectionCard>
+
+				<SectionCard title="Active Workloads" icon={Server}>
+					<div class="workload-summary">
+						<div class="w-stat">
+							<span class="val">--</span>
+							<span class="lbl">Total VMs</span>
+						</div>
+						<div class="w-stat">
+							<span class="val">--</span>
+							<span class="lbl">Healthy</span>
+						</div>
+						<p class="w-hint">Workload rollups are currently being calculated for this cluster.</p>
+					</div>
+				</SectionCard>
+			</div>
+
+			<aside class="detail-side-span">
+				<SectionCard title="Recent Tasks" icon={History} badgeLabel={String(summary.activeTasks)}>
+					{#if summary.activeTasks === 0}
+						<p class="empty-hint">No active tasks for this cluster.</p>
+					{:else}
+						<div class="mini-activity">
+							<p>Multiple operations are currently running or recently completed.</p>
+							<a href="/tasks?query={summary.clusterId}" class="view-link">Open Cluster Tasks</a>
+						</div>
 					{/if}
-				</div>
-				<p>Current version posture for this cluster.</p>
-			</article>
-			<article class="detail-card">
-				<div class="detail-card__label">Tasks</div>
-				<div class="detail-card__value">{detail.summary.activeTasks}</div>
-				<p>Accepted or running tasks targeting this cluster.</p>
-			</article>
-			<article class="detail-card">
-				<div class="detail-card__label">Alerts</div>
-				<div class="detail-card__value">{detail.summary.alerts}</div>
-				<p>Unresolved events linked to this cluster.</p>
-			</article>
-		</div>
+				</SectionCard>
 
-		<section class="capacity-section" aria-label="Capacity">
-			<div class="capacity-row">
-				<div>CPU</div>
-				<div class="capacity-row__value">
-					<Badge label={`${detail.summary.cpuPercent}%`} tone={capacityTone(detail.summary.cpuPercent)} />
-				</div>
-			</div>
-			<div class="capacity-row">
-				<div>Memory</div>
-				<div class="capacity-row__value">
-					<Badge
-						label={`${detail.summary.memoryPercent}%`}
-						tone={capacityTone(detail.summary.memoryPercent)}
-					/>
-				</div>
-			</div>
-			<div class="capacity-row">
-				<div>Storage</div>
-				<div class="capacity-row__value">
-					<Badge
-						label={`${detail.summary.storagePercent}%`}
-						tone={capacityTone(detail.summary.storagePercent)}
-					/>
-				</div>
-			</div>
-		</section>
-
-		{#if detail.summary.topIssue}
-			<StateBanner
-				variant="degraded"
-				title="Top issue"
-				description={detail.summary.topIssue}
-				hint="Use Events and Tasks pages for full timeline context."
-			/>
-		{/if}
-
-		<div class="detail-links">
-			<a href="/clusters">Back to clusters</a>
-			<a href="/nodes">Open nodes</a>
-			<a href="/tasks">Open tasks</a>
-			<a href="/events">Open events</a>
-		</div>
+				<SectionCard title="Unresolved Alerts" icon={AlertTriangle} badgeLabel={String(summary.alerts)} badgeTone={summary.alerts > 0 ? 'warning' : 'neutral'}>
+					{#if summary.alerts === 0}
+						<p class="empty-hint">Cluster reporting nominal health signals.</p>
+					{:else}
+						<div class="mini-activity">
+							<p>{summary.alerts} signals require operator inspection.</p>
+							<a href="/events?query={summary.clusterId}" class="view-link">Open Cluster Events</a>
+						</div>
+					{/if}
+				</SectionCard>
+			</aside>
+		</main>
 	{/if}
-</PageShell>
+</div>
 
 <style>
-	.detail-header {
+	.detail-page {
 		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
+		flex-direction: column;
 		gap: 1rem;
-	}
-
-	.detail-header h1 {
-		margin: 0;
-		font-size: 1.5rem;
-		color: var(--shell-text);
-	}
-
-	.detail-header p {
-		margin: 0.35rem 0 0;
-		color: var(--shell-text-muted);
-		font-size: 0.9rem;
-	}
-
-	.detail-header__eyebrow {
-		font-size: 0.72rem;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-		font-weight: 700;
-	}
-
-	.detail-header__badges {
-		display: flex;
-		gap: 0.5rem;
-		flex-wrap: wrap;
 	}
 
 	.detail-grid {
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.detail-main-span {
+		display: flex;
+		flex-direction: column;
 		gap: 1rem;
 	}
 
-	.detail-card {
-		border: 1px solid var(--shell-line);
-		background: var(--shell-surface);
-		border-radius: 1rem;
-		padding: 1rem;
+	.detail-side-span {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
 	}
 
-	.detail-card__label {
-		font-size: 0.72rem;
-		text-transform: uppercase;
-		letter-spacing: 0.12em;
-		color: var(--shell-text-muted);
-		font-weight: 700;
+	.capacity-segments {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		padding: 0.5rem 0;
 	}
 
-	.detail-card__value {
-		margin-top: 0.35rem;
-		font-size: 1.45rem;
-		color: var(--shell-text);
-		font-weight: 700;
+	.cap-segment {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
 	}
 
-	.detail-card__inline {
-		font-size: 0.95rem;
-		font-weight: 600;
-		color: var(--shell-text-muted);
-	}
-
-	.detail-card p {
-		margin: 0.45rem 0 0;
-		color: var(--shell-text-secondary);
-		font-size: 0.85rem;
-	}
-
-	.capacity-section {
-		border: 1px solid var(--shell-line);
-		background: var(--shell-surface);
-		border-radius: 1rem;
-		padding: 0.75rem 1rem;
-	}
-
-	.capacity-row {
+	.cap-info {
 		display: flex;
 		justify-content: space-between;
+		align-items: baseline;
+	}
+
+	.cap-label {
+		font-size: var(--text-xs);
+		font-weight: 500;
+		color: var(--shell-text-muted);
+	}
+
+	.cap-val {
+		font-family: var(--font-mono);
+		font-size: var(--text-sm);
+		font-weight: 700;
+	}
+
+	.workload-summary {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.75rem;
+	}
+
+	.w-stat {
+		display: flex;
+		flex-direction: column;
 		align-items: center;
-		padding: 0.6rem 0;
-		border-bottom: 1px solid var(--shell-line);
-		color: var(--shell-text);
+		padding: 0.75rem;
+		background: var(--shell-surface-muted);
+		border-radius: 0.35rem;
 	}
 
-	.capacity-row:last-child {
-		border-bottom: none;
+	.w-stat .val { font-size: var(--text-lg); font-weight: 700; }
+	.w-stat .lbl { font-size: 10px; color: var(--shell-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+	.w-hint {
+		grid-column: 1 / -1;
+		font-size: 11px;
+		color: var(--shell-text-muted);
+		text-align: center;
+		margin-top: 0.5rem;
 	}
 
-	.capacity-row__value {
+	.mini-activity {
 		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
 	}
 
-	.detail-links {
-		display: flex;
-		gap: 1rem;
-		flex-wrap: wrap;
+	.mini-activity p {
+		font-size: var(--text-xs);
+		color: var(--shell-text-secondary);
+		margin: 0;
 	}
 
-	.detail-links a {
-		color: var(--shell-accent);
+	.view-link {
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
 		text-decoration: none;
-		font-weight: 600;
+		color: var(--shell-accent);
 	}
 
-	@media (max-width: 960px) {
-		.detail-grid {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
+	.empty-hint {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		text-align: center;
+		padding: 1rem 0;
 	}
 
-	@media (max-width: 640px) {
+	@media (max-width: 1200px) {
 		.detail-grid {
 			grid-template-columns: 1fr;
 		}

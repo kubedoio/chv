@@ -1,5 +1,19 @@
 <script lang="ts">
-	import { PageShell, StateBanner, Badge } from '$lib/components/system';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import { 
+		Settings, 
+		Shield, 
+		Fingerprint, 
+		Users as UsersIcon, 
+		History, 
+		Lock,
+		Terminal,
+		User
+	} from 'lucide-svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 
@@ -7,158 +21,196 @@
 
 	const page = getPageDefinition('/settings');
 	const model = $derived(data.settings);
+
+	const envProps = $derived([
+		{ label: 'Control Plane', value: model.version },
+		{ label: 'Build Hash', value: model.build, isMono: true },
+		{ label: 'Environment', value: model.environment },
+		{ label: 'API Endpoint', value: model.api_endpoint, isMono: true }
+	]);
+
+	const accessProps = $derived([
+		{ label: 'Session TTL', value: `${model.session_ttl_hours} hours` },
+		{ label: 'Active Users', value: String(model.users.length) }
+	]);
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
+<div class="settings-page">
 	{#if model.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Settings unavailable"
-			description="The settings view could not be loaded."
-			hint="Navigation remains available. Retry once the control plane is reachable."
-		/>
+		<ErrorState title="Settings Unavailable" description="Failed to retrieve configuration from the control plane." />
 	{:else}
-		<div class="settings-page">
-			<section class="settings-section" aria-labelledby="env-title">
-				<h2 id="env-title" class="settings-section__title">Environment</h2>
-				<div class="settings-card">
-					<div class="kv-row">
-						<div class="kv-row__label">Control plane version</div>
-						<div class="kv-row__value">{model.version}</div>
-					</div>
-					<div class="kv-row">
-						<div class="kv-row__label">Build</div>
-						<div class="kv-row__value mono">{model.build}</div>
-					</div>
-					<div class="kv-row">
-						<div class="kv-row__label">Environment</div>
-						<div class="kv-row__value"><Badge label={model.environment} tone="healthy" /></div>
-					</div>
-					<div class="kv-row">
-						<div class="kv-row__label">API endpoint</div>
-						<div class="kv-row__value mono">{model.api_endpoint}</div>
-					</div>
-				</div>
-			</section>
+		<PageHeaderWithAction page={page} />
 
-			<section class="settings-section" aria-labelledby="access-title">
-				<h2 id="access-title" class="settings-section__title">Access</h2>
-				<div class="settings-card">
-					<div class="kv-row">
-						<div class="kv-row__label">Session TTL</div>
-						<div class="kv-row__value">{model.session_ttl_hours} hours</div>
+		<main class="settings-grid">
+			<div class="settings-main">
+				<SectionCard title="System Environment" icon={Terminal}>
+					<PropertyGrid properties={envProps} columns={2} />
+				</SectionCard>
+
+				<SectionCard title="Access & Security" icon={Shield}>
+					<PropertyGrid properties={accessProps} columns={2} />
+					
+					<div class="users-roster">
+						<div class="roster-header">Registered Operators</div>
+						<ul class="user-list">
+							{#each model.users as user}
+								<li>
+									<div class="user-entry">
+										<div class="user-info">
+											<User size={12} class="user-icon" />
+											<span class="user-email">{user.email}</span>
+										</div>
+										<StatusBadge label={user.role} tone="unknown" />
+									</div>
+								</li>
+							{/each}
+						</ul>
 					</div>
-					<div class="kv-row">
-						<div class="kv-row__label">Active users</div>
-						<div class="kv-row__value">{model.users.length}</div>
-					</div>
-				</div>
-				<div class="user-list">
-					{#each model.users as user}
-						<div class="user-card">
-							<div class="user-card__email">{user.email}</div>
-							<Badge label={user.role} tone="unknown" />
+				</SectionCard>
+
+				<SectionCard title="Audit and Hardening" icon={Lock}>
+					<div class="audit-banner">
+						<Fingerprint size={16} />
+						<div class="audit-text">
+							<strong>Advanced governance pending</strong>
+							<p>Audit logging, API key rotation, and RBAC policies will be available in the next control plane release.</p>
 						</div>
-					{/each}
-				</div>
-			</section>
+					</div>
+				</SectionCard>
+			</div>
 
-			<section class="settings-section" aria-labelledby="audit-title">
-				<h2 id="audit-title" class="settings-section__title">Audit and configuration</h2>
-				<div class="settings-card">
-					<p class="settings-note">
-						Advanced access controls, audit logging, and API key management will be available in a future release.
-						Current settings are intentionally scoped to essential operational information.
-					</p>
-				</div>
-			</section>
-		</div>
+			<aside class="settings-side">
+				<SectionCard title="Quick Actions" icon={Settings}>
+					<div class="action-buttons">
+						<button class="btn-secondary w-full justify-start">
+							<History size={14} />
+							View Audit Logs
+						</button>
+						<button class="btn-secondary w-full justify-start">
+							<Lock size={14} />
+							Rotate Root Keys
+						</button>
+						<button class="btn-secondary w-full justify-start">
+							<UsersIcon size={14} />
+							Invite Operator
+						</button>
+					</div>
+				</SectionCard>
+			</aside>
+		</main>
 	{/if}
-</PageShell>
+</div>
 
 <style>
 	.settings-page {
-		display: grid;
-		gap: 2rem;
-		max-width: 800px;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
 	}
 
-	.settings-section {
+	.settings-grid {
 		display: grid;
-		gap: 0.9rem;
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
 	}
 
-	.settings-section__title {
-		font-size: 1rem;
+	.settings-main {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.settings-side {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.users-roster {
+		margin-top: 1.25rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--shell-line);
+	}
+
+	.roster-header {
+		font-size: 10px;
 		font-weight: 700;
-		color: var(--shell-text);
-		margin: 0;
-	}
-
-	.settings-card {
-		border: 1px solid var(--shell-line);
-		border-radius: 1rem;
-		background: var(--shell-surface);
-		padding: 1rem;
-	}
-
-	.kv-row {
-		display: grid;
-		grid-template-columns: minmax(10rem, 0.5fr) minmax(0, 1fr);
-		gap: 0.9rem;
-		padding: 0.65rem 0;
-		border-bottom: 1px solid var(--shell-line);
-		font-size: 0.95rem;
-		align-items: center;
-	}
-
-	.kv-row:first-child {
-		padding-top: 0;
-	}
-
-	.kv-row:last-child {
-		padding-bottom: 0;
-		border-bottom: 0;
-	}
-
-	.kv-row__label {
+		text-transform: uppercase;
 		color: var(--shell-text-muted);
-	}
-
-	.kv-row__value {
-		color: var(--shell-text);
-	}
-
-	.mono {
-		font-family: var(--font-mono);
-		font-size: 0.9em;
+		letter-spacing: 0.05em;
+		margin-bottom: 0.75rem;
 	}
 
 	.user-list {
-		display: grid;
-		gap: 0.6rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
 	}
 
-	.user-card {
+	.user-entry {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 0.5rem 0.75rem;
+		background: var(--shell-surface-muted);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.25rem;
+	}
+
+	.user-info {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.85rem;
-		background: var(--shell-surface-muted);
-		padding: 0.8rem 1rem;
+		gap: 0.5rem;
 	}
 
-	.user-card__email {
+	.user-icon {
+		opacity: 0.5;
+	}
+
+	.user-email {
+		font-size: var(--text-sm);
 		font-weight: 500;
-		color: var(--shell-text);
 	}
 
-	.settings-note {
-		margin: 0;
-		font-size: 0.92rem;
-		line-height: 1.55;
+	.audit-banner {
+		display: flex;
+		gap: 1rem;
+		padding: 0.75rem;
+		background: var(--shell-surface-muted);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
 		color: var(--shell-text-secondary);
+	}
+
+	.audit-text strong {
+		display: block;
+		font-size: var(--text-sm);
+		color: var(--shell-text);
+		margin-bottom: 0.15rem;
+	}
+
+	.audit-text p {
+		font-size: 11px;
+		line-height: 1.4;
+		margin: 0;
+	}
+
+	.action-buttons {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.w-full { width: 100%; }
+	.justify-start { justify-content: flex-start; }
+
+	@media (max-width: 1100px) {
+		.settings-grid {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>
