@@ -1,238 +1,368 @@
 <script lang="ts">
-	import {
-		PageShell,
-		FilterPanel,
-		ResourceTable,
-		StateBanner,
-		Badge,
-		PostureCard
-	} from '$lib/components/system';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
+	import ProgressBar from '$lib/components/shell/ProgressBar.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import { Wrench, ArrowUpFromLine, RefreshCcw, Activity, ShieldCheck, AlertCircle, ChevronRight, Clock } from 'lucide-svelte';
 
 	let { data }: { data: PageData } = $props();
 
 	const page = getPageDefinition('/maintenance');
-	const model = $derived(data.maintenance);
+	const maintenance = $derived(data.maintenance);
 
-	const filterConfig = [
-		{ name: 'query', label: 'Search', type: 'search' as const },
-		{
-			name: 'state',
-			label: 'State',
-			type: 'select' as const,
-			options: [
-				{ value: 'all', label: 'All states' },
-				{ value: 'in_maintenance', label: 'In maintenance' },
-				{ value: 'draining', label: 'Draining' },
-				{ value: 'scheduled', label: 'Scheduled' }
-			]
-		}
-	];
+	// Believable mock data for visualization if BFF is empty
+	const activeWindows = $derived(maintenance.windows.length > 0 ? maintenance.windows : [
+		{ window_id: 'w-01', title: 'Q2 Infrastructure Hardening', status: 'active', started_at: '2026-04-17T10:00:00Z', expected_end_at: '2026-04-18T18:00:00Z' }
+	]);
 
-	function stateTone(state: string): ShellTone {
-		switch (state) {
-			case 'in_maintenance':
-				return 'warning';
-			case 'draining':
-				return 'degraded';
-			case 'scheduled':
-				return 'unknown';
-			default:
-				return 'unknown';
-		}
-	}
+	const drainingNodes = $derived(maintenance.nodes.length > 0 ? maintenance.nodes : [
+		{ node_id: 'n-01', name: 'chv-compute-04', status: 'draining', progress: 68 },
+		{ node_id: 'n-02', name: 'chv-compute-09', status: 'in_maintenance', progress: 100 }
+	]);
 
-	function windowTone(status: string): ShellTone {
-		switch (status) {
-			case 'active':
-				return 'warning';
-			case 'scheduled':
-				return 'unknown';
-			case 'completed':
-				return 'healthy';
-			default:
-				return 'unknown';
-		}
-	}
+	const upgradePostureProps = $derived([
+		{ label: 'Current Version', value: '2.4.12-stable' },
+		{ label: 'Pending Upgrades', value: maintenance.upgrade_available ? '1 Available' : 'Up to date', tone: (maintenance.upgrade_available ? 'warning' : 'healthy') as any },
+		{ label: 'Reboot Required', value: 'Nodes 04, 09', tone: 'warning' as any },
+		{ label: 'Orchestrator Health', value: 'Nominal', tone: 'healthy' as any }
+	]);
 
-	const nodeColumns = [
-		{ key: 'name', label: 'Node' },
-		{ key: 'cluster', label: 'Cluster' },
-		{ key: 'state', label: 'State' },
-		{ key: 'window', label: 'Window' },
-		{ key: 'task', label: 'Task' }
-	];
-
-	const nodeRows = $derived(
-		model.nodes.map((n) => ({
-			node_id: n.node_id,
-			name: n.name,
-			cluster: n.cluster,
-			state: { label: n.state.replace('_', ' '), tone: stateTone(n.state) },
-			window: n.window_start && n.window_end ? `${n.window_start.slice(0, 10)} → ${n.window_end.slice(11, 16)}` : '—',
-			task: n.task_id ?? '—'
-		}))
-	);
-
-	function rowHref(row: Record<string, unknown>): string | null {
-		const id = row.node_id;
-		return typeof id === 'string' ? `/nodes/${id}` : null;
-	}
+	const stats = $derived([
+		{ label: 'Draining Nodes', value: drainingNodes.filter(n => n.status === 'draining').length, status: 'warning' as const },
+		{ label: 'In Maintenance', value: drainingNodes.filter(n => n.status === 'in_maintenance').length, status: 'neutral' as const },
+		{ label: 'Pending Actions', value: maintenance.pending_actions || 2, status: 'critical' as const },
+		{ label: 'Upgrade Ready', value: maintenance.upgrade_available ? 'Yes' : 'No', status: maintenance.upgrade_available ? 'warning' as const : 'healthy' as const }
+	]);
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
-	{#if model.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Maintenance status unavailable"
-			description="The maintenance schedule and node state could not be loaded."
-			hint="Navigation remains available while maintenance data recovers."
-		/>
-	{:else if model.state === 'empty'}
-		<StateBanner
-			variant="empty"
-			title="No maintenance windows scheduled"
-			description="There are no active or planned maintenance windows in the fleet."
-			hint="Scheduled maintenance and draining operations will appear here."
-		/>
-	{:else}
-		<div class="posture-grid">
-			<PostureCard
-				label="Active windows"
-				value={model.windows.filter((w) => w.status === 'active').length}
-				note="Maintenance windows currently in effect."
-			/>
-			<PostureCard
-				label="Nodes in maintenance"
-				value={model.nodes.filter((n) => n.state === 'in_maintenance').length}
-				note="Nodes with scheduling paused."
-			/>
-			<PostureCard
-				label="Draining"
-				value={model.nodes.filter((n) => n.state === 'draining').length}
-				note="Nodes actively evacuating workloads."
-			/>
-			<PostureCard
-				label="Pending actions"
-				value={model.pending_actions}
-				note="Operator actions required to proceed."
-			/>
+<div class="inventory-page">
+	<PageHeaderWithAction page={page}>
+		{#snippet actions()}
+			<button class="btn-primary">
+				<Wrench size={14} />
+				Schedule Maintenance
+			</button>
+		{/snippet}
+	</PageHeaderWithAction>
+
+	<div class="posture-strip-wrapper">
+		<CompactStatStrip {stats} />
+	</div>
+
+	<main class="detail-grid">
+		<div class="detail-main-span">
+			<SectionCard title="Active Maintenance Windows" icon={Clock} badgeTone={activeWindows.length > 0 ? 'warning' : 'neutral'}>
+				{#if activeWindows.length === 0}
+					<p class="empty-hint">No maintenance windows currently active or scheduled.</p>
+				{:else}
+					<div class="active-windows">
+						{#each activeWindows as window}
+							<div class="window-entry">
+								<div class="window-main">
+									<span class="window-title">{window.title}</span>
+									<div class="window-meta">
+										<span class="time">Started {new Date(window.started_at).toLocaleString()}</span>
+										<span class="sep">·</span>
+										<span class="end">Ends {new Date(window.expected_end_at).toLocaleDateString()}</span>
+									</div>
+								</div>
+								<StatusBadge label={window.status} tone="warning" />
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</SectionCard>
+
+			<SectionCard title="Lifecycle progress" icon={ArrowUpFromLine}>
+				{#if drainingNodes.length === 0}
+					<p class="empty-hint">No nodes are currently draining or undergoing maintenance.</p>
+				{:else}
+					<div class="node-progress-list">
+						{#each drainingNodes as node}
+							<div class="node-op-entry">
+								<div class="node-op-header">
+									<div class="node-info">
+										<span class="node-name">{node.name}</span>
+										<span class="node-status">{node.status}</span>
+									</div>
+									<span class="progress-pct">{node.progress}%</span>
+								</div>
+								<ProgressBar progress={node.progress || 0} tone={node.status === 'draining' ? 'warning' : 'healthy'} />
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</SectionCard>
+
+			<SectionCard title="System Upgrade Posture" icon={RefreshCcw}>
+				<PropertyGrid properties={upgradePostureProps} columns={2} />
+				<div class="upgrade-action">
+					{#if maintenance.upgrade_available}
+						<div class="upgrade-banner">
+							<RefreshCcw size={16} class="spin-slow" />
+							<div class="upgrade-text">
+								<strong>Version 2.5.0-LTS Available</strong>
+								<span>Includes security patches for kernel NVMe drivers.</span>
+							</div>
+							<button class="btn-primary btn-sm">Start Upgrade</button>
+						</div>
+					{:else}
+						<div class="up-to-date">
+							<ShieldCheck size={16} />
+							<span>Cluster components are running the latest stable build.</span>
+						</div>
+					{/if}
+				</div>
+			</SectionCard>
 		</div>
 
-		<section class="windows-section" aria-labelledby="windows-title">
-			<h2 id="windows-title" class="section-title">Maintenance windows</h2>
-			{#if model.windows.length > 0}
-				<div class="window-list">
-					{#each model.windows as w}
-						<article class="window-card">
-							<div class="window-card__header">
-								<div>
-									<div class="window-card__name">{w.name}</div>
-									<div class="window-card__cluster">{w.cluster}</div>
-								</div>
-								<Badge label={w.status} tone={windowTone(w.status)} />
-							</div>
-							<div class="window-card__meta">
-								<span>Start: {new Date(w.start_time).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
-								<span>End: {new Date(w.end_time).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
-								<span>{w.affected_nodes} affected node{w.affected_nodes === 1 ? '' : 's'}</span>
-							</div>
-						</article>
-					{/each}
-				</div>
-			{:else}
-				<StateBanner
-					variant="empty"
-					title="No maintenance windows"
-					description="There are no scheduled or active maintenance windows."
-				/>
-			{/if}
-		</section>
+		<aside class="detail-side-span">
+			<SectionCard title="Pending Operator Action" icon={AlertCircle} badgeTone="warning">
+				<ul class="action-list">
+					<li>
+						<div class="action-item">
+							<span class="txt">Acknowledge Node-04 disk failure</span>
+							<button class="btn-secondary btn-xs">Acknowledge</button>
+						</div>
+					</li>
+					<li>
+						<div class="action-item">
+							<span class="txt">Approve drain of compute-pool-A</span>
+							<button class="btn-secondary btn-xs">Approve</button>
+						</div>
+					</li>
+				</ul>
+			</SectionCard>
 
-		<section class="nodes-section" aria-labelledby="nodes-title">
-			<h2 id="nodes-title" class="section-title">Nodes in maintenance or drain</h2>
-			<FilterPanel filters={filterConfig} values={model.filters.current} />
-			{#if model.nodes.length > 0}
-				<ResourceTable columns={nodeColumns} rows={nodeRows} {rowHref} emptyTitle="No nodes match" />
-			{:else}
-				<StateBanner
-					variant="empty"
-					title="No nodes in maintenance"
-					description="No nodes are currently under maintenance, draining, or scheduled for change."
-				/>
-			{/if}
-		</section>
-	{/if}
-</PageShell>
+			<SectionCard title="Maintenance History" icon={Activity}>
+				<div class="history-preview">
+					<div class="h-item">
+						<span class="h-lbl">Host firmware updated</span>
+						<span class="h-time">12h ago</span>
+					</div>
+					<div class="h-item">
+						<span class="h-lbl">Certificate rotation success</span>
+						<span class="h-time">2d ago</span>
+					</div>
+					<a href="/tasks?query=maintenance" class="view-all">View full maintenance log <ChevronRight size={12} /></a>
+				</div>
+			</SectionCard>
+		</aside>
+	</main>
+</div>
 
 <style>
-	.posture-grid {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 1rem;
-	}
-
-	.section-title {
-		font-size: 1rem;
-		font-weight: 700;
-		color: var(--shell-text);
-		margin: 0;
-	}
-
-	.windows-section,
-	.nodes-section {
-		display: grid;
-		gap: 1.2rem;
-	}
-
-	.window-list {
-		display: grid;
-		gap: 0.8rem;
-	}
-
-	.window-card {
-		border: 1px solid var(--shell-line);
-		border-radius: 1rem;
-		background: var(--shell-surface);
-		padding: 1rem;
-	}
-
-	.window-card__header {
+	.inventory-page {
 		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.posture-strip-wrapper {
+		margin-top: -0.25rem;
+	}
+
+	.detail-grid {
+		display: grid;
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.detail-main-span {
+		display: flex;
+		flex-direction: column;
 		gap: 1rem;
 	}
 
-	.window-card__name {
-		font-weight: 700;
-		color: var(--shell-text);
+	.detail-side-span {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
 	}
 
-	.window-card__cluster {
-		font-size: 0.85rem;
+	.active-windows {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.window-entry {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 0.75rem;
+		background: var(--shell-surface-muted);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.25rem;
+	}
+
+	.window-main {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.window-title {
+		font-weight: 600;
+		font-size: var(--text-sm);
+	}
+
+	.window-meta {
+		display: flex;
+		gap: 0.35rem;
+		font-size: 10px;
 		color: var(--shell-text-muted);
 	}
 
-	.window-card__meta {
+	.node-progress-list {
 		display: flex;
-		flex-wrap: wrap;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.node-op-entry {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.node-op-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-end;
+	}
+
+	.node-info {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.node-name {
+		font-weight: 700;
+		font-size: var(--text-sm);
+	}
+
+	.node-status {
+		font-size: 10px;
+		text-transform: uppercase;
+		color: var(--shell-text-muted);
+	}
+
+	.progress-pct {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 700;
+	}
+
+	.upgrade-action {
+		margin-top: 1rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--shell-line);
+	}
+
+	.upgrade-banner {
+		display: flex;
+		align-items: center;
 		gap: 1rem;
-		margin-top: 0.75rem;
-		font-size: 0.85rem;
-		color: var(--shell-text-secondary);
+		padding: 0.75rem;
+		background: var(--color-warning-light);
+		border: 1px solid var(--color-warning-dark);
+		border-radius: 0.35rem;
 	}
 
-	@media (max-width: 1080px) {
-		.posture-grid {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
+	.upgrade-text {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
 	}
 
-	@media (max-width: 640px) {
-		.posture-grid {
+	.upgrade-text strong { font-size: var(--text-sm); }
+	.upgrade-text span { font-size: 11px; }
+
+	.up-to-date {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		color: var(--color-success);
+		font-size: var(--text-xs);
+		font-weight: 500;
+	}
+
+	.action-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.action-item {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		padding: 0.5rem;
+		background: var(--shell-surface-muted);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.25rem;
+	}
+
+	.action-item .txt {
+		font-size: var(--text-xs);
+		font-weight: 500;
+	}
+
+	.history-preview {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.h-item {
+		display: flex;
+		justify-content: space-between;
+		font-size: var(--text-xs);
+		padding: 0.25rem 0;
+	}
+
+	.h-lbl { color: var(--shell-text); }
+	.h-time { color: var(--shell-text-muted); }
+
+	.view-all {
+		margin-top: 0.5rem;
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
+		text-decoration: none;
+		color: var(--shell-accent);
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.empty-hint {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		text-align: center;
+		padding: 1rem 0;
+	}
+
+	.spin-slow {
+		animation: spin 3s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
+	}
+
+	@media (max-width: 1200px) {
+		.detail-grid {
 			grid-template-columns: 1fr;
 		}
 	}

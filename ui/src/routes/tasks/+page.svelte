@@ -1,142 +1,185 @@
 <script lang="ts">
-	import { PageShell, FilterPanel, ResourceTable, StateBanner, UrlPagination } from '$lib/components/system';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
+	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import FilterBar from '$lib/components/FilterBar.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import ResourceLink from '$lib/components/shell/ResourceLink.svelte';
+	import DurationLine from '$lib/components/shell/DurationLine.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
 	import type { PageData } from './$types';
+	import { History, User, Activity, Clock } from 'lucide-svelte';
+	import { goto } from '$app/navigation';
+	import { page as appPage } from '$app/stores';
 
 	let { data }: { data: PageData } = $props();
 
 	const page = getPageDefinition('/tasks');
 	const tasks = $derived(data.tasks);
-	const hasAppliedFilters = $derived(Object.keys(tasks.filters.applied).length > 0);
+	const items = $derived(tasks.items);
 
-	const filterConfig = $derived([
-		{ name: 'query', label: 'Search', type: 'search' as const },
+	const stats = $derived([
+		{ label: 'Total Tasks', value: tasks.page.totalItems },
+		{ label: 'Running', value: items.filter(t => t.status === 'running').length, status: 'warning' as const },
+		{ label: 'Failed', value: items.filter(t => t.status === 'failed').length, status: 'critical' as const },
+		{ label: 'Completed', value: items.filter(t => t.status === 'succeeded').length, status: 'healthy' as const }
+	]);
+
+	const filters = $derived([
+		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Task ID or resource...' },
 		{
-			name: 'status',
+			key: 'status',
 			label: 'Status',
 			type: 'select' as const,
 			options: [
 				{ value: 'all', label: 'All states' },
-				...tasks.filters.options.statuses.map((s) => ({
+				...tasks.filters.options.statuses.map((s: string) => ({
 					value: s,
 					label: getTaskStatusMeta(s).label
 				}))
 			]
 		},
 		{
-			name: 'resourceKind',
-			label: 'Resource',
-			type: 'select' as const,
-			options: [
-				{ value: 'all', label: 'All resources' },
-				...tasks.filters.options.resourceKinds.map((k) => ({ value: k, label: k }))
-			]
-		},
-		{
-			name: 'window',
+			key: 'window',
 			label: 'Window',
 			type: 'select' as const,
 			options: [
 				{ value: 'active', label: 'Active only' },
 				{ value: '24h', label: 'Last 24 hours' },
 				{ value: '7d', label: 'Last 7 days' },
-				{ value: '30d', label: 'Last 30 days' },
 				{ value: 'all', label: 'All time' }
 			]
 		}
 	]);
 
+	function handleFilterChange(key: string, value: any) {
+		const newParams = new URLSearchParams($appPage.url.searchParams);
+		if (value === '' || value === 'all') {
+			newParams.delete(key);
+		} else {
+			newParams.set(key, String(value));
+		}
+		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
+	}
+
 	const columns = [
-		{ key: 'task', label: 'Task' },
+		{ key: 'task_id', label: 'Task ID' },
 		{ key: 'status', label: 'Status' },
 		{ key: 'operation', label: 'Operation' },
-		{ key: 'resource', label: 'Resource' },
-		{ key: 'actor', label: 'Actor' },
+		{ key: 'resource', label: 'Target Resource' },
+		{ key: 'actor', label: 'Triggered By' },
 		{ key: 'started', label: 'Started' },
-		{ key: 'finished', label: 'Finished' },
-		{ key: 'duration', label: 'Duration' }
+		{ key: 'duration', label: 'Duration', align: 'right' as const }
 	];
 
 	const rows = $derived(
-		tasks.items.map((task) => {
+		items.map((task) => {
 			const statusMeta = getTaskStatusMeta(task.status);
 			return {
-				task: task.task_id,
+				...task,
 				status: { label: statusMeta.label, tone: statusMeta.tone },
-				operation: task.operation,
-				resource: `${task.resource_kind} ${task.resource_id}`,
-				actor: task.actor,
-				started: formatTimestamp(task.started_unix_ms),
-				finished: task.finished_unix_ms ? formatTimestamp(task.finished_unix_ms) : '—',
-				duration: formatDuration(task.started_unix_ms, task.finished_unix_ms),
-				resource_kind: task.resource_kind,
-				resource_id: task.resource_id
+				started: new Date(task.started_unix_ms).toLocaleString('en-US', {
+					month: 'short',
+					day: 'numeric',
+					hour: 'numeric',
+					minute: '2-digit'
+				})
 			};
 		})
 	);
-
-	function formatTimestamp(ms: number): string {
-		return new Intl.DateTimeFormat('en-US', {
-			month: 'short',
-			day: 'numeric',
-			hour: 'numeric',
-			minute: '2-digit'
-		}).format(new Date(ms));
-	}
-
-	function formatDuration(startedMs: number, finishedMs: number): string {
-		if (!finishedMs) return '—';
-		const elapsedSeconds = Math.max(Math.round((finishedMs - startedMs) / 1000), 0);
-		if (elapsedSeconds < 60) return `${elapsedSeconds}s`;
-		if (elapsedSeconds < 3600) return `${Math.round(elapsedSeconds / 60)}m`;
-		if (elapsedSeconds < 86400) return `${Math.round(elapsedSeconds / 3600)}h`;
-		return `${Math.round(elapsedSeconds / 86400)}d`;
-	}
-
-	function rowHref(row: Record<string, unknown>): string | null {
-		const kind = String(row.resource_kind ?? '');
-		const id = String(row.resource_id ?? '');
-		if (!kind || !id) return null;
-		if (kind === 'vm') return `/vms/${id}`;
-		if (kind === 'node') return `/nodes/${id}`;
-		return `/${kind}s/${id}`;
-	}
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
-	<FilterPanel filters={filterConfig} values={tasks.filters.current} />
+<div class="inventory-page">
+	<PageHeaderWithAction page={page} />
 
-	{#if tasks.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Task center is unavailable"
-			description="The task list could not be loaded from the BFF."
-			hint="Accepted, running, and completed work stays distinct once the task feed is reachable again."
+	<div class="posture-strip-wrapper">
+		<CompactStatStrip {stats} />
+	</div>
+
+	<div class="inventory-controls">
+		<FilterBar 
+			{filters} 
+			activeFilters={tasks.filters.current} 
+			onFilterChange={handleFilterChange}
+			onClearAll={() => goto($appPage.url.pathname)}
 		/>
-	{:else if tasks.state === 'empty'}
-		<StateBanner
-			variant="empty"
-			title={hasAppliedFilters ? 'No tasks match the current filters' : 'No tasks yet'}
-			description={hasAppliedFilters
-				? 'Try widening the status, resource, or time window filters to bring more task history back into view.'
-				: 'Accepted operations, active runs, and completed work will appear here once the control plane starts producing task records.'}
-			hint="The task center keeps filter state even when the result set is empty."
-		/>
-	{:else}
-		<ResourceTable
-			{columns}
-			{rows}
-			{rowHref}
-			emptyTitle="No tasks match"
-			emptyDescription="Try adjusting filters to see more results."
-		/>
-		<UrlPagination
-			page={tasks.page.page}
-			pageSize={tasks.page.pageSize}
-			totalItems={tasks.page.totalItems}
-			basePath="/tasks"
-			params={tasks.filters.current}
-		/>
-	{/if}
-</PageShell>
+	</div>
+
+	<main class="inventory-main single-col">
+		<section class="inventory-table-area">
+			{#if tasks.state === 'error'}
+				<ErrorState />
+			{:else if tasks.state === 'empty'}
+				<EmptyInfrastructureState 
+					title="No tasks match these filters" 
+					description="Adjust your search criteria or time window." 
+					hint="Recent mutations in the control plane will appear here shortly."
+				/>
+			{:else}
+				<InventoryTable 
+					{columns} 
+					rows={rows}
+				>
+					{#snippet cell({ column, row })}
+						{#if column.key === 'task_id'}
+							<span class="mono-id">{row.task_id}</span>
+						{:else if column.key === 'resource'}
+							<ResourceLink kind={row.resource_kind} id={row.resource_id} name={row.resource_name} compact />
+						{:else if column.key === 'actor'}
+							<div class="actor-cell">
+								<User size={12} class="actor-icon" />
+								<span>{row.actor}</span>
+							</div>
+						{:else if column.key === 'duration'}
+							<DurationLine startedMs={row.started_unix_ms} finishedMs={row.finished_unix_ms} />
+						{:else}
+							{row[column.key]}
+						{/if}
+					{/snippet}
+				</InventoryTable>
+			{/if}
+		</section>
+	</main>
+</div>
+
+<style>
+	.inventory-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.posture-strip-wrapper {
+		margin-top: -0.25rem;
+	}
+
+	.inventory-controls {
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		overflow: hidden;
+	}
+
+	.single-col {
+		grid-template-columns: 1fr !important;
+	}
+
+	.mono-id {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--shell-text-muted);
+	}
+
+	.actor-cell {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+	}
+
+	.actor-icon {
+		opacity: 0.5;
+	}
+</style>

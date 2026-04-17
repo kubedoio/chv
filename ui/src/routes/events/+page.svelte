@@ -1,26 +1,36 @@
 <script lang="ts">
-	import {
-		PageShell,
-		FilterPanel,
-		ResourceTable,
-		StateBanner,
-		UrlPagination,
-		PostureStrip,
-		PostureCard
-	} from '$lib/components/system';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
+	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import FilterBar from '$lib/components/FilterBar.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import ResourceLink from '$lib/components/shell/ResourceLink.svelte';
+	import SeverityShield from '$lib/components/shell/SeverityShield.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import { Bell, AlertTriangle, Info, ShieldAlert, ChevronRight, Activity } from 'lucide-svelte';
+	import { goto } from '$app/navigation';
+	import { page as appPage } from '$app/stores';
 
 	let { data }: { data: PageData } = $props();
 
 	const page = getPageDefinition('/events');
 	const model = $derived(data.events);
+	const items = $derived(model.items);
 
-	const filterConfig = [
-		{ name: 'query', label: 'Search', type: 'search' as const },
+	const stats = $derived([
+		{ label: 'Total Events', value: items.length },
+		{ label: 'Critical', value: items.filter(e => e.severity === 'critical' && e.state !== 'resolved').length, status: 'critical' as const },
+		{ label: 'Warning', value: items.filter(e => e.severity === 'warning' && e.state !== 'resolved').length, status: 'warning' as const },
+		{ label: 'Unresolved', value: items.filter(e => e.state !== 'resolved').length, status: 'neutral' as const }
+	]);
+
+	const filters = [
+		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Summary or resource...' },
 		{
-			name: 'severity',
+			key: 'severity',
 			label: 'Severity',
 			type: 'select' as const,
 			options: [
@@ -31,7 +41,7 @@
 			]
 		},
 		{
-			name: 'state',
+			key: 'state',
 			label: 'State',
 			type: 'select' as const,
 			options: [
@@ -43,60 +53,28 @@
 		}
 	];
 
-	function severityTone(severity: string): ShellTone {
-		switch (severity) {
-			case 'critical':
-				return 'failed';
-			case 'warning':
-				return 'warning';
-			case 'info':
-				return 'unknown';
-			default:
-				return 'unknown';
+	function handleFilterChange(key: string, value: any) {
+		const newParams = new URLSearchParams($appPage.url.searchParams);
+		if (value === '' || value === 'all') {
+			newParams.delete(key);
+		} else {
+			newParams.set(key, String(value));
 		}
+		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
 	}
-
-	function stateTone(state: string): ShellTone {
-		switch (state) {
-			case 'open':
-				return 'failed';
-			case 'acknowledged':
-				return 'warning';
-			case 'resolved':
-				return 'healthy';
-			default:
-				return 'unknown';
-		}
-	}
-
-	const posture = $derived(() => {
-		const items = model.items;
-		return {
-			total: items.length,
-			critical: items.filter((e) => e.severity === 'critical' && e.state !== 'resolved').length,
-			warning: items.filter((e) => e.severity === 'warning' && e.state !== 'resolved').length,
-			open: items.filter((e) => e.state === 'open').length,
-			acknowledged: items.filter((e) => e.state === 'acknowledged').length
-		};
-	});
 
 	const columns = [
-		{ key: 'severity', label: 'Severity' },
-		{ key: 'summary', label: 'Summary' },
-		{ key: 'resource', label: 'Resource' },
-		{ key: 'type', label: 'Type' },
+		{ key: 'severity', label: 'Sev', align: 'center' as const },
+		{ key: 'summary', label: 'Event Summary' },
+		{ key: 'resource', label: 'Affected Resource' },
+		{ key: 'type', label: 'Category' },
 		{ key: 'state', label: 'State' },
-		{ key: 'occurred', label: 'Occurred' }
+		{ key: 'occurred', label: 'Time', align: 'right' as const }
 	];
 
 	const rows = $derived(
-		model.items.map((item) => ({
-			event_id: item.event_id,
-			severity: { label: item.severity, tone: severityTone(item.severity) },
-			summary: item.summary,
-			resource: `${item.resource_kind} / ${item.resource_name}`,
-			type: item.type,
-			state: { label: item.state, tone: stateTone(item.state) },
+		items.map((item) => ({
+			...item,
 			occurred: new Date(item.occurred_at).toLocaleString('en-US', {
 				month: 'short',
 				day: 'numeric',
@@ -105,111 +83,215 @@
 			})
 		}))
 	);
+
+	const criticalEvents = $derived(items.filter(e => e.severity === 'critical' && e.state !== 'resolved').slice(0, 3));
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
-	<div class="events-header">
-		<PostureStrip
-			chips={[
-				{ label: 'Total', value: posture().total },
-				{
-					label: 'Critical',
-					value: posture().critical,
-					variant: posture().critical > 0 ? 'failed' : 'default'
-				},
-				{
-					label: 'Warning',
-					value: posture().warning,
-					variant: posture().warning > 0 ? 'warning' : 'default'
-				},
-				{
-					label: 'Open',
-					value: posture().open,
-					variant: posture().open > 0 ? 'failed' : 'default'
-				},
-				{ label: 'Acknowledged', value: posture().acknowledged }
-			]}
+<div class="inventory-page">
+	<PageHeaderWithAction page={page} />
+
+	<div class="posture-strip-wrapper">
+		<CompactStatStrip {stats} />
+	</div>
+
+	<div class="inventory-controls">
+		<FilterBar 
+			{filters} 
+			activeFilters={model.filters.current} 
+			onFilterChange={handleFilterChange}
+			onClearAll={() => goto($appPage.url.pathname)}
 		/>
 	</div>
 
-	{#if model.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Event history unavailable"
-			description="The event feed could not be loaded from the control plane."
-			hint="Navigation remains available. Retry once the event stream is reachable."
-		/>
-	{:else if model.state === 'empty'}
-		<StateBanner
-			variant="empty"
-			title="No events match the current view"
-			description="Try widening the severity or state filters, or check back once new events are generated."
-			hint="Filters are URL-backed so a filtered view can be shared between operators."
-		/>
-	{:else}
-		<div class="posture-grid">
-			<PostureCard
-				label="Unresolved critical"
-				value={posture().critical}
-				note={posture().critical > 0 ? 'Critical events requiring immediate attention.' : 'No unresolved critical events.'}
-			/>
-			<PostureCard
-				label="Degraded resources"
-				value={posture().warning}
-				note={posture().warning > 0 ? 'Warnings that may escalate without intervention.' : 'No active warnings.'}
-			/>
-		</div>
-
-		<section class="inventory-section" aria-labelledby="inventory-title">
-			<h2 id="inventory-title" class="inventory-section__title">Event feed</h2>
-			<FilterPanel filters={filterConfig} values={model.filters.current} />
-			<ResourceTable {columns} {rows} emptyTitle="No events match the current filters" />
-			<UrlPagination
-				page={model.page.page}
-				pageSize={model.page.pageSize}
-				totalItems={model.page.totalItems}
-				basePath="/events"
-				params={model.filters.current}
-			/>
+	<main class="inventory-main">
+		<section class="inventory-table-area">
+			{#if model.state === 'error'}
+				<ErrorState />
+			{:else if model.state === 'empty'}
+				<EmptyInfrastructureState 
+					title="No events match your criteria" 
+					description="Adjust filters to view diagnostic history." 
+					hint="System-level events are kept until resolved or rotated."
+				/>
+			{:else}
+				<InventoryTable 
+					{columns} 
+					rows={rows}
+				>
+					{#snippet cell({ column, row })}
+						{#if column.key === 'severity'}
+							<SeverityShield severity={row.severity} />
+						{:else if column.key === 'resource'}
+							<ResourceLink kind={row.resource_kind} id={row.resource_id} name={row.resource_name} compact />
+						{:else if column.key === 'state'}
+							<span class="state-label state-{row.state}">{row.state}</span>
+						{:else}
+							{row[column.key]}
+						{/if}
+					{/snippet}
+				</InventoryTable>
+			{/if}
 		</section>
-	{/if}
-</PageShell>
+
+		<aside class="support-area">
+			<SectionCard title="Priority Inspection" icon={ShieldAlert} badgeTone={criticalEvents.length > 0 ? 'failed' : 'neutral'}>
+				{#if criticalEvents.length === 0}
+					<p class="empty-hint">No unresolved critical alerts.</p>
+				{:else}
+					<ul class="priority-list">
+						{#each criticalEvents as event}
+							<li>
+								<div class="priority-item">
+									<div class="priority-main">
+										<span class="p-summary">{event.summary}</span>
+										<div class="p-meta">
+											<span class="p-time">{new Date(event.occurred_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+											<span class="dot">·</span>
+											<span class="p-res">{event.resource_name}</span>
+										</div>
+									</div>
+									<a href="/events?query={event.event_id}" class="p-link">
+										<ChevronRight size={14} />
+									</a>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</SectionCard>
+
+			<SectionCard title="Resource Posture" icon={Activity}>
+				<div class="resource-summary">
+					<div class="res-stat">
+						<span class="val">{items.filter(e => e.severity === 'warning').length}</span>
+						<span class="lbl">Warnings</span>
+					</div>
+					<div class="res-stat">
+						<span class="val">{items.filter(e => e.state === 'resolved').length}</span>
+						<span class="lbl">Resolved</span>
+					</div>
+				</div>
+			</SectionCard>
+		</aside>
+	</main>
+</div>
 
 <style>
-	.events-header {
+	.inventory-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.posture-strip-wrapper {
+		margin-top: -0.25rem;
+	}
+
+	.inventory-controls {
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		overflow: hidden;
+	}
+
+	.inventory-main {
+		display: grid;
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.state-label {
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		color: var(--shell-text-muted);
+	}
+
+	.state-open { color: var(--color-danger); }
+	.state-acknowledged { color: var(--color-warning-dark); }
+	.state-resolved { color: var(--color-success); }
+
+	.priority-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.priority-item {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 0.5rem;
+		background: var(--shell-surface-muted);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.25rem;
+	}
+
+	.priority-main {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+	}
+
+	.p-summary {
+		font-weight: 600;
+		font-size: var(--text-sm);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.p-meta {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		flex-wrap: wrap;
+		gap: 0.25rem;
+		font-size: 10px;
+		color: var(--shell-text-muted);
 	}
 
-	.posture-grid {
+	.p-link {
+		color: var(--shell-text-muted);
+	}
+
+	.resource-summary {
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 1rem;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.5rem;
 	}
 
-	.inventory-section {
-		display: grid;
-		gap: 1.2rem;
+	.res-stat {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding: 0.5rem;
+		background: var(--shell-surface-muted);
+		border-radius: 0.25rem;
 	}
 
-	.inventory-section__title {
-		font-size: 1rem;
+	.res-stat .val {
+		font-size: var(--text-lg);
 		font-weight: 700;
-		color: var(--shell-text);
-		margin: 0;
 	}
 
-	@media (max-width: 1080px) {
-		.posture-grid {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
+	.res-stat .lbl {
+		font-size: 10px;
+		color: var(--shell-text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
 	}
 
-	@media (max-width: 640px) {
-		.posture-grid {
+	.empty-hint {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		text-align: center;
+		padding: 0.5rem 0;
+	}
+
+	@media (max-width: 1200px) {
+		.inventory-main {
 			grid-template-columns: 1fr;
 		}
 	}

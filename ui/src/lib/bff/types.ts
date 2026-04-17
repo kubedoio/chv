@@ -308,15 +308,57 @@ export type TaskListItem = {
 	operation: string;
 	resource_kind: string;
 	resource_id: string;
+	resource_name?: string;
 	actor: string;
 	started_unix_ms: number;
-	finished_unix_ms: number;
+	finished_unix_ms?: number;
+	failure_summary?: string;
 };
 
 export type ListTasksResponse = {
 	items: TaskListItem[];
 	page: PageMeta;
 	filters: FilterMeta;
+};
+
+export type InfrastructureEvent = {
+	event_id: string;
+	severity: 'info' | 'warning' | 'critical';
+	type: string;
+	resource_kind: string;
+	resource_id: string;
+	resource_name?: string;
+	summary: string;
+	state: 'resolved' | 'unresolved';
+	occurred_at: string;
+};
+
+export type ListEventsResponse = {
+	items: InfrastructureEvent[];
+	page: PageMeta;
+	filters: FilterMeta;
+};
+
+export type MaintenanceWindow = {
+	window_id: string;
+	title: string;
+	status: 'active' | 'pending' | 'completed';
+	started_at: string;
+	expected_end_at: string;
+};
+
+export type MaintenanceNode = {
+	node_id: string;
+	name: string;
+	status: 'draining' | 'in_maintenance' | 'ready';
+	progress?: number;
+};
+
+export type GetMaintenanceResponse = {
+	windows: MaintenanceWindow[];
+	nodes: MaintenanceNode[];
+	pending_actions: number;
+	upgrade_available?: string;
 };
 
 // View-model types used by the UI

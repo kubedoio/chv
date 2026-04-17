@@ -1,11 +1,8 @@
 import { bffFetch } from './client';
 import { BFFEndpoints } from './endpoints';
+import type { GetMaintenanceResponse } from './types';
 
-export async function getMaintenance(token?: string): Promise<{
-	windows: Record<string, unknown>[];
-	nodes: Record<string, unknown>[];
-	pending_actions: number;
-}> {
+export async function getMaintenance(token?: string): Promise<GetMaintenanceResponse> {
 	return bffFetch(BFFEndpoints.getMaintenance, {
 		method: 'POST',
 		body: JSON.stringify({}),

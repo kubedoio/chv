@@ -19,9 +19,10 @@
 		rows: any[];
 		rowHref?: (row: any) => string | null;
 		emptySnippet?: Snippet;
+		cell?: Snippet<[{ column: Column, row: any }]>;
 	}
 
-	let { columns, rows, rowHref, emptySnippet }: Props = $props();
+	let { columns, rows, rowHref, emptySnippet, cell }: Props = $props();
 
 	function isBadge(val: any): val is BadgeData {
 		return val && typeof val === 'object' && 'tone' in val && 'label' in val;
@@ -50,7 +51,9 @@
 						{#each columns as col, i}
 							{@const val = row[col.key]}
 							<td class="align-{col.align ?? 'left'}">
-								{#if i === 0 && rowHref?.(row)}
+								{#if cell}
+									{@render cell({ column: col, row })}
+								{:else if i === 0 && rowHref?.(row)}
 									<a href={rowHref(row)} class="row-link">
 										{val}
 									</a>
