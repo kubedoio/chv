@@ -16,11 +16,20 @@ pub async fn list_vms(
             COALESCE(vos.node_id, vds.target_node_id, v.node_id) AS node_id,
             COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown') AS power_state,
             COALESCE(vos.health_status, 'unknown') AS health,
-            COALESCE(vds.cpu_count::text, '') AS cpu,
-            COALESCE(pg_size_pretty(vds.memory_bytes), '') AS memory,
-            COALESCE(volume_counts.volume_count, 0)::int AS volume_count,
-            0::int AS nic_count,
-            COALESCE(last_task.operation_id, '') AS last_task
+            COALESCE(CAST(vds.cpu_count AS TEXT), '') AS cpu,
+            CASE WHEN vds.memory_bytes IS NULL THEN ''
+                 WHEN vds.memory_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(vds.memory_bytes AS REAL)/1073741824.0)
+                 WHEN vds.memory_bytes >= 1048576 THEN printf('%.1f MiB', CAST(vds.memory_bytes AS REAL)/1048576.0)
+                 WHEN vds.memory_bytes >= 1024 THEN printf('%.1f KiB', CAST(vds.memory_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', vds.memory_bytes) END AS memory,
+            COALESCE(volume_counts.volume_count, 0) AS volume_count,
+            COALESCE(nic_counts.nic_count, 0) AS nic_count,
+            COALESCE(
+                (SELECT operation_id FROM operations
+                 WHERE resource_kind = 'vm' AND resource_id = v.vm_id
+                 ORDER BY requested_at DESC LIMIT 1),
+                ''
+            ) AS last_task
         FROM vms v
         LEFT JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
         LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id
@@ -30,13 +39,11 @@ pub async fn list_vms(
             WHERE attached_vm_id IS NOT NULL
             GROUP BY attached_vm_id
         ) volume_counts ON v.vm_id = volume_counts.attached_vm_id
-        LEFT JOIN LATERAL (
-            SELECT operation_id
-            FROM operations
-            WHERE resource_kind = 'vm' AND resource_id = v.vm_id
-            ORDER BY requested_at DESC
-            LIMIT 1
-        ) last_task ON true
+        LEFT JOIN (
+            SELECT vm_id, COUNT(*) AS nic_count
+            FROM vm_nic_desired_state
+            GROUP BY vm_id
+        ) nic_counts ON v.vm_id = nic_counts.vm_id
         ORDER BY v.vm_id
         "#,
     )
@@ -90,8 +97,12 @@ pub async fn get_vm(
             COALESCE(vos.node_id, vds.target_node_id, v.node_id) AS node_id,
             COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown') AS power_state,
             COALESCE(vos.health_status, 'unknown') AS health,
-            COALESCE(vds.cpu_count::text, '') AS cpu,
-            COALESCE(pg_size_pretty(vds.memory_bytes), '') AS memory
+            COALESCE(CAST(vds.cpu_count AS TEXT), '') AS cpu,
+            CASE WHEN vds.memory_bytes IS NULL THEN ''
+                 WHEN vds.memory_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(vds.memory_bytes AS REAL)/1073741824.0)
+                 WHEN vds.memory_bytes >= 1048576 THEN printf('%.1f MiB', CAST(vds.memory_bytes AS REAL)/1048576.0)
+                 WHEN vds.memory_bytes >= 1024 THEN printf('%.1f KiB', CAST(vds.memory_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', vds.memory_bytes) END AS memory
         FROM vms v
         LEFT JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
         LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id
@@ -109,9 +120,9 @@ pub async fn get_vm(
                 r#"
                 SELECT
                     operation_id AS task_id,
-                    status::text AS status,
+                    status,
                     operation_type AS summary,
-                    EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS started_unix_ms
+                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms
                 FROM operations
                 WHERE resource_kind = 'vm' AND resource_id = $1
                 ORDER BY requested_at DESC
@@ -135,6 +146,77 @@ pub async fn get_vm(
                 })
                 .collect();
 
+            let attached_volumes = sqlx::query_as::<_, VmVolumeRow>(
+                r#"
+                SELECT
+                    v.volume_id,
+                    v.display_name AS name,
+                    CASE WHEN v.capacity_bytes IS NULL THEN ''
+                         WHEN v.capacity_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(v.capacity_bytes AS REAL)/1073741824.0)
+                         WHEN v.capacity_bytes >= 1048576 THEN printf('%.1f MiB', CAST(v.capacity_bytes AS REAL)/1048576.0)
+                         WHEN v.capacity_bytes >= 1024 THEN printf('%.1f KiB', CAST(v.capacity_bytes AS REAL)/1024.0)
+                         ELSE printf('%d B', v.capacity_bytes) END AS size,
+                    COALESCE(vds.device_name, '') AS device_name,
+                    COALESCE(vds.read_only, false) AS read_only,
+                    COALESCE(vos.health_status, 'unknown') AS health
+                FROM volume_desired_state vds
+                JOIN volumes v ON vds.volume_id = v.volume_id
+                LEFT JOIN volume_observed_state vos ON v.volume_id = vos.volume_id
+                WHERE vds.attached_vm_id = $1
+                "#,
+            )
+            .bind(vm_id)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to get vm volumes: {}", e)))?;
+
+            let volumes_json: Vec<Value> = attached_volumes
+                .into_iter()
+                .map(|v| {
+                    json!({
+                        "volume_id": v.volume_id,
+                        "name": v.name,
+                        "size": v.size,
+                        "device_name": v.device_name,
+                        "read_only": v.read_only,
+                        "health": v.health,
+                    })
+                })
+                .collect();
+
+            let attached_nics = sqlx::query_as::<_, VmNicRow>(
+                r#"
+                SELECT
+                    nv.nic_id,
+                    nv.network_id,
+                    COALESCE(n.display_name, nv.network_id) AS network_name,
+                    COALESCE(nv.mac_address, '') AS mac_address,
+                    COALESCE(nv.ip_address, '') AS ip_address,
+                    COALESCE(nv.nic_model, 'virtio') AS nic_model
+                FROM vm_nic_desired_state nv
+                LEFT JOIN networks n ON nv.network_id = n.network_id
+                WHERE nv.vm_id = $1
+                "#,
+            )
+            .bind(vm_id)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to get vm nics: {}", e)))?;
+
+            let nics_json: Vec<Value> = attached_nics
+                .into_iter()
+                .map(|n| {
+                    json!({
+                        "nic_id": n.nic_id,
+                        "network_id": n.network_id,
+                        "network_name": n.network_name,
+                        "mac_address": n.mac_address,
+                        "ip_address": n.ip_address,
+                        "nic_model": n.nic_model,
+                    })
+                })
+                .collect();
+
             Ok(Json(json!({
                 "summary": {
                     "vm_id": r.vm_id,
@@ -145,6 +227,8 @@ pub async fn get_vm(
                     "cpu": r.cpu,
                     "memory": r.memory,
                     "recent_tasks": tasks_json,
+                    "attached_volumes": volumes_json,
+                    "attached_nics": nics_json,
                 }
             })))
         }
@@ -215,4 +299,24 @@ struct RecentTaskRow {
     status: String,
     summary: String,
     started_unix_ms: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct VmVolumeRow {
+    volume_id: String,
+    name: String,
+    size: String,
+    device_name: String,
+    read_only: bool,
+    health: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct VmNicRow {
+    nic_id: String,
+    network_id: String,
+    network_name: String,
+    mac_address: String,
+    ip_address: String,
+    nic_model: String,
 }

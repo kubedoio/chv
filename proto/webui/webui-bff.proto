@@ -183,6 +183,19 @@ message MutateVolumeResponse {
   string summary = 4;
 }
 
+message MutateNetworkRequest {
+  string network_id = 1;
+  string action = 2;
+  bool force = 3;
+}
+
+message MutateNetworkResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string network_id = 3;
+  string summary = 4;
+}
+
 message ListVolumesRequest {
   uint32 page = 1;
   uint32 page_size = 2;
@@ -444,4 +457,5 @@ service WebUiMutationService {
   rpc MutateVm(MutateVmRequest) returns (MutateVmResponse);
   rpc MutateNode(MutateNodeRequest) returns (MutateNodeResponse);
   rpc MutateVolume(MutateVolumeRequest) returns (MutateVolumeResponse);
+  rpc MutateNetwork(MutateNetworkRequest) returns (MutateNetworkResponse);
 }

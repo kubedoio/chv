@@ -8,7 +8,7 @@ use chv_webui_bff::AppState;
 
 pub async fn list_operations(State(state): State<AppState>) -> impl IntoResponse {
     let rows = sqlx::query_as::<_, OperationRow>(
-        r#"SELECT operation_id, status::text as status FROM operations ORDER BY requested_at DESC LIMIT 100"#,
+        r#"SELECT operation_id, status FROM operations ORDER BY requested_at DESC LIMIT 100"#,
     )
     .fetch_all(&state.pool)
     .await;
@@ -33,7 +33,7 @@ pub async fn get_operation(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let row = sqlx::query_as::<_, OperationRow>(
-        r#"SELECT operation_id, status::text as status FROM operations WHERE operation_id = $1"#,
+        r#"SELECT operation_id, status FROM operations WHERE operation_id = $1"#,
     )
     .bind(&id)
     .fetch_optional(&state.pool)

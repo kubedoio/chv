@@ -58,7 +58,7 @@ pub async fn get_overview(
         SELECT
             message AS summary,
             'Cluster' AS scope,
-            severity::text AS severity
+            severity
         FROM alerts
         WHERE status != 'resolved'
         ORDER BY opened_at DESC
@@ -84,12 +84,12 @@ pub async fn get_overview(
         r#"
         SELECT
             operation_id AS task_id,
-            status::text AS status,
+            status,
             operation_type AS summary,
-            resource_kind::text AS resource_kind,
+            resource_kind,
             resource_id,
             operation_type AS operation,
-            EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS started_unix_ms
+            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms
         FROM operations
         ORDER BY requested_at DESC
         LIMIT 5

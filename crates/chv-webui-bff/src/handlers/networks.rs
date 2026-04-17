@@ -15,18 +15,16 @@ pub async fn list_networks(
             n.display_name AS name,
             COALESCE(nos.exposure_status, 'private') AS exposure,
             COALESCE(nos.health_status, 'unknown') AS health,
-            0::int AS attached_vms,
-            COALESCE(last_task.operation_type, '') AS last_task,
-            COALESCE(alert_counts.alerts, 0)::int AS alerts
+            (SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = n.network_id) AS attached_vms,
+            COALESCE(
+                (SELECT operation_type FROM operations
+                 WHERE resource_kind = 'network' AND resource_id = n.network_id
+                 ORDER BY requested_at DESC LIMIT 1),
+                ''
+            ) AS last_task,
+            COALESCE(alert_counts.alerts, 0) AS alerts
         FROM networks n
         LEFT JOIN network_observed_state nos ON n.network_id = nos.network_id
-        LEFT JOIN LATERAL (
-            SELECT operation_type
-            FROM operations
-            WHERE resource_kind = 'network' AND resource_id = n.network_id
-            ORDER BY requested_at DESC
-            LIMIT 1
-        ) last_task ON true
         LEFT JOIN (
             SELECT resource_id, COUNT(*) AS alerts
             FROM alerts
@@ -84,18 +82,19 @@ pub async fn get_network(
             n.display_name AS name,
             COALESCE(nos.exposure_status, 'private') AS exposure,
             COALESCE(nos.health_status, 'unknown') AS health,
-            COALESCE(last_task.operation_type, '') AS last_task,
-            COALESCE(alert_counts.alerts, 0)::int AS alerts,
-            n.created_at::text AS created_at
+            COALESCE(
+                (SELECT operation_type FROM operations
+                 WHERE resource_kind = 'network' AND resource_id = n.network_id
+                 ORDER BY requested_at DESC LIMIT 1),
+                ''
+            ) AS last_task,
+            COALESCE(alert_counts.alerts, 0) AS alerts,
+            n.created_at AS created_at,
+            COALESCE(nds.cidr, '') AS cidr,
+            COALESCE(nds.gateway, '') AS gateway
         FROM networks n
         LEFT JOIN network_observed_state nos ON n.network_id = nos.network_id
-        LEFT JOIN LATERAL (
-            SELECT operation_type
-            FROM operations
-            WHERE resource_kind = 'network' AND resource_id = n.network_id
-            ORDER BY requested_at DESC
-            LIMIT 1
-        ) last_task ON true
+        LEFT JOIN network_desired_state nds ON n.network_id = nds.network_id
         LEFT JOIN (
             SELECT resource_id, COUNT(*) AS alerts
             FROM alerts
@@ -118,8 +117,8 @@ pub async fn get_network(
             "health": r.health,
             "exposure": r.exposure,
             "policy": "default",
-            "cidr": "10.0.0.0/24",
-            "gateway": "10.0.0.1",
+            "cidr": r.cidr,
+            "gateway": r.gateway,
             "attached_vms": [],
             "created_at": r.created_at.unwrap_or_default(),
             "last_task": r.last_task,
@@ -149,4 +148,38 @@ struct NetworkDetailRow {
     last_task: String,
     alerts: i32,
     created_at: Option<String>,
+    cidr: String,
+    gateway: String,
+}
+
+pub async fn mutate_network(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let network_id = payload
+        .get("network_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
+        .to_string();
+
+    let action = payload
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing action".into()))?
+        .to_string();
+
+    let force = payload.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let response = state
+        .mutations
+        .mutate_network(network_id, action, force, claims.username)
+        .await?;
+
+    Ok(Json(json!({
+        "accepted": response.accepted,
+        "task_id": response.task_id,
+        "network_id": response.network_id,
+        "summary": response.summary,
+    })))
 }

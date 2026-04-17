@@ -20,9 +20,9 @@ VALUES (
     $4,
     $5,
     $6,
-    to_timestamp($7 / 1000.0),
-    to_timestamp($8 / 1000.0),
-    to_timestamp($8 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     hostname = EXCLUDED.hostname,
@@ -73,8 +73,8 @@ VALUES (
     $14,
     $15,
     $16,
-    to_timestamp($17 / 1000.0),
-    to_timestamp($17 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $17 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $17 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     architecture = EXCLUDED.architecture,
@@ -109,7 +109,7 @@ VALUES (
     $2,
     $3,
     $4,
-    to_timestamp($5 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $5 / 1000.0, 'unixepoch')
 )
 "#;
 
@@ -129,14 +129,14 @@ INSERT INTO node_desired_state (
 VALUES (
     $1,
     $2,
-    $3::node_state,
+    $3,
     $4,
     $5,
     $6,
     $7,
     $8,
-    to_timestamp($9 / 1000.0),
-    to_timestamp($9 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -153,7 +153,7 @@ ON CONFLICT (node_id) DO UPDATE SET
 const UPDATE_NODE_CERTIFICATE_SQL: &str = r#"
 UPDATE nodes SET
     certificate_serial = $2,
-    updated_at = now()
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 WHERE node_id = $1
 "#;
 
@@ -173,8 +173,8 @@ VALUES (
     $3,
     $4,
     $5,
-    to_timestamp($6 / 1000.0),
-    to_timestamp($7 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     operation_id = EXCLUDED.operation_id,
@@ -183,7 +183,7 @@ ON CONFLICT (node_id) DO UPDATE SET
     details = EXCLUDED.details,
     started_at = EXCLUDED.started_at,
     completed_at = EXCLUDED.completed_at,
-    updated_at = now()
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 "#;
 
 const PATCH_NODE_STATE_PRESERVING_POLICY_SQL: &str = r#"
@@ -202,14 +202,14 @@ INSERT INTO node_desired_state (
 VALUES (
     $1,
     $2,
-    $3::node_state,
+    $3,
     $4,
     $5,
     $6,
     false,
     NULL,
-    to_timestamp($7 / 1000.0),
-    to_timestamp($7 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -227,8 +227,8 @@ UPDATE node_desired_state SET
     requested_by = $3,
     updated_by = $4,
     scheduling_paused = $5,
-    requested_at = to_timestamp($6 / 1000.0),
-    updated_at = to_timestamp($6 / 1000.0)
+    requested_at = strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch')
 WHERE node_id = $1
 "#;
 
@@ -248,14 +248,14 @@ INSERT INTO node_desired_state (
 VALUES (
     $1,
     $2,
-    'Draining'::node_state,
+    'Draining',
     $3,
     $4,
     NULL,
     false,
     $5,
-    to_timestamp($6 / 1000.0),
-    to_timestamp($6 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,

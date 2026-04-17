@@ -19,10 +19,10 @@ INSERT INTO events (
     details
 )
 VALUES (
-    to_timestamp($1 / 1000.0),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $1 / 1000.0, 'unixepoch'),
     $2,
-    $3::event_severity,
-    $4::resource_kind,
+    $3,
+    $4,
     $5,
     $6,
     $7,

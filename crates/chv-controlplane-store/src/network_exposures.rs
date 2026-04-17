@@ -11,7 +11,7 @@ INSERT INTO network_exposures (
     network_id, service_name, protocol, listen_address, listen_port,
     target_address, target_port, exposure_policy, updated_at
 )
-VALUES ($1, $2, $3, $4::inet, $5, $6::inet, $7, $8, to_timestamp($9 / 1000.0))
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch'))
 ON CONFLICT (network_id, service_name) DO UPDATE SET
     protocol = EXCLUDED.protocol,
     listen_address = EXCLUDED.listen_address,

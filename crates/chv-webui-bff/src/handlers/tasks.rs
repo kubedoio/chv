@@ -32,13 +32,13 @@ pub async fn list_tasks(
         r#"
         SELECT
             operation_id AS task_id,
-            status::text AS status,
+            status,
             operation_type AS operation,
-            resource_kind::text AS resource_kind,
+            resource_kind,
             resource_id,
             requested_by AS actor,
-            EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS started_unix_ms,
-            EXTRACT(EPOCH FROM completed_at)::bigint * 1000 AS finished_unix_ms
+            CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms,
+            CAST(strftime('%s', completed_at) AS INTEGER) * 1000 AS finished_unix_ms
         FROM operations
         WHERE 1=1
         "#,
@@ -49,22 +49,22 @@ pub async fn list_tasks(
     if let Some(status) = filters.get("status").and_then(|v| v.as_str()) {
         if status != "all" {
             bindings.push(status.to_string());
-            query_sql.push_str(&format!(" AND status::text = ${}", bindings.len()));
+            query_sql.push_str(&format!(" AND status = ${}", bindings.len()));
         }
     }
 
     if let Some(resource_kind) = filters.get("resource_kind").and_then(|v| v.as_str()) {
         if resource_kind != "all" {
             bindings.push(resource_kind.to_string());
-            query_sql.push_str(&format!(" AND resource_kind::text = ${}", bindings.len()));
+            query_sql.push_str(&format!(" AND resource_kind = ${}", bindings.len()));
         }
     }
 
     if let Some(window) = filters.get("window").and_then(|v| v.as_str()) {
         match window {
-            "24h" => query_sql.push_str(" AND requested_at > now() - interval '24 hours'"),
-            "7d" => query_sql.push_str(" AND requested_at > now() - interval '7 days'"),
-            "30d" => query_sql.push_str(" AND requested_at > now() - interval '30 days'"),
+            "24h" => query_sql.push_str(" AND requested_at > datetime('now', '-24 hours')"),
+            "7d" => query_sql.push_str(" AND requested_at > datetime('now', '-7 days')"),
+            "30d" => query_sql.push_str(" AND requested_at > datetime('now', '-30 days')"),
             "active" => query_sql.push_str(
                 " AND status IN ('Pending', 'Accepted', 'Running')",
             ),
@@ -141,13 +141,13 @@ pub async fn stream_tasks(
                 r#"
                 SELECT
                     operation_id AS task_id,
-                    status::text AS status,
+                    status,
                     operation_type AS summary,
-                    resource_kind::text AS resource_kind,
+                    resource_kind,
                     resource_id,
-                    EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS event_unix_ms
+                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS event_unix_ms
                 FROM operations
-                WHERE requested_at > now() - interval '30 seconds'
+                WHERE requested_at > datetime('now', '-30 seconds')
                 "#,
             );
 
@@ -164,7 +164,7 @@ pub async fn stream_tasks(
 
             if !kinds.is_empty() {
                 let offset = ids.len();
-                sql.push_str(" AND resource_kind::text IN (");
+                sql.push_str(" AND resource_kind IN (");
                 for (i, _kind) in kinds.iter().enumerate() {
                     if i > 0 {
                         sql.push(',');

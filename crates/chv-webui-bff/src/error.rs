@@ -10,6 +10,7 @@ pub enum BffError {
     Internal(String),
     NotFound(String),
     BadRequest(String),
+    Unauthorized(String),
 }
 
 impl IntoResponse for BffError {
@@ -27,6 +28,7 @@ impl IntoResponse for BffError {
             ),
             BffError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone(), "NOT_FOUND"),
             BffError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone(), "BAD_REQUEST"),
+            BffError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone(), "UNAUTHORIZED"),
         };
 
         let body = Json(json!({

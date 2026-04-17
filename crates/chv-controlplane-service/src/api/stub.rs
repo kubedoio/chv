@@ -1,7 +1,7 @@
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::Json,
     Json as AxumJson,
 };
 use chv_webui_bff::auth::Claims;
@@ -13,23 +13,49 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub async fn login_handler(
     State(state): State<AppState>,
     AxumJson(payload): AxumJson<Value>,
-) -> impl axum::response::IntoResponse {
-    let username = payload
-        .get("username")
-        .and_then(|v| v.as_str())
-        .unwrap_or("admin");
+) -> Result<axum::response::Json<serde_json::Value>, chv_webui_bff::BffError> {
+    let username = match payload.get("username").and_then(|v| v.as_str()) {
+        Some(u) => u,
+        None => {
+            return Err(chv_webui_bff::BffError::BadRequest("missing username".into()));
+        }
+    };
 
-    let password = payload
-        .get("password")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let password = match payload.get("password").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => {
+            return Err(chv_webui_bff::BffError::BadRequest("missing password".into()));
+        }
+    };
 
-    if username != "admin" || password != "admin" {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid credentials"})),
-        )
-            .into_response();
+    // Look up user by username
+    let row = sqlx::query_as::<_, UserRow>(
+        "SELECT user_id, password_hash, role FROM users WHERE username = $1"
+    )
+    .bind(username)
+    .fetch_optional(&state.pool)
+    .await;
+
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Err(chv_webui_bff::BffError::Unauthorized("Invalid credentials".into()));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "db error during login");
+            return Err(chv_webui_bff::BffError::Internal("Internal error".into()));
+        }
+    };
+
+    let password_ok = match bcrypt::verify(password, &row.password_hash) {
+        Ok(ok) => ok,
+        Err(e) => {
+            tracing::error!(error = %e, "bcrypt verify error");
+            return Err(chv_webui_bff::BffError::Internal("Internal error".into()));
+        }
+    };
+    if !password_ok {
+        return Err(chv_webui_bff::BffError::Unauthorized("Invalid credentials".into()));
     }
 
     let exp = SystemTime::now()
@@ -39,9 +65,9 @@ pub async fn login_handler(
         + 7 * 24 * 60 * 60; // 7 days
 
     let claims = Claims {
-        sub: username.to_string(),
+        sub: row.user_id.clone(),
         username: username.to_string(),
-        role: "admin".to_string(),
+        role: row.role.clone(),
         exp,
     };
 
@@ -54,35 +80,29 @@ pub async fn login_handler(
         Ok(t) => t,
         Err(e) => {
             tracing::error!(error = %e, "failed to encode jwt token");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "failed to generate token"})),
-            )
-                .into_response();
+            return Err(chv_webui_bff::BffError::Internal("failed to generate token".into()));
         }
     };
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "token": token,
-            "user": {
-                "id": "00000000-0000-0000-0000-000000000001",
-                "username": username,
-                "role": "admin"
-            }
-        })),
-    )
-        .into_response()
+    Ok(axum::response::Json(serde_json::json!({
+        "token": token,
+        "user": {
+            "id": row.user_id,
+            "username": username,
+            "role": row.role,
+        }
+    })))
 }
 
-pub async fn me_handler() -> impl axum::response::IntoResponse {
+pub async fn me_handler(
+    chv_webui_bff::auth::BearerToken(claims): chv_webui_bff::auth::BearerToken,
+) -> impl axum::response::IntoResponse {
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "id": "00000000-0000-0000-0000-000000000001",
-            "username": "admin",
-            "role": "admin"
+            "id": claims.sub,
+            "username": claims.username,
+            "role": claims.role
         })),
     )
 }
@@ -183,4 +203,11 @@ pub async fn repair_install_stub(AxumJson(_payload): AxumJson<Value>) -> impl ax
             "message": "Repair completed"
         })),
     )
+}
+
+#[derive(sqlx::FromRow)]
+struct UserRow {
+    user_id: String,
+    password_hash: String,
+    role: String,
 }

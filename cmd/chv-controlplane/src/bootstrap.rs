@@ -26,10 +26,7 @@ pub async fn build_service(
         database_url: config.database.url.clone(),
         migrations_dir: config.database.migrations_dir.clone(),
         max_connections: config.database.max_connections,
-        min_connections: config.database.min_connections,
         acquire_timeout_secs: config.database.acquire_timeout_secs,
-        idle_timeout_secs: config.database.idle_timeout_secs,
-        max_lifetime_secs: config.database.max_lifetime_secs,
     };
 
     let pool = connect_pool(&store_config).await?;

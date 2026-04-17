@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chv_controlplane_store::StorePool;
 use chv_controlplane_types::domain::Generation;
 use chv_webui_bff::{BffError, MutationService};
-use chv_webui_bff_api::chv_webui_bff_v1::{MutateNodeResponse, MutateVmResponse, MutateVolumeResponse};
+use chv_webui_bff_api::chv_webui_bff_v1::{MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse};
 use control_plane_node_api::control_plane_node_api as proto;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -269,5 +269,15 @@ impl MutationService for ControlPlaneMutationService {
             volume_id,
             summary: result.human_summary,
         })
+    }
+
+    async fn mutate_network(
+        &self,
+        _network_id: String,
+        _action: String,
+        _force: bool,
+        _requested_by: String,
+    ) -> Result<MutateNetworkResponse, BffError> {
+        Err(BffError::NotImplemented)
     }
 }

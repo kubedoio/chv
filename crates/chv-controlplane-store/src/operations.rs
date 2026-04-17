@@ -22,17 +22,17 @@ INSERT INTO operations (
 VALUES (
     $1,
     $2,
-    $3::resource_kind,
+    $3,
     $4,
     $5,
-    $6::operation_status,
+    $6,
     $7,
     $8,
     $9,
     $10,
     $11,
-    to_timestamp($12 / 1000.0),
-    to_timestamp($12 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $12 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $12 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (idempotency_key) DO NOTHING
 "#;
@@ -40,7 +40,7 @@ ON CONFLICT (idempotency_key) DO NOTHING
 const SELECT_OPERATION_SQL: &str = r#"
 SELECT
     operation_id,
-    status::text
+    status
 FROM operations
 WHERE idempotency_key = $1
 "#;
@@ -48,15 +48,15 @@ WHERE idempotency_key = $1
 const UPDATE_OPERATION_STATUS_SQL: &str = r#"
 UPDATE operations
 SET
-    status = $2::operation_status,
+    status = $2,
     error_code = $3,
     error_message = $4,
     observed_generation = $5,
     updated_by = $6,
-    updated_at = to_timestamp($7 / 1000.0),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
     completed_at = CASE
-        WHEN $2::operation_status IN ('Succeeded', 'Failed', 'Rejected', 'Stale', 'Conflict')
-        THEN to_timestamp($7 / 1000.0)
+        WHEN $2 IN ('Succeeded', 'Failed', 'Rejected', 'Stale', 'Conflict')
+        THEN strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
         ELSE completed_at
     END
 WHERE operation_id = $1

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chv_webui_bff_api::chv_webui_bff_v1::{MutateNodeResponse, MutateVmResponse, MutateVolumeResponse};
+use chv_webui_bff_api::chv_webui_bff_v1::{MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse};
 
 use crate::error::BffError;
 
@@ -28,4 +28,12 @@ pub trait MutationService: Send + Sync {
         resize_bytes: Option<u64>,
         requested_by: String,
     ) -> Result<MutateVolumeResponse, BffError>;
+
+    async fn mutate_network(
+        &self,
+        network_id: String,
+        action: String,
+        force: bool,
+        requested_by: String,
+    ) -> Result<MutateNetworkResponse, BffError>;
 }

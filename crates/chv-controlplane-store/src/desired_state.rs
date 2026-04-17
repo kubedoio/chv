@@ -16,7 +16,7 @@ VALUES (
     $3,
     $4,
     $5,
-    to_timestamp($6 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (vm_id) DO UPDATE SET
     node_id = EXCLUDED.node_id,
@@ -54,8 +54,8 @@ VALUES (
     $9,
     $10,
     $11,
-    to_timestamp($12 / 1000.0),
-    to_timestamp($12 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $12 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $12 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (vm_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -89,7 +89,7 @@ VALUES (
     $4,
     $5,
     $6,
-    to_timestamp($7 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     node_id = EXCLUDED.node_id,
@@ -126,8 +126,8 @@ VALUES (
     $8,
     $9,
     $10,
-    to_timestamp($11 / 1000.0),
-    to_timestamp($11 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $11 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $11 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -156,7 +156,7 @@ VALUES (
     $2,
     $3,
     $4,
-    to_timestamp($5 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $5 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (network_id) DO UPDATE SET
     node_id = EXCLUDED.node_id,
@@ -181,8 +181,8 @@ VALUES (
     $3,
     $4,
     $5,
-    to_timestamp($6 / 1000.0),
-    to_timestamp($6 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (network_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -213,8 +213,8 @@ VALUES (
     $5,
     $6,
     $7,
-    to_timestamp($8 / 1000.0),
-    to_timestamp($8 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (vm_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -245,8 +245,8 @@ VALUES (
     $4,
     $5,
     $6,
-    to_timestamp($7 / 1000.0),
-    to_timestamp($7 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -276,8 +276,8 @@ VALUES (
     $4,
     $5,
     $6,
-    to_timestamp($7 / 1000.0),
-    to_timestamp($7 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -412,16 +412,19 @@ impl DesiredStateRepository {
             .await
             .map_err(|e| match &e {
                 sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
-                    let (entity, id) = match db_err.constraint() {
-                        Some(c) if c.ends_with("_attached_vm_id_fkey") => (
+                    // In SQLite, FK violations don't report constraint names.
+                    // If attached_vm_id was provided, the vm FK is the likely culprit.
+                    let (entity, id) = if input.attached_vm_id.is_some() {
+                        (
                             "vm",
                             input
                                 .attached_vm_id
                                 .as_ref()
                                 .map(|vm| vm.to_string())
                                 .unwrap_or_default(),
-                        ),
-                        _ => ("volume", input.volume_id.to_string()),
+                        )
+                    } else {
+                        ("volume", input.volume_id.to_string())
                     };
                     StoreError::NotFound { entity, id }
                 }

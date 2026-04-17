@@ -16,13 +16,13 @@ INSERT INTO node_observed_state (
 VALUES (
     $1,
     $2,
-    $3::node_state,
+    $3,
     $4,
     $5,
     $6,
-    CASE WHEN $7 IS NULL THEN NULL ELSE to_timestamp($7 / 1000.0) END,
-    to_timestamp($8 / 1000.0),
-    to_timestamp($8 / 1000.0)
+    CASE WHEN $7 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch') END,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -57,10 +57,10 @@ VALUES (
     $5,
     $6,
     $7,
-    CASE WHEN $8 IS NULL THEN NULL ELSE to_timestamp($8 / 1000.0) END,
+    CASE WHEN $8 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch') END,
     $9,
-    to_timestamp($10 / 1000.0),
-    to_timestamp($10 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $10 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $10 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (vm_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -96,9 +96,9 @@ VALUES (
     $5,
     $6,
     $7,
-    CASE WHEN $8 IS NULL THEN NULL ELSE to_timestamp($8 / 1000.0) END,
-    to_timestamp($9 / 1000.0),
-    to_timestamp($9 / 1000.0)
+    CASE WHEN $8 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch') END,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -129,9 +129,9 @@ VALUES (
     $3,
     $4,
     $5,
-    CASE WHEN $6 IS NULL THEN NULL ELSE to_timestamp($6 / 1000.0) END,
-    to_timestamp($7 / 1000.0),
-    to_timestamp($7 / 1000.0)
+    CASE WHEN $6 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch') END,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (network_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -146,8 +146,8 @@ ON CONFLICT (network_id) DO UPDATE SET
 const ACK_NODE_OBSERVED_GENERATION_SQL: &str = r#"
 UPDATE node_observed_state SET
     observed_generation = $2,
-    observed_at = to_timestamp($3 / 1000.0),
-    updated_at = to_timestamp($3 / 1000.0)
+    observed_at = strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch')
 WHERE node_id = $1
 "#;
 
@@ -163,8 +163,8 @@ VALUES (
     $1,
     $2,
     COALESCE((SELECT runtime_status FROM vm_observed_state WHERE vm_id = $1), ''),
-    to_timestamp($3 / 1000.0),
-    to_timestamp($3 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (vm_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -184,8 +184,8 @@ VALUES (
     $1,
     $2,
     COALESCE((SELECT runtime_status FROM volume_observed_state WHERE volume_id = $1), ''),
-    to_timestamp($3 / 1000.0),
-    to_timestamp($3 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -205,8 +205,8 @@ VALUES (
     $1,
     $2,
     COALESCE((SELECT runtime_status FROM network_observed_state WHERE network_id = $1), ''),
-    to_timestamp($3 / 1000.0),
-    to_timestamp($3 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (network_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -282,16 +282,20 @@ impl ObservedStateRepository {
             .await
             .map_err(|e| match &e {
                 sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
-                    let (entity, id) = match db_err.constraint() {
-                        Some(c) if c.ends_with("_node_id_fkey") => (
+                    // In SQLite, FK violations don't report constraint names.
+                    // If node_id was provided, the node FK is the likely culprit;
+                    // otherwise the vm_id FK failed (vm doesn't exist).
+                    let (entity, id) = if input.node_id.is_some() {
+                        (
                             "node",
                             input
                                 .node_id
                                 .as_ref()
                                 .map(|n| n.to_string())
                                 .unwrap_or_default(),
-                        ),
-                        _ => ("vm", input.vm_id.to_string()),
+                        )
+                    } else {
+                        ("vm", input.vm_id.to_string())
                     };
                     StoreError::NotFound { entity, id }
                 }
@@ -339,16 +343,20 @@ impl ObservedStateRepository {
             .await
             .map_err(|e| match &e {
                 sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
-                    let (entity, id) = match db_err.constraint() {
-                        Some(c) if c.ends_with("_attached_vm_id_fkey") => (
+                    // In SQLite, FK violations don't report constraint names.
+                    // If attached_vm_id was provided, the vm FK is the likely culprit;
+                    // otherwise the volume_id FK failed.
+                    let (entity, id) = if input.attached_vm_id.is_some() {
+                        (
                             "vm",
                             input
                                 .attached_vm_id
                                 .as_ref()
                                 .map(|v| v.to_string())
                                 .unwrap_or_default(),
-                        ),
-                        _ => ("volume", input.volume_id.to_string()),
+                        )
+                    } else {
+                        ("volume", input.volume_id.to_string())
                     };
                     StoreError::NotFound { entity, id }
                 }

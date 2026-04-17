@@ -40,7 +40,7 @@ async fn test_expired_bootstrap_token() {
     let repo = BootstrapTokenRepository::new(pool.clone());
 
     let hash = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"; // sha256("123")
-    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use, expires_at) VALUES ($1, true, now() - interval '1 hour')")
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use, expires_at) VALUES ($1, true, strftime('%Y-%m-%dT%H:%M:%SZ', strftime('%s','now') - 3600, 'unixepoch'))")
         .bind(hash)
         .execute(&pool)
         .await
@@ -330,7 +330,7 @@ async fn test_ack_node_generation_preserves_observed_state() {
         .unwrap();
 
     sqlx::query(
-        "INSERT INTO node_observed_state (node_id, observed_generation, observed_state, observed_at, updated_at) VALUES ($1, 1, 'Discovered', now(), now())",
+        "INSERT INTO node_observed_state (node_id, observed_generation, observed_state, observed_at, updated_at) VALUES ($1, 1, 'Discovered', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
     )
     .bind(node_id.as_str())
     .execute(&pool)
@@ -342,7 +342,7 @@ async fn test_ack_node_generation_preserves_observed_state() {
         .expect("ack should succeed when observed row exists");
 
     let row = sqlx::query(
-        "SELECT observed_generation, observed_state::text as observed_state FROM node_observed_state WHERE node_id = $1",
+        "SELECT observed_generation, observed_state FROM node_observed_state WHERE node_id = $1",
     )
     .bind(node_id.as_str())
     .fetch_one(&pool)
@@ -370,7 +370,7 @@ async fn test_ack_node_generation_rejects_missing_observed_row() {
 
     // Seed desired state but no observed state
     sqlx::query(
-        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused) VALUES ($1, 1, 'TenantReady', now(), now(), false)",
+        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused) VALUES ($1, 1, 'TenantReady', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), false)",
     )
     .bind(node_id.as_str())
     .execute(&pool)

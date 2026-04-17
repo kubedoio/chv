@@ -47,26 +47,103 @@ impl Reconciler {
             "reconcile tick"
         );
 
-        // Only act when tenant-ready
-        if !matches!(self.current_state().await, NodeState::TenantReady) {
-            return Ok(());
+        match self.current_state().await {
+            NodeState::Discovered => {
+                self.transition_state(NodeState::Bootstrapping).await?;
+            }
+            NodeState::Bootstrapping => {
+                // Probe stord: if reachable, advance to HostReady
+                match StordClient::connect(&self.stord_socket).await {
+                    Ok(_) => {
+                        self.transition_state(NodeState::HostReady).await?;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "stord not reachable, staying in Bootstrapping");
+                    }
+                }
+            }
+            NodeState::HostReady => {
+                // Verify stord can serve volume sessions, then advance to StorageReady
+                match StordClient::connect(&self.stord_socket).await {
+                    Ok(mut stord) => match stord.health_probe().await {
+                        Ok(_) => {
+                            self.transition_state(NodeState::StorageReady).await?;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "stord health_probe failed, staying in HostReady");
+                        }
+                    },
+                    Err(e) => {
+                        warn!(error = %e, "stord not reachable, staying in HostReady");
+                    }
+                }
+            }
+            NodeState::StorageReady => {
+                // Verify nwd can respond, then advance to NetworkReady
+                match NwdClient::connect(&self.nwd_socket).await {
+                    Ok(mut nwd) => match nwd.list_namespace_state().await {
+                        Ok(_) => {
+                            self.transition_state(NodeState::NetworkReady).await?;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "nwd list_namespace_state failed, staying in StorageReady");
+                        }
+                    },
+                    Err(e) => {
+                        warn!(error = %e, "nwd not reachable, staying in StorageReady");
+                    }
+                }
+            }
+            NodeState::NetworkReady => {
+                self.transition_state(NodeState::TenantReady).await?;
+            }
+            NodeState::TenantReady => {
+                self.reconcile_networks().await?;
+                self.reconcile_volumes().await?;
+                self.reconcile_vms().await?;
+            }
+            NodeState::Degraded | NodeState::Draining | NodeState::Maintenance | NodeState::Failed => {}
         }
 
-        self.reconcile_networks().await?;
-        self.reconcile_volumes().await?;
-        self.reconcile_vms().await?;
         Ok(())
     }
 
     async fn reconcile_networks(&mut self) -> Result<(), ChvError> {
-        let cache = self.cache.lock().await;
-        let mut desired_networks: BTreeSet<String> = cache.vm_network_ids().into_iter().collect();
-        desired_networks.extend(cache.network_fragments.keys().cloned());
+        // Build a map of network_id -> cidr from network fragments (spec_json).
+        // Falls back to the hardcoded default if the fragment has no subnet_cidr.
+        const DEFAULT_CIDR: &str = "10.0.0.0/24";
+
+        let (desired_networks, network_cidrs) = {
+            let cache = self.cache.lock().await;
+            let mut desired_networks: BTreeSet<String> =
+                cache.vm_network_ids().into_iter().collect();
+            desired_networks.extend(cache.network_fragments.keys().cloned());
+
+            let mut network_cidrs: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for (net_id, frag) in &cache.network_fragments {
+                let cidr = serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("subnet_cidr")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| DEFAULT_CIDR.to_string());
+                network_cidrs.insert(net_id.clone(), cidr);
+            }
+
+            (desired_networks, network_cidrs)
+        };
+        // Cache lock is dropped here — all subsequent operations are lock-free async I/O.
 
         let mut nwd = NwdClient::connect(&self.nwd_socket).await?;
         for net_id in &desired_networks {
             let bridge = format!("br-{}", net_id);
-            let cidr = "10.0.0.0/24"; // TODO: derive from fragment when available
+            let cidr = network_cidrs
+                .get(net_id)
+                .map(|s| s.as_str())
+                .unwrap_or(DEFAULT_CIDR);
             let op_id = format!("reconcile-network-ensure-{}", net_id);
             if let Err(e) = nwd
                 .ensure_network_topology(net_id, &bridge, cidr, Some(&op_id))
@@ -166,16 +243,34 @@ impl Reconciler {
             cache.volume_handles.insert(disk.volume_id.clone(), handle);
         }
 
+        const DEFAULT_NIC_CIDR: &str = "10.0.0.0/24";
         let mut nics = Vec::new();
         let mut nic_attachments = Vec::new();
         for nic in &vm_spec.nics {
             let nic_id = format!("{}-{}", vm_id, nic.network_id);
             let nic_op_id = format!("{}-attach-nic-{}", operation_id, nic_id);
+            // Read subnet_cidr from the network fragment if available; fall back to default.
+            let nic_cidr = {
+                let cache = self.cache.lock().await;
+                cache
+                    .network_fragments
+                    .get(&nic.network_id)
+                    .and_then(|frag| {
+                        serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("subnet_cidr")
+                                    .and_then(|c| c.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                    })
+                    .unwrap_or_else(|| DEFAULT_NIC_CIDR.to_string())
+            };
             if let Err(e) = nwd
                 .ensure_network_topology(
                     &nic.network_id,
                     &format!("br-{}", nic.network_id),
-                    "10.0.0.0/24",
+                    &nic_cidr,
                     Some(&nic_op_id),
                 )
                 .await
@@ -504,6 +599,25 @@ mod tests {
         )
         .await;
         assert!(rec.run_once().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reconciler_advances_from_discovered_to_bootstrapping() {
+        let cache = NodeCache {
+            node_state: "Discovered".to_string(),
+            ..Default::default()
+        };
+        let mut rec = Reconciler::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord-discovered.sock"),
+            PathBuf::from("/tmp/fake-nwd-discovered.sock"),
+        )
+        .await;
+        assert!(rec.run_once().await.is_ok());
+        assert_eq!(rec.current_state().await, NodeState::Bootstrapping);
     }
 
     #[tokio::test]

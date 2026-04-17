@@ -13,21 +13,19 @@ pub async fn get_maintenance(
         SELECT
             n.node_id,
             n.display_name AS name,
-            COALESCE(nos.observed_state::text, 'Unknown') AS observed_state,
-            COALESCE(nds.desired_state::text, 'Unknown') AS desired_state,
+            COALESCE(nos.observed_state, 'Unknown') AS observed_state,
+            COALESCE(nds.desired_state, 'Unknown') AS desired_state,
             COALESCE(nds.state_reason, '') AS reason,
-            COALESCE(task_counts.active_task, '') AS task_id
+            COALESCE(
+                (SELECT operation_id FROM operations
+                 WHERE resource_kind = 'node' AND resource_id = n.node_id
+                   AND status IN ('Pending', 'Accepted', 'Running')
+                 ORDER BY requested_at DESC LIMIT 1),
+                ''
+            ) AS task_id
         FROM nodes n
         LEFT JOIN node_desired_state nds ON n.node_id = nds.node_id
         LEFT JOIN node_observed_state nos ON n.node_id = nos.node_id
-        LEFT JOIN LATERAL (
-            SELECT operation_id AS active_task
-            FROM operations
-            WHERE resource_kind = 'node' AND resource_id = n.node_id
-              AND status IN ('Pending', 'Accepted', 'Running')
-            ORDER BY requested_at DESC
-            LIMIT 1
-        ) task_counts ON true
         WHERE nds.desired_state = 'Maintenance' OR nds.scheduling_paused = true
         ORDER BY n.node_id
         "#,
@@ -39,12 +37,12 @@ pub async fn get_maintenance(
     let windows = sqlx::query_as::<_, MaintenanceWindowRow>(
         r#"
         SELECT
-            maintenance_window_id::text AS window_id,
+            maintenance_window_id AS window_id,
             reason AS name,
             scope_id AS cluster,
             window_status AS status,
-            starts_at::text AS start_time,
-            ends_at::text AS end_time
+            starts_at AS start_time,
+            ends_at AS end_time
         FROM maintenance_windows
         WHERE window_status IN ('active', 'scheduled')
         ORDER BY starts_at

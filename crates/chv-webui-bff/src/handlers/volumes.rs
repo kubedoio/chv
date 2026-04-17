@@ -16,21 +16,23 @@ pub async fn list_volumes(
             v.node_id,
             COALESCE(vos.health_status, 'unknown') AS health,
             COALESCE(vds.desired_status, vos.runtime_status, 'Unknown') AS status,
-            COALESCE(pg_size_pretty(v.capacity_bytes), '') AS size,
+            CASE WHEN v.capacity_bytes IS NULL THEN ''
+                 WHEN v.capacity_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(v.capacity_bytes AS REAL)/1073741824.0)
+                 WHEN v.capacity_bytes >= 1048576 THEN printf('%.1f MiB', CAST(v.capacity_bytes AS REAL)/1048576.0)
+                 WHEN v.capacity_bytes >= 1024 THEN printf('%.1f KiB', CAST(v.capacity_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', v.capacity_bytes) END AS size,
             COALESCE(vds.attached_vm_id, '') AS attached_vm_id,
             COALESCE(vms.display_name, '') AS attached_vm_name,
-            COALESCE(last_task.operation_type, '') AS last_task
+            COALESCE(
+                (SELECT operation_type FROM operations
+                 WHERE resource_kind = 'volume' AND resource_id = v.volume_id
+                 ORDER BY requested_at DESC LIMIT 1),
+                ''
+            ) AS last_task
         FROM volumes v
         LEFT JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
         LEFT JOIN vms ON vds.attached_vm_id = vms.vm_id
         LEFT JOIN volume_observed_state vos ON v.volume_id = vos.volume_id
-        LEFT JOIN LATERAL (
-            SELECT operation_type
-            FROM operations
-            WHERE resource_kind = 'volume' AND resource_id = v.volume_id
-            ORDER BY requested_at DESC
-            LIMIT 1
-        ) last_task ON true
         ORDER BY v.volume_id
         "#,
     )
@@ -82,7 +84,11 @@ pub async fn get_volume(
             v.display_name AS name,
             v.node_id,
             COALESCE(vos.health_status, 'unknown') AS health,
-            COALESCE(pg_size_pretty(v.capacity_bytes), '') AS size,
+            CASE WHEN v.capacity_bytes IS NULL THEN ''
+                 WHEN v.capacity_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(v.capacity_bytes AS REAL)/1073741824.0)
+                 WHEN v.capacity_bytes >= 1048576 THEN printf('%.1f MiB', CAST(v.capacity_bytes AS REAL)/1048576.0)
+                 WHEN v.capacity_bytes >= 1024 THEN printf('%.1f KiB', CAST(v.capacity_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', v.capacity_bytes) END AS size,
             COALESCE(vds.desired_status, vos.runtime_status, 'Unknown') AS status,
             COALESCE(vds.attached_vm_id, '') AS attached_vm_id,
             COALESCE(vms.display_name, '') AS attached_vm_name,
@@ -90,18 +96,16 @@ pub async fn get_volume(
             COALESCE(vds.read_only, false) AS read_only,
             COALESCE(v.volume_kind, '') AS volume_kind,
             COALESCE(v.storage_class, '') AS storage_class,
-            COALESCE(last_task.operation_type, '') AS last_task
+            COALESCE(
+                (SELECT operation_type FROM operations
+                 WHERE resource_kind = 'volume' AND resource_id = v.volume_id
+                 ORDER BY requested_at DESC LIMIT 1),
+                ''
+            ) AS last_task
         FROM volumes v
         LEFT JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
         LEFT JOIN vms ON vds.attached_vm_id = vms.vm_id
         LEFT JOIN volume_observed_state vos ON v.volume_id = vos.volume_id
-        LEFT JOIN LATERAL (
-            SELECT operation_type
-            FROM operations
-            WHERE resource_kind = 'volume' AND resource_id = v.volume_id
-            ORDER BY requested_at DESC
-            LIMIT 1
-        ) last_task ON true
         WHERE v.volume_id = $1
         "#,
     )
@@ -116,10 +120,10 @@ pub async fn get_volume(
                 r#"
                 SELECT
                     operation_id AS task_id,
-                    status::text AS status,
+                    status,
                     operation_type AS summary,
                     operation_type AS operation,
-                    EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS started_unix_ms
+                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms
                 FROM operations
                 WHERE resource_kind = 'volume' AND resource_id = $1
                 ORDER BY requested_at DESC

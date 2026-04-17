@@ -160,6 +160,33 @@ export type GetVmRequest = {
 	vm_id: string;
 };
 
+export type AttachedVolume = {
+	volume_id: string;
+	name: string;
+	size: string;
+	device_name: string;
+	read_only: boolean;
+	health: string;
+};
+
+export type AttachedNic = {
+	nic_id: string;
+	network_id: string;
+	network_name: string;
+	mac_address: string;
+	ip_address: string;
+	nic_model: string;
+};
+
+export type VmEvent = {
+	event_id: string;
+	severity: string;
+	type: string;
+	summary: string;
+	occurred_at: string;
+	state: string;
+};
+
 export type VmSummary = {
 	vm_id: string;
 	name: string;
@@ -169,6 +196,8 @@ export type VmSummary = {
 	cpu: string;
 	memory: string;
 	recent_tasks: RelatedTask[];
+	attached_volumes?: AttachedVolume[];
+	attached_nics?: AttachedNic[];
 };
 
 export type GetVmResponse = {

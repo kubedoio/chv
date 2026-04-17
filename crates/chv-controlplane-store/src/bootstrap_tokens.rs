@@ -9,7 +9,7 @@ WHERE token_hash = $1
 
 const MARK_USED_SQL: &str = r#"
 UPDATE bootstrap_tokens
-SET used_at = now(), updated_at = now()
+SET used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 WHERE token_hash = $1 AND used_at IS NULL
 "#;
 

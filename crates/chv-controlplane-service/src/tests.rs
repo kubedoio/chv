@@ -105,6 +105,7 @@ async fn test_admin_nodes_endpoint() {
     .await
     .unwrap();
 
+
     let app = crate::api::router::admin_router(test_app_state(pool));
 
     let response = app
@@ -176,7 +177,7 @@ async fn test_publish_alert_persistence() {
     .await
     .unwrap();
 
-    sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES ($1, $2, 'node', 'node-1', 'Test', 'Pending', now())")
+    sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES (?, ?, 'node', 'node-1', 'Test', 'Pending', strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
         .bind(op_id)
         .bind("idem-123")
         .execute(&pool)
@@ -190,7 +191,7 @@ async fn test_publish_alert_persistence() {
     assert_eq!(result.result.unwrap().status, "ok");
 
     // VERIFY PERSISTENCE - use runtime query to avoid needing DATABASE_URL at compile time
-    let alert = sqlx::query("SELECT alert_type, operation_id FROM alerts WHERE node_id = $1")
+    let alert = sqlx::query("SELECT alert_type, operation_id FROM alerts WHERE node_id = ?")
         .bind("node-1")
         .fetch_one(&pool)
         .await
@@ -238,7 +239,7 @@ async fn test_enrollment_extended_inventory_persistence() {
 
     // Seed a bootstrap token for enrollment (sha256("123"))
     let hash = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3";
-    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES ($1, false)")
+    sqlx::query("INSERT INTO bootstrap_tokens (token_hash, one_time_use) VALUES (?, false)")
         .bind(hash)
         .execute(&pool)
         .await
@@ -275,7 +276,7 @@ async fn test_enrollment_extended_inventory_persistence() {
         .expect("Enrollment failed");
 
     // VERIFY PERSISTENCE
-    let node = sqlx::query("SELECT hostname FROM nodes WHERE node_id = $1")
+    let node = sqlx::query("SELECT hostname FROM nodes WHERE node_id = ?")
         .bind("node-new-1")
         .fetch_one(&pool)
         .await
@@ -283,7 +284,7 @@ async fn test_enrollment_extended_inventory_persistence() {
     let hostname: String = sqlx::Row::get(&node, "hostname");
     assert_eq!(hostname, "host-1");
 
-    let inv = sqlx::query("SELECT storage_classes, labels FROM node_inventory WHERE node_id = $1")
+    let inv = sqlx::query("SELECT storage_classes, labels FROM node_inventory WHERE node_id = ?")
         .bind("node-new-1")
         .fetch_one(&pool)
         .await
@@ -362,7 +363,7 @@ async fn test_report_bootstrap_result_persistence() {
 
     // Verify persistence
     let row =
-        sqlx::query("SELECT success, operation_id FROM node_bootstrap_results WHERE node_id = $1")
+        sqlx::query("SELECT success, operation_id FROM node_bootstrap_results WHERE node_id = ?")
             .bind("node-b1")
             .fetch_one(&pool)
             .await
@@ -523,7 +524,7 @@ async fn test_apply_vm_desired_state_persistence() {
 
     // Verify persistence in vm_desired_state
     let row =
-        sqlx::query("SELECT vm_id, desired_generation FROM vm_desired_state WHERE vm_id = $1")
+        sqlx::query("SELECT vm_id, desired_generation FROM vm_desired_state WHERE vm_id = ?")
             .bind("vm-1")
             .fetch_one(&pool)
             .await
@@ -584,7 +585,7 @@ async fn test_apply_network_desired_state_with_exposures() {
 
     // Verify persistence in network_exposures
     let row = sqlx::query(
-        "SELECT network_id, service_name, listen_port FROM network_exposures WHERE network_id = $1",
+        "SELECT network_id, service_name, listen_port FROM network_exposures WHERE network_id = ?",
     )
     .bind("net-1")
     .fetch_one(&pool)
@@ -659,7 +660,7 @@ async fn test_apply_node_desired_state_persistence() {
     // seed node
     sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-reconcile', 'host', 'host')")
         .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES ('op-node', 'idem-node', 'node', 'node-reconcile', 'Test', 'Pending', now())")
+    sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES ('op-node', 'idem-node', 'node', 'node-reconcile', 'Test', 'Pending', strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
         .execute(&pool).await.unwrap();
     let node_repo = NodeRepository::new(pool.clone());
     let desired_repo = DesiredStateRepository::new(pool.clone());
@@ -785,7 +786,7 @@ async fn test_create_vm_creates_operation() {
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
     let row =
-        sqlx::query("SELECT operation_id, status::text as status FROM operations WHERE operation_type = 'CreateVm'")
+        sqlx::query("SELECT operation_id, status FROM operations WHERE operation_type = 'CreateVm'")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -888,7 +889,7 @@ async fn test_drain_node_updates_desired_state() {
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
     let row = sqlx::query(
-        "SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1",
+        "SELECT desired_state FROM node_desired_state WHERE node_id = ?",
     )
     .bind("node-lifecycle-3")
     .fetch_one(&pool)
@@ -931,7 +932,7 @@ async fn test_enter_maintenance_updates_desired_state() {
     assert_eq!(resp.result.unwrap().status, "OK");
 
     let row = sqlx::query(
-        "SELECT desired_state::text as desired_state FROM node_desired_state WHERE node_id = $1",
+        "SELECT desired_state FROM node_desired_state WHERE node_id = ?",
     )
     .bind("node-maint")
     .fetch_one(&pool)
@@ -976,7 +977,7 @@ async fn test_create_vm_writes_desired_state() {
     let resp = service.create_vm(req).await.unwrap();
     assert_eq!(resp.result.unwrap().status, "OK");
 
-    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = $1")
+    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = ?")
         .bind("vm-1")
         .fetch_one(&pool)
         .await
@@ -1293,7 +1294,7 @@ async fn test_acknowledge_desired_state_version_persists_observed_generation() {
         .unwrap();
     assert_eq!(resp.result.unwrap().node_observed_generation, "5");
 
-    let row = sqlx::query("SELECT observed_generation FROM vm_observed_state WHERE vm_id = $1")
+    let row = sqlx::query("SELECT observed_generation FROM vm_observed_state WHERE vm_id = ?")
         .bind("vm-ack")
         .fetch_one(&pool)
         .await
@@ -1316,7 +1317,7 @@ async fn test_acknowledge_advances_operation_to_succeeded() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES ('op-ack2', 'idem-ack2', 'vm', 'vm-ack2', 'Test', 'Pending', now())")
+    sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES ('op-ack2', 'idem-ack2', 'vm', 'vm-ack2', 'Test', 'Pending', strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
         .execute(&pool).await.unwrap();
 
     let node_repo = NodeRepository::new(pool.clone());
@@ -1352,7 +1353,7 @@ async fn test_acknowledge_advances_operation_to_succeeded() {
         .await
         .unwrap();
 
-    let row = sqlx::query("SELECT status::text as status, observed_generation FROM operations WHERE operation_id = $1")
+    let row = sqlx::query("SELECT status, observed_generation FROM operations WHERE operation_id = ?")
         .bind("op-ack2")
         .fetch_one(&pool)
         .await
@@ -1380,7 +1381,7 @@ async fn test_acknowledge_preserves_existing_vm_runtime_status() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO vm_observed_state (vm_id, observed_generation, runtime_status, observed_at, updated_at) VALUES ('vm-ack-runtime', 1, 'Running', now(), now())",
+        "INSERT INTO vm_observed_state (vm_id, observed_generation, runtime_status, observed_at, updated_at) VALUES ('vm-ack-runtime', 1, 'Running', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
     )
     .execute(&pool)
     .await
@@ -1415,7 +1416,7 @@ async fn test_acknowledge_preserves_existing_vm_runtime_status() {
         .unwrap();
 
     let row = sqlx::query(
-        "SELECT observed_generation, runtime_status FROM vm_observed_state WHERE vm_id = $1",
+        "SELECT observed_generation, runtime_status FROM vm_observed_state WHERE vm_id = ?",
     )
     .bind("vm-ack-runtime")
     .fetch_one(&pool)
@@ -1568,7 +1569,7 @@ async fn test_start_vm_persists_desired_power_state_running() {
     service.start_vm(req).await.unwrap();
 
     let row = sqlx::query(
-        "SELECT desired_power_state, desired_status FROM vm_desired_state WHERE vm_id = $1",
+        "SELECT desired_power_state, desired_status FROM vm_desired_state WHERE vm_id = ?",
     )
     .bind("vm-start")
     .fetch_one(&pool)
@@ -1597,7 +1598,7 @@ async fn test_start_vm_preserves_existing_vm_shape() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_at, updated_at, target_node_id, cpu_count, memory_bytes, image_ref, boot_mode, desired_power_state) VALUES ('vm-preserve', 1, 'seeded', now(), now(), 'node-vm-preserve', 4, 8192, 'image-a', 'uefi', 'Stopped')",
+        "INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_at, updated_at, target_node_id, cpu_count, memory_bytes, image_ref, boot_mode, desired_power_state) VALUES ('vm-preserve', 1, 'seeded', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'node-vm-preserve', 4, 8192, 'image-a', 'uefi', 'Stopped')",
     )
     .execute(&pool)
     .await
@@ -1625,7 +1626,7 @@ async fn test_start_vm_preserves_existing_vm_shape() {
     service.start_vm(req).await.unwrap();
 
     let row = sqlx::query(
-        "SELECT cpu_count, memory_bytes, image_ref, boot_mode, desired_power_state FROM vm_desired_state WHERE vm_id = $1",
+        "SELECT cpu_count, memory_bytes, image_ref, boot_mode, desired_power_state FROM vm_desired_state WHERE vm_id = ?",
     )
     .bind("vm-preserve")
     .fetch_one(&pool)
@@ -1681,7 +1682,7 @@ async fn test_stop_vm_persists_desired_power_state_stopped() {
 
     service.stop_vm(req).await.unwrap();
 
-    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = $1")
+    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = ?")
         .bind("vm-stop")
         .fetch_one(&pool)
         .await
@@ -1722,7 +1723,7 @@ async fn test_reboot_vm_persists_desired_power_state_rebooting() {
 
     service.reboot_vm(req).await.unwrap();
 
-    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = $1")
+    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = ?")
         .bind("vm-reboot")
         .fetch_one(&pool)
         .await
@@ -1769,7 +1770,7 @@ async fn test_delete_vm_persists_desired_power_state_deleted() {
 
     service.delete_vm(req).await.unwrap();
 
-    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = $1")
+    let row = sqlx::query("SELECT desired_power_state FROM vm_desired_state WHERE vm_id = ?")
         .bind("vm-del")
         .fetch_one(&pool)
         .await
@@ -1819,7 +1820,7 @@ async fn test_attach_volume_persists_attached_vm_id() {
 
     service.attach_volume(req).await.unwrap();
 
-    let row = sqlx::query("SELECT attached_vm_id FROM volume_desired_state WHERE volume_id = $1")
+    let row = sqlx::query("SELECT attached_vm_id FROM volume_desired_state WHERE volume_id = ?")
         .bind("vol-attach")
         .fetch_one(&pool)
         .await
@@ -1867,7 +1868,7 @@ async fn test_detach_volume_clears_attached_vm_id() {
 
     service.detach_volume(req).await.unwrap();
 
-    let row = sqlx::query("SELECT attached_vm_id FROM volume_desired_state WHERE volume_id = $1")
+    let row = sqlx::query("SELECT attached_vm_id FROM volume_desired_state WHERE volume_id = ?")
         .bind("vol-detach")
         .fetch_one(&pool)
         .await
@@ -1910,7 +1911,7 @@ async fn test_resize_volume_persists_resize_to_bytes() {
 
     service.resize_volume(req).await.unwrap();
 
-    let row = sqlx::query("SELECT resize_to_bytes FROM volume_desired_state WHERE volume_id = $1")
+    let row = sqlx::query("SELECT resize_to_bytes FROM volume_desired_state WHERE volume_id = ?")
         .bind("vol-resize")
         .fetch_one(&pool)
         .await
@@ -1942,7 +1943,7 @@ async fn test_resize_volume_preserves_existing_volume_shape() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO volume_desired_state (volume_id, desired_generation, desired_status, requested_at, updated_at, attached_vm_id, attachment_mode, device_name, read_only, resize_to_bytes) VALUES ('vol-preserve', 1, 'seeded', now(), now(), 'vm-preserve-attach', 'rw', '/dev/vdb', true, NULL)",
+        "INSERT INTO volume_desired_state (volume_id, desired_generation, desired_status, requested_at, updated_at, attached_vm_id, attachment_mode, device_name, read_only, resize_to_bytes) VALUES ('vol-preserve', 1, 'seeded', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'vm-preserve-attach', 'rw', '/dev/vdb', true, NULL)",
     )
     .execute(&pool)
     .await
@@ -1971,7 +1972,7 @@ async fn test_resize_volume_preserves_existing_volume_shape() {
     service.resize_volume(req).await.unwrap();
 
     let volume = sqlx::query(
-        "SELECT capacity_bytes, volume_kind, storage_class FROM volumes WHERE volume_id = $1",
+        "SELECT capacity_bytes, volume_kind, storage_class FROM volumes WHERE volume_id = ?",
     )
     .bind("vol-preserve")
     .fetch_one(&pool)
@@ -1985,7 +1986,7 @@ async fn test_resize_volume_preserves_existing_volume_shape() {
     assert_eq!(storage_class, Some("ssd".to_string()));
 
     let desired = sqlx::query(
-        "SELECT attached_vm_id, attachment_mode, device_name, read_only, resize_to_bytes FROM volume_desired_state WHERE volume_id = $1",
+        "SELECT attached_vm_id, attachment_mode, device_name, read_only, resize_to_bytes FROM volume_desired_state WHERE volume_id = ?",
     )
     .bind("vol-preserve")
     .fetch_one(&pool)
@@ -2014,7 +2015,7 @@ async fn test_pause_node_scheduling_persists_scheduling_paused() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused) VALUES ('node-pause', 1, 'TenantReady', now(), now(), false)",
+        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused) VALUES ('node-pause', 1, 'TenantReady', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), false)",
     )
     .execute(&pool)
     .await
@@ -2039,7 +2040,7 @@ async fn test_pause_node_scheduling_persists_scheduling_paused() {
 
     service.pause_node_scheduling(req).await.unwrap();
 
-    let row = sqlx::query("SELECT scheduling_paused FROM node_desired_state WHERE node_id = $1")
+    let row = sqlx::query("SELECT scheduling_paused FROM node_desired_state WHERE node_id = ?")
         .bind("node-pause")
         .fetch_one(&pool)
         .await
@@ -2059,7 +2060,7 @@ async fn test_pause_node_scheduling_preserves_existing_desired_state() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused, allow_workload_stop) VALUES ('node-pause-preserve', 1, 'Draining', now(), now(), false, true)",
+        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused, allow_workload_stop) VALUES ('node-pause-preserve', 1, 'Draining', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), false, true)",
     )
     .execute(&pool)
     .await
@@ -2086,7 +2087,7 @@ async fn test_pause_node_scheduling_preserves_existing_desired_state() {
     service.pause_node_scheduling(req).await.unwrap();
 
     let row = sqlx::query(
-        "SELECT desired_state::text as desired_state, scheduling_paused, allow_workload_stop FROM node_desired_state WHERE node_id = $1",
+        "SELECT desired_state, scheduling_paused, allow_workload_stop FROM node_desired_state WHERE node_id = ?",
     )
     .bind("node-pause-preserve")
     .fetch_one(&pool)
@@ -2107,7 +2108,7 @@ async fn test_resume_node_scheduling_clears_scheduling_paused() {
     sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-resume', 'host', 'host')")
         .execute(&pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused) VALUES ('node-resume', 1, 'TenantReady', now(), now(), true)",
+        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused) VALUES ('node-resume', 1, 'TenantReady', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), true)",
     )
     .execute(&pool)
     .await
@@ -2132,7 +2133,7 @@ async fn test_resume_node_scheduling_clears_scheduling_paused() {
 
     service.resume_node_scheduling(req).await.unwrap();
 
-    let row = sqlx::query("SELECT scheduling_paused FROM node_desired_state WHERE node_id = $1")
+    let row = sqlx::query("SELECT scheduling_paused FROM node_desired_state WHERE node_id = ?")
         .bind("node-resume")
         .fetch_one(&pool)
         .await
@@ -2182,7 +2183,7 @@ async fn test_pause_node_scheduling_rejects_missing_desired_state() {
     }
 
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM node_desired_state WHERE node_id = $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM node_desired_state WHERE node_id = ?")
             .bind("node-pause-missing")
             .fetch_one(&pool)
             .await
@@ -2231,7 +2232,7 @@ async fn test_resume_node_scheduling_rejects_missing_desired_state() {
     }
 
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM node_desired_state WHERE node_id = $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM node_desired_state WHERE node_id = ?")
             .bind("node-resume-missing")
             .fetch_one(&pool)
             .await
@@ -2269,7 +2270,7 @@ async fn test_exit_maintenance_persists_tenant_ready() {
 
     service.exit_maintenance(req).await.unwrap();
 
-    let row = sqlx::query("SELECT desired_state::text as desired_state, scheduling_paused FROM node_desired_state WHERE node_id = $1")
+    let row = sqlx::query("SELECT desired_state, scheduling_paused FROM node_desired_state WHERE node_id = ?")
         .bind("node-exit")
         .fetch_one(&pool)
         .await
@@ -2307,7 +2308,7 @@ async fn test_drain_node_persists_allow_workload_stop() {
 
     service.drain_node(req).await.unwrap();
 
-    let row = sqlx::query("SELECT allow_workload_stop FROM node_desired_state WHERE node_id = $1")
+    let row = sqlx::query("SELECT allow_workload_stop FROM node_desired_state WHERE node_id = ?")
         .bind("node-drain2")
         .fetch_one(&pool)
         .await
@@ -2354,7 +2355,7 @@ async fn test_lifecycle_operation_accepted_after_intent_persisted() {
     let resp = service.start_vm(req).await.unwrap();
     let op_id = resp.result.unwrap().operation_id;
 
-    let row = sqlx::query("SELECT status::text as status FROM operations WHERE operation_id = $1")
+    let row = sqlx::query("SELECT status FROM operations WHERE operation_id = ?")
         .bind(&op_id)
         .fetch_one(&pool)
         .await
@@ -2537,14 +2538,14 @@ async fn test_start_vm_fails_operation_when_vm_missing() {
 
     // Look up the operation by idempotency key to get the actual operation_id
     let operation_id: String =
-        sqlx::query_scalar("SELECT operation_id FROM operations WHERE idempotency_key = $1")
+        sqlx::query_scalar("SELECT operation_id FROM operations WHERE idempotency_key = ?")
             .bind("request:op-fail-test")
             .fetch_one(&pool)
             .await
             .unwrap();
 
     // Operation should be Failed, not Pending or Accepted
-    let row = sqlx::query("SELECT status::text as status FROM operations WHERE operation_id = $1")
+    let row = sqlx::query("SELECT status FROM operations WHERE operation_id = ?")
         .bind(&operation_id)
         .fetch_one(&pool)
         .await
@@ -2554,7 +2555,7 @@ async fn test_start_vm_fails_operation_when_vm_missing() {
 
     // OperationFailed event should exist
     let event = sqlx::query(
-        "SELECT event_type::text as event_type FROM events WHERE operation_id = $1 AND event_type = 'OperationFailed'",
+        "SELECT event_type FROM events WHERE operation_id = ? AND event_type = 'OperationFailed'",
     )
     .bind(&operation_id)
     .fetch_one(&pool)
@@ -2600,7 +2601,7 @@ async fn test_failed_operation_can_be_retried_idempotently() {
 
     // Retrieve the actual generated operation_id
     let operation_id: String =
-        sqlx::query_scalar("SELECT operation_id FROM operations WHERE idempotency_key = $1")
+        sqlx::query_scalar("SELECT operation_id FROM operations WHERE idempotency_key = ?")
             .bind("request:op-retry-test")
             .fetch_one(&pool)
             .await
@@ -2621,7 +2622,7 @@ async fn test_failed_operation_can_be_retried_idempotently() {
     // Should get the same operation idempotently
     assert_eq!(op_id2, operation_id);
 
-    let row = sqlx::query("SELECT status::text as status FROM operations WHERE operation_id = $1")
+    let row = sqlx::query("SELECT status FROM operations WHERE operation_id = ?")
         .bind(&operation_id)
         .fetch_one(&pool)
         .await

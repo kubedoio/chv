@@ -10,17 +10,25 @@ pub async fn list_nodes(State(state): State<AppState>) -> Result<Json<serde_json
         SELECT
             n.node_id,
             n.display_name AS name,
-            COALESCE(nos.observed_state::text, 'Unknown') AS state,
+            COALESCE(nos.observed_state, 'Unknown') AS state,
             COALESCE(nos.health_status, 'unknown') AS health,
-            COALESCE(ni.cpu_count::text, '') AS cpu,
-            COALESCE(pg_size_pretty(ni.memory_bytes), '') AS memory,
-            COALESCE(pg_size_pretty(ni.disk_bytes), '') AS storage,
+            COALESCE(CAST(ni.cpu_count AS TEXT), '') AS cpu,
+            CASE WHEN ni.memory_bytes IS NULL THEN ''
+                 WHEN ni.memory_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(ni.memory_bytes AS REAL)/1073741824.0)
+                 WHEN ni.memory_bytes >= 1048576 THEN printf('%.1f MiB', CAST(ni.memory_bytes AS REAL)/1048576.0)
+                 WHEN ni.memory_bytes >= 1024 THEN printf('%.1f KiB', CAST(ni.memory_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', ni.memory_bytes) END AS memory,
+            CASE WHEN ni.disk_bytes IS NULL THEN ''
+                 WHEN ni.disk_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(ni.disk_bytes AS REAL)/1073741824.0)
+                 WHEN ni.disk_bytes >= 1048576 THEN printf('%.1f MiB', CAST(ni.disk_bytes AS REAL)/1048576.0)
+                 WHEN ni.disk_bytes >= 1024 THEN printf('%.1f KiB', CAST(ni.disk_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', ni.disk_bytes) END AS storage,
             '' AS network,
             COALESCE(n.agent_version, '') AS version,
-            COALESCE(nds.desired_state::text = 'Maintenance', false) AS maintenance,
+            COALESCE(nds.desired_state = 'Maintenance', false) AS maintenance,
             COALESCE(nds.scheduling_paused, false) AS scheduling_paused,
-            COALESCE(task_counts.active_tasks, 0)::int AS active_tasks,
-            COALESCE(alert_counts.alerts, 0)::int AS alerts
+            COALESCE(task_counts.active_tasks, 0) AS active_tasks,
+            COALESCE(alert_counts.alerts, 0) AS alerts
         FROM nodes n
         LEFT JOIN node_observed_state nos ON n.node_id = nos.node_id
         LEFT JOIN node_desired_state nds ON n.node_id = nds.node_id
@@ -91,17 +99,25 @@ pub async fn get_node(
         SELECT
             n.node_id,
             n.display_name AS name,
-            COALESCE(nos.observed_state::text, 'Unknown') AS state,
+            COALESCE(nos.observed_state, 'Unknown') AS state,
             COALESCE(nos.health_status, 'unknown') AS health,
-            COALESCE(ni.cpu_count::text, '') AS cpu,
-            COALESCE(pg_size_pretty(ni.memory_bytes), '') AS memory,
-            COALESCE(pg_size_pretty(ni.disk_bytes), '') AS storage,
+            COALESCE(CAST(ni.cpu_count AS TEXT), '') AS cpu,
+            CASE WHEN ni.memory_bytes IS NULL THEN ''
+                 WHEN ni.memory_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(ni.memory_bytes AS REAL)/1073741824.0)
+                 WHEN ni.memory_bytes >= 1048576 THEN printf('%.1f MiB', CAST(ni.memory_bytes AS REAL)/1048576.0)
+                 WHEN ni.memory_bytes >= 1024 THEN printf('%.1f KiB', CAST(ni.memory_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', ni.memory_bytes) END AS memory,
+            CASE WHEN ni.disk_bytes IS NULL THEN ''
+                 WHEN ni.disk_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(ni.disk_bytes AS REAL)/1073741824.0)
+                 WHEN ni.disk_bytes >= 1048576 THEN printf('%.1f MiB', CAST(ni.disk_bytes AS REAL)/1048576.0)
+                 WHEN ni.disk_bytes >= 1024 THEN printf('%.1f KiB', CAST(ni.disk_bytes AS REAL)/1024.0)
+                 ELSE printf('%d B', ni.disk_bytes) END AS storage,
             '' AS network,
             COALESCE(n.agent_version, '') AS version,
-            COALESCE(nds.desired_state::text = 'Maintenance', false) AS maintenance,
+            COALESCE(nds.desired_state = 'Maintenance', false) AS maintenance,
             COALESCE(nds.scheduling_paused, false) AS scheduling_paused,
-            COALESCE(task_counts.active_tasks, 0)::int AS active_tasks,
-            COALESCE(alert_counts.alerts, 0)::int AS alerts
+            COALESCE(task_counts.active_tasks, 0) AS active_tasks,
+            COALESCE(alert_counts.alerts, 0) AS alerts
         FROM nodes n
         LEFT JOIN node_observed_state nos ON n.node_id = nos.node_id
         LEFT JOIN node_desired_state nds ON n.node_id = nds.node_id
@@ -136,8 +152,12 @@ pub async fn get_node(
                     v.display_name AS name,
                     COALESCE(vds.desired_power_state, vos.runtime_status, 'Unknown') AS power_state,
                     COALESCE(vos.health_status, 'unknown') AS health,
-                    COALESCE(vds.cpu_count::text, '') AS cpu,
-                    COALESCE(pg_size_pretty(vds.memory_bytes), '') AS memory
+                    COALESCE(CAST(vds.cpu_count AS TEXT), '') AS cpu,
+                    CASE WHEN vds.memory_bytes IS NULL THEN ''
+                         WHEN vds.memory_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(vds.memory_bytes AS REAL)/1073741824.0)
+                         WHEN vds.memory_bytes >= 1048576 THEN printf('%.1f MiB', CAST(vds.memory_bytes AS REAL)/1048576.0)
+                         WHEN vds.memory_bytes >= 1024 THEN printf('%.1f KiB', CAST(vds.memory_bytes AS REAL)/1024.0)
+                         ELSE printf('%d B', vds.memory_bytes) END AS memory
                 FROM vms v
                 LEFT JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
                 LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id
@@ -168,10 +188,10 @@ pub async fn get_node(
                 r#"
                 SELECT
                     operation_id AS task_id,
-                    status::text AS status,
+                    status,
                     operation_type AS summary,
                     operation_type AS operation,
-                    EXTRACT(EPOCH FROM requested_at)::bigint * 1000 AS started_unix_ms
+                    CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS started_unix_ms
                 FROM operations
                 WHERE resource_kind = 'node' AND resource_id = $1
                 ORDER BY requested_at DESC

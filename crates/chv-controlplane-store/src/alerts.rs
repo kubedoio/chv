@@ -15,14 +15,14 @@ INSERT INTO alerts (
 )
 VALUES (
     $1,
-    $2::event_severity,
-    $3::resource_kind,
+    $2,
+    $3,
     $4,
     $5,
     $6,
     $7,
     $8,
-    to_timestamp($9 / 1000.0)
+    strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch')
 )
 RETURNING alert_id
 "#;
@@ -37,8 +37,8 @@ impl AlertRepository {
         Self { pool }
     }
 
-    pub async fn create(&self, input: &AlertCreateInput) -> Result<uuid::Uuid, StoreError> {
-        let row: (uuid::Uuid,) = sqlx::query_as(CREATE_ALERT_SQL)
+    pub async fn create(&self, input: &AlertCreateInput) -> Result<String, StoreError> {
+        let row: (String,) = sqlx::query_as(CREATE_ALERT_SQL)
             .bind(&input.alert_type)
             .bind(input.severity.as_str())
             .bind(input.resource_kind.as_ref().map(|k| k.as_str()))

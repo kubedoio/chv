@@ -1,17 +1,19 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { Play, RotateCcw, Square } from 'lucide-svelte';
-	import { PageShell, StateBanner, Badge } from '$lib/components/system';
+	import { PageShell, StateBanner, Badge, ResourceTable } from '$lib/components/system';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import TaskReferenceCallout from '$lib/components/webui/TaskReferenceCallout.svelte';
 	import TaskTimelineItem from '$lib/components/webui/TaskTimelineItem.svelte';
 	import Button from '$lib/components/primitives/Button.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData, ActionData } from './$types';
-	import type { VmLifecycleAction, VmLifecycleActionResult } from '$lib/bff/types';
+	import type { VmLifecycleAction, VmLifecycleActionResult, VmEvent } from '$lib/bff/types';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
 	import { mapRelatedTask } from '$lib/webui/task-helpers';
 	import type { ShellTone } from '$lib/shell/app-shell';
+	import { BFFEndpoints } from '$lib/bff/endpoints';
+	import { bffFetch } from '$lib/bff/client';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
@@ -20,6 +22,33 @@
 	let pendingAction = $state<VmLifecycleAction | null>(null);
 	let confirmingAction = $state<VmLifecycleAction | null>(null);
 	let actionInput = $state<HTMLInputElement | null>(null);
+
+	let vmEvents = $state<VmEvent[]>([]);
+	let eventsLoading = $state(false);
+	let eventsLoaded = $state(false);
+
+	async function loadVmEvents(vmId: string) {
+		if (eventsLoaded || eventsLoading) return;
+		eventsLoading = true;
+		try {
+			const res = await bffFetch<{ items: VmEvent[] }>(BFFEndpoints.listVmEvents, {
+				method: 'POST',
+				body: JSON.stringify({ vm_id: vmId })
+			});
+			vmEvents = res?.items ?? [];
+		} catch {
+			vmEvents = [];
+		} finally {
+			eventsLoading = false;
+			eventsLoaded = true;
+		}
+	}
+
+	$effect(() => {
+		if (detail.currentTab === 'events' && detail.state === 'ready' && !eventsLoaded) {
+			loadVmEvents(detail.summary.vmId);
+		}
+	});
 
 	function toPowerStateTone(state: string): ShellTone {
 		const s = state.toLowerCase();
@@ -37,6 +66,15 @@
 		if (h === 'warning') return 'warning';
 		if (h === 'failed') return 'failed';
 		return 'unknown';
+	}
+
+	function toSeverityTone(severity: string): ShellTone {
+		switch (severity.toLowerCase()) {
+			case 'critical': return 'failed';
+			case 'warning': return 'warning';
+			case 'info': return 'unknown';
+			default: return 'unknown';
+		}
 	}
 
 	const mutationResult = $derived<VmLifecycleActionResult | null>(
@@ -100,6 +138,74 @@
 		confirmingAction = null;
 		pendingAction = null;
 	}
+
+	// Volume table
+	const volumeColumns = [
+		{ key: 'name', label: 'Name' },
+		{ key: 'size', label: 'Size' },
+		{ key: 'device', label: 'Device' },
+		{ key: 'read_only', label: 'Read-only' },
+		{ key: 'health', label: 'Health' }
+	];
+
+	const volumeRows = $derived(
+		(detail.summary.attachedVolumes ?? []).map((v) => ({
+			volume_id: v.volume_id,
+			name: v.name,
+			size: v.size,
+			device: v.device_name,
+			read_only: v.read_only ? 'Yes' : 'No',
+			health: { label: v.health, tone: toHealthTone(v.health) }
+		}))
+	);
+
+	// NIC table
+	const nicColumns = [
+		{ key: 'nic_id', label: 'NIC ID' },
+		{ key: 'network', label: 'Network' },
+		{ key: 'mac_address', label: 'MAC Address' },
+		{ key: 'ip_address', label: 'IP Address' },
+		{ key: 'model', label: 'Model' }
+	];
+
+	const nicRows = $derived(
+		(detail.summary.attachedNics ?? []).map((n) => ({
+			nic_id: n.nic_id,
+			network: n.network_name || n.network_id,
+			mac_address: n.mac_address,
+			ip_address: n.ip_address,
+			model: n.nic_model
+		}))
+	);
+
+	// Events table
+	const eventColumns = [
+		{ key: 'severity', label: 'Severity' },
+		{ key: 'type', label: 'Type' },
+		{ key: 'summary', label: 'Summary' },
+		{ key: 'occurred_at', label: 'Occurred At' }
+	];
+
+	const eventRows = $derived(
+		vmEvents.map((e) => ({
+			event_id: e.event_id,
+			severity: { label: e.severity, tone: toSeverityTone(e.severity) },
+			type: e.type,
+			summary: e.summary,
+			occurred_at: (() => {
+				try {
+					return new Date(e.occurred_at).toLocaleString('en-US', {
+						month: 'short',
+						day: 'numeric',
+						hour: 'numeric',
+						minute: '2-digit'
+					});
+				} catch {
+					return e.occurred_at;
+				}
+			})()
+		}))
+	);
 </script>
 
 <PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
@@ -247,18 +353,16 @@
 				</div>
 			</article>
 		{:else if detail.currentTab === 'volumes'}
-			<StateBanner
-				variant="empty"
-				title="Volume details not yet available"
-				description="The BFF does not yet expose volume details for this VM."
-				hint="This tab will populate once the volume endpoint is implemented."
+			<ResourceTable
+				columns={volumeColumns}
+				rows={volumeRows}
+				emptyTitle="No volumes attached."
 			/>
 		{:else if detail.currentTab === 'networks'}
-			<StateBanner
-				variant="empty"
-				title="Network details not yet available"
-				description="The BFF does not yet expose network details for this VM."
-				hint="This tab will populate once the network endpoint is implemented."
+			<ResourceTable
+				columns={nicColumns}
+				rows={nicRows}
+				emptyTitle="No NICs attached."
 			/>
 		{:else if detail.currentTab === 'tasks'}
 			<div class="detail-page__stack">
@@ -276,12 +380,15 @@
 				{/if}
 			</div>
 		{:else if detail.currentTab === 'events'}
-			<StateBanner
-				variant="empty"
-				title="Event history not yet available"
-				description="The BFF does not yet expose event history for this VM."
-				hint="This tab will populate once the events endpoint is implemented."
-			/>
+			{#if eventsLoading}
+				<div class="detail-page__loading">Loading events…</div>
+			{:else}
+				<ResourceTable
+					columns={eventColumns}
+					rows={eventRows}
+					emptyTitle="No events."
+				/>
+			{/if}
 		{:else}
 			<article class="detail-page__panel">
 				<div class="detail-page__eyebrow">Configuration</div>
@@ -413,6 +520,13 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.5rem;
+	}
+
+	.detail-page__loading {
+		padding: 2rem;
+		text-align: center;
+		color: var(--shell-text-muted);
+		font-size: 0.92rem;
 	}
 
 	@media (max-width: 1100px) {

@@ -1,7 +1,7 @@
 import type { PageLoad } from './$types';
 import { getStoredToken } from '$lib/api/client';
 import { getVm } from '$lib/bff/vms';
-import type { VmSummary, RelatedTask } from '$lib/bff/types';
+import type { VmSummary, RelatedTask, AttachedVolume, AttachedNic } from '$lib/bff/types';
 
 export type VmDetailModel = {
 	state: 'ready' | 'empty' | 'error';
@@ -14,6 +14,8 @@ export type VmDetailModel = {
 		health: string;
 		cpu: string;
 		memory: string;
+		attachedVolumes: AttachedVolume[];
+		attachedNics: AttachedNic[];
 	};
 	sections: { id: string; label: string; count?: number }[];
 	recentTasks: RelatedTask[];
@@ -57,7 +59,9 @@ function buildDetailModel(summary: VmSummary | null, currentTab: string): VmDeta
 				powerState: '',
 				health: '',
 				cpu: '',
-				memory: ''
+				memory: '',
+				attachedVolumes: [],
+				attachedNics: []
 			},
 			sections: buildSections(null),
 			recentTasks: [],
@@ -75,7 +79,9 @@ function buildDetailModel(summary: VmSummary | null, currentTab: string): VmDeta
 			powerState: summary.power_state,
 			health: summary.health,
 			cpu: summary.cpu,
-			memory: summary.memory
+			memory: summary.memory,
+			attachedVolumes: summary.attached_volumes ?? [],
+			attachedNics: summary.attached_nics ?? []
 		},
 		sections: buildSections(summary),
 		recentTasks: summary.recent_tasks ?? [],
@@ -101,7 +107,9 @@ export const load: PageLoad = async ({ params, url }) => {
 				powerState: '',
 				health: '',
 				cpu: '',
-				memory: ''
+				memory: '',
+				attachedVolumes: [],
+				attachedNics: []
 			},
 			sections: buildSections(null),
 			recentTasks: [],

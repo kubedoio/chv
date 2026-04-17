@@ -1,12 +1,10 @@
--- Remove NOT NULL constraint on desired_status columns so they can be omitted
--- when only domain-specific fields carry intent.
-ALTER TABLE vm_desired_state ALTER COLUMN desired_status DROP NOT NULL;
-ALTER TABLE volume_desired_state ALTER COLUMN desired_status DROP NOT NULL;
-ALTER TABLE network_desired_state ALTER COLUMN desired_status DROP NOT NULL;
+-- SQLite: columns are nullable by default; NOT NULL was never enforced in SQLite schema.
+-- This migration is a no-op for SQLite.
+-- Original intent: allow desired_status to be NULL in vm/volume/network_desired_state.
 
 -- Volume resize intent
-ALTER TABLE volume_desired_state ADD COLUMN IF NOT EXISTS resize_to_bytes bigint;
+ALTER TABLE volume_desired_state ADD COLUMN resize_to_bytes integer;
 
 -- Node scheduling policy and drain options
-ALTER TABLE node_desired_state ADD COLUMN IF NOT EXISTS scheduling_paused boolean NOT NULL DEFAULT false;
-ALTER TABLE node_desired_state ADD COLUMN IF NOT EXISTS allow_workload_stop boolean;
+ALTER TABLE node_desired_state ADD COLUMN scheduling_paused integer NOT NULL DEFAULT 0;
+ALTER TABLE node_desired_state ADD COLUMN allow_workload_stop integer;

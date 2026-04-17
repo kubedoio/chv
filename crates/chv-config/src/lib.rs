@@ -126,7 +126,7 @@ const DEFAULT_CONTROLPLANE_HTTP_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_CONTROLPLANE_LOG_LEVEL: &str = "info";
 const DEFAULT_CONTROLPLANE_RUNTIME_DIR: &str = "/run/chv/controlplane";
 const DEFAULT_CONTROLPLANE_DATABASE_URL: &str =
-    "postgres://postgres:postgres@127.0.0.1:5432/chv_controlplane";
+    "sqlite:///var/lib/chv/controlplane.db";
 const DEFAULT_CONTROLPLANE_MIGRATIONS_DIR: &str = "cmd/chv-controlplane/migrations";
 const DEFAULT_CONTROLPLANE_DB_MAX_CONNECTIONS: u32 = 16;
 const DEFAULT_CONTROLPLANE_DB_MIN_CONNECTIONS: u32 = 1;
