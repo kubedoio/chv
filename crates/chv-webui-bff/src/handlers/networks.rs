@@ -101,7 +101,7 @@ pub async fn get_network(
             WHERE status != 'resolved' AND resource_kind = 'network'
             GROUP BY resource_id
         ) alert_counts ON n.network_id = alert_counts.resource_id
-        WHERE n.network_id = $1
+        WHERE n.network_id = ?
         "#,
     )
     .bind(network_id)
@@ -110,20 +110,46 @@ pub async fn get_network(
     .map_err(|e| BffError::Internal(format!("failed to get network: {}", e)))?;
 
     match row {
-        Some(r) => Ok(Json(json!({
-            "network_id": r.network_id,
-            "name": r.name,
-            "scope": "fleet",
-            "health": r.health,
-            "exposure": r.exposure,
-            "policy": "default",
-            "cidr": r.cidr,
-            "gateway": r.gateway,
-            "attached_vms": [],
-            "created_at": r.created_at.unwrap_or_default(),
-            "last_task": r.last_task,
-            "alerts": r.alerts,
-        }))),
+        Some(r) => {
+            let attached_vms = sqlx::query_as::<_, AttachedVmRow>(
+                r#"SELECT v.vm_id, v.display_name,
+                          COALESCE(vos.runtime_status, 'unknown') AS runtime_status
+                   FROM vm_nic_desired_state vn
+                   JOIN vms v ON vn.vm_id = v.vm_id
+                   LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id
+                   WHERE vn.network_id = ?"#,
+            )
+            .bind(&r.network_id)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to get attached vms: {}", e)))?;
+
+            let attached_vms_json: Vec<serde_json::Value> = attached_vms
+                .iter()
+                .map(|vm| {
+                    serde_json::json!({
+                        "vm_id": vm.vm_id,
+                        "display_name": vm.display_name,
+                        "runtime_status": vm.runtime_status,
+                    })
+                })
+                .collect();
+
+            Ok(Json(json!({
+                "network_id": r.network_id,
+                "name": r.name,
+                "scope": "fleet",
+                "health": r.health,
+                "exposure": r.exposure,
+                "policy": "default",
+                "cidr": r.cidr,
+                "gateway": r.gateway,
+                "attached_vms": attached_vms_json,
+                "created_at": r.created_at.unwrap_or_default(),
+                "last_task": r.last_task,
+                "alerts": r.alerts,
+            })))
+        }
         None => Err(BffError::NotFound(format!("network {} not found", network_id))),
     }
 }
@@ -150,6 +176,13 @@ struct NetworkDetailRow {
     created_at: Option<String>,
     cidr: String,
     gateway: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct AttachedVmRow {
+    vm_id: String,
+    display_name: String,
+    runtime_status: String,
 }
 
 pub async fn mutate_network(
