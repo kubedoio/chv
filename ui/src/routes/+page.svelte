@@ -3,102 +3,15 @@
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import { PageShell, StateBanner, Badge, PostureStrip, PostureCard } from '$lib/components/system';
 	import { ArrowRight, Activity, AlertTriangle, Server, Box, Blocks } from 'lucide-svelte';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import { severityTone, statusTone, formatTimeAgo } from '$lib/webui/overview-helpers';
+	import { buildPostureChips, buildAttentionItems } from '$lib/webui/overview-derive';
 
 	let { data }: { data: PageData } = $props();
 
 	const page = getPageDefinition('/');
 	const overview = $derived(data.overview);
-
-	function severityTone(severity: string): ShellTone {
-		switch (severity) {
-			case 'critical':
-				return 'failed';
-			case 'warning':
-				return 'warning';
-			default:
-				return 'unknown';
-		}
-	}
-
-	function statusTone(status: string): ShellTone {
-		switch (status) {
-			case 'running':
-				return 'warning';
-			case 'failed':
-				return 'failed';
-			case 'succeeded':
-				return 'healthy';
-			default:
-				return 'unknown';
-		}
-	}
-
-	function formatTimeAgo(ms: number): string {
-		const seconds = Math.max(Math.round((Date.now() - ms) / 1000), 0);
-		if (seconds < 60) return `${seconds}s ago`;
-		const minutes = Math.round(seconds / 60);
-		if (minutes < 60) return `${minutes}m ago`;
-		const hours = Math.round(minutes / 60);
-		if (hours < 24) return `${hours}h ago`;
-		return `${Math.round(hours / 24)}d ago`;
-	}
-
-	const postureChips = $derived([
-		{ label: 'Clusters', value: overview.clusters_total },
-		{ label: 'Nodes', value: overview.nodes_total },
-		{ label: 'VMs running', value: overview.vms_running },
-		{
-			label: 'Degraded',
-			value: overview.clusters_degraded + overview.nodes_degraded,
-			variant: overview.clusters_degraded + overview.nodes_degraded > 0 ? ('degraded' as const) : undefined
-		},
-		{
-			label: 'Tasks',
-			value: overview.active_tasks,
-			variant: overview.active_tasks > 0 ? ('warning' as const) : undefined
-		},
-		{
-			label: 'Alerts',
-			value: overview.unresolved_alerts,
-			variant: overview.unresolved_alerts > 0 ? ('failed' as const) : undefined
-		}
-	]);
-
-	const attentionItems = $derived(
-		[
-			...(overview.clusters_degraded > 0
-				? [
-						{
-							type: 'cluster' as const,
-							title: `${overview.clusters_degraded} cluster${overview.clusters_degraded === 1 ? '' : 's'} degraded`,
-							detail: 'Review cluster posture for pressure or version skew.',
-							href: '/clusters'
-						}
-					]
-				: []),
-			...(overview.nodes_degraded > 0
-				? [
-						{
-							type: 'node' as const,
-							title: `${overview.nodes_degraded} node${overview.nodes_degraded === 1 ? '' : 's'} degraded`,
-							detail: 'Check node readiness and capacity pressure.',
-							href: '/nodes'
-						}
-					]
-				: []),
-			...(overview.unresolved_alerts > 0
-				? [
-						{
-							type: 'alert' as const,
-							title: `${overview.unresolved_alerts} unresolved alert${overview.unresolved_alerts === 1 ? '' : 's'}`,
-							detail: 'Alerts require operator inspection or acknowledgement.',
-							href: '/events'
-						}
-					]
-				: [])
-		].slice(0, 4)
-	);
+	const postureChips = $derived(buildPostureChips(overview));
+	const attentionItems = $derived(buildAttentionItems(overview));
 </script>
 
 <PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
