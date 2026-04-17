@@ -44,6 +44,8 @@ export type OverviewResponse = {
 	unresolved_alerts?: number;
 	maintenance_nodes?: number;
 	capacity_hotspots?: number;
+	cpu_usage_percent?: number;
+	memory_usage_percent?: number;
 	alerts?: { summary: string; scope: string; severity: string }[];
 	recent_tasks?: RecentTask[];
 };
@@ -99,6 +101,8 @@ export type NodeSummary = {
 	memory: string;
 	storage: string;
 	network: string;
+	uptime?: string;
+	last_checkin?: string;
 	recent_tasks: RelatedTask[];
 };
 
@@ -358,7 +362,11 @@ export type GetMaintenanceResponse = {
 	windows: MaintenanceWindow[];
 	nodes: MaintenanceNode[];
 	pending_actions: number;
+	pending_operator_actions?: { id: string; summary: string }[];
 	upgrade_available?: string;
+	current_version?: string;
+	reboot_required_nodes?: string[];
+	orchestrator_health?: string;
 };
 
 // View-model types used by the UI

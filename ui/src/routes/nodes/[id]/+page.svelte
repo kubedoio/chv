@@ -171,10 +171,7 @@
 					{#if detail.summary.health === 'healthy'}
 						<p class="empty-hint">No active alerts or hardware degradation detected.</p>
 					{:else}
-						<div class="alert-box tone-warning">
-							<span class="alert-label">Host Degraded</span>
-							<p class="alert-desc">This host is reporting warning signals in its IPMI logs. Manual inspection recommended.</p>
-						</div>
+						<p class="empty-hint">Host infrastructure signals indicate degradation. Review events for details.</p>
 					{/if}
 				</SectionCard>
 
@@ -183,8 +180,8 @@
 						columns={1}
 						properties={[
 							{ label: 'OS Version', value: detail.summary.version },
-							{ label: 'Uptime', value: '42 days' },
-							{ label: 'Last Check-in', value: '14s ago' }
+							{ label: 'Uptime', value: detail.summary.uptime || '—' },
+							{ label: 'Last Check-in', value: detail.summary.last_checkin || '—' }
 						]} 
 					/>
 				</SectionCard>

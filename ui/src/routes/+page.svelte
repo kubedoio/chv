@@ -65,12 +65,6 @@
 		/>
 	{:else}
 		<PageHeaderWithAction page={page}>
-			{#snippet actions()}
-				<div class="header-activity-hint">
-					<Activity size={12} class="pulse" />
-					<span>BFF Stream Active</span>
-				</div>
-			{/snippet}
 		</PageHeaderWithAction>
 
 		<div class="posture-strip-wrapper">
@@ -138,16 +132,16 @@
 						<div class="cap-item">
 							<div class="cap-header">
 								<span>Fleet CPU Allocation</span>
-								<span>72%</span>
+								<span>{Math.round(overview.cpu_usage_percent || 0)}%</span>
 							</div>
-							<div class="cap-bar"><div class="cap-fill" style="width: 72%"></div></div>
+							<div class="cap-bar"><div class="cap-fill" style="width: {overview.cpu_usage_percent || 0}%"></div></div>
 						</div>
 						<div class="cap-item">
 							<div class="cap-header">
 								<span>Fleet Memory Reservation</span>
-								<span>54%</span>
+								<span>{Math.round(overview.memory_usage_percent || 0)}%</span>
 							</div>
-							<div class="cap-bar"><div class="cap-fill" style="width: 54%"></div></div>
+							<div class="cap-bar"><div class="cap-fill" style="width: {overview.memory_usage_percent || 0}%"></div></div>
 						</div>
 					</div>
 				</SectionCard>

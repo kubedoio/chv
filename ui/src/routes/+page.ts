@@ -32,6 +32,8 @@ export type OverviewModel = {
 	unresolved_alerts: number;
 	maintenance_nodes: number;
 	capacity_hotspots: number;
+	cpu_usage_percent: number;
+	memory_usage_percent: number;
 	alerts: OverviewAlert[];
 	recent_tasks: OverviewTask[];
 	state: 'ready' | 'loading' | 'empty' | 'error';
@@ -49,6 +51,8 @@ const EMPTY_OVERVIEW: Omit<OverviewModel, 'state'> = {
 	unresolved_alerts: 0,
 	maintenance_nodes: 0,
 	capacity_hotspots: 0,
+	cpu_usage_percent: 0,
+	memory_usage_percent: 0,
 	alerts: [],
 	recent_tasks: []
 };
@@ -73,6 +77,8 @@ function toOverviewModel(res: OverviewResponse): OverviewModel {
 		unresolved_alerts: res.unresolved_alerts ?? 0,
 		maintenance_nodes: res.maintenance_nodes ?? 0,
 		capacity_hotspots: res.capacity_hotspots ?? 0,
+		cpu_usage_percent: res.cpu_usage_percent ?? 0,
+		memory_usage_percent: res.memory_usage_percent ?? 0,
 		alerts: (res.alerts ?? []).map((alert) => ({
 			summary: alert.summary,
 			scope: alert.scope,

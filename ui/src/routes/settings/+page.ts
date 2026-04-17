@@ -23,10 +23,7 @@ export const load: PageLoad = async () => {
 			environment: res.environment,
 			api_endpoint: res.api_endpoint,
 			session_ttl_hours: res.session_ttl_hours,
-			users: [
-				{ id: 'u-1', email: 'admin@chv.local', role: 'Admin' },
-				{ id: 'u-2', email: 'operator@chv.local', role: 'Operator' }
-			],
+			users: [],
 			state: 'ready'
 		};
 		return { settings: model };

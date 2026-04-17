@@ -59,19 +59,7 @@ export async function buildVmsLoad({ searchParams, token }: VmsLoadDeps): Promis
 
 	try {
 		const res = await listVms(req, token);
-		let fetchedItems = res.items;
-
-		// Inject believable infrastructure mocks if the inventory is empty
-		if (fetchedItems.length === 0) {
-			fetchedItems = [
-				{ vm_id: 'vm-01', name: 'app-prod-01', node_id: 'node-01', power_state: 'running', health: 'healthy', cpu: '25%', memory: '8.0 GB', volume_count: 1, nic_count: 2, last_task: 'Snapshot', alerts: 0 },
-				{ vm_id: 'vm-02', name: 'db-prod-01', node_id: 'node-02', power_state: 'running', health: 'healthy', cpu: '65%', memory: '32.0 GB', volume_count: 4, nic_count: 1, last_task: 'Storage Backup', alerts: 0 },
-				{ vm_id: 'vm-03', name: 'cache-prod-01', node_id: 'node-01', power_state: 'running', health: 'warning', cpu: '92%', memory: '16.0 GB', volume_count: 1, nic_count: 1, last_task: 'Resize', alerts: 2 },
-				{ vm_id: 'vm-04', name: 'worker-01', node_id: 'node-02', power_state: 'paused', health: 'healthy', cpu: '0%', memory: '4.0 GB', volume_count: 1, nic_count: 1, last_task: 'Pause', alerts: 0 },
-				{ vm_id: 'vm-05', name: 'legacy-app-01', node_id: 'node-03', power_state: 'crashed', health: 'critical', cpu: '0%', memory: '0.0 GB', volume_count: 2, nic_count: 1, last_task: 'Start', alerts: 5 },
-				{ vm_id: 'vm-06', name: 'build-node-01', node_id: 'node-05', power_state: 'stopped', health: 'healthy', cpu: '0%', memory: '0.0 GB', volume_count: 1, nic_count: 1, last_task: 'Stop', alerts: 0 }
-			];
-		}
+		const fetchedItems = res.items;
 
 		return {
 			items: fetchedItems,

@@ -106,21 +106,21 @@ const pageDefinitions: PageDefinition[] = [
 		],
 		summary: [
 			{
-				label: 'Health strip',
-				value: 'Fleet, nodes, VMs',
-				note: 'Scan high-level readiness before opening resource lists.',
+				label: 'Infrastructure health',
+				value: 'Nominal signals',
+				note: 'Fleet, nodes, and VM readiness overview.',
 				tone: 'healthy'
 			},
 			{
 				label: 'Recent work',
-				value: 'Tasks and failures',
-				note: 'Surface active operations and the last failed workflows.',
+				value: 'Active operations',
+				note: 'Surface running tasks and recent failures.',
 				tone: 'warning'
 			},
 			{
-				label: 'Capacity pulse',
-				value: 'CPU, memory, storage',
-				note: 'Reserve space for real capacity cards once BFF view models land.',
+				label: 'Capacity usage',
+				value: 'Resource pressure',
+				note: 'CPU, memory, and storage utilization hotspots.',
 				tone: 'unknown'
 			}
 		],
@@ -482,15 +482,15 @@ const pageDefinitions: PageDefinition[] = [
 				tone: 'healthy'
 			},
 			{
-				label: 'Operator task',
-				value: 'Source of new VMs',
-				note: 'The first slice should clarify what can be imported, cloned, or reused.',
+				label: 'Provisioning source',
+				value: 'Baseline images',
+				note: 'Managed boot images and reusable template definitions.',
 				tone: 'warning'
 			},
 			{
-				label: 'Follow-up flow',
-				value: 'Create VM from source',
-				note: 'Creation should route straight into visible task context once mutations exist.',
+				label: 'Workflow routing',
+				value: 'Provisioning pipeline',
+				note: 'Creation tasks route into the global task history.',
 				tone: 'unknown'
 			}
 		],
@@ -734,9 +734,9 @@ const pageDefinitions: PageDefinition[] = [
 				tone: 'warning'
 			},
 			{
-				label: 'Future depth',
-				value: 'Support workflows',
-				note: 'Diagnostic export and support tools can land later without widening the shell.',
+				label: 'Support integration',
+				value: 'Diagnostic tools',
+				note: 'Export logs and diagnostic bundles for assistance.',
 				tone: 'unknown'
 			}
 		],

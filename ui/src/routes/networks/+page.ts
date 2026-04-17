@@ -54,18 +54,7 @@ export const load: PageLoad = async ({ url }) => {
 
 	try {
 		const res = await listNetworks(token);
-		let fetchedItems = (res.items ?? []) as NetworkListItem[];
-
-		// Inject believable infrastructure mocks if the inventory is empty
-		if (fetchedItems.length === 0) {
-			fetchedItems = [
-				{ network_id: 'net-01', name: 'public-bridge', scope: 'global', health: 'healthy', attached_vms: 12, exposure: 'public', policy: 'allow-all', last_task: 'Created', alerts: 0 },
-				{ network_id: 'net-02', name: 'private-vpc-01', scope: 'cluster-01', health: 'healthy', attached_vms: 45, exposure: 'private', policy: 'default-deny', last_task: 'Subnet Add', alerts: 0 },
-				{ network_id: 'net-03', name: 'dmz-nat-01', scope: 'cluster-01', health: 'warning', attached_vms: 3, exposure: 'nat', policy: 'ingress-only', last_task: 'Route Update', alerts: 1 },
-				{ network_id: 'net-04', name: 'management-ipmi', scope: 'datacenter', health: 'healthy', attached_vms: 150, exposure: 'private', policy: 'system-managed', last_task: 'Audit', alerts: 0 },
-				{ network_id: 'net-05', name: 'storage-fab-01', scope: 'global', health: 'degraded', attached_vms: 8, exposure: 'private', policy: 'jumbo-frames', last_task: 'Port Reset', alerts: 2 }
-			];
-		}
+		const fetchedItems = (res.items ?? []) as NetworkListItem[];
 
 		const filtered = filterNetworks(fetchedItems, current);
 

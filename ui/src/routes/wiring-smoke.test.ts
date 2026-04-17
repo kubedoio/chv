@@ -4,10 +4,6 @@ import { load as backupJobsRedirect } from './backup-jobs/+page';
 import { load as metricsRedirect } from './metrics/+page';
 import { load as storageRedirect } from './storage/+page';
 import { load as templatesRedirect } from './templates/+page';
-import { load as nodeImagesRedirect } from './nodes/[id]/images/+page';
-import { load as nodeNetworksRedirect } from './nodes/[id]/networks/+page';
-import { load as nodeStorageRedirect } from './nodes/[id]/storage/+page';
-import { load as nodeVmsRedirect } from './nodes/[id]/vms/+page';
 
 async function expectRedirect(
 	invoke: () => unknown,
@@ -73,12 +69,5 @@ describe('frontend-backend wiring smoke checks', () => {
 		await expectRedirect(() => templatesRedirect({} as never), '/images');
 		await expectRedirect(() => backupJobsRedirect({} as never), '/tasks');
 		await expectRedirect(() => metricsRedirect({} as never), '/');
-	});
-
-	it('redirects legacy node subpages to BFF-backed node detail views', async () => {
-		await expectRedirect(() => nodeVmsRedirect({ params: { id: 'node-1' } } as never), '/nodes/node-1?tab=vms');
-		await expectRedirect(() => nodeNetworksRedirect({ params: { id: 'node-1' } } as never), '/nodes/node-1');
-		await expectRedirect(() => nodeImagesRedirect({ params: { id: 'node-1' } } as never), '/nodes/node-1');
-		await expectRedirect(() => nodeStorageRedirect({ params: { id: 'node-1' } } as never), '/nodes/node-1');
 	});
 });

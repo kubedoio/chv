@@ -92,14 +92,16 @@
 				<SectionCard title="Active Workloads" icon={Server}>
 					<div class="workload-summary">
 						<div class="w-stat">
-							<span class="val">--</span>
+							<span class="val">{summary.vmCount ?? '—'}</span>
 							<span class="lbl">Total VMs</span>
 						</div>
 						<div class="w-stat">
-							<span class="val">--</span>
+							<span class="val">{summary.vmHealthy ?? '—'}</span>
 							<span class="lbl">Healthy</span>
 						</div>
-						<p class="w-hint">Workload rollups are currently being calculated for this cluster.</p>
+						{#if summary.vmCount === undefined}
+							<p class="w-hint">Workload rollups are currently being calculated for this cluster.</p>
+						{/if}
 					</div>
 				</SectionCard>
 			</div>

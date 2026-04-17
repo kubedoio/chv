@@ -14,27 +14,20 @@
 	const page = getPageDefinition('/maintenance');
 	const maintenance = $derived(data.maintenance);
 
-	// Believable mock data for visualization if BFF is empty
-	const activeWindows = $derived(maintenance.windows.length > 0 ? maintenance.windows : [
-		{ window_id: 'w-01', title: 'Q2 Infrastructure Hardening', status: 'active', started_at: '2026-04-17T10:00:00Z', expected_end_at: '2026-04-18T18:00:00Z' }
-	]);
-
-	const drainingNodes = $derived(maintenance.nodes.length > 0 ? maintenance.nodes : [
-		{ node_id: 'n-01', name: 'chv-compute-04', status: 'draining', progress: 68 },
-		{ node_id: 'n-02', name: 'chv-compute-09', status: 'in_maintenance', progress: 100 }
-	]);
+	const activeWindows = $derived(maintenance.windows);
+	const drainingNodes = $derived(maintenance.nodes);
 
 	const upgradePostureProps = $derived([
-		{ label: 'Current Version', value: '2.4.12-stable' },
-		{ label: 'Pending Upgrades', value: maintenance.upgrade_available ? '1 Available' : 'Up to date', tone: (maintenance.upgrade_available ? 'warning' : 'healthy') as any },
-		{ label: 'Reboot Required', value: 'Nodes 04, 09', tone: 'warning' as any },
-		{ label: 'Orchestrator Health', value: 'Nominal', tone: 'healthy' as any }
+		{ label: 'Current Version', value: maintenance.current_version || 'Unavailable' },
+		{ label: 'Pending Upgrades', value: maintenance.upgrade_available ? 'Upgrades available' : 'Up to date', tone: (maintenance.upgrade_available ? 'warning' : 'healthy') as any },
+		{ label: 'Reboot Required', value: maintenance.reboot_required_nodes ? maintenance.reboot_required_nodes.join(', ') : 'None', tone: (maintenance.reboot_required_nodes?.length ? 'warning' : 'healthy') as any },
+		{ label: 'Orchestrator Health', value: maintenance.orchestrator_health || 'Unknown', tone: (maintenance.orchestrator_health === 'Nominal' ? 'healthy' : 'warning') as any }
 	]);
 
 	const stats = $derived([
 		{ label: 'Draining Nodes', value: drainingNodes.filter(n => n.status === 'draining').length, status: 'warning' as const },
 		{ label: 'In Maintenance', value: drainingNodes.filter(n => n.status === 'in_maintenance').length, status: 'neutral' as const },
-		{ label: 'Pending Actions', value: maintenance.pending_actions || 2, status: 'critical' as const },
+		{ label: 'Pending Actions', value: maintenance.pending_actions || 0, status: 'critical' as const },
 		{ label: 'Upgrade Ready', value: maintenance.upgrade_available ? 'Yes' : 'No', status: maintenance.upgrade_available ? 'warning' as const : 'healthy' as const }
 	]);
 </script>
@@ -122,34 +115,24 @@
 
 		<aside class="detail-side-span">
 			<SectionCard title="Pending Operator Action" icon={AlertCircle} badgeTone="warning">
-				<ul class="action-list">
-					<li>
-						<div class="action-item">
-							<span class="txt">Acknowledge Node-04 disk failure</span>
-							<button class="btn-secondary btn-xs">Acknowledge</button>
-						</div>
-					</li>
-					<li>
-						<div class="action-item">
-							<span class="txt">Approve drain of compute-pool-A</span>
-							<button class="btn-secondary btn-xs">Approve</button>
-						</div>
-					</li>
-				</ul>
+				{#if (maintenance.pending_operator_actions || []).length === 0}
+					<p class="empty-hint">No operator actions required.</p>
+				{:else}
+					<ul class="action-list">
+						{#each maintenance.pending_operator_actions as action}
+							<li>
+								<div class="action-item">
+									<span class="txt">{action.summary}</span>
+									<button class="btn-secondary btn-xs">Acknowledge</button>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				{/if}
 			</SectionCard>
 
 			<SectionCard title="Maintenance History" icon={Activity}>
-				<div class="history-preview">
-					<div class="h-item">
-						<span class="h-lbl">Host firmware updated</span>
-						<span class="h-time">12h ago</span>
-					</div>
-					<div class="h-item">
-						<span class="h-lbl">Certificate rotation success</span>
-						<span class="h-time">2d ago</span>
-					</div>
-					<a href="/tasks?query=maintenance" class="view-all">View full maintenance log <ChevronRight size={12} /></a>
-				</div>
+				<p class="empty-hint">No recent maintenance history available.</p>
 			</SectionCard>
 		</aside>
 	</main>

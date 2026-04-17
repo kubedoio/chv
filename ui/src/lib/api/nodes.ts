@@ -13,22 +13,6 @@ export type {
 
 import type { Node, TreeNode } from './types';
 
-// Backward compatibility - generates a default node placeholder
-// This is used by the UI when no nodes exist yet
-export function getDefaultNode(): Node {
-  return {
-    id: 'placeholder',
-    name: 'Datacenter Node',
-    hostname: 'connecting...',
-    ip_address: '...',
-    status: 'online',
-    is_local: false,
-    capabilities: undefined,
-    last_seen_at: '2024-01-01T00:00:00Z',
-    created_at: '2024-01-01T00:00:00Z',
-    updated_at: '2024-01-01T00:00:00Z'
-  };
-}
 
 // Tree navigation helper functions
 
