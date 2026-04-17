@@ -13,10 +13,10 @@
 
 	function getStatusClass(status?: string) {
 		switch (status) {
-			case 'healthy': return 'text-success-700';
-			case 'warning': return 'text-warning-700';
-			case 'critical': return 'text-danger-700';
-			default: return 'text-neutral-900';
+			case 'healthy': return 'stat-value--healthy';
+			case 'warning': return 'stat-value--warning';
+			case 'critical': return 'stat-value--critical';
+			default: return 'stat-value--neutral';
 		}
 	}
 </script>
@@ -58,5 +58,11 @@
 		font-size: var(--text-lg);
 		font-weight: 600;
 		font-variant-numeric: tabular-nums;
+		color: var(--shell-text);
 	}
+
+	.stat-value--healthy { color: var(--color-success); }
+	.stat-value--warning { color: var(--color-warning); }
+	.stat-value--critical { color: var(--color-danger); }
+	.stat-value--neutral { color: var(--shell-text); }
 </style>

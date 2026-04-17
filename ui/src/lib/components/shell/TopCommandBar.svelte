@@ -94,12 +94,6 @@
 		outline: none;
 	}
 
-	.command-bar__badges {
-		display: flex;
-		flex-wrap: wrap;
-		justify-content: flex-end;
-		gap: 0.55rem;
-	}
 
 	@media (max-width: 960px) {
 		.command-bar {

@@ -49,8 +49,8 @@
 	.app-shell__main {
 		display: grid;
 		align-content: start;
-		gap: 1rem;
-		padding: 1rem;
+		gap: 0.75rem;
+		padding: 0.75rem;
 	}
 
 	.app-shell__content {

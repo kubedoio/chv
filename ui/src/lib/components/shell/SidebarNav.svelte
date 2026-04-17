@@ -80,8 +80,7 @@
 		letter-spacing: 0.08em;
 	}
 
-	.app-nav__brand-title,
-	.app-nav__brand-subtitle {
+	.app-nav__brand-title {
 		line-height: 1.2;
 	}
 

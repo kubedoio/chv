@@ -39,13 +39,13 @@
 <style>
 	.section-header {
 		display: grid;
-		gap: 1rem;
+		gap: 0.75rem;
 	}
 
 	.section-header__title-row {
 		display: flex;
 		align-items: center;
-		gap: 1rem;
+		gap: 0.75rem;
 	}
 
 	.section-header__actions {
