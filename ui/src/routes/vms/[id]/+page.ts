@@ -7,18 +7,18 @@ export type VmDetailModel = {
 	state: 'ready' | 'empty' | 'error';
 	currentTab: string;
 	summary: {
-		vmId: string;
+		vm_id: string;
 		name: string;
-		nodeId: string;
-		powerState: string;
+		node_id: string;
+		power_state: string;
 		health: string;
 		cpu: string;
 		memory: string;
-		attachedVolumes: AttachedVolume[];
-		attachedNics: AttachedNic[];
+		attached_volumes?: AttachedVolume[];
+		attached_nics?: AttachedNic[];
 	};
 	sections: { id: string; label: string; count?: number }[];
-	recentTasks: RelatedTask[];
+	recent_tasks: RelatedTask[];
 	configuration: Array<{ label: string; value: string }>;
 };
 
@@ -53,18 +53,18 @@ function buildDetailModel(summary: VmSummary | null, currentTab: string): VmDeta
 			state: 'empty',
 			currentTab,
 			summary: {
-				vmId: '',
+				vm_id: '',
 				name: '',
-				nodeId: '',
-				powerState: '',
+				node_id: '',
+				power_state: '',
 				health: '',
 				cpu: '',
 				memory: '',
-				attachedVolumes: [],
-				attachedNics: []
+				attached_volumes: [],
+				attached_nics: []
 			},
 			sections: buildSections(null),
-			recentTasks: [],
+			recent_tasks: [],
 			configuration: []
 		};
 	}
@@ -73,18 +73,18 @@ function buildDetailModel(summary: VmSummary | null, currentTab: string): VmDeta
 		state: 'ready',
 		currentTab,
 		summary: {
-			vmId: summary.vm_id,
+			vm_id: summary.vm_id,
 			name: summary.name,
-			nodeId: summary.node_id,
-			powerState: summary.power_state,
+			node_id: summary.node_id,
+			power_state: summary.power_state,
 			health: summary.health,
 			cpu: summary.cpu,
 			memory: summary.memory,
-			attachedVolumes: summary.attached_volumes ?? [],
-			attachedNics: summary.attached_nics ?? []
+			attached_volumes: summary.attached_volumes ?? [],
+			attached_nics: summary.attached_nics ?? []
 		},
 		sections: buildSections(summary),
-		recentTasks: summary.recent_tasks ?? [],
+		recent_tasks: summary.recent_tasks ?? [],
 		configuration: buildConfiguration(summary)
 	};
 }
@@ -101,18 +101,18 @@ export const load: PageLoad = async ({ params, url }) => {
 			state: 'error',
 			currentTab,
 			summary: {
-				vmId: params.id,
+				vm_id: params.id,
 				name: '',
-				nodeId: '',
-				powerState: '',
+				node_id: '',
+				power_state: '',
 				health: '',
 				cpu: '',
 				memory: '',
-				attachedVolumes: [],
-				attachedNics: []
+				attached_volumes: [],
+				attached_nics: []
 			},
 			sections: buildSections(null),
-			recentTasks: [],
+			recent_tasks: [],
 			configuration: []
 		};
 		return { detail, requestedVmId: params.id };

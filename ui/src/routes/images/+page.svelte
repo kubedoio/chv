@@ -1,206 +1,263 @@
 <script lang="ts">
-	import {
-		PageShell,
-		FilterPanel,
-		ResourceTable,
-		StateBanner,
-		UrlPagination,
-		Badge
-	} from '$lib/components/system';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
+	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import FilterBar from '$lib/components/FilterBar.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import { Plus, Download, Tag, ChevronRight } from 'lucide-svelte';
+	import { goto } from '$app/navigation';
+	import { page as appPage } from '$app/stores';
 
 	let { data }: { data: PageData } = $props();
 
-	const page = getPageDefinition('/images');
 	const model = $derived(data.images);
+	const items = $derived(model.items);
 
-	const filterConfig = [
-		{ name: 'query', label: 'Search', type: 'search' as const },
-		{
-			name: 'status',
-			label: 'Status',
-			type: 'select' as const,
+	const stats = $derived([
+		{ label: 'Total Images', value: items.length },
+		{ label: 'Ready', value: items.filter(i => i.status === 'ready').length, status: 'healthy' as const },
+		{ label: 'Pending', value: items.filter(i => i.status === 'pending').length, status: 'warning' as const },
+		{ label: 'Deprecated', value: items.filter(i => i.status === 'deprecated').length, status: 'neutral' as const },
+		{ label: 'Total Usage', value: items.reduce((sum, i) => sum + (i.usage_count || 0), 0), status: 'neutral' as const }
+	]);
+
+	const filters = [
+		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Name/OS...' },
+		{ 
+			key: 'status', 
+			label: 'Status', 
+			type: 'select' as const, 
 			options: [
-				{ value: 'all', label: 'All statuses' },
 				{ value: 'ready', label: 'Ready' },
 				{ value: 'pending', label: 'Pending' },
 				{ value: 'failed', label: 'Failed' },
 				{ value: 'deprecated', label: 'Deprecated' }
-			]
+			] 
 		}
 	];
 
-	function mapStatusTone(status: string): ShellTone {
-		switch (status) {
-			case 'ready':
-				return 'healthy';
-			case 'pending':
-				return 'warning';
-			case 'failed':
-				return 'failed';
-			case 'deprecated':
-				return 'degraded';
-			default:
-				return 'unknown';
+	function handleFilterChange(key: string, value: any) {
+		const newParams = new URLSearchParams($appPage.url.searchParams);
+		if (value === '' || value === 'all') {
+			newParams.delete(key);
+		} else {
+			newParams.set(key, String(value));
 		}
+		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
+	}
+
+	function handleClearFilters() {
+		goto($appPage.url.pathname);
 	}
 
 	const columns = [
-		{ key: 'name', label: 'Image / Template' },
-		{ key: 'os', label: 'OS' },
+		{ key: 'name', label: 'Name' },
+		{ key: 'os', label: 'Type/OS' },
 		{ key: 'version', label: 'Version' },
 		{ key: 'status', label: 'Status' },
-		{ key: 'size', label: 'Size' },
-		{ key: 'usage_count', label: 'Used by' },
-		{ key: 'last_updated', label: 'Updated' }
+		{ key: 'last_updated', label: 'Updated' },
+		{ key: 'usage_count', label: 'Usage', align: 'center' as const },
+		{ key: 'size', label: 'Size', align: 'right' as const },
+		{ key: 'notes', label: 'Notes' }
 	];
 
-	const rows = $derived(
-		model.items.map((item) => ({
-			image_id: item.image_id,
-			name: item.name,
-			os: item.os,
-			version: item.version,
-			status: { label: item.status, tone: mapStatusTone(item.status) },
-			size: item.size,
-			usage_count: item.usage_count === 0 ? 'Unused' : `${item.usage_count} VM${item.usage_count === 1 ? '' : 's'}`,
-			last_updated: item.last_updated
-		}))
-	);
-
-	const summary = $derived(() => {
-		const items = model.items;
-		return {
-			total: items.length,
-			ready: items.filter((i) => i.status === 'ready').length,
-			pending: items.filter((i) => i.status === 'pending').length,
-			deprecated: items.filter((i) => i.status === 'deprecated').length,
-			failed: items.filter((i) => i.status === 'failed').length
-		};
-	});
-</script>
-
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
-	{#if model.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Image inventory unavailable"
-			description="The image and template roster could not be loaded."
-			hint="Navigation remains available while the inventory recovers."
-		/>
-	{:else if model.state === 'empty'}
-		<StateBanner
-			variant="empty"
-			title="No images match the current view"
-			description="Try widening the filters or import a base image to populate this page."
-		/>
-	{:else}
-		<div class="images-summary">
-			<div class="images-summary__card">
-				<div class="images-summary__label">Total images</div>
-				<div class="images-summary__value">{summary().total}</div>
-			</div>
-			<div class="images-summary__card">
-				<div class="images-summary__label">Ready</div>
-				<div class="images-summary__value images-summary__value--healthy">{summary().ready}</div>
-			</div>
-			<div class="images-summary__card">
-				<div class="images-summary__label">Pending</div>
-				<div class="images-summary__value images-summary__value--warning">{summary().pending}</div>
-			</div>
-			<div class="images-summary__card">
-				<div class="images-summary__label">Deprecated</div>
-				<div class="images-summary__value images-summary__value--degraded">{summary().deprecated}</div>
-			</div>
-			<div class="images-summary__card">
-				<div class="images-summary__label">Failed</div>
-				<div class="images-summary__value images-summary__value--failed">{summary().failed}</div>
-			</div>
-		</div>
-
-		<section class="inventory-section" aria-labelledby="inventory-title">
-			<h2 id="inventory-title" class="inventory-section__title">Image inventory</h2>
-			<FilterPanel filters={filterConfig} values={model.filters.current} />
-			<ResourceTable {columns} {rows} emptyTitle="No images match the current filters" />
-			<UrlPagination
-				page={model.page.page}
-				pageSize={model.page.pageSize}
-				totalItems={model.page.totalItems}
-				basePath="/images"
-				params={model.filters.current}
-			/>
-		</section>
-	{/if}
-</PageShell>
-
-<style>
-	.images-summary {
-		display: grid;
-		grid-template-columns: repeat(5, minmax(0, 1fr));
-		gap: 1rem;
-	}
-
-	.images-summary__card {
-		border: 1px solid var(--shell-line);
-		border-radius: 1rem;
-		background: var(--shell-surface);
-		padding: 1rem;
-	}
-
-	.images-summary__label {
-		font-size: 0.7rem;
-		font-weight: 700;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-	}
-
-	.images-summary__value {
-		margin-top: 0.35rem;
-		font-size: 1.5rem;
-		font-weight: 700;
-		color: var(--shell-text);
-	}
-
-	.images-summary__value--healthy {
-		color: var(--status-healthy-text);
-	}
-
-	.images-summary__value--warning {
-		color: var(--status-warning-text);
-	}
-
-	.images-summary__value--degraded {
-		color: var(--status-degraded-text);
-	}
-
-	.images-summary__value--failed {
-		color: var(--status-failed-text);
-	}
-
-	.inventory-section {
-		display: grid;
-		gap: 1.2rem;
-	}
-
-	.inventory-section__title {
-		font-size: 1rem;
-		font-weight: 700;
-		color: var(--shell-text);
-		margin: 0;
-	}
-
-	@media (max-width: 1080px) {
-		.images-summary {
-			grid-template-columns: repeat(3, minmax(0, 1fr));
+	function mapStatusTone(status: string): any {
+		switch (status) {
+			case 'ready': return 'healthy';
+			case 'pending': return 'warning';
+			case 'failed': return 'failed';
+			case 'deprecated': return 'unknown';
+			default: return 'unknown';
 		}
 	}
 
-	@media (max-width: 640px) {
-		.images-summary {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+	const tableRows = $derived(items.map(item => ({
+		...item,
+		status: { label: item.status, tone: mapStatusTone(item.status) },
+		notes: item.usage_count > 50 ? 'High usage base' : 'Standard image'
+	})));
+
+	const pendingImages = $derived(items.filter(i => i.status === 'pending').slice(0, 3));
+	const pageDef = getPageDefinition('/images');
+</script>
+
+<div class="inventory-page">
+	<PageHeaderWithAction page={pageDef}>
+		{#snippet actions()}
+			<button class="btn-primary">
+				<Plus size={14} />
+				Import Image
+			</button>
+		{/snippet}
+	</PageHeaderWithAction>
+
+	<div class="posture-strip-wrapper">
+		<CompactStatStrip {stats} />
+	</div>
+
+	<div class="inventory-controls">
+		<FilterBar 
+			{filters} 
+			activeFilters={model.filters.current} 
+			onFilterChange={handleFilterChange}
+			onClearAll={handleClearFilters}
+		/>
+	</div>
+
+	<main class="inventory-main">
+		<section class="inventory-table-area">
+			{#if model.state === 'error'}
+				<ErrorState />
+			{:else if model.state === 'empty'}
+				<EmptyInfrastructureState 
+					title="No images or templates found"
+					description="Adjust your search criteria or import a new cloud image."
+					hint="Images are typically large artifacts. Ensure you have sufficient staging storage."
+				/>
+			{:else}
+				<InventoryTable 
+					{columns} 
+					rows={tableRows} 
+					rowHref={(row) => `/images/${row.image_id}`} 
+				/>
+			{/if}
+		</section>
+
+		<aside class="support-area">
+			<div class="support-panel">
+				<div class="support-panel__header">
+					<Download size={14} />
+					<h3>Image Imports</h3>
+				</div>
+				<div class="support-panel__content">
+					{#if pendingImages.length === 0}
+						<p class="empty-hint">No active image ingestion tasks.</p>
+					{:else}
+						<ul class="attention-list">
+							{#each pendingImages as img}
+								<li>
+									<div class="attention-card">
+										<div class="attention-card__main">
+											<span class="res-name">{img.name}</span>
+											<span class="res-issue">Pending ingestion · {img.size}</span>
+										</div>
+									</div>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+			</div>
+
+			<div class="support-panel">
+				<div class="support-panel__header">
+					<Tag size={14} />
+					<h3>Global Templates</h3>
+				</div>
+				<div class="support-panel__content">
+					<p class="empty-hint">3 standard templates published by System.</p>
+				</div>
+			</div>
+		</aside>
+	</main>
+</div>
+
+<style>
+	.inventory-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.posture-strip-wrapper {
+		margin-top: -0.25rem;
+	}
+
+	.inventory-controls {
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		overflow: hidden;
+	}
+
+	.inventory-main {
+		display: grid;
+		grid-template-columns: 1fr 280px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.support-area {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.support-panel {
+		background: var(--shell-surface);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		padding: 0.75rem;
+	}
+
+	.support-panel__header {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.75rem;
+		border-bottom: 1px solid var(--shell-line);
+		padding-bottom: 0.5rem;
+	}
+
+	.support-panel__header h3 {
+		font-size: var(--text-xs);
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--shell-text-muted);
+	}
+
+	.empty-hint {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		padding: 0.5rem 0;
+	}
+
+	.attention-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.attention-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.5rem;
+		background: var(--shell-surface-muted);
+		border-radius: 0.25rem;
+		text-decoration: none;
+		color: var(--shell-text);
+	}
+
+	.res-name {
+		font-size: var(--text-sm);
+		font-weight: 600;
+	}
+
+	.res-issue {
+		font-size: var(--text-xs);
+		color: var(--color-warning-dark);
+	}
+
+	@media (max-width: 1100px) {
+		.inventory-main {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

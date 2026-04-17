@@ -1,219 +1,320 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
-	import { PageShell, FilterPanel, StateBanner, ResourceTable } from '$lib/components/system';
+	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
+	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
+	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import FilterBar from '$lib/components/FilterBar.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
-	import type { PageData, ActionData } from './$types';
-	import type { ShellTone } from '$lib/shell/app-shell';
+	import type { PageData } from './$types';
+	import { Plus, Activity, AlertCircle, ChevronRight } from 'lucide-svelte';
+	import { goto } from '$app/navigation';
+	import { page as appPage } from '$app/stores';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
 
-	const page = getPageDefinition('/vms');
 	const model = $derived(data.vms);
+	const items = $derived(model.items);
 
-	type MutationResult = { accepted: boolean; task_id: string; vm_id: string; summary: string };
+	const stats = $derived([
+		{ label: 'Total VMs', value: items.length },
+		{ label: 'Running', value: items.filter(v => v.power_state === 'running').length, status: 'healthy' as const },
+		{ label: 'Stopped', value: items.filter(v => v.power_state === 'stopped').length, status: 'neutral' as const },
+		{ label: 'Degraded', value: items.filter(v => v.health !== 'healthy').length, status: items.filter(v => v.health !== 'healthy').length > 0 ? 'warning' as const : 'neutral' as const },
+		{ label: 'Open Alerts', value: items.reduce((sum, v) => sum + (v.alerts || 0), 0), status: items.reduce((sum, v) => sum + (v.alerts || 0), 0) > 0 ? 'critical' as const : 'neutral' as const }
+	]);
 
-	let lastMutation = $state<MutationResult | null>(null);
-	let lastError = $state<string | null>(null);
-
-	$effect(() => {
-		if (form && 'accepted' in form && form.accepted === true) {
-			lastMutation = form as unknown as MutationResult;
-			lastError = null;
-		} else if (form && 'message' in form) {
-			lastError = String(form.message);
-			lastMutation = null;
-		}
-	});
-
-	function powerStateTone(state: string): ShellTone {
-		switch (state.toLowerCase()) {
-			case 'running':
-				return 'healthy';
-			case 'stopped':
-				return 'unknown';
-			case 'failed':
-				return 'failed';
-			default:
-				return 'unknown';
-		}
-	}
-
-	function healthTone(health: string): ShellTone {
-		switch (health.toLowerCase()) {
-			case 'healthy':
-				return 'healthy';
-			case 'degraded':
-				return 'degraded';
-			case 'failed':
-				return 'failed';
-			case 'warning':
-				return 'warning';
-			default:
-				return 'unknown';
-		}
-	}
-
-	function lastTaskTone(task: string): ShellTone {
-		const t = task.toLowerCase();
-		if (t.includes('fail') || t.includes('error')) return 'failed';
-		if (t.includes('success') || t.includes('complete')) return 'healthy';
-		return 'unknown';
-	}
-
-	const filterConfig = [
-		{ name: 'query', label: 'Search', type: 'search' as const },
-		{
-			name: 'powerState',
-			label: 'Power state',
-			type: 'select' as const,
+	const filters = [
+		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Name or node...' },
+		{ 
+			key: 'powerState', 
+			label: 'Power', 
+			type: 'select' as const, 
 			options: [
-				{ value: 'all', label: 'All states' },
-				{ value: 'creating', label: 'Creating' },
-				{ value: 'stopped', label: 'Stopped' },
-				{ value: 'starting', label: 'Starting' },
 				{ value: 'running', label: 'Running' },
-				{ value: 'stopping', label: 'Stopping' },
-				{ value: 'rebooting', label: 'Rebooting' },
-				{ value: 'deleting', label: 'Deleting' },
-				{ value: 'failed', label: 'Failed' },
-				{ value: 'unknown', label: 'Unknown' }
-			]
+				{ value: 'stopped', label: 'Stopped' },
+				{ value: 'paused', label: 'Paused' },
+				{ value: 'crashed', label: 'Crashed' }
+			] 
 		},
 		{
-			name: 'health',
+			key: 'health',
 			label: 'Health',
 			type: 'select' as const,
 			options: [
-				{ value: 'all', label: 'All health' },
 				{ value: 'healthy', label: 'Healthy' },
-				{ value: 'degraded', label: 'Degraded' },
-				{ value: 'failed', label: 'Failed' },
-				{ value: 'unknown', label: 'Unknown' }
+				{ value: 'warning', label: 'Warning' },
+				{ value: 'critical', label: 'Critical' }
 			]
-		},
-		{ name: 'nodeId', label: 'Node', type: 'search' as const }
+		}
 	];
+
+	function handleFilterChange(key: string, value: any) {
+		const newParams = new URLSearchParams($appPage.url.searchParams);
+		if (value === '' || value === 'all') {
+			newParams.delete(key);
+		} else {
+			newParams.set(key, String(value));
+		}
+		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
+	}
+
+	function handleClearFilters() {
+		goto($appPage.url.pathname);
+	}
 
 	const columns = [
 		{ key: 'name', label: 'VM' },
 		{ key: 'node_id', label: 'Node' },
-		{ key: 'power_state', label: 'Power state' },
+		{ key: 'power_state', label: 'Power', align: 'center' as const },
 		{ key: 'health', label: 'Health' },
-		{ key: 'cpu', label: 'CPU' },
-		{ key: 'memory', label: 'Memory' },
-		{ key: 'storage', label: 'Storage' },
-		{ key: 'networks', label: 'Networks' },
-		{ key: 'tags', label: 'Tags' },
-		{ key: 'last_task', label: 'Last task' }
+		{ key: 'cpu', label: 'CPU', align: 'right' as const },
+		{ key: 'memory', label: 'Memory', align: 'right' as const },
+		{ key: 'volume_count', label: 'Volumes', align: 'center' as const },
+		{ key: 'nic_count', label: 'NICs', align: 'center' as const },
+		{ key: 'last_task', label: 'Last Task' },
+		{ key: 'alerts', label: 'Alerts', align: 'center' as const }
 	];
 
-	const rows = $derived(
-		model.items.map((item) => ({
-			vm_id: item.vm_id,
-			name: item.name,
-			node_id: item.node_id,
-			power_state: { label: item.power_state, tone: powerStateTone(item.power_state) },
-			health: { label: item.health, tone: healthTone(item.health) },
-			cpu: item.cpu,
-			memory: item.memory,
-			storage: item.volume_count,
-			networks: item.nic_count,
-			tags: '-',
-			last_task: { label: item.last_task, tone: lastTaskTone(item.last_task) }
-		}))
-	);
-
-	function rowHref(row: Record<string, unknown>): string | null {
-		const id = row.vm_id;
-		return typeof id === 'string' ? `/vms/${id}` : null;
+	function mapPowerTone(state: string): any {
+		switch (state) {
+			case 'running': return 'healthy';
+			case 'stopped': return 'unknown';
+			case 'paused': return 'warning';
+			case 'crashed': return 'failed';
+			default: return 'unknown';
+		}
 	}
+
+	function mapHealthTone(health: string): any {
+		switch (health) {
+			case 'healthy': return 'healthy';
+			case 'warning': return 'warning';
+			case 'critical': return 'failed';
+			default: return 'unknown';
+		}
+	}
+
+	const tableRows = $derived(items.map(item => ({
+		...item,
+		power_state: { label: item.power_state, tone: mapPowerTone(item.power_state) },
+		health: { label: item.health, tone: mapHealthTone(item.health) }
+	})));
+
+	const attentionVms = $derived(items.filter(v => v.health !== 'healthy' || (v.alerts ?? 0) > 0).slice(0, 3));
+	const pageDef = getPageDefinition('/vms');
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
-	<FilterPanel filters={filterConfig} values={model.filters.current} />
+<div class="inventory-page">
+	<PageHeaderWithAction page={pageDef}>
+		{#snippet actions()}
+			<button class="btn-primary">
+				<Plus size={14} />
+				Create VM
+			</button>
+		{/snippet}
+	</PageHeaderWithAction>
 
-	{#if lastMutation}
-		<StateBanner
-			variant="success"
-			title={lastMutation.summary}
-			description={`Task ${lastMutation.task_id} accepted for VM ${lastMutation.vm_id}`}
-			hint="The task will appear in the task timeline once it begins processing."
-		/>
-	{/if}
+	<div class="posture-strip-wrapper">
+		<CompactStatStrip {stats} />
+	</div>
 
-	{#if lastError}
-		<StateBanner variant="error" title="Action failed" description={lastError} />
-	{/if}
+	<div class="inventory-controls">
+		<FilterBar 
+			{filters} 
+			activeFilters={model.filters.current} 
+			onFilterChange={handleFilterChange}
+			onClearAll={handleClearFilters}
+		/>
+	</div>
 
-	{#if model.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="VM inventory unavailable"
-			description="The VM roster could not be loaded from the BFF."
-			hint="The UI keeps power state, health, and task transparency ready for the next healthy refresh."
-		/>
-	{:else if model.state === 'empty'}
-		<StateBanner
-			variant="empty"
-			title="No virtual machines match the current view"
-			description="Widen the filters or create a VM to populate this page."
-			hint="The list remains URL-backed so a filtered VM view can be shared between operators."
-		/>
-	{:else}
-		<ResourceTable {columns} {rows} {rowHref} emptyTitle="No virtual machines">
-			{#snippet actionCell(row)}
-				<form
-					method="POST"
-					use:enhance={() => {
-						return async ({ update }) => {
-							await update();
-						};
-					}}
-					class="action-form"
-				>
-					<input type="hidden" name="vm_id" value={row.vm_id as string} />
-					<select name="action" class="action-select" required>
-						<option value="" disabled selected>Action</option>
-						<option value="start">Start</option>
-						<option value="stop">Stop</option>
-						<option value="restart">Restart</option>
-					</select>
-					<button type="submit" class="action-button">Run</button>
-				</form>
-			{/snippet}
-		</ResourceTable>
-	{/if}
-</PageShell>
+	<main class="inventory-main">
+		<section class="inventory-table-area">
+			{#if model.state === 'error'}
+				<ErrorState />
+			{:else if model.state === 'empty'}
+				<EmptyInfrastructureState 
+					title="No virtual machines match your query"
+					description="Adjust your search criteria or create a new instance."
+					hint="You can use 'Enroll Node' to add more compute capacity first."
+				/>
+			{:else}
+				<InventoryTable 
+					{columns} 
+					rows={tableRows} 
+					rowHref={(row) => `/vms/${row.vm_id}`} 
+				/>
+			{/if}
+		</section>
+
+		<aside class="support-area">
+			<div class="support-panel">
+				<div class="support-panel__header">
+					<AlertCircle size={14} style="color: var(--color-danger)" />
+					<h3>System Alerts</h3>
+				</div>
+				<div class="support-panel__content">
+					{#if attentionVms.length === 0}
+						<p class="empty-hint">Workloads behaving as expected.</p>
+					{:else}
+						<ul class="attention-list">
+							{#each attentionVms as vm}
+								<li>
+									<a href="/vms/{vm.vm_id}" class="attention-card">
+										<div class="attention-card__main">
+											<span class="res-name">{vm.name}</span>
+											<span class="res-issue">{vm.alerts} alerts · {vm.health}</span>
+										</div>
+										<ChevronRight size={14} />
+									</a>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+			</div>
+
+			<div class="support-panel">
+				<div class="support-panel__header">
+					<Activity size={14} />
+					<h3>Workload Tasks</h3>
+				</div>
+				<div class="support-panel__content">
+					<ul class="task-list">
+						<li>
+							<div class="task-item">
+								<span class="task-label">Replication</span>
+								<span class="task-time">Just now</span>
+							</div>
+						</li>
+						<li>
+							<div class="task-item">
+								<span class="task-label">Live Migration</span>
+								<span class="task-time">5m ago</span>
+							</div>
+						</li>
+					</ul>
+				</div>
+			</div>
+		</aside>
+	</main>
+</div>
 
 <style>
-	.action-form {
+	.inventory-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.posture-strip-wrapper {
+		margin-top: -0.25rem;
+	}
+
+	.inventory-controls {
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		overflow: hidden;
+	}
+
+	.inventory-main {
+		display: grid;
+		grid-template-columns: 1fr 280px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.support-area {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.support-panel {
+		background: var(--shell-surface);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		padding: 0.75rem;
+	}
+
+	.support-panel__header {
 		display: flex;
 		align-items: center;
-		gap: 0.4rem;
+		gap: 0.5rem;
+		margin-bottom: 0.75rem;
+		border-bottom: 1px solid var(--shell-line);
+		padding-bottom: 0.5rem;
 	}
 
-	.action-select {
-		min-height: 2rem;
-		padding: 0.35rem 0.5rem;
-		border-radius: 0.6rem;
-		border: 1px solid var(--shell-line-strong);
-		background: var(--shell-surface-muted);
-		color: var(--shell-text);
-		font-size: 0.85rem;
+	.support-panel__header h3 {
+		font-size: var(--text-xs);
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--shell-text-muted);
 	}
 
-	.action-button {
-		display: inline-flex;
+	.empty-hint {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		padding: 0.5rem 0;
+	}
+
+	.attention-list, .task-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.attention-card {
+		display: flex;
 		align-items: center;
-		justify-content: center;
-		min-height: 2rem;
-		padding: 0 0.75rem;
-		border-radius: 999px;
-		font-size: 0.85rem;
+		justify-content: space-between;
+		padding: 0.5rem;
+		background: var(--shell-surface-muted);
+		border-radius: 0.25rem;
+		text-decoration: none;
+		color: var(--shell-text);
+		transition: background 0.15s ease;
+	}
+
+	.attention-card:hover {
+		background: var(--shell-line);
+	}
+
+	.attention-card__main {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.res-name {
+		font-size: var(--text-sm);
 		font-weight: 600;
-		border: 1px solid transparent;
-		background: var(--shell-accent);
-		color: #fff9f2;
-		cursor: pointer;
+	}
+
+	.res-issue {
+		font-size: var(--text-xs);
+		color: var(--color-danger-dark);
+	}
+
+	.task-item {
+		display: flex;
+		justify-content: space-between;
+		font-size: var(--text-sm);
+		padding: 0.25rem 0.5rem;
+	}
+
+	.task-time {
+		color: var(--shell-text-muted);
+		font-size: var(--text-xs);
+	}
+
+	@media (max-width: 1100px) {
+		.inventory-main {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

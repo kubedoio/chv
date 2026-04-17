@@ -7,17 +7,21 @@ export type VolumeDetailModel = {
 	state: 'ready' | 'empty' | 'error';
 	currentTab: string;
 	summary: {
-		volumeId: string;
+		volume_id: string;
 		name: string;
-		nodeId: string;
+		node_id: string;
 		size: string;
 		status: string;
 		health: string;
-		attachedVmId: string;
-		attachedVmName: string;
+		attached_vm_id: string;
+		attached_vm_name: string;
+		device_name?: string;
+		read_only?: boolean;
+		volume_kind?: string;
+		storage_class?: string;
 	};
 	sections: { id: string; label: string; count?: number }[];
-	recentTasks: RelatedTask[];
+	recent_tasks: RelatedTask[];
 	configuration: Array<{ label: string; value: string }>;
 };
 
@@ -52,17 +56,21 @@ function buildDetailModel(summary: VolumeSummary | null, currentTab: string): Vo
 			state: 'empty',
 			currentTab,
 			summary: {
-				volumeId: '',
+				volume_id: '',
 				name: '',
-				nodeId: '',
+				node_id: '',
 				size: '',
 				status: '',
 				health: '',
-				attachedVmId: '',
-				attachedVmName: ''
+				attached_vm_id: '',
+				attached_vm_name: '',
+				device_name: '',
+				read_only: false,
+				volume_kind: '',
+				storage_class: ''
 			},
 			sections: buildSections(null),
-			recentTasks: [],
+			recent_tasks: [],
 			configuration: []
 		};
 	}
@@ -71,17 +79,21 @@ function buildDetailModel(summary: VolumeSummary | null, currentTab: string): Vo
 		state: 'ready',
 		currentTab,
 		summary: {
-			volumeId: summary.volume_id,
+			volume_id: summary.volume_id,
 			name: summary.name,
-			nodeId: summary.node_id,
+			node_id: summary.node_id,
 			size: summary.size,
 			status: summary.status,
 			health: summary.health,
-			attachedVmId: summary.attached_vm_id,
-			attachedVmName: summary.attached_vm_name
+			attached_vm_id: summary.attached_vm_id,
+			attached_vm_name: summary.attached_vm_name,
+			device_name: summary.device_name,
+			read_only: summary.read_only,
+			volume_kind: summary.volume_kind,
+			storage_class: summary.storage_class
 		},
 		sections: buildSections(summary),
-		recentTasks: summary.recent_tasks ?? [],
+		recent_tasks: summary.recent_tasks ?? [],
 		configuration: buildConfiguration(summary)
 	};
 }
@@ -98,17 +110,17 @@ export const load: PageLoad = async ({ params, url }) => {
 			state: 'error',
 			currentTab,
 			summary: {
-				volumeId: params.id,
+				volume_id: params.id,
 				name: '',
-				nodeId: '',
+				node_id: '',
 				size: '',
 				status: '',
 				health: '',
-				attachedVmId: '',
-				attachedVmName: ''
+				attached_vm_id: '',
+				attached_vm_name: ''
 			},
 			sections: buildSections(null),
-			recentTasks: [],
+			recent_tasks: [],
 			configuration: []
 		};
 		return { detail, requestedVolumeId: params.id };

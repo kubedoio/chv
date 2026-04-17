@@ -211,6 +211,51 @@ select:focus {
 }
 
 /* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+button, 
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-default);
+  border: 1px solid transparent;
+}
+
+.btn-primary {
+  background-color: var(--shell-accent);
+  color: white;
+  border-color: var(--shell-accent);
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+.btn-secondary {
+  background-color: var(--shell-surface);
+  color: var(--shell-text);
+  border-color: var(--shell-line);
+}
+
+.btn-secondary:hover {
+  background-color: var(--shell-surface-muted);
+  border-color: var(--shell-line-strong);
+}
+
+.btn-sm {
+  padding: 0.25rem 0.5rem;
+  font-size: var(--text-xs);
+}
+
+/* ==========================================================================
    Accessibility
    ========================================================================== */
 

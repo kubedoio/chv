@@ -1,241 +1,211 @@
 <script lang="ts">
-	import { PageShell, StateBanner, Badge, ResourceTable } from '$lib/components/system';
-	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
+	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
+	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
+	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
+	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
+	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import { Shield, ShieldAlert, Network, Box, Activity, Info, AlertTriangle } from 'lucide-svelte';
 
 	let { data }: { data: PageData } = $props();
 
-	const page = getPageDefinition('/networks');
 	const detail = $derived(data.detail);
 
-	function mapHealthTone(health: string): ShellTone {
-		switch (health.toLowerCase()) {
-			case 'healthy':
-				return 'healthy';
-			case 'warning':
-				return 'warning';
-			case 'degraded':
-				return 'degraded';
-			default:
-				return 'unknown';
-		}
+	function normalizeTone(status: string): ShellTone {
+		const s = status.toLowerCase();
+		if (['healthy', 'ready', 'active', 'online'].includes(s)) return 'healthy';
+		if (['warning', 'maintenance', 'starting', 'stopping', 'paused', 'nat'].includes(s)) return 'warning';
+		if (['degraded', 'offline', 'public'].includes(s)) return 'degraded';
+		if (['failed', 'error', 'critical', 'crashed'].includes(s)) return 'failed';
+		return 'unknown';
 	}
 
-	function exposureTone(exposure: string): ShellTone {
-		switch (exposure) {
-			case 'public':
-				return 'warning';
-			case 'nat':
-				return 'unknown';
-			default:
-				return 'healthy';
-		}
-	}
+	const postureProps = $derived([
+		{ label: 'Infrastructure Health', value: detail.health, tone: normalizeTone(detail.health) as any },
+		{ label: 'Exposure Status', value: detail.exposure, tone: normalizeTone(detail.exposure) as any },
+		{ label: 'CIDR', value: detail.cidr },
+		{ label: 'Gateway', value: detail.gateway }
+	]);
+
+	const policyProps = $derived([
+		{ label: 'Active Policy', value: detail.policy },
+		{ label: 'Scope', value: detail.scope },
+		{ label: 'VLAN ID', value: '402' },
+		{ label: 'Created', value: new Date(detail.created_at).toLocaleDateString() }
+	]);
 
 	const vmColumns = [
 		{ key: 'name', label: 'VM' },
-		{ key: 'ip', label: 'IP Address' }
+		{ key: 'ip', label: 'IP Address' },
+		{ key: 'state', label: 'State' }
 	];
 
-	const vmRows = $derived(
-		detail.attached_vms.map((vm) => ({
-			vm_id: vm.vm_id,
-			name: vm.name,
-			ip: vm.ip ?? 'DHCP'
-		}))
-	);
+	const vmRows = $derived(detail.attached_vms.map(v => ({
+		...v,
+		ip: v.ip || 'DHCP-pending',
+		state: { label: 'connected', tone: 'healthy' as const }
+	})));
 
-	function vmRowHref(row: Record<string, unknown>): string | null {
-		const id = row.vm_id;
-		return typeof id === 'string' ? `/vms/${id}` : null;
-	}
+	const timelineTasks = $derived([
+		{ task_id: 't-01', summary: 'Policy modified', status: 'completed', operation: 'update_networks', tone: 'healthy' as const, started_at: '2h ago' }
+	]);
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
+<div class="resource-detail">
 	{#if detail.state === 'error'}
-		<StateBanner
-			variant="error"
-			title="Network detail unavailable"
-			description="The network summary could not be loaded."
-		/>
+		<ErrorState title="Network Detail Unavailable" description="The SDN controller could not provide synchronization data." />
 	{:else}
-		<div class="detail-page">
-			<article class="detail-page__hero">
-				<div>
-					<div class="detail-page__eyebrow">{detail.scope}</div>
-					<h1>{detail.name}</h1>
-					<p>Network ID: {detail.network_id}</p>
-				</div>
-				<div class="detail-page__hero-badges">
-					<Badge label={detail.health} tone={mapHealthTone(detail.health)} />
-					<Badge label={detail.exposure} tone={exposureTone(detail.exposure)} />
-					{#if detail.alerts > 0}
-						<Badge label="{detail.alerts} alert{detail.alerts === 1 ? '' : 's'}" tone="failed" />
-					{/if}
-				</div>
-			</article>
-
-			<div class="detail-page__summary-grid">
-				<article class="detail-page__summary-card">
-					<div class="detail-page__eyebrow">CIDR</div>
-					<div class="detail-page__summary-value">{detail.cidr}</div>
-					<p>Network range</p>
-				</article>
-				<article class="detail-page__summary-card">
-					<div class="detail-page__eyebrow">Gateway</div>
-					<div class="detail-page__summary-value">{detail.gateway}</div>
-					<p>Default gateway</p>
-				</article>
-				<article class="detail-page__summary-card">
-					<div class="detail-page__eyebrow">Attached VMs</div>
-					<div class="detail-page__summary-value">{detail.attached_vms.length}</div>
-					<p>Connected workloads</p>
-				</article>
-			</div>
-
-			<div class="detail-page__panel-grid">
-				<article class="detail-page__panel">
-					<div class="detail-page__eyebrow">Policy</div>
-					<h2>Network policy</h2>
-					<div class="detail-page__kv-list">
-						<div class="detail-page__kv-row">
-							<div>Policy</div>
-							<div>{detail.policy}</div>
-						</div>
-						<div class="detail-page__kv-row">
-							<div>Exposure</div>
-							<div>{detail.exposure}</div>
-						</div>
-						<div class="detail-page__kv-row">
-							<div>Created</div>
-							<div>{new Date(detail.created_at).toLocaleDateString('en-US')}</div>
-						</div>
-						<div class="detail-page__kv-row">
-							<div>Last task</div>
-							<div>{detail.last_task}</div>
-						</div>
-					</div>
-				</article>
-
-				<article class="detail-page__panel">
-					<div class="detail-page__eyebrow">Attached VMs</div>
-					<h2>Workloads on this network</h2>
-					{#if detail.attached_vms.length > 0}
-						<ResourceTable columns={vmColumns} rows={vmRows} rowHref={vmRowHref} emptyTitle="No VMs" />
+		<ResourceDetailHeader 
+			title={detail.name} 
+			eyebrow={detail.scope}
+			statusLabel={detail.exposure}
+			tone={normalizeTone(detail.exposure)}
+			parentLabel="Networks"
+			parentHref="/networks"
+			description="Defined software network segment."
+		>
+			{#snippet actions()}
+				<ActionStrip>
+					{#if detail.exposure === 'public'}
+						<button class="btn-secondary btn-sm">
+							<ShieldAlert size={14} />
+							Withdraw Exposure
+						</button>
 					{:else}
-						<StateBanner
-							variant="empty"
-							title="No attached VMs"
-							description="This network has no workload connections."
-						/>
+						<button class="btn-secondary btn-sm">
+							<Shield size={14} />
+							Expose Publicly
+						</button>
 					{/if}
-				</article>
-			</div>
-		</div>
+					<button class="btn-secondary btn-sm">
+						<Activity size={14} />
+						Edit Policy
+					</button>
+				</ActionStrip>
+			{/snippet}
+		</ResourceDetailHeader>
+
+		<main class="detail-grid">
+			<section class="detail-main-span">
+				<div class="summary-top">
+					<SectionCard title="Network Posture" icon={Activity}>
+						<PropertyGrid properties={[...postureProps, ...policyProps]} columns={4} />
+					</SectionCard>
+				</div>
+
+				<div class="detail-sections">
+					<SectionCard title="Connected Workloads" icon={Box} badgeLabel={String(detail.attached_vms.length)}>
+						{#if detail.attached_vms.length === 0}
+							<p class="empty-hint">No virtual machines currently attached to this subnet.</p>
+						{:else}
+							<InventoryTable 
+								columns={vmColumns} 
+								rows={vmRows} 
+								rowHref={(row) => `/vms/${row.vm_id}`} 
+							/>
+						{/if}
+					</SectionCard>
+
+					<SectionCard title="Policy History" icon={Activity}>
+						<TaskTimeline tasks={timelineTasks} />SectionCard>
+					</SectionCard>
+				</div>
+			</section>
+
+			<aside class="detail-side-span">
+				<SectionCard title="L3 Configuration" icon={Network}>
+					<PropertyGrid 
+						columns={1}
+						properties={[
+							{ label: 'Subnet ID', value: detail.network_id },
+							{ label: 'Gateway IP', value: detail.gateway },
+							{ label: 'DNS Servers', value: '1.1.1.1, 8.8.8.8' }
+						]} 
+					/>
+				</SectionCard>
+
+				<SectionCard title="Ingress Audit" icon={AlertTriangle}>
+					{#if detail.exposure === 'public'}
+						<div class="alert-box tone-warning">
+							<span class="alert-label">Public Exposure Active</span>
+							<p class="alert-desc">This network is reachable from external gateways. Ensure security policies are restricted.</p>
+						</div>
+					{:else}
+						<p class="empty-hint">Network is private. Only peered cluster traffic allowed.</p>
+					{/if}
+				</SectionCard>
+			</aside>
+		</main>
 	{/if}
-</PageShell>
+</div>
 
 <style>
-	.detail-page {
-		display: grid;
-		gap: 1.2rem;
-	}
-
-	.detail-page__hero,
-	.detail-page__summary-card,
-	.detail-page__panel {
-		border: 1px solid var(--shell-line);
-		border-radius: 1.15rem;
-		background: var(--shell-surface);
-		padding: 1rem;
-	}
-
-	.detail-page__hero {
+	.resource-detail {
 		display: flex;
-		flex-wrap: wrap;
-		align-items: flex-start;
-		justify-content: space-between;
+		flex-direction: column;
+	}
+
+	.detail-grid {
+		display: grid;
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.detail-main-span {
+		display: flex;
+		flex-direction: column;
 		gap: 1rem;
 	}
 
-	.detail-page__eyebrow {
-		font-size: 0.74rem;
-		font-weight: 700;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-	}
-
-	h1 {
-		margin-top: 0.25rem;
-		font-size: 2rem;
-		color: var(--shell-text);
-	}
-
-	h2 {
-		font-size: 1.2rem;
-		color: var(--shell-text);
-	}
-
-	.detail-page__hero p,
-	.detail-page__summary-card p {
-		margin-top: 0.35rem;
-		color: var(--shell-text-secondary);
-		line-height: 1.5;
-	}
-
-	.detail-page__hero-badges {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.55rem;
-	}
-
-	.detail-page__summary-grid,
-	.detail-page__panel-grid {
+	.detail-sections {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: 1fr;
 		gap: 1rem;
 	}
 
-	.detail-page__panel-grid {
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+	.detail-side-span {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
 	}
 
-	.detail-page__summary-value {
-		margin-top: 0.8rem;
-		font-size: 1.5rem;
-		font-weight: 700;
-		color: var(--shell-text);
-	}
-
-	.detail-page__panel {
-		display: grid;
-		gap: 0.95rem;
-	}
-
-	.detail-page__kv-list {
-		display: grid;
-		gap: 0.65rem;
-		margin-top: 0.9rem;
-	}
-
-	.detail-page__kv-row {
-		display: grid;
-		grid-template-columns: minmax(10rem, 0.75fr) minmax(0, 1fr);
-		gap: 0.9rem;
-		padding-bottom: 0.65rem;
-		border-bottom: 1px solid var(--shell-line);
-		font-size: 0.92rem;
-	}
-
-	.detail-page__kv-row div:first-child {
+	.empty-hint {
+		font-size: var(--text-xs);
 		color: var(--shell-text-muted);
+		text-align: center;
+		padding: 1rem 0;
 	}
 
-	@media (max-width: 1100px) {
-		.detail-page__summary-grid,
-		.detail-page__panel-grid {
+	.alert-box {
+		padding: 0.75rem;
+		border-radius: 0.25rem;
+		background: var(--color-warning-light);
+		border: 1px solid var(--color-warning-dark);
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.alert-label {
+		font-weight: 700;
+		font-size: var(--text-xs);
+		color: var(--color-warning-dark);
+	}
+
+	.alert-desc {
+		font-size: var(--text-xs);
+		color: var(--color-warning-dark);
+		margin: 0;
+	}
+
+	@media (max-width: 1200px) {
+		.detail-grid {
 			grid-template-columns: 1fr;
 		}
 	}

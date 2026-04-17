@@ -148,6 +148,7 @@ export type VmListItem = {
 	volume_count: number;
 	nic_count: number;
 	last_task: string;
+	alerts?: number;
 };
 
 export type ListVmsResponse = {
@@ -241,6 +242,9 @@ export type VolumeListItem = {
 	attached_vm_name: string;
 	status: string;
 	last_task: string;
+	alerts?: number;
+	backend?: string;
+	policy?: string;
 };
 
 export type ListVolumesRequest = {

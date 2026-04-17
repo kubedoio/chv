@@ -7,7 +7,7 @@ export type NodeDetailModel = {
 	state: 'ready' | 'empty' | 'error';
 	currentTab: string;
 	summary: {
-		nodeId: string;
+		node_id: string;
 		name: string;
 		cluster: string;
 		state: string;
@@ -21,7 +21,7 @@ export type NodeDetailModel = {
 		scheduling: boolean;
 	};
 	sections: { id: string; label: string; count?: number }[];
-	hostedVms: {
+	hosted_vms: {
 		vm_id: string;
 		name: string;
 		power_state: string;
@@ -29,7 +29,7 @@ export type NodeDetailModel = {
 		cpu: string;
 		memory: string;
 	}[];
-	recentTasks: { task_id: string; status: string; summary: string; operation: string; started_unix_ms: number }[];
+	recent_tasks: { task_id: string; status: string; summary: string; operation: string; started_unix_ms: number }[];
 	configuration: Array<{ label: string; value: string }>;
 };
 
@@ -39,7 +39,7 @@ function mapDetail(res: GetNodeResponse | null, currentTab: string, fallbackId: 
 			state: 'error',
 			currentTab,
 			summary: {
-				nodeId: fallbackId,
+				node_id: fallbackId,
 				name: fallbackId,
 				cluster: '',
 				state: '',
@@ -58,8 +58,8 @@ function mapDetail(res: GetNodeResponse | null, currentTab: string, fallbackId: 
 				{ id: 'tasks', label: 'Tasks', count: 0 },
 				{ id: 'configuration', label: 'Configuration' }
 			],
-			hostedVms: [],
-			recentTasks: [],
+			hosted_vms: [],
+			recent_tasks: [],
 			configuration: [{ label: 'Node ID', value: fallbackId }]
 		};
 	}
@@ -69,7 +69,7 @@ function mapDetail(res: GetNodeResponse | null, currentTab: string, fallbackId: 
 		state: res.state ?? 'ready',
 		currentTab,
 		summary: {
-			nodeId: summary.node_id,
+			node_id: summary.node_id,
 			name: summary.name,
 			cluster: summary.cluster,
 			state: summary.state,
@@ -88,8 +88,8 @@ function mapDetail(res: GetNodeResponse | null, currentTab: string, fallbackId: 
 			{ id: 'tasks', label: 'Tasks', count: res.recentTasks?.length ?? 0 },
 			{ id: 'configuration', label: 'Configuration' }
 		],
-		hostedVms: res.hostedVms ?? [],
-		recentTasks: res.recentTasks ?? [],
+		hosted_vms: res.hostedVms ?? [],
+		recent_tasks: res.recentTasks ?? [],
 		configuration: res.configuration ?? [
 			{ label: 'Node ID', value: summary.node_id },
 			{ label: 'Version', value: summary.version },

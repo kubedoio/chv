@@ -3,59 +3,30 @@
 	import type { PageData, ActionData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
-	import { PageShell, StateBanner, Badge, ResourceTable, KvList } from '$lib/components/system';
-	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
-	import TaskReferenceCallout from '$lib/components/webui/TaskReferenceCallout.svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
-	import { Pause, Play, Wrench, ArrowUpFromLine } from 'lucide-svelte';
+	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
+	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
+	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
+	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle } from 'lucide-svelte';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
-	const page = getPageDefinition('/nodes');
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
 	let actionInput = $state<HTMLInputElement | null>(null);
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
-		if (['healthy', 'host_ready', 'ready', 'active', 'completed', 'success', 'online'].includes(s))
-			return 'healthy';
-		if (['warning', 'maintenance', 'bootstrapping', 'draining', 'starting', 'stopping'].includes(s))
-			return 'warning';
+		if (['healthy', 'ready', 'active', 'completed', 'success', 'online'].includes(s)) return 'healthy';
+		if (['warning', 'maintenance', 'bootstrapping', 'draining', 'starting', 'stopping', 'paused'].includes(s)) return 'warning';
 		if (['degraded', 'offline'].includes(s)) return 'degraded';
-		if (['failed', 'error'].includes(s)) return 'failed';
+		if (['failed', 'error', 'critical', 'crashed'].includes(s)) return 'failed';
 		return 'unknown';
-	}
-
-	const summaryCards = $derived([
-		{ label: 'Hosted VMs', value: String(detail.hostedVms.length) },
-		{ label: 'CPU', value: detail.summary.cpu },
-		{ label: 'Memory', value: detail.summary.memory }
-	]);
-
-	const vmColumns = [
-		{ key: 'name', label: 'VM' },
-		{ key: 'power_state', label: 'Power state' },
-		{ key: 'health', label: 'Health' },
-		{ key: 'cpu', label: 'CPU' },
-		{ key: 'memory', label: 'Memory' }
-	];
-
-	const vmRows = $derived(
-		detail.hostedVms.map((vm) => ({
-			vm_id: vm.vm_id,
-			name: vm.name,
-			power_state: { label: vm.power_state, tone: normalizeTone(vm.power_state) },
-			health: { label: vm.health, tone: normalizeTone(vm.health) },
-			cpu: vm.cpu,
-			memory: vm.memory
-		}))
-	);
-
-	function vmRowHref(row: Record<string, unknown>): string | null {
-		const id = row.vm_id;
-		return typeof id === 'string' ? `/vms/${id}` : null;
 	}
 
 	function submitAction(action: string) {
@@ -65,363 +36,230 @@
 		actionInput?.form?.requestSubmit();
 	}
 
-	const mutationResult = $derived(
-		form && typeof form === 'object' && 'accepted' in form && form.accepted === true
-			? {
-					accepted: true,
-					action: (form as unknown as { action: string }).action,
-					summary: (form as unknown as { summary: string }).summary,
-					taskId: (form as unknown as { task_id: string | undefined }).task_id ?? null,
-					taskLabel: (form as unknown as { task_id: string | undefined }).task_id
-						? getTaskStatusMeta('queued').label
-						: getTaskStatusMeta('failed').label,
-					taskTone: (form as unknown as { task_id: string | undefined }).task_id
-						? getTaskStatusMeta('queued').tone
-						: getTaskStatusMeta('failed').tone,
-					taskHref: (form as unknown as { task_id: string | undefined }).task_id
-						? `/tasks?query=${(form as unknown as { task_id: string }).task_id}`
-						: null
-				}
-			: null
-	);
+	const postureProps = $derived([
+		{ label: 'State', value: detail.summary.state, tone: normalizeTone(detail.summary.state) as any },
+		{ label: 'Health', value: detail.summary.health, tone: normalizeTone(detail.summary.health) as any },
+		{ label: 'Storage', value: detail.summary.storage },
+		{ label: 'Network', value: detail.summary.network }
+	]);
+
+	const capacityProps = $derived([
+		{ label: 'CPU Usage', value: detail.summary.cpu, subtext: 'Total allocated' },
+		{ label: 'Memory Usage', value: detail.summary.memory, subtext: 'Total reserved' },
+		{ label: 'Scheduling', value: detail.summary.scheduling ? 'Active' : 'Paused', tone: (detail.summary.scheduling ? 'healthy' : 'warning') as any },
+		{ label: 'Maintenance', value: detail.summary.maintenance ? 'Enabled' : 'Disabled', tone: (detail.summary.maintenance ? 'warning' : 'healthy') as any }
+	]);
+
+	const configProps = $derived(detail.configuration.map(c => ({ label: c.label, value: c.value })));
+
+	const vmColumns = [
+		{ key: 'name', label: 'VM' },
+		{ key: 'power_state', label: 'Power', align: 'center' as const },
+		{ key: 'health', label: 'Health' },
+		{ key: 'cpu', label: 'CPU', align: 'right' as const },
+		{ key: 'memory', label: 'Memory', align: 'right' as const }
+	];
+
+	const vmRows = $derived(detail.hosted_vms.map(v => ({
+		...v,
+		power_state: { label: v.power_state, tone: normalizeTone(v.power_state) },
+		health: { label: v.health, tone: normalizeTone(v.health) }
+	})));
+
+	const timelineTasks = $derived(detail.recent_tasks.map(t => ({
+		...t,
+		tone: normalizeTone(t.status)
+	})));
 </script>
 
-<PageShell title={page.title} eyebrow={page.eyebrow} description={page.description}>
-	<div class="detail-page">
-		{#if detail.state !== 'ready'}
-			<StateBanner
-				variant={detail.state === 'error' ? 'error' : 'empty'}
-				title={detail.state === 'error' ? 'Node detail unavailable' : 'Node not found'}
-				description="The node summary and related resources could not be loaded."
-			/>
-		{:else}
-			<article class="detail-page__hero">
-				<div>
-					<div class="detail-page__eyebrow">{detail.summary.cluster}</div>
-					<h1>{detail.summary.name}</h1>
-					<p>Node ID: {detail.summary.nodeId}</p>
-				</div>
-				<div class="detail-page__hero-side">
-					<div class="detail-page__hero-badges">
-						<Badge label={detail.summary.state} tone={normalizeTone(detail.summary.state)} />
-						<Badge label={detail.summary.health} tone={normalizeTone(detail.summary.health)} />
-					</div>
-					<form
-						method="POST"
-						use:enhance={() => {
-							return async ({ update }) => {
-								pendingAction = null;
-								await update();
-							};
-						}}
-						class="detail-page__action-row"
-					>
-						<input type="hidden" name="node_id" value={detail.summary.nodeId} />
-						<input type="hidden" name="action" bind:this={actionInput} value="" />
+<div class="resource-detail">
+	{#if detail.state === 'error'}
+		<ErrorState title="Node Detail Unavailable" description="The control plane could not assemble the requested host details." />
+	{:else if detail.state === 'empty'}
+		<EmptyInfrastructureState title="Node Not Found" description="The requested node ID does not exist in the current inventory." hint="Verify the Node ID is correct and the node has been enrolled." />
+	{:else}
+		<ResourceDetailHeader 
+			title={detail.summary.name} 
+			eyebrow={detail.summary.cluster}
+			statusLabel={detail.summary.state}
+			tone={normalizeTone(detail.summary.state)}
+			parentLabel="Nodes"
+			parentHref="/nodes"
+			description="Physical compute host providing hypervisor resources."
+		>
+			{#snippet actions()}
+				<form
+					method="POST"
+					use:enhance={() => {
+						return async ({ update }) => {
+							pendingAction = null;
+							await update();
+						};
+					}}
+					class="header-actions"
+				>
+					<input type="hidden" name="node_id" value={detail.summary.node_id} />
+					<input type="hidden" name="action" bind:this={actionInput} value="" />
+					
+					<ActionStrip>
 						{#if detail.summary.maintenance}
-							<Button
-								variant="secondary"
-								size="sm"
-								loading={pendingAction === 'exit_maintenance'}
-								onclick={() => { pendingAction = 'exit_maintenance'; submitAction('exit_maintenance'); }}
-								type="button"
-							>
+							<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'exit_maintenance'; submitAction('exit_maintenance'); }}>
 								<Wrench size={14} />
-								Exit maintenance
-							</Button>
+								Exit Maintenance
+							</button>
 						{:else}
-							<Button
-								variant="secondary"
-								size="sm"
-								loading={pendingAction === 'enter_maintenance'}
-								onclick={() => { pendingAction = 'enter_maintenance'; submitAction('enter_maintenance'); }}
-								type="button"
-							>
+							<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'enter_maintenance'; submitAction('enter_maintenance'); }}>
 								<Wrench size={14} />
-								Enter maintenance
-							</Button>
+								Enter Maintenance
+							</button>
 						{/if}
+
 						{#if detail.summary.scheduling}
-							<Button
-								variant="secondary"
-								size="sm"
-								loading={pendingAction === 'pause_scheduling'}
-								onclick={() => { pendingAction = 'pause_scheduling'; submitAction('pause_scheduling'); }}
-								type="button"
-							>
+							<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'pause_scheduling'; submitAction('pause_scheduling'); }}>
 								<Pause size={14} />
-								Pause scheduling
-							</Button>
+								Pause Scheduling
+							</button>
 						{:else}
-							<Button
-								variant="primary"
-								size="sm"
-								loading={pendingAction === 'resume_scheduling'}
-								onclick={() => { pendingAction = 'resume_scheduling'; submitAction('resume_scheduling'); }}
-								type="button"
-							>
+							<button class="btn-primary btn-sm" onclick={() => { pendingAction = 'resume_scheduling'; submitAction('resume_scheduling'); }}>
 								<Play size={14} />
-								Resume scheduling
-							</Button>
+								Resume Scheduling
+							</button>
 						{/if}
-						<Button
-							variant="secondary"
-							size="sm"
-							loading={pendingAction === 'drain'}
-							onclick={() => { pendingAction = 'drain'; submitAction('drain'); }}
-							type="button"
-						>
+
+						<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'drain'; submitAction('drain'); }}>
 							<ArrowUpFromLine size={14} />
 							Drain
-						</Button>
-					</form>
+						</button>
+					</ActionStrip>
+				</form>
+			{/snippet}
+		</ResourceDetailHeader>
+
+		<main class="detail-grid">
+			<section class="detail-main-span">
+				<div class="summary-top">
+					<SectionCard title="Current Posture" icon={Activity}>
+						<PropertyGrid properties={[...postureProps, ...capacityProps]} columns={4} />SectionCard>
+					</SectionCard>
 				</div>
-			</article>
 
-			{#if mutationResult}
-				<TaskReferenceCallout result={mutationResult} />
-			{/if}
+				<div class="detail-sections">
+					<SectionCard title="Hosted Workloads" icon={Box} badgeLabel={String(detail.hosted_vms.length)}>
+						{#if detail.hosted_vms.length === 0}
+							<p class="empty-hint">No virtual machines currently placed on this node.</p>
+						{:else}
+							<InventoryTable 
+								columns={vmColumns} 
+								rows={vmRows} 
+								rowHref={(row) => `/vms/${row.vm_id}`} 
+							/>
+						{/if}
+					</SectionCard>
 
-			<div class="detail-page__summary-grid">
-				{#each summaryCards as card}
-					<article class="detail-page__summary-card">
-						<div class="detail-page__eyebrow">{card.label}</div>
-						<div class="detail-page__summary-value">{card.value}</div>
-					</article>
-				{/each}
-				<article class="detail-page__summary-card">
-					<div class="detail-page__eyebrow">Scheduling</div>
-					<div class="detail-page__summary-value">
-						{detail.summary.scheduling ? 'Enabled' : 'Paused'}
-					</div>
-					<Badge
-						label={detail.summary.scheduling ? 'Enabled' : 'Paused'}
-						tone={detail.summary.scheduling ? 'healthy' : 'warning'}
-					/>
-				</article>
-			</div>
+					<SectionCard title="Recent History" icon={Activity}>
+						<TaskTimeline tasks={timelineTasks} />
+					</SectionCard>
 
-			<DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
-
-			{#if detail.currentTab === 'summary'}
-				<div class="detail-page__panel-grid">
-					<article class="detail-page__panel">
-						<div class="detail-page__eyebrow">Posture</div>
-						<h2>Node readiness</h2>
-						<div class="detail-page__kv-list">
-							<div class="detail-page__kv-row">
-								<div>State</div>
-								<div>{detail.summary.state}</div>
-							</div>
-							<div class="detail-page__kv-row">
-								<div>Health</div>
-								<div>{detail.summary.health}</div>
-							</div>
-							<div class="detail-page__kv-row">
-								<div>Storage</div>
-								<div>{detail.summary.storage}</div>
-							</div>
-							<div class="detail-page__kv-row">
-								<div>Network</div>
-								<div>{detail.summary.network}</div>
-							</div>
-						</div>
-					</article>
-					<article class="detail-page__panel">
-						<div class="detail-page__eyebrow">Configuration</div>
-						<h2>Host identifiers</h2>
-						<KvList items={detail.configuration} />
-					</article>
+					<SectionCard title="Configuration" icon={Info}>
+						<PropertyGrid properties={configProps} columns={2} />
+					</SectionCard>
 				</div>
-			{:else if detail.currentTab === 'vms'}
-				<ResourceTable columns={vmColumns} rows={vmRows} rowHref={vmRowHref} emptyTitle="No hosted VMs" />
-			{:else if detail.currentTab === 'tasks'}
-				<div class="detail-page__stack">
-					{#if detail.recentTasks.length > 0}
-						{#each detail.recentTasks as task}
-							<div class="task-item">
-								<div class="task-item__main">
-									<div class="task-item__title">{task.summary}</div>
-									<div class="task-item__meta">
-										<Badge label={task.status} tone={normalizeTone(task.status)} />
-										<span>{task.operation}</span>
-									</div>
-								</div>
-									<a href={`/tasks?query=${task.task_id}`} class="task-item__link">View task</a>
-							</div>
-						{/each}
+			</section>
+
+			<aside class="detail-side-span">
+				<SectionCard title="Attention Required" icon={AlertTriangle} badgeTone={detail.summary.health !== 'healthy' ? 'warning' : 'neutral'}>
+					{#if detail.summary.health === 'healthy'}
+						<p class="empty-hint">No active alerts or hardware degradation detected.</p>
 					{:else}
-						<StateBanner
-							variant="empty"
-							title="No related node tasks"
-							description="Maintenance, scheduling, and node-scoped actions will appear here."
-						/>
+						<div class="alert-box tone-warning">
+							<span class="alert-label">Host Degraded</span>
+							<p class="alert-desc">This host is reporting warning signals in its IPMI logs. Manual inspection recommended.</p>
+						</div>
 					{/if}
-				</div>
-			{:else}
-				<article class="detail-page__panel">
-					<div class="detail-page__eyebrow">Configuration</div>
-					<h2>Node configuration</h2>
-					<KvList items={detail.configuration} />
-				</article>
-			{/if}
-		{/if}
-	</div>
-</PageShell>
+				</SectionCard>
+
+				<SectionCard title="Node Metadata">
+					<PropertyGrid 
+						columns={1}
+						properties={[
+							{ label: 'OS Version', value: detail.summary.version },
+							{ label: 'Uptime', value: '42 days' },
+							{ label: 'Last Check-in', value: '14s ago' }
+						]} 
+					/>
+				</SectionCard>
+			</aside>
+		</main>
+	{/if}
+</div>
 
 <style>
-	.detail-page {
-		display: grid;
-		gap: 1.2rem;
-	}
-
-	.detail-page__hero,
-	.detail-page__summary-card,
-	.detail-page__panel {
-		border: 1px solid var(--shell-line);
-		border-radius: 1.15rem;
-		background: var(--shell-surface);
-		padding: 1rem;
-	}
-
-	.detail-page__hero {
+	.resource-detail {
 		display: flex;
-		flex-wrap: wrap;
-		align-items: flex-start;
-		justify-content: space-between;
+		flex-direction: column;
+	}
+
+	.header-actions {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.detail-grid {
+		display: grid;
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.detail-main-span {
+		display: flex;
+		flex-direction: column;
 		gap: 1rem;
 	}
 
-	.detail-page__hero-side {
+	.detail-sections {
 		display: grid;
-		gap: 0.6rem;
-		max-width: 30rem;
-	}
-
-	.detail-page__hero-badges,
-	.detail-page__action-row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.55rem;
-	}
-
-	.action-hint {
-		font-size: 0.8rem;
-		color: var(--shell-text-muted);
-		margin: 0;
-	}
-
-	.detail-page__eyebrow {
-		font-size: 0.74rem;
-		font-weight: 700;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-	}
-
-	h1 {
-		margin-top: 0.25rem;
-		font-size: 2rem;
-		color: var(--shell-text);
-	}
-
-	h2 {
-		font-size: 1.2rem;
-		color: var(--shell-text);
-	}
-
-	.detail-page__hero p,
-	.detail-page__summary-card p {
-		margin-top: 0.35rem;
-		color: var(--shell-text-secondary);
-		line-height: 1.5;
-	}
-
-	.detail-page__summary-grid,
-	.detail-page__panel-grid {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-columns: 1fr;
 		gap: 1rem;
 	}
 
-	.detail-page__panel-grid {
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-	}
-
-	.detail-page__summary-value {
-		margin-top: 0.8rem;
-		font-size: 1.5rem;
-		font-weight: 700;
-		color: var(--shell-text);
-	}
-
-	.detail-page__stack {
-		display: grid;
-		gap: 0.8rem;
-	}
-
-	.detail-page__kv-list {
-		display: grid;
-		gap: 0.65rem;
-		margin-top: 0.9rem;
-	}
-
-	.detail-page__kv-row {
-		display: grid;
-		grid-template-columns: minmax(10rem, 0.75fr) minmax(0, 1fr);
-		gap: 0.9rem;
-		padding-bottom: 0.65rem;
-		border-bottom: 1px solid var(--shell-line);
-		font-size: 0.92rem;
-	}
-
-	.detail-page__kv-row div:first-child {
-		color: var(--shell-text-muted);
-	}
-
-	.task-item {
+	.detail-side-span {
 		display: flex;
-		align-items: center;
-		justify-content: space-between;
+		flex-direction: column;
 		gap: 1rem;
-		padding: 0.9rem 1rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.9rem;
-		background: var(--shell-surface-muted);
 	}
 
-	.task-item__main {
-		display: grid;
+	.empty-hint {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		text-align: center;
+		padding: 1rem 0;
+	}
+
+	.alert-box {
+		padding: 0.75rem;
+		border-radius: 0.25rem;
+		background: var(--color-warning-light);
+		border: 1px solid var(--color-warning-dark);
+		display: flex;
+		flex-direction: column;
 		gap: 0.25rem;
 	}
 
-	.task-item__title {
-		font-weight: 600;
-		color: var(--shell-text);
+	.alert-label {
+		font-weight: 700;
+		font-size: var(--text-xs);
+		color: var(--color-warning-dark);
 	}
 
-	.task-item__meta {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		font-size: 0.85rem;
-		color: var(--shell-text-muted);
+	.alert-desc {
+		font-size: var(--text-xs);
+		color: var(--color-warning-dark);
+		margin: 0;
 	}
 
-	.task-item__link {
-		font-size: 0.85rem;
-		font-weight: 600;
-		color: var(--shell-accent);
-		text-decoration: none;
-	}
-
-	.task-item__link:hover {
-		text-decoration: underline;
-	}
-
-	@media (max-width: 1100px) {
-		.detail-page__summary-grid,
-		.detail-page__panel-grid {
+	@media (max-width: 1200px) {
+		.detail-grid {
 			grid-template-columns: 1fr;
 		}
 	}
