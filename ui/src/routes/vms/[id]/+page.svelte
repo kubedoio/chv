@@ -25,10 +25,10 @@
 
 	let vmEvents = $state<VmEvent[]>([]);
 	let eventsLoading = $state(false);
-	let eventsLoaded = $state(false);
+	let eventsLoadedForVm = $state('');
 
 	async function loadVmEvents(vmId: string) {
-		if (eventsLoaded || eventsLoading) return;
+		if (eventsLoadedForVm === vmId || eventsLoading) return;
 		eventsLoading = true;
 		try {
 			const res = await bffFetch<{ items: VmEvent[] }>(BFFEndpoints.listVmEvents, {
@@ -40,12 +40,12 @@
 			vmEvents = [];
 		} finally {
 			eventsLoading = false;
-			eventsLoaded = true;
+			eventsLoadedForVm = vmId;
 		}
 	}
 
 	$effect(() => {
-		if (detail.currentTab === 'events' && detail.state === 'ready' && !eventsLoaded) {
+		if (detail.currentTab === 'events' && detail.state === 'ready' && eventsLoadedForVm !== detail.summary.vmId) {
 			loadVmEvents(detail.summary.vmId);
 		}
 	});

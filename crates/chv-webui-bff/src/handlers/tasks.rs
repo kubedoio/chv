@@ -62,9 +62,9 @@ pub async fn list_tasks(
 
     if let Some(window) = filters.get("window").and_then(|v| v.as_str()) {
         match window {
-            "24h" => query_sql.push_str(" AND requested_at > datetime('now', '-24 hours')"),
-            "7d" => query_sql.push_str(" AND requested_at > datetime('now', '-7 days')"),
-            "30d" => query_sql.push_str(" AND requested_at > datetime('now', '-30 days')"),
+            "24h" => query_sql.push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')"),
+            "7d" => query_sql.push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')"),
+            "30d" => query_sql.push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 days')"),
             "active" => query_sql.push_str(
                 " AND status IN ('Pending', 'Accepted', 'Running')",
             ),
@@ -147,7 +147,7 @@ pub async fn stream_tasks(
                     resource_id,
                     CAST(strftime('%s', requested_at) AS INTEGER) * 1000 AS event_unix_ms
                 FROM operations
-                WHERE requested_at > datetime('now', '-30 seconds')
+                WHERE requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 seconds')
                 "#,
             );
 

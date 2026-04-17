@@ -9,3 +9,13 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     last_login_at text
 );
+
+-- Bootstrap admin user (password: admin, bcrypt cost 12)
+INSERT OR IGNORE INTO users (user_id, username, password_hash, role, display_name)
+VALUES (
+    '00000000-0000-0000-0000-000000000001',
+    'admin',
+    '$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m',
+    'admin',
+    'Administrator'
+);
