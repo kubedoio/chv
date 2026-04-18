@@ -3,6 +3,8 @@
 	import FormField from '$lib/components/forms/FormField.svelte';
 	import Input from '$lib/components/Input.svelte';
 	import { createVm } from '$lib/bff/vms';
+	import { listImages } from '$lib/bff/images';
+	import { listNetworks } from '$lib/bff/networks';
 	import { getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
 
@@ -17,6 +19,11 @@
 	}: Props = $props();
 
 	let step = $state(1); // 1: Basic, 2: Cloud-init, 3: Review
+
+	// Data loaded from BFF
+	let images = $state<{ image_id: string; name: string }[]>([]);
+	let networks = $state<{ network_id: string; name: string }[]>([]);
+	let loadingData = $state(false);
 
 	// Basic config
 	let name = $state('');
@@ -54,6 +61,36 @@
 		nameError = '';
 	}
 
+	async function loadData() {
+		loadingData = true;
+		try {
+			const token = getStoredToken() ?? undefined;
+			const [imgRes, netRes] = await Promise.all([
+				listImages(token),
+				listNetworks(token)
+			]);
+			images = (imgRes.items as any[]).map((i) => ({
+				image_id: i.image_id as string,
+				name: i.name as string
+			}));
+			networks = (netRes.items as any[]).map((n) => ({
+				network_id: n.network_id as string,
+				name: n.name as string
+			}));
+			// Pre-select first available image and network
+			if (images.length > 0 && !imageId) {
+				imageId = images[0].image_id;
+			}
+			if (networks.length > 0 && !networkId) {
+				networkId = networks[0].network_id;
+			}
+		} catch (e) {
+			console.error('Failed to load images/networks', e);
+		} finally {
+			loadingData = false;
+		}
+	}
+
 	function validateName(): boolean {
 		if (!name.trim()) {
 			nameError = 'Name is required';
@@ -78,6 +115,7 @@
 			!name.startsWith('-') &&
 			!name.endsWith('-') &&
 			imageId !== '' &&
+			(imageId === 'default' || images.length > 0) &&
 			networkId !== ''
 		);
 	}
@@ -113,14 +151,16 @@
 		}
 	}
 
-	// Get selected items for review (placeholder labels for first-VM milestone)
-	const selectedImage = $derived({ name: imageId || '—' });
-	const selectedNetwork = $derived({ name: networkId || '—' });
+	// Get selected items for review
+	const selectedImage = $derived(images.find((i) => i.image_id === imageId) ?? { name: imageId || '—' });
+	const selectedNetwork = $derived(networks.find((n) => n.network_id === networkId) ?? { name: networkId || '—' });
 
-	// Reset form when modal closes
+	// Reset form when modal closes; load data when it opens
 	$effect(() => {
 		if (!open) {
 			resetForm();
+		} else {
+			loadData();
 		}
 	});
 </script>
@@ -148,27 +188,55 @@
 			</FormField>
 
 			<FormField label="Image" required labelFor="vm-image">
-				<select
-					id="vm-image"
-					bind:value={imageId}
-					class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-					disabled={submitting}
-				>
-					<option value="">Select an image...</option>
-					<option value="default">default</option>
-				</select>
+				{#if loadingData}
+					<div class="text-sm text-muted">Loading images...</div>
+				{:else if images.length === 0}
+					<div class="rounded border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+						No images available.
+						<a href="/images" class="underline" onclick={() => (open = false)}>Go to Images</a>
+						to import one first.
+					</div>
+				{:else}
+					<select
+						id="vm-image"
+						bind:value={imageId}
+						class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
+						disabled={submitting}
+					>
+						<option value="">Select an image...</option>
+						{#each images as img}
+							<option value={img.image_id}>{img.name}</option>
+						{/each}
+					</select>
+				{/if}
 			</FormField>
 
 			<FormField label="Network" required labelFor="vm-network">
-				<select
-					id="vm-network"
-					bind:value={networkId}
-					class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-					disabled={submitting}
-				>
-					<option value="">Select a network...</option>
-					<option value="default">default</option>
-				</select>
+				{#if loadingData}
+					<div class="text-sm text-muted">Loading networks...</div>
+				{:else if networks.length === 0}
+					<select
+						id="vm-network"
+						bind:value={networkId}
+						class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
+						disabled={submitting}
+					>
+						<option value="default">default (auto-create)</option>
+					</select>
+					<p class="text-xs text-muted mt-1">A default network will be created automatically.</p>
+				{:else}
+					<select
+						id="vm-network"
+						bind:value={networkId}
+						class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
+						disabled={submitting}
+					>
+						<option value="">Select a network...</option>
+						{#each networks as net}
+							<option value={net.network_id}>{net.name}</option>
+						{/each}
+					</select>
+				{/if}
 			</FormField>
 
 			<div class="grid grid-cols-2 gap-4">

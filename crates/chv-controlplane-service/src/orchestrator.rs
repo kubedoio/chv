@@ -403,7 +403,13 @@ impl Orchestrator {
     fn resolve_kernel_path(&self, image_ref: &str) -> String {
         // For the first VM milestone, use a simple config-based mapping.
         // In production this would query an image registry.
-        if image_ref == "default" || image_ref.is_empty() {
+        // If image_ref looks like a disk image path (absolute path or file:// URI),
+        // use the default kernel path instead.
+        if image_ref == "default"
+            || image_ref.is_empty()
+            || image_ref.starts_with('/')
+            || image_ref.starts_with("file://")
+        {
             self.kernel_path.clone()
         } else {
             format!("/var/lib/chv/kernels/{}", image_ref)

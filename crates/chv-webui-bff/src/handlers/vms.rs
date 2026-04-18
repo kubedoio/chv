@@ -298,12 +298,27 @@ pub async fn create_vm(
         .map(|mb| mb * 1024 * 1024)
         .unwrap_or(2 * 1024 * 1024 * 1024);
 
-    let image_ref = payload
+    let mut image_ref = payload
         .get("image_ref")
         .and_then(|v| v.as_str())
         .or_else(|| payload.get("image_id").and_then(|v| v.as_str()))
         .unwrap_or("default")
         .to_string();
+
+    // If image_id is a real image UUID (not "default"), look up its source_url/path.
+    if image_ref != "default" && !image_ref.is_empty() {
+        if let Some(source_url) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT source_url FROM images WHERE image_id = ?"
+        )
+        .bind(&image_ref)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?
+        .flatten()
+        {
+            image_ref = source_url;
+        }
+    }
 
     let requested_by = payload
         .get("requested_by")

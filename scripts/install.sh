@@ -303,7 +303,7 @@ import_base_image() {
     sqlite3 "${CHV_DB_PATH}" \
         "INSERT INTO images
          (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at)
-         VALUES ('${image_id}', 'ubuntu-noble', 'disk', 'raw', ${size_bytes}, NULL, '${BASE_IMAGE_URL}', 'ubuntu', '24.04', 'available', NULL,
+         VALUES ('${image_id}', 'ubuntu-noble', 'disk', 'raw', ${size_bytes}, NULL, '${BASE_IMAGE_PATH}', 'ubuntu', '24.04', 'available', NULL,
                  strftime('%Y-%m-%dT%H:%M:%SZ','now'),
                  strftime('%Y-%m-%dT%H:%M:%SZ','now'));" 2>/dev/null
 
