@@ -170,6 +170,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             cmd.arg("--net")
                 .arg(format!("mac={},tap={}", nic.mac_address, nic.tap_name));
         }
+        cmd.arg("--console")
+            .arg("off")
+            .arg("--serial")
+            .arg(format!("file=/run/chv/agent/vm-{}-serial.log", config.vm_id));
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
         info!(

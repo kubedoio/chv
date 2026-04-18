@@ -75,9 +75,9 @@ pub async fn list_networks(
                 "policy": "default",
                 "last_task": r.last_task,
                 "alerts": r.alerts,
-                "dhcp_enabled": r.dhcp_enabled,
+                "dhcp_enabled": r.dhcp_enabled != 0,
                 "ipam_mode": r.ipam_mode,
-                "is_default": r.is_default,
+                "is_default": r.is_default != 0,
             })
         })
         .collect();
@@ -184,9 +184,9 @@ pub async fn get_network(
                 "created_at": r.created_at.unwrap_or_default(),
                 "last_task": r.last_task,
                 "alerts": r.alerts,
-                "dhcp_enabled": r.dhcp_enabled,
+                "dhcp_enabled": r.dhcp_enabled != 0,
                 "ipam_mode": r.ipam_mode,
-                "is_default": r.is_default,
+                "is_default": r.is_default != 0,
             })))
         }
         None => Err(BffError::NotFound(format!(
@@ -227,7 +227,7 @@ pub async fn create_network(
 
     let dhcp_enabled = payload
         .get("dhcp_enabled")
-        .and_then(|v| v.as_bool())
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
         .unwrap_or(true);
 
     let ipam_mode = payload
@@ -238,7 +238,7 @@ pub async fn create_network(
 
     let is_default = payload
         .get("is_default")
-        .and_then(|v| v.as_bool())
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
         .unwrap_or(false);
 
     let network_id = uuid::Uuid::new_v4().to_string();
@@ -367,9 +367,9 @@ pub async fn update_network(
     let name = payload.get("name").and_then(|v| v.as_str());
     let cidr = payload.get("cidr").and_then(|v| v.as_str());
     let gateway = payload.get("gateway").and_then(|v| v.as_str());
-    let dhcp_enabled = payload.get("dhcp_enabled").and_then(|v| v.as_bool()).map(|d| if d { 1 } else { 0 });
+    let dhcp_enabled = payload.get("dhcp_enabled").and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))).map(|d| if d { 1 } else { 0 });
     let ipam_mode = payload.get("ipam_mode").and_then(|v| v.as_str());
-    let is_default = payload.get("is_default").and_then(|v| v.as_bool()).map(|d| if d { 1 } else { 0 });
+    let is_default = payload.get("is_default").and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))).map(|d| if d { 1 } else { 0 });
 
     let mut tx = state
         .pool

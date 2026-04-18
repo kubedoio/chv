@@ -123,6 +123,16 @@ impl MutationService for ControlPlaneMutationService {
                     })
                     .await
             }
+            "delete" => {
+                self.lifecycle_service
+                    .delete_vm(proto::DeleteVmRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        vm_id: vm_id.clone(),
+                        force,
+                    })
+                    .await
+            }
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
 

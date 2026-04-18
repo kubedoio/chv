@@ -1,9 +1,9 @@
 import { fail } from '@sveltejs/kit';
-import { mutateVm } from '$lib/bff/vms';
+import { mutateVm, deleteVm } from '$lib/bff/vms';
 import { BFFError } from '$lib/bff/client';
 import type { MutateVmResponse } from '$lib/bff/types';
 
-const VALID_VM_ACTIONS = ['start', 'stop', 'restart'] as const;
+const VALID_VM_ACTIONS = ['start', 'stop', 'restart', 'delete'] as const;
 type ValidVmAction = (typeof VALID_VM_ACTIONS)[number];
 
 export async function handleVmMutation(
@@ -24,6 +24,16 @@ export async function handleVmMutation(
 	const validAction = action as ValidVmAction;
 
 	try {
+		if (validAction === 'delete') {
+			const result = await deleteVm({ vm_id, requested_by: 'webui' }, token);
+			return {
+				accepted: true,
+				task_id: result.operation_id,
+				vm_id: result.vm_id,
+				summary: `Delete VM accepted`,
+				action: validAction
+			};
+		}
 		const result = await mutateVm({ vm_id, action: validAction, force: false }, token);
 		return { ...result, action: validAction };
 	} catch (err) {

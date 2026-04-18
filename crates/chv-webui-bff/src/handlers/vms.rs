@@ -640,6 +640,36 @@ pub async fn mutate_vm(
     })))
 }
 
+pub async fn get_vm_console(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let vm_id = payload
+        .get("vm_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?;
+
+    let log_path = format!("/run/chv/agent/vm-{}-serial.log", vm_id);
+    let log_content = tokio::fs::read_to_string(&log_path)
+        .await
+        .unwrap_or_default();
+
+    // Return last 500 lines
+    let line_count = log_content.lines().count();
+    let tail = if line_count > 500 {
+        log_content.lines().skip(line_count - 500).collect::<Vec<_>>().join("\n")
+    } else {
+        log_content
+    };
+
+    Ok(Json(json!({
+        "vm_id": vm_id,
+        "log_path": log_path,
+        "content": tail,
+        "lines": line_count,
+    })))
+}
+
 #[derive(sqlx::FromRow)]
 struct VmRow {
     vm_id: String,

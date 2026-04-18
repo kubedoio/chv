@@ -47,6 +47,10 @@ pub fn bff_router() -> Router<AppState> {
         .route("/v1/vms/delete", post(crate::handlers::vms::delete_vm))
         .route("/v1/vms/mutate", post(crate::handlers::vms::mutate_vm))
         .route(
+            "/v1/vms/console",
+            post(crate::handlers::vms::get_vm_console),
+        )
+        .route(
             "/v1/vms/events",
             post(crate::handlers::events::list_events_for_vm),
         )
