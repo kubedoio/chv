@@ -87,6 +87,30 @@ impl ProcessCloudHypervisorAdapter {
         let status_code = parse_http_status(&buf[..n]).unwrap_or(0);
         Ok(status_code)
     }
+
+    fn validate_vm_config(&self, config: &VmConfig) -> Result<(), ChvError> {
+        if !self.chv_binary.exists() {
+            return Err(ChvError::InvalidArgument {
+                field: "chv_binary_path".to_string(),
+                reason: format!("binary not found: {}", self.chv_binary.display()),
+            });
+        }
+        if !config.kernel_path.exists() {
+            return Err(ChvError::InvalidArgument {
+                field: "kernel_path".to_string(),
+                reason: format!("kernel not found: {}", config.kernel_path.display()),
+            });
+        }
+        for disk in &config.disks {
+            if !disk.path.exists() {
+                return Err(ChvError::InvalidArgument {
+                    field: "disk_path".to_string(),
+                    reason: format!("disk not found: {}", disk.path.display()),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn parse_http_status(response_bytes: &[u8]) -> Option<u16> {
@@ -103,6 +127,16 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         config: &VmConfig,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
+        self.validate_vm_config(config)?;
+        if config.api_socket_path.exists() {
+            tokio::fs::remove_file(&config.api_socket_path)
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: config.api_socket_path.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+        }
+
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
         cmd.arg("--api-socket").arg(&config.api_socket_path);
         cmd.arg("--cpus").arg(format!("boot={}", config.cpus));
@@ -134,12 +168,23 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             "spawning cloud-hypervisor"
         );
 
-        let child = cmd.spawn().map_err(|e| ChvError::Io {
+        let mut child = cmd.spawn().map_err(|e| ChvError::Io {
             path: self.chv_binary.to_string_lossy().to_string(),
             source: e,
         })?;
 
-        Self::wait_for_socket(&config.api_socket_path, std::time::Duration::from_secs(10)).await?;
+        if let Err(e) =
+            Self::wait_for_socket(&config.api_socket_path, std::time::Duration::from_secs(10)).await
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "failed to start cloud-hypervisor for vm {}: {}",
+                    config.vm_id, e
+                ),
+            });
+        }
 
         let mut map = self.vms.lock().await;
         map.insert(
@@ -235,7 +280,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
 #[cfg(test)]
 mod tests {
+    use super::ProcessCloudHypervisorAdapter;
     use super::parse_http_status;
+    use crate::adapter::{VmConfig, VmDiskConfig};
+    use chv_errors::ChvError;
+    use std::path::PathBuf;
 
     #[test]
     fn parse_http_status_extracts_200() {
@@ -257,5 +306,49 @@ mod tests {
     #[test]
     fn parse_http_status_handles_empty() {
         assert_eq!(parse_http_status(b""), None);
+    }
+
+    #[test]
+    fn validate_vm_config_rejects_missing_kernel() {
+        let dir = tempfile::tempdir().unwrap();
+        let chv_bin = dir.path().join("cloud-hypervisor");
+        std::fs::write(&chv_bin, b"#!/bin/true").unwrap();
+        let adapter = ProcessCloudHypervisorAdapter::new(chv_bin);
+        let cfg = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 1,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: dir.path().join("missing-kernel"),
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: PathBuf::from("/tmp/chv-vm-1.sock"),
+        };
+        let err = adapter.validate_vm_config(&cfg).unwrap_err();
+        assert!(matches!(err, ChvError::InvalidArgument { field, .. } if field == "kernel_path"));
+    }
+
+    #[test]
+    fn validate_vm_config_accepts_existing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let chv_bin = dir.path().join("cloud-hypervisor");
+        let kernel = dir.path().join("vmlinux");
+        let disk = dir.path().join("root.img");
+        std::fs::write(&chv_bin, b"#!/bin/true").unwrap();
+        std::fs::write(&kernel, b"kernel").unwrap();
+        std::fs::write(&disk, b"disk").unwrap();
+        let adapter = ProcessCloudHypervisorAdapter::new(chv_bin);
+        let cfg = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 1,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: kernel,
+            disks: vec![VmDiskConfig {
+                path: disk,
+                read_only: false,
+            }],
+            nics: vec![],
+            api_socket_path: PathBuf::from("/tmp/chv-vm-1.sock"),
+        };
+        adapter.validate_vm_config(&cfg).unwrap();
     }
 }

@@ -106,6 +106,27 @@ impl VmRuntime {
     pub fn list(&self) -> Vec<VmRecord> {
         self.vms.lock().unwrap().values().cloned().collect()
     }
+
+    pub fn record_failure(
+        &self,
+        vm_id: impl Into<String>,
+        generation: impl Into<String>,
+        error: impl Into<String>,
+    ) {
+        let vm_id = vm_id.into();
+        let generation = generation.into();
+        let error = error.into();
+        let mut map = self.vms.lock().unwrap();
+        let entry = map.entry(vm_id.clone()).or_insert_with(|| VmRecord {
+            vm_id: vm_id.clone(),
+            observed_generation: generation.clone(),
+            runtime_status: "Failed".to_string(),
+            last_error: Some(error.clone()),
+        });
+        entry.observed_generation = generation;
+        entry.runtime_status = "Failed".to_string();
+        entry.last_error = Some(error);
+    }
 }
 
 #[cfg(test)]
@@ -178,5 +199,15 @@ mod tests {
             .unwrap();
         rt.delete_vm("vm-1", Some("op-4")).await.unwrap();
         assert!(rt.get("vm-1").is_none());
+    }
+
+    #[test]
+    fn vm_runtime_record_failure_upserts_failed_state() {
+        let (rt, _mock) = test_runtime();
+        rt.record_failure("vm-1", "7", "kernel missing");
+        let rec = rt.get("vm-1").unwrap();
+        assert_eq!(rec.observed_generation, "7");
+        assert_eq!(rec.runtime_status, "Failed");
+        assert_eq!(rec.last_error.as_deref(), Some("kernel missing"));
     }
 }

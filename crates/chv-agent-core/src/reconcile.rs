@@ -358,6 +358,8 @@ impl Reconciler {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             };
@@ -365,6 +367,8 @@ impl Reconciler {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to parse vm_fragment spec_json");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             };
@@ -375,6 +379,8 @@ impl Reconciler {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to prepare vm");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             };
@@ -384,12 +390,16 @@ impl Reconciler {
                 .await
             {
                 warn!(vm_id = %vm_id, error = %e, "failed to create vm");
+                self.vm_runtime
+                    .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                 continue;
             }
             if spec.desired_state == "Running" {
                 let start_op_id = format!("{}-start", op_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to start vm");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             }
@@ -414,18 +424,20 @@ impl Reconciler {
 
         // Reconcile existing VMs
         for vm_id in desired.intersection(&actual) {
-            let raw = {
+            let (generation, raw) = {
                 let cache = self.cache.lock().await;
                 let Some(fragment) = cache.vm_fragments.get(vm_id) else {
                     warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
                     continue;
                 };
-                fragment.spec_json.clone()
+                (fragment.generation.clone(), fragment.spec_json.clone())
             };
             let raw = match std::str::from_utf8(&raw) {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             };
@@ -433,6 +445,8 @@ impl Reconciler {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to parse vm_fragment spec_json");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             };
@@ -444,12 +458,16 @@ impl Reconciler {
                 let op_id = format!("reconcile-vm-start-{}", vm_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to start vm");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             } else if spec.desired_state == "Stopped" && record.runtime_status == "Running" {
                 let op_id = format!("reconcile-vm-stop-{}", vm_id);
                 if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, Some(&op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to stop vm");
+                    self.vm_runtime
+                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
                     continue;
                 }
             }

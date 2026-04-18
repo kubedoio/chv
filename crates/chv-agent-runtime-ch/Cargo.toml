@@ -9,3 +9,6 @@ chv-errors = { path = "../chv-errors" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -363,6 +363,7 @@ dependencies = [
  "async-trait",
  "chv-common",
  "chv-errors",
+ "tempfile",
  "tokio",
  "tracing",
 ]

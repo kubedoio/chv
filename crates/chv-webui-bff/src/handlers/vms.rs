@@ -336,12 +336,13 @@ pub async fn create_vm(
     // Insert VM desired state
     sqlx::query(
         r#"
-        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, cpu_count, memory_bytes, image_ref, requested_at, updated_at)
-        VALUES (?, 1, 'Pending', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&vm_id)
     .bind(&requested_by)
+    .bind(&node_id)
     .bind(cpu_count)
     .bind(memory_bytes)
     .bind(&image_ref)
@@ -437,7 +438,7 @@ pub async fn create_vm(
     sqlx::query(
         r#"
         INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
-        VALUES (?, ?, 'vm', ?, 'create', 'Accepted', ?, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        VALUES (?, ?, 'vm', ?, 'CreateVm', 'Accepted', ?, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&operation_id)
@@ -517,7 +518,7 @@ pub async fn delete_vm(
     sqlx::query(
         r#"
         INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
-        VALUES (?, ?, 'vm', ?, 'delete', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        VALUES (?, ?, 'vm', ?, 'DeleteVm', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&operation_id)

@@ -194,12 +194,13 @@ impl Orchestrator {
                     .as_ref()
                     .map(|r| r.status.as_str())
                     .unwrap_or("OK");
-                let final_status = if status == "OK" {
+                let accepted = status.eq_ignore_ascii_case("ok");
+                let final_status = if accepted {
                     OperationStatus::Succeeded
                 } else {
                     OperationStatus::Failed
                 };
-                let error_message = if status == "OK" {
+                let error_message = if accepted {
                     None
                 } else {
                     result.result.map(|r| r.human_summary)

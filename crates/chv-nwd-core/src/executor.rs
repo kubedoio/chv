@@ -137,6 +137,18 @@ impl LinuxExecutor {
         std::path::Path::new("/var/run/netns").join(name).exists()
     }
 
+    fn tap_name_for_nic(nic_id: &str) -> String {
+        // Linux interface names are limited to 15 bytes (IFNAMSIZ - 1).
+        // Derive a stable compact tap name from the nic_id so very long IDs
+        // (e.g. UUID-derived values) do not break `ip tuntap add`.
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+        for byte in nic_id.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+        }
+        format!("tap-{:08x}", (hash & 0xffff_ffff) as u32)
+    }
+
     async fn run_nft(args: &[&str]) -> Result<(), ChvError> {
         let out = Command::new("nft")
             .args(args)
@@ -329,7 +341,7 @@ impl NetworkExecutor for LinuxExecutor {
         _mac_address: &str,
         _ip_address: &str,
     ) -> Result<(String, String), ChvError> {
-        let tap_name = format!("tap-{}", nic_id);
+        let tap_name = Self::tap_name_for_nic(nic_id);
 
         Self::run_ip(&["tuntap", "add", "dev", &tap_name, "mode", "tap"]).await?;
         Self::run_ip(&["link", "set", "dev", &tap_name, "master", bridge_name]).await?;
@@ -341,7 +353,7 @@ impl NetworkExecutor for LinuxExecutor {
     }
 
     async fn detach_vm_nic(&self, nic_id: &str) -> Result<(), ChvError> {
-        let tap_handle = format!("tap-{}", nic_id);
+        let tap_handle = Self::tap_name_for_nic(nic_id);
         let out = Command::new("ip")
             .args(["tuntap", "del", "dev", &tap_handle, "mode", "tap"])
             .output()
@@ -594,5 +606,15 @@ mod tests {
             }
         }
         assert_eq!(found_handle, Some("10".to_string()));
+    }
+
+    #[test]
+    fn tap_name_is_stable_and_linux_safe_length() {
+        let nic_id = "95f4f899-58b9-44b6-95f5-0f35a2e590a6-default-network";
+        let a = LinuxExecutor::tap_name_for_nic(nic_id);
+        let b = LinuxExecutor::tap_name_for_nic(nic_id);
+        assert_eq!(a, b);
+        assert!(a.len() <= 15, "tap name exceeds Linux IFNAMSIZ: {}", a);
+        assert!(a.starts_with("tap-"));
     }
 }

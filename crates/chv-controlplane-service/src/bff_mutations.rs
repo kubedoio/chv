@@ -209,9 +209,17 @@ impl MutationService for ControlPlaneMutationService {
         resize_bytes: Option<u64>,
         requested_by: String,
     ) -> Result<MutateVolumeResponse, BffError> {
-        // Look up the volume's node_id and vm_id from the volume_desired_state table.
+        // Look up the volume's node_id from volumes and attachment/size from volume_desired_state/volumes.
         let row = sqlx::query_as::<_, VolumeLookupRow>(
-            "SELECT node_id, attached_vm_id as vm_id, size_bytes FROM volume_desired_state WHERE volume_id = $1"
+            r#"
+            SELECT
+                v.node_id as node_id,
+                vds.attached_vm_id as vm_id,
+                v.capacity_bytes as size_bytes
+            FROM volumes v
+            JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
+            WHERE v.volume_id = $1
+            "#
         )
         .bind(&volume_id)
         .fetch_optional(&self.pool)
