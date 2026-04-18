@@ -119,6 +119,8 @@
 		{/snippet}
 	</PageHeaderWithAction>
 
+	<CreateVMModal bind:open={modalOpen} onSuccess={() => invalidateAll()} />
+
 	<div class="posture-strip-wrapper">
 		<CompactStatStrip {stats} />
 	</div>
