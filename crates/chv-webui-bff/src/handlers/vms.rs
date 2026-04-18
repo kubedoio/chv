@@ -264,6 +264,8 @@ pub async fn create_vm(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    tracing::info!("create_vm handler started");
+
     // Support both legacy BFF payload and CreateVMModal payload
     let display_name = payload
         .get("display_name")
@@ -272,10 +274,13 @@ pub async fn create_vm(
         .ok_or_else(|| BffError::BadRequest("missing name/display_name".into()))?
         .to_string();
 
+    tracing::info!(%display_name, "create_vm: parsed display_name");
+
     let node_id = if let Some(nid) = payload.get("node_id").and_then(|v| v.as_str()) {
         nid.to_string()
     } else {
         // Pick the first enrolled node as default
+        tracing::info!("create_vm: looking up default node");
         sqlx::query_scalar::<_, String>(
             "SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1",
         )
@@ -284,6 +289,7 @@ pub async fn create_vm(
         .map_err(|e| BffError::Internal(format!("failed to query nodes: {}", e)))?
         .ok_or_else(|| BffError::BadRequest("no nodes enrolled and node_id not provided".into()))?
     };
+    tracing::info!(%node_id, "create_vm: selected node");
 
     let cpu_count = payload
         .get("cpu_count")
@@ -304,9 +310,11 @@ pub async fn create_vm(
         .or_else(|| payload.get("image_id").and_then(|v| v.as_str()))
         .unwrap_or("default")
         .to_string();
+    tracing::info!(%image_ref, "create_vm: initial image_ref");
 
     // If image_id is a real image UUID (not "default"), look up its source_url/path.
     if image_ref != "default" && !image_ref.is_empty() {
+        tracing::info!(%image_ref, "create_vm: looking up image in DB");
         if let Some(source_url) = sqlx::query_scalar::<_, Option<String>>(
             "SELECT source_url FROM images WHERE image_id = ?"
         )
@@ -316,7 +324,10 @@ pub async fn create_vm(
         .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?
         .flatten()
         {
+            tracing::info!(%source_url, "create_vm: resolved image_ref to source_url");
             image_ref = source_url;
+        } else {
+            tracing::warn!(%image_ref, "create_vm: image not found in DB, keeping original image_ref");
         }
     }
 
@@ -343,6 +354,7 @@ pub async fn create_vm(
     let vm_id = uuid::Uuid::new_v4().to_string();
     let volume_id = uuid::Uuid::new_v4().to_string();
     let operation_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(%vm_id, %volume_id, %operation_id, "create_vm: generated IDs, beginning transaction");
     let mut tx = state
         .pool
         .begin()
@@ -480,10 +492,12 @@ pub async fn create_vm(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
 
+    tracing::info!(%vm_id, "create_vm: committing transaction");
     tx.commit()
         .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
+    tracing::info!(%vm_id, "create_vm: transaction committed successfully");
     Ok(Json(json!({
         "vm_id": vm_id,
         "operation_id": operation_id,
