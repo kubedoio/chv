@@ -100,7 +100,7 @@ install_dependencies() {
     apt-get install -y -qq \
         nginx \
         qemu-kvm bridge-utils iproute2 iptables curl openssl \
-        coreutils tar gzip sqlite3
+        dnsmasq coreutils tar gzip sqlite3
 }
 
 # -----------------------------------------------------------------------------

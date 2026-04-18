@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::TopologySpec;
 use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -241,6 +242,172 @@ impl LinuxExecutor {
             Err(e) => Err(e),
         }
     }
+
+    fn derive_dhcp_range(cidr: &str) -> Result<(String, String, String), ChvError> {
+        let parts: Vec<&str> = cidr.split('/').collect();
+        if parts.len() != 2 {
+            return Err(ChvError::InvalidArgument {
+                field: "cidr".to_string(),
+                reason: format!("invalid CIDR: {}", cidr),
+            });
+        }
+        let ip = parts[0];
+        let prefix: u8 = parts[1].parse().map_err(|_| ChvError::InvalidArgument {
+            field: "cidr".to_string(),
+            reason: format!("invalid prefix in CIDR: {}", cidr),
+        })?;
+
+        let octets: Vec<&str> = ip.split('.').collect();
+        if octets.len() != 4 {
+            return Err(ChvError::InvalidArgument {
+                field: "cidr".to_string(),
+                reason: format!("invalid IP in CIDR: {}", cidr),
+            });
+        }
+
+        match prefix {
+            24 => {
+                let base = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+                Ok((
+                    format!("{}.50", base),
+                    format!("{}.250", base),
+                    "255.255.255.0".to_string(),
+                ))
+            }
+            16 => {
+                let base = format!("{}.{}", octets[0], octets[1]);
+                Ok((
+                    format!("{}.0.50", base),
+                    format!("{}.255.250", base),
+                    "255.255.0.0".to_string(),
+                ))
+            }
+            _ => {
+                let base = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+                Ok((
+                    format!("{}.50", base),
+                    format!("{}.250", base),
+                    "255.255.255.0".to_string(),
+                ))
+            }
+        }
+    }
+
+    async fn start_dnsmasq(
+        network_id: &str,
+        bridge_name: &str,
+        cidr: &str,
+        gateway_ip: &str,
+    ) -> Result<(), ChvError> {
+        let runtime_dir = PathBuf::from("/run/chv/nwd");
+        let _ = tokio::fs::create_dir_all(&runtime_dir).await;
+
+        let conf_path = runtime_dir.join(format!("dnsmasq-{}.conf", network_id));
+        let hosts_path = runtime_dir.join(format!("dnsmasq-{}.hosts", network_id));
+        let pid_path = runtime_dir.join(format!("dnsmasq-{}.pid", network_id));
+
+        // Check if already running
+        if let Ok(pid_str) = tokio::fs::read_to_string(&pid_path).await {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                if Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .output()
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Create empty hostsfile if not exists
+        let _ = tokio::fs::write(&hosts_path, "").await;
+
+        let (range_start, range_end, netmask) = Self::derive_dhcp_range(cidr)?;
+
+        let config = format!(
+            "interface={}\nbind-interfaces\ndhcp-range={},{},{},12h\ndhcp-option=3,{}\ndhcp-option=6,{}\ndhcp-hostsfile={}\nexcept-interface=lo\nno-resolv\nserver=1.1.1.1\n",
+            bridge_name,
+            range_start,
+            range_end,
+            netmask,
+            gateway_ip,
+            gateway_ip,
+            hosts_path.display()
+        );
+        tokio::fs::write(&conf_path, config).await.map_err(|e| ChvError::Io {
+            path: conf_path.to_string_lossy().to_string(),
+            source: e,
+        })?;
+
+        let out = Command::new("dnsmasq")
+            .args([
+                "--conf-file",
+                &conf_path.to_string_lossy(),
+                "--pid-file",
+                &pid_path.to_string_lossy(),
+            ])
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "dnsmasq".to_string(),
+                source: e,
+            })?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(ChvError::NetworkUnavailable {
+                resource: "dnsmasq".to_string(),
+                reason: format!("dnsmasq failed: {}", stderr),
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn stop_dnsmasq(network_id: &str) {
+        let runtime_dir = PathBuf::from("/run/chv/nwd");
+        let pid_path = runtime_dir.join(format!("dnsmasq-{}.pid", network_id));
+        let conf_path = runtime_dir.join(format!("dnsmasq-{}.conf", network_id));
+        let hosts_path = runtime_dir.join(format!("dnsmasq-{}.hosts", network_id));
+
+        if let Ok(pid_str) = tokio::fs::read_to_string(&pid_path).await {
+            let _ = Command::new("kill")
+                .args([pid_str.trim()])
+                .output()
+                .await;
+        }
+
+        let _ = tokio::fs::remove_file(&pid_path).await;
+        let _ = tokio::fs::remove_file(&conf_path).await;
+        let _ = tokio::fs::remove_file(&hosts_path).await;
+    }
+
+    async fn add_dhcp_host(network_id: &str, mac_address: &str, ip_address: &str) {
+        let hosts_path = format!("/run/chv/nwd/dnsmasq-{}.hosts", network_id);
+        let pid_path = format!("/run/chv/nwd/dnsmasq-{}.pid", network_id);
+
+        let content = tokio::fs::read_to_string(&hosts_path).await.unwrap_or_default();
+        let entry = format!("{},{}\n", mac_address, ip_address);
+
+        if !content.contains(mac_address) {
+            if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&hosts_path)
+                .await
+            {
+                let _ = file.write_all(entry.as_bytes()).await;
+            }
+        }
+
+        if let Ok(pid_str) = tokio::fs::read_to_string(&pid_path).await {
+            let _ = Command::new("kill")
+                .args(["-HUP", pid_str.trim()])
+                .output()
+                .await;
+        }
+    }
 }
 
 #[async_trait]
@@ -258,6 +425,19 @@ impl NetworkExecutor for LinuxExecutor {
             Self::run_ip(&["link", "add", &spec.bridge_name, "type", "bridge"]).await?;
         }
         Self::run_ip(&["link", "set", &spec.bridge_name, "up"]).await?;
+
+        // Assign gateway IP to bridge
+        if !spec.gateway_ip.is_empty() && !spec.subnet_cidr.is_empty() {
+            let prefix = spec.subnet_cidr.split('/').nth(1).unwrap_or("24");
+            let _ = Self::run_ip(&["addr", "add", &format!("{}/{}", spec.gateway_ip, prefix), "dev", &spec.bridge_name]).await;
+        }
+
+        // Start dnsmasq for DHCP
+        if !spec.subnet_cidr.is_empty() && !spec.gateway_ip.is_empty() {
+            if let Err(e) = Self::start_dnsmasq(&spec.network_id, &spec.bridge_name, &spec.subnet_cidr, &spec.gateway_ip).await {
+                warn!(error = %e, "failed to start dnsmasq");
+            }
+        }
 
         // Namespace
         if !Self::namespace_exists(&spec.namespace_name).await {
@@ -287,6 +467,8 @@ impl NetworkExecutor for LinuxExecutor {
             namespace = %state.namespace_name,
             "deleting topology"
         );
+
+        Self::stop_dnsmasq(network_id).await;
 
         if Self::namespace_exists(&state.namespace_name).await {
             if let Err(e) = Self::run_ip(&["netns", "del", &state.namespace_name]).await {
@@ -338,14 +520,16 @@ impl NetworkExecutor for LinuxExecutor {
         nic_id: &str,
         _vm_id: &str,
         bridge_name: &str,
-        _mac_address: &str,
-        _ip_address: &str,
+        mac_address: &str,
+        ip_address: &str,
     ) -> Result<(String, String), ChvError> {
         let tap_name = Self::tap_name_for_nic(nic_id);
 
         Self::run_ip(&["tuntap", "add", "dev", &tap_name, "mode", "tap"]).await?;
         Self::run_ip(&["link", "set", "dev", &tap_name, "master", bridge_name]).await?;
         Self::run_ip(&["link", "set", "dev", &tap_name, "up"]).await?;
+
+        Self::add_dhcp_host(network_id, mac_address, ip_address).await;
 
         info!(network_id = %network_id, nic_id = %nic_id, tap = %tap_name, "attached VM NIC");
 
