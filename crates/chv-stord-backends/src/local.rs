@@ -5,6 +5,8 @@ use chv_errors::ChvError;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
+const DEFAULT_SPARSE_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
 pub struct LocalFileBackend {
     runtime_dir: PathBuf,
 }
@@ -19,6 +21,33 @@ impl LocalFileBackend {
             PathBuf::from(&locator.locator)
         } else {
             self.runtime_dir.join(&locator.locator)
+        }
+    }
+
+    fn resolve_optional_path(&self, path: &str) -> PathBuf {
+        if std::path::Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            self.runtime_dir.join(path)
+        }
+    }
+
+    fn parse_size_bytes(&self, locator: &BackendLocator) -> Result<u64, ChvError> {
+        match locator.options.get("size_bytes") {
+            Some(raw) => {
+                let parsed = raw.parse::<u64>().map_err(|_| ChvError::InvalidArgument {
+                    field: "size_bytes".to_string(),
+                    reason: format!("invalid integer: {}", raw),
+                })?;
+                if parsed == 0 {
+                    return Err(ChvError::InvalidArgument {
+                        field: "size_bytes".to_string(),
+                        reason: "size_bytes must be > 0".to_string(),
+                    });
+                }
+                Ok(parsed)
+            }
+            None => Ok(DEFAULT_SPARSE_SIZE_BYTES),
         }
     }
 
@@ -103,7 +132,10 @@ impl StorageBackend for LocalFileBackend {
         locator: &BackendLocator,
         _policy: &DevicePolicy,
     ) -> Result<VolumeExport, ChvError> {
-        if locator.backend_class != "local" && locator.backend_class != "local-file" {
+        if locator.backend_class != "local"
+            && locator.backend_class != "local-file"
+            && locator.backend_class != "localdisk"
+        {
             return Err(ChvError::BackendUnavailable {
                 backend: locator.backend_class.clone(),
                 reason: "local backend only handles local class".to_string(),
@@ -114,18 +146,75 @@ impl StorageBackend for LocalFileBackend {
         info!(volume_id, path = %path.display(), "opening local volume");
 
         if !path.exists() {
-            warn!(volume_id, path = %path.display(), "path does not exist yet; creating sparse raw volume for first-VM milestone");
-            let file = std::fs::File::create(&path)
-                .map_err(|e| ChvError::BackendUnavailable {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| ChvError::BackendUnavailable {
                     backend: "local".to_string(),
-                    reason: format!("failed to create volume file: {}", e),
+                    reason: format!("failed to create parent directory: {}", e),
                 })?;
-            let default_size: u64 = 10 * 1024 * 1024 * 1024; // 10 GB
-            file.set_len(default_size)
-                .map_err(|e| ChvError::BackendUnavailable {
-                    backend: "local".to_string(),
-                    reason: format!("failed to set volume file size: {}", e),
-                })?;
+            }
+
+            let size_bytes = self.parse_size_bytes(locator)?;
+            let seed_from = locator
+                .options
+                .get("seed_from")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+
+            match seed_from {
+                Some(seed) => {
+                    let seed_path = self.resolve_optional_path(seed);
+                    if !seed_path.exists() {
+                        return Err(ChvError::NotFound {
+                            resource: "seed_source".to_string(),
+                            id: seed_path.to_string_lossy().to_string(),
+                        });
+                    }
+                    std::fs::copy(&seed_path, &path).map_err(|e| ChvError::BackendUnavailable {
+                        backend: "local".to_string(),
+                        reason: format!("failed to seed volume from image: {}", e),
+                    })?;
+
+                    let file = std::fs::File::options()
+                        .write(true)
+                        .open(&path)
+                        .map_err(|e| ChvError::BackendUnavailable {
+                            backend: "local".to_string(),
+                            reason: format!("failed to open seeded volume: {}", e),
+                        })?;
+                    if file.metadata().map(|m| m.len()).unwrap_or(0) < size_bytes {
+                        file.set_len(size_bytes)
+                            .map_err(|e| ChvError::BackendUnavailable {
+                                backend: "local".to_string(),
+                                reason: format!("failed to expand seeded volume: {}", e),
+                            })?;
+                    }
+                    info!(
+                        volume_id,
+                        path = %path.display(),
+                        seed = %seed_path.display(),
+                        size_bytes,
+                        "seeded local volume from image"
+                    );
+                }
+                None => {
+                    warn!(
+                        volume_id,
+                        path = %path.display(),
+                        size_bytes,
+                        "path does not exist yet; creating sparse raw volume"
+                    );
+                    let file =
+                        std::fs::File::create(&path).map_err(|e| ChvError::BackendUnavailable {
+                            backend: "local".to_string(),
+                            reason: format!("failed to create volume file: {}", e),
+                        })?;
+                    file.set_len(size_bytes)
+                        .map_err(|e| ChvError::BackendUnavailable {
+                            backend: "local".to_string(),
+                            reason: format!("failed to set volume file size: {}", e),
+                        })?;
+                }
+            }
         }
 
         let export_kind = Self::detect_kind(&path);
@@ -640,5 +729,52 @@ mod tests {
             .prepare_clone("vol-1", "local-vol-1-vol.qcow2", "clone1")
             .await;
         assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+    }
+
+    #[tokio::test]
+    async fn local_backend_open_with_seed_and_size_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("seed.img");
+        {
+            let mut f = std::fs::File::create(&seed).unwrap();
+            f.write_all(&[1u8; 512]).unwrap();
+        }
+
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let mut options = std::collections::HashMap::new();
+        options.insert("seed_from".to_string(), seed.to_string_lossy().to_string());
+        options.insert("size_bytes".to_string(), "4096".to_string());
+        let locator = BackendLocator {
+            backend_class: "local".to_string(),
+            locator: "seeded.img".to_string(),
+            options,
+        };
+
+        let export = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
+        assert!(export.export_path.ends_with("seeded.img"));
+        let meta = std::fs::metadata(dir.path().join("seeded.img")).unwrap();
+        assert_eq!(meta.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn local_backend_rejects_invalid_size_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let mut options = std::collections::HashMap::new();
+        options.insert("size_bytes".to_string(), "abc".to_string());
+        let locator = BackendLocator {
+            backend_class: "local".to_string(),
+            locator: "bad-size.img".to_string(),
+            options,
+        };
+
+        let err = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChvError::InvalidArgument { .. }));
     }
 }

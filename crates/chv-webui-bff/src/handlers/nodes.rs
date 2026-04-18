@@ -8,8 +8,16 @@ pub async fn list_nodes(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, BffError> {
-    let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200);
+    let page = payload
+        .get("page")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1);
+    let page_size = payload
+        .get("page_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .clamp(1, 200);
     let offset = (page - 1) * page_size;
     let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
         .fetch_one(&state.pool)
@@ -292,7 +300,10 @@ pub async fn mutate_node(
         .ok_or_else(|| BffError::BadRequest("missing action".into()))?
         .to_string();
 
-    let response = state.mutations.mutate_node(node_id, action, claims.username).await?;
+    let response = state
+        .mutations
+        .mutate_node(node_id, action, claims.username)
+        .await?;
 
     Ok(Json(json!({
         "accepted": response.accepted,

@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use chv_controlplane_store::StorePool;
 use chv_controlplane_types::domain::Generation;
 use chv_webui_bff::{BffError, MutationService};
-use chv_webui_bff_api::chv_webui_bff_v1::{MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse};
+use chv_webui_bff_api::chv_webui_bff_v1::{
+    MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse,
+};
 use control_plane_node_api::control_plane_node_api as proto;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,14 +83,13 @@ impl MutationService for ControlPlaneMutationService {
         requested_by: String,
     ) -> Result<MutateVmResponse, BffError> {
         // Look up the VM's node_id from the vms table.
-        let node_id = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT node_id FROM vms WHERE vm_id = $1"
-        )
-        .bind(&vm_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
-        .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+        let node_id =
+            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = $1")
+                .bind(&vm_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
+                .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
 
         let meta = self.build_meta(node_id.clone(), requested_by);
 
@@ -126,7 +127,9 @@ impl MutationService for ControlPlaneMutationService {
         };
 
         let ack = self.map_ack(ack)?;
-        let result = ack.result.ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
 
         Ok(MutateVmResponse {
             accepted: result.status == "OK",
@@ -191,7 +194,9 @@ impl MutationService for ControlPlaneMutationService {
         };
 
         let ack = self.map_ack(ack)?;
-        let result = ack.result.ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
 
         Ok(MutateNodeResponse {
             accepted: result.status == "OK",
@@ -219,7 +224,7 @@ impl MutationService for ControlPlaneMutationService {
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
             WHERE v.volume_id = $1
-            "#
+            "#,
         )
         .bind(&volume_id)
         .fetch_optional(&self.pool)
@@ -269,7 +274,9 @@ impl MutationService for ControlPlaneMutationService {
         };
 
         let ack = self.map_ack(ack)?;
-        let result = ack.result.ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
 
         Ok(MutateVolumeResponse {
             accepted: result.status == "OK",

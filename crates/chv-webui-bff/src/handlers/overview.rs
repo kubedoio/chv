@@ -21,7 +21,7 @@ pub async fn get_overview(
     .unwrap_or(0);
 
     let maintenance_nodes = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM node_desired_state WHERE desired_state = 'Maintenance'"
+        "SELECT COUNT(*) FROM node_desired_state WHERE desired_state = 'Maintenance'",
     )
     .fetch_one(&state.pool)
     .await
@@ -33,25 +33,24 @@ pub async fn get_overview(
         .unwrap_or(0);
 
     let vms_running = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Running'"
+        "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Running'",
     )
     .fetch_one(&state.pool)
     .await
     .unwrap_or(0);
 
     let active_tasks = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM operations WHERE status IN ('Pending', 'Accepted', 'Running')"
+        "SELECT COUNT(*) FROM operations WHERE status IN ('Pending', 'Accepted', 'Running')",
     )
     .fetch_one(&state.pool)
     .await
     .unwrap_or(0);
 
-    let unresolved_alerts = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM alerts WHERE status != 'resolved'"
-    )
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or(0);
+    let unresolved_alerts =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alerts WHERE status != 'resolved'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or(0);
 
     let alerts_rows = sqlx::query_as::<_, AlertRow>(
         r#"

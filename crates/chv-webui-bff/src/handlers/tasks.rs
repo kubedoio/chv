@@ -1,5 +1,5 @@
-use axum::{extract::State, response::Json};
 use axum::response::sse::{Event, Sse};
+use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::Duration;
@@ -62,12 +62,13 @@ pub async fn list_tasks(
 
     if let Some(window) = filters.get("window").and_then(|v| v.as_str()) {
         match window {
-            "24h" => query_sql.push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')"),
-            "7d" => query_sql.push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')"),
-            "30d" => query_sql.push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 days')"),
-            "active" => query_sql.push_str(
-                " AND status IN ('Pending', 'Accepted', 'Running')",
-            ),
+            "24h" => query_sql
+                .push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')"),
+            "7d" => query_sql
+                .push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')"),
+            "30d" => query_sql
+                .push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 days')"),
+            "active" => query_sql.push_str(" AND status IN ('Pending', 'Accepted', 'Running')"),
             _ => {}
         }
     }
@@ -142,11 +143,21 @@ pub async fn stream_tasks(
     let pool = state.pool.clone();
     let resource_ids_filter: Vec<String> = params
         .get("resource_ids")
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let resource_kinds_filter: Vec<String> = params
         .get("resource_kinds")
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
 
     let tick_interval = interval(Duration::from_secs(3));

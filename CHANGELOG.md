@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 - Rust control plane Phase 1 foundation with inbound gRPC and HTTP admin APIs
 - `chv-controlplane` binary with optional mTLS for gRPC and axum-based admin server
 - `ControlPlaneService`, `LifecycleService`, `ReconcileService`, `EnrollmentService`, and `TelemetryService` implementations
-- PostgreSQL-backed repositories: nodes, desired state, observed state, bootstrap tokens, network exposures
+- SQLite-backed repositories: nodes, desired state, observed state, bootstrap tokens, network exposures
 - Structured error mapping to tonic::Status with sanitized user-facing messages
 - Operation journal for VM lifecycle with idempotency via resource fingerprinting
 - Desired-state fragment parsers with strict validation and `deny_unknown_fields`

@@ -8,8 +8,16 @@ pub async fn list_volumes(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200);
+    let page = payload
+        .get("page")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1);
+    let page_size = payload
+        .get("page_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .clamp(1, 200);
     let offset = (page - 1) * page_size;
     let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM volumes")
         .fetch_one(&state.pool)
@@ -182,7 +190,10 @@ pub async fn get_volume(
                 }
             })))
         }
-        None => Err(BffError::NotFound(format!("volume {} not found", volume_id))),
+        None => Err(BffError::NotFound(format!(
+            "volume {} not found",
+            volume_id
+        ))),
     }
 }
 
@@ -203,7 +214,10 @@ pub async fn mutate_volume(
         .ok_or_else(|| BffError::BadRequest("missing action".into()))?
         .to_string();
 
-    let force = payload.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = payload
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let resize_bytes = payload.get("resize_bytes").and_then(|v| v.as_u64());
 
     let response = state

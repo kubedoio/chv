@@ -25,10 +25,7 @@ pub async fn list_nodes(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-pub async fn get_node(
-    Path(id): Path<String>,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn get_node(Path(id): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
     let row = sqlx::query_as::<_, NodeRow>(
         r#"SELECT node_id, hostname, display_name FROM nodes WHERE node_id = $1"#,
     )

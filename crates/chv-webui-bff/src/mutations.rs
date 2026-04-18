@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use chv_webui_bff_api::chv_webui_bff_v1::{MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse};
+use chv_webui_bff_api::chv_webui_bff_v1::{
+    MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse,
+};
 
 use crate::error::BffError;
 

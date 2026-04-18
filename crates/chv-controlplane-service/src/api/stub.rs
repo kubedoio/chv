@@ -17,20 +17,24 @@ pub async fn login_handler(
     let username = match payload.get("username").and_then(|v| v.as_str()) {
         Some(u) => u,
         None => {
-            return Err(chv_webui_bff::BffError::BadRequest("missing username".into()));
+            return Err(chv_webui_bff::BffError::BadRequest(
+                "missing username".into(),
+            ));
         }
     };
 
     let password = match payload.get("password").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => {
-            return Err(chv_webui_bff::BffError::BadRequest("missing password".into()));
+            return Err(chv_webui_bff::BffError::BadRequest(
+                "missing password".into(),
+            ));
         }
     };
 
     // Look up user by username
     let row = sqlx::query_as::<_, UserRow>(
-        "SELECT user_id, password_hash, role FROM users WHERE username = $1"
+        "SELECT user_id, password_hash, role FROM users WHERE username = $1",
     )
     .bind(username)
     .fetch_optional(&state.pool)
@@ -39,7 +43,9 @@ pub async fn login_handler(
     let row = match row {
         Ok(Some(r)) => r,
         Ok(None) => {
-            return Err(chv_webui_bff::BffError::Unauthorized("Invalid credentials".into()));
+            return Err(chv_webui_bff::BffError::Unauthorized(
+                "Invalid credentials".into(),
+            ));
         }
         Err(e) => {
             tracing::error!(error = %e, "db error during login");
@@ -55,7 +61,9 @@ pub async fn login_handler(
         }
     };
     if !password_ok {
-        return Err(chv_webui_bff::BffError::Unauthorized("Invalid credentials".into()));
+        return Err(chv_webui_bff::BffError::Unauthorized(
+            "Invalid credentials".into(),
+        ));
     }
 
     let exp = SystemTime::now()
@@ -80,7 +88,9 @@ pub async fn login_handler(
         Ok(t) => t,
         Err(e) => {
             tracing::error!(error = %e, "failed to encode jwt token");
-            return Err(chv_webui_bff::BffError::Internal("failed to generate token".into()));
+            return Err(chv_webui_bff::BffError::Internal(
+                "failed to generate token".into(),
+            ));
         }
     };
 
@@ -131,7 +141,9 @@ pub async fn list_operations_stub() -> impl axum::response::IntoResponse {
     (StatusCode::OK, Json(serde_json::json!([])))
 }
 
-pub async fn list_events_stub(Query(_params): Query<HashMap<String, String>>) -> impl axum::response::IntoResponse {
+pub async fn list_events_stub(
+    Query(_params): Query<HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
     (StatusCode::OK, Json(serde_json::json!([])))
 }
 
@@ -195,7 +207,9 @@ pub async fn bootstrap_install_stub() -> impl axum::response::IntoResponse {
     )
 }
 
-pub async fn repair_install_stub(AxumJson(_payload): AxumJson<Value>) -> impl axum::response::IntoResponse {
+pub async fn repair_install_stub(
+    AxumJson(_payload): AxumJson<Value>,
+) -> impl axum::response::IntoResponse {
     (
         StatusCode::OK,
         Json(serde_json::json!({

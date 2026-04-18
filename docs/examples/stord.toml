@@ -2,5 +2,5 @@
 # Place this file at /etc/chv/stord.toml
 
 socket_path = "/run/chv/stord/api.sock"
-runtime_dir = "/run/chv/stord"
+runtime_dir = "/var/lib/chv/storage/localdisk"
 log_level = "info"

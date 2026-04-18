@@ -89,7 +89,7 @@ async fn open_close_health_list_smoke() {
         .unwrap()
         .into_inner();
     assert_eq!(health_resp.volume_id, "vol-1");
-    assert_eq!(health_resp.health_status, "unhealthy"); // file does not exist yet
+    assert_eq!(health_resp.health_status, "healthy");
     assert_eq!(health_resp.backend_state, "open");
 
     // ListVolumeSessions

@@ -380,7 +380,7 @@ EOF
 
     cat > "$CHV_CONFIG_DIR/stord.toml" <<EOF
 socket_path = "/run/chv/stord/api.sock"
-runtime_dir = "/run/chv/stord"
+runtime_dir = "${CHV_DATA_DIR}/storage/localdisk"
 log_level = "info"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/stord.toml"

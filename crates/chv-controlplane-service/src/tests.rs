@@ -105,7 +105,6 @@ async fn test_admin_nodes_endpoint() {
     .await
     .unwrap();
 
-
     let app = crate::api::router::admin_router(test_app_state(pool));
 
     let response = app
@@ -523,12 +522,11 @@ async fn test_apply_vm_desired_state_persistence() {
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
     // Verify persistence in vm_desired_state
-    let row =
-        sqlx::query("SELECT vm_id, desired_generation FROM vm_desired_state WHERE vm_id = ?")
-            .bind("vm-1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let row = sqlx::query("SELECT vm_id, desired_generation FROM vm_desired_state WHERE vm_id = ?")
+        .bind("vm-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let vm_id: String = sqlx::Row::get(&row, "vm_id");
     let desired_generation: i64 = sqlx::Row::get(&row, "desired_generation");
     assert_eq!(vm_id, "vm-1");
@@ -785,11 +783,12 @@ async fn test_create_vm_creates_operation() {
     let result = service.create_vm(request).await;
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
-    let row =
-        sqlx::query("SELECT operation_id, status FROM operations WHERE operation_type = 'CreateVm'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let row = sqlx::query(
+        "SELECT operation_id, status FROM operations WHERE operation_type = 'CreateVm'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let status: String = sqlx::Row::get(&row, "status");
     assert_eq!(status, "Accepted");
 }
@@ -888,13 +887,11 @@ async fn test_drain_node_updates_desired_state() {
     let result = service.drain_node(request).await;
     assert!(result.is_ok(), "Expected success, got {:?}", result);
 
-    let row = sqlx::query(
-        "SELECT desired_state FROM node_desired_state WHERE node_id = ?",
-    )
-    .bind("node-lifecycle-3")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let row = sqlx::query("SELECT desired_state FROM node_desired_state WHERE node_id = ?")
+        .bind("node-lifecycle-3")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let desired_state: String = sqlx::Row::get(&row, "desired_state");
     assert_eq!(desired_state, "Draining");
 }
@@ -931,13 +928,11 @@ async fn test_enter_maintenance_updates_desired_state() {
     let resp = service.enter_maintenance(req).await.unwrap();
     assert_eq!(resp.result.unwrap().status, "OK");
 
-    let row = sqlx::query(
-        "SELECT desired_state FROM node_desired_state WHERE node_id = ?",
-    )
-    .bind("node-maint")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let row = sqlx::query("SELECT desired_state FROM node_desired_state WHERE node_id = ?")
+        .bind("node-maint")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let state: String = sqlx::Row::get(&row, "desired_state");
     assert_eq!(state, "Maintenance");
 }
@@ -1353,11 +1348,12 @@ async fn test_acknowledge_advances_operation_to_succeeded() {
         .await
         .unwrap();
 
-    let row = sqlx::query("SELECT status, observed_generation FROM operations WHERE operation_id = ?")
-        .bind("op-ack2")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let row =
+        sqlx::query("SELECT status, observed_generation FROM operations WHERE operation_id = ?")
+            .bind("op-ack2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let status: String = sqlx::Row::get(&row, "status");
     let gen: i64 = sqlx::Row::get(&row, "observed_generation");
     assert_eq!(status, "Succeeded");
@@ -2270,11 +2266,13 @@ async fn test_exit_maintenance_persists_tenant_ready() {
 
     service.exit_maintenance(req).await.unwrap();
 
-    let row = sqlx::query("SELECT desired_state, scheduling_paused FROM node_desired_state WHERE node_id = ?")
-        .bind("node-exit")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let row = sqlx::query(
+        "SELECT desired_state, scheduling_paused FROM node_desired_state WHERE node_id = ?",
+    )
+    .bind("node-exit")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let state: String = sqlx::Row::get(&row, "desired_state");
     let paused: bool = sqlx::Row::get(&row, "scheduling_paused");
     assert_eq!(state, "TenantReady");

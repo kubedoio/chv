@@ -52,7 +52,10 @@ pub async fn get_maintenance(
     .await
     .map_err(|e| BffError::Internal(format!("failed to get maintenance windows: {}", e)))?;
 
-    let pending_actions = nodes.iter().filter(|n| n.observed_state == "Draining").count() as u32;
+    let pending_actions = nodes
+        .iter()
+        .filter(|n| n.observed_state == "Draining")
+        .count() as u32;
 
     let nodes_json: Vec<Value> = nodes
         .into_iter()

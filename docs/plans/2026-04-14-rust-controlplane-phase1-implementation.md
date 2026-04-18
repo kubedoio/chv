@@ -6,7 +6,7 @@
 
 **Architecture:** Build on the existing workspace (`chv-controlplane-types`, `chv-controlplane-store`, `chv-controlplane-service`, `cmd/chv-controlplane`). Add new repositories, service modules, and an axum router. Keep desired/observed state separate. No outbound `chv-agent` client in Phase 1.
 
-**Tech Stack:** Rust, Tokio, tonic, axum, sqlx (PostgreSQL), serde, rcgen, testcontainers, metrics-exporter-prometheus.
+**Tech Stack:** Rust, Tokio, tonic, axum, sqlx (SQLite), serde, rcgen, testcontainers, metrics-exporter-prometheus.
 
 ---
 
@@ -264,7 +264,7 @@ Expected: PASS
 
 Run:
 ```bash
-git add -A && git commit -m "feat(enrollment): validate bootstrap tokens against postgres"
+git add -A && git commit -m "feat(enrollment): validate bootstrap tokens against sqlite"
 ```
 
 ---

@@ -102,7 +102,10 @@ impl Reconciler {
                 self.reconcile_volumes().await?;
                 self.reconcile_vms().await?;
             }
-            NodeState::Degraded | NodeState::Draining | NodeState::Maintenance | NodeState::Failed => {}
+            NodeState::Degraded
+            | NodeState::Draining
+            | NodeState::Maintenance
+            | NodeState::Failed => {}
         }
 
         Ok(())
@@ -223,11 +226,24 @@ impl Reconciler {
         let mut volume_ids = Vec::new();
         for disk in &vm_spec.disks {
             let open_op_id = format!("{}-open-volume-{}", operation_id, disk.volume_id);
+            let mut open_options = std::collections::HashMap::new();
+            if let Some(size_bytes) = disk.size_bytes {
+                open_options.insert("size_bytes".to_string(), size_bytes.to_string());
+            }
+            if let Some(seed_from) = vm_spec
+                .disk_seed_path
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                open_options.insert("seed_from".to_string(), seed_from.to_string());
+            }
             let (_volume_id, handle, export_path) = stord
-                .open_volume(
+                .open_volume_with_options(
                     &disk.volume_id,
                     "local",
                     &format!("{}.img", disk.volume_id),
+                    open_options,
                     Some(&open_op_id),
                 )
                 .await?;
@@ -358,8 +374,11 @@ impl Reconciler {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             };
@@ -367,8 +386,11 @@ impl Reconciler {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to parse vm_fragment spec_json");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             };
@@ -379,8 +401,11 @@ impl Reconciler {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to prepare vm");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             };
@@ -390,16 +415,22 @@ impl Reconciler {
                 .await
             {
                 warn!(vm_id = %vm_id, error = %e, "failed to create vm");
-                self.vm_runtime
-                    .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                self.vm_runtime.record_failure(
+                    vm_id.to_string(),
+                    generation.clone(),
+                    e.to_string(),
+                );
                 continue;
             }
             if spec.desired_state == "Running" {
                 let start_op_id = format!("{}-start", op_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to start vm");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             }
@@ -436,8 +467,11 @@ impl Reconciler {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to decode vm_fragment spec_json as utf-8");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             };
@@ -445,8 +479,11 @@ impl Reconciler {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(vm_id = %vm_id, error = %e, "failed to parse vm_fragment spec_json");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             };
@@ -458,16 +495,22 @@ impl Reconciler {
                 let op_id = format!("reconcile-vm-start-{}", vm_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to start vm");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             } else if spec.desired_state == "Stopped" && record.runtime_status == "Running" {
                 let op_id = format!("reconcile-vm-stop-{}", vm_id);
                 if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, Some(&op_id)).await {
                     warn!(vm_id = %vm_id, error = %e, "failed to stop vm");
-                    self.vm_runtime
-                        .record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
                     continue;
                 }
             }

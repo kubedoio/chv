@@ -182,7 +182,10 @@ fn certificate_rotation_due(cache: &NodeCache, now_unix_ms: i64) -> bool {
     if !cache.enrollment_complete {
         return false;
     }
-    let (cert_path, key_path) = match (cache.certificate_path.as_ref(), cache.private_key_path.as_ref()) {
+    let (cert_path, key_path) = match (
+        cache.certificate_path.as_ref(),
+        cache.private_key_path.as_ref(),
+    ) {
         (Some(c), Some(k)) => (c, k),
         _ => return false,
     };
@@ -397,7 +400,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .trim()
         .to_string();
     let node_id = cache.lock().await.node_id.clone();
-    let inventory_reporter = InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir);
+    let inventory_reporter =
+        InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir);
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
 

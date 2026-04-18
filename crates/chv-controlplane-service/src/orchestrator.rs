@@ -1,7 +1,5 @@
 use crate::node_client::NodeClient;
-use chv_controlplane_store::{
-    OperationRepository, OperationStatusUpdateInput, StorePool,
-};
+use chv_controlplane_store::{OperationRepository, OperationStatusUpdateInput, StorePool};
 use chv_controlplane_types::domain::{OperationId, OperationStatus};
 use chv_errors::ChvError;
 use std::path::PathBuf;
@@ -107,13 +105,13 @@ impl Orchestrator {
     }
 
     async fn dispatch_operation(&self, row: &AcceptedOperationRow) -> Result<(), ChvError> {
-        let node_id = row.node_id.as_deref().ok_or_else(|| ChvError::InvalidArgument {
-            field: "node_id".to_string(),
-            reason: format!(
-                "operation {} has no target node",
-                row.operation_id
-            ),
-        })?;
+        let node_id = row
+            .node_id
+            .as_deref()
+            .ok_or_else(|| ChvError::InvalidArgument {
+                field: "node_id".to_string(),
+                reason: format!("operation {} has no target node", row.operation_id),
+            })?;
 
         let socket_path = self.resolve_agent_socket(node_id);
         let mut client = NodeClient::connect(&socket_path).await?;
@@ -146,9 +144,7 @@ impl Orchestrator {
         let ack = match row.operation_type.as_str() {
             "create" | "CreateVm" => {
                 // Desired-state path: build full agent spec and dispatch ApplyVmDesiredState
-                let vm_spec_json = self
-                    .build_agent_vm_spec(&row.resource_id)
-                    .await?;
+                let vm_spec_json = self.build_agent_vm_spec(&row.resource_id).await?;
                 client
                     .apply_vm_desired_state(
                         node_id,
@@ -162,22 +158,49 @@ impl Orchestrator {
             }
             "StartVm" => {
                 client
-                    .start_vm(node_id, &row.resource_id, &generation, &row.operation_id, None)
+                    .start_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
                     .await
             }
             "StopVm" => {
                 client
-                    .stop_vm(node_id, &row.resource_id, &generation, false, &row.operation_id, None)
+                    .stop_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        false,
+                        &row.operation_id,
+                        None,
+                    )
                     .await
             }
             "RebootVm" => {
                 client
-                    .reboot_vm(node_id, &row.resource_id, &generation, false, &row.operation_id, None)
+                    .reboot_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        false,
+                        &row.operation_id,
+                        None,
+                    )
                     .await
             }
             "DeleteVm" => {
                 client
-                    .delete_vm(node_id, &row.resource_id, &generation, false, &row.operation_id, None)
+                    .delete_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        false,
+                        &row.operation_id,
+                        None,
+                    )
                     .await
             }
             other => {
@@ -248,9 +271,7 @@ impl Orchestrator {
                     })
                     .await
                     .map_err(|e2| ChvError::Internal {
-                        reason: format!(
-                            "agent rejected operation and status update failed: {e2}"
-                        ),
+                        reason: format!("agent rejected operation and status update failed: {e2}"),
                     })?;
                 Err(e)
             }
@@ -294,11 +315,13 @@ impl Orchestrator {
         let volume_rows = sqlx::query_as::<_, VolumeDesiredStateRow>(
             r#"
             SELECT
-                volume_id,
-                read_only
-            FROM volume_desired_state
-            WHERE attached_vm_id = ?
-            ORDER BY volume_id
+                vds.volume_id,
+                vds.read_only,
+                v.capacity_bytes
+            FROM volume_desired_state vds
+            JOIN volumes v ON v.volume_id = vds.volume_id
+            WHERE vds.attached_vm_id = ?
+            ORDER BY vds.volume_id
             "#,
         )
         .bind(vm_id)
@@ -332,13 +355,21 @@ impl Orchestrator {
             self.kernel_path.clone()
         };
 
-        let disks: Vec<AgentDiskSpec> = volume_rows
-            .into_iter()
-            .map(|v| AgentDiskSpec {
-                volume_id: v.volume_id,
-                read_only: v.read_only.unwrap_or(false),
-            })
-            .collect();
+        let disks: Vec<AgentDiskSpec> =
+            volume_rows
+                .into_iter()
+                .map(|v| AgentDiskSpec {
+                    volume_id: v.volume_id,
+                    read_only: v.read_only.unwrap_or(false),
+                    size_bytes: v.capacity_bytes.and_then(|b| {
+                        if b > 0 {
+                            Some(b as u64)
+                        } else {
+                            None
+                        }
+                    }),
+                })
+                .collect();
 
         let nics: Vec<AgentNicSpec> = nic_rows
             .into_iter()
@@ -349,13 +380,16 @@ impl Orchestrator {
             })
             .collect();
 
-        let desired_state = vm_row.desired_power_state.unwrap_or_else(|| "Running".to_string());
+        let desired_state = vm_row
+            .desired_power_state
+            .unwrap_or_else(|| "Running".to_string());
 
         let spec = AgentVmSpec {
             name: vm_row.display_name.unwrap_or_else(|| vm_id.to_string()),
             cpus: vm_row.cpu_count.unwrap_or(1) as u32,
             memory_bytes: vm_row.memory_bytes.unwrap_or(512 * 1024 * 1024) as u64,
             kernel_path,
+            disk_seed_path: self.resolve_disk_seed_path(vm_row.image_ref.as_deref()),
             disks,
             nics,
             desired_state,
@@ -374,6 +408,20 @@ impl Orchestrator {
         } else {
             format!("/var/lib/chv/kernels/{}", image_ref)
         }
+    }
+
+    fn resolve_disk_seed_path(&self, image_ref: Option<&str>) -> Option<String> {
+        let image_ref = image_ref?.trim();
+        if image_ref.is_empty() || image_ref == "default" {
+            return None;
+        }
+        if let Some(path) = image_ref.strip_prefix("file://") {
+            return Some(path.to_string());
+        }
+        if image_ref.starts_with('/') {
+            return Some(image_ref.to_string());
+        }
+        Some(format!("/var/lib/chv/images/{}", image_ref))
     }
 }
 
@@ -401,6 +449,7 @@ struct VmDesiredStateRow {
 struct VolumeDesiredStateRow {
     volume_id: String,
     read_only: Option<bool>,
+    capacity_bytes: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -416,6 +465,8 @@ struct AgentVmSpec {
     cpus: u32,
     memory_bytes: u64,
     kernel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_seed_path: Option<String>,
     disks: Vec<AgentDiskSpec>,
     nics: Vec<AgentNicSpec>,
     desired_state: String,
@@ -425,6 +476,8 @@ struct AgentVmSpec {
 struct AgentDiskSpec {
     volume_id: String,
     read_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
 }
 
 #[derive(serde::Serialize)]

@@ -63,8 +63,27 @@ impl StordClient {
         locator: &str,
         operation_id: Option<&str>,
     ) -> Result<(String, String, String), ChvError> {
-        let mut options = std::collections::HashMap::new();
-        options.insert("volume_id".to_string(), volume_id.to_string());
+        self.open_volume_with_options(
+            volume_id,
+            backend_class,
+            locator,
+            std::collections::HashMap::new(),
+            operation_id,
+        )
+        .await
+    }
+
+    pub async fn open_volume_with_options(
+        &mut self,
+        volume_id: &str,
+        backend_class: &str,
+        locator: &str,
+        mut options: std::collections::HashMap<String, String>,
+        operation_id: Option<&str>,
+    ) -> Result<(String, String, String), ChvError> {
+        options
+            .entry("volume_id".to_string())
+            .or_insert_with(|| volume_id.to_string());
         let req = OpenVolumeRequest {
             meta: Some(chv_stord_api::chv_stord_api::Meta {
                 operation_id: operation_id.unwrap_or("").to_string(),

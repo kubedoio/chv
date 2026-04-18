@@ -362,7 +362,7 @@ upstream_iface = "ens19"
 **`/etc/chv/stord.toml`**
 ```toml
 socket_path = "/run/chv/stord/api.sock"
-runtime_dir = "/run/chv/stord"
+runtime_dir = "/var/lib/chv/storage/localdisk"
 log_level = "info"
 ```
 

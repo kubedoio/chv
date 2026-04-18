@@ -11,6 +11,8 @@ pub struct VmSpec {
     pub cpus: u32,
     pub memory_bytes: u64,
     pub kernel_path: String,
+    #[serde(default)]
+    pub disk_seed_path: Option<String>,
     pub disks: Vec<DiskSpec>,
     pub nics: Vec<NicSpec>,
     #[serde(default = "default_running")]
@@ -22,6 +24,8 @@ pub struct DiskSpec {
     pub volume_id: String,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -80,7 +84,8 @@ mod tests {
             "disks": [
                 {
                     "volume_id": "vol-1",
-                    "read_only": true
+                    "read_only": true,
+                    "size_bytes": 10737418240
                 }
             ],
             "nics": [
@@ -96,8 +101,10 @@ mod tests {
         assert_eq!(spec.cpus, 2);
         assert_eq!(spec.memory_bytes, 1073741824);
         assert_eq!(spec.kernel_path, "/var/lib/chv/vmlinux");
+        assert_eq!(spec.disk_seed_path, None);
         assert_eq!(spec.disks.len(), 1);
         assert!(spec.disks[0].read_only);
+        assert_eq!(spec.disks[0].size_bytes, Some(10737418240));
         assert_eq!(spec.nics.len(), 1);
         assert_eq!(spec.nics[0].mac_address, "aa:bb:cc:dd:ee:ff");
         assert!(spec.validate().is_ok());
@@ -110,6 +117,7 @@ mod tests {
             cpus: 0,
             memory_bytes: 512,
             kernel_path: "/kernel".to_string(),
+            disk_seed_path: None,
             disks: vec![],
             nics: vec![],
             desired_state: "Running".to_string(),
@@ -128,6 +136,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 512,
             kernel_path: "".to_string(),
+            disk_seed_path: None,
             disks: vec![],
             nics: vec![],
             desired_state: "Running".to_string(),
@@ -146,6 +155,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 512,
             kernel_path: "/kernel".to_string(),
+            disk_seed_path: None,
             disks: vec![],
             nics: vec![NicSpec {
                 network_id: "net-1".to_string(),

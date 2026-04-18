@@ -43,7 +43,7 @@
 16. **Events stable ORDER BY**: Added `event_id DESC` as secondary sort key to prevent page duplication/skipping
 17. **Dead code suppressed**: `MaintenanceNodeRow.reason` annotated `#[allow(dead_code)]`
 18. **Unused import removed**: `warn` import in container.rs (now using `error!`)
-19. **Config test fixed**: Replaced `postgres://` URL with `sqlite://`, added jwt_secret to test fixture
+19. **Config test fixed**: Replaced legacy non-SQLite DB URL with `sqlite://`, added jwt_secret to test fixture
 
 ## Deferred Findings (FIX IN FOLLOW-UP)
 

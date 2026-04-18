@@ -31,7 +31,8 @@ impl InventoryReporter {
     fn probe_storage_classes(base: &Path) -> Vec<String> {
         // Known storage class subdirectory names mirroring the stord backend names.
         const KNOWN: &[&str] = &["localdisk", "ceph", "nfs"];
-        KNOWN.iter()
+        KNOWN
+            .iter()
             .filter(|&&name| base.join(name).is_dir())
             .map(|&name| name.to_string())
             .collect()

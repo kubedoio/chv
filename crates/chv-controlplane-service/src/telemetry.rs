@@ -345,9 +345,13 @@ impl TelemetryService for TelemetryServiceImplementation {
             .meta
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))?;
 
-        // Agent-generated alerts use synthetic operation_ids that don't exist in the
-        // operations table. Skip the FK to avoid constraint failures.
-        let op_id: Option<OperationId> = None;
+        let operation_id = meta.operation_id.trim();
+        if operation_id.is_empty() {
+            return Err(ControlPlaneServiceError::InvalidArgument(
+                "operation_id cannot be empty".into(),
+            ));
+        }
+        let op_id = OperationId::new(operation_id.to_string()).ok();
 
         let severity = EventSeverity::from_str(&request.severity).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument(format!(
@@ -367,7 +371,7 @@ impl TelemetryService for TelemetryServiceImplementation {
                 node_id: Some(node_id.clone()),
                 status: ALERT_STATUS_OPEN.into(),
                 message: request.summary.clone(),
-                operation_id: op_id.as_ref().map(|o| o.to_string()),
+                operation_id: Some(operation_id.to_string()),
                 opened_unix_ms: meta.request_unix_ms,
             })
             .await

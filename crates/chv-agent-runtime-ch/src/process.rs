@@ -280,8 +280,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::ProcessCloudHypervisorAdapter;
     use super::parse_http_status;
+    use super::ProcessCloudHypervisorAdapter;
     use crate::adapter::{VmConfig, VmDiskConfig};
     use chv_errors::ChvError;
     use std::path::PathBuf;

@@ -42,6 +42,11 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+BUILD_USER="${SUDO_USER:-}"
+if [ -z "$BUILD_USER" ] || ! id -u "$BUILD_USER" &>/dev/null; then
+    BUILD_USER="root"
+fi
+
 # -----------------------------------------------------------------------------
 # Step 1: Uninstall previous installation
 # -----------------------------------------------------------------------------
@@ -113,7 +118,12 @@ fi
 # -----------------------------------------------------------------------------
 echo "[2/4] Building release tarball from source..."
 cd "$PROJECT_ROOT"
-./scripts/build-release.sh
+if [ "$BUILD_USER" = "root" ]; then
+    ./scripts/build-release.sh
+else
+    echo "  Building as user: $BUILD_USER (preserves incremental cargo/npm caches)"
+    sudo -u "$BUILD_USER" -H /bin/bash -lc "cd \"$PROJECT_ROOT\" && ./scripts/build-release.sh"
+fi
 
 # -----------------------------------------------------------------------------
 # Step 3: Determine version and tarball path

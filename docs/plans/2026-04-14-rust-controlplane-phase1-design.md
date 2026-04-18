@@ -9,7 +9,7 @@ Approved for implementation
 - Mandatory separate HTTP port (`http_bind`) for `axum` admin / health / metrics.
 - Split `network_desired_state` into topology table + `network_exposures` table (1:N relationship).
 - Delete `legacy/go-controlplane/` entirely as part of this work.
-- Bootstrap token validation uses a PostgreSQL `bootstrap_tokens` table (hashed tokens, expiration, optional one-time-use).
+- Bootstrap token validation uses a SQLite `bootstrap_tokens` table (hashed tokens, expiration, optional one-time-use).
 - gRPC server supports **optional mTLS** via config (`tls_cert_path`, `tls_key_path`), falling back to plaintext if absent.
 
 ---
@@ -17,7 +17,7 @@ Approved for implementation
 ## Component Boundaries
 
 ### Control plane binary (`cmd/chv-controlplane`)
-- Starts PostgreSQL pool and runs migrations.
+- Starts SQLite pool and runs migrations.
 - Loads CA cert/key for enrollment.
 - Builds `ControlPlaneComponents` (enrollment, inventory, telemetry, reconcile, lifecycle).
 - Spawns two Tokio tasks:

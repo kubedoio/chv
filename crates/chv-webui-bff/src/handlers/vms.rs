@@ -8,8 +8,16 @@ pub async fn list_vms(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200);
+    let page = payload
+        .get("page")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1);
+    let page_size = payload
+        .get("page_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .clamp(1, 200);
     let offset = (page - 1) * page_size;
     let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms")
         .fetch_one(&state.pool)
@@ -268,11 +276,13 @@ pub async fn create_vm(
         nid.to_string()
     } else {
         // Pick the first enrolled node as default
-        sqlx::query_scalar::<_, String>("SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1")
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to query nodes: {}", e)))?
-            .ok_or_else(|| BffError::BadRequest("no nodes enrolled and node_id not provided".into()))?
+        sqlx::query_scalar::<_, String>(
+            "SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1",
+        )
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to query nodes: {}", e)))?
+        .ok_or_else(|| BffError::BadRequest("no nodes enrolled and node_id not provided".into()))?
     };
 
     let cpu_count = payload
@@ -311,12 +321,17 @@ pub async fn create_vm(
         .get("volume_size_gb")
         .and_then(|v| v.as_i64())
         .unwrap_or(10)
-        * 1024 * 1024 * 1024;
+        * 1024
+        * 1024
+        * 1024;
 
     let vm_id = uuid::Uuid::new_v4().to_string();
     let volume_id = uuid::Uuid::new_v4().to_string();
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let mut tx = state.pool.begin().await
+    let mut tx = state
+        .pool
+        .begin()
+        .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
     // Insert VM
@@ -380,11 +395,12 @@ pub async fn create_vm(
     .map_err(|e| BffError::Internal(format!("failed to insert volume_desired_state: {}", e)))?;
 
     // Insert network if not exists
-    let network_exists: Option<String> = sqlx::query_scalar("SELECT network_id FROM networks WHERE network_id = ?")
-        .bind(&network_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
+    let network_exists: Option<String> =
+        sqlx::query_scalar("SELECT network_id FROM networks WHERE network_id = ?")
+            .bind(&network_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
 
     if network_exists.is_none() {
         sqlx::query(
@@ -449,7 +465,8 @@ pub async fn create_vm(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
 
-    tx.commit().await
+    tx.commit()
+        .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
     Ok(Json(json!({
@@ -477,19 +494,20 @@ pub async fn delete_vm(
         .to_string();
 
     // Check vm exists
-    let exists = sqlx::query_scalar::<_, String>(
-        "SELECT vm_id FROM vms WHERE vm_id = ?",
-    )
-    .bind(&vm_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to check vm existence: {}", e)))?;
+    let exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
+        .bind(&vm_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check vm existence: {}", e)))?;
 
     if exists.is_none() {
         return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
     }
 
-    let mut tx = state.pool.begin().await
+    let mut tx = state
+        .pool
+        .begin()
+        .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
     sqlx::query(
@@ -505,13 +523,12 @@ pub async fn delete_vm(
     .await
     .map_err(|e| BffError::Internal(format!("failed to update vm_desired_state: {}", e)))?;
 
-    let new_generation: i64 = sqlx::query_scalar(
-        "SELECT desired_generation FROM vm_desired_state WHERE vm_id = ?"
-    )
-    .bind(&vm_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
+    let new_generation: i64 =
+        sqlx::query_scalar("SELECT desired_generation FROM vm_desired_state WHERE vm_id = ?")
+            .bind(&vm_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
 
     let operation_id = uuid::Uuid::new_v4().to_string();
     let idempotency_key = format!("delete-vm-{}", vm_id);
@@ -530,7 +547,8 @@ pub async fn delete_vm(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
 
-    tx.commit().await
+    tx.commit()
+        .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
     Ok(Json(json!({
@@ -557,7 +575,10 @@ pub async fn mutate_vm(
         .ok_or_else(|| BffError::BadRequest("missing action".into()))?
         .to_string();
 
-    let force = payload.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = payload
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let response = state
         .mutations
@@ -637,7 +658,7 @@ fn generate_mac(vm_id: &str, network_id: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     let octets = [
-        0x02,                       // locally administered
+        0x02, // locally administered
         ((hash >> 8) & 0xFF) as u8,
         ((hash >> 16) & 0xFF) as u8,
         ((hash >> 24) & 0xFF) as u8,

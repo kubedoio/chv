@@ -48,4 +48,4 @@ jsonwebtoken = "9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum = "0.7"
 bcrypt = "0.15"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "migrate", "derive", "json", "uuid", "chrono"] }

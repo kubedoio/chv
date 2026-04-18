@@ -8,8 +8,16 @@ pub async fn list_networks(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    let page = payload.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-    let page_size = payload.get("page_size").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200);
+    let page = payload
+        .get("page")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1);
+    let page_size = payload
+        .get("page_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .clamp(1, 200);
     let offset = (page - 1) * page_size;
     let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM networks")
         .fetch_one(&state.pool)
@@ -165,7 +173,10 @@ pub async fn get_network(
                 "alerts": r.alerts,
             })))
         }
-        None => Err(BffError::NotFound(format!("network {} not found", network_id))),
+        None => Err(BffError::NotFound(format!(
+            "network {} not found",
+            network_id
+        ))),
     }
 }
 
@@ -217,7 +228,10 @@ pub async fn mutate_network(
         .ok_or_else(|| BffError::BadRequest("missing action".into()))?
         .to_string();
 
-    let force = payload.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = payload
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let response = state
         .mutations

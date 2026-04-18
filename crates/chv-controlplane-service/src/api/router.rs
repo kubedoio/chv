@@ -1,5 +1,10 @@
 use crate::api::{health, nodes, operations, stub};
-use axum::{http::StatusCode, response::Json, routing::{get, post}, Router};
+use axum::{
+    http::StatusCode,
+    response::Json,
+    routing::{get, post},
+    Router,
+};
 use chv_webui_bff::AppState;
 
 async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
@@ -42,14 +47,23 @@ pub fn admin_router(bff_state: AppState) -> Router {
         .route("/api/v1/events", get(stub::list_events_stub))
         .route("/api/v1/images", get(stub::list_images_stub))
         .route("/api/v1/vm-templates", get(stub::list_vm_templates_stub))
-        .route("/api/v1/cloud-init-templates", get(stub::list_cloud_init_templates_stub))
+        .route(
+            "/api/v1/cloud-init-templates",
+            get(stub::list_cloud_init_templates_stub),
+        )
         .route("/api/v1/backup-jobs", get(stub::list_backup_jobs_stub))
-        .route("/api/v1/backup-history", get(stub::list_backup_history_stub))
+        .route(
+            "/api/v1/backup-history",
+            get(stub::list_backup_history_stub),
+        )
         .route("/api/v1/quotas", get(stub::list_quotas_stub))
         .route("/api/v1/usage", get(stub::get_usage_stub))
         // Install stubs
         .route("/api/v1/install/status", get(stub::get_install_status_stub))
-        .route("/api/v1/install/bootstrap", post(stub::bootstrap_install_stub))
+        .route(
+            "/api/v1/install/bootstrap",
+            post(stub::bootstrap_install_stub),
+        )
         .route("/api/v1/install/repair", post(stub::repair_install_stub))
         .fallback(not_found_handler)
         .with_state(bff_state)

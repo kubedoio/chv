@@ -26,7 +26,7 @@ impl Default for StordConfig {
     fn default() -> Self {
         Self {
             socket_path: PathBuf::from("/run/chv/stord/api.sock"),
-            runtime_dir: PathBuf::from("/run/chv/stord"),
+            runtime_dir: PathBuf::from("/var/lib/chv/storage/localdisk"),
             log_level: "info".to_string(),
             backend_allowlist: vec![],
             metrics_bind: None,
@@ -134,8 +134,7 @@ const DEFAULT_CONTROLPLANE_GRPC_BIND: &str = "127.0.0.1:8443";
 const DEFAULT_CONTROLPLANE_HTTP_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_CONTROLPLANE_LOG_LEVEL: &str = "info";
 const DEFAULT_CONTROLPLANE_RUNTIME_DIR: &str = "/run/chv/controlplane";
-const DEFAULT_CONTROLPLANE_DATABASE_URL: &str =
-    "sqlite:///var/lib/chv/controlplane.db";
+const DEFAULT_CONTROLPLANE_DATABASE_URL: &str = "sqlite:///var/lib/chv/controlplane.db";
 const DEFAULT_CONTROLPLANE_MIGRATIONS_DIR: &str = "cmd/chv-controlplane/migrations";
 const DEFAULT_CONTROLPLANE_DB_MAX_CONNECTIONS: u32 = 16;
 const DEFAULT_CONTROLPLANE_DB_MIN_CONNECTIONS: u32 = 1;
@@ -272,7 +271,7 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
     }
     if cfg.jwt_secret.len() < 32 {
         return Err(ConfigError::Invalid(
-            "jwt_secret must be at least 32 characters".to_string()
+            "jwt_secret must be at least 32 characters".to_string(),
         ));
     }
     Ok(cfg)

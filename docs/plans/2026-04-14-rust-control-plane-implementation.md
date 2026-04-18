@@ -4,9 +4,9 @@
 
 **Goal:** Build the actual Rust control plane as a separate service stack, move control-plane-owned responsibilities out of `chv-agent`, and bring node/control-plane behavior into compliance with the CHV specs.
 
-**Architecture:** Keep `chv-agent` as the sole node-side orchestrator and local Cloud Hypervisor caller. Add a separate Rust control-plane workspace slice inside the existing repo with typed proto-facing services, durable PostgreSQL-backed state, and explicit desired/observed separation. Remove hardcoded operational literals from handlers and reconcilers by sourcing all values from typed config, persisted desired state, proto contracts, or shared domain enums.
+**Architecture:** Keep `chv-agent` as the sole node-side orchestrator and local Cloud Hypervisor caller. Add a separate Rust control-plane workspace slice inside the existing repo with typed proto-facing services, durable SQLite-backed state, and explicit desired/observed separation. Remove hardcoded operational literals from handlers and reconcilers by sourcing all values from typed config, persisted desired state, proto contracts, or shared domain enums.
 
-**Tech Stack:** Rust stable, Tokio, tonic, axum, sqlx, serde, tracing, PostgreSQL, existing generated proto crates.
+**Tech Stack:** Rust stable, Tokio, tonic, axum, sqlx, serde, tracing, SQLite, existing generated proto crates.
 
 ---
 
@@ -35,7 +35,7 @@
 - No `chv-controlplane` binary
 - No `chv-api` or admin/BFF binary
 - No control-plane persistence crate
-- No PostgreSQL/sqlx integration
+- No SQLite/sqlx integration
 - No migration system
 - No persisted `operations`, `events`, `alerts`, `node_states`, `*_desired_state`, `*_observed_state`
 
@@ -158,7 +158,7 @@ Build bottom-up:
 
 ## Phase 2: Persistence and Migrations
 
-### Task 2.1: Add PostgreSQL/sqlx foundation
+### Task 2.1: Add SQLite/sqlx foundation
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -167,7 +167,7 @@ Build bottom-up:
 - Create: `cmd/chv-controlplane/migrations/`
 
 **Acceptance criteria:**
-- Control-plane store uses PostgreSQL + `sqlx`
+- Control-plane store uses SQLite + `sqlx`
 - Database pool boots from config
 - Migration runner exists in control-plane startup
 
@@ -204,7 +204,7 @@ Build bottom-up:
 - No state JSON blobs are used where first-class columns are required for filtering/idempotency
 
 **Verification:**
-- Run migration against local PostgreSQL
+- Run migration against local SQLite
 - Run: `cargo check -p chv-controlplane-store`
 
 ### Task 2.3: Add store repositories with no freeform SQL literals in services
@@ -421,7 +421,7 @@ Build bottom-up:
 
 ### Checkpoint A: After Phase 2
 - Workspace compiles
-- PostgreSQL store boots
+- SQLite store boots
 - Migrations apply cleanly
 - Desired and observed tables are separate
 
@@ -442,7 +442,7 @@ Build bottom-up:
 | Trying to “improve” agent and control plane in one pass | High | Land persistence and service skeleton first, then boundary cleanup |
 | Hidden literal defaults keep creeping back in | High | Add lint-like grep checks in CI and code review checklist |
 | Desired/observed split gets blurred again in shared structs | High | Separate repository APIs and structs for desired vs observed |
-| Idempotency only implemented in memory | High | Journal operations in PostgreSQL before dispatch |
+| Idempotency only implemented in memory | High | Journal operations in SQLite before dispatch |
 | Agent request handlers still ack before durable writes | High | Treat persistence failures as request failures and test them |
 
 ## First Recommended Execution Slice

@@ -33,7 +33,7 @@ The current Rust ecosystem already fits this architecture well:
 - Runtime: Tokio
 - Internal RPC: `tonic`
 - Admin/API/BFF HTTP: `axum`
-- Persistence: PostgreSQL + `sqlx`
+- Persistence: SQLite + `sqlx`
 - Serialization: `serde`
 - Logging/diagnostics: `tracing`
 - Telemetry export: OpenTelemetry hooks
@@ -79,7 +79,7 @@ Recommended shared crates:
 ## Persistence model
 
 ### Recommended database
-PostgreSQL first.
+SQLite first.
 
 ### Suggested tables
 - `nodes`
@@ -202,7 +202,7 @@ Instrument from day one, but keep the first export path simple.
 - config loading
 - tracing/bootstrap
 - health/readiness endpoints
-- PostgreSQL connection
+- SQLite connection
 - enrollment service
 - basic node inventory/state persistence
 
