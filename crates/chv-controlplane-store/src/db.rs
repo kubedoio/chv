@@ -57,7 +57,8 @@ pub fn build_connect_options(
     config: &ControlPlaneStoreConfig,
 ) -> Result<SqliteConnectOptions, StoreError> {
     Ok(SqliteConnectOptions::from_str(&config.database_url)?
-        .create_if_missing(true))
+        .create_if_missing(true)
+        .pragma("foreign_keys", "OFF"))
 }
 
 pub fn build_pool_options(config: &ControlPlaneStoreConfig) -> SqlitePoolOptions {
