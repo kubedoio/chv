@@ -274,13 +274,9 @@ impl TelemetryService for TelemetryServiceImplementation {
             .meta
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))?;
 
-        let op_id = if meta.operation_id.is_empty() {
-            None
-        } else {
-            Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?)
-        };
+        // Agent-generated events use synthetic operation_ids that don't exist in the
+        // operations table. Skip the FK to avoid constraint failures.
+        let op_id: Option<OperationId> = None;
 
         let severity = EventSeverity::from_str(&request.severity).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument(format!(
@@ -344,13 +340,9 @@ impl TelemetryService for TelemetryServiceImplementation {
             .meta
             .ok_or_else(|| ControlPlaneServiceError::InvalidArgument("missing meta".into()))?;
 
-        let op_id = if meta.operation_id.is_empty() {
-            None
-        } else {
-            Some(OperationId::new(meta.operation_id.clone()).map_err(|e| {
-                ControlPlaneServiceError::InvalidArgument(format!("invalid operation_id: {}", e))
-            })?)
-        };
+        // Agent-generated alerts use synthetic operation_ids that don't exist in the
+        // operations table. Skip the FK to avoid constraint failures.
+        let op_id: Option<OperationId> = None;
 
         let severity = EventSeverity::from_str(&request.severity).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument(format!(
