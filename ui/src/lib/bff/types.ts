@@ -181,6 +181,7 @@ export type AttachedNic = {
 	mac_address: string;
 	ip_address: string;
 	nic_model: string;
+	addressing_mode: string;
 };
 
 export type VmEvent = {
@@ -436,3 +437,52 @@ export type MutationActionResult = {
 	taskTone: 'healthy' | 'warning' | 'degraded' | 'failed' | 'unknown';
 	taskHref: string | null;
 };
+
+export type IpamMode = 'internal' | 'external' | 'none';
+
+export interface CreateNetworkInput {
+	name: string;
+	cidr: string;
+	gateway: string;
+	bridge_name?: string;
+	dhcp_enabled?: boolean;
+	ipam_mode?: IpamMode;
+	is_default?: boolean;
+}
+
+export interface NetworkListItem {
+	network_id: string;
+	name: string;
+	exposure: string;
+	health: string;
+	attached_vms: number;
+	last_task: string;
+	alerts: number;
+	dhcp_enabled: boolean;
+	ipam_mode: string;
+	is_default: boolean;
+}
+
+export interface NetworkDetailModel {
+	network_id: string;
+	name: string;
+	scope: string;
+	health: string;
+	exposure: string;
+	policy: string;
+	cidr: string;
+	gateway: string;
+	dhcp_enabled: boolean;
+	ipam_mode: string;
+	is_default: boolean;
+	attached_vms: Array<{
+		vm_id: string;
+		display_name: string;
+		runtime_status: string;
+		ip_address?: string;
+		mac_address?: string;
+	}>;
+	created_at: string;
+	last_task: string;
+	alerts: number;
+}

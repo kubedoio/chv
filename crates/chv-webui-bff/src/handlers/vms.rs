@@ -215,9 +215,11 @@ pub async fn get_vm(
                     COALESCE(n.display_name, nv.network_id) AS network_name,
                     COALESCE(nv.mac_address, '') AS mac_address,
                     COALESCE(nv.ip_address, '') AS ip_address,
-                    COALESCE(nv.nic_model, 'virtio') AS nic_model
+                    COALESCE(nv.nic_model, 'virtio') AS nic_model,
+                    COALESCE(nds.ipam_mode, 'none') AS addressing_mode
                 FROM vm_nic_desired_state nv
                 LEFT JOIN networks n ON nv.network_id = n.network_id
+                LEFT JOIN network_desired_state nds ON nds.network_id = nv.network_id
                 WHERE nv.vm_id = $1
                 "#,
             )
@@ -236,6 +238,7 @@ pub async fn get_vm(
                         "mac_address": n.mac_address,
                         "ip_address": n.ip_address,
                         "nic_model": n.nic_model,
+                        "addressing_mode": n.addressing_mode,
                     })
                 })
                 .collect();
@@ -430,6 +433,15 @@ pub async fn create_vm(
             .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
 
     if network_exists.is_none() {
+        let network_cidr = payload
+            .get("network_cidr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("10.200.0.0/24");
+        let network_gateway = payload
+            .get("network_gateway")
+            .and_then(|v| v.as_str())
+            .unwrap_or("10.200.0.1");
+
         sqlx::query(
             r#"
             INSERT INTO networks (network_id, node_id, display_name, updated_at)
@@ -445,11 +457,17 @@ pub async fn create_vm(
 
         sqlx::query(
             r#"
-            INSERT INTO network_desired_state (network_id, desired_generation, desired_status, requested_by, requested_at, updated_at)
-            VALUES (?, 1, 'Pending', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            INSERT INTO network_desired_state (
+                network_id, desired_generation, desired_status,
+                cidr, gateway, dhcp_enabled, ipam_mode, is_default,
+                requested_by, requested_at, updated_at
+            )
+            VALUES (?, 1, 'Pending', ?, ?, 1, 'internal', 0, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             "#,
         )
         .bind(&network_id)
+        .bind(network_cidr)
+        .bind(network_gateway)
         .bind(&requested_by)
         .execute(&mut *tx)
         .await
@@ -673,6 +691,7 @@ struct VmNicRow {
     mac_address: String,
     ip_address: String,
     nic_model: String,
+    addressing_mode: String,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

@@ -113,10 +113,10 @@ impl Reconciler {
 
     async fn reconcile_networks(&mut self) -> Result<(), ChvError> {
         // Build a map of network_id -> cidr from network fragments (spec_json).
-        // Falls back to the hardcoded default if the fragment has no subnet_cidr.
+        // Falls back to the hardcoded default if the fragment has no cidr.
         const DEFAULT_CIDR: &str = "10.0.0.0/24";
 
-        let (desired_networks, network_cidrs) = {
+        let (desired_networks, network_cidrs, network_gateways) = {
             let cache = self.cache.lock().await;
             let mut desired_networks: BTreeSet<String> =
                 cache.vm_network_ids().into_iter().collect();
@@ -124,19 +124,31 @@ impl Reconciler {
 
             let mut network_cidrs: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
+            let mut network_gateways: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
             for (net_id, frag) in &cache.network_fragments {
-                let cidr = serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
-                    .ok()
+                let spec = serde_json::from_slice::<serde_json::Value>(&frag.spec_json).ok();
+                let cidr = spec
+                    .as_ref()
                     .and_then(|v| {
-                        v.get("subnet_cidr")
+                        v.get("cidr")
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string())
                     })
                     .unwrap_or_else(|| DEFAULT_CIDR.to_string());
+                let gateway = spec
+                    .as_ref()
+                    .and_then(|v| {
+                        v.get("gateway")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_default();
                 network_cidrs.insert(net_id.clone(), cidr);
+                network_gateways.insert(net_id.clone(), gateway);
             }
 
-            (desired_networks, network_cidrs)
+            (desired_networks, network_cidrs, network_gateways)
         };
         // Cache lock is dropped here — all subsequent operations are lock-free async I/O.
 
@@ -147,9 +159,13 @@ impl Reconciler {
                 .get(net_id)
                 .map(|s| s.as_str())
                 .unwrap_or(DEFAULT_CIDR);
+            let gateway = network_gateways
+                .get(net_id)
+                .map(|s| s.as_str())
+                .unwrap_or("");
             let op_id = format!("reconcile-network-ensure-{}", net_id);
             if let Err(e) = nwd
-                .ensure_network_topology(net_id, &bridge, cidr, Some(&op_id))
+                .ensure_network_topology(net_id, &bridge, cidr, gateway, Some(&op_id))
                 .await
             {
                 warn!(network_id = %net_id, error = %e, "failed to ensure network topology");
@@ -265,28 +281,18 @@ impl Reconciler {
         for nic in &vm_spec.nics {
             let nic_id = format!("{}-{}", vm_id, nic.network_id);
             let nic_op_id = format!("{}-attach-nic-{}", operation_id, nic_id);
-            // Read subnet_cidr from the network fragment if available; fall back to default.
-            let nic_cidr = {
-                let cache = self.cache.lock().await;
-                cache
-                    .network_fragments
-                    .get(&nic.network_id)
-                    .and_then(|frag| {
-                        serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("subnet_cidr")
-                                    .and_then(|c| c.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                    })
-                    .unwrap_or_else(|| DEFAULT_NIC_CIDR.to_string())
+            let nic_cidr = if nic.cidr.is_empty() {
+                DEFAULT_NIC_CIDR.to_string()
+            } else {
+                nic.cidr.clone()
             };
+            let nic_gateway = nic.gateway.clone();
             if let Err(e) = nwd
                 .ensure_network_topology(
                     &nic.network_id,
                     &format!("br-{}", nic.network_id),
                     &nic_cidr,
+                    &nic_gateway,
                     Some(&nic_op_id),
                 )
                 .await

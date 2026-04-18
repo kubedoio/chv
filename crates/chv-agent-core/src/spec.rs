@@ -37,6 +37,10 @@ pub struct NicSpec {
     pub ip_address: String,
     #[serde(default)]
     pub tap_name: String,
+    #[serde(default)]
+    pub cidr: String,
+    #[serde(default)]
+    pub gateway: String,
 }
 
 impl VmSpec {
@@ -167,6 +171,8 @@ mod tests {
                 mac_address: "".to_string(),
                 ip_address: "10.0.0.2".to_string(),
                 tap_name: "tap0".to_string(),
+                cidr: "".to_string(),
+                gateway: "".to_string(),
             }],
             desired_state: "Running".to_string(),
         };

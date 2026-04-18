@@ -28,6 +28,16 @@ pub struct VolumeSpec {
 pub struct NetworkSpec {
     pub network_class: Option<String>,
     pub exposures: Option<Vec<NetworkExposureSpec>>,
+    #[serde(default)]
+    pub cidr: Option<String>,
+    #[serde(default)]
+    pub gateway: Option<String>,
+    #[serde(default)]
+    pub nat_enabled: Option<bool>,
+    #[serde(default)]
+    pub dhcp_enabled: Option<bool>,
+    #[serde(default)]
+    pub ipam_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]

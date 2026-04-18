@@ -258,6 +258,7 @@ impl NwdClient {
         network_id: &str,
         bridge_name: &str,
         subnet_cidr: &str,
+        gateway_ip: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         let req = EnsureNetworkTopologyRequest {
@@ -274,7 +275,7 @@ impl NwdClient {
                 bridge_name: bridge_name.to_string(),
                 namespace_name: format!("ns-{}", network_id),
                 subnet_cidr: subnet_cidr.to_string(),
-                gateway_ip: "".to_string(),
+                gateway_ip: gateway_ip.to_string(),
                 options: std::collections::HashMap::new(),
             }),
         };

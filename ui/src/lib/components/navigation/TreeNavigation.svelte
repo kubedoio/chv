@@ -260,27 +260,6 @@
                       {/if}
                     </li>
                     
-                    <!-- cell network -->
-                    <li class="select-none">
-                      <div 
-                        class="mx-2 rounded-md {isActive(`/nodes/${node.id}/networks`) ? 'bg-[#e57035]/15 text-[#ff9a65]' : 'hover:bg-white/5'}"
-                        style="margin-left: 2rem;"
-                      >
-                        <a
-                          href={`/nodes/${node.id}/networks`}
-                          class="flex items-center gap-2 px-3 py-2 text-sm"
-                          aria-current={isActive(`/nodes/${node.id}/networks`) ? 'page' : undefined}
-                        >
-                          <span class="w-5"></span>
-                          <Network size={16} class="text-slate-400" />
-                          <span class="truncate">cell network</span>
-                          {#if node.resources?.networks}
-                            <span class="ml-auto text-xs text-slate-500">{node.resources.networks}</span>
-                          {/if}
-                        </a>
-                      </div>
-                    </li>
-                    
                     <!-- cell storage -->
                     <li class="select-none">
                       <div 

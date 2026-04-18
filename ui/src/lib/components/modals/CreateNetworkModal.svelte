@@ -3,9 +3,10 @@
 	import FormField from '$lib/components/forms/FormField.svelte';
 	import Input from '$lib/components/Input.svelte';
 	import Select from '$lib/components/Select.svelte';
-	import { createAPIClient, getStoredToken } from '$lib/api/client';
+	import { getStoredToken } from '$lib/api/client';
+	import { createNetwork } from '$lib/bff/networks';
 	import { toast } from '$lib/stores/toast';
-	import type { CreateNetworkInput } from '$lib/api/types';
+	import type { CreateNetworkInput } from '$lib/bff/types';
 
 	interface Props {
 		open?: boolean;
@@ -14,14 +15,14 @@
 
 	let { open = $bindable(false), onSuccess }: Props = $props();
 
-	const client = createAPIClient({ token: getStoredToken() ?? undefined });
-
 	// Form state
 	let name = $state('');
-	let mode = $state('bridge');
 	let bridgeName = $state('chvbr0');
 	let cidr = $state('10.0.0.0/24');
-	let gatewayIp = $state('10.0.0.1');
+	let gateway = $state('10.0.0.1');
+	let dhcpEnabled = $state(true);
+	let ipamMode = $state('internal');
+	let isDefault = $state(false);
 	let submitting = $state(false);
 	let formError = $state('');
 
@@ -29,26 +30,32 @@
 	let nameError = $state('');
 	let bridgeNameError = $state('');
 	let cidrError = $state('');
-	let gatewayIpError = $state('');
+	let gatewayError = $state('');
 
 	// Validation regexes
 	const nameRegex = /^[a-z0-9-]+$/;
 	const cidrRegex = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
 	const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
 
-	const modeOptions = [{ value: 'bridge', label: 'bridge' }];
+	const ipamOptions = [
+		{ value: 'internal', label: 'Internal' },
+		{ value: 'external', label: 'External', disabled: true, title: 'Not available in this release' },
+		{ value: 'none', label: 'None' }
+	];
 
 	function resetForm() {
 		name = '';
-		mode = 'bridge';
 		bridgeName = 'chvbr0';
 		cidr = '10.0.0.0/24';
-		gatewayIp = '10.0.0.1';
+		gateway = '10.0.0.1';
+		dhcpEnabled = true;
+		ipamMode = 'internal';
+		isDefault = false;
 		formError = '';
 		nameError = '';
 		bridgeNameError = '';
 		cidrError = '';
-		gatewayIpError = '';
+		gatewayError = '';
 	}
 
 	function validateName(): boolean {
@@ -103,21 +110,21 @@
 	}
 
 	function validateGateway(): boolean {
-		if (!gatewayIp.trim()) {
-			gatewayIpError = 'Gateway IP is required';
+		if (!gateway.trim()) {
+			gatewayError = 'Gateway IP is required';
 			return false;
 		}
-		if (!ipRegex.test(gatewayIp)) {
-			gatewayIpError = 'Gateway must be a valid IP address (e.g., 10.0.0.1)';
+		if (!ipRegex.test(gateway)) {
+			gatewayError = 'Gateway must be a valid IP address (e.g., 10.0.0.1)';
 			return false;
 		}
 		// Validate octets are within range
-		const octets = gatewayIp.split('.').map(Number);
+		const octets = gateway.split('.').map(Number);
 		if (octets.some((o) => o < 0 || o > 255)) {
-			gatewayIpError = 'IP octets must be between 0 and 255';
+			gatewayError = 'IP octets must be between 0 and 255';
 			return false;
 		}
-		gatewayIpError = '';
+		gatewayError = '';
 		return true;
 	}
 
@@ -128,19 +135,19 @@
 
 	function isValid(): boolean {
 		// Quick check without setting errors - used for button disabled state
-		if (!name.trim() || !bridgeName.trim() || !cidr.trim() || !gatewayIp.trim()) {
+		if (!name.trim() || !bridgeName.trim() || !cidr.trim() || !gateway.trim()) {
 			return false;
 		}
 		if (!nameRegex.test(name) || name.startsWith('-') || name.endsWith('-')) {
 			return false;
 		}
 		if (!cidrRegex.test(cidr)) return false;
-		if (!ipRegex.test(gatewayIp)) return false;
+		if (!ipRegex.test(gateway)) return false;
 
 		// Additional validation for octets
 		const [ip] = cidr.split('/');
 		if (ip.split('.').map(Number).some((o) => o < 0 || o > 255)) return false;
-		if (gatewayIp.split('.').map(Number).some((o) => o < 0 || o > 255)) return false;
+		if (gateway.split('.').map(Number).some((o) => o < 0 || o > 255)) return false;
 
 		return true;
 	}
@@ -155,14 +162,16 @@
 
 		const data: CreateNetworkInput = {
 			name: name.trim(),
-			mode: 'bridge',
-			bridge_name: bridgeName.trim(),
 			cidr: cidr.trim(),
-			gateway_ip: gatewayIp.trim()
+			gateway: gateway.trim(),
+			bridge_name: bridgeName.trim(),
+			dhcp_enabled: dhcpEnabled,
+			ipam_mode: ipamMode as 'internal' | 'external' | 'none',
+			is_default: isDefault
 		};
 
 		try {
-			await client.createNetwork(data);
+			await createNetwork(data, getStoredToken() ?? undefined);
 			toast.success(`Network "${name}" created successfully`);
 			open = false;
 			onSuccess?.();
@@ -201,10 +210,6 @@
 			/>
 		</FormField>
 
-		<FormField label="Mode" helper="Only 'bridge' mode is supported in MVP-1" labelFor="network-mode">
-			<Select id="network-mode" bind:value={mode} options={modeOptions} disabled />
-		</FormField>
-
 		<FormField label="Bridge Name" error={bridgeNameError} required labelFor="bridge-name">
 			<Input
 				id="bridge-name"
@@ -225,13 +230,37 @@
 			/>
 		</FormField>
 
-		<FormField label="Gateway IP" error={gatewayIpError} required labelFor="gateway-ip">
+		<FormField label="Gateway IP" error={gatewayError} required labelFor="gateway-ip">
 			<Input
 				id="gateway-ip"
-				bind:value={gatewayIp}
+				bind:value={gateway}
 				placeholder="10.0.0.1"
 				disabled={submitting}
 				onblur={validateGateway}
+			/>
+		</FormField>
+
+		<FormField label="IPAM Mode" helper="External IPAM is not available in this release." labelFor="ipam-mode">
+			<Select id="ipam-mode" bind:value={ipamMode} options={ipamOptions} disabled={submitting} />
+		</FormField>
+
+		<FormField label="DHCP Enabled" labelFor="dhcp-enabled">
+			<input
+				id="dhcp-enabled"
+				type="checkbox"
+				bind:checked={dhcpEnabled}
+				disabled={submitting}
+				class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+			/>
+		</FormField>
+
+		<FormField label="Default Network" helper="Set as default for dev-install workloads" labelFor="is-default">
+			<input
+				id="is-default"
+				type="checkbox"
+				bind:checked={isDefault}
+				disabled={submitting}
+				class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
 			/>
 		</FormField>
 	</form>

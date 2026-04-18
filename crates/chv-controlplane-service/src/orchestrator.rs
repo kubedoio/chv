@@ -374,12 +374,40 @@ impl Orchestrator {
                 })
                 .collect();
 
+        let mut network_configs: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
+        for nic in &nic_rows {
+            if network_configs.contains_key(&nic.network_id) {
+                continue;
+            }
+            let row = sqlx::query_as::<_, NetworkDesiredStateRow>(
+                "SELECT cidr, gateway FROM network_desired_state WHERE network_id = ?",
+            )
+            .bind(&nic.network_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to query network desired state: {e}"),
+            })?;
+            let cidr = row.as_ref().and_then(|r| r.cidr.clone()).unwrap_or_default();
+            let gateway = row.as_ref().and_then(|r| r.gateway.clone()).unwrap_or_default();
+            network_configs.insert(nic.network_id.clone(), (cidr, gateway));
+        }
+
         let nics: Vec<AgentNicSpec> = nic_rows
             .into_iter()
-            .map(|n| AgentNicSpec {
-                network_id: n.network_id,
-                mac_address: n.mac_address.unwrap_or_default(),
-                ip_address: n.ip_address.unwrap_or_default(),
+            .map(|n| {
+                let (cidr, gateway) = network_configs
+                    .get(&n.network_id)
+                    .cloned()
+                    .unwrap_or_default();
+                AgentNicSpec {
+                    network_id: n.network_id,
+                    mac_address: n.mac_address.unwrap_or_default(),
+                    ip_address: n.ip_address.unwrap_or_default(),
+                    cidr,
+                    gateway,
+                }
             })
             .collect();
 
@@ -469,6 +497,12 @@ struct VmNicRow {
     ip_address: Option<String>,
 }
 
+#[derive(sqlx::FromRow)]
+struct NetworkDesiredStateRow {
+    cidr: Option<String>,
+    gateway: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct AgentVmSpec {
     name: String,
@@ -497,6 +531,8 @@ struct AgentNicSpec {
     network_id: String,
     mac_address: String,
     ip_address: String,
+    cidr: String,
+    gateway: String,
 }
 
 fn now_unix_ms() -> i64 {

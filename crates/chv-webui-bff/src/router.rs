@@ -68,6 +68,14 @@ pub fn bff_router() -> Router<AppState> {
             post(crate::handlers::networks::get_network),
         )
         .route(
+            "/v1/networks/create",
+            post(crate::handlers::networks::create_network),
+        )
+        .route(
+            "/v1/networks/delete",
+            post(crate::handlers::networks::delete_network),
+        )
+        .route(
             "/v1/networks/mutate",
             post(crate::handlers::networks::mutate_network),
         )

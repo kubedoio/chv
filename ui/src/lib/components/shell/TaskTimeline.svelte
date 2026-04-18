@@ -14,14 +14,15 @@
 
 	interface Props {
 		tasks: Task[];
+		emptyText?: string;
 	}
 
-	let { tasks }: Props = $props();
+	let { tasks, emptyText }: Props = $props();
 </script>
 
 <div class="task-timeline">
 	{#if tasks.length === 0}
-		<p class="empty-hint">No recent tasks recorded for this resource.</p>
+		<p class="empty-hint">{emptyText ?? 'No recent tasks recorded for this resource.'}</p>
 	{:else}
 		{#each tasks as task}
 			<div class="task-entry">

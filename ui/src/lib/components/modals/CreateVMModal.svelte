@@ -22,7 +22,7 @@
 
 	// Data loaded from BFF
 	let images = $state<{ image_id: string; name: string }[]>([]);
-	let networks = $state<{ network_id: string; name: string }[]>([]);
+	let networks = $state<{ network_id: string; name: string; dhcp_enabled: boolean; ipam_mode: string; is_default: boolean }[]>([]);
 	let loadingData = $state(false);
 
 	// Basic config
@@ -75,14 +75,18 @@
 			}));
 			networks = (netRes.items as any[]).map((n) => ({
 				network_id: n.network_id as string,
-				name: n.name as string
+				name: n.name as string,
+				dhcp_enabled: n.dhcp_enabled as boolean,
+				ipam_mode: n.ipam_mode as string,
+				is_default: n.is_default as boolean
 			}));
 			// Pre-select first available image and network
 			if (images.length > 0 && !imageId) {
 				imageId = images[0].image_id;
 			}
 			if (networks.length > 0 && !networkId) {
-				networkId = networks[0].network_id;
+				const defaultNet = networks.find((n) => n.is_default);
+				networkId = defaultNet ? defaultNet.network_id : networks[0].network_id;
 			}
 		} catch (e) {
 			console.error('Failed to load images/networks', e);

@@ -52,6 +52,18 @@ pub async fn get_overview(
             .await
             .unwrap_or(0);
 
+    let networks_total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM networks")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+
+    let networks_healthy = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM network_observed_state WHERE health_status = 'healthy'"
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0);
+
     let alerts_rows = sqlx::query_as::<_, AlertRow>(
         r#"
         SELECT
@@ -121,6 +133,8 @@ pub async fn get_overview(
         "nodes_degraded": nodes_degraded,
         "vms_running": vms_running,
         "vms_total": vms_total,
+        "networks_total": networks_total,
+        "networks_healthy": networks_healthy,
         "active_tasks": active_tasks,
         "unresolved_alerts": unresolved_alerts,
         "maintenance_nodes": maintenance_nodes,

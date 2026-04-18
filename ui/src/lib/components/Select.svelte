@@ -5,6 +5,7 @@
 		value: string;
 		label: string;
 		disabled?: boolean;
+		title?: string;
 	}
 
 	interface Props extends HTMLSelectAttributes {
@@ -64,7 +65,7 @@
 			<option value="" disabled selected>{placeholder}</option>
 		{/if}
 		{#each options as option}
-			<option value={option.value} disabled={option.disabled}>
+			<option value={option.value} disabled={option.disabled} title={option.title}>
 				{option.label}
 			</option>
 		{/each}

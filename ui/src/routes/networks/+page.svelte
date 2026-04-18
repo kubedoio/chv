@@ -6,12 +6,17 @@
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
+	import type { ShellTone } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Plus, Shield, Network, ChevronRight } from 'lucide-svelte';
-	import { goto } from '$app/navigation';
+	import { Plus, Shield, ChevronRight } from 'lucide-svelte';
+	import { goto, invalidateAll } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
+	import CreateNetworkModal from '$lib/components/modals/CreateNetworkModal.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 
 	let { data }: { data: PageData } = $props();
+
+	let createOpen = $state(false);
 
 	const model = $derived(data.networks);
 	const items = $derived(model.items);
@@ -97,6 +102,10 @@
 		exposure: { label: item.exposure, tone: mapExposureTone(item.exposure) }
 	})));
 
+	function isBadge(val: any): val is { label: string; tone: ShellTone } {
+		return val && typeof val === 'object' && 'tone' in val && 'label' in val;
+	}
+
 	const vulnerableNetworks = $derived(items.filter(n => n.exposure === 'public').slice(0, 3));
 	const pageDef = getPageDefinition('/networks');
 </script>
@@ -104,7 +113,7 @@
 <div class="inventory-page">
 	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
-			<button class="btn-primary">
+			<button class="btn-primary" onclick={() => createOpen = true}>
 				<Plus size={14} />
 				Create Network
 			</button>
@@ -135,11 +144,27 @@
 					hint="Networks can be cluster-local or span multiple datacenters via VXLAN."
 				/>
 			{:else}
-				<InventoryTable 
-					{columns} 
-					rows={tableRows} 
-					rowHref={(row) => `/networks/${row.network_id}`} 
-				/>
+				<InventoryTable
+					{columns}
+					rows={tableRows}
+					rowHref={(row) => `/networks/${row.network_id}`}
+				>
+					{#snippet cell({ column, row })}
+						{@const val = row[column.key]}
+						{#if column.key === 'name'}
+							<a href={`/networks/${row.network_id}`} class="row-link">
+								{row.name}
+							</a>
+							{#if row.is_default}
+								<StatusBadge label="Default" tone="unknown" />
+							{/if}
+						{:else if isBadge(val)}
+							<StatusBadge label={val.label} tone={val.tone} />
+						{:else}
+							<span class="cell-text">{val}</span>
+						{/if}
+					{/snippet}
+				</InventoryTable>
 			{/if}
 		</section>
 
@@ -169,19 +194,11 @@
 					{/if}
 				</div>
 			</div>
-
-			<div class="support-panel">
-				<div class="support-panel__header">
-					<Network size={14} />
-					<h3>Recent Peering</h3>
-				</div>
-				<div class="support-panel__content">
-					<p class="empty-hint">No external gateway changes in the last 24h.</p>
-				</div>
-			</div>
 		</aside>
 	</main>
 </div>
+
+<CreateNetworkModal bind:open={createOpen} onSuccess={() => invalidateAll()} />
 
 <style>
 	.inventory-page {

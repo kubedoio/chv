@@ -39,9 +39,13 @@ pub async fn list_networks(
                  ORDER BY requested_at DESC LIMIT 1),
                 ''
             ) AS last_task,
-            COALESCE(alert_counts.alerts, 0) AS alerts
+            COALESCE(alert_counts.alerts, 0) AS alerts,
+            COALESCE(nds.dhcp_enabled, 1) AS dhcp_enabled,
+            COALESCE(nds.ipam_mode, 'internal') AS ipam_mode,
+            COALESCE(nds.is_default, 0) AS is_default
         FROM networks n
         LEFT JOIN network_observed_state nos ON n.network_id = nos.network_id
+        LEFT JOIN network_desired_state nds ON n.network_id = nds.network_id
         LEFT JOIN (
             SELECT resource_id, COUNT(*) AS alerts
             FROM alerts
@@ -71,6 +75,9 @@ pub async fn list_networks(
                 "policy": "default",
                 "last_task": r.last_task,
                 "alerts": r.alerts,
+                "dhcp_enabled": r.dhcp_enabled,
+                "ipam_mode": r.ipam_mode,
+                "is_default": r.is_default,
             })
         })
         .collect();
@@ -114,7 +121,10 @@ pub async fn get_network(
             COALESCE(alert_counts.alerts, 0) AS alerts,
             n.created_at AS created_at,
             COALESCE(nds.cidr, '') AS cidr,
-            COALESCE(nds.gateway, '') AS gateway
+            COALESCE(nds.gateway, '') AS gateway,
+            COALESCE(nds.dhcp_enabled, 1) AS dhcp_enabled,
+            COALESCE(nds.ipam_mode, 'internal') AS ipam_mode,
+            COALESCE(nds.is_default, 0) AS is_default
         FROM networks n
         LEFT JOIN network_observed_state nos ON n.network_id = nos.network_id
         LEFT JOIN network_desired_state nds ON n.network_id = nds.network_id
@@ -171,6 +181,9 @@ pub async fn get_network(
                 "created_at": r.created_at.unwrap_or_default(),
                 "last_task": r.last_task,
                 "alerts": r.alerts,
+                "dhcp_enabled": r.dhcp_enabled,
+                "ipam_mode": r.ipam_mode,
+                "is_default": r.is_default,
             })))
         }
         None => Err(BffError::NotFound(format!(
@@ -178,6 +191,153 @@ pub async fn get_network(
             network_id
         ))),
     }
+}
+
+pub async fn create_network(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing name".into()))?
+        .to_string();
+
+    let cidr = payload
+        .get("cidr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let gateway = payload
+        .get("gateway")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let _bridge_name = payload
+        .get("bridge_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let dhcp_enabled = payload
+        .get("dhcp_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let ipam_mode = payload
+        .get("ipam_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("internal")
+        .to_string();
+
+    let is_default = payload
+        .get("is_default")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let network_id = uuid::Uuid::new_v4().to_string();
+
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO networks (network_id, display_name, network_class, created_at, updated_at)
+        VALUES (?, ?, 'bridge', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&network_id)
+    .bind(&name)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert network: {}", e)))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO network_desired_state (
+            network_id, desired_generation, desired_status, cidr, gateway,
+            dhcp_enabled, ipam_mode, is_default, requested_at, updated_at
+        )
+        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&network_id)
+    .bind(&cidr)
+    .bind(&gateway)
+    .bind(if dhcp_enabled { 1 } else { 0 })
+    .bind(&ipam_mode)
+    .bind(if is_default { 1 } else { 0 })
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
+
+    Ok(Json(json!({
+        "network_id": network_id,
+        "name": name,
+        "cidr": cidr,
+        "gateway": gateway,
+        "dhcp_enabled": dhcp_enabled,
+        "ipam_mode": ipam_mode,
+        "is_default": is_default,
+    })))
+}
+
+pub async fn delete_network(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let network_id = payload
+        .get("network_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
+        .to_string();
+
+    let attached_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = ?"
+    )
+    .bind(&network_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to count attached vms: {}", e)))?;
+
+    if attached_count > 0 {
+        return Err(BffError::BadRequest(format!(
+            "cannot delete network {}: {} VM(s) still attached",
+            network_id, attached_count
+        )));
+    }
+
+    let exists = sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
+        .bind(&network_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
+
+    if exists.is_none() {
+        return Err(BffError::NotFound(format!("network {} not found", network_id)));
+    }
+
+    sqlx::query("DELETE FROM networks WHERE network_id = ?")
+        .bind(&network_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to delete network: {}", e)))?;
+
+    Ok(Json(json!({
+        "deleted": true,
+        "network_id": network_id,
+    })))
 }
 
 #[derive(sqlx::FromRow)]
@@ -189,6 +349,9 @@ struct NetworkRow {
     attached_vms: i32,
     last_task: String,
     alerts: i32,
+    dhcp_enabled: i32,
+    ipam_mode: String,
+    is_default: i32,
 }
 
 #[derive(sqlx::FromRow)]
@@ -202,6 +365,9 @@ struct NetworkDetailRow {
     created_at: Option<String>,
     cidr: String,
     gateway: String,
+    dhcp_enabled: i32,
+    ipam_mode: String,
+    is_default: i32,
 }
 
 #[derive(sqlx::FromRow)]

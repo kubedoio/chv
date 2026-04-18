@@ -285,15 +285,19 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                 .and_then(|v| v.as_str())
                 .unwrap_or("br0");
             let cidr = spec
-                .get("subnet_cidr")
+                .get("cidr")
                 .and_then(|v| v.as_str())
                 .unwrap_or("10.0.0.0/24");
+            let gateway = spec
+                .get("gateway")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
                 .await
                 .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
 
-            nwd.ensure_network_topology(&inner.network_id, bridge, cidr, Some(&meta.operation_id))
+            nwd.ensure_network_topology(&inner.network_id, bridge, cidr, gateway, Some(&meta.operation_id))
                 .await
                 .map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
 
@@ -448,11 +452,18 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 .await
                 .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
             for nic in &vm_spec.nics {
+                let nic_cidr = if nic.cidr.is_empty() {
+                    "10.0.0.0/24".to_string()
+                } else {
+                    nic.cidr.clone()
+                };
+                let nic_gateway = nic.gateway.clone();
                 if let Err(e) = nwd
                     .ensure_network_topology(
                         &nic.network_id,
                         &format!("br-{}", nic.network_id),
-                        "10.0.0.0/24",
+                        &nic_cidr,
+                        &nic_gateway,
                         Some(op_id),
                     )
                     .await

@@ -71,8 +71,27 @@
 		{ key: 'network_name', label: 'Network' },
 		{ key: 'ip_address', label: 'IP Address' },
 		{ key: 'mac_address', label: 'MAC Address' },
-		{ key: 'nic_model', label: 'Model' }
+		{ key: 'nic_model', label: 'Model' },
+		{ key: 'addressing_mode', label: 'Addressing' }
 	];
+
+	function addressingTone(mode: string): ShellTone {
+		if (mode === 'internal') return 'healthy';
+		if (mode === 'external') return 'warning';
+		return 'unknown';
+	}
+
+	function addressingLabel(mode: string): string {
+		if (mode === 'internal') return 'DHCP';
+		if (mode === 'external') return 'External';
+		return 'Static';
+	}
+
+	const nicRows = $derived((detail.summary.attached_nics ?? []).map(n => ({
+		...n,
+		ip_address: n.ip_address || 'No IP address reported yet',
+		addressing_mode: { label: addressingLabel(n.addressing_mode), tone: addressingTone(n.addressing_mode) }
+	})));
 
 	const timelineTasks = $derived(detail.recent_tasks.map(t => ({
 		...t,
@@ -167,7 +186,7 @@
 						{:else}
 							<InventoryTable 
 								columns={nicColumns} 
-								rows={detail.summary.attached_nics} 
+								rows={nicRows} 
 							/>
 						{/if}
 					</SectionCard>
@@ -177,7 +196,7 @@
 					</SectionCard>
 
 					<SectionCard title="Guest Configuration" icon={Info}>
-						<PropertyGrid properties={configProps} columns={2} />SectionCard>
+						<PropertyGrid properties={configProps} columns={2} />
 					</SectionCard>
 				</div>
 			</section>

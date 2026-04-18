@@ -6,7 +6,6 @@
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
@@ -35,33 +34,50 @@
 	const policyProps = $derived([
 		{ label: 'Active Policy', value: detail.policy },
 		{ label: 'Scope', value: detail.scope },
-		{ label: 'VLAN ID', value: '402' },
 		{ label: 'Created', value: new Date(detail.created_at).toLocaleDateString() }
 	]);
 
 	const vmColumns = [
-		{ key: 'name', label: 'VM' },
-		{ key: 'ip', label: 'IP Address' },
-		{ key: 'state', label: 'State' }
+		{ key: 'display_name', label: 'VM' },
+		{ key: 'ip_address', label: 'IP Address' },
+		{ key: 'runtime_status', label: 'State' },
+		{ key: 'addressing_mode', label: 'Addressing' }
 	];
+
+	function addressingTone(mode: string): ShellTone {
+		if (mode === 'internal') return 'healthy';
+		if (mode === 'external') return 'warning';
+		return 'unknown';
+	}
+
+	function addressingLabel(mode: string): string {
+		if (mode === 'internal') return 'DHCP';
+		if (mode === 'external') return 'External';
+		return 'Static';
+	}
+
+	function vmStatusTone(status: string): ShellTone {
+		const s = status.toLowerCase();
+		if (s === 'running') return 'healthy';
+		if (s === 'stopped') return 'unknown';
+		if (s.includes('fail') || s.includes('error')) return 'failed';
+		return 'warning';
+	}
 
 	const vmRows = $derived(detail.attached_vms.map(v => ({
 		...v,
-		ip: v.ip || 'DHCP-pending',
-		state: { label: 'connected', tone: 'healthy' as const }
+		ip_address: v.ip_address || 'DHCP-pending',
+		runtime_status: { label: v.runtime_status || 'connected', tone: vmStatusTone(v.runtime_status) },
+		addressing_mode: { label: addressingLabel(detail.ipam_mode), tone: addressingTone(detail.ipam_mode) }
 	})));
-
-	const timelineTasks = $derived([
-		{ task_id: 't-01', summary: 'Policy modified', status: 'completed', operation: 'update_networks', tone: 'healthy' as const, started_at: '2h ago' }
-	]);
 </script>
 
 <div class="resource-detail">
 	{#if detail.state === 'error'}
-		<ErrorState title="Network Detail Unavailable" description="The SDN controller could not provide synchronization data." />
+		<ErrorState title={detail.title ?? 'Network Detail Unavailable'} description={detail.description ?? 'The SDN controller could not provide synchronization data.'} />
 	{:else}
-		<ResourceDetailHeader 
-			title={detail.name} 
+		<ResourceDetailHeader
+			title={detail.name}
 			eyebrow={detail.scope}
 			statusLabel={detail.exposure}
 			tone={normalizeTone(detail.exposure)}
@@ -72,23 +88,30 @@
 			{#snippet actions()}
 				<ActionStrip>
 					{#if detail.exposure === 'public'}
-						<button class="btn-secondary btn-sm">
+						<button class="btn-secondary btn-sm" disabled title="Not available in this release">
 							<ShieldAlert size={14} />
 							Withdraw Exposure
 						</button>
 					{:else}
-						<button class="btn-secondary btn-sm">
+						<button class="btn-secondary btn-sm" disabled title="Not available in this release">
 							<Shield size={14} />
 							Expose Publicly
 						</button>
 					{/if}
-					<button class="btn-secondary btn-sm">
+					<button class="btn-secondary btn-sm" disabled title="Not available in this release">
 						<Activity size={14} />
 						Edit Policy
 					</button>
 				</ActionStrip>
 			{/snippet}
 		</ResourceDetailHeader>
+
+		{#if detail.is_default}
+			<div class="default-banner">
+				<Info size={14} />
+				<span>This network is the default for dev-install workloads.</span>
+			</div>
+		{/if}
 
 		<main class="detail-grid">
 			<section class="detail-main-span">
@@ -103,29 +126,34 @@
 						{#if detail.attached_vms.length === 0}
 							<p class="empty-hint">No virtual machines currently attached to this subnet.</p>
 						{:else}
-							<InventoryTable 
-								columns={vmColumns} 
-								rows={vmRows} 
-								rowHref={(row) => `/vms/${row.vm_id}`} 
+							<InventoryTable
+								columns={vmColumns}
+								rows={vmRows}
+								rowHref={(row) => `/vms/${row.vm_id}`}
 							/>
 						{/if}
 					</SectionCard>
 
 					<SectionCard title="Policy History" icon={Activity}>
-						<TaskTimeline tasks={timelineTasks} />SectionCard>
+						{#if detail.last_task}
+							<p class="last-activity">Last activity: {detail.last_task}</p>
+						{:else}
+							<p class="empty-hint">No events in the last 24 hours.</p>
+						{/if}
 					</SectionCard>
 				</div>
 			</section>
 
 			<aside class="detail-side-span">
 				<SectionCard title="L3 Configuration" icon={Network}>
-					<PropertyGrid 
+					<PropertyGrid
 						columns={1}
 						properties={[
 							{ label: 'Subnet ID', value: detail.network_id },
 							{ label: 'Gateway IP', value: detail.gateway },
-							{ label: 'DNS Servers', value: '1.1.1.1, 8.8.8.8' }
-						]} 
+							{ label: 'DHCP', value: detail.dhcp_enabled ? 'Enabled' : 'Disabled' },
+							{ label: 'IPAM Mode', value: detail.ipam_mode }
+						]}
 					/>
 				</SectionCard>
 
@@ -148,6 +176,19 @@
 	.resource-detail {
 		display: flex;
 		flex-direction: column;
+	}
+
+	.default-banner {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		margin-bottom: 1rem;
+		background: var(--shell-surface-muted);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		font-size: var(--text-sm);
+		color: var(--shell-text-secondary);
 	}
 
 	.detail-grid {
@@ -180,6 +221,12 @@
 		color: var(--shell-text-muted);
 		text-align: center;
 		padding: 1rem 0;
+	}
+
+	.last-activity {
+		font-size: var(--text-sm);
+		color: var(--shell-text-secondary);
+		padding: 0.5rem 0;
 	}
 
 	.alert-box {

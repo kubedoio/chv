@@ -12,6 +12,9 @@ export type NetworkListItem = {
 	policy: string;
 	last_task: string;
 	alerts: number;
+	dhcp_enabled: boolean;
+	ipam_mode: string;
+	is_default: boolean;
 };
 
 export type NetworksListModel = {
