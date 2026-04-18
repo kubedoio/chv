@@ -90,7 +90,9 @@ pub async fn list_events(
             "total_items": total_count,
             "total_pages": total_pages,
         },
-        "filters": null,
+        "filters": {
+            "applied": {}
+        },
     })))
 }
 
@@ -197,7 +199,9 @@ pub async fn list_events_for_vm(
             "page_size": 50,
             "total_items": total,
         },
-        "filters": null,
+        "filters": {
+            "applied": {}
+        },
     })))
 }
 

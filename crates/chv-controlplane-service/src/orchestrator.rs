@@ -53,11 +53,11 @@ impl Orchestrator {
                 o.resource_kind,
                 o.resource_id,
                 o.desired_generation,
-                COALESCE(vds.target_node_id, nds.node_id) as node_id
+                COALESCE(vds.target_node_id, vol.node_id, net.node_id) as node_id
             FROM operations o
             LEFT JOIN vm_desired_state vds ON o.resource_id = vds.vm_id
-            LEFT JOIN volume_desired_state vold ON o.resource_id = vold.volume_id
-            LEFT JOIN network_desired_state nds ON o.resource_id = nds.network_id
+            LEFT JOIN volumes vol ON o.resource_id = vol.volume_id
+            LEFT JOIN networks net ON o.resource_id = net.network_id
             WHERE o.status = 'Accepted'
             ORDER BY o.requested_at ASC
             LIMIT 10

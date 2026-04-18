@@ -89,7 +89,9 @@ pub async fn list_vms(
             "total_items": total_count,
             "total_pages": total_pages,
         },
-        "filters": null,
+        "filters": {
+            "applied": {}
+        },
     })))
 }
 

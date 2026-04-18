@@ -375,11 +375,11 @@ impl FromStr for EventSeverity {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "Debug" => Ok(Self::Debug),
-            "Info" => Ok(Self::Info),
-            "Warning" => Ok(Self::Warning),
-            "Error" => Ok(Self::Error),
-            "Critical" => Ok(Self::Critical),
+            "Debug" | "debug" => Ok(Self::Debug),
+            "Info" | "info" => Ok(Self::Info),
+            "Warning" | "warning" => Ok(Self::Warning),
+            "Error" | "error" => Ok(Self::Error),
+            "Critical" | "critical" => Ok(Self::Critical),
             _ => Err(ParseEventSeverityError),
         }
     }
@@ -448,7 +448,7 @@ impl FromStr for EventType {
             "DesiredStateAcknowledged" => Ok(Self::DesiredStateAcknowledged),
             "DesiredStateRejected" => Ok(Self::DesiredStateRejected),
             "ObservedStateReported" => Ok(Self::ObservedStateReported),
-            "StateTransition" => Ok(Self::StateTransition),
+            "StateTransition" | "NodeStateTransition" => Ok(Self::StateTransition),
             "OperationStarted" => Ok(Self::OperationStarted),
             "OperationCompleted" => Ok(Self::OperationCompleted),
             "OperationFailed" => Ok(Self::OperationFailed),

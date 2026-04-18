@@ -67,7 +67,9 @@ pub async fn list_clusters(
             "page_size": 50,
             "total_items": items.len() as u64,
         },
-        "filters": null,
+        "filters": {
+            "applied": {}
+        },
     })))
 }
 

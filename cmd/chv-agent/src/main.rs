@@ -506,10 +506,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     consecutive_health_failures = 0;
                 }
                 let severity = match derived {
-                    NodeState::Failed => "critical",
-                    NodeState::Degraded => "warning",
-                    NodeState::TenantReady => "info",
-                    _ => "info",
+                    NodeState::Failed => "Critical",
+                    NodeState::Degraded => "Warning",
+                    NodeState::TenantReady => "Info",
+                    _ => "Info",
                 };
                 let (target_node_id, desired_state_version) = {
                     let cache = cache.lock().await;
@@ -525,7 +525,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         request_unix_ms: now_unix_ms(),
                     },
                     severity,
-                    "NodeStateTransition",
+                    "StateTransition",
                     &format!(
                         "node transitioned from {} to {}",
                         from_str,
@@ -567,8 +567,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             desired_state_version,
                             request_unix_ms: now_unix_ms(),
                         },
-                        "critical",
-                        "NodeStateTransition",
+                        "Critical",
+                        "StateTransition",
                         "node transitioned to Failed after persistent health degradation",
                     );
                     send_or_defer_control_plane_message(
