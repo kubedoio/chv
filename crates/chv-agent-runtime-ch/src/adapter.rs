@@ -8,6 +8,7 @@ pub struct VmConfig {
     pub cpus: u32,
     pub memory_bytes: u64,
     pub kernel_path: PathBuf,
+    pub firmware_path: Option<PathBuf>,
     pub disks: Vec<VmDiskConfig>,
     pub nics: Vec<VmNicConfig>,
     pub api_socket_path: PathBuf,

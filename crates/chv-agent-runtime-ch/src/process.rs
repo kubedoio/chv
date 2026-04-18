@@ -95,7 +95,14 @@ impl ProcessCloudHypervisorAdapter {
                 reason: format!("binary not found: {}", self.chv_binary.display()),
             });
         }
-        if !config.kernel_path.exists() {
+        if let Some(ref fw) = config.firmware_path {
+            if !fw.exists() {
+                return Err(ChvError::InvalidArgument {
+                    field: "firmware_path".to_string(),
+                    reason: format!("firmware not found: {}", fw.display()),
+                });
+            }
+        } else if !config.kernel_path.exists() {
             return Err(ChvError::InvalidArgument {
                 field: "kernel_path".to_string(),
                 reason: format!("kernel not found: {}", config.kernel_path.display()),
@@ -142,7 +149,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         cmd.arg("--cpus").arg(format!("boot={}", config.cpus));
         cmd.arg("--memory")
             .arg(format!("size={}", config.memory_bytes));
-        cmd.arg("--kernel").arg(&config.kernel_path);
+        if let Some(ref fw) = config.firmware_path {
+            cmd.arg("--firmware").arg(fw);
+        } else {
+            cmd.arg("--kernel").arg(&config.kernel_path);
+        }
         for disk in &config.disks {
             let arg = if disk.read_only {
                 format!("path={},readonly=on", disk.path.display())
@@ -319,6 +330,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 512 * 1024 * 1024,
             kernel_path: dir.path().join("missing-kernel"),
+            firmware_path: None,
             disks: vec![],
             nics: vec![],
             api_socket_path: PathBuf::from("/tmp/chv-vm-1.sock"),
@@ -342,6 +354,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 512 * 1024 * 1024,
             kernel_path: kernel,
+            firmware_path: None,
             disks: vec![VmDiskConfig {
                 path: disk,
                 read_only: false,

@@ -504,6 +504,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             cpus: vm_spec.cpus,
             memory_bytes: vm_spec.memory_bytes,
             kernel_path: std::path::PathBuf::from(vm_spec.kernel_path),
+            firmware_path: vm_spec.firmware_path.as_ref().map(std::path::PathBuf::from),
             disks,
             nics,
             api_socket_path: std::path::PathBuf::from(format!(
@@ -1477,6 +1478,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 1024,
             kernel_path: std::path::PathBuf::from("/dev/null"),
+            firmware_path: None,
             disks: vec![],
             nics: vec![],
             api_socket_path: std::path::PathBuf::from("/run/chv/agent/vm-vm-1.sock"),
@@ -1551,6 +1553,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 1024,
             kernel_path: std::path::PathBuf::from("/dev/null"),
+            firmware_path: None,
             disks: vec![],
             nics: vec![],
             api_socket_path: std::path::PathBuf::from("/run/chv/agent/vm-vm-1.sock"),

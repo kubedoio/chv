@@ -233,6 +233,11 @@ install_cloud_hypervisor() {
 BASE_IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-${CHV_ARCH}.img"
 BASE_IMAGE_PATH="${CHV_DATA_DIR}/images/ubuntu-noble-${CHV_ARCH}.img"
 
+# Cloud Hypervisor Firmware
+FIRMWARE_ARCH="${ARCH}"
+FIRMWARE_URL="https://github.com/kubedoio/rust-hypervisor-firmware/releases/download/v0.5.0/hypervisor-fw-${FIRMWARE_ARCH}"
+FIRMWARE_PATH="${CHV_DATA_DIR}/hypervisor-fw"
+
 download_base_image() {
     info "Checking for base OS image..."
 
@@ -262,6 +267,29 @@ download_base_image() {
 # -----------------------------------------------------------------------------
 # Import Base Image into Control Plane
 # -----------------------------------------------------------------------------
+download_firmware() {
+    info "Checking for cloud-hypervisor firmware..."
+
+    if [ -f "$FIRMWARE_PATH" ]; then
+        info "Firmware already exists at ${FIRMWARE_PATH}, skipping download."
+        return
+    fi
+
+    info "Downloading cloud-hypervisor firmware for ${FIRMWARE_ARCH}..."
+    info "URL: ${FIRMWARE_URL}"
+
+    if curl -fsSL --retry 3 --retry-delay 5 "$FIRMWARE_URL" -o "$FIRMWARE_PATH"; then
+        chown "${CHV_USER}:${CHV_USER}" "$FIRMWARE_PATH"
+        chmod 755 "$FIRMWARE_PATH"
+        local fw_size
+        fw_size=$(du -h "$FIRMWARE_PATH" | cut -f1)
+        info "Firmware downloaded (${fw_size}) -> ${FIRMWARE_PATH}"
+    else
+        warn "Failed to download firmware from ${FIRMWARE_URL}"
+        warn "VM creation may fail without firmware."
+    fi
+}
+
 import_base_image() {
     if [ ! -f "$BASE_IMAGE_PATH" ]; then
         info "No base image to import."
@@ -800,6 +828,7 @@ download_release
 install_binaries_and_assets
 install_cloud_hypervisor
 download_base_image
+download_firmware
 generate_certs
 setup_network
 install_configs

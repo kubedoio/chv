@@ -152,6 +152,7 @@ pub async fn build_service(
         operation_repo.clone(),
         config.agent_socket_pattern.clone(),
         config.kernel_path.clone(),
+        config.firmware_path.clone(),
     );
     tokio::spawn(orchestrator.run());
 

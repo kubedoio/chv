@@ -12,6 +12,7 @@ pub struct Orchestrator {
     operation_repo: OperationRepository,
     agent_socket_pattern: String,
     kernel_path: String,
+    firmware_path: String,
     tick_interval: Duration,
 }
 
@@ -21,12 +22,14 @@ impl Orchestrator {
         operation_repo: OperationRepository,
         agent_socket_pattern: String,
         kernel_path: String,
+        firmware_path: String,
     ) -> Self {
         Self {
             pool,
             operation_repo,
             agent_socket_pattern,
             kernel_path,
+            firmware_path,
             tick_interval: Duration::from_secs(2),
         }
     }
@@ -389,6 +392,7 @@ impl Orchestrator {
             cpus: vm_row.cpu_count.unwrap_or(1) as u32,
             memory_bytes: vm_row.memory_bytes.unwrap_or(512 * 1024 * 1024) as u64,
             kernel_path,
+            firmware_path: Some(self.firmware_path.clone()),
             disk_seed_path: self.resolve_disk_seed_path(vm_row.image_ref.as_deref()),
             disks,
             nics,
@@ -471,6 +475,8 @@ struct AgentVmSpec {
     cpus: u32,
     memory_bytes: u64,
     kernel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    firmware_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disk_seed_path: Option<String>,
     disks: Vec<AgentDiskSpec>,

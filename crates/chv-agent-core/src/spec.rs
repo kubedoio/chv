@@ -12,6 +12,8 @@ pub struct VmSpec {
     pub memory_bytes: u64,
     pub kernel_path: String,
     #[serde(default)]
+    pub firmware_path: Option<String>,
+    #[serde(default)]
     pub disk_seed_path: Option<String>,
     pub disks: Vec<DiskSpec>,
     pub nics: Vec<NicSpec>,
@@ -117,6 +119,7 @@ mod tests {
             cpus: 0,
             memory_bytes: 512,
             kernel_path: "/kernel".to_string(),
+            firmware_path: None,
             disk_seed_path: None,
             disks: vec![],
             nics: vec![],
@@ -136,6 +139,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 512,
             kernel_path: "".to_string(),
+            firmware_path: None,
             disk_seed_path: None,
             disks: vec![],
             nics: vec![],
@@ -155,6 +159,7 @@ mod tests {
             cpus: 1,
             memory_bytes: 512,
             kernel_path: "/kernel".to_string(),
+            firmware_path: None,
             disk_seed_path: None,
             disks: vec![],
             nics: vec![NicSpec {
