@@ -10,6 +10,7 @@ use chv_controlplane_types::domain::{
 };
 use control_plane_node_api::control_plane_node_api as proto;
 use std::str::FromStr;
+use tracing::warn;
 
 #[async_trait]
 pub trait TelemetryService: Send + Sync {
@@ -292,7 +293,8 @@ impl TelemetryService for TelemetryServiceImplementation {
             ))
         })?;
 
-        self.event_repo
+        if let Err(e) = self
+            .event_repo
             .append(&EventAppendInput {
                 operation_id: op_id,
                 node_id: Some(node_id),
@@ -315,7 +317,10 @@ impl TelemetryService for TelemetryServiceImplementation {
                 requested_by: Some(meta.requested_by),
                 correlation_id: None,
             })
-            .await?;
+            .await
+        {
+            warn!(error = %e, node_id = %request.node_id, "failed to persist event, skipping");
+        }
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -352,7 +357,8 @@ impl TelemetryService for TelemetryServiceImplementation {
         })?;
 
         // CREATE PERSISTENT ALERT
-        self.alert_repo
+        if let Err(e) = self
+            .alert_repo
             .create(&AlertCreateInput {
                 alert_type: request.alert_type.clone(),
                 severity,
@@ -364,10 +370,14 @@ impl TelemetryService for TelemetryServiceImplementation {
                 operation_id: op_id.as_ref().map(|o| o.to_string()),
                 opened_unix_ms: meta.request_unix_ms,
             })
-            .await?;
+            .await
+        {
+            warn!(error = %e, node_id = %request.node_id, "failed to persist alert, skipping");
+        }
 
         // Also emit event for the alert
-        self.event_repo
+        if let Err(e) = self
+            .event_repo
             .append(&EventAppendInput {
                 operation_id: op_id,
                 node_id: Some(node_id),
@@ -392,7 +402,10 @@ impl TelemetryService for TelemetryServiceImplementation {
                 requested_by: Some(meta.requested_by),
                 correlation_id: None,
             })
-            .await?;
+            .await
+        {
+            warn!(error = %e, node_id = %request.node_id, "failed to persist alert event, skipping");
+        }
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {
