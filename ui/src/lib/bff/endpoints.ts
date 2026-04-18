@@ -28,6 +28,7 @@ export const BFFEndpoints = {
 	listEvents: '/v1/events',
 	listVmEvents: '/v1/vms/events',
 	listImages: '/v1/images',
+	importImage: '/v1/images/import',
 	getMaintenance: '/v1/maintenance',
 	getSettings: '/v1/settings'
 } as const;

@@ -70,6 +70,10 @@ pub fn bff_router() -> Router<AppState> {
         .route("/v1/events", post(crate::handlers::events::list_events))
         .route("/v1/images", post(crate::handlers::images::list_images))
         .route(
+            "/v1/images/import",
+            post(crate::handlers::images::import_image),
+        )
+        .route(
             "/v1/maintenance",
             post(crate::handlers::maintenance::get_maintenance),
         )

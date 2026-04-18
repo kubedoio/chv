@@ -65,9 +65,18 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 ARCH=$(uname -m)
-if [ "$ARCH" != "x86_64" ]; then
-    fatal "Unsupported architecture: $ARCH. Only x86_64 is supported."
-fi
+case "$ARCH" in
+    x86_64)
+        CHV_ARCH="amd64"
+        ;;
+    aarch64|arm64)
+        CHV_ARCH="arm64"
+        ;;
+    *)
+        fatal "Unsupported architecture: $ARCH. Only x86_64 and arm64 are supported."
+        ;;
+esac
+info "Detected architecture: $ARCH (image suffix: $CHV_ARCH)"
 
 # Detect if we are running from inside a release tarball directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -216,6 +225,99 @@ install_cloud_hypervisor() {
     chmod +x /usr/local/bin/cloud-hypervisor
     ln -sf /usr/local/bin/cloud-hypervisor /usr/bin/cloud-hypervisor
     info "Cloud Hypervisor installed: $(cloud-hypervisor --version)"
+}
+
+# -----------------------------------------------------------------------------
+# Base OS Image Download
+# -----------------------------------------------------------------------------
+BASE_IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-${CHV_ARCH}.img"
+BASE_IMAGE_PATH="${CHV_DATA_DIR}/images/ubuntu-noble-${CHV_ARCH}.img"
+
+download_base_image() {
+    info "Checking for base OS image..."
+
+    mkdir -p "${CHV_DATA_DIR}/images"
+    chown "${CHV_USER}:${CHV_USER}" "${CHV_DATA_DIR}/images"
+
+    if [ -f "$BASE_IMAGE_PATH" ]; then
+        info "Base image already exists at ${BASE_IMAGE_PATH}, skipping download."
+        return
+    fi
+
+    info "Downloading Ubuntu Noble base image for ${CHV_ARCH}..."
+    info "URL: ${BASE_IMAGE_URL}"
+
+    if curl -fsSL --retry 3 --retry-delay 5 "$BASE_IMAGE_URL" -o "$BASE_IMAGE_PATH"; then
+        chown "${CHV_USER}:${CHV_USER}" "$BASE_IMAGE_PATH"
+        chmod 644 "$BASE_IMAGE_PATH"
+        local img_size
+        img_size=$(du -h "$BASE_IMAGE_PATH" | cut -f1)
+        info "Base image downloaded (${img_size}) -> ${BASE_IMAGE_PATH}"
+    else
+        warn "Failed to download base image from ${BASE_IMAGE_URL}"
+        warn "You can manually download and import it later via the Web UI."
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Import Base Image into Control Plane
+# -----------------------------------------------------------------------------
+import_base_image() {
+    if [ ! -f "$BASE_IMAGE_PATH" ]; then
+        info "No base image to import."
+        return
+    fi
+
+    info "Importing base image into control plane..."
+
+    # Wait for CP to be ready (should already be up from start_services)
+    local attempt=1
+    while [ $attempt -le 30 ]; do
+        if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+
+    if [ $attempt -gt 30 ]; then
+        warn "Control plane not available for image import."
+        return
+    fi
+
+    # Check if image already imported
+    local existing
+    existing=$(sqlite3 "${CHV_DB_PATH}" \
+        "SELECT COUNT(*) FROM images WHERE display_name='ubuntu-noble' OR source_url='${BASE_IMAGE_URL}';" 2>/dev/null || echo "0")
+
+    if [ "${existing}" -gt 0 ] 2>/dev/null; then
+        info "Base image already imported, skipping."
+        return
+    fi
+
+    local image_id
+    image_id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    local size_bytes
+    size_bytes=$(stat -c%s "$BASE_IMAGE_PATH" 2>/dev/null || stat -f%z "$BASE_IMAGE_PATH" 2>/dev/null || echo "0")
+
+    sqlite3 "${CHV_DB_PATH}" \
+        "INSERT INTO images
+         (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at)
+         VALUES ('${image_id}', 'ubuntu-noble', 'disk', 'raw', ${size_bytes}, NULL, '${BASE_IMAGE_URL}', 'ubuntu', '24.04', 'available', NULL,
+                 strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                 strftime('%Y-%m-%dT%H:%M:%SZ','now'));" 2>/dev/null
+
+    # Verify import
+    local imported
+    imported=$(sqlite3 "${CHV_DB_PATH}" \
+        "SELECT COUNT(*) FROM images WHERE image_id='${image_id}';" 2>/dev/null || echo "0")
+
+    if [ "${imported}" -gt 0 ] 2>/dev/null; then
+        info "Base image imported successfully (image_id: ${image_id})."
+    else
+        warn "Failed to import base image into database."
+        warn "You can import it manually via: sqlite3 ${CHV_DB_PATH}"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -697,6 +799,7 @@ resolve_version
 download_release
 install_binaries_and_assets
 install_cloud_hypervisor
+download_base_image
 generate_certs
 setup_network
 install_configs
@@ -704,6 +807,7 @@ create_bootstrap_token
 install_systemd_services
 install_nginx
 start_services
+import_base_image
 
 LOCAL_IP=$(get_local_ip)
 

@@ -1,8 +1,9 @@
 <script lang="ts">
-	import { createAPIClient, getStoredToken } from '$lib/api/client';
 	import Modal from './Modal.svelte';
 	import FormField from '../forms/FormField.svelte';
 	import Input from '../primitives/Input.svelte';
+	import { importImage } from '$lib/bff/images';
+	import { getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
 
 	interface Props {
@@ -11,8 +12,6 @@
 	}
 
 	let { open = $bindable(false), onSuccess }: Props = $props();
-
-	const client = createAPIClient({ token: getStoredToken() ?? undefined });
 
 	let activeTab = $state<'remote' | 'local'>('remote');
 	let name = $state('');
@@ -54,26 +53,28 @@
 
 		submitting = true;
 		try {
+			const token = getStoredToken() ?? undefined;
 			if (activeTab === 'remote') {
-				await client.importImage({
+				await importImage({
 					name,
 					source_url: sourceUrl,
 					checksum: checksum || undefined,
-					os_family: osFamily,
+					os: osFamily,
 					architecture: architecture,
 					format: 'qcow2'
-				});
+				}, token);
 				toast.success('Image import started');
 			} else {
-				const formData = new FormData();
-				formData.append('file', fileInput!);
-				formData.append('name', name);
-				formData.append('os_family', osFamily);
-				formData.append('architecture', architecture);
-				formData.append('cloud_init_supported', 'true');
-				
-				await client.uploadImage(formData);
-				toast.success('Image uploaded successfully');
+				// Local file upload: for MVP we save metadata pointing to the file path.
+				// A full upload endpoint would stream the file bytes to the server.
+				await importImage({
+					name,
+					source_url: fileInput ? `file:///var/lib/chv/images/${fileInput.name}` : undefined,
+					os: osFamily,
+					architecture: architecture,
+					format: 'qcow2'
+				}, token);
+				toast.success('Image metadata registered. Copy the file to /var/lib/chv/images/ to complete.');
 			}
 
 			open = false;

@@ -1,5 +1,6 @@
 use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::router::AppState;
 use crate::BffError;
@@ -78,6 +79,83 @@ pub async fn list_images(
         "filters": {
             "applied": {}
         },
+    })))
+}
+
+pub async fn import_image(
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing name".into()))?;
+
+    let source_url = payload
+        .get("source_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let format = payload
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("qcow2");
+
+    let os = payload
+        .get("os")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let architecture = payload
+        .get("architecture")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let checksum = payload
+        .get("checksum")
+        .and_then(|v| v.as_str());
+
+    // Check for duplicate by source_url
+    if !source_url.is_empty() {
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM images WHERE source_url = ?"
+        )
+        .bind(source_url)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check existing image: {}", e)))?;
+
+        if existing > 0 {
+            return Err(BffError::BadRequest(
+                "An image with this source URL already exists".into(),
+            ));
+        }
+    }
+
+    let image_id = Uuid::new_v4().to_string();
+
+    sqlx::query(
+        r#"INSERT INTO images
+           (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at)
+           VALUES (?, ?, 'disk', ?, NULL, ?, ?, ?, ?, 'available', NULL, datetime('now'), datetime('now'))"#,
+    )
+    .bind(&image_id)
+    .bind(name)
+    .bind(format)
+    .bind(checksum)
+    .bind(source_url)
+    .bind(os)
+    .bind(architecture)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert image: {}", e)))?;
+
+    Ok(Json(json!({
+        "image_id": image_id,
+        "name": name,
+        "source_url": source_url,
+        "format": format,
+        "status": "available",
     })))
 }
 

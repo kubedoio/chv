@@ -371,6 +371,23 @@ export type ListEventsResponse = {
 	filters: FilterMeta;
 };
 
+export type ImportImageRequest = {
+	name: string;
+	source_url?: string;
+	checksum?: string;
+	os?: string;
+	architecture?: string;
+	format?: string;
+};
+
+export type ImportImageResponse = {
+	image_id: string;
+	name: string;
+	source_url: string;
+	format: string;
+	status: string;
+};
+
 export type MaintenanceWindow = {
 	window_id: string;
 	title: string;

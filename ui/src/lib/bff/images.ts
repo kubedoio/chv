@@ -1,5 +1,6 @@
 import { bffFetch } from './client';
 import { BFFEndpoints } from './endpoints';
+import type { ImportImageRequest, ImportImageResponse } from './types';
 
 export async function listImages(token?: string): Promise<{
 	items: Record<string, unknown>[];
@@ -9,6 +10,17 @@ export async function listImages(token?: string): Promise<{
 	return bffFetch(BFFEndpoints.listImages, {
 		method: 'POST',
 		body: JSON.stringify({}),
+		token
+	});
+}
+
+export async function importImage(
+	req: ImportImageRequest,
+	token?: string
+): Promise<ImportImageResponse> {
+	return bffFetch<ImportImageResponse>(BFFEndpoints.importImage, {
+		method: 'POST',
+		body: JSON.stringify(req),
 		token
 	});
 }

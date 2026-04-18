@@ -5,6 +5,7 @@
 	import FilterBar from '$lib/components/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import ImportImageModal from '$lib/components/modals/ImportImageModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 	import { Plus, Download, Tag, ChevronRight } from 'lucide-svelte';
@@ -12,6 +13,8 @@
 	import { page as appPage } from '$app/stores';
 
 	let { data }: { data: PageData } = $props();
+
+	let modalOpen = $state(false);
 
 	const model = $derived(data.images);
 	const items = $derived(model.items);
@@ -87,12 +90,14 @@
 <div class="inventory-page">
 	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
-			<button class="btn-primary">
+			<button class="btn-primary" onclick={() => (modalOpen = true)}>
 				<Plus size={14} />
 				Import Image
 			</button>
 		{/snippet}
 	</PageHeaderWithAction>
+
+	<ImportImageModal bind:open={modalOpen} onSuccess={() => window.location.reload()} />
 
 	<div class="posture-strip-wrapper">
 		<CompactStatStrip {stats} />
