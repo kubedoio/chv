@@ -76,7 +76,10 @@ impl proto::inventory_service_server::InventoryService for InventoryServer {
             .service
             .report_node_inventory(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "report_node_inventory failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 
@@ -88,7 +91,10 @@ impl proto::inventory_service_server::InventoryService for InventoryServer {
             .service
             .report_service_versions(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "report_service_versions failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 }
@@ -113,7 +119,10 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             .service
             .report_node_state(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "report_node_state failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 
@@ -125,7 +134,10 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             .service
             .report_vm_state(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "report_vm_state failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 
@@ -137,7 +149,10 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             .service
             .report_volume_state(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "report_volume_state failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 
@@ -149,7 +164,10 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             .service
             .report_network_state(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "report_network_state failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 
@@ -161,7 +179,10 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             .service
             .publish_event(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "publish_event failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 
@@ -173,7 +194,10 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             .service
             .publish_alert(request.into_inner())
             .await
-            .map_err(tonic::Status::from)?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "publish_alert failed");
+                tonic::Status::from(e)
+            })?;
         Ok(Response::new(resp))
     }
 }

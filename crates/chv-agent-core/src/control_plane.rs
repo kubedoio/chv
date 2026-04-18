@@ -251,7 +251,10 @@ impl ControlPlaneClient {
 
         let mut unsent = Vec::new();
         for message in pending {
+            let kind = format!("{:?}", message.kind);
+            tracing::info!(message_kind = %kind, "dispatching pending control-plane message");
             if let Err(e) = self.dispatch_pending_message(&message).await {
+                tracing::warn!(message_kind = %kind, error = %e, "dispatch pending message failed");
                 unsent.push(message);
                 cache.replace_pending_control_plane_messages(unsent);
                 return Err(e);

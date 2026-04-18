@@ -12,10 +12,10 @@ pub async fn list_clusters(
         r#"
         SELECT
             COUNT(*) AS node_count,
-            COUNT(*) FILTER (WHERE nos.health_status IN ('degraded', 'warning', 'critical')) AS degraded_count,
-            COUNT(*) FILTER (WHERE nds.desired_state = 'Maintenance') AS maintenance_count,
-            MODE() WITHIN GROUP (ORDER BY n.agent_version) AS version,
-            COUNT(DISTINCT n.agent_version) > 1 AS version_skew,
+            SUM(CASE WHEN nos.health_status IN ('degraded', 'warning', 'critical') THEN 1 ELSE 0 END) AS degraded_count,
+            SUM(CASE WHEN nds.desired_state = 'Maintenance' THEN 1 ELSE 0 END) AS maintenance_count,
+            (SELECT agent_version FROM nodes GROUP BY agent_version ORDER BY COUNT(*) DESC LIMIT 1) AS version,
+            CASE WHEN COUNT(DISTINCT n.agent_version) > 1 THEN 1 ELSE 0 END AS version_skew,
             (SELECT COUNT(*) FROM operations WHERE status IN ('Pending', 'Accepted', 'Running')) AS active_tasks,
             (SELECT COUNT(*) FROM alerts WHERE status != 'resolved') AS alerts
         FROM nodes n
