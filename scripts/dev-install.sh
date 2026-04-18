@@ -46,6 +46,14 @@ BUILD_USER="${SUDO_USER:-}"
 if [ -z "$BUILD_USER" ] || ! id -u "$BUILD_USER" &>/dev/null; then
     BUILD_USER="root"
 fi
+if [ "$BUILD_USER" != "root" ]; then
+    if ! sudo -u "$BUILD_USER" test -r "$PROJECT_ROOT" \
+        || ! sudo -u "$BUILD_USER" test -w "$PROJECT_ROOT" \
+        || ! sudo -u "$BUILD_USER" test -x "$PROJECT_ROOT"; then
+        echo "  [WARN] $BUILD_USER cannot access $PROJECT_ROOT; falling back to root build."
+        BUILD_USER="root"
+    fi
+fi
 
 # -----------------------------------------------------------------------------
 # Step 1: Uninstall previous installation
