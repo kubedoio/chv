@@ -321,6 +321,13 @@ export type MutateNodeResponse = {
 	summary: string;
 };
 
+export type EnrollNodeResponse = {
+	success: boolean;
+	cache_cleared: boolean;
+	token_ready: boolean;
+	message: string;
+};
+
 export type ListTasksRequest = {
 	page: number;
 	page_size: number;

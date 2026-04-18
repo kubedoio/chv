@@ -33,6 +33,10 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/nodes/mutate",
             post(crate::handlers::nodes::mutate_node),
         )
+        .route(
+            "/v1/nodes/enroll",
+            post(crate::handlers::nodes::enroll_node),
+        )
         .route("/v1/vms", post(crate::handlers::vms::list_vms))
         .route("/v1/vms/get", post(crate::handlers::vms::get_vm))
         .route("/v1/vms/create", post(crate::handlers::vms::create_vm))

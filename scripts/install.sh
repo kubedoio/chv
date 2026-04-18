@@ -645,6 +645,9 @@ start_services() {
         fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
     fi
 
+    # Ensure agent cache is cleared so reinstall triggers fresh enrollment
+    rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
+
     systemctl enable --now chv-agent
 
     info "Waiting for agent enrollment (up to 60s)..."

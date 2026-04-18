@@ -95,6 +95,9 @@ if [ "$NO_UNINSTALL" = "0" ]; then
     # Remove database (clean state for new install)
     rm -f /var/lib/chv/controlplane.db
 
+    # Remove agent cache so re-install triggers fresh enrollment
+    rm -f /var/lib/chv/cache/agent-cache.json
+
     # Remove UI assets and migrations
     rm -rf /opt/chv/ui/*
     rm -rf /usr/local/share/chv/migrations/*

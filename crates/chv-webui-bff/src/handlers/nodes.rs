@@ -1,5 +1,6 @@
 use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
+use std::path::Path;
 
 use crate::router::AppState;
 use crate::BffError;
@@ -310,6 +311,46 @@ pub async fn mutate_node(
         "task_id": response.task_id,
         "node_id": response.node_id,
         "summary": response.summary,
+    })))
+}
+
+/// Manual enrollment recovery: clears the agent cache so the next agent restart
+/// triggers a fresh enrollment bootstrap. Returns instructions for the operator.
+pub async fn enroll_node(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, BffError> {
+    let cache_path = Path::new("/var/lib/chv/cache/agent-cache.json");
+    let cache_existed = cache_path.exists();
+
+    if cache_existed {
+        match tokio::fs::remove_file(cache_path).await {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(BffError::Internal(format!(
+                    "failed to remove agent cache: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    // Also ensure a bootstrap token exists in the DB for the agent to consume
+    let token_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bootstrap_tokens WHERE used_at IS NULL")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check bootstrap tokens: {}", e)))?;
+
+    let token_ready = token_count > 0;
+
+    Ok(Json(json!({
+        "success": true,
+        "cache_cleared": cache_existed,
+        "token_ready": token_ready,
+        "message": if cache_existed {
+            "Agent enrollment cache cleared. Restart the agent service to complete enrollment: sudo systemctl restart chv-agent"
+        } else {
+            "No stale enrollment cache found. If the agent is not enrolling, ensure the bootstrap token is valid and restart the agent service."
+        },
     })))
 }
 

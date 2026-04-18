@@ -13,6 +13,8 @@
 	import { Plus, Bell, Activity, AlertCircle, ChevronRight } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { enrollNode } from '$lib/bff/nodes';
+	import { toast } from '$lib/stores/toast';
 
 	let { data }: { data: PageData } = $props();
 
@@ -96,7 +98,22 @@
 <div class="nodes-page">
 	<PageHeaderWithAction page={nodePageDef}>
 		{#snippet actions()}
-			<button class="btn-primary">
+			<button
+				class="btn-primary"
+				onclick={async () => {
+					try {
+						const result = await enrollNode();
+						if (result.success) {
+							toast.success(result.message);
+						} else {
+							toast.error(result.message);
+						}
+					} catch (e) {
+						const msg = e instanceof Error ? e.message : 'Enrollment request failed';
+						toast.error(msg);
+					}
+				}}
+			>
 				<Plus size={14} />
 				Enroll Node
 			</button>
