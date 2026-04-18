@@ -114,7 +114,18 @@ impl StorageBackend for LocalFileBackend {
         info!(volume_id, path = %path.display(), "opening local volume");
 
         if !path.exists() {
-            warn!(volume_id, path = %path.display(), "path does not exist yet");
+            warn!(volume_id, path = %path.display(), "path does not exist yet; creating sparse raw volume for first-VM milestone");
+            let file = std::fs::File::create(&path)
+                .map_err(|e| ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to create volume file: {}", e),
+                })?;
+            let default_size: u64 = 10 * 1024 * 1024 * 1024; // 10 GB
+            file.set_len(default_size)
+                .map_err(|e| ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to set volume file size: {}", e),
+                })?;
         }
 
         let export_kind = Self::detect_kind(&path);

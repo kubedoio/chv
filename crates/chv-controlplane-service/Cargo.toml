@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
+chv-errors = { path = "../chv-errors" }
 chv-webui-bff = { path = "../chv-webui-bff" }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
@@ -22,6 +23,7 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
+hyper-util = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt.workspace = true

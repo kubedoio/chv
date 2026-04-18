@@ -5,13 +5,17 @@
 	import FilterBar from '$lib/components/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import CreateVMModal from '$lib/components/modals/CreateVMModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 	import { Plus, Activity, AlertCircle, ChevronRight } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
+	import { invalidateAll } from '$app/navigation';
 
 	let { data }: { data: PageData } = $props();
+
+	let modalOpen = $state(false);
 
 	const model = $derived(data.vms);
 	const items = $derived(model.items);
@@ -108,7 +112,7 @@
 <div class="inventory-page">
 	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
-			<button class="btn-primary">
+			<button class="btn-primary" onclick={() => (modalOpen = true)}>
 				<Plus size={14} />
 				Create VM
 			</button>

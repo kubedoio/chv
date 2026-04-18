@@ -254,46 +254,70 @@ pub async fn create_vm(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    // Support both legacy BFF payload and CreateVMModal payload
     let display_name = payload
         .get("display_name")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| BffError::BadRequest("missing display_name".into()))?
+        .or_else(|| payload.get("name").and_then(|v| v.as_str()))
+        .ok_or_else(|| BffError::BadRequest("missing name/display_name".into()))?
         .to_string();
 
-    let node_id = payload
-        .get("node_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BffError::BadRequest("missing node_id".into()))?
-        .to_string();
+    let node_id = if let Some(nid) = payload.get("node_id").and_then(|v| v.as_str()) {
+        nid.to_string()
+    } else {
+        // Pick the first enrolled node as default
+        sqlx::query_scalar::<_, String>("SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1")
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to query nodes: {}", e)))?
+            .ok_or_else(|| BffError::BadRequest("no nodes enrolled and node_id not provided".into()))?
+    };
 
     let cpu_count = payload
         .get("cpu_count")
         .and_then(|v| v.as_i64())
-        .ok_or_else(|| BffError::BadRequest("missing cpu_count".into()))?;
+        .or_else(|| payload.get("vcpu").and_then(|v| v.as_i64()))
+        .unwrap_or(2);
 
     let memory_bytes = payload
         .get("memory_bytes")
         .and_then(|v| v.as_i64())
-        .ok_or_else(|| BffError::BadRequest("missing memory_bytes".into()))?;
+        .or_else(|| payload.get("memory_mb").and_then(|v| v.as_i64()))
+        .map(|mb| mb * 1024 * 1024)
+        .unwrap_or(2 * 1024 * 1024 * 1024);
 
     let image_ref = payload
         .get("image_ref")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| BffError::BadRequest("missing image_ref".into()))?
+        .or_else(|| payload.get("image_id").and_then(|v| v.as_str()))
+        .unwrap_or("default")
         .to_string();
 
     let requested_by = payload
         .get("requested_by")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| BffError::BadRequest("missing requested_by".into()))?
+        .unwrap_or("webui")
         .to_string();
 
-    let vm_id = uuid::Uuid::new_v4().to_string();
-    let operation_id = uuid::Uuid::new_v4().to_string();
+    let network_id = payload
+        .get("network_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
 
+    let volume_size_bytes = payload
+        .get("volume_size_gb")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(10)
+        * 1024 * 1024 * 1024;
+
+    let vm_id = uuid::Uuid::new_v4().to_string();
+    let volume_id = uuid::Uuid::new_v4().to_string();
+    let operation_id = uuid::Uuid::new_v4().to_string();
     let mut tx = state.pool.begin().await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
+    // Insert VM
     sqlx::query(
         r#"
         INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
@@ -307,6 +331,7 @@ pub async fn create_vm(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
 
+    // Insert VM desired state
     sqlx::query(
         r#"
         INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, cpu_count, memory_bytes, image_ref, requested_at, updated_at)
@@ -322,6 +347,90 @@ pub async fn create_vm(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
 
+    // Insert volume
+    sqlx::query(
+        r#"
+        INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, updated_at)
+        VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&volume_id)
+    .bind(&node_id)
+    .bind(format!("{}-disk", display_name))
+    .bind(volume_size_bytes)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert volume: {}", e)))?;
+
+    // Insert volume desired state (attached to VM)
+    sqlx::query(
+        r#"
+        INSERT INTO volume_desired_state (volume_id, desired_generation, desired_status, requested_by, attached_vm_id, device_name, read_only, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', ?, ?, 'vda', 0, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&volume_id)
+    .bind(&requested_by)
+    .bind(&vm_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert volume_desired_state: {}", e)))?;
+
+    // Insert network if not exists
+    let network_exists: Option<String> = sqlx::query_scalar("SELECT network_id FROM networks WHERE network_id = ?")
+        .bind(&network_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
+
+    if network_exists.is_none() {
+        sqlx::query(
+            r#"
+            INSERT INTO networks (network_id, node_id, display_name, updated_at)
+            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            "#,
+        )
+        .bind(&network_id)
+        .bind(&node_id)
+        .bind(format!("network-{}", network_id))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to insert network: {}", e)))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO network_desired_state (network_id, desired_generation, desired_status, requested_by, requested_at, updated_at)
+            VALUES (?, 1, 'Pending', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            "#,
+        )
+        .bind(&network_id)
+        .bind(&requested_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
+    }
+
+    // Insert NIC
+    let nic_id = format!("{}-{}", vm_id, network_id);
+    let mac_address = generate_mac(&vm_id, &network_id);
+    let ip_address = generate_ip(&vm_id, &network_id);
+
+    sqlx::query(
+        r#"
+        INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id, mac_address, ip_address, nic_model, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'virtio', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&nic_id)
+    .bind(&vm_id)
+    .bind(&network_id)
+    .bind(&mac_address)
+    .bind(&ip_address)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert vm_nic_desired_state: {}", e)))?;
+
+    // Insert operation
     let idempotency_key = format!("create-vm-{}", vm_id);
     sqlx::query(
         r#"
@@ -511,4 +620,43 @@ struct VmNicRow {
     mac_address: String,
     ip_address: String,
     nic_model: String,
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Deterministically generate a MAC address from vm_id + network_id.
+/// Sets the locally-administered bit to avoid conflicts with OUI space.
+fn generate_mac(vm_id: &str, network_id: &str) -> String {
+    let input = format!("{}:{}", vm_id, network_id);
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let octets = [
+        0x02,                       // locally administered
+        ((hash >> 8) & 0xFF) as u8,
+        ((hash >> 16) & 0xFF) as u8,
+        ((hash >> 24) & 0xFF) as u8,
+        ((hash >> 32) & 0xFF) as u8,
+        ((hash >> 40) & 0xFF) as u8,
+    ];
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        octets[0], octets[1], octets[2], octets[3], octets[4], octets[5]
+    )
+}
+
+/// Deterministically generate a 10.x.x.x IP from vm_id + network_id.
+fn generate_ip(vm_id: &str, _network_id: &str) -> String {
+    let input = vm_id;
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let o2 = ((hash >> 8) & 0xFF) as u8;
+    let o3 = ((hash >> 16) & 0xFF) as u8;
+    let o4 = ((hash >> 24) & 0xFF) as u8;
+    format!("10.{}.{}.{}", o2, o3, o4)
 }

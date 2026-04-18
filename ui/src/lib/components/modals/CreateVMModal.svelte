@@ -2,43 +2,29 @@
 	import Modal from '$lib/components/modals/Modal.svelte';
 	import FormField from '$lib/components/forms/FormField.svelte';
 	import Input from '$lib/components/Input.svelte';
-	import { createAPIClient, getStoredToken } from '$lib/api/client';
+	import { createVm } from '$lib/bff/vms';
+	import { getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
-	import { onMount } from 'svelte';
-	import type { Image, Network, StoragePool, VM, UsageWithQuota } from '$lib/api/types';
 
 	interface Props {
 		open?: boolean;
 		onSuccess?: () => void;
-		images?: Image[];
-		pools?: StoragePool[];
-		networks?: Network[];
 	}
 
 	let {
 		open = $bindable(false),
-		onSuccess,
-		images = [],
-		pools = [],
-		networks = []
+		onSuccess
 	}: Props = $props();
-
-	const client = createAPIClient({ token: getStoredToken() ?? undefined });
-
-	// Quota checking
-	let usageData = $state<UsageWithQuota | null>(null);
-	let quotaError = $state<string | null>(null);
 
 	let step = $state(1); // 1: Basic, 2: Cloud-init, 3: Review
 
 	// Basic config
 	let name = $state('');
 	let imageId = $state('');
-	let poolId = $state('');
 	let networkId = $state('');
 	let vcpu = $state(2);
 	let memoryMb = $state(2048);
-	let consoleType = $state<'serial'>('serial');
+	let volumeSizeGb = $state(10);
 
 	// Cloud-init
 	let userData = $state('#cloud-config\n');
@@ -47,88 +33,9 @@
 
 	let submitting = $state(false);
 	let formError = $state('');
-	let checkingQuota = $state(false);
 
 	// Field errors
 	let nameError = $state('');
-
-	// Load quota data when modal opens
-	$effect(() => {
-		if (open) {
-			loadQuotaData();
-		}
-	});
-
-	async function loadQuotaData() {
-		checkingQuota = true;
-		quotaError = null;
-		try {
-			usageData = await client.getUsage();
-		} catch (err) {
-			console.error('Failed to load quota data:', err);
-			// Don't block form if quota check fails
-		} finally {
-			checkingQuota = false;
-		}
-	}
-
-	function getResourceUsagePercent(used: number, limit: number): number {
-		if (limit === 0) return 0;
-		return Math.min(100, Math.round((used / limit) * 100));
-	}
-
-	function wouldExceedQuota(): { exceeded: boolean; message: string } {
-		if (!usageData) return { exceeded: false, message: '' };
-
-		const { usage, quota } = usageData;
-
-		// Check VMs
-		if (usage.vms + 1 > quota.max_vms) {
-			return { exceeded: true, message: `VM limit exceeded (${usage.vms}/${quota.max_vms})` };
-		}
-
-		// Check CPU
-		if (usage.cpus + vcpu > quota.max_cpu) {
-			return { exceeded: true, message: `CPU limit would be exceeded (${usage.cpus + vcpu}/${quota.max_cpu})` };
-		}
-
-		// Check Memory
-		const memoryGB = Math.ceil(memoryMb / 1024);
-		if (usage.memory_gb + memoryGB > quota.max_memory_gb) {
-			return { exceeded: true, message: `Memory limit would be exceeded (${usage.memory_gb + memoryGB}GB/${quota.max_memory_gb}GB)` };
-		}
-
-		// Check Storage (estimate 10GB if can't determine)
-		const storageGB = 10;
-		if (usage.storage_gb + storageGB > quota.max_storage_gb) {
-			return { exceeded: true, message: `Storage limit would be exceeded (${usage.storage_gb + storageGB}GB/${quota.max_storage_gb}GB)` };
-		}
-
-		return { exceeded: false, message: '' };
-	}
-
-	function getQuotaWarning(): string | null {
-		if (!usageData) return null;
-		const { usage, quota } = usageData;
-
-		const warnings: string[] = [];
-
-		// Check if approaching limits after this VM
-		const vmPercent = getResourceUsagePercent(usage.vms + 1, quota.max_vms);
-		const cpuPercent = getResourceUsagePercent(usage.cpus + vcpu, quota.max_cpu);
-		const memoryGB = Math.ceil(memoryMb / 1024);
-		const memoryPercent = getResourceUsagePercent(usage.memory_gb + memoryGB, quota.max_memory_gb);
-
-		if (vmPercent >= 80) warnings.push(`VM usage will be at ${vmPercent}%`);
-		if (cpuPercent >= 80) warnings.push(`CPU usage will be at ${cpuPercent}%`);
-		if (memoryPercent >= 80) warnings.push(`Memory usage will be at ${memoryPercent}%`);
-
-		if (warnings.length > 0) {
-			return 'Approaching quota limits: ' + warnings.join(', ');
-		}
-
-		return null;
-	}
 
 	const nameRegex = /^[a-z0-9-]+$/;
 
@@ -136,11 +43,10 @@
 		step = 1;
 		name = '';
 		imageId = '';
-		poolId = '';
 		networkId = '';
 		vcpu = 2;
 		memoryMb = 2048;
-		consoleType = 'serial';
+		volumeSizeGb = 10;
 		userData = '#cloud-config\n';
 		username = 'admin';
 		sshKey = '';
@@ -166,16 +72,13 @@
 	}
 
 	function canProceedToStep2(): boolean {
-		const quotaCheck = wouldExceedQuota();
 		return (
 			name.trim() !== '' &&
 			nameRegex.test(name) &&
 			!name.startsWith('-') &&
 			!name.endsWith('-') &&
 			imageId !== '' &&
-			poolId !== '' &&
-			networkId !== '' &&
-			!quotaCheck.exceeded
+			networkId !== ''
 		);
 	}
 
@@ -185,21 +88,19 @@
 		submitting = true;
 		formError = '';
 
+		const token = getStoredToken() ?? undefined;
 		const data = {
 			name: name.trim(),
 			image_id: imageId,
-			storage_pool_id: poolId,
-			network_id: networkId,
+			network_id: networkId || 'default',
 			vcpu,
 			memory_mb: memoryMb,
-			user_data: userData,
-			username,
-			ssh_authorized_keys: sshKey ? [sshKey] : [],
-			console_type: 'serial' as const
+			volume_size_gb: volumeSizeGb,
+			requested_by: 'webui'
 		};
 
 		try {
-			await client.createVM(data);
+			await createVm(data, token);
 			toast.success('VM created successfully');
 			open = false;
 			onSuccess?.();
@@ -212,10 +113,9 @@
 		}
 	}
 
-	// Get selected items for review
-	const selectedImage = $derived(images.find((i) => i.id === imageId));
-	const selectedPool = $derived(pools.find((p) => p.id === poolId));
-	const selectedNetwork = $derived(networks.find((n) => n.id === networkId));
+	// Get selected items for review (placeholder labels for first-VM milestone)
+	const selectedImage = $derived({ name: imageId || '—' });
+	const selectedNetwork = $derived({ name: networkId || '—' });
 
 	// Reset form when modal closes
 	$effect(() => {
@@ -255,23 +155,7 @@
 					disabled={submitting}
 				>
 					<option value="">Select an image...</option>
-					{#each images as img}
-						<option value={img.id}>{img.name} ({img.os_family})</option>
-					{/each}
-				</select>
-			</FormField>
-
-			<FormField label="Storage Pool" required labelFor="vm-pool">
-				<select
-					id="vm-pool"
-					bind:value={poolId}
-					class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-					disabled={submitting}
-				>
-					<option value="">Select a pool...</option>
-					{#each pools as pool}
-						<option value={pool.id}>{pool.name}</option>
-					{/each}
+					<option value="default">default</option>
 				</select>
 			</FormField>
 
@@ -283,9 +167,7 @@
 					disabled={submitting}
 				>
 					<option value="">Select a network...</option>
-					{#each networks as net}
-						<option value={net.id}>{net.name} ({net.bridge_name})</option>
-					{/each}
+					<option value="default">default</option>
 				</select>
 			</FormField>
 
@@ -312,42 +194,16 @@
 				</FormField>
 			</div>
 
-			<!-- Quota Check Display -->
-			{#if checkingQuota}
-				<div class="rounded bg-slate-50 px-3 py-2 text-sm text-slate-600 flex items-center gap-2">
-					<svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-					</svg>
-					Checking quota...
-				</div>
-			{:else if usageData}
-				{@const quotaCheck = wouldExceedQuota()}
-				{@const warning = getQuotaWarning()}
-				{#if quotaCheck.exceeded}
-					<div class="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
-						<div class="font-medium mb-1">⚠️ Quota Exceeded</div>
-						<div>{quotaCheck.message}</div>
-						<div class="mt-2 text-xs">
-							Current usage: {usageData.usage.vms} VMs, {usageData.usage.cpus} CPUs, {usageData.usage.memory_gb}GB RAM
-						</div>
-					</div>
-				{:else if warning}
-					<div class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-700" role="alert">
-						<div class="font-medium mb-1">⚡ Quota Warning</div>
-						<div>{warning}</div>
-					</div>
-				{:else}
-					<div class="rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700">
-						<div class="font-medium mb-1">✓ Within Quota</div>
-						<div class="text-xs">
-							After this VM: {usageData.usage.vms + 1}/{usageData.quota.max_vms} VMs,
-							{usageData.usage.cpus + vcpu}/{usageData.quota.max_cpu} CPUs,
-							{usageData.usage.memory_gb + Math.ceil(memoryMb / 1024)}/{usageData.quota.max_memory_gb}GB RAM
-						</div>
-					</div>
-				{/if}
-			{/if}
+			<FormField label="Disk Size (GB)" labelFor="vm-disk-size">
+				<Input
+					id="vm-disk-size"
+					type="number"
+					bind:value={volumeSizeGb}
+					min={1}
+					max={500}
+					disabled={submitting}
+				/>
+			</FormField>
 		</form>
 	{:else if step === 2}
 		<form id="create-vm-step2" class="space-y-5">
@@ -395,14 +251,12 @@
 					<span class="font-medium text-ink">{selectedImage?.name}</span>
 				</div>
 				<div class="flex justify-between border-b border-line pb-2">
-					<span class="text-muted">Storage:</span>
-					<span class="font-medium text-ink">{selectedPool?.name} (localdisk)</span>
+					<span class="text-muted">Network:</span>
+					<span class="font-medium text-ink">{selectedNetwork?.name}</span>
 				</div>
 				<div class="flex justify-between border-b border-line pb-2">
-					<span class="text-muted">Network:</span>
-					<span class="font-medium text-ink">
-						{selectedNetwork?.name} ({selectedNetwork?.bridge_name})
-					</span>
+					<span class="text-muted">Disk:</span>
+					<span class="font-medium text-ink">{volumeSizeGb} GB</span>
 				</div>
 				<div class="flex justify-between border-b border-line pb-2">
 					<span class="text-muted">Resources:</span>
@@ -417,10 +271,9 @@
 			<div class="rounded bg-chrome p-4 text-xs text-muted">
 				<p class="font-medium mb-2">This will create:</p>
 				<ul class="ml-4 list-disc space-y-1">
-					<li>qcow2 disk cloned from {selectedImage?.format} image</li>
-					<li>seed.iso with cloud-init configuration</li>
-					<li>TAP device on {selectedNetwork?.bridge_name} bridge</li>
-					<li>VM workspace at /var/lib/chv/vms/{name}</li>
+					<li>VM with {vcpu} vCPU, {memoryMb} MB RAM</li>
+					<li>{volumeSizeGb} GB boot disk</li>
+					<li>Network interface on {selectedNetwork?.name}</li>
 				</ul>
 			</div>
 		</div>

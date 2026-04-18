@@ -5,6 +5,8 @@ mod enrollment;
 mod error;
 mod inventory;
 mod lifecycle;
+mod node_client;
+mod orchestrator;
 mod reconcile;
 mod server;
 mod telemetry;
@@ -18,6 +20,8 @@ pub use enrollment::{
 pub use error::ControlPlaneServiceError;
 pub use inventory::{InventoryService, InventoryServiceImplementation};
 pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
+pub use node_client::NodeClient;
+pub use orchestrator::Orchestrator;
 pub use reconcile::{ReconcileService, ReconcileServiceImplementation};
 pub use server::{
     EnrollmentServer, InventoryServer, LifecycleServer, ReconcileServer, TelemetryServer,

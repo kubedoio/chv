@@ -142,6 +142,8 @@ const DEFAULT_CONTROLPLANE_DB_MIN_CONNECTIONS: u32 = 1;
 const DEFAULT_CONTROLPLANE_DB_ACQUIRE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_CONTROLPLANE_DB_IDLE_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_CONTROLPLANE_DB_MAX_LIFETIME_SECS: u64 = 1800;
+const DEFAULT_CONTROLPLANE_AGENT_SOCKET_PATTERN: &str = "/run/chv/agent/api.sock";
+const DEFAULT_CONTROLPLANE_KERNEL_PATH: &str = "/var/lib/chv/vmlinux";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ControlPlaneTlsConfig {
@@ -169,6 +171,10 @@ pub struct ControlPlaneConfig {
     pub database: ControlPlaneDatabaseConfig,
     #[serde(default)]
     pub tls: ControlPlaneTlsConfig,
+    #[serde(default = "default_agent_socket_pattern")]
+    pub agent_socket_pattern: String,
+    #[serde(default = "default_kernel_path")]
+    pub kernel_path: String,
 }
 
 fn default_jwt_secret() -> String {
@@ -219,6 +225,8 @@ impl Default for ControlPlaneConfig {
             jwt_secret: default_jwt_secret(),
             database: ControlPlaneDatabaseConfig::default(),
             tls: ControlPlaneTlsConfig::default(),
+            agent_socket_pattern: default_agent_socket_pattern(),
+            kernel_path: default_kernel_path(),
         }
     }
 }
@@ -241,6 +249,14 @@ fn default_controlplane_db_idle_timeout_secs() -> u64 {
 
 fn default_controlplane_db_max_lifetime_secs() -> u64 {
     DEFAULT_CONTROLPLANE_DB_MAX_LIFETIME_SECS
+}
+
+fn default_agent_socket_pattern() -> String {
+    DEFAULT_CONTROLPLANE_AGENT_SOCKET_PATTERN.to_string()
+}
+
+fn default_kernel_path() -> String {
+    DEFAULT_CONTROLPLANE_KERNEL_PATH.to_string()
 }
 
 pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfig, ConfigError> {

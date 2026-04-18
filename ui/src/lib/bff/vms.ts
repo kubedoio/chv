@@ -5,6 +5,8 @@ import type {
 	ListVmsResponse,
 	GetVmRequest,
 	GetVmResponse,
+	CreateVmRequest,
+	CreateVmResponse,
 	MutateVmRequest,
 	MutateVmResponse
 } from './types';
@@ -19,6 +21,14 @@ export async function listVms(req: ListVmsRequest, token?: string): Promise<List
 
 export async function getVm(req: GetVmRequest, token?: string): Promise<GetVmResponse> {
 	return bffFetch<GetVmResponse>(BFFEndpoints.getVm, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+export async function createVm(req: CreateVmRequest, token?: string): Promise<CreateVmResponse> {
+	return bffFetch<CreateVmResponse>(BFFEndpoints.createVm, {
 		method: 'POST',
 		body: JSON.stringify(req),
 		token

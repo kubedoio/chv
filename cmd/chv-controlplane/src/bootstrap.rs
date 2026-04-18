@@ -2,7 +2,8 @@ use chv_config::ControlPlaneConfig;
 use chv_controlplane_service::{
     ControlPlaneComponents, ControlPlaneMutationService, ControlPlaneRuntime, ControlPlaneService,
     ControlPlaneServiceError, EnrollmentServiceImplementation, InventoryServiceImplementation,
-    LifecycleServiceImplementation, ReconcileServiceImplementation, TelemetryServiceImplementation,
+    LifecycleServiceImplementation, Orchestrator, ReconcileServiceImplementation,
+    TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
     connect_pool, run_migrations, AlertRepository, BootstrapTokenRepository,
@@ -145,6 +146,14 @@ pub async fn build_service(
         http_shutdown_tx,
         http_join_handle,
     );
+
+    let orchestrator = Orchestrator::new(
+        pool.clone(),
+        operation_repo.clone(),
+        config.agent_socket_pattern.clone(),
+        config.kernel_path.clone(),
+    );
+    tokio::spawn(orchestrator.run());
 
     Ok(ControlPlaneService::new(
         runtime,

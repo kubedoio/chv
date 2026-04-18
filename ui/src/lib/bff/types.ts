@@ -209,6 +209,27 @@ export type GetVmResponse = {
 	summary: VmSummary;
 };
 
+export type CreateVmRequest = {
+	name?: string;
+	display_name?: string;
+	node_id?: string;
+	cpu_count?: number;
+	vcpu?: number;
+	memory_bytes?: number;
+	memory_mb?: number;
+	image_ref?: string;
+	image_id?: string;
+	requested_by?: string;
+	network_id?: string;
+	volume_size_gb?: number;
+};
+
+export type CreateVmResponse = {
+	vm_id: string;
+	operation_id: string;
+	status: string;
+};
+
 export type MutateVmRequest = {
 	vm_id: string;
 	action: string;
