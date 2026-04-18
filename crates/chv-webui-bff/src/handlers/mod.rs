@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod clusters;
 pub mod events;
 pub mod images;

@@ -24,6 +24,10 @@ pub struct AppState {
 pub fn bff_router() -> Router<AppState> {
     Router::new()
         .route(
+            "/v1/auth/login",
+            post(crate::handlers::auth::login),
+        )
+        .route(
             "/v1/overview",
             post(crate::handlers::overview::get_overview),
         )
