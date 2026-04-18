@@ -146,11 +146,12 @@ pub async fn get_network(
         Some(r) => {
             let attached_vms = sqlx::query_as::<_, AttachedVmRow>(
                 r#"SELECT v.vm_id, v.display_name,
-                          COALESCE(vos.runtime_status, 'unknown') AS runtime_status
-                   FROM vm_nic_desired_state vn
-                   JOIN vms v ON vn.vm_id = v.vm_id
+                          COALESCE(vos.runtime_status, 'unknown') AS runtime_status,
+                          nv.ip_address, nv.mac_address
+                   FROM vm_nic_desired_state nv
+                   JOIN vms v ON nv.vm_id = v.vm_id
                    LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id
-                   WHERE vn.network_id = ?"#,
+                   WHERE nv.network_id = ?"#,
             )
             .bind(&r.network_id)
             .fetch_all(&state.pool)
@@ -164,6 +165,8 @@ pub async fn get_network(
                         "vm_id": vm.vm_id,
                         "display_name": vm.display_name,
                         "runtime_status": vm.runtime_status,
+                        "ip_address": vm.ip_address,
+                        "mac_address": vm.mac_address,
                     })
                 })
                 .collect();
@@ -340,6 +343,82 @@ pub async fn delete_network(
     })))
 }
 
+pub async fn update_network(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let network_id = payload
+        .get("network_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
+        .to_string();
+
+    let exists = sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
+        .bind(&network_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
+
+    if exists.is_none() {
+        return Err(BffError::NotFound(format!("network {} not found", network_id)));
+    }
+
+    let name = payload.get("name").and_then(|v| v.as_str());
+    let cidr = payload.get("cidr").and_then(|v| v.as_str());
+    let gateway = payload.get("gateway").and_then(|v| v.as_str());
+    let dhcp_enabled = payload.get("dhcp_enabled").and_then(|v| v.as_bool()).map(|d| if d { 1 } else { 0 });
+    let ipam_mode = payload.get("ipam_mode").and_then(|v| v.as_str());
+    let is_default = payload.get("is_default").and_then(|v| v.as_bool()).map(|d| if d { 1 } else { 0 });
+
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    if let Some(name) = name {
+        sqlx::query("UPDATE networks SET display_name = ? WHERE network_id = ?")
+            .bind(name)
+            .bind(&network_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to update network name: {}", e)))?;
+    }
+
+    if cidr.is_some() || gateway.is_some() || dhcp_enabled.is_some() || ipam_mode.is_some() || is_default.is_some() {
+        sqlx::query(
+            r#"
+            UPDATE network_desired_state
+            SET
+                cidr = COALESCE(?, cidr),
+                gateway = COALESCE(?, gateway),
+                dhcp_enabled = COALESCE(?, dhcp_enabled),
+                ipam_mode = COALESCE(?, ipam_mode),
+                is_default = COALESCE(?, is_default),
+                desired_generation = desired_generation + 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE network_id = ?
+            "#,
+        )
+        .bind(cidr)
+        .bind(gateway)
+        .bind(dhcp_enabled)
+        .bind(ipam_mode)
+        .bind(is_default)
+        .bind(&network_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to update network desired state: {}", e)))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
+
+    get_network(State(state), axum::Json(json!({ "network_id": network_id }))).await
+}
+
 #[derive(sqlx::FromRow)]
 struct NetworkRow {
     network_id: String,
@@ -375,6 +454,8 @@ struct AttachedVmRow {
     vm_id: String,
     display_name: String,
     runtime_status: String,
+    ip_address: Option<String>,
+    mac_address: Option<String>,
 }
 
 pub async fn mutate_network(

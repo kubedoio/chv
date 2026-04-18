@@ -1,6 +1,6 @@
 import { bffFetch } from './client';
 import { BFFEndpoints } from './endpoints';
-import type { CreateNetworkInput } from './types';
+import type { CreateNetworkInput, UpdateNetworkInput } from './types';
 
 export async function listNetworks(token?: string): Promise<{
 	items: Record<string, unknown>[];
@@ -28,6 +28,16 @@ export async function createNetwork(data: CreateNetworkInput, token?: string): P
 	network_id: string;
 }> {
 	return bffFetch(BFFEndpoints.createNetwork, {
+		method: 'POST',
+		body: JSON.stringify(data),
+		token
+	});
+}
+
+export async function updateNetwork(data: UpdateNetworkInput, token?: string): Promise<{
+	network_id: string;
+}> {
+	return bffFetch(BFFEndpoints.updateNetwork, {
 		method: 'POST',
 		body: JSON.stringify(data),
 		token

@@ -4,16 +4,18 @@
 	import Input from '$lib/components/Input.svelte';
 	import Select from '$lib/components/Select.svelte';
 	import { getStoredToken } from '$lib/api/client';
-	import { createNetwork } from '$lib/bff/networks';
+	import { createNetwork, updateNetwork } from '$lib/bff/networks';
 	import { toast } from '$lib/stores/toast';
-	import type { CreateNetworkInput } from '$lib/bff/types';
+	import type { CreateNetworkInput, NetworkDetailModel, UpdateNetworkInput } from '$lib/bff/types';
 
 	interface Props {
 		open?: boolean;
 		onSuccess?: () => void;
+		editMode?: boolean;
+		network?: NetworkDetailModel;
 	}
 
-	let { open = $bindable(false), onSuccess }: Props = $props();
+	let { open = $bindable(false), onSuccess, editMode = false, network }: Props = $props();
 
 	// Form state
 	let name = $state('');
@@ -160,23 +162,36 @@
 		submitting = true;
 		formError = '';
 
-		const data: CreateNetworkInput = {
-			name: name.trim(),
-			cidr: cidr.trim(),
-			gateway: gateway.trim(),
-			bridge_name: bridgeName.trim(),
-			dhcp_enabled: dhcpEnabled,
-			ipam_mode: ipamMode as 'internal' | 'external' | 'none',
-			is_default: isDefault
-		};
-
 		try {
-			await createNetwork(data, getStoredToken() ?? undefined);
-			toast.success(`Network "${name}" created successfully`);
+			if (editMode && network) {
+				const data: UpdateNetworkInput = {
+					network_id: network.network_id,
+					name: name.trim(),
+					cidr: cidr.trim(),
+					gateway: gateway.trim(),
+					dhcp_enabled: dhcpEnabled,
+					ipam_mode: ipamMode as 'internal' | 'external' | 'none',
+					is_default: isDefault
+				};
+				await updateNetwork(data, getStoredToken() ?? undefined);
+				toast.success(`Network "${name}" updated successfully`);
+			} else {
+				const data: CreateNetworkInput = {
+					name: name.trim(),
+					cidr: cidr.trim(),
+					gateway: gateway.trim(),
+					bridge_name: bridgeName.trim(),
+					dhcp_enabled: dhcpEnabled,
+					ipam_mode: ipamMode as 'internal' | 'external' | 'none',
+					is_default: isDefault
+				};
+				await createNetwork(data, getStoredToken() ?? undefined);
+				toast.success(`Network "${name}" created successfully`);
+			}
 			open = false;
 			onSuccess?.();
 		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Failed to create network';
+			const message = err instanceof Error ? err.message : (editMode ? 'Failed to update network' : 'Failed to create network');
 			formError = message;
 			toast.error(message);
 		} finally {
@@ -184,15 +199,24 @@
 		}
 	}
 
-	// Reset form when modal closes
+	// Populate form in edit mode or reset on close
 	$effect(() => {
-		if (!open) {
+		if (open) {
+			if (editMode && network) {
+				name = network.name;
+				cidr = network.cidr;
+				gateway = network.gateway;
+				dhcpEnabled = network.dhcp_enabled;
+				ipamMode = network.ipam_mode;
+				isDefault = network.is_default;
+			}
+		} else {
 			resetForm();
 		}
 	});
 </script>
 
-<Modal bind:open title="Create Network" closeOnBackdrop={!submitting}>
+<Modal bind:open title={editMode ? 'Edit Network' : 'Create Network'} closeOnBackdrop={!submitting}>
 	<form id="create-network-form" onsubmit={handleSubmit} class="space-y-5">
 		{#if formError}
 			<div class="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
@@ -215,7 +239,7 @@
 				id="bridge-name"
 				bind:value={bridgeName}
 				placeholder="chvbr0"
-				disabled={submitting}
+				disabled={submitting || editMode}
 				onblur={validateBridgeName}
 			/>
 		</FormField>
@@ -292,7 +316,7 @@
 					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
 				</svg>
 			{/if}
-			{submitting ? 'Creating...' : 'Create Network'}
+			{submitting ? (editMode ? 'Saving...' : 'Creating...') : (editMode ? 'Save Changes' : 'Create Network')}
 		</button>
 	{/snippet}
 </Modal>

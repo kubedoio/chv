@@ -450,6 +450,16 @@ export interface CreateNetworkInput {
 	is_default?: boolean;
 }
 
+export interface UpdateNetworkInput {
+	network_id: string;
+	name?: string;
+	cidr?: string;
+	gateway?: string;
+	dhcp_enabled?: boolean;
+	ipam_mode?: IpamMode;
+	is_default?: boolean;
+}
+
 export interface NetworkListItem {
 	network_id: string;
 	name: string;

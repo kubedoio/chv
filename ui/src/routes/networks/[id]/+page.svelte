@@ -9,7 +9,8 @@
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import { Shield, ShieldAlert, Network, Box, Activity, Info, AlertTriangle } from 'lucide-svelte';
+	import { Shield, ShieldAlert, Network, Box, Activity, Info, AlertTriangle, Pencil } from 'lucide-svelte';
+	import CreateNetworkModal from '$lib/components/modals/CreateNetworkModal.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -40,6 +41,7 @@
 	const vmColumns = [
 		{ key: 'display_name', label: 'VM' },
 		{ key: 'ip_address', label: 'IP Address' },
+		{ key: 'mac_address', label: 'MAC Address' },
 		{ key: 'runtime_status', label: 'State' },
 		{ key: 'addressing_mode', label: 'Addressing' }
 	];
@@ -64,9 +66,12 @@
 		return 'warning';
 	}
 
+	let showEditModal = $state(false);
+
 	const vmRows = $derived(detail.attached_vms.map(v => ({
 		...v,
 		ip_address: v.ip_address || 'DHCP-pending',
+		mac_address: v.mac_address || '—',
 		runtime_status: { label: v.runtime_status || 'connected', tone: vmStatusTone(v.runtime_status) },
 		addressing_mode: { label: addressingLabel(detail.ipam_mode), tone: addressingTone(detail.ipam_mode) }
 	})));
@@ -102,7 +107,11 @@
 						<Activity size={14} />
 						Edit Policy
 					</button>
-				</ActionStrip>
+					<button class="btn-secondary btn-sm" onclick={() => showEditModal = true}>
+						<Pencil size={14} />
+						Edit
+					</button>
+			</ActionStrip>
 			{/snippet}
 		</ResourceDetailHeader>
 
@@ -143,6 +152,13 @@
 					</SectionCard>
 				</div>
 			</section>
+
+			<CreateNetworkModal
+				bind:open={showEditModal}
+				editMode={true}
+				network={detail}
+				onSuccess={() => window.location.reload()}
+			/>
 
 			<aside class="detail-side-span">
 				<SectionCard title="L3 Configuration" icon={Network}>
