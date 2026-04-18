@@ -179,13 +179,20 @@ async fn send_or_defer_control_plane_message(
 }
 
 fn certificate_rotation_due(cache: &NodeCache, now_unix_ms: i64) -> bool {
-    cache.enrollment_complete
-        && cache.certificate_path.is_some()
-        && cache.private_key_path.is_some()
-        && cache
-            .last_certificate_rotation_unix_ms
-            .map(|last| now_unix_ms - last >= CERT_ROTATION_INTERVAL_SECS * 1000)
-            .unwrap_or(true)
+    if !cache.enrollment_complete {
+        return false;
+    }
+    let (cert_path, key_path) = match (cache.certificate_path.as_ref(), cache.private_key_path.as_ref()) {
+        (Some(c), Some(k)) => (c, k),
+        _ => return false,
+    };
+    if !std::path::Path::new(cert_path).exists() || !std::path::Path::new(key_path).exists() {
+        return false;
+    }
+    cache
+        .last_certificate_rotation_unix_ms
+        .map(|last| now_unix_ms - last >= CERT_ROTATION_INTERVAL_SECS * 1000)
+        .unwrap_or(true)
 }
 
 #[tokio::main]

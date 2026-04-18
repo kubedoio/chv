@@ -171,7 +171,7 @@ impl NodeCache {
         Self {
             cache_version: CACHE_VERSION,
             node_id: node_id.into(),
-            observed_generation: String::new(),
+            observed_generation: "0".to_string(),
             node_state: "Bootstrapping".to_string(),
             enrollment_complete: false,
             certificate_path: None,

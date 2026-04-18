@@ -81,9 +81,13 @@ impl TelemetryService for TelemetryServiceImplementation {
             ControlPlaneServiceError::InvalidArgument(format!("invalid node_id: {}", e))
         })?;
 
-        let gen = Generation::from_str(&request.observed_generation).map_err(|_| {
-            ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
-        })?;
+        let gen = if request.observed_generation.is_empty() {
+            Generation::new(0)
+        } else {
+            Generation::from_str(&request.observed_generation).map_err(|_| {
+                ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
+            })?
+        };
 
         let state = NodeState::from_str(&request.state).map_err(|_| {
             ControlPlaneServiceError::InvalidArgument(format!(
@@ -132,9 +136,13 @@ impl TelemetryService for TelemetryServiceImplementation {
             ControlPlaneServiceError::InvalidArgument(format!("invalid vm_id: {}", e))
         })?;
 
-        let gen = Generation::from_str(&request.observed_generation).map_err(|_| {
-            ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
-        })?;
+        let gen = if request.observed_generation.is_empty() {
+            Generation::new(0)
+        } else {
+            Generation::from_str(&request.observed_generation).map_err(|_| {
+                ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
+            })?
+        };
 
         self.observed_state_repo
             .upsert_vm(&VmObservedStateInput {
@@ -178,9 +186,13 @@ impl TelemetryService for TelemetryServiceImplementation {
             ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e))
         })?;
 
-        let gen = Generation::from_str(&request.observed_generation).map_err(|_| {
-            ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
-        })?;
+        let gen = if request.observed_generation.is_empty() {
+            Generation::new(0)
+        } else {
+            Generation::from_str(&request.observed_generation).map_err(|_| {
+                ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
+            })?
+        };
 
         self.observed_state_repo
             .upsert_volume(&VolumeObservedStateInput {
@@ -219,9 +231,13 @@ impl TelemetryService for TelemetryServiceImplementation {
             ControlPlaneServiceError::InvalidArgument(format!("invalid network_id: {}", e))
         })?;
 
-        let gen = Generation::from_str(&request.observed_generation).map_err(|_| {
-            ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
-        })?;
+        let gen = if request.observed_generation.is_empty() {
+            Generation::new(0)
+        } else {
+            Generation::from_str(&request.observed_generation).map_err(|_| {
+                ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
+            })?
+        };
 
         self.observed_state_repo
             .upsert_network(&NetworkObservedStateInput {
