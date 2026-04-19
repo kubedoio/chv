@@ -32,13 +32,6 @@ impl ProcessCloudHypervisorAdapter {
         }
     }
 
-    pub fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
-        let map = self.vms.lock().ok()?;
-        let proc = map.get(vm_id)?;
-        let fd = nix::unistd::dup(proc.pty_master.as_raw_fd()).ok()?;
-        Some(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-
     async fn wait_for_socket(socket: &Path, timeout: std::time::Duration) -> Result<(), ChvError> {
         let start = std::time::Instant::now();
         loop {
@@ -334,6 +327,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             warn!(status = status, "unexpected status from vmm.reboot");
         }
         Ok(())
+    }
+
+    fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
+        let map = self.vms.lock().ok()?;
+        let proc = map.get(vm_id)?;
+        let fd = nix::unistd::dup(proc.pty_master.as_raw_fd()).ok()?;
+        Some(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 }
 

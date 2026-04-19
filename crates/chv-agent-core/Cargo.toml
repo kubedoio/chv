@@ -23,6 +23,9 @@ tokio-stream = { workspace = true }
 tower = { workspace = true }
 hyper-util = { workspace = true }
 uuid = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+libc = "0.2"
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

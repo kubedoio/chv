@@ -1,6 +1,7 @@
 pub mod agent_server;
 pub mod cache;
 pub mod config;
+pub mod console_server;
 pub mod control_plane;
 pub mod daemon_clients;
 pub mod enrollment;
@@ -16,6 +17,7 @@ pub mod vm_runtime;
 pub use agent_server::AgentServer;
 pub use cache::NodeCache;
 pub use config::AgentConfig;
+pub use console_server::ConsoleServer;
 pub use control_plane::ControlPlaneClient;
 pub use daemon_clients::{NwdClient, StordClient};
 pub use enrollment::{BootstrapResponse, EnrollmentClient};

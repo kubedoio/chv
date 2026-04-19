@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -44,4 +45,8 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
     ) -> Result<(), ChvError>;
     async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError>;
     async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError>;
+
+    fn pty_master(&self, _vm_id: &str) -> Option<OwnedFd> {
+        None
+    }
 }

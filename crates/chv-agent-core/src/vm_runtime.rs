@@ -1,6 +1,7 @@
 use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig};
 use chv_errors::ChvError;
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,10 @@ impl VmRuntime {
             vms: Arc::new(Mutex::new(HashMap::new())),
             adapter,
         }
+    }
+
+    pub fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
+        self.adapter.pty_master(vm_id)
     }
 
     pub async fn create_vm(
