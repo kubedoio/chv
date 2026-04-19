@@ -98,6 +98,10 @@ pub fn bff_router() -> Router<AppState> {
             post(crate::handlers::images::import_image),
         )
         .route(
+            "/v1/images/delete",
+            post(crate::handlers::images::delete_image),
+        )
+        .route(
             "/v1/maintenance",
             post(crate::handlers::maintenance::get_maintenance),
         )
@@ -113,5 +117,18 @@ pub fn bff_router() -> Router<AppState> {
         .route(
             "/v1/volumes/mutate",
             post(crate::handlers::volumes::mutate_volume),
+        )
+        .route("/v1/users", post(crate::handlers::users::list_users))
+        .route(
+            "/v1/users/create",
+            post(crate::handlers::users::create_user),
+        )
+        .route(
+            "/v1/users/update",
+            post(crate::handlers::users::update_user),
+        )
+        .route(
+            "/v1/users/delete",
+            post(crate::handlers::users::delete_user),
         )
 }

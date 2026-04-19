@@ -221,6 +221,23 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             .arg("off")
             .arg("--serial")
             .arg(format!("tty={}", slave_path));
+
+        if let Some(ref userdata) = config.cloud_init_userdata {
+            if !userdata.trim().is_empty() {
+                let vm_runtime_dir = config.api_socket_path
+                    .parent()
+                    .expect("api_socket_path must have a parent directory");
+                let userdata_path = vm_runtime_dir.join("user-data.yaml");
+                tokio::fs::write(&userdata_path, userdata.as_bytes())
+                    .await
+                    .map_err(|e| ChvError::Io {
+                        path: userdata_path.to_string_lossy().to_string(),
+                        source: e,
+                    })?;
+                cmd.arg("--user-data").arg(&userdata_path);
+            }
+        }
+
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
         info!(
@@ -491,6 +508,7 @@ mod tests {
             disks: vec![],
             nics: vec![],
             api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         let err = adapter.validate_vm_config(&cfg).unwrap_err();
         assert!(matches!(err, ChvError::InvalidArgument { field, .. } if field == "kernel_path"));
@@ -518,6 +536,7 @@ mod tests {
             }],
             nics: vec![],
             api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         adapter.validate_vm_config(&cfg).unwrap();
     }

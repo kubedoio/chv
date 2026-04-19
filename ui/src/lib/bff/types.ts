@@ -223,6 +223,7 @@ export type CreateVmRequest = {
 	requested_by?: string;
 	network_id?: string;
 	volume_size_gb?: number;
+	cloud_init_userdata?: string;
 };
 
 export type CreateVmResponse = {
@@ -319,6 +320,25 @@ export type VolumeSummary = {
 
 export type GetVolumeResponse = {
 	summary: VolumeSummary;
+};
+
+export type CreateNodeRequest = {
+	name: string;
+	hostname: string;
+	ip_address: string;
+	agent_url?: string;
+};
+
+export type CreateNodeBffResponse = {
+	id: string;
+	name: string;
+	hostname: string;
+	ip_address: string;
+	status: string;
+	is_local: boolean;
+	agent_url?: string;
+	agent_token: string;
+	created_at?: string;
 };
 
 export type MutateNodeRequest = {

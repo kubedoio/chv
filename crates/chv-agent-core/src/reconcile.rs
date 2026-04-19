@@ -359,6 +359,7 @@ impl Reconciler {
             disks,
             nics,
             api_socket_path: vm_dir.join("vm.sock"),
+            cloud_init_userdata: vm_spec.cloud_init_userdata.clone(),
         })
     }
 
@@ -1075,6 +1076,7 @@ mod tests {
             disks: vec![],
             nics: vec![],
             api_socket_path: dir.path().join("vms/vm-orphan/vm.sock"),
+            cloud_init_userdata: None,
         };
         runtime
             .create_vm("vm-orphan", "1", &config, None)
@@ -1114,6 +1116,7 @@ mod tests {
             disks: vec![],
             nics: vec![],
             api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         runtime.create_vm("vm-1", "1", &config, None).await.unwrap();
         runtime.stop_vm("vm-1", false, None).await.unwrap();

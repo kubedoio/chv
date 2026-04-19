@@ -20,6 +20,7 @@ pub struct VmConfig {
     pub disks: Vec<VmDiskConfig>,
     pub nics: Vec<VmNicConfig>,
     pub api_socket_path: PathBuf,
+    pub cloud_init_userdata: Option<String>,
 }
 
 #[derive(Debug, Clone)]

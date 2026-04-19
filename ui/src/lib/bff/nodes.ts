@@ -7,7 +7,9 @@ import type {
 	GetNodeResponse,
 	MutateNodeRequest,
 	MutateNodeResponse,
-	EnrollNodeResponse
+	EnrollNodeResponse,
+	CreateNodeRequest,
+	CreateNodeBffResponse
 } from './types';
 
 export async function listNodes(
@@ -34,6 +36,17 @@ export async function mutateNode(
 	token?: string
 ): Promise<MutateNodeResponse> {
 	return bffFetch<MutateNodeResponse>(BFFEndpoints.mutateNode, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+export async function createNode(
+	req: CreateNodeRequest,
+	token?: string
+): Promise<CreateNodeBffResponse> {
+	return bffFetch<CreateNodeBffResponse>(BFFEndpoints.createNode, {
 		method: 'POST',
 		body: JSON.stringify(req),
 		token
