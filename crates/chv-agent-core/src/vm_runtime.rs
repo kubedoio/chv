@@ -1,4 +1,4 @@
-use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig};
+use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig, VmInfo};
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -102,6 +102,22 @@ impl VmRuntime {
         })?;
         rec.runtime_status = "Running".to_string();
         Ok(())
+    }
+
+    pub async fn resize_vm(
+        &self,
+        vm_id: &str,
+        cpus: Option<u32>,
+        memory_bytes: Option<u64>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter
+            .resize_vm(vm_id, cpus, memory_bytes, operation_id)
+            .await
+    }
+
+    pub async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
+        self.adapter.vm_info(vm_id).await
     }
 
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {

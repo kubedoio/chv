@@ -274,6 +274,18 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         Ok(Response::new(resp))
     }
 
+    async fn resize_vm(
+        &self,
+        request: Request<proto::ResizeVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .resize_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
     async fn attach_volume(
         &self,
         request: Request<proto::AttachVolumeRequest>,

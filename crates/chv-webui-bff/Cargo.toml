@@ -11,12 +11,12 @@ serde_json = { workspace = true }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
+chv-common = { path = "../chv-common" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls"] }
 async-trait = { workspace = true }
 jsonwebtoken = { workspace = true }
-uuid = { workspace = true }
 bcrypt = { workspace = true }
 chrono = "0.4"

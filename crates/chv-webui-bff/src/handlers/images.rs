@@ -1,6 +1,5 @@
 use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use crate::router::AppState;
 use crate::BffError;
@@ -132,7 +131,7 @@ pub async fn import_image(
         }
     }
 
-    let image_id = Uuid::new_v4().to_string();
+    let image_id = chv_common::gen_short_id();
 
     sqlx::query(
         r#"INSERT INTO images

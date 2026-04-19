@@ -357,6 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
         Some(config.cache_path.clone()),
+        config.runtime_dir.clone(),
     );
     let server_socket = config.socket_path.clone();
     tokio::spawn(async move {
@@ -378,6 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vm_runtime.clone(),
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
+        config.runtime_dir.clone(),
     )
     .await;
 

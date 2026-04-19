@@ -180,6 +180,14 @@ message DeleteVmRequest {
   bool force = 4;
 }
 
+message ResizeVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  optional uint32 desired_vcpus = 4;
+  optional uint64 desired_memory_bytes = 5;
+}
+
 message AttachVolumeRequest {
   RequestMeta meta = 1;
   string node_id = 2;
@@ -310,6 +318,7 @@ service LifecycleService {
   rpc StopVm(StopVmRequest) returns (AckResponse);
   rpc RebootVm(RebootVmRequest) returns (AckResponse);
   rpc DeleteVm(DeleteVmRequest) returns (AckResponse);
+  rpc ResizeVm(ResizeVmRequest) returns (AckResponse);
   rpc AttachVolume(AttachVolumeRequest) returns (AckResponse);
   rpc DetachVolume(DetachVolumeRequest) returns (AckResponse);
   rpc ResizeVolume(ResizeVolumeRequest) returns (AckResponse);

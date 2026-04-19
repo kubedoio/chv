@@ -3,7 +3,7 @@ use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::adapter::{CloudHypervisorAdapter, VmConfig};
+use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmInfo};
 
 #[derive(Debug, Clone, Default)]
 pub struct MockCloudHypervisorAdapter {
@@ -44,5 +44,39 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
 
     async fn reboot_vm(&self, _vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
         Ok(())
+    }
+
+    async fn resize_vm(
+        &self,
+        vm_id: &str,
+        cpus: Option<u32>,
+        memory_bytes: Option<u64>,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let mut map = self.vms.lock().unwrap();
+        let config = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
+            resource: "vm".to_string(),
+            id: vm_id.to_string(),
+        })?;
+        if let Some(c) = cpus {
+            config.cpus = c;
+        }
+        if let Some(m) = memory_bytes {
+            config.memory_bytes = m;
+        }
+        Ok(())
+    }
+
+    async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
+        let map = self.vms.lock().unwrap();
+        let config = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+            resource: "vm".to_string(),
+            id: vm_id.to_string(),
+        })?;
+        Ok(VmInfo {
+            state: "Running".to_string(),
+            cpus: config.cpus,
+            memory_bytes: config.memory_bytes,
+        })
     }
 }
