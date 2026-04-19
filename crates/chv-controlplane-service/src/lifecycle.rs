@@ -230,7 +230,7 @@ impl LifecycleServiceImplementation {
             format!("request:{}", meta.operation_id.trim())
         };
 
-        let operation_id = OperationId::new(format!("{}-{}", operation_type, uuid::Uuid::new_v4()))
+        let operation_id = OperationId::new(format!("{}-{}", operation_type, chv_common::gen_short_id()))
             .map_err(|e| {
                 ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e))
             })?;

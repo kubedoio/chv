@@ -243,7 +243,7 @@ pub async fn create_network(
         .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
         .unwrap_or(false);
 
-    let network_id = uuid::Uuid::new_v4().to_string();
+    let network_id = chv_common::gen_short_id();
 
     let mut tx = state
         .pool

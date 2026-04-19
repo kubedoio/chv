@@ -354,9 +354,9 @@ pub async fn create_vm(
         * 1024
         * 1024;
 
-    let vm_id = uuid::Uuid::new_v4().to_string();
-    let volume_id = uuid::Uuid::new_v4().to_string();
-    let operation_id = uuid::Uuid::new_v4().to_string();
+    let vm_id = chv_common::gen_short_id();
+    let volume_id = chv_common::gen_short_id();
+    let operation_id = chv_common::gen_short_id();
     tracing::info!(%vm_id, %volume_id, %operation_id, "create_vm: generated IDs, beginning transaction");
     let mut tx = state
         .pool
@@ -586,7 +586,7 @@ pub async fn delete_vm(
             .await
             .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
 
-    let operation_id = uuid::Uuid::new_v4().to_string();
+    let operation_id = chv_common::gen_short_id();
     let idempotency_key = format!("delete-vm-{}", vm_id);
     sqlx::query(
         r#"
