@@ -248,11 +248,11 @@ export type GetVmConsoleRequest = {
 	vm_id: string;
 };
 
-export type GetVmConsoleResponse = {
-	boot_logs: string;
+
+export type GetVmConsoleUrlResponse = {
 	vm_id: string;
-	available: boolean;
-	last_updated?: string;
+	url: string;
+	expires_at: string;
 };
 
 export type MutateVolumeRequest = {

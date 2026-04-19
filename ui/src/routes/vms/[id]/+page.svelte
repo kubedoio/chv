@@ -11,7 +11,9 @@
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight } from 'lucide-svelte';
+	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal } from 'lucide-svelte';
+	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
+	import VmConsole from '$lib/components/vms/VmConsole.svelte';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
@@ -160,64 +162,78 @@
 			{/snippet}
 		</ResourceDetailHeader>
 
+		<DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
+
 		<main class="detail-grid">
-			<section class="detail-main-span">
-				<div class="summary-top">
-					<SectionCard title="Guest Posture" icon={Activity}>
-						<PropertyGrid properties={postureProps} columns={4} />
-					</SectionCard>
-				</div>
-
-				<div class="detail-sections">
-					<SectionCard title="Storage Attachments" icon={Database} badgeLabel={String(detail.summary.attached_volumes?.length ?? 0)}>
-						{#if !detail.summary.attached_volumes || detail.summary.attached_volumes.length === 0}
-							<p class="empty-hint">No storage volumes attached to this guest.</p>
+			{#if detail.currentTab === 'console'}
+				<section class="detail-main-span">
+					<SectionCard title="Serial Console" icon={Terminal}>
+						{#if detail.consoleUrl}
+							<VmConsole vmId={detail.summary.vm_id} consoleUrl={detail.consoleUrl} />
 						{:else}
-							<InventoryTable 
-								columns={volumeColumns} 
-								rows={volumeRows} 
-								rowHref={(row) => `/volumes/${row.volume_id}`} 
-							/>
+							<p class="empty-hint">Console URL unavailable. The VM may not be running.</p>
 						{/if}
 					</SectionCard>
+				</section>
+			{:else}
+				<section class="detail-main-span">
+					<div class="summary-top">
+						<SectionCard title="Guest Posture" icon={Activity}>
+							<PropertyGrid properties={postureProps} columns={4} />
+						</SectionCard>
+					</div>
 
-					<SectionCard title="Network Interfaces" icon={Network} badgeLabel={String(detail.summary.attached_nics?.length ?? 0)}>
-						{#if !detail.summary.attached_nics || detail.summary.attached_nics.length === 0}
-							<p class="empty-hint">No NICs defined for this guest.</p>
-						{:else}
-							<InventoryTable 
-								columns={nicColumns} 
-								rows={nicRows} 
-							/>
-						{/if}
+					<div class="detail-sections">
+						<SectionCard title="Storage Attachments" icon={Database} badgeLabel={String(detail.summary.attached_volumes?.length ?? 0)}>
+							{#if !detail.summary.attached_volumes || detail.summary.attached_volumes.length === 0}
+								<p class="empty-hint">No storage volumes attached to this guest.</p>
+							{:else}
+								<InventoryTable 
+									columns={volumeColumns} 
+									rows={volumeRows} 
+									rowHref={(row) => `/volumes/${row.volume_id}`} 
+								/>
+							{/if}
+						</SectionCard>
+
+						<SectionCard title="Network Interfaces" icon={Network} badgeLabel={String(detail.summary.attached_nics?.length ?? 0)}>
+							{#if !detail.summary.attached_nics || detail.summary.attached_nics.length === 0}
+								<p class="empty-hint">No NICs defined for this guest.</p>
+							{:else}
+								<InventoryTable 
+									columns={nicColumns} 
+									rows={nicRows} 
+								/>
+							{/if}
+						</SectionCard>
+
+						<SectionCard title="Operational History" icon={Activity}>
+							<TaskTimeline tasks={timelineTasks} />
+						</SectionCard>
+
+						<SectionCard title="Guest Configuration" icon={Info}>
+							<PropertyGrid properties={configProps} columns={2} />
+						</SectionCard>
+					</div>
+				</section>
+
+				<aside class="detail-side-span">
+					<SectionCard title="Hypervisor Placement" icon={ChevronRight}>
+						<PropertyGrid 
+							columns={1}
+							properties={[
+								{ label: 'Host Node', value: detail.summary.node_id },
+								{ label: 'Placement Policy', value: 'Balanced' },
+								{ label: 'Hypervisor', value: 'KVM / QEMU' }
+							]} 
+						/>
 					</SectionCard>
 
-					<SectionCard title="Operational History" icon={Activity}>
-						<TaskTimeline tasks={timelineTasks} />
+					<SectionCard title="System Alerts" icon={AlertTriangle}>
+						<p class="empty-hint">No active hypervisor alerts for this workload.</p>
 					</SectionCard>
-
-					<SectionCard title="Guest Configuration" icon={Info}>
-						<PropertyGrid properties={configProps} columns={2} />
-					</SectionCard>
-				</div>
-			</section>
-
-			<aside class="detail-side-span">
-				<SectionCard title="Hypervisor Placement" icon={ChevronRight}>
-					<PropertyGrid 
-						columns={1}
-						properties={[
-							{ label: 'Host Node', value: detail.summary.node_id },
-							{ label: 'Placement Policy', value: 'Balanced' },
-							{ label: 'Hypervisor', value: 'KVM / QEMU' }
-						]} 
-					/>
-				</SectionCard>
-
-				<SectionCard title="System Alerts" icon={AlertTriangle}>
-					<p class="empty-hint">No active hypervisor alerts for this workload.</p>
-				</SectionCard>
-			</aside>
+				</aside>
+			{/if}
 		</main>
 	{/if}
 </div>

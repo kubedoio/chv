@@ -16,7 +16,7 @@ export const BFFEndpoints = {
 	enrollNode: '/v1/nodes/enroll',
 	listVms: '/v1/vms',
 	getVm: '/v1/vms/get',
-	getVmConsole: '/v1/vms/console',
+	getVmConsoleUrl: '/v1/vms/console-url',
 	createVm: '/v1/vms/create',
 	mutateVm: '/v1/vms/mutate',
 	deleteVm: '/v1/vms/delete',
