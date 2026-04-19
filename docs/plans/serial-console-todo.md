@@ -1,8 +1,8 @@
 # Serial Console — Post-Implementation TODO
 
 ## Agent
-- [ ] **JWT token validation**: `ConsoleServer` currently only checks `token` query param is non-empty. Implement full JWT verification using `jsonwebtoken` with `jwt_secret`.
-- [ ] **Token expiry enforcement**: Validate `exp` claim against current time.
+- [x] **JWT token validation**: HS256 JWT decode via `jsonwebtoken` crate. `validate_console_token()` in `console_server.rs`. Config guards reject insecure defaults. _(Sprint 2)_
+- [x] **Token expiry enforcement**: `exp` claim validated by `jsonwebtoken` library (default leeway 60s). _(Sprint 2)_
 - [ ] **Rate limiting**: Add per-VM connection rate limit to prevent token replay abuse.
 
 ## BFF
@@ -10,7 +10,7 @@
 - [ ] **Console URL refresh**: If the token expires while the user is on the Console tab, auto-refresh the URL before WebSocket reconnect.
 
 ## UI
-- [ ] **Remove `BootLogViewer.svelte`**: The old log-file-based console is superseded by the WebSocket serial console. Remove component and `getBootLogs` API once the serial console is validated in production.
+- [x] **Remove `BootLogViewer.svelte`**: Removed component, `getBootLogs` API, and `getVmConsole` BFF function. _(Sprint 3)_
 - [ ] **Copy-to-clipboard / download session**: Add toolbar buttons to copy terminal contents or download the session log.
 - [ ] **Reconnect UI**: Show explicit "Reconnect" button instead of relying solely on auto-reconnect.
 
