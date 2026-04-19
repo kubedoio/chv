@@ -5,6 +5,7 @@ use crate::router::AppState;
 use crate::BffError;
 
 pub async fn list_vms(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -104,6 +105,7 @@ pub async fn list_vms(
 }
 
 pub async fn get_vm(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -301,12 +303,13 @@ pub async fn create_vm(
         .or_else(|| payload.get("vcpu").and_then(|v| v.as_i64()))
         .unwrap_or(2);
 
-    let memory_bytes = payload
-        .get("memory_bytes")
-        .and_then(|v| v.as_i64())
-        .or_else(|| payload.get("memory_mb").and_then(|v| v.as_i64()))
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(2 * 1024 * 1024 * 1024);
+    let memory_bytes = if let Some(bytes) = payload.get("memory_bytes").and_then(|v| v.as_i64()) {
+        bytes
+    } else if let Some(mb) = payload.get("memory_mb").and_then(|v| v.as_i64()) {
+        mb * 1024 * 1024
+    } else {
+        2 * 1024 * 1024 * 1024
+    };
 
     let mut image_ref = payload
         .get("image_ref")
@@ -552,11 +555,7 @@ pub async fn delete_vm(
         .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?
         .to_string();
 
-    let requested_by = payload
-        .get("requested_by")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BffError::BadRequest("missing requested_by".into()))?
-        .to_string();
+    let requested_by = claims.sub.clone();
 
     // Check vm exists
     let exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
@@ -668,6 +667,10 @@ pub async fn get_vm_console(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?;
 
+    if !chv_common::validate_id(vm_id) {
+        return Err(BffError::BadRequest("invalid vm_id format".into()));
+    }
+
     let log_path = format!("/run/chv/agent/vms/{}/console.log", vm_id);
     let log_content = tokio::fs::read_to_string(&log_path)
         .await
@@ -703,7 +706,7 @@ fn generate_console_token(
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let exp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or(std::time::Duration::ZERO)
         .as_secs()
         + 60;
     let claims = ConsoleTokenClaims {
@@ -724,6 +727,10 @@ pub async fn get_vm_console_url(
     State(state): State<AppState>,
     axum::extract::Path(vm_id): axum::extract::Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    if !chv_common::validate_id(&vm_id) {
+        return Err(BffError::BadRequest("invalid vm_id format".into()));
+    }
+
     let node_id: Option<String> =
         sqlx::query_scalar("SELECT node_id FROM vms WHERE vm_id = ?")
             .bind(&vm_id)

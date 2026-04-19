@@ -4,6 +4,26 @@ use serde_json::{json, Value};
 use crate::router::AppState;
 use crate::BffError;
 
+/// Validate that a CIDR string is in IPv4 or IPv6 CIDR notation.
+/// Accepts "X.X.X.X/N" (N 0-32) or "hex:…/N" (N 0-128).
+fn is_valid_cidr(cidr: &str) -> bool {
+    if let Some((addr, prefix)) = cidr.split_once('/') {
+        if let Ok(n) = prefix.parse::<u32>() {
+            if addr.contains(':') {
+                // IPv6: simple check for hex+colons structure, prefix 0-128
+                return n <= 128 && addr.split(':').count() <= 8;
+            } else {
+                // IPv4: four dotted octets, prefix 0-32
+                let octets: Vec<&str> = addr.split('.').collect();
+                if octets.len() == 4 && n <= 32 {
+                    return octets.iter().all(|o| o.parse::<u8>().is_ok());
+                }
+            }
+        }
+    }
+    false
+}
+
 #[derive(sqlx::FromRow)]
 struct FirewallRuleRow {
     rule_id: String,
@@ -106,6 +126,13 @@ pub async fn create_firewall_rule(
         .get("source_cidr")
         .and_then(|v| v.as_str())
         .unwrap_or("0.0.0.0/0");
+
+    if !is_valid_cidr(source_cidr) {
+        return Err(BffError::BadRequest(format!(
+            "invalid CIDR format: {}",
+            source_cidr
+        )));
+    }
 
     let description = payload
         .get("description")

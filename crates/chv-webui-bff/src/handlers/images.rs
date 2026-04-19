@@ -128,7 +128,7 @@ pub async fn import_image(
         .map_err(|e| BffError::Internal(format!("failed to check existing image: {}", e)))?;
 
         if existing > 0 {
-            return Err(BffError::BadRequest(
+            return Err(BffError::Conflict(
                 "An image with this source URL already exists".into(),
             ));
         }

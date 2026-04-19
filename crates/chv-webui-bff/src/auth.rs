@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
+    Json,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::BffError;
 
@@ -42,30 +42,31 @@ pub fn validate_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken:
     Ok(token_data.claims)
 }
 
-fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
 pub struct BearerToken(pub Claims);
 
 #[async_trait]
 impl FromRequestParts<crate::router::AppState> for BearerToken {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = (StatusCode, Json<serde_json::Value>);
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &crate::router::AppState,
     ) -> Result<Self, Self::Rejection> {
+        let reject = |msg: &'static str| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "message": msg, "code": 401 })),
+            )
+        };
+
         let auth = parts
             .headers
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?;
+            .ok_or_else(|| reject("missing authorization header"))?;
 
         if !auth.to_ascii_lowercase().starts_with("bearer ") {
-            return Err((StatusCode::UNAUTHORIZED, "invalid authorization scheme"));
+            return Err(reject("invalid authorization scheme"));
         }
         let token = &auth[7..];
 
@@ -79,7 +80,7 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
 
         // Try API token (chv_ prefix)
         if token.starts_with("chv_") {
-            let token_hash = sha256_hex(token);
+            let token_hash = chv_common::sha256_hex(token);
 
             #[derive(sqlx::FromRow)]
             struct ApiTokenUser {
@@ -131,7 +132,7 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
             }
         }
 
-        Err((StatusCode::UNAUTHORIZED, "invalid or expired token"))
+        Err(reject("invalid or expired token"))
     }
 }
 
@@ -221,8 +222,9 @@ mod tests {
 
     #[test]
     fn sha256_hex_is_correct_length() {
-        let hash = sha256_hex("chv_test_token");
+        let hash = chv_common::sha256_hex("chv_test_token");
         assert_eq!(hash.len(), 64);
     }
 }
+
 

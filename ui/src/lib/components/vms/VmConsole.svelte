@@ -21,6 +21,22 @@
 	let statusText = $state('Disconnected');
 	let copied = $state(false);
 	let copyTimer: ReturnType<typeof setTimeout>;
+	let wsError = $state('');
+
+	function validateWsUrl(url: string): boolean {
+		// Allow relative paths (starting with /) — they're always same-origin
+		if (url.startsWith('/')) return true;
+		// Allow ws:// or wss:// only if they target the same host
+		if (url.startsWith('ws://') || url.startsWith('wss://')) {
+			try {
+				const parsed = new URL(url);
+				return parsed.host === window.location.host;
+			} catch {
+				return false;
+			}
+		}
+		return false;
+	}
 
 	function buildWsUrl(url: string): string {
 		return url.startsWith('ws')
@@ -29,6 +45,13 @@
 	}
 
 	function connectWith(url: string) {
+		if (!validateWsUrl(url)) {
+			wsError = `Refused to connect: WebSocket URL does not match the application origin.`;
+			statusText = 'Connection blocked';
+			terminal.writeln('\r\n\x1b[31m[Connection blocked: invalid WebSocket origin]\x1b[0m');
+			return;
+		}
+		wsError = '';
 		if (socket) socket.close();
 		const wsUrl = buildWsUrl(url);
 		socket = new WebSocket(wsUrl);
@@ -160,6 +183,9 @@
 </script>
 
 <div class="console-wrapper">
+	{#if wsError}
+		<div class="console-error">{wsError}</div>
+	{/if}
 	<div class="console-toolbar">
 		<div class="toolbar-left">
 			<span class="console-status">
@@ -297,5 +323,13 @@
 
 	:global(.xterm-screen) {
 		background: transparent !important;
+	}
+
+	.console-error {
+		padding: 0.5rem 0.75rem;
+		background: #3b1111;
+		border-bottom: 1px solid #7f1d1d;
+		color: #fca5a5;
+		font-size: 0.8rem;
 	}
 </style>

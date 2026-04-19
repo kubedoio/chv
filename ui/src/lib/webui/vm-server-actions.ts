@@ -44,6 +44,7 @@ export async function handleVmMutation(
 					? 'Backend service unavailable. Check that the control plane is running.'
 					: err.message
 				: 'Mutation failed';
-		return fail(500, { message });
+		const status = err instanceof BFFError && err.status >= 400 ? err.status : 500;
+		return fail(status, { message });
 	}
 }

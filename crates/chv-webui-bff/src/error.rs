@@ -11,6 +11,7 @@ pub enum BffError {
     NotFound(String),
     BadRequest(String),
     Unauthorized(String),
+    Conflict(String),
 }
 
 impl IntoResponse for BffError {
@@ -21,14 +22,18 @@ impl IntoResponse for BffError {
                 "Not implemented".to_string(),
                 "NOT_IMPLEMENTED",
             ),
-            BffError::Internal(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                msg.clone(),
-                "INTERNAL_ERROR",
-            ),
+            BffError::Internal(msg) => {
+                tracing::error!(error = %msg, "internal server error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                    "INTERNAL_ERROR",
+                )
+            }
             BffError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone(), "NOT_FOUND"),
             BffError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone(), "BAD_REQUEST"),
             BffError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone(), "UNAUTHORIZED"),
+            BffError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), "CONFLICT"),
         };
 
         let body = Json(json!({

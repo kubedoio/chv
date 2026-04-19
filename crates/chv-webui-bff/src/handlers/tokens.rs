@@ -1,17 +1,10 @@
 use axum::{extract::State, response::Json};
 use rand::Rng;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::auth::BearerToken;
 use crate::router::AppState;
 use crate::BffError;
-
-fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
-}
 
 fn rand_bytes_32() -> [u8; 32] {
     rand::rng().random()
@@ -84,7 +77,7 @@ pub async fn create_token(
 
     let token_id = chv_common::gen_short_id();
     let raw_token = format!("chv_{}", hex::encode(rand_bytes_32()));
-    let token_hash = sha256_hex(&raw_token);
+    let token_hash = chv_common::sha256_hex(&raw_token);
 
     sqlx::query(
         "INSERT INTO api_tokens (token_id, user_id, name, token_hash, scope) VALUES (?, ?, ?, ?, ?)",
@@ -163,7 +156,7 @@ pub async fn revoke_token(
 }
 
 pub fn sha256_hex_pub(input: &str) -> String {
-    sha256_hex(input)
+    chv_common::sha256_hex(input)
 }
 
 #[cfg(test)]
@@ -180,22 +173,22 @@ mod tests {
 
     #[test]
     fn sha256_hex_produces_64_char_string() {
-        let hash = sha256_hex("test-input");
+        let hash = chv_common::sha256_hex("test-input");
         assert_eq!(hash.len(), 64);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn sha256_hex_is_deterministic() {
-        let h1 = sha256_hex("same-input");
-        let h2 = sha256_hex("same-input");
+        let h1 = chv_common::sha256_hex("same-input");
+        let h2 = chv_common::sha256_hex("same-input");
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn sha256_hex_differs_for_different_inputs() {
-        let h1 = sha256_hex("input-a");
-        let h2 = sha256_hex("input-b");
+        let h1 = chv_common::sha256_hex("input-a");
+        let h2 = chv_common::sha256_hex("input-b");
         assert_ne!(h1, h2);
     }
 }

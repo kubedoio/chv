@@ -471,11 +471,11 @@ impl Reconciler {
         // Delete extra VMs
         for vm_id in actual.difference(&desired) {
             let op_id = format!("reconcile-vm-delete-{}", vm_id);
-            if let Err(e) = self.cleanup_vm(vm_id).await {
-                warn!(vm_id = %vm_id, error = %e, "cleanup vm failed");
-            }
             if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, Some(&op_id)).await {
                 warn!(vm_id = %vm_id, error = %e, "failed to stop vm before delete");
+            }
+            if let Err(e) = self.cleanup_vm(vm_id).await {
+                warn!(vm_id = %vm_id, error = %e, "cleanup vm failed");
             }
             if let Err(e) = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await {
                 warn!(vm_id = %vm_id, error = %e, "failed to delete vm");

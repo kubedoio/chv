@@ -393,6 +393,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "rand 0.9.4",
+ "sha2",
 ]
 
 [[package]]

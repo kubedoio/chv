@@ -1,6 +1,7 @@
 use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
 
+use crate::auth::BearerToken;
 use crate::router::AppState;
 use crate::BffError;
 
@@ -18,6 +19,7 @@ struct SnapshotRow {
 }
 
 pub async fn list_vm_snapshots(
+    BearerToken(_claims): BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -71,6 +73,10 @@ pub async fn create_snapshot(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?
         .to_string();
+
+    if !chv_common::validate_id(&vm_id) {
+        return Err(BffError::BadRequest("invalid vm_id format".into()));
+    }
 
     let name = payload
         .get("name")
@@ -143,18 +149,37 @@ pub async fn delete_snapshot(
         .ok_or_else(|| BffError::BadRequest("missing snapshot_id".into()))?
         .to_string();
 
-    let deleted = sqlx::query("DELETE FROM vm_snapshots WHERE snapshot_id = ?")
+    // Fetch the snapshot to get its vm_id and verify it exists before deleting
+    let snapshot = sqlx::query_as::<_, SnapshotRow>(
+        "SELECT snapshot_id, vm_id, name, description, size_bytes, \
+         includes_memory, snapshot_path, status, created_at \
+         FROM vm_snapshots WHERE snapshot_id = ?",
+    )
+    .bind(&snapshot_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to look up snapshot: {}", e)))?
+    .ok_or_else(|| BffError::NotFound(format!("snapshot {} not found", snapshot_id)))?;
+
+    // Verify the VM this snapshot belongs to still exists (ownership check)
+    let vm_exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
+        .bind(&snapshot.vm_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to verify vm access: {}", e)))?;
+
+    if vm_exists.is_none() {
+        return Err(BffError::NotFound(format!(
+            "vm {} for snapshot {} not found",
+            snapshot.vm_id, snapshot_id
+        )));
+    }
+
+    sqlx::query("DELETE FROM vm_snapshots WHERE snapshot_id = ?")
         .bind(&snapshot_id)
         .execute(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete snapshot: {}", e)))?;
-
-    if deleted.rows_affected() == 0 {
-        return Err(BffError::NotFound(format!(
-            "snapshot {} not found",
-            snapshot_id
-        )));
-    }
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,
@@ -190,6 +215,27 @@ pub async fn restore_snapshot(
     let snapshot = row.ok_or_else(|| {
         BffError::NotFound(format!("snapshot {} not found", snapshot_id))
     })?;
+
+    // Check VM power state — must be stopped before restoring a snapshot
+    let runtime_status: Option<String> = sqlx::query_scalar(
+        "SELECT runtime_status FROM vm_observed_state WHERE vm_id = ?",
+    )
+    .bind(&snapshot.vm_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
+    .flatten();
+
+    let is_running = runtime_status
+        .as_deref()
+        .map(|s| matches!(s, "Running" | "Starting" | "Resuming"))
+        .unwrap_or(false);
+
+    if is_running {
+        return Err(BffError::BadRequest(
+            "VM must be stopped before restoring a snapshot".into(),
+        ));
+    }
 
     // Mark VM as restoring
     sqlx::query(

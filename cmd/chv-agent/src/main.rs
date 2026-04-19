@@ -415,6 +415,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir);
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
+    let mut consecutive_reconcile_failures: u32 = 0;
 
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     loop {
@@ -748,6 +749,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Err(e) = reconciler.run_once().await {
             warn!(error = %e, "reconcile tick failed");
+            consecutive_reconcile_failures += 1;
+            let backoff_secs = std::cmp::min(
+                1u64 << consecutive_reconcile_failures.min(6),
+                60,
+            );
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        } else {
+            consecutive_reconcile_failures = 0;
         }
 
         // Periodically persist cache so gRPC mutations are durable even without state transitions.

@@ -59,7 +59,7 @@ export async function getVmConsoleUrl(
 	vm_id: string,
 	token?: string
 ): Promise<GetVmConsoleUrlResponse> {
-	return bffFetch<GetVmConsoleUrlResponse>(`/v1/vms/${vm_id}/console-url`, {
+	return bffFetch<GetVmConsoleUrlResponse>(`${BFFEndpoints.getVmConsoleUrl}/${vm_id}`, {
 		method: 'GET',
 		token
 	});

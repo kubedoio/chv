@@ -113,7 +113,7 @@ impl ConsoleServer {
         let (mut ws_tx, mut ws_rx) = socket.split();
 
         // PTY → WebSocket
-        let read_task = tokio::spawn(async move {
+        let mut read_task = tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
                 match pty_reader.read(&mut buf).await {
@@ -133,7 +133,7 @@ impl ConsoleServer {
         });
 
         // WebSocket → PTY
-        let write_task = tokio::spawn(async move {
+        let mut write_task = tokio::spawn(async move {
             while let Some(result) = ws_rx.next().await {
                 match result {
                     Ok(axum::extract::ws::Message::Text(text)) => {
@@ -159,11 +159,14 @@ impl ConsoleServer {
         });
 
         tokio::select! {
-            _ = read_task => {},
-            _ = write_task => {},
+            _ = &mut read_task => {
+                write_task.abort();
+            },
+            _ = &mut write_task => {
+                read_task.abort();
+            },
         }
 
-        // Keep pty_fd alive until both tasks finish
         drop(pty_fd);
     }
 }

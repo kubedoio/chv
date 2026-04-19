@@ -91,22 +91,39 @@ impl ProcessCloudHypervisorAdapter {
 
         let mut buf = Vec::new();
         let mut tmp = [0u8; 4096];
-        loop {
-            let n = stream.read(&mut tmp).await.map_err(|e| ChvError::Io {
+        let read_fut = async {
+            loop {
+                let n = stream.read(&mut tmp).await.map_err(|e| ChvError::Io {
+                    path: socket.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header_bytes = &buf[..header_end];
+                    let headers = String::from_utf8_lossy(header_bytes);
+                    let content_length = headers
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.splitn(2, ':').nth(1))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    if buf.len() >= body_start + content_length {
+                        break;
+                    }
+                }
+            }
+            Ok::<(), ChvError>(())
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), read_fut)
+            .await
+            .map_err(|_| ChvError::Io {
                 path: socket.to_string_lossy().to_string(),
-                source: e,
-            })?;
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&tmp[..n]);
-            // If we've read at least the status line and headers are done, check if body complete.
-            // For simplicity stop after the first non-zero read that includes headers.
-            let raw = String::from_utf8_lossy(&buf);
-            if raw.contains("\r\n\r\n") {
-                break;
-            }
-        }
+                source: std::io::Error::new(std::io::ErrorKind::TimedOut, "socket read timed out"),
+            })??;
 
         let raw = String::from_utf8_lossy(&buf);
         let status_code = parse_http_status(raw.as_bytes()).unwrap_or(0);
@@ -292,9 +309,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         // Auto-boot via CLI means VM is already running; send boot API for completeness.
         let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.boot", None).await?;
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
         if status != 200 && status != 204 {
-            warn!(status = status, "unexpected status from vmm.boot");
+            warn!(status = status, "unexpected status from vm.boot");
         }
         Ok(())
     }
@@ -368,9 +385,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
 
         let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.reboot", None).await?;
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
         if status != 200 && status != 204 {
-            warn!(status = status, "unexpected status from vmm.reboot");
+            warn!(status = status, "unexpected status from vm.reboot");
         }
         Ok(())
     }

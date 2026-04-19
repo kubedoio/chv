@@ -23,6 +23,14 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
     }
     let generated = generate_secure_secret();
     if std::fs::write(SHARED_SECRET_PATH, &generated).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                SHARED_SECRET_PATH,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
         eprintln!(
             "INFO: generated jwt_secret and saved to {} (shared by all CHV services)",
             SHARED_SECRET_PATH
@@ -30,8 +38,8 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
     } else {
         eprintln!(
             "WARNING: generated jwt_secret but could not write to {}. \
-             To share between services, add to {} config: jwt_secret = \"{}\"",
-            SHARED_SECRET_PATH, service_name, generated
+             Set jwt_secret in {} config manually.",
+            SHARED_SECRET_PATH, service_name
         );
     }
     generated

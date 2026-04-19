@@ -100,9 +100,9 @@
     <div class="space-y-5 p-6">
       <label class="block">
         <span class="mb-2 block text-sm text-muted">Username</span>
-        <input 
-          bind:value={username} 
-          on:keydown={handleKeydown}
+        <input
+          bind:value={username}
+          onkeydown={handleKeydown}
           class="w-full border border-line px-3 py-2 text-sm"
           placeholder="Enter username"
           autocomplete="username"
@@ -111,9 +111,9 @@
 
       <label class="block">
         <span class="mb-2 block text-sm text-muted">Password</span>
-        <input 
-          bind:value={password} 
-          on:keydown={handleKeydown}
+        <input
+          bind:value={password}
+          onkeydown={handleKeydown}
           type="password"
           class="w-full border border-line px-3 py-2 text-sm"
           placeholder="Enter password"
@@ -125,9 +125,9 @@
         <div class="border border-danger bg-red-50 px-3 py-3 text-sm text-danger">{error}</div>
       {/if}
 
-      <button 
+      <button
         class="button-primary w-full px-4 py-2 text-sm font-medium"
-        on:click|preventDefault={handleLogin}
+        onclick={(e) => { e.preventDefault(); handleLogin(); }}
         disabled={loading}
       >
         {#if loading}

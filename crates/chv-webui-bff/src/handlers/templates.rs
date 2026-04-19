@@ -167,6 +167,24 @@ pub async fn delete_vm_template(
         )));
     }
 
+    // Refuse deletion if any VMs reference this template's image
+    let vm_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM vm_desired_state vds
+           JOIN vm_templates t ON t.image_id IS NOT NULL AND vds.image_ref = t.image_id
+           WHERE t.template_id = ?"#
+    )
+    .bind(&template_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("db error: {}", e)))?;
+
+    if vm_count > 0 {
+        return Err(BffError::Conflict(format!(
+            "Template is in use by {} VM(s)",
+            vm_count
+        )));
+    }
+
     sqlx::query("DELETE FROM vm_templates WHERE template_id = ?")
         .bind(&template_id)
         .execute(&state.pool)
