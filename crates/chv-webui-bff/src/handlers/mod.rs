@@ -1,13 +1,16 @@
 pub mod auth;
 pub mod clusters;
 pub mod events;
+pub mod firewall;
 pub mod images;
 pub mod maintenance;
 pub mod networks;
 pub mod nodes;
 pub mod overview;
 pub mod settings;
+pub mod storage;
 pub mod tasks;
+pub mod templates;
 pub mod users;
 pub mod vms;
 pub mod volumes;

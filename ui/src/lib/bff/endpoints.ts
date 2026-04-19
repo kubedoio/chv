@@ -36,5 +36,8 @@ export const BFFEndpoints = {
 	listImages: '/v1/images',
 	importImage: '/v1/images/import',
 	getMaintenance: '/v1/maintenance',
-	getSettings: '/v1/settings'
+	getSettings: '/v1/settings',
+	listFirewallRules: '/v1/firewall-rules',
+	createFirewallRule: '/v1/firewall-rules/create',
+	deleteFirewallRule: '/v1/firewall-rules/delete'
 } as const;

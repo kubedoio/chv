@@ -42,7 +42,7 @@ pub fn admin_router(bff_state: AppState) -> Router {
         .route("/api/v1/nodes", get(stub::list_nodes_stub))
         .route("/api/v1/vms", get(stub::list_vms_stub))
         .route("/api/v1/networks", get(stub::list_networks_stub))
-        .route("/api/v1/storage-pools", get(stub::list_storage_pools_stub))
+        .route("/api/v1/storage-pools", get(stub::list_storage_pools_stub).post(stub::create_storage_pool_stub))
         .route("/api/v1/operations", get(stub::list_operations_stub))
         .route("/api/v1/events", get(stub::list_events_stub))
         .route("/api/v1/images", get(stub::list_images_stub))

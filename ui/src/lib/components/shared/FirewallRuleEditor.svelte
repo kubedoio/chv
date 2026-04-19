@@ -1,22 +1,27 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Plus, Trash2, Shield, ArrowUp, ArrowDown } from 'lucide-svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
+  import { getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import type { FirewallRule } from '$lib/api/types';
-  
+  import {
+    listFirewallRules,
+    createFirewallRule,
+    deleteFirewallRule,
+    type FirewallRuleItem
+  } from '$lib/bff/firewall';
+
   interface Props {
-    vmId: string;
+    networkId: string;
   }
-  
-  let { vmId }: Props = $props();
-  
-  const client = createAPIClient({ token: getStoredToken() ?? undefined });
-  
-  let rules = $state<FirewallRule[]>([]);
+
+  let { networkId }: Props = $props();
+
+  const token = getStoredToken() ?? undefined;
+
+  let rules = $state<FirewallRuleItem[]>([]);
   let loading = $state(false);
   let showForm = $state(false);
-  
+
   let form = $state({
     direction: 'ingress' as 'ingress' | 'egress',
     protocol: 'tcp' as 'tcp' | 'udp' | 'icmp' | 'all',
@@ -26,25 +31,34 @@
     priority: 100,
     description: ''
   });
-  
+
   onMount(() => {
     loadRules();
   });
-  
+
   async function loadRules() {
     loading = true;
     try {
-      rules = await client.listFirewallRules(vmId);
+      rules = await listFirewallRules(networkId, token);
     } catch (e) {
       toast.error('Failed to load firewall rules');
     } finally {
       loading = false;
     }
   }
-  
+
   async function createRule() {
     try {
-      await client.createFirewallRule(vmId, form);
+      await createFirewallRule({
+        network_id: networkId,
+        direction: form.direction,
+        action: form.action,
+        protocol: form.protocol,
+        port_range: form.port_range,
+        source_cidr: form.source_cidr,
+        description: form.description,
+        priority: form.priority
+      }, token);
       toast.success('Firewall rule created');
       showForm = false;
       resetForm();
@@ -53,11 +67,11 @@
       toast.error(e.message || 'Failed to create rule');
     }
   }
-  
+
   async function deleteRule(ruleId: string) {
     if (!confirm('Are you sure you want to delete this rule?')) return;
     try {
-      await client.deleteFirewallRule(vmId, ruleId);
+      await deleteFirewallRule(ruleId, token);
       toast.success('Rule deleted');
       loadRules();
     } catch (e: any) {
