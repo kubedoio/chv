@@ -19,6 +19,8 @@ pub struct VmSpec {
     pub nics: Vec<NicSpec>,
     #[serde(default = "default_running")]
     pub desired_state: String,
+    #[serde(default)]
+    pub cloud_init_userdata: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

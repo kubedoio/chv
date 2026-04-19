@@ -298,7 +298,8 @@ impl Orchestrator {
                 vds.cpu_count,
                 vds.memory_bytes,
                 vds.image_ref,
-                vds.desired_power_state
+                vds.desired_power_state,
+                vds.cloud_init_userdata
             FROM vms v
             JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
             WHERE v.vm_id = ?
@@ -425,6 +426,7 @@ impl Orchestrator {
             disks,
             nics,
             desired_state,
+            cloud_init_userdata: vm_row.cloud_init_userdata,
         };
 
         serde_json::to_string(&spec).map_err(|e| ChvError::Internal {
@@ -481,6 +483,7 @@ struct VmDesiredStateRow {
     memory_bytes: Option<i64>,
     image_ref: Option<String>,
     desired_power_state: Option<String>,
+    cloud_init_userdata: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -516,6 +519,8 @@ struct AgentVmSpec {
     disks: Vec<AgentDiskSpec>,
     nics: Vec<AgentNicSpec>,
     desired_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_init_userdata: Option<String>,
 }
 
 #[derive(serde::Serialize)]

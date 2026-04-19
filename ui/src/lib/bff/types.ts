@@ -223,6 +223,7 @@ export type CreateVmRequest = {
 	requested_by?: string;
 	network_id?: string;
 	volume_size_gb?: number;
+	cloud_init_userdata?: string;
 };
 
 export type CreateVmResponse = {

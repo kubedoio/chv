@@ -354,6 +354,12 @@ pub async fn create_vm(
         * 1024
         * 1024;
 
+    let cloud_init_userdata = payload
+        .get("cloud_init_userdata")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+
     let vm_id = chv_common::gen_short_id();
     let volume_id = chv_common::gen_short_id();
     let operation_id = chv_common::gen_short_id();
@@ -381,8 +387,8 @@ pub async fn create_vm(
     // Insert VM desired state
     sqlx::query(
         r#"
-        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, requested_at, updated_at)
-        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, cloud_init_userdata, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&vm_id)
@@ -391,6 +397,7 @@ pub async fn create_vm(
     .bind(cpu_count)
     .bind(memory_bytes)
     .bind(&image_ref)
+    .bind(&cloud_init_userdata)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
