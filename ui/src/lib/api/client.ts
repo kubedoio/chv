@@ -76,6 +76,26 @@ export function clearToken(): void {
 }
 
 /**
+ * Decode the JWT role claim from the stored token.
+ * Handles base64url encoding (RFC 7515) by normalising before decoding.
+ * Returns the role string or null if the token is absent / malformed.
+ */
+export function getStoredRole(): string | null {
+  try {
+    const token = getStoredToken();
+    if (!token) return null;
+    const parts = token.split('.');
+    if (parts.length < 3) return null;
+    const segment = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = segment.padEnd(Math.ceil(segment.length / 4) * 4, '=');
+    const payload = JSON.parse(atob(padded));
+    return payload.role ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Custom API error class that preserves error details from the server.
  */
 export class APIError extends Error {

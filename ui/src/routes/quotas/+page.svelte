@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Cpu, HardDrive, Network, Server, Settings, AlertTriangle } from 'lucide-svelte';
-  import { createAPIClient, APIError } from '$lib/api/client';
+  import { createAPIClient, APIError, getStoredRole } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import QuotaSettingsModal from '$lib/components/modals/QuotaSettingsModal.svelte';
   import type { UsageWithQuota, Quota, UserInfo } from '$lib/api/types';
@@ -14,7 +14,11 @@
   let error = $state<string | null>(null);
   let showSettingsModal = $state(false);
   let editingQuota = $state<Quota | null>(null);
-  let isAdmin = $state(false); // TODO: Get from auth context
+  function getIsAdmin(): boolean {
+    return getStoredRole() === 'admin';
+  }
+
+  let isAdmin = $state(getIsAdmin());
 
   const client = createAPIClient();
 
@@ -131,6 +135,7 @@
       </p>
     </div>
     <div class="flex items-center gap-2">
+      {#if isAdmin}
       <button
         onclick={handleEditQuota}
         class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
@@ -138,6 +143,7 @@
         <Settings size={18} />
         Adjust Quota
       </button>
+      {/if}
       <button
         onclick={loadQuotaData}
         disabled={loading}
