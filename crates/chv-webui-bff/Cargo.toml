@@ -18,4 +18,5 @@ sqlx = { workspace = true, features = ["runtime-tokio-rustls"] }
 async-trait = { workspace = true }
 jsonwebtoken = { workspace = true }
 uuid = { workspace = true }
+bcrypt = { workspace = true }
 chrono = "0.4"
