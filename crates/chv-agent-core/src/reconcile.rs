@@ -188,14 +188,24 @@ impl Reconciler {
     }
 
     async fn reconcile_volumes(&mut self) -> Result<(), ChvError> {
-        let cache = self.cache.lock().await;
-        let pairs: HashSet<(String, String)> = cache.vm_volume_handles().into_iter().collect();
+        let (pairs, cached_handles) = {
+            let cache = self.cache.lock().await;
+            let pairs: HashSet<(String, String)> = cache.vm_volume_handles().into_iter().collect();
+            let cached_handles = cache.volume_handles.clone();
+            (pairs, cached_handles)
+        };
         if pairs.is_empty() {
             return Ok(());
         }
         let mut stord = StordClient::connect(&self.stord_socket).await?;
         for (vm_id, volume_id) in pairs {
-            // Open volume if not already open (best-effort)
+            // Only re-attach volumes that were previously opened (cached).
+            // Fresh volumes will be opened (with seed_from + size_bytes) by prepare_vm in reconcile_vms.
+            // Without this guard, open_volume with no options defaults size_bytes to 10 GiB
+            // and creates an empty sparse volume, skipping seeding when prepare_vm runs later.
+            if !cached_handles.contains_key(&volume_id) {
+                continue;
+            }
             let locator = format!("{}.img", volume_id);
             let op_id = format!("reconcile-volume-attach-{}-{}", vm_id, volume_id);
             match stord

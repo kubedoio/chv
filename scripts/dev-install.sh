@@ -134,6 +134,9 @@ elif [ "$NO_UNINSTALL" = "0" ]; then
     # Remove agent cache so re-install triggers fresh enrollment
     rm -f /var/lib/chv/cache/agent-cache.json
 
+    # Remove any stale volume files so seeding works on fresh install
+    rm -rf /var/lib/chv/storage/localdisk/*
+
     # Remove UI assets and migrations
     rm -rf /opt/chv/ui/*
     rm -rf /usr/local/share/chv/migrations/*
