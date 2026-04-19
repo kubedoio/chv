@@ -12,6 +12,7 @@
 #   INSTALL_CHV_BRIDGE_IFACE    - Host interface to attach to bridge (default: ens19)
 #   INSTALL_CHV_BRIDGE_NAME     - Bridge name (default: chvbr0)
 #   INSTALL_CHV_BRIDGE_CIDR     - Bridge CIDR (default: 10.200.0.1/24)
+#   INSTALL_CHV_NO_SEED         - Set to "1" to skip default network + test VM creation
 
 set -euo pipefail
 
@@ -22,6 +23,7 @@ INSTALL_CHV_VERSION="${INSTALL_CHV_VERSION:-latest}"
 INSTALL_CHV_TARBALL_PATH="${INSTALL_CHV_TARBALL_PATH:-}"
 INSTALL_CHV_SKIP_DEPS="${INSTALL_CHV_SKIP_DEPS:-0}"
 INSTALL_CHV_SKIP_CLOUD_HV="${INSTALL_CHV_SKIP_CLOUD_HV:-0}"
+INSTALL_CHV_NO_SEED="${INSTALL_CHV_NO_SEED:-0}"
 
 # Network defaults
 INSTALL_CHV_BRIDGE_IFACE="${INSTALL_CHV_BRIDGE_IFACE:-ens19}"
@@ -345,6 +347,124 @@ import_base_image() {
     else
         warn "Failed to import base image into database."
         warn "You can import it manually via: sqlite3 ${CHV_DB_PATH}"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Seed Dev Resources (default network + test VM)
+# -----------------------------------------------------------------------------
+seed_dev_resources() {
+    if ! cmd_exists sqlite3; then
+        warn "sqlite3 not available, skipping dev resource seeding."
+        return
+    fi
+
+    info "Seeding dev resources (default network + test-1 VM)..."
+
+    # Get the enrolled node_id
+    local node_id
+    node_id=$(sqlite3 "${CHV_DB_PATH}" \
+        "SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1;" 2>/dev/null || echo "")
+    if [ -z "$node_id" ]; then
+        warn "No enrolled node found, skipping dev resource seeding."
+        return
+    fi
+
+    # Derive network CIDR from bridge CIDR (e.g. 10.200.0.1/24 -> 10.200.0.0/24)
+    local bridge_ip="${INSTALL_CHV_BRIDGE_CIDR%/*}"
+    local bridge_prefix="${INSTALL_CHV_BRIDGE_CIDR#*/}"
+    local network_cidr="${bridge_ip%.*}.0/${bridge_prefix}"
+    local gateway_ip="${bridge_ip}"
+
+    local now
+    now=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+    # --- Create default network ---
+    local net_exists
+    net_exists=$(sqlite3 "${CHV_DB_PATH}" \
+        "SELECT COUNT(*) FROM networks WHERE network_id='default';" 2>/dev/null || echo "0")
+    if [ "${net_exists}" -eq 0 ] 2>/dev/null; then
+        sqlite3 "${CHV_DB_PATH}" <<EOF
+INSERT INTO networks (network_id, node_id, display_name, created_at, updated_at)
+VALUES ('default', '${node_id}', 'default', '${now}', '${now}');
+
+INSERT INTO network_desired_state (
+    network_id, desired_generation, desired_status,
+    cidr, gateway, dhcp_enabled, ipam_mode, is_default,
+    requested_by, requested_at, updated_at
+)
+VALUES ('default', 1, 'Ready',
+        '${network_cidr}', '${gateway_ip}', 1, 'internal', 1,
+        'dev-install', '${now}', '${now}');
+
+INSERT INTO network_observed_state (
+    network_id, observed_generation, runtime_status, health_status, exposure_status,
+    observed_at, updated_at
+)
+VALUES ('default', 1, 'ready', 'healthy', 'private',
+        '${now}', '${now}');
+EOF
+        info "Default network created (${network_cidr}, gateway ${gateway_ip})."
+    else
+        info "Default network already exists, skipping."
+    fi
+
+    # --- Create test-1 VM ---
+    local vm_exists
+    vm_exists=$(sqlite3 "${CHV_DB_PATH}" \
+        "SELECT COUNT(*) FROM vms WHERE vm_id='test-1';" 2>/dev/null || echo "0")
+    if [ "${vm_exists}" -eq 0 ] 2>/dev/null; then
+        local memory_bytes=$((512 * 1024 * 1024))
+        local volume_size=$((10 * 1024 * 1024 * 1024))  # 10 GB
+        local volume_id="test-1-disk"
+        local nic_id="test-1-default"
+        local mac_address="02:00:00:00:00:01"
+        # First usable host IP after gateway (.2)
+        local ip_address="${bridge_ip%.*}.2"
+
+        sqlite3 "${CHV_DB_PATH}" <<EOF
+INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
+VALUES ('test-1', '${node_id}', 'test-1', '${now}', '${now}');
+
+INSERT INTO vm_desired_state (
+    vm_id, desired_generation, desired_status, requested_by, target_node_id,
+    cpu_count, memory_bytes, image_ref, boot_mode, desired_power_state,
+    requested_at, updated_at
+)
+VALUES ('test-1', 1, 'Pending', 'dev-install', '${node_id}',
+        1, ${memory_bytes}, '${BASE_IMAGE_PATH}', 'firmware', 'Running',
+        '${now}', '${now}');
+
+INSERT INTO vm_observed_state (
+    vm_id, observed_generation, runtime_status, health_status, node_id,
+    observed_at, updated_at
+)
+VALUES ('test-1', 1, 'stopped', 'unknown', '${node_id}',
+        '${now}', '${now}');
+
+INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, volume_kind, created_at, updated_at)
+VALUES ('${volume_id}', '${node_id}', 'test-1-disk', ${volume_size}, 'disk', '${now}', '${now}');
+
+INSERT INTO volume_desired_state (
+    volume_id, desired_generation, desired_status, requested_by, attached_vm_id,
+    device_name, read_only, requested_at, updated_at
+)
+VALUES ('${volume_id}', 1, 'Pending', 'dev-install', 'test-1',
+        'vda', 0, '${now}', '${now}');
+
+INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id, mac_address, ip_address, nic_model, created_at, updated_at)
+VALUES ('${nic_id}', 'test-1', 'default', '${mac_address}', '${ip_address}', 'virtio', '${now}', '${now}');
+
+INSERT INTO operations (
+    operation_id, idempotency_key, resource_kind, resource_id, operation_type, status,
+    requested_by, desired_generation, requested_at, created_at, updated_at
+)
+VALUES ('op-create-test-1', 'create-vm-test-1', 'vm', 'test-1', 'CreateVm', 'Accepted',
+        'dev-install', 1, '${now}', '${now}', '${now}');
+EOF
+        info "Test VM 'test-1' created (1 CPU, 512 MB, 10 GB disk, IP ${ip_address})."
+    else
+        info "Test VM 'test-1' already exists, skipping."
     fi
 }
 
@@ -837,6 +957,10 @@ install_systemd_services
 install_nginx
 start_services
 import_base_image
+
+if [ "${INSTALL_CHV_NO_SEED:-0}" != "1" ]; then
+    seed_dev_resources
+fi
 
 LOCAL_IP=$(get_local_ip)
 

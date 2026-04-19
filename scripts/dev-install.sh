@@ -2,7 +2,11 @@
 # Dev Install: build from source, uninstall any previous installation, then
 # install all-in-one on the local machine with predefined dev defaults.
 #
-# Usage: sudo ./scripts/dev-install.sh [--no-uninstall]
+# After install, a default network and a test VM are automatically created:
+#   Network: default (CIDR derived from INSTALL_CHV_BRIDGE_CIDR)
+#   VM:      test-1 (1 CPU, 512 MB RAM, 10 GB disk)
+#
+# Usage: sudo ./scripts/dev-install.sh [--no-uninstall] [--no-seed]
 #
 # Predefined dev defaults (override via environment):
 #   INSTALL_CHV_BRIDGE_IFACE  - default: ens19
@@ -11,6 +15,7 @@
 #
 # Options:
 #   --no-uninstall   Skip the uninstall step (useful for first install)
+#   --no-seed        Skip creating the default network and test-1 VM
 
 set -euo pipefail
 
@@ -18,9 +23,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 NO_UNINSTALL=0
+NO_SEED=0
 for arg in "$@"; do
     case "$arg" in
         --no-uninstall) NO_UNINSTALL=1 ;;
+        --no-seed) NO_SEED=1 ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
 done
@@ -33,6 +40,11 @@ export INSTALL_CHV_BRIDGE_CIDR="${INSTALL_CHV_BRIDGE_CIDR:-10.200.0.1/24}"
 echo "==============================================="
 echo "CHV Local Dev Install (All-in-One)"
 echo "Bridge: ${INSTALL_CHV_BRIDGE_NAME} (${INSTALL_CHV_BRIDGE_CIDR}) on ${INSTALL_CHV_BRIDGE_IFACE}"
+if [ "$NO_SEED" = "0" ]; then
+    echo "Seed:   default network + test-1 VM (1 CPU, 512 MB)"
+else
+    echo "Seed:   skipped (--no-seed)"
+fi
 echo "==============================================="
 echo ""
 
@@ -150,8 +162,15 @@ echo "[3/4] Built tarball: $TARBALL"
 echo "[4/4] Running installer..."
 export INSTALL_CHV_TARBALL_PATH="$(realpath "$TARBALL")"
 export INSTALL_CHV_VERSION="$VERSION"
+export INSTALL_CHV_NO_SEED="$NO_SEED"
 
 "$PROJECT_ROOT/scripts/install.sh"
 
 echo ""
 echo "Dev install complete! Version: $VERSION"
+if [ "$NO_SEED" = "0" ]; then
+    echo ""
+    echo "Seeded resources:"
+    echo "  Network: default (${INSTALL_CHV_BRIDGE_CIDR%/*} network)"
+    echo "  VM:      test-1 (1 CPU, 512 MB RAM, 10 GB disk)"
+fi
