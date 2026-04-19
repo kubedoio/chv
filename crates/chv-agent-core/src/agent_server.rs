@@ -665,6 +665,40 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }))
     }
 
+    async fn resize_vm(
+        &self,
+        req: Request<proto::ResizeVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .resize_vm(
+                &inner.vm_id,
+                inner.desired_vcpus,
+                inner.desired_memory_bytes,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "vm resized".to_string(),
+            }),
+        }))
+    }
+
     async fn attach_volume(
         &self,
         req: Request<proto::AttachVolumeRequest>,

@@ -42,6 +42,11 @@ pub trait LifecycleService: Send + Sync {
         request: proto::DeleteVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 
+    async fn resize_vm(
+        &self,
+        request: proto::ResizeVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
     async fn attach_volume(
         &self,
         request: proto::AttachVolumeRequest,
@@ -580,6 +585,34 @@ impl LifecycleService for LifecycleServiceImplementation {
         .await?;
 
         Ok(Self::ok_ack(&operation_id, "delete vm accepted"))
+    }
+
+    async fn resize_vm(
+        &self,
+        request: proto::ResizeVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "ResizeVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!(
+                    "vcpus={:?},memory_bytes={:?}",
+                    request.desired_vcpus, request.desired_memory_bytes
+                )),
+            )
+            .await?;
+
+        // Record intent accepted; actual resize is orchestrated by the reconciler
+        // dispatching to the agent's resize_vm RPC.
+        let _ = (&node_id, &vm_id);
+        Ok(Self::ok_ack(&operation_id, "resize vm accepted"))
     }
 
     async fn attach_volume(

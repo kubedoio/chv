@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
 
-use crate::adapter::{CloudHypervisorAdapter, VmConfig};
+use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmInfo};
 
 struct VmProcess {
     api_socket: std::path::PathBuf,
@@ -53,6 +53,16 @@ impl ProcessCloudHypervisorAdapter {
         path: &str,
         body: Option<&str>,
     ) -> Result<u16, ChvError> {
+        let (status, _body) = Self::ch_api_request_with_body(socket, method, path, body).await?;
+        Ok(status)
+    }
+
+    async fn ch_api_request_with_body(
+        socket: &Path,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), ChvError> {
         let mut stream = UnixStream::connect(socket)
             .await
             .map_err(|e| ChvError::Io {
@@ -79,14 +89,33 @@ impl ProcessCloudHypervisorAdapter {
                 source: e,
             })?;
 
-        let mut buf = [0u8; 1024];
-        let n = stream.read(&mut buf).await.map_err(|e| ChvError::Io {
-            path: socket.to_string_lossy().to_string(),
-            source: e,
-        })?;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut tmp).await.map_err(|e| ChvError::Io {
+                path: socket.to_string_lossy().to_string(),
+                source: e,
+            })?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            // If we've read at least the status line and headers are done, check if body complete.
+            // For simplicity stop after the first non-zero read that includes headers.
+            let raw = String::from_utf8_lossy(&buf);
+            if raw.contains("\r\n\r\n") {
+                break;
+            }
+        }
 
-        let status_code = parse_http_status(&buf[..n]).unwrap_or(0);
-        Ok(status_code)
+        let raw = String::from_utf8_lossy(&buf);
+        let status_code = parse_http_status(raw.as_bytes()).unwrap_or(0);
+        let response_body = if let Some(idx) = raw.find("\r\n\r\n") {
+            raw[idx + 4..].to_string()
+        } else {
+            String::new()
+        };
+        Ok((status_code, response_body))
     }
 
     fn validate_vm_config(&self, config: &VmConfig) -> Result<(), ChvError> {
@@ -327,6 +356,86 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             warn!(status = status, "unexpected status from vmm.reboot");
         }
         Ok(())
+    }
+
+    async fn resize_vm(
+        &self,
+        vm_id: &str,
+        cpus: Option<u32>,
+        memory_bytes: Option<u64>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, ?cpus, ?memory_bytes, op = operation_id.unwrap_or("-"), "resizing vm via ch api");
+
+        let mut obj = serde_json::Map::new();
+        if let Some(c) = cpus {
+            obj.insert("desired_vcpus".to_string(), serde_json::Value::from(c));
+        }
+        if let Some(m) = memory_bytes {
+            obj.insert("desired_ram".to_string(), serde_json::Value::from(m));
+        }
+        let body = serde_json::Value::Object(obj).to_string();
+
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resize", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.resize returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        let (status, body) =
+            Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
+        if status != 200 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.info returned unexpected status {}", status),
+            });
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| ChvError::Internal {
+            reason: format!("failed to parse vm.info response: {}", e),
+        })?;
+
+        let state = v
+            .get("state")
+            .and_then(|s| s.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let cpus = v
+            .pointer("/config/cpus/boot_vcpus")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0) as u32;
+        let memory_bytes = v
+            .pointer("/config/memory/size")
+            .and_then(|m| m.as_u64())
+            .unwrap_or(0);
+
+        Ok(VmInfo {
+            state,
+            cpus,
+            memory_bytes,
+        })
     }
 
     fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {

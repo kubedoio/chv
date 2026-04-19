@@ -380,6 +380,8 @@ dependencies = [
  "chv-common",
  "chv-errors",
  "nix",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -593,6 +595,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "bcrypt",
  "chrono",
  "chv-controlplane-store",
  "chv-controlplane-types",
