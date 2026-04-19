@@ -3,6 +3,8 @@
 	import type { PageData, ActionData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
+	import { getStoredToken } from '$lib/api/client';
+	import { getVmConsoleUrl } from '$lib/bff/vms';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -169,7 +171,14 @@
 				<section class="detail-main-span">
 					<SectionCard title="Serial Console" icon={Terminal}>
 						{#if detail.consoleUrl}
-							<VmConsole vmId={detail.summary.vm_id} consoleUrl={detail.consoleUrl} />
+							<VmConsole
+								vmId={detail.summary.vm_id}
+								consoleUrl={detail.consoleUrl}
+								getConsoleUrl={async () => {
+									const res = await getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined);
+									return res.url;
+								}}
+							/>
 						{:else}
 							<p class="empty-hint">Console URL unavailable. The VM may not be running.</p>
 						{/if}
