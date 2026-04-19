@@ -356,6 +356,7 @@ dependencies = [
  "futures-util",
  "hyper-util",
  "libc",
+ "nix",
  "prost",
  "serde",
  "serde_json",

@@ -13,13 +13,11 @@ use tokio::net::TcpListener;
 #[derive(Clone)]
 pub struct ConsoleServer {
     vm_runtime: crate::vm_runtime::VmRuntime,
-    token_secret: String,
 }
 
 #[derive(Clone)]
 struct ConsoleState {
     vm_runtime: crate::vm_runtime::VmRuntime,
-    token_secret: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -34,14 +32,13 @@ struct ResizeMsg {
 }
 
 impl ConsoleServer {
-    pub fn new(vm_runtime: crate::vm_runtime::VmRuntime, token_secret: String) -> Self {
-        Self { vm_runtime, token_secret }
+    pub fn new(vm_runtime: crate::vm_runtime::VmRuntime) -> Self {
+        Self { vm_runtime }
     }
 
     pub async fn run(self, bind: &str) -> Result<(), chv_errors::ChvError> {
         let state = ConsoleState {
             vm_runtime: self.vm_runtime.clone(),
-            token_secret: self.token_secret.clone(),
         };
         let app = Router::new()
             .route("/vms/:vm_id/console", get(Self::ws_handler))

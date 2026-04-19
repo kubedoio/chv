@@ -2,6 +2,7 @@ use chv_agent_core::{
     agent_server::AgentServer,
     cache::{NodeCache, PendingControlPlaneMessage},
     config::{load_agent_config, AgentConfig},
+    console_server::ConsoleServer,
     control_plane::ControlPlaneClient,
     daemon_clients::{NwdClient, StordClient},
     enrollment::EnrollmentClient,
@@ -361,6 +362,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         if let Err(e) = agent_server.serve(&server_socket).await {
             warn!(error = %e, "agent server exited");
+        }
+    });
+
+    let console_bind = config.console_bind.clone();
+    let console_server = ConsoleServer::new(vm_runtime.clone());
+    tokio::spawn(async move {
+        if let Err(e) = console_server.run(&console_bind).await {
+            warn!(error = %e, bind = %console_bind, "console server exited");
         }
     });
 
