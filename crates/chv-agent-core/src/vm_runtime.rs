@@ -117,15 +117,14 @@ impl VmRuntime {
         let generation = generation.into();
         let error = error.into();
         let mut map = self.vms.lock().unwrap();
-        let entry = map.entry(vm_id.clone()).or_insert_with(|| VmRecord {
-            vm_id: vm_id.clone(),
-            observed_generation: generation.clone(),
-            runtime_status: "Failed".to_string(),
-            last_error: Some(error.clone()),
-        });
-        entry.observed_generation = generation;
-        entry.runtime_status = "Failed".to_string();
-        entry.last_error = Some(error);
+        // Only update existing records; do not create phantom records for VMs
+        // that were never successfully created. A phantom record causes the
+        // reconciler to skip creation and try start/stop on a non-existent VM.
+        if let Some(entry) = map.get_mut(&vm_id) {
+            entry.observed_generation = generation;
+            entry.runtime_status = "Failed".to_string();
+            entry.last_error = Some(error);
+        }
     }
 }
 
@@ -204,13 +203,33 @@ mod tests {
         assert!(rt.get("vm-1").is_none());
     }
 
-    #[test]
-    fn vm_runtime_record_failure_upserts_failed_state() {
+    #[tokio::test]
+    async fn vm_runtime_record_failure_upserts_failed_state() {
         let (rt, _mock) = test_runtime();
+        let config = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 2,
+            memory_bytes: 1024,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+        };
+        rt.create_vm("vm-1", "5", &config, Some("op-1"))
+            .await
+            .unwrap();
         rt.record_failure("vm-1", "7", "kernel missing");
         let rec = rt.get("vm-1").unwrap();
         assert_eq!(rec.observed_generation, "7");
         assert_eq!(rec.runtime_status, "Failed");
         assert_eq!(rec.last_error.as_deref(), Some("kernel missing"));
+    }
+
+    #[test]
+    fn vm_runtime_record_failure_does_not_create_phantom() {
+        let (rt, _mock) = test_runtime();
+        rt.record_failure("vm-phantom", "1", "prepare failed");
+        assert!(rt.get("vm-phantom").is_none());
     }
 }
