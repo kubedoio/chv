@@ -795,10 +795,13 @@ mod tests {
 
     #[test]
     fn certificate_rotation_due_respects_interval() {
+        let cert_file = tempfile::NamedTempFile::new().unwrap();
+        let key_file = tempfile::NamedTempFile::new().unwrap();
+
         let mut cache = NodeCache::new("node-1");
         cache.enrollment_complete = true;
-        cache.certificate_path = Some("/tmp/agent.crt".to_string());
-        cache.private_key_path = Some("/tmp/agent.key".to_string());
+        cache.certificate_path = Some(cert_file.path().to_str().unwrap().to_string());
+        cache.private_key_path = Some(key_file.path().to_str().unwrap().to_string());
         assert!(certificate_rotation_due(
             &cache,
             CERT_ROTATION_INTERVAL_SECS * 1000
