@@ -5,6 +5,8 @@
   import { toast } from '$lib/stores/toast';
   import QuotaSettingsModal from '$lib/components/modals/QuotaSettingsModal.svelte';
   import type { UsageWithQuota, Quota, UserInfo } from '$lib/api/types';
+  import ErrorState from '$lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 
   // State
   let usageData = $state<UsageWithQuota | null>(null);
@@ -158,19 +160,14 @@
       <span class="ml-3 text-slate-500">Loading quota data...</span>
     </div>
   {:else if error}
-    <!-- Error State -->
-    <div class="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
-      <div class="text-red-500 text-lg font-medium mb-2">Failed to Load</div>
-      <p class="text-red-600 text-sm mb-4">{error}</p>
-      <button
-        onclick={loadQuotaData}
-        class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
-      >
-        Try Again
-      </button>
-    </div>
-  {:else if usageData}
-    <!-- Quota Status Banner -->
+    <ErrorState />
+  {:else if !usageData}
+    <EmptyInfrastructureState
+      title="No quota data available"
+      description="Quota information could not be loaded for your account."
+      hint="Contact your administrator to ensure quotas are configured for your user."
+    />
+  {:else}
     {@const criticalResources = resources.filter(r => getPercentage(r.key) >= 95)}
     {@const warningResources = resources.filter(r => {
       const p = getPercentage(r.key);

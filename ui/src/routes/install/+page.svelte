@@ -4,6 +4,7 @@
   import InstallStatusPanel from '$lib/components/feedback/InstallStatusPanel.svelte';
   import { toast } from '$lib/stores/toast';
   import type { InstallStatusResponse, InstallActionResponse } from '$lib/api/types';
+  import ErrorState from '$lib/components/shell/ErrorState.svelte';
 
   const client = createAPIClient({ token: getStoredToken() ?? undefined });
 
@@ -89,15 +90,19 @@
   onMount(loadStatus);
 </script>
 
-<InstallStatusPanel
-  {status}
-  {loading}
-  {actionLoading}
-  {error}
-  {lastActionResult}
-  handleBootstrap={bootstrapInstall}
-  handleRefresh={loadStatus}
-  handleRepairBridge={repairBridge}
-  handleRepairDirectories={repairDirectories}
-  handleRepairLocaldisk={repairLocaldisk}
-/>
+{#if error && !status && !loading}
+  <ErrorState />
+{:else}
+  <InstallStatusPanel
+    {status}
+    {loading}
+    {actionLoading}
+    {error}
+    {lastActionResult}
+    handleBootstrap={bootstrapInstall}
+    handleRefresh={loadStatus}
+    handleRepairBridge={repairBridge}
+    handleRepairDirectories={repairDirectories}
+    handleRepairLocaldisk={repairLocaldisk}
+  />
+{/if}
