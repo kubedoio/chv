@@ -202,3 +202,11 @@
 /Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/Cargo.toml
 /Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/crates/chv-webui-bff/src/auth.rs
 /Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/crates/chv-webui-bff/src/handlers/vms.rs
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/ui/src/lib/api/client.ts
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/ui/src/routes/quotas/+page.svelte
+/Users/I761222/.claude/projects/-Users-I761222-projects-claude-chv--claude-worktrees-gap-remediation-sprint2/841224ed-8142-46df-8653-bcf4ad937099/tool-results/bjqau52xc.txt
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/ui/src/lib/api/types.ts
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/ui/src/routes/login/+page.svelte
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/ui/src/routes/+page.ts
+/Users/I761222/.claude/projects/-Users-I761222-projects-claude-chv--claude-worktrees-gap-remediation-sprint2/841224ed-8142-46df-8653-bcf4ad937099/tool-results/b21bisf8g.txt
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/ui/src/lib/api/client.test.ts
