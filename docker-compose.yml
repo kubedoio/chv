@@ -1,0 +1,17 @@
+services:
+  chv:
+    build: .
+    ports:
+      - "80:80"       # Web UI
+      - "8443:8443"   # gRPC (agent enrollment)
+    volumes:
+      - chv-data:/var/lib/chv
+      - chv-config:/etc/chv
+    restart: unless-stopped
+    privileged: true   # Required for KVM/Cloud Hypervisor
+    devices:
+      - /dev/kvm:/dev/kvm
+
+volumes:
+  chv-data:
+  chv-config:

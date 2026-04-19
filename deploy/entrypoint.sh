@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+echo "=== CHV Starting ==="
+
+# Start nginx (serves UI + proxies API)
+nginx
+
+# Start storage daemon
+chv-stord /etc/chv/stord.toml 2>/dev/null &
+STORD_PID=$!
+
+# Start network daemon
+chv-nwd /etc/chv/nwd.toml 2>/dev/null &
+NWD_PID=$!
+
+# Start control plane (includes BFF)
+chv-controlplane /etc/chv/controlplane.toml &
+CP_PID=$!
+
+# Start agent
+chv-agent /etc/chv/agent.toml 2>/dev/null &
+AGENT_PID=$!
+
+echo "=== CHV Ready ==="
+echo "  UI:     http://localhost:80"
+echo "  API:    http://localhost:8080"
+echo "  gRPC:   localhost:8443"
+echo ""
+echo "  Login:  admin / admin"
+echo "  Change password after first login."
+
+# Wait for any process to exit
+wait -n $CP_PID $AGENT_PID $STORD_PID $NWD_PID 2>/dev/null || true
+echo "=== CHV process exited, shutting down ==="
+kill $CP_PID $AGENT_PID $STORD_PID $NWD_PID 2>/dev/null || true
+wait
