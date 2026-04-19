@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Child;
-use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::adapter::{CloudHypervisorAdapter, VmConfig};
@@ -16,19 +16,27 @@ use crate::adapter::{CloudHypervisorAdapter, VmConfig};
 struct VmProcess {
     api_socket: std::path::PathBuf,
     child: Child,
+    pty_master: OwnedFd,
 }
 
 pub struct ProcessCloudHypervisorAdapter {
     chv_binary: std::path::PathBuf,
-    vms: Arc<Mutex<HashMap<String, VmProcess>>>,
+    vms: Arc<std::sync::Mutex<HashMap<String, VmProcess>>>,
 }
 
 impl ProcessCloudHypervisorAdapter {
     pub fn new(chv_binary: impl Into<std::path::PathBuf>) -> Self {
         Self {
             chv_binary: chv_binary.into(),
-            vms: Arc::new(Mutex::new(HashMap::new())),
+            vms: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
+        let map = self.vms.lock().ok()?;
+        let proc = map.get(vm_id)?;
+        let fd = nix::unistd::dup(proc.pty_master.as_raw_fd()).ok()?;
+        Some(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
     async fn wait_for_socket(socket: &Path, timeout: std::time::Duration) -> Result<(), ChvError> {
@@ -144,6 +152,23 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 })?;
         }
 
+        let pty_master = nix::pty::posix_openpt(nix::fcntl::OFlag::O_RDWR).map_err(|e| ChvError::Io {
+            path: "pty".to_string(),
+            source: std::io::Error::from_raw_os_error(e as i32),
+        })?;
+        nix::pty::grantpt(&pty_master).map_err(|e| ChvError::Io {
+            path: "pty".to_string(),
+            source: std::io::Error::from_raw_os_error(e as i32),
+        })?;
+        nix::pty::unlockpt(&pty_master).map_err(|e| ChvError::Io {
+            path: "pty".to_string(),
+            source: std::io::Error::from_raw_os_error(e as i32),
+        })?;
+        let slave_path = unsafe { nix::pty::ptsname(&pty_master) }.map_err(|e| ChvError::Io {
+            path: "pty".to_string(),
+            source: std::io::Error::from_raw_os_error(e as i32),
+        })?;
+
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
         cmd.arg("--api-socket").arg(&config.api_socket_path);
         cmd.arg("--cpus").arg(format!("boot={}", config.cpus));
@@ -173,12 +198,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         cmd.arg("--console")
             .arg("off")
             .arg("--serial")
-            .arg(format!("file=/run/chv/agent/vm-{}-serial.log", config.vm_id));
+            .arg(format!("tty={}", slave_path));
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
         info!(
             vm_id = %config.vm_id,
             socket = %config.api_socket_path.display(),
+            pty = %slave_path,
             op = operation_id.unwrap_or("-"),
             "spawning cloud-hypervisor"
         );
@@ -201,29 +227,33 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
-        let mut map = self.vms.lock().await;
+        let mut map = self.vms.lock().unwrap();
         map.insert(
             config.vm_id.clone(),
             VmProcess {
                 api_socket: config.api_socket_path.clone(),
                 child,
+                pty_master: unsafe { OwnedFd::from_raw_fd(pty_master.into_raw_fd()) },
             },
         );
         Ok(config.vm_id.clone())
     }
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let map = self.vms.lock().await;
-        let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-            resource: "vm".to_string(),
-            id: vm_id.to_string(),
-        })?;
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "booting vm via ch api");
 
         // Auto-boot via CLI means VM is already running; send boot API for completeness.
         let status =
-            Self::ch_api_request(&proc.api_socket, "PUT", "/api/v1/vmm.boot", None).await?;
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.boot", None).await?;
         if status != 200 && status != 204 {
             warn!(status = status, "unexpected status from vmm.boot");
         }
@@ -236,36 +266,47 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         force: bool,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let mut map = self.vms.lock().await;
-        let proc = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
-            resource: "vm".to_string(),
-            id: vm_id.to_string(),
-        })?;
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
 
         info!(vm_id = %vm_id, force = force, op = operation_id.unwrap_or("-"), "stopping vm");
 
         if force {
-            let _ = proc.child.start_kill();
+            let mut map = self.vms.lock().unwrap();
+            if let Some(proc) = map.get_mut(vm_id) {
+                let _ = proc.child.start_kill();
+            }
         } else {
             let status =
-                Self::ch_api_request(&proc.api_socket, "PUT", "/api/v1/vmm.shutdown", None).await?;
+                Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.shutdown", None).await?;
             if status != 200 && status != 204 {
                 warn!(
                     status = status,
                     "graceful shutdown failed, falling back to kill"
                 );
-                let _ = proc.child.start_kill();
+                let mut map = self.vms.lock().unwrap();
+                if let Some(proc) = map.get_mut(vm_id) {
+                    let _ = proc.child.start_kill();
+                }
             }
         }
         Ok(())
     }
 
     async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let mut map = self.vms.lock().await;
-        let mut proc = map.remove(vm_id).ok_or_else(|| ChvError::NotFound {
-            resource: "vm".to_string(),
-            id: vm_id.to_string(),
-        })?;
+        let mut proc = {
+            let mut map = self.vms.lock().unwrap();
+            map.remove(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?
+        };
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "deleting vm");
 
@@ -276,16 +317,19 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let map = self.vms.lock().await;
-        let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-            resource: "vm".to_string(),
-            id: vm_id.to_string(),
-        })?;
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
 
         let status =
-            Self::ch_api_request(&proc.api_socket, "PUT", "/api/v1/vmm.reboot", None).await?;
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.reboot", None).await?;
         if status != 200 && status != 204 {
             warn!(status = status, "unexpected status from vmm.reboot");
         }
