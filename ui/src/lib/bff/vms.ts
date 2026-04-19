@@ -51,7 +51,7 @@ export async function deleteVm(
 	req: { vm_id: string; requested_by: string },
 	token?: string
 ): Promise<{ vm_id: string; operation_id: string; status: string }> {
-	return bffFetch(BFFEndpoints.createVm, { method: 'POST', body: JSON.stringify(req), token });
+	return bffFetch(BFFEndpoints.deleteVm, { method: 'POST', body: JSON.stringify(req), token });
 }
 
 

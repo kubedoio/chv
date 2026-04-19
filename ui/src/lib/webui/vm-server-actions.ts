@@ -37,7 +37,13 @@ export async function handleVmMutation(
 		const result = await mutateVm({ vm_id, action: validAction, force: false }, token);
 		return { ...result, action: validAction };
 	} catch (err) {
-		const message = err instanceof BFFError ? err.message : err instanceof Error ? err.message : 'Mutation failed';
+		const message = err instanceof BFFError
+			? err.message
+			: err instanceof Error
+				? err.message.includes('<html') || err.message.includes('Unexpected token')
+					? 'Backend service unavailable. Check that the control plane is running.'
+					: err.message
+				: 'Mutation failed';
 		return fail(500, { message });
 	}
 }
