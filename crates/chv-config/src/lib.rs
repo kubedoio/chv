@@ -91,6 +91,8 @@ pub struct AgentConfig {
     pub bootstrap_token_path: Option<PathBuf>,
     #[serde(default = "default_storage_base_dir")]
     pub storage_base_dir: PathBuf,
+    #[serde(default = "default_console_bind")]
+    pub console_bind: String,
 }
 
 impl Default for AgentConfig {
@@ -113,12 +115,17 @@ impl Default for AgentConfig {
             ca_cert_path: None,
             bootstrap_token_path: None,
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
+            console_bind: default_console_bind(),
         }
     }
 }
 
 fn default_storage_base_dir() -> PathBuf {
     PathBuf::from("/var/lib/chv/storage")
+}
+
+fn default_console_bind() -> String {
+    "127.0.0.1:8444".to_string()
 }
 
 pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError> {
