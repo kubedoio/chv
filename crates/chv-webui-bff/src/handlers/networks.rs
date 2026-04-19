@@ -172,21 +172,23 @@ pub async fn get_network(
                 .collect();
 
             Ok(Json(json!({
-                "network_id": r.network_id,
-                "name": r.name,
-                "scope": "fleet",
-                "health": r.health,
-                "exposure": r.exposure,
-                "policy": "default",
-                "cidr": r.cidr,
-                "gateway": r.gateway,
-                "attached_vms": attached_vms_json,
-                "created_at": r.created_at.unwrap_or_default(),
-                "last_task": r.last_task,
-                "alerts": r.alerts,
-                "dhcp_enabled": r.dhcp_enabled != 0,
-                "ipam_mode": r.ipam_mode,
-                "is_default": r.is_default != 0,
+                "detail": {
+                    "network_id": r.network_id,
+                    "name": r.name,
+                    "scope": "fleet",
+                    "health": r.health,
+                    "exposure": r.exposure,
+                    "policy": "default",
+                    "cidr": r.cidr,
+                    "gateway": r.gateway,
+                    "attached_vms": attached_vms_json,
+                    "created_at": r.created_at.unwrap_or_default(),
+                    "last_task": r.last_task,
+                    "alerts": r.alerts,
+                    "dhcp_enabled": r.dhcp_enabled != 0,
+                    "ipam_mode": r.ipam_mode,
+                    "is_default": r.is_default != 0,
+                }
             })))
         }
         None => Err(BffError::NotFound(format!(
