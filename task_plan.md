@@ -1,60 +1,71 @@
-# Task Plan: Sprint 9 — P1 Gap Closure + Templates
+# Task Plan: Sprint 10 — Snapshots, Export/Import, Metrics Wiring
 
 ## Goal
 
-Close the highest-impact P1 gaps (VM templates, firewall rules, metrics) and wire the 7 pre-built but unused UI components to real backends.
+Add VM snapshots (the #1 missing enterprise feature), wire the 6 pre-built metrics components, and connect VMExportImport for backup/restore capability.
 
 ## Phases
-- [x] Phase 1: Research (gap analysis + component inventory)
-- [x] Phase 2: Plan approach
+- [x] Phase 1: Research
+- [x] Phase 2: Plan
 - [ ] Phase 3: Implement
 - [ ] Phase 4: Verify and deliver
 
 ## Tasks
 
-### T1: VM Templates — DB + Backend + Wire UI (P1, high leverage)
-The templates UI page is FULLY BUILT (imports, CRUD, create-from-template flow) but calls
-APIs that don't exist. This is the highest-leverage item in the entire gap analysis.
-- Migration 0013: CREATE TABLE vm_templates (template_id, name, description, cpu, memory_bytes, disk_size_bytes, image_id, cloud_init_userdata, network_id, created_by, created_at, updated_at)
-- Migration 0013: CREATE TABLE cloud_init_templates (template_id, name, description, content, created_by, created_at, updated_at)
-- BFF handlers: list_vm_templates, create_vm_template, delete_vm_template, list_cloud_init_templates, delete_cloud_init_template
-- Routes: /v1/vm-templates, /v1/vm-templates/create, /v1/vm-templates/delete, /v1/cloud-init-templates, /v1/cloud-init-templates/delete
-- UI: Already built. Just needs the backend to respond.
+### T1: VM Snapshots — Full vertical slice (P1, highest value)
+Cloud Hypervisor supports snapshotting via its HTTP API:
+- `PUT /api/v1/vm.snapshot` with `{"destination_url": "file:///path/to/snapshot"}`
+- `PUT /api/v1/vm.restore` with `{"source_url": "file:///path/to/snapshot"}`
 
-### T2: Firewall Rules — DB + Backend + Wire UI (P1)
-FirewallRuleEditor.svelte is built. Needs:
-- Migration 0014: CREATE TABLE firewall_rules (rule_id, network_id, direction, action, protocol, port_range, source_cidr, description, priority, created_at)
-- BFF handlers: list_firewall_rules (by network_id), create_rule, delete_rule
-- Routes: /v1/networks/firewall-rules, /v1/networks/firewall-rules/create, /v1/networks/firewall-rules/delete
-- Wire FirewallRuleEditor into network detail page
+Implementation:
+- Migration 0016: CREATE TABLE vm_snapshots (snapshot_id, vm_id, name, description, size_bytes, includes_memory, snapshot_path, status, created_at)
+- Extend CloudHypervisorAdapter trait: snapshot_vm(), restore_snapshot(), list_snapshots()
+- Implement in process.rs via CH HTTP API
+- BFF handlers: list_vm_snapshots, create_snapshot, restore_snapshot, delete_snapshot
+- Routes: /v1/vms/snapshots, /v1/vms/snapshots/create, /v1/vms/snapshots/restore, /v1/vms/snapshots/delete
+- UI: Snapshots tab on VM detail page (table + create/restore/delete buttons)
+- Snapshot storage: /run/chv/agent/vms/{vm_id}/snapshots/{snapshot_id}/
 
-### T3: Storage Pools — DB + Backend + Wire UI (P1)
-CreateStoragePoolModal.svelte is built. The UI already calls listStoragePools().
-- Migration 0015: CREATE TABLE storage_pools (pool_id, node_id, name, backend_class, total_bytes, used_bytes, status, created_at, updated_at)
-- BFF handlers: list_storage_pools, create_storage_pool
-- Routes: /v1/storage-pools, /v1/storage-pools/create
-- Wire into storage page
+### T2: VM Export/Import (P1, backup capability)
+VMExportImport.svelte is fully built. Needs backend:
+- BFF handler: export_vm — creates a task, copies disk image to export path
+- BFF handler: import_vm — accepts uploaded disk image, creates new VM
+- Routes: /v1/vms/export, /v1/vms/import
+- Wire VMExportImport.svelte into VM detail page
 
-### T4: Wire Metrics Components (P1)
-VMMetricsWidget, VMMetricsHistory, MetricsChart, Sparkline, TopResourceConsumers,
-NodeHealthDashboard — all built, none wired.
-- Add basic metrics BFF handler returning node/VM resource usage from observed_state tables
-- Wire VMMetricsWidget into VM detail page
+### T3: Wire Metrics Components (P1, 6 components)
+All built, none connected. Need a metrics BFF endpoint:
+- BFF handler: get_vm_metrics — returns CPU/memory/disk stats from vm_observed_state
+- BFF handler: get_node_metrics — returns node resource stats from node_observed_state
+- Wire VMMetricsWidget into VM detail Summary tab
+- Wire VMMetricsHistory into VM detail (new Metrics tab)
 - Wire NodeHealthDashboard into node detail page
 - Wire TopResourceConsumers into overview page
+- Wire MetricsChart and Sparkline as data visualization
 
-### T5: User Management UI Page
-Sprint 8 added the backend (list/create/update/delete users). Add the UI page.
-- New route: /settings/users
-- User list table with role badges
-- Create/edit/delete buttons
-- Follow the mockup from gap-analysis-mockups.html
+### T4: RBAC Enforcement (P2, security)
+Currently only user management checks roles. Add role checks to:
+- create_vm, delete_vm, mutate_vm — require admin or operator
+- create_template, delete_template — require admin or operator
+- create_firewall_rule, delete_firewall_rule — require admin
+- list endpoints remain accessible to all authenticated users (viewer can read)
+
+### T5: API Tokens (P2, programmatic access)
+- Migration 0017: CREATE TABLE api_tokens (token_id, user_id, name, token_hash, scope, expires_at, last_used_at, created_at)
+- BFF handlers: list_tokens, create_token, revoke_token
+- Token auth: accept Bearer tokens that are API tokens (not just JWTs)
+- UI: API Tokens section in settings page
 
 ## Decisions Made
-- Templates use two separate tables (vm_templates + cloud_init_templates) matching the UI's existing two-tab design
-- Firewall rules are per-network (not per-VM) matching the network detail page context
-- Storage pools are the admin view of storage backends per node
-- Metrics use existing observed_state data (no Prometheus yet — that's sprint 12)
+- Snapshots stored on local disk per VM (not centralized storage — that's Phase N)
+- Export produces qcow2 files (CH native format)
+- Metrics use existing observed_state tables (no Prometheus yet)
+- RBAC: viewer=read, operator=read+write, admin=read+write+admin
+- API tokens are SHA-256 hashed in DB, plain text shown once on creation
+
+## Priority Order
+T1 (snapshots) > T3 (metrics) > T4 (RBAC) > T2 (export) > T5 (API tokens)
+T1 is the single most-requested enterprise feature. T3 has highest leverage (6 components).
 
 ## Status
-**Currently in Phase 3** - Starting T1
+**Currently in Phase 3** - Starting implementation
