@@ -199,10 +199,11 @@ pub async fn get_network(
 }
 
 pub async fn create_network(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let name = payload
         .get("name")
         .and_then(|v| v.as_str())
@@ -298,10 +299,11 @@ pub async fn create_network(
 }
 
 pub async fn delete_network(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let network_id = payload
         .get("network_id")
         .and_then(|v| v.as_str())
@@ -346,10 +348,11 @@ pub async fn delete_network(
 }
 
 pub async fn update_network(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let network_id = payload
         .get("network_id")
         .and_then(|v| v.as_str())
@@ -465,6 +468,7 @@ pub async fn mutate_network(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let network_id = payload
         .get("network_id")
         .and_then(|v| v.as_str())

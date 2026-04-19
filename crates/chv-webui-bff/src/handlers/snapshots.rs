@@ -61,10 +61,11 @@ pub async fn list_vm_snapshots(
 }
 
 pub async fn create_snapshot(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
@@ -131,10 +132,11 @@ pub async fn create_snapshot(
 }
 
 pub async fn delete_snapshot(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let snapshot_id = payload
         .get("snapshot_id")
         .and_then(|v| v.as_str())
@@ -161,10 +163,11 @@ pub async fn delete_snapshot(
 }
 
 pub async fn restore_snapshot(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let snapshot_id = payload
         .get("snapshot_id")
         .and_then(|v| v.as_str())

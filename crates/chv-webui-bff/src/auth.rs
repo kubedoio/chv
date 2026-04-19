@@ -5,12 +5,32 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::BffError;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub username: String,
     pub role: String,
     pub exp: u64,
+}
+
+pub fn require_operator_or_admin(claims: &Claims) -> Result<(), BffError> {
+    if claims.role == "admin" || claims.role == "operator" {
+        Ok(())
+    } else {
+        Err(BffError::Unauthorized(
+            "operator or admin role required".into(),
+        ))
+    }
+}
+
+pub fn require_admin(claims: &Claims) -> Result<(), BffError> {
+    if claims.role == "admin" {
+        Ok(())
+    } else {
+        Err(BffError::Unauthorized("admin role required".into()))
+    }
 }
 
 pub fn validate_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {

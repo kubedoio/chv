@@ -57,10 +57,11 @@ pub async fn list_storage_pools(
 }
 
 pub async fn create_storage_pool(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let name = payload
         .get("name")
         .and_then(|v| v.as_str())

@@ -263,10 +263,11 @@ pub async fn get_vm(
 }
 
 pub async fn create_vm(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     tracing::info!("create_vm handler started");
 
     // Support both legacy BFF payload and CreateVMModal payload
@@ -540,10 +541,11 @@ pub async fn create_vm(
 }
 
 pub async fn delete_vm(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
@@ -626,6 +628,7 @@ pub async fn mutate_vm(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
