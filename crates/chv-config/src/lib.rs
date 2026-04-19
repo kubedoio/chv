@@ -8,6 +8,35 @@ fn generate_secure_secret() -> String {
     hex::encode(bytes)
 }
 
+const SHARED_SECRET_PATH: &str = "/etc/chv/jwt_secret";
+
+fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
+    if current != "chv-dev-secret-change-in-production" && current.len() >= 32 {
+        return current.to_string();
+    }
+    if let Ok(secret) = std::fs::read_to_string(SHARED_SECRET_PATH) {
+        let secret = secret.trim().to_string();
+        if secret.len() >= 32 {
+            eprintln!("INFO: loaded jwt_secret from {}", SHARED_SECRET_PATH);
+            return secret;
+        }
+    }
+    let generated = generate_secure_secret();
+    if std::fs::write(SHARED_SECRET_PATH, &generated).is_ok() {
+        eprintln!(
+            "INFO: generated jwt_secret and saved to {} (shared by all CHV services)",
+            SHARED_SECRET_PATH
+        );
+    } else {
+        eprintln!(
+            "WARNING: generated jwt_secret but could not write to {}. \
+             To share between services, add to {} config: jwt_secret = \"{}\"",
+            SHARED_SECRET_PATH, service_name, generated
+        );
+    }
+    generated
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("io error: {0}")]
@@ -148,13 +177,7 @@ pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError
         cfg = toml::from_str(&text)?;
     }
     if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
-        let generated = generate_secure_secret();
-        eprintln!(
-            "WARNING: jwt_secret not configured or too short. Auto-generated a secure secret for this session. \
-             To persist, add to your agent config: jwt_secret = \"{}\"",
-            generated
-        );
-        cfg.jwt_secret = generated;
+        cfg.jwt_secret = resolve_jwt_secret(&cfg.jwt_secret, "agent");
     }
     Ok(cfg)
 }
@@ -302,13 +325,7 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
         cfg = toml::from_str(&text)?;
     }
     if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
-        let generated = generate_secure_secret();
-        eprintln!(
-            "WARNING: jwt_secret not configured or too short. Auto-generated a secure secret for this session. \
-             To persist, add to your controlplane config: jwt_secret = \"{}\"",
-            generated
-        );
-        cfg.jwt_secret = generated;
+        cfg.jwt_secret = resolve_jwt_secret(&cfg.jwt_secret, "controlplane");
     }
     Ok(cfg)
 }
