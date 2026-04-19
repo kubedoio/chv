@@ -474,10 +474,19 @@ pub async fn create_vm(
         .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
     }
 
+    // Fetch network CIDR for IP generation
+    let network_cidr: String = sqlx::query_scalar(
+        "SELECT COALESCE(cidr, '') FROM network_desired_state WHERE network_id = ?"
+    )
+    .bind(&network_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to fetch network cidr: {}", e)))?;
+
     // Insert NIC
     let nic_id = format!("{}-{}", vm_id, network_id);
     let mac_address = generate_mac(&vm_id, &network_id);
-    let ip_address = generate_ip(&vm_id, &network_id);
+    let ip_address = generate_ip(&vm_id, &network_id, &network_cidr);
 
     sqlx::query(
         r#"
@@ -749,16 +758,56 @@ fn generate_mac(vm_id: &str, network_id: &str) -> String {
     )
 }
 
-/// Deterministically generate a 10.x.x.x IP from vm_id + network_id.
-fn generate_ip(vm_id: &str, _network_id: &str) -> String {
-    let input = vm_id;
+/// Deterministically generate an IP within the given CIDR from vm_id + network_id.
+/// Skips .0 (network), .1 (gateway), and .255 (broadcast for /24).
+fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
+    if cidr.is_empty() {
+        // Fallback to deterministic 10.x.x.x when no CIDR is configured
+        let input = vm_id;
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in input.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let o2 = ((hash >> 8) & 0xFF) as u8;
+        let o3 = ((hash >> 16) & 0xFF) as u8;
+        let o4 = ((hash >> 24) & 0xFF) as u8;
+        return format!("10.{}.{}.{}", o2, o3, o4);
+    }
+
+    let (base_str, prefix_str) = cidr.split_once('/').unwrap_or((cidr, "24"));
+    let prefix: u32 = prefix_str.parse().unwrap_or(24);
+    let host_bits = 32u32.saturating_sub(prefix);
+    let total_hosts = if host_bits >= 32 { 1u32 } else { 1u32 << host_bits };
+    let usable_hosts = total_hosts.saturating_sub(3).max(1); // exclude network, gateway, broadcast
+
+    // Parse base IP into u32
+    let base_u32 = base_str
+        .split('.')
+        .map(|s| s.parse::<u8>().unwrap_or(0))
+        .fold(0u32, |acc, octet| (acc << 8) | octet as u32);
+
+    // Network address (masked)
+    let mask = if prefix >= 32 { 0xFFFFFFFF } else { 0xFFFFFFFFu32 << (32 - prefix) };
+    let network_u32 = base_u32 & mask;
+
+    // Deterministic offset from hash of vm_id + network_id
+    let input = format!("{}-{}", vm_id, network_id);
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in input.bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    let o2 = ((hash >> 8) & 0xFF) as u8;
-    let o3 = ((hash >> 16) & 0xFF) as u8;
-    let o4 = ((hash >> 24) & 0xFF) as u8;
-    format!("10.{}.{}.{}", o2, o3, o4)
+    let offset = (hash % usable_hosts as u64) as u32;
+
+    // +2 to skip .0 (network) and .1 (gateway)
+    let host_u32 = network_u32 + 2 + offset;
+
+    let octets = [
+        ((host_u32 >> 24) & 0xFF) as u8,
+        ((host_u32 >> 16) & 0xFF) as u8,
+        ((host_u32 >> 8) & 0xFF) as u8,
+        (host_u32 & 0xFF) as u8,
+    ];
+    format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3])
 }
