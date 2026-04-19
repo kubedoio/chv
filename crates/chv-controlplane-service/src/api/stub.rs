@@ -133,8 +133,112 @@ pub async fn list_networks_stub() -> impl axum::response::IntoResponse {
     (StatusCode::OK, Json(serde_json::json!([])))
 }
 
-pub async fn list_storage_pools_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!([])))
+pub async fn list_storage_pools_stub(
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    let rows = sqlx::query_as::<_, StoragePoolRow>(
+        r#"
+        SELECT pool_id, node_id, name, backend_class, path,
+               total_bytes, used_bytes, status, created_at
+        FROM storage_pools
+        ORDER BY created_at
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let items: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    let allocatable = r.total_bytes - r.used_bytes;
+                    serde_json::json!({
+                        "id": r.pool_id,
+                        "pool_id": r.pool_id,
+                        "node_id": r.node_id,
+                        "name": r.name,
+                        "pool_type": r.backend_class,
+                        "path": r.path,
+                        "capacity_bytes": r.total_bytes,
+                        "allocatable_bytes": allocatable,
+                        "is_default": false,
+                        "status": r.status,
+                        "created_at": r.created_at,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(items)))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "list_storage_pools db query failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!([])))
+        }
+    }
+}
+
+pub async fn create_storage_pool_stub(
+    chv_webui_bff::auth::BearerToken(_claims): chv_webui_bff::auth::BearerToken,
+    State(state): State<AppState>,
+    AxumJson(payload): AxumJson<Value>,
+) -> impl axum::response::IntoResponse {
+    let name = match payload.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {"code": "BAD_REQUEST", "message": "missing name", "retryable": false}}))),
+    };
+
+    let node_id = payload.get("node_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let backend_class = payload
+        .get("pool_type")
+        .or_else(|| payload.get("backend_class"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("localdisk")
+        .to_string();
+    let path = payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let total_bytes = payload
+        .get("capacity_bytes")
+        .or_else(|| payload.get("total_bytes"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let pool_id = chv_common::gen_short_id();
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO storage_pools (pool_id, node_id, name, backend_class, path, total_bytes, used_bytes, status)
+        VALUES (?, ?, ?, ?, ?, ?, 0, 'available')
+        "#,
+    )
+    .bind(&pool_id)
+    .bind(&node_id)
+    .bind(&name)
+    .bind(&backend_class)
+    .bind(&path)
+    .bind(total_bytes)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": pool_id,
+                "pool_id": pool_id,
+                "node_id": node_id,
+                "name": name,
+                "pool_type": backend_class,
+                "path": path,
+                "capacity_bytes": total_bytes,
+                "allocatable_bytes": total_bytes,
+                "is_default": false,
+                "status": "available",
+            })),
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "create_storage_pool db insert failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": {"code": "INTERNAL", "message": "failed to create storage pool", "retryable": false}})))
+        }
+    }
 }
 
 pub async fn list_operations_stub() -> impl axum::response::IntoResponse {
@@ -224,4 +328,17 @@ struct UserRow {
     user_id: String,
     password_hash: String,
     role: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct StoragePoolRow {
+    pool_id: String,
+    node_id: Option<String>,
+    name: String,
+    backend_class: String,
+    path: String,
+    total_bytes: i64,
+    used_bytes: i64,
+    status: String,
+    created_at: String,
 }

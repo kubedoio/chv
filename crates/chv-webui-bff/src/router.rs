@@ -131,6 +131,15 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/users/delete",
             post(crate::handlers::users::delete_user),
         )
+        // Storage Pools
+        .route(
+            "/v1/storage-pools",
+            post(crate::handlers::storage::list_storage_pools),
+        )
+        .route(
+            "/v1/storage-pools/create",
+            post(crate::handlers::storage::create_storage_pool),
+        )
         // VM Templates
         .route(
             "/v1/vm-templates",

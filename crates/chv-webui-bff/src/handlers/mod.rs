@@ -8,6 +8,7 @@ pub mod networks;
 pub mod nodes;
 pub mod overview;
 pub mod settings;
+pub mod storage;
 pub mod tasks;
 pub mod templates;
 pub mod users;
