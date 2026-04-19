@@ -322,6 +322,25 @@ export type GetVolumeResponse = {
 	summary: VolumeSummary;
 };
 
+export type CreateNodeRequest = {
+	name: string;
+	hostname: string;
+	ip_address: string;
+	agent_url?: string;
+};
+
+export type CreateNodeBffResponse = {
+	id: string;
+	name: string;
+	hostname: string;
+	ip_address: string;
+	status: string;
+	is_local: boolean;
+	agent_url?: string;
+	agent_token: string;
+	created_at?: string;
+};
+
 export type MutateNodeRequest = {
 	node_id: string;
 	action: string;
