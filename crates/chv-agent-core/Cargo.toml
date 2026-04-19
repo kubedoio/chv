@@ -27,6 +27,7 @@ axum = { workspace = true, features = ["ws"] }
 libc = "0.2"
 futures-util = "0.3"
 nix = { workspace = true, features = ["term", "ioctl", "process"] }
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

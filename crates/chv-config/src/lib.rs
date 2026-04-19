@@ -93,6 +93,8 @@ pub struct AgentConfig {
     pub storage_base_dir: PathBuf,
     #[serde(default = "default_console_bind")]
     pub console_bind: String,
+    #[serde(default = "default_agent_jwt_secret")]
+    pub jwt_secret: String,
 }
 
 impl Default for AgentConfig {
@@ -116,6 +118,7 @@ impl Default for AgentConfig {
             bootstrap_token_path: None,
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
             console_bind: default_console_bind(),
+            jwt_secret: default_agent_jwt_secret(),
         }
     }
 }
@@ -128,11 +131,25 @@ fn default_console_bind() -> String {
     "127.0.0.1:8444".to_string()
 }
 
+fn default_agent_jwt_secret() -> String {
+    "chv-dev-secret-change-in-production".to_string()
+}
+
 pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError> {
     let mut cfg = AgentConfig::default();
     if let Some(p) = path {
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
+    }
+    if cfg.jwt_secret == "chv-dev-secret-change-in-production" {
+        return Err(ConfigError::Invalid(
+            "jwt_secret is set to the insecure default; generate one with: openssl rand -base64 32 | tr -d '=+/'".to_string()
+        ));
+    }
+    if cfg.jwt_secret.len() < 32 {
+        return Err(ConfigError::Invalid(
+            "jwt_secret must be at least 32 characters".to_string(),
+        ));
     }
     Ok(cfg)
 }

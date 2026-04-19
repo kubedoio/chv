@@ -366,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let console_bind = config.console_bind.clone();
-    let console_server = ConsoleServer::new(vm_runtime.clone());
+    let console_server = ConsoleServer::new(vm_runtime.clone(), config.jwt_secret.clone());
     tokio::spawn(async move {
         if let Err(e) = console_server.run(&console_bind).await {
             warn!(error = %e, bind = %console_bind, "console server exited");
