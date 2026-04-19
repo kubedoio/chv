@@ -173,4 +173,21 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/firewall-rules/delete",
             post(crate::handlers::firewall::delete_firewall_rule),
         )
+        // VM Snapshots
+        .route(
+            "/v1/vms/snapshots",
+            post(crate::handlers::snapshots::list_vm_snapshots),
+        )
+        .route(
+            "/v1/vms/snapshots/create",
+            post(crate::handlers::snapshots::create_snapshot),
+        )
+        .route(
+            "/v1/vms/snapshots/delete",
+            post(crate::handlers::snapshots::delete_snapshot),
+        )
+        .route(
+            "/v1/vms/snapshots/restore",
+            post(crate::handlers::snapshots::restore_snapshot),
+        )
 }

@@ -67,6 +67,24 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
         Ok(())
     }
 
+    async fn snapshot_vm(
+        &self,
+        _vm_id: &str,
+        _destination: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn restore_snapshot(
+        &self,
+        _vm_id: &str,
+        _source: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
     async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
         let map = self.vms.lock().unwrap();
         let config = map.get(vm_id).ok_or_else(|| ChvError::NotFound {

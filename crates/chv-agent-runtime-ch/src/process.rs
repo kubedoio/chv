@@ -455,6 +455,62 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         })
     }
 
+    async fn snapshot_vm(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "snapshotting vm via ch api");
+
+        let body = format!(r#"{{"destination_url":"file://{}"}}"#, destination);
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.snapshot", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.snapshot returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn restore_snapshot(
+        &self,
+        vm_id: &str,
+        source: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, source = %source, op = operation_id.unwrap_or("-"), "restoring snapshot via ch api");
+
+        let body = format!(r#"{{"source_url":"file://{}"}}"#, source);
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.restore", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.restore returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
     fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
         let map = self.vms.lock().ok()?;
         let proc = map.get(vm_id)?;
