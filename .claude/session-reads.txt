@@ -194,3 +194,11 @@
 /Users/I761222/projects/claude/chv/.worktrees/sqlite-migration/crates/chv-controlplane-service/src/api/operations.rs
 /Users/I761222/projects/claude/chv/.worktrees/sqlite-migration/crates/chv-config/src/lib.rs
 /Users/I761222/projects/claude/chv/.worktrees/sqlite-migration/crates/chv-controlplane-service/src/tests.rs
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/cmd/chv-agent/src/main.rs
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/cmd/chv-agent/Cargo.toml
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/crates/chv-config/src/lib.rs
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/crates/chv-agent-core/src/console_server.rs
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/crates/chv-agent-core/Cargo.toml
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/Cargo.toml
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/crates/chv-webui-bff/src/auth.rs
+/Users/I761222/projects/claude/chv/.claude/worktrees/gap-remediation-sprint2/crates/chv-webui-bff/src/handlers/vms.rs

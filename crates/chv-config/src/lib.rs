@@ -314,6 +314,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn load_agent_config_rejects_insecure_default_without_file() {
+        let err = load_agent_config(None).unwrap_err();
+        assert!(
+            err.to_string().contains("insecure default"),
+            "expected 'insecure default' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_agent_config_rejects_short_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+socket_path = "/run/chv/agent/api.sock"
+runtime_dir = "/run/chv/agent"
+log_level = "info"
+control_plane_addr = "https://localhost:8443"
+stord_socket = "/run/chv/stord/api.sock"
+nwd_socket = "/run/chv/nwd/api.sock"
+chv_binary_path = "/usr/bin/cloud-hypervisor"
+stord_binary_path = "/usr/bin/chv-stord"
+nwd_binary_path = "/usr/bin/chv-nwd"
+cache_path = "/var/lib/chv/cache/agent-cache.json"
+node_id = "test-node"
+jwt_secret = "tooshort"
+"#,
+        )
+        .expect("write config");
+
+        let err = load_agent_config(Some(&config_path)).unwrap_err();
+        assert!(
+            err.to_string().contains("32 characters"),
+            "expected '32 characters' in error, got: {err}"
+        );
+    }
+
+    #[test]
     fn load_controlplane_config_rejects_insecure_default_without_file() {
         let err = load_controlplane_config(None).unwrap_err();
         assert!(err.to_string().contains("insecure default"));
