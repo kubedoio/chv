@@ -679,6 +679,64 @@ pub async fn get_vm_console(
     })))
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ConsoleTokenClaims {
+    sub: String,
+    username: String,
+    exp: u64,
+}
+
+fn generate_console_token(
+    vm_id: &str,
+    username: &str,
+    secret: &str,
+) -> Result<String, jsonwebtoken::errors::Error> {
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 60;
+    let claims = ConsoleTokenClaims {
+        sub: vm_id.to_string(),
+        username: username.to_string(),
+        exp,
+    };
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+    )
+}
+
+pub async fn get_vm_console_url(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::extract::Path(vm_id): axum::extract::Path<String>,
+) -> Result<Json<Value>, BffError> {
+    let node_id: Option<String> =
+        sqlx::query_scalar("SELECT node_id FROM vms WHERE vm_id = ?")
+            .bind(&vm_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?;
+
+    let node_id = node_id.ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+
+    let token = generate_console_token(&vm_id, &claims.username, &state.jwt_secret)
+        .map_err(|e| BffError::Internal(format!("failed to generate console token: {}", e)))?;
+
+    // TODO: resolve actual agent console URL from node inventory (Task 7)
+    let console_url = format!("ws://{}:8444/vms/{}/console?token={}", node_id, vm_id, token);
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+
+    Ok(Json(json!({
+        "vm_id": vm_id,
+        "url": console_url,
+        "expires_at": expires_at.to_rfc3339(),
+    })))
+}
+
 #[derive(sqlx::FromRow)]
 struct VmRow {
     vm_id: String,
