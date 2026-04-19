@@ -8,6 +8,7 @@ import {
 	Network,
 	Server,
 	Settings,
+	Users,
 	Wrench
 } from 'lucide-svelte';
 
@@ -102,7 +103,8 @@ export const navigationGroups: NavGroup[] = [
 	{
 		label: 'Administration',
 		items: [
-			{ href: '/settings', label: 'Settings / Access', shortLabel: 'Settings', icon: Settings }
+			{ href: '/settings', label: 'Settings / Access', shortLabel: 'Settings', icon: Settings },
+			{ href: '/settings/users', label: 'User Management', shortLabel: 'Users', icon: Users }
 		]
 	}
 ];
