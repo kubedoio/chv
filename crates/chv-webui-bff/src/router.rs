@@ -151,4 +151,17 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/cloud-init-templates/:id",
             delete(crate::handlers::templates::delete_cloud_init_template),
         )
+        // Firewall Rules
+        .route(
+            "/v1/firewall-rules",
+            post(crate::handlers::firewall::list_firewall_rules),
+        )
+        .route(
+            "/v1/firewall-rules/create",
+            post(crate::handlers::firewall::create_firewall_rule),
+        )
+        .route(
+            "/v1/firewall-rules/delete",
+            post(crate::handlers::firewall::delete_firewall_rule),
+        )
 }
