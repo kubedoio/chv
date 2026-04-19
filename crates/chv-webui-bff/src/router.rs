@@ -194,4 +194,14 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/vms/snapshots/restore",
             post(crate::handlers::snapshots::restore_snapshot),
         )
+        // API Tokens
+        .route("/v1/tokens", post(crate::handlers::tokens::list_tokens))
+        .route(
+            "/v1/tokens/create",
+            post(crate::handlers::tokens::create_token),
+        )
+        .route(
+            "/v1/tokens/revoke",
+            post(crate::handlers::tokens::revoke_token),
+        )
 }

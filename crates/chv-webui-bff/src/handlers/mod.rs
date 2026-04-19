@@ -13,6 +13,7 @@ pub mod snapshots;
 pub mod storage;
 pub mod tasks;
 pub mod templates;
+pub mod tokens;
 pub mod users;
 pub mod vms;
 pub mod volumes;
