@@ -93,6 +93,8 @@ pub struct AgentConfig {
     pub storage_base_dir: PathBuf,
     #[serde(default = "default_console_bind")]
     pub console_bind: String,
+    #[serde(default = "default_agent_jwt_secret")]
+    pub jwt_secret: String,
 }
 
 impl Default for AgentConfig {
@@ -116,6 +118,7 @@ impl Default for AgentConfig {
             bootstrap_token_path: None,
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
             console_bind: default_console_bind(),
+            jwt_secret: default_agent_jwt_secret(),
         }
     }
 }
@@ -128,11 +131,25 @@ fn default_console_bind() -> String {
     "127.0.0.1:8444".to_string()
 }
 
+fn default_agent_jwt_secret() -> String {
+    "chv-dev-secret-change-in-production".to_string()
+}
+
 pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError> {
     let mut cfg = AgentConfig::default();
     if let Some(p) = path {
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
+    }
+    if cfg.jwt_secret == "chv-dev-secret-change-in-production" {
+        return Err(ConfigError::Invalid(
+            "jwt_secret is set to the insecure default; generate one with: openssl rand -base64 32 | tr -d '=+/'".to_string()
+        ));
+    }
+    if cfg.jwt_secret.len() < 32 {
+        return Err(ConfigError::Invalid(
+            "jwt_secret must be at least 32 characters".to_string(),
+        ));
     }
     Ok(cfg)
 }
@@ -295,6 +312,45 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_agent_config_rejects_insecure_default_without_file() {
+        let err = load_agent_config(None).unwrap_err();
+        assert!(
+            err.to_string().contains("insecure default"),
+            "expected 'insecure default' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_agent_config_rejects_short_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+socket_path = "/run/chv/agent/api.sock"
+runtime_dir = "/run/chv/agent"
+log_level = "info"
+control_plane_addr = "https://localhost:8443"
+stord_socket = "/run/chv/stord/api.sock"
+nwd_socket = "/run/chv/nwd/api.sock"
+chv_binary_path = "/usr/bin/cloud-hypervisor"
+stord_binary_path = "/usr/bin/chv-stord"
+nwd_binary_path = "/usr/bin/chv-nwd"
+cache_path = "/var/lib/chv/cache/agent-cache.json"
+node_id = "test-node"
+jwt_secret = "tooshort"
+"#,
+        )
+        .expect("write config");
+
+        let err = load_agent_config(Some(&config_path)).unwrap_err();
+        assert!(
+            err.to_string().contains("32 characters"),
+            "expected '32 characters' in error, got: {err}"
+        );
+    }
 
     #[test]
     fn load_controlplane_config_rejects_insecure_default_without_file() {
