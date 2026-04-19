@@ -1,6 +1,12 @@
+use rand::Rng;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+
+fn generate_secure_secret() -> String {
+    let bytes: [u8; 32] = rand::rng().random();
+    hex::encode(bytes)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -141,15 +147,14 @@ pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
     }
-    if cfg.jwt_secret == "chv-dev-secret-change-in-production" {
-        return Err(ConfigError::Invalid(
-            "jwt_secret is set to the insecure default; generate one with: openssl rand -base64 32 | tr -d '=+/'".to_string()
-        ));
-    }
-    if cfg.jwt_secret.len() < 32 {
-        return Err(ConfigError::Invalid(
-            "jwt_secret must be at least 32 characters".to_string(),
-        ));
+    if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
+        let generated = generate_secure_secret();
+        eprintln!(
+            "WARNING: jwt_secret not configured or too short. Auto-generated a secure secret for this session. \
+             To persist, add to your agent config: jwt_secret = \"{}\"",
+            generated
+        );
+        cfg.jwt_secret = generated;
     }
     Ok(cfg)
 }
@@ -296,15 +301,14 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
     }
-    if cfg.jwt_secret == "chv-dev-secret-change-in-production" {
-        return Err(ConfigError::Invalid(
-            "jwt_secret is set to the insecure default; generate one with: openssl rand -base64 32 | tr -d '=+/'".to_string()
-        ));
-    }
-    if cfg.jwt_secret.len() < 32 {
-        return Err(ConfigError::Invalid(
-            "jwt_secret must be at least 32 characters".to_string(),
-        ));
+    if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
+        let generated = generate_secure_secret();
+        eprintln!(
+            "WARNING: jwt_secret not configured or too short. Auto-generated a secure secret for this session. \
+             To persist, add to your controlplane config: jwt_secret = \"{}\"",
+            generated
+        );
+        cfg.jwt_secret = generated;
     }
     Ok(cfg)
 }
@@ -314,16 +318,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_agent_config_rejects_insecure_default_without_file() {
-        let err = load_agent_config(None).unwrap_err();
-        assert!(
-            err.to_string().contains("insecure default"),
-            "expected 'insecure default' in error, got: {err}"
-        );
+    fn load_agent_config_auto_generates_secret_when_default() {
+        let cfg = load_agent_config(None).expect("should succeed with auto-generated secret");
+        assert_ne!(cfg.jwt_secret, "chv-dev-secret-change-in-production");
+        assert!(cfg.jwt_secret.len() >= 32, "auto-generated secret should be at least 32 chars");
     }
 
     #[test]
-    fn load_agent_config_rejects_short_secret() {
+    fn load_agent_config_auto_generates_secret_when_short() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("agent.toml");
         std::fs::write(
@@ -345,17 +347,16 @@ jwt_secret = "tooshort"
         )
         .expect("write config");
 
-        let err = load_agent_config(Some(&config_path)).unwrap_err();
-        assert!(
-            err.to_string().contains("32 characters"),
-            "expected '32 characters' in error, got: {err}"
-        );
+        let cfg = load_agent_config(Some(&config_path)).expect("should succeed with auto-generated secret");
+        assert_ne!(cfg.jwt_secret, "tooshort");
+        assert!(cfg.jwt_secret.len() >= 32);
     }
 
     #[test]
-    fn load_controlplane_config_rejects_insecure_default_without_file() {
-        let err = load_controlplane_config(None).unwrap_err();
-        assert!(err.to_string().contains("insecure default"));
+    fn load_controlplane_config_auto_generates_secret_when_default() {
+        let cfg = load_controlplane_config(None).expect("should succeed with auto-generated secret");
+        assert_ne!(cfg.jwt_secret, "chv-dev-secret-change-in-production");
+        assert!(cfg.jwt_secret.len() >= 32);
     }
 
     #[test]

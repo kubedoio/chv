@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { ChevronDown, House, LogOut } from 'lucide-svelte';
+	import { ChevronDown, House, LogOut, Moon, Sun } from 'lucide-svelte';
 	import { navigationGroups } from '$lib/shell/app-shell';
 	import { clearToken, createAPIClient } from '$lib/api/client';
+	import { theme } from '$lib/stores/theme.svelte';
 
 	function isActive(href: string, pathname: string): boolean {
 		if (href === '/') {
@@ -104,6 +105,15 @@
 	</div>
 
 	<div class="app-nav__footer">
+		<button type="button" class="app-nav__logout app-nav__theme-toggle" onclick={() => theme.toggle()} aria-label="Toggle dark mode">
+			{#if theme.value === 'dark'}
+				<Sun size={15} />
+				<span>Light mode</span>
+			{:else}
+				<Moon size={15} />
+				<span>Dark mode</span>
+			{/if}
+		</button>
 		<button type="button" class="app-nav__logout" onclick={handleLogout} aria-label="Log out">
 			<LogOut size={15} />
 			<span>Log out</span>
@@ -248,7 +258,9 @@
 
 	/* ── footer ── */
 	.app-nav__footer {
-		display: grid;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
 		border-top: 1px solid var(--shell-line);
 		padding-top: 0.75rem;
 	}

@@ -138,6 +138,79 @@
   --content-max-width: 1600px;
 }
 
+[data-theme="dark"] {
+  --color-primary: #c4854e;
+  --color-primary-hover: #d49560;
+  --color-primary-active: #b07540;
+  --color-primary-light: #2d2318;
+  --color-primary-dark: #e8b07a;
+  --color-primary-glow: rgba(196, 133, 78, 0.15);
+
+  --color-success: #5a9e62;
+  --color-success-light: #1a2e1c;
+  --color-success-dark: #7cc485;
+  --color-success-glow: rgba(90, 158, 98, 0.15);
+
+  --color-warning: #c4922e;
+  --color-warning-light: #2d2410;
+  --color-warning-dark: #e0b050;
+  --color-warning-glow: rgba(196, 146, 46, 0.15);
+
+  --color-danger: #c46054;
+  --color-danger-light: #2d1a17;
+  --color-danger-dark: #e07a70;
+  --color-danger-glow: rgba(196, 96, 84, 0.15);
+
+  --color-info: #6a8cad;
+  --color-info-light: #1a2230;
+  --color-info-dark: #8ab0d0;
+  --color-info-glow: rgba(106, 140, 173, 0.15);
+
+  --color-neutral-50: #1a1816;
+  --color-neutral-100: #222019;
+  --color-neutral-200: #2e2b24;
+  --color-neutral-300: #3d3930;
+  --color-neutral-400: #6b6050;
+  --color-neutral-500: #9a8e7c;
+  --color-neutral-600: #b5a998;
+  --color-neutral-700: #d0c8ba;
+  --color-neutral-800: #e8e2d8;
+  --color-neutral-900: #f5f2ec;
+
+  --color-sidebar-bg: #1e1c18;
+  --color-sidebar-dark: #161410;
+  --color-sidebar-border: #2e2b24;
+  --color-sidebar-text: #9a8e7c;
+  --color-sidebar-text-active: #f5f2ec;
+
+  --shell-bg: #1a1816;
+  --shell-surface: rgba(30, 28, 24, 0.96);
+  --shell-surface-muted: rgba(26, 24, 20, 0.96);
+  --shell-line: rgba(180, 160, 130, 0.12);
+  --shell-line-strong: rgba(180, 160, 130, 0.22);
+  --shell-text: #f0ebe3;
+  --shell-text-secondary: #b5a998;
+  --shell-text-muted: #7c7065;
+  --shell-accent: #c4854e;
+  --shell-accent-soft: #2d2318;
+
+  --status-healthy-bg: #1a2e1c;
+  --status-healthy-border: rgba(90, 158, 98, 0.18);
+  --status-healthy-text: #7cc485;
+  --status-warning-bg: #2d2410;
+  --status-warning-border: rgba(196, 146, 46, 0.18);
+  --status-warning-text: #e0b050;
+  --status-degraded-bg: #1a2230;
+  --status-degraded-border: rgba(106, 140, 173, 0.18);
+  --status-degraded-text: #8ab0d0;
+  --status-failed-bg: #2d1a17;
+  --status-failed-border: rgba(196, 96, 84, 0.18);
+  --status-failed-text: #e07a70;
+  --status-unknown-bg: #2e2b24;
+  --status-unknown-border: rgba(154, 142, 124, 0.18);
+  --status-unknown-text: #b5a998;
+}
+
 /* ==========================================================================
    Base Styles
    ========================================================================== */
