@@ -9,8 +9,6 @@ import type {
 	CreateVmResponse,
 	MutateVmRequest,
 	MutateVmResponse,
-	GetVmConsoleRequest,
-	GetVmConsoleResponse,
 	GetVmConsoleUrlResponse
 } from './types';
 
@@ -56,16 +54,6 @@ export async function deleteVm(
 	return bffFetch(BFFEndpoints.createVm, { method: 'POST', body: JSON.stringify(req), token });
 }
 
-export async function getVmConsole(
-	req: GetVmConsoleRequest,
-	token?: string
-): Promise<GetVmConsoleResponse> {
-	return bffFetch<GetVmConsoleResponse>(BFFEndpoints.getVmConsole, {
-		method: 'POST',
-		body: JSON.stringify(req),
-		token
-	});
-}
 
 export async function getVmConsoleUrl(
 	vm_id: string,

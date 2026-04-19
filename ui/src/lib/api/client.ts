@@ -591,14 +591,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       const query = params.toString() ? `?${params.toString()}` : '';
       return request<{ message: string; graceful: boolean; timeout: number }>(`/api/v1/vms/${id}/restart${query}`, { method: 'POST' });
     },
-    getBootLogs(id: string, lines?: number) {
-      const query = lines ? `?lines=${lines}` : '';
-      return request<{
-        vm_id: string;
-        lines: { line_number: number; content: string; timestamp: string }[];
-        count: number;
-      }>(`/api/v1/vms/${id}/boot-logs${query}`);
-    },
     // VM Templates
     listVMTemplates() {
       return request<VMTemplate[]>('/api/v1/vm-templates');

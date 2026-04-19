@@ -248,12 +248,6 @@ export type GetVmConsoleRequest = {
 	vm_id: string;
 };
 
-export type GetVmConsoleResponse = {
-	boot_logs: string;
-	vm_id: string;
-	available: boolean;
-	last_updated?: string;
-};
 
 export type GetVmConsoleUrlResponse = {
 	vm_id: string;
