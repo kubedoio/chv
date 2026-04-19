@@ -70,9 +70,11 @@ pub async fn list_vm_templates(
 }
 
 pub async fn create_vm_template(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let name = payload
         .get("name")
         .and_then(|v| v.as_str())
@@ -146,9 +148,11 @@ pub async fn create_vm_template(
 }
 
 pub async fn delete_vm_template(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(template_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let exists: bool =
         sqlx::query_scalar("SELECT COUNT(*) > 0 FROM vm_templates WHERE template_id = ?")
             .bind(&template_id)
@@ -227,9 +231,11 @@ pub async fn list_cloud_init_templates(
 }
 
 pub async fn create_cloud_init_template(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let name = payload
         .get("name")
         .and_then(|v| v.as_str())
@@ -275,9 +281,11 @@ pub async fn create_cloud_init_template(
 }
 
 pub async fn delete_cloud_init_template(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(template_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let exists: bool =
         sqlx::query_scalar("SELECT COUNT(*) > 0 FROM cloud_init_templates WHERE template_id = ?")
             .bind(&template_id)

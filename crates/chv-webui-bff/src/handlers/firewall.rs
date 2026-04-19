@@ -72,9 +72,11 @@ pub async fn list_firewall_rules(
 }
 
 pub async fn create_firewall_rule(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_admin(&claims)?;
     let network_id = payload
         .get("network_id")
         .and_then(|v| v.as_str())
@@ -150,9 +152,11 @@ pub async fn create_firewall_rule(
 }
 
 pub async fn delete_firewall_rule(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_admin(&claims)?;
     let rule_id = payload
         .get("rule_id")
         .and_then(|v| v.as_str())

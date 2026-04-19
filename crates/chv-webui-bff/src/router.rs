@@ -31,6 +31,10 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/overview",
             post(crate::handlers::overview::get_overview),
         )
+        .route(
+            "/v1/metrics",
+            post(crate::handlers::metrics::get_metrics),
+        )
         .route("/v1/nodes", post(crate::handlers::nodes::list_nodes))
         .route("/v1/nodes/get", post(crate::handlers::nodes::get_node))
         .route(
@@ -172,5 +176,32 @@ pub fn bff_router() -> Router<AppState> {
         .route(
             "/v1/firewall-rules/delete",
             post(crate::handlers::firewall::delete_firewall_rule),
+        )
+        // VM Snapshots
+        .route(
+            "/v1/vms/snapshots",
+            post(crate::handlers::snapshots::list_vm_snapshots),
+        )
+        .route(
+            "/v1/vms/snapshots/create",
+            post(crate::handlers::snapshots::create_snapshot),
+        )
+        .route(
+            "/v1/vms/snapshots/delete",
+            post(crate::handlers::snapshots::delete_snapshot),
+        )
+        .route(
+            "/v1/vms/snapshots/restore",
+            post(crate::handlers::snapshots::restore_snapshot),
+        )
+        // API Tokens
+        .route("/v1/tokens", post(crate::handlers::tokens::list_tokens))
+        .route(
+            "/v1/tokens/create",
+            post(crate::handlers::tokens::create_token),
+        )
+        .route(
+            "/v1/tokens/revoke",
+            post(crate::handlers::tokens::revoke_token),
         )
 }

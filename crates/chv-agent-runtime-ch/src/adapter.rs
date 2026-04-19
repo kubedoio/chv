@@ -74,6 +74,30 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
         })
     }
 
+    async fn snapshot_vm(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let _ = (vm_id, destination, operation_id);
+        Err(ChvError::Internal {
+            reason: "snapshot_vm not implemented".to_string(),
+        })
+    }
+
+    async fn restore_snapshot(
+        &self,
+        vm_id: &str,
+        source: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let _ = (vm_id, source, operation_id);
+        Err(ChvError::Internal {
+            reason: "restore_snapshot not implemented".to_string(),
+        })
+    }
+
     fn pty_master(&self, _vm_id: &str) -> Option<OwnedFd> {
         None
     }

@@ -83,9 +83,11 @@ pub async fn list_images(
 }
 
 pub async fn import_image(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let name = payload
         .get("name")
         .and_then(|v| v.as_str())
@@ -160,9 +162,11 @@ pub async fn import_image(
 }
 
 pub async fn delete_image(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let image_id = payload.get("image_id").and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing image_id".into()))?;
 

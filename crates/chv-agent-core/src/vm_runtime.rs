@@ -120,6 +120,24 @@ impl VmRuntime {
         self.adapter.vm_info(vm_id).await
     }
 
+    pub async fn snapshot_vm(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.snapshot_vm(vm_id, destination, operation_id).await
+    }
+
+    pub async fn restore_snapshot(
+        &self,
+        vm_id: &str,
+        source: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.restore_snapshot(vm_id, source, operation_id).await
+    }
+
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
         self.vms.lock().unwrap().get(vm_id).cloned()
     }

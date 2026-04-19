@@ -16,6 +16,7 @@
 	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal } from 'lucide-svelte';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import VmConsole from '$lib/components/vms/VmConsole.svelte';
+	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
@@ -193,6 +194,13 @@
 					</div>
 
 					<div class="detail-sections">
+						<VMMetricsWidget vms={{
+							total: 1,
+							running: detail.summary.power_state.toLowerCase() === 'running' ? 1 : 0,
+							stopped: detail.summary.power_state.toLowerCase() === 'stopped' ? 1 : 0,
+							error: detail.summary.health.toLowerCase() === 'error' ? 1 : 0
+						}} />
+
 						<SectionCard title="Storage Attachments" icon={Database} badgeLabel={String(detail.summary.attached_volumes?.length ?? 0)}>
 							{#if !detail.summary.attached_volumes || detail.summary.attached_volumes.length === 0}
 								<p class="empty-hint">No storage volumes attached to this guest.</p>
