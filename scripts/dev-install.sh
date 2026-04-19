@@ -6,7 +6,7 @@
 #   Network: default (CIDR derived from INSTALL_CHV_BRIDGE_CIDR)
 #   VM:      test-1 (1 CPU, 512 MB RAM, 10 GB disk)
 #
-# Usage: sudo ./scripts/dev-install.sh [--no-uninstall] [--no-seed]
+# Usage: sudo ./scripts/dev-install.sh [--no-uninstall] [--no-seed] [--install-only]
 #
 # Predefined dev defaults (override via environment):
 #   INSTALL_CHV_BRIDGE_IFACE  - default: ens19
@@ -16,6 +16,7 @@
 # Options:
 #   --no-uninstall   Skip the uninstall step (useful for first install)
 #   --no-seed        Skip creating the default network and test-1 VM
+#   --install-only   Skip uninstall + build; run install.sh with existing tarball
 
 set -euo pipefail
 
@@ -24,10 +25,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 NO_UNINSTALL=0
 NO_SEED=0
+INSTALL_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --no-uninstall) NO_UNINSTALL=1 ;;
         --no-seed) NO_SEED=1 ;;
+        --install-only) INSTALL_ONLY=1 ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
 done
@@ -44,6 +47,9 @@ if [ "$NO_SEED" = "0" ]; then
     echo "Seed:   default network + test-1 VM (1 CPU, 512 MB)"
 else
     echo "Seed:   skipped (--no-seed)"
+fi
+if [ "$INSTALL_ONLY" = "1" ]; then
+    echo "Mode:   install-only (skipping uninstall + build)"
 fi
 echo "==============================================="
 echo ""
@@ -67,11 +73,29 @@ if [ "$BUILD_USER" != "root" ]; then
     fi
 fi
 
+# Determine version and tarball path up front (needed for install-only mode)
+VERSION=$(cat "${PROJECT_ROOT}/VERSION" | tr -d '[:space:]')
+TARBALL="${PROJECT_ROOT}/dist/chv-${VERSION}-linux-amd64.tar.gz"
+
+step_num=0
+next_step() {
+    step_num=$((step_num + 1))
+    echo "[${step_num}] $*"
+}
+
 # -----------------------------------------------------------------------------
-# Step 1: Uninstall previous installation
+# Uninstall previous installation
 # -----------------------------------------------------------------------------
-if [ "$NO_UNINSTALL" = "0" ]; then
-    echo "[1/4] Removing previous CHV installation..."
+if [ "$INSTALL_ONLY" = "1" ]; then
+    if [ ! -f "$TARBALL" ]; then
+        echo "ERROR: --install-only requires existing tarball: $TARBALL"
+        echo "Run without --install-only first, or build manually with:"
+        echo "  ./scripts/build-release.sh"
+        exit 1
+    fi
+    echo "[skip] Uninstall + build skipped (--install-only)"
+elif [ "$NO_UNINSTALL" = "0" ]; then
+    next_step "Removing previous CHV installation..."
 
     # Stop and disable all CHV services
     for svc in chv-agent chv-stord chv-nwd chv-controlplane; do
@@ -133,33 +157,35 @@ if [ "$NO_UNINSTALL" = "0" ]; then
 
     echo "  Previous installation removed."
 else
-    echo "[1/4] Skipping uninstall (--no-uninstall)"
+    echo "[skip] Skipping uninstall (--no-uninstall)"
 fi
 
 # -----------------------------------------------------------------------------
-# Step 2: Build release tarball from source
+# Build release tarball from source
 # -----------------------------------------------------------------------------
-echo "[2/4] Building release tarball from source..."
-cd "$PROJECT_ROOT"
-if [ "$BUILD_USER" = "root" ]; then
-    ./scripts/build-release.sh
+if [ "$INSTALL_ONLY" = "1" ]; then
+    echo "[skip] Build skipped (--install-only)"
 else
-    echo "  Building as user: $BUILD_USER (preserves incremental cargo/npm caches)"
-    sudo -u "$BUILD_USER" -H /bin/bash -lc "cd \"$PROJECT_ROOT\" && ./scripts/build-release.sh"
+    next_step "Building release tarball from source..."
+    cd "$PROJECT_ROOT"
+    if [ "$BUILD_USER" = "root" ]; then
+        ./scripts/build-release.sh
+    else
+        echo "  Building as user: $BUILD_USER (preserves incremental cargo/npm caches)"
+        sudo -u "$BUILD_USER" -H /bin/bash -lc "cd \"$PROJECT_ROOT\" && ./scripts/build-release.sh"
+    fi
+
+    if [ ! -f "$TARBALL" ]; then
+        echo "ERROR: Build completed but tarball not found: $TARBALL"
+        exit 1
+    fi
+    next_step "Built tarball: $TARBALL"
 fi
 
 # -----------------------------------------------------------------------------
-# Step 3: Determine version and tarball path
+# Run installer with local tarball
 # -----------------------------------------------------------------------------
-VERSION=$(cat VERSION | tr -d '[:space:]')
-TARBALL="dist/chv-${VERSION}-linux-amd64.tar.gz"
-
-echo "[3/4] Built tarball: $TARBALL"
-
-# -----------------------------------------------------------------------------
-# Step 4: Run installer with local tarball
-# -----------------------------------------------------------------------------
-echo "[4/4] Running installer..."
+next_step "Running installer..."
 export INSTALL_CHV_TARBALL_PATH="$(realpath "$TARBALL")"
 export INSTALL_CHV_VERSION="$VERSION"
 export INSTALL_CHV_NO_SEED="$NO_SEED"

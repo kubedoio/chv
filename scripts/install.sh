@@ -46,6 +46,7 @@ EXTRACT_DIR=""
 CLEANUP_TMPDIR=""
 JWT_SECRET=""
 BOOTSTRAP_TOKEN=""
+CHV_NODE_ID=""
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -394,16 +395,12 @@ seed_dev_resources() {
         return
     fi
 
-    info "Seeding dev resources (default network + test-1 VM)..."
-
-    # Get the enrolled node_id
-    local node_id
-    node_id=$(sqlite3 "${CHV_DB_PATH}" \
-        "SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1;" 2>/dev/null || echo "")
-    if [ -z "$node_id" ]; then
-        warn "No enrolled node found, skipping dev resource seeding."
+    if [ -z "$CHV_NODE_ID" ]; then
+        warn "CHV_NODE_ID not set, skipping dev resource seeding."
         return
     fi
+
+    info "Seeding dev resources (default network + test-1 VM) for node ${CHV_NODE_ID}..."
 
     # Derive network CIDR from bridge CIDR (e.g. 10.200.0.1/24 -> 10.200.0.0/24)
     local bridge_ip="${INSTALL_CHV_BRIDGE_CIDR%/*}"
@@ -421,7 +418,7 @@ seed_dev_resources() {
     if [ "${net_exists}" -eq 0 ] 2>/dev/null; then
         sqlite3 "${CHV_DB_PATH}" <<EOF
 INSERT INTO networks (network_id, node_id, display_name, created_at, updated_at)
-VALUES ('default', '${node_id}', 'default', '${now}', '${now}');
+VALUES ('default', '${CHV_NODE_ID}', 'default', '${now}', '${now}');
 
 INSERT INTO network_desired_state (
     network_id, desired_generation, desired_status,
@@ -459,14 +456,14 @@ EOF
 
         sqlite3 "${CHV_DB_PATH}" <<EOF
 INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
-VALUES ('test-1', '${node_id}', 'test-1', '${now}', '${now}');
+VALUES ('test-1', '${CHV_NODE_ID}', 'test-1', '${now}', '${now}');
 
 INSERT INTO vm_desired_state (
     vm_id, desired_generation, desired_status, requested_by, target_node_id,
     cpu_count, memory_bytes, image_ref, boot_mode, desired_power_state,
     requested_at, updated_at
 )
-VALUES ('test-1', 1, 'Pending', 'dev-install', '${node_id}',
+VALUES ('test-1', 1, 'Pending', 'dev-install', '${CHV_NODE_ID}',
         1, ${memory_bytes}, '${BASE_IMAGE_PATH}', 'firmware', 'Running',
         '${now}', '${now}');
 
@@ -474,11 +471,11 @@ INSERT INTO vm_observed_state (
     vm_id, observed_generation, runtime_status, health_status, node_id,
     observed_at, updated_at
 )
-VALUES ('test-1', 1, 'stopped', 'unknown', '${node_id}',
+VALUES ('test-1', 1, 'stopped', 'unknown', '${CHV_NODE_ID}',
         '${now}', '${now}');
 
 INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, volume_kind, created_at, updated_at)
-VALUES ('${volume_id}', '${node_id}', 'test-1-disk', ${volume_size}, 'disk', '${now}', '${now}');
+VALUES ('${volume_id}', '${CHV_NODE_ID}', 'test-1-disk', ${volume_size}, 'disk', '${now}', '${now}');
 
 INSERT INTO volume_desired_state (
     volume_id, desired_generation, desired_status, requested_by, attached_vm_id,
@@ -618,6 +615,9 @@ EOF
 install_configs() {
     info "Installing configuration files..."
 
+    CHV_NODE_ID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    info "Node ID: ${CHV_NODE_ID}"
+
     JWT_SECRET=$(openssl rand -base64 32 | tr -d '=+/')
 
     cat > "$CHV_CONFIG_DIR/controlplane.toml" <<EOF
@@ -652,7 +652,7 @@ chv_binary_path = "/usr/bin/cloud-hypervisor"
 stord_binary_path = "/usr/local/bin/chv-stord"
 nwd_binary_path = "/usr/local/bin/chv-nwd"
 cache_path = "${CHV_DATA_DIR}/cache/agent-cache.json"
-node_id = ""
+node_id = "${CHV_NODE_ID}"
 metrics_bind = "127.0.0.1:9901"
 storage_base_dir = "${CHV_DATA_DIR}/storage"
 bootstrap_token_path = "${CHV_CONFIG_DIR}/bootstrap.token"
@@ -1006,6 +1006,7 @@ cat <<EOF
 ===============================================
 
 Version:        ${INSTALL_CHV_VERSION}
+Node ID:        ${CHV_NODE_ID}
 Web UI:         http://${LOCAL_IP}/
 API:            http://127.0.0.1:8080/
 Database:       ${CHV_DB_PATH}
