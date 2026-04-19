@@ -130,6 +130,7 @@ mod tests {
             disks: vec![],
             nics: vec![],
             desired_state: "Running".to_string(),
+            cloud_init_userdata: None,
         };
         let err = spec.validate().unwrap_err();
         match err {
@@ -150,6 +151,7 @@ mod tests {
             disks: vec![],
             nics: vec![],
             desired_state: "Running".to_string(),
+            cloud_init_userdata: None,
         };
         let err = spec.validate().unwrap_err();
         match err {
@@ -177,6 +179,7 @@ mod tests {
                 gateway: "".to_string(),
             }],
             desired_state: "Running".to_string(),
+            cloud_init_userdata: None,
         };
         let err = spec.validate().unwrap_err();
         match err {
