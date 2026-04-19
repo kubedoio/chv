@@ -251,7 +251,7 @@ download_base_image() {
         # Ensure existing image is raw (not qcow2)
         if cmd_exists qemu-img; then
             local img_fmt
-            img_fmt=$(qemu-img info --output=json "$BASE_IMAGE_PATH" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4)
+            img_fmt=$(qemu-img info --output=json "$BASE_IMAGE_PATH" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4 || true)
             if [ "$img_fmt" = "qcow2" ]; then
                 info "Converting existing qcow2 image to raw format..."
                 local raw_path="${BASE_IMAGE_PATH}.raw"
@@ -278,7 +278,7 @@ download_base_image() {
         # Ubuntu cloud images are qcow2; convert to raw for CHV firmware boot
         if cmd_exists qemu-img; then
             local img_fmt
-            img_fmt=$(qemu-img info --output=json "$tmp_image" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4)
+            img_fmt=$(qemu-img info --output=json "$tmp_image" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4 || true)
             if [ "$img_fmt" = "qcow2" ]; then
                 info "Converting qcow2 image to raw format..."
                 qemu-img convert -f qcow2 -O raw "$tmp_image" "$BASE_IMAGE_PATH"
@@ -366,19 +366,12 @@ import_base_image() {
     local size_bytes
     size_bytes=$(stat -c%s "$BASE_IMAGE_PATH" 2>/dev/null || stat -f%z "$BASE_IMAGE_PATH" 2>/dev/null || echo "0")
 
-    sqlite3 "${CHV_DB_PATH}" \
+    if sqlite3 "${CHV_DB_PATH}" \
         "INSERT INTO images
          (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at)
          VALUES ('${image_id}', 'ubuntu-noble', 'disk', 'raw', ${size_bytes}, NULL, '${BASE_IMAGE_PATH}', 'ubuntu', '24.04', 'available', NULL,
                  strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'));" 2>/dev/null
-
-    # Verify import
-    local imported
-    imported=$(sqlite3 "${CHV_DB_PATH}" \
-        "SELECT COUNT(*) FROM images WHERE image_id='${image_id}';" 2>/dev/null || echo "0")
-
-    if [ "${imported}" -gt 0 ] 2>/dev/null; then
+                 strftime('%Y-%m-%dT%H:%M:%SZ','now'));" 2>/dev/null; then
         info "Base image imported successfully (image_id: ${image_id})."
     else
         warn "Failed to import base image into database."
@@ -416,7 +409,7 @@ seed_dev_resources() {
     net_exists=$(sqlite3 "${CHV_DB_PATH}" \
         "SELECT COUNT(*) FROM networks WHERE network_id='default';" 2>/dev/null || echo "0")
     if [ "${net_exists}" -eq 0 ] 2>/dev/null; then
-        sqlite3 "${CHV_DB_PATH}" <<EOF
+        if sqlite3 "${CHV_DB_PATH}" <<EOF
 INSERT INTO networks (network_id, node_id, display_name, created_at, updated_at)
 VALUES ('default', '${CHV_NODE_ID}', 'default', '${now}', '${now}');
 
@@ -436,12 +429,21 @@ INSERT INTO network_observed_state (
 VALUES ('default', 1, 'ready', 'healthy', 'private',
         '${now}', '${now}');
 EOF
-        info "Default network created (${network_cidr}, gateway ${gateway_ip})."
+        then
+            info "Default network created (${network_cidr}, gateway ${gateway_ip})."
+        else
+            warn "Failed to create default network in database."
+        fi
     else
         info "Default network already exists, skipping."
     fi
 
     # --- Create test-1 VM ---
+    if [ ! -f "$BASE_IMAGE_PATH" ]; then
+        warn "Base image not found at ${BASE_IMAGE_PATH}, skipping test VM creation."
+        return
+    fi
+
     local vm_exists
     vm_exists=$(sqlite3 "${CHV_DB_PATH}" \
         "SELECT COUNT(*) FROM vms WHERE vm_id='test-1';" 2>/dev/null || echo "0")
@@ -454,7 +456,7 @@ EOF
         # First usable host IP after gateway (.2)
         local ip_address="${bridge_ip%.*}.2"
 
-        sqlite3 "${CHV_DB_PATH}" <<EOF
+        if sqlite3 "${CHV_DB_PATH}" <<EOF
 INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
 VALUES ('test-1', '${CHV_NODE_ID}', 'test-1', '${now}', '${now}');
 
@@ -494,7 +496,11 @@ INSERT INTO operations (
 VALUES ('op-create-test-1', 'create-vm-test-1', 'vm', 'test-1', 'CreateVm', 'Accepted',
         'dev-install', 1, '${now}', '${now}', '${now}');
 EOF
-        info "Test VM 'test-1' created (1 CPU, 512 MB, 10 GB disk, IP ${ip_address})."
+        then
+            info "Test VM 'test-1' created (1 CPU, 512 MB, 10 GB disk, IP ${ip_address})."
+        else
+            warn "Failed to create test VM in database."
+        fi
     else
         info "Test VM 'test-1' already exists, skipping."
     fi
