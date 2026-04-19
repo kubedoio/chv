@@ -171,7 +171,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -193,7 +193,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -215,7 +215,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -235,7 +235,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await

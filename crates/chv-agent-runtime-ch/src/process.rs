@@ -490,7 +490,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/tmp/chv-vm-1.sock"),
+            api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
         };
         let err = adapter.validate_vm_config(&cfg).unwrap_err();
         assert!(matches!(err, ChvError::InvalidArgument { field, .. } if field == "kernel_path"));
@@ -517,7 +517,7 @@ mod tests {
                 read_only: false,
             }],
             nics: vec![],
-            api_socket_path: PathBuf::from("/tmp/chv-vm-1.sock"),
+            api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
         };
         adapter.validate_vm_config(&cfg).unwrap();
     }

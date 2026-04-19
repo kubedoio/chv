@@ -658,7 +658,7 @@ pub async fn get_vm_console(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?;
 
-    let log_path = format!("/run/chv/agent/vm-{}-serial.log", vm_id);
+    let log_path = format!("/run/chv/agent/vms/{}/console.log", vm_id);
     let log_content = tokio::fs::read_to_string(&log_path)
         .await
         .unwrap_or_default();
