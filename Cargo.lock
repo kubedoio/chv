@@ -391,13 +391,16 @@ dependencies = [
 name = "chv-common"
 version = "0.1.0"
 dependencies = [
- "uuid",
+ "hex",
+ "rand 0.9.4",
 ]
 
 [[package]]
 name = "chv-config"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "rand 0.9.4",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -427,6 +430,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bcrypt",
+ "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-errors",
@@ -445,7 +449,6 @@ dependencies = [
  "tonic",
  "tower 0.5.3",
  "tracing",
- "uuid",
  "x509-parser",
 ]
 
@@ -597,6 +600,7 @@ dependencies = [
  "axum",
  "bcrypt",
  "chrono",
+ "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-webui-bff-api",
@@ -607,7 +611,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "uuid",
 ]
 
 [[package]]
