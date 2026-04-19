@@ -13,6 +13,7 @@
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle } from 'lucide-svelte';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
+	import NodeHealthDashboard from '$lib/components/NodeHealthDashboard.svelte';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
@@ -144,6 +145,10 @@
 				</div>
 
 				<div class="detail-sections">
+					<SectionCard title="Node Health" icon={Activity}>
+						<NodeHealthDashboard />
+					</SectionCard>
+
 					<SectionCard title="Hosted Workloads" icon={Box} badgeLabel={String(detail.hosted_vms.length)}>
 						{#if detail.hosted_vms.length === 0}
 							<p class="empty-hint">No virtual machines currently placed on this node.</p>

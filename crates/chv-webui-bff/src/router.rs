@@ -31,6 +31,10 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/overview",
             post(crate::handlers::overview::get_overview),
         )
+        .route(
+            "/v1/metrics",
+            post(crate::handlers::metrics::get_metrics),
+        )
         .route("/v1/nodes", post(crate::handlers::nodes::list_nodes))
         .route("/v1/nodes/get", post(crate::handlers::nodes::get_node))
         .route(

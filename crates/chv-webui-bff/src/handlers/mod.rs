@@ -4,6 +4,7 @@ pub mod events;
 pub mod firewall;
 pub mod images;
 pub mod maintenance;
+pub mod metrics;
 pub mod networks;
 pub mod nodes;
 pub mod overview;

@@ -22,6 +22,7 @@
 		ArrowUpRight
 	} from 'lucide-svelte';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
+	import TopResourceConsumers from '$lib/components/TopResourceConsumers.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -200,6 +201,10 @@
 				</SectionCard>
 			</aside>
 		</main>
+
+		<div class="top-consumers-wrapper">
+			<TopResourceConsumers />
+		</div>
 	{/if}
 </div>
 
@@ -484,6 +489,10 @@
 		text-decoration: none;
 		color: var(--shell-accent);
 		letter-spacing: 0.05em;
+	}
+
+	.top-consumers-wrapper {
+		margin-top: 1rem;
 	}
 
 	@media (max-width: 1100px) {
