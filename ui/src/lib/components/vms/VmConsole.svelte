@@ -20,7 +20,8 @@
 
 	function connect() {
 		if (socket) socket.close();
-		socket = new WebSocket(consoleUrl);
+		const wsUrl = consoleUrl.startsWith('ws') ? consoleUrl : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}${consoleUrl}`;
+		socket = new WebSocket(wsUrl);
 		socket.binaryType = 'arraybuffer';
 
 		socket.onopen = () => {

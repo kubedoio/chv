@@ -721,13 +721,13 @@ pub async fn get_vm_console_url(
             .await
             .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?;
 
-    let node_id = node_id.ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+    let _node_id = node_id.ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
 
     let token = generate_console_token(&vm_id, &claims.username, &state.jwt_secret)
         .map_err(|e| BffError::Internal(format!("failed to generate console token: {}", e)))?;
 
-    // TODO: resolve actual agent console URL from node inventory (Task 7)
-    let console_url = format!("ws://{}:8444/vms/{}/console?token={}", node_id, vm_id, token);
+    // Return a relative path so the browser connects through the nginx WebSocket proxy
+    let console_url = format!("/ws/vms/{}/console?token={}", vm_id, token);
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
 
     Ok(Json(json!({

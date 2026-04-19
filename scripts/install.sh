@@ -674,6 +674,7 @@ bootstrap_token_path = "${CHV_CONFIG_DIR}/bootstrap.token"
 tls_cert_path = "/run/chv/agent/agent.crt"
 tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
+console_bind = "127.0.0.1:8444"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/agent.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml"
@@ -865,6 +866,17 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /ws/vms/ {
+        proxy_pass http://127.0.0.1:8444/vms/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400;
     }
 
     gzip on;
