@@ -11,11 +11,14 @@
   import CreateStoragePoolModal from '$lib/components/modals/CreateStoragePoolModal.svelte';
   import { useTable, formatBytes } from '$lib/utils/table.svelte';
   import type { StoragePool } from '$lib/api/types';
+  import ErrorState from '$lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });
   let items: StoragePool[] = $state([]);
   let loading = $state(true);
+  let error = $state(false);
   let createModalOpen = $state(false);
 
   // Table state management - reactive to items
@@ -112,10 +115,12 @@
 
   async function loadStoragePools() {
     loading = true;
+    error = false;
     try {
       items = (await client.listStoragePools()) ?? [];
     } catch (err) {
       toast.error('Failed to load storage pools');
+      error = true;
       items = [];
     } finally {
       loading = false;
@@ -154,41 +159,55 @@
     </button>
   </div>
 
-  <!-- Filter bar -->
-  <FilterBar
-    filters={filterOptions}
-    activeFilters={table.filters}
-    onFilterChange={table.setFilter}
-    onClearAll={table.clearAllFilters}
-  />
-
-  <!-- Data table -->
-  <DataTable
-    data={table.paginatedData}
-    {columns}
-    {loading}
-    sortColumn={table.sortColumn ?? undefined}
-    sortDirection={table.sortDirection}
-    emptyIcon={HardDrive as unknown as typeof import('svelte').SvelteComponent}
-    emptyTitle="No storage pools yet"
-    emptyDescription="Create a storage pool to store VM disks"
-    onSort={handleSort}
-    rowId={(pool: StoragePool) => pool.id}
-  >
-    {#snippet children(pool: StoragePool)}
-      <StateBadge label={pool.status} />
-    {/snippet}
-  </DataTable>
-
-  <!-- Pagination -->
-  {#if !loading && table.totalItems > 0}
-    <Pagination
-      page={table.page}
-      pageSize={table.pageSize}
-      totalItems={table.totalItems}
-      onPageChange={table.setPage}
-      onPageSizeChange={table.setPageSize}
+  {#if error}
+    <div class="p-4">
+      <ErrorState />
+    </div>
+  {:else if !loading && items.length === 0}
+    <div class="p-4">
+      <EmptyInfrastructureState
+        title="No storage pools configured"
+        description="Storage pools define where VM disk images are stored on the host."
+        hint="Click 'Create Pool' to add a local disk storage pool."
+      />
+    </div>
+  {:else}
+    <!-- Filter bar -->
+    <FilterBar
+      filters={filterOptions}
+      activeFilters={table.filters}
+      onFilterChange={table.setFilter}
+      onClearAll={table.clearAllFilters}
     />
+
+    <!-- Data table -->
+    <DataTable
+      data={table.paginatedData}
+      {columns}
+      {loading}
+      sortColumn={table.sortColumn ?? undefined}
+      sortDirection={table.sortDirection}
+      emptyIcon={HardDrive as unknown as typeof import('svelte').SvelteComponent}
+      emptyTitle="No storage pools yet"
+      emptyDescription="Create a storage pool to store VM disks"
+      onSort={handleSort}
+      rowId={(pool: StoragePool) => pool.id}
+    >
+      {#snippet children(pool: StoragePool)}
+        <StateBadge label={pool.status} />
+      {/snippet}
+    </DataTable>
+
+    <!-- Pagination -->
+    {#if !loading && table.totalItems > 0}
+      <Pagination
+        page={table.page}
+        pageSize={table.pageSize}
+        totalItems={table.totalItems}
+        onPageChange={table.setPage}
+        onPageSizeChange={table.setPageSize}
+      />
+    {/if}
   {/if}
 </section>
 
