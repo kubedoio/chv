@@ -114,4 +114,17 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/volumes/mutate",
             post(crate::handlers::volumes::mutate_volume),
         )
+        .route("/v1/users", post(crate::handlers::users::list_users))
+        .route(
+            "/v1/users/create",
+            post(crate::handlers::users::create_user),
+        )
+        .route(
+            "/v1/users/update",
+            post(crate::handlers::users::update_user),
+        )
+        .route(
+            "/v1/users/delete",
+            post(crate::handlers::users::delete_user),
+        )
 }
