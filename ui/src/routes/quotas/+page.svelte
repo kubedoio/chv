@@ -14,11 +14,7 @@
   let error = $state<string | null>(null);
   let showSettingsModal = $state(false);
   let editingQuota = $state<Quota | null>(null);
-  function getIsAdmin(): boolean {
-    return getStoredRole() === 'admin';
-  }
-
-  let isAdmin = $state(getIsAdmin());
+  let isAdmin = $state(getStoredRole() === 'admin');
 
   const client = createAPIClient();
 
