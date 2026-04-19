@@ -136,23 +136,24 @@
 								<button class="btn-danger btn-sm" onclick={() => submitAction(confirmingAction!)}>Confirm</button>
 								<button class="btn-secondary btn-sm" onclick={() => confirmingAction = null}>Cancel</button>
 							</div>
-						{:else}
-							<button class="btn-primary btn-sm" disabled={detail.summary.power_state === 'running'} onclick={() => handleActionClick('start')}>
-								<Play size={14} />
-								Start
-							</button>
-							<button class="btn-secondary btn-sm" disabled={detail.summary.power_state !== 'running'} onclick={() => handleActionClick('stop', true)}>
-								<Square size={14} />
-								Stop
-							</button>
-							<button class="btn-secondary btn-sm" disabled={detail.summary.power_state !== 'running'} onclick={() => handleActionClick('restart', true)}>
-								<RotateCcw size={14} />
-								Reboot
-							</button>
-							<button class="btn-secondary btn-sm" onclick={() => handleActionClick('delete', true)}>
-								<Trash2 size={14} />
-								Delete
-							</button>
+							{:else}
+								{@const ps = detail.summary.power_state.toLowerCase()}
+								<button class="btn-primary btn-sm" disabled={ps === 'running'} onclick={() => handleActionClick('start')}>
+									<Play size={14} />
+									Start
+								</button>
+								<button class="btn-secondary btn-sm" disabled={ps !== 'running'} onclick={() => handleActionClick('stop', true)}>
+									<Square size={14} />
+									Stop
+								</button>
+								<button class="btn-secondary btn-sm" disabled={ps !== 'running'} onclick={() => handleActionClick('restart', true)}>
+									<RotateCcw size={14} />
+									Reboot
+								</button>
+								<button class="btn-secondary btn-sm" onclick={() => handleActionClick('delete', true)}>
+									<Trash2 size={14} />
+									Delete
+								</button>
 						{/if}
 					</ActionStrip>
 				</form>

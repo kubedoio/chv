@@ -22,8 +22,8 @@
 
 	const stats = $derived([
 		{ label: 'Total VMs', value: items.length },
-		{ label: 'Running', value: items.filter(v => v.power_state === 'running').length, status: 'healthy' as const },
-		{ label: 'Stopped', value: items.filter(v => v.power_state === 'stopped').length, status: 'neutral' as const },
+		{ label: 'Running', value: items.filter(v => v.power_state.toLowerCase() === 'running').length, status: 'healthy' as const },
+		{ label: 'Stopped', value: items.filter(v => v.power_state.toLowerCase() === 'stopped').length, status: 'neutral' as const },
 		{ label: 'Degraded', value: items.filter(v => v.health !== 'healthy').length, status: items.filter(v => v.health !== 'healthy').length > 0 ? 'warning' as const : 'neutral' as const },
 		{ label: 'Open Alerts', value: items.reduce((sum, v) => sum + (v.alerts || 0), 0), status: items.reduce((sum, v) => sum + (v.alerts || 0), 0) > 0 ? 'critical' as const : 'neutral' as const }
 	]);
