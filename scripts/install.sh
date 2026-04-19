@@ -247,19 +247,54 @@ download_base_image() {
     chown "${CHV_USER}:${CHV_USER}" "${CHV_DATA_DIR}/images"
 
     if [ -f "$BASE_IMAGE_PATH" ]; then
-        info "Base image already exists at ${BASE_IMAGE_PATH}, skipping download."
+        # Ensure existing image is raw (not qcow2)
+        if cmd_exists qemu-img; then
+            local img_fmt
+            img_fmt=$(qemu-img info --output=json "$BASE_IMAGE_PATH" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4)
+            if [ "$img_fmt" = "qcow2" ]; then
+                info "Converting existing qcow2 image to raw format..."
+                local raw_path="${BASE_IMAGE_PATH}.raw"
+                qemu-img convert -f qcow2 -O raw "$BASE_IMAGE_PATH" "$raw_path"
+                mv "$raw_path" "$BASE_IMAGE_PATH"
+                chown "${CHV_USER}:${CHV_USER}" "$BASE_IMAGE_PATH"
+                info "Base image converted to raw -> ${BASE_IMAGE_PATH}"
+            else
+                info "Base image already exists at ${BASE_IMAGE_PATH}, skipping download."
+            fi
+        else
+            info "Base image already exists at ${BASE_IMAGE_PATH}, skipping download."
+        fi
         return
     fi
 
     info "Downloading Ubuntu Noble base image for ${CHV_ARCH}..."
     info "URL: ${BASE_IMAGE_URL}"
 
-    if curl -fsSL --retry 3 --retry-delay 5 "$BASE_IMAGE_URL" -o "$BASE_IMAGE_PATH"; then
+    local tmp_image
+    tmp_image="${BASE_IMAGE_PATH}.tmp"
+
+    if curl -fsSL --retry 3 --retry-delay 5 "$BASE_IMAGE_URL" -o "$tmp_image"; then
+        # Ubuntu cloud images are qcow2; convert to raw for CHV firmware boot
+        if cmd_exists qemu-img; then
+            local img_fmt
+            img_fmt=$(qemu-img info --output=json "$tmp_image" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4)
+            if [ "$img_fmt" = "qcow2" ]; then
+                info "Converting qcow2 image to raw format..."
+                qemu-img convert -f qcow2 -O raw "$tmp_image" "$BASE_IMAGE_PATH"
+                rm -f "$tmp_image"
+            else
+                mv "$tmp_image" "$BASE_IMAGE_PATH"
+            fi
+        else
+            warn "qemu-img not found; keeping image as-is (may be qcow2)."
+            mv "$tmp_image" "$BASE_IMAGE_PATH"
+        fi
+
         chown "${CHV_USER}:${CHV_USER}" "$BASE_IMAGE_PATH"
         chmod 644 "$BASE_IMAGE_PATH"
         local img_size
         img_size=$(du -h "$BASE_IMAGE_PATH" | cut -f1)
-        info "Base image downloaded (${img_size}) -> ${BASE_IMAGE_PATH}"
+        info "Base image ready (${img_size}) -> ${BASE_IMAGE_PATH}"
     else
         warn "Failed to download base image from ${BASE_IMAGE_URL}"
         warn "You can manually download and import it later via the Web UI."
