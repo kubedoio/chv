@@ -302,6 +302,15 @@ download_base_image() {
     fi
 }
 
+## added for workaround
+copy_firmware() {
+info "Copy BUID firmware file..."
+	#cp /root/Build/CloudHvX64/DEBUG_GCC/FV/CLOUDHV.fd
+	cp /root/CLOUDHV.fd /var/lib/chv/hypervisor-fw
+
+}
+
+
 # -----------------------------------------------------------------------------
 # Import Base Image into Control Plane
 # -----------------------------------------------------------------------------
@@ -989,7 +998,8 @@ download_release
 install_binaries_and_assets
 install_cloud_hypervisor
 download_base_image
-download_firmware
+#download_firmware
+copy_firmware
 generate_certs
 setup_network
 install_configs
