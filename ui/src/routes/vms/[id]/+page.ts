@@ -1,6 +1,6 @@
 import type { PageLoad } from './$types';
 import { getStoredToken } from '$lib/api/client';
-import { getVm } from '$lib/bff/vms';
+import { getVm, getVmConsoleUrl } from '$lib/bff/vms';
 import type { VmSummary, RelatedTask, AttachedVolume, AttachedNic } from '$lib/bff/types';
 
 export type VmDetailModel = {
@@ -20,6 +20,7 @@ export type VmDetailModel = {
 	sections: { id: string; label: string; count?: number }[];
 	recent_tasks: RelatedTask[];
 	configuration: Array<{ label: string; value: string }>;
+	consoleUrl?: string;
 };
 
 function buildSections(summary: VmSummary | null): { id: string; label: string; count?: number }[] {
@@ -47,7 +48,7 @@ function buildConfiguration(summary: VmSummary): Array<{ label: string; value: s
 	];
 }
 
-function buildDetailModel(summary: VmSummary | null, currentTab: string): VmDetailModel {
+function buildDetailModel(summary: VmSummary | null, currentTab: string, consoleUrl?: string): VmDetailModel {
 	if (!summary) {
 		return {
 			state: 'empty',
@@ -85,7 +86,8 @@ function buildDetailModel(summary: VmSummary | null, currentTab: string): VmDeta
 		},
 		sections: buildSections(summary),
 		recent_tasks: summary.recent_tasks ?? [],
-		configuration: buildConfiguration(summary)
+		configuration: buildConfiguration(summary),
+		consoleUrl
 	};
 }
 
@@ -94,7 +96,16 @@ export const load: PageLoad = async ({ params, url }) => {
 	const currentTab = url.searchParams.get('tab') ?? 'summary';
 	try {
 		const res = await getVm({ vm_id: params.id }, token);
-		const detail = buildDetailModel(res.summary ?? null, currentTab);
+		let consoleUrl: string | undefined;
+		if (currentTab === 'console') {
+			try {
+				const consoleRes = await getVmConsoleUrl(params.id, token);
+				consoleUrl = consoleRes.url;
+			} catch (e) {
+				console.warn('Failed to fetch console URL:', e);
+			}
+		}
+		const detail = buildDetailModel(res.summary ?? null, currentTab, consoleUrl);
 		return { detail, requestedVmId: params.id };
 	} catch {
 		const detail: VmDetailModel = {

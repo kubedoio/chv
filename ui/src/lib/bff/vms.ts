@@ -10,7 +10,8 @@ import type {
 	MutateVmRequest,
 	MutateVmResponse,
 	GetVmConsoleRequest,
-	GetVmConsoleResponse
+	GetVmConsoleResponse,
+	GetVmConsoleUrlResponse
 } from './types';
 
 export async function listVms(req: ListVmsRequest, token?: string): Promise<ListVmsResponse> {
@@ -62,6 +63,16 @@ export async function getVmConsole(
 	return bffFetch<GetVmConsoleResponse>(BFFEndpoints.getVmConsole, {
 		method: 'POST',
 		body: JSON.stringify(req),
+		token
+	});
+}
+
+export async function getVmConsoleUrl(
+	vm_id: string,
+	token?: string
+): Promise<GetVmConsoleUrlResponse> {
+	return bffFetch<GetVmConsoleUrlResponse>(`/v1/vms/${vm_id}/console-url`, {
+		method: 'GET',
 		token
 	});
 }

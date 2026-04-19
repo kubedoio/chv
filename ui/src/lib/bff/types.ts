@@ -255,6 +255,12 @@ export type GetVmConsoleResponse = {
 	last_updated?: string;
 };
 
+export type GetVmConsoleUrlResponse = {
+	vm_id: string;
+	url: string;
+	expires_at: string;
+};
+
 export type MutateVolumeRequest = {
 	volume_id: string;
 	action: string;
