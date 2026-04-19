@@ -98,6 +98,10 @@ pub fn bff_router() -> Router<AppState> {
             post(crate::handlers::images::import_image),
         )
         .route(
+            "/v1/images/delete",
+            post(crate::handlers::images::delete_image),
+        )
+        .route(
             "/v1/maintenance",
             post(crate::handlers::maintenance::get_maintenance),
         )

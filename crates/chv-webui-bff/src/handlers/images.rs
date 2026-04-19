@@ -19,7 +19,7 @@ pub async fn list_images(
         .unwrap_or(50)
         .clamp(1, 200);
     let offset = (page - 1) * page_size;
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM images")
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE status != 'deleted'")
         .fetch_one(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to count images: {}", e)))?;
@@ -41,6 +41,7 @@ pub async fn list_images(
             usage_count,
             updated_at AS last_updated
         FROM images
+        WHERE status != 'deleted'
         ORDER BY updated_at DESC
         LIMIT ? OFFSET ?
         "#,
@@ -155,6 +156,46 @@ pub async fn import_image(
         "source_url": source_url,
         "format": format,
         "status": "available",
+    })))
+}
+
+pub async fn delete_image(
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let image_id = payload.get("image_id").and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing image_id".into()))?;
+
+    // Check if image exists
+    let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM images WHERE image_id = ? AND status != 'deleted'")
+        .bind(image_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("db error: {}", e)))?;
+
+    if !exists {
+        return Err(BffError::NotFound(format!("image {} not found", image_id)));
+    }
+
+    // Check usage_count
+    let usage: i64 = sqlx::query_scalar("SELECT usage_count FROM images WHERE image_id = ?")
+        .bind(image_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("db error: {}", e)))?;
+
+    // Soft delete
+    sqlx::query("UPDATE images SET status = 'deleted', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE image_id = ?")
+        .bind(image_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to delete image: {}", e)))?;
+
+    Ok(Json(json!({
+        "deleted": true,
+        "image_id": image_id,
+        "was_in_use": usage > 0,
+        "usage_count": usage,
     })))
 }
 
