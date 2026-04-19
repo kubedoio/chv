@@ -15,6 +15,13 @@ pub struct Reconciler {
     pub vm_runtime: VmRuntime,
     pub stord_socket: PathBuf,
     pub nwd_socket: PathBuf,
+    pub runtime_dir: PathBuf,
+}
+
+/// Returns the per-VM runtime directory for the given VM.
+/// This directory holds the VM's socket, logs, PID file, and other runtime artifacts.
+pub fn vm_runtime_dir(base: &Path, vm_id: &str) -> PathBuf {
+    base.join("vms").join(vm_id)
 }
 
 impl Reconciler {
@@ -23,12 +30,14 @@ impl Reconciler {
         vm_runtime: VmRuntime,
         stord_socket: PathBuf,
         nwd_socket: PathBuf,
+        runtime_dir: PathBuf,
     ) -> Self {
         Self {
             cache,
             vm_runtime,
             stord_socket,
             nwd_socket,
+            runtime_dir,
         }
     }
 
@@ -336,6 +345,11 @@ impl Reconciler {
             cache.observe_vm_attachment(vm_id, &volume_ids, &nic_attachments);
         }
 
+        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+        tokio::fs::create_dir_all(&vm_dir)
+            .await
+            .map_err(|e| ChvError::Internal { reason: format!("failed to create vm dir: {}", e) })?;
+
         Ok(VmConfig {
             vm_id: vm_id.to_string(),
             cpus: vm_spec.cpus,
@@ -344,7 +358,7 @@ impl Reconciler {
             firmware_path: vm_spec.firmware_path.as_ref().map(PathBuf::from),
             disks,
             nics,
-            api_socket_path: PathBuf::from(format!("/run/chv/agent/vm-{}.sock", vm_id)),
+            api_socket_path: vm_dir.join("vm.sock"),
         })
     }
 
@@ -466,6 +480,8 @@ impl Reconciler {
                 warn!(vm_id = %vm_id, error = %e, "failed to delete vm");
                 continue;
             }
+            let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+            let _ = tokio::fs::remove_dir_all(&vm_dir).await;
             let mut cache = self.cache.lock().await;
             cache.remove_vm_state(vm_id);
         }
@@ -665,6 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconciler_skips_when_not_tenant_ready() {
+        let dir = tempfile::tempdir().unwrap();
         let mut cache = test_cache();
         cache.node_state = "Bootstrapping".to_string();
         let mut rec = Reconciler::new(
@@ -674,6 +691,7 @@ mod tests {
             )),
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
         )
         .await;
         assert!(rec.run_once().await.is_ok());
@@ -681,6 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconciler_advances_from_discovered_to_bootstrapping() {
+        let dir = tempfile::tempdir().unwrap();
         let cache = NodeCache {
             node_state: "Discovered".to_string(),
             ..Default::default()
@@ -692,6 +711,7 @@ mod tests {
             )),
             PathBuf::from("/tmp/fake-stord-discovered.sock"),
             PathBuf::from("/tmp/fake-nwd-discovered.sock"),
+            dir.path().to_path_buf(),
         )
         .await;
         assert!(rec.run_once().await.is_ok());
@@ -700,6 +720,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconciler_uses_latest_cached_node_state() {
+        let dir = tempfile::tempdir().unwrap();
         let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
         let mock =
             std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
@@ -708,6 +729,7 @@ mod tests {
             VmRuntime::new(mock.clone()),
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
         )
         .await;
 
@@ -1021,6 +1043,7 @@ mod tests {
             VmRuntime::new(mock.clone()),
             stord_socket,
             nwd_socket,
+            dir.path().to_path_buf(),
         )
         .await;
         rec.reconcile_vms().await.unwrap();
@@ -1051,7 +1074,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-orphan.sock"),
+            api_socket_path: dir.path().join("vms/vm-orphan/vm.sock"),
         };
         runtime
             .create_vm("vm-orphan", "1", &config, None)
@@ -1063,6 +1086,7 @@ mod tests {
             runtime,
             stord_socket,
             nwd_socket,
+            dir.path().to_path_buf(),
         )
         .await;
         rec.reconcile_vms().await.unwrap();
@@ -1089,7 +1113,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
         };
         runtime.create_vm("vm-1", "1", &config, None).await.unwrap();
         runtime.stop_vm("vm-1", false, None).await.unwrap();
@@ -1100,6 +1124,7 @@ mod tests {
             runtime,
             stord_socket,
             nwd_socket,
+            dir.path().to_path_buf(),
         )
         .await;
         rec.reconcile_vms().await.unwrap();

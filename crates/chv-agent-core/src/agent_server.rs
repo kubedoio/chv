@@ -1,6 +1,6 @@
 use crate::cache::{NodeCache, VmNicAttachment};
 use crate::control_plane::ControlPlaneClient;
-use crate::reconcile::cleanup_vm_resources;
+use crate::reconcile::{cleanup_vm_resources, vm_runtime_dir};
 use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
 use chv_agent_runtime_ch::adapter::VmConfig;
@@ -20,6 +20,7 @@ pub struct AgentServer {
     pub stord_socket: std::path::PathBuf,
     pub nwd_socket: std::path::PathBuf,
     pub cache_path: Option<std::path::PathBuf>,
+    pub runtime_dir: std::path::PathBuf,
 }
 
 impl AgentServer {
@@ -29,6 +30,7 @@ impl AgentServer {
         stord_socket: std::path::PathBuf,
         nwd_socket: std::path::PathBuf,
         cache_path: Option<std::path::PathBuf>,
+        runtime_dir: std::path::PathBuf,
     ) -> Self {
         Self {
             cache,
@@ -36,6 +38,7 @@ impl AgentServer {
             stord_socket,
             nwd_socket,
             cache_path,
+            runtime_dir,
         }
     }
 
@@ -510,6 +513,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             self.persist_cache(&cache).await;
         }
 
+        let vm_dir = vm_runtime_dir(&self.runtime_dir, &vm.vm_id);
         let config = VmConfig {
             vm_id: vm.vm_id.clone(),
             cpus: vm_spec.cpus,
@@ -518,10 +522,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             firmware_path: vm_spec.firmware_path.as_ref().map(std::path::PathBuf::from),
             disks,
             nics,
-            api_socket_path: std::path::PathBuf::from(format!(
-                "/run/chv/agent/vm-{}.sock",
-                vm.vm_id
-            )),
+            api_socket_path: vm_dir.join("vm.sock"),
         };
         self.vm_runtime
             .create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id))
@@ -905,6 +906,7 @@ mod tests {
             std::path::PathBuf::from("/run/chv/stord/api.sock"),
             std::path::PathBuf::from("/run/chv/nwd/api.sock"),
             None,
+            std::path::PathBuf::from("/run/chv/agent"),
         )
     }
 
@@ -1492,7 +1494,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: std::path::PathBuf::from("/run/chv/agent/vm-vm-1.sock"),
+            api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
         };
         runtime
             .create_vm("vm-1", "1", &config, Some("op-1"))
@@ -1505,6 +1507,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             None,
+            dir.path().to_path_buf(),
         );
 
         let req = proto::DeleteVmRequest {
@@ -1567,7 +1570,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: std::path::PathBuf::from("/run/chv/agent/vm-vm-1.sock"),
+            api_socket_path: std::path::PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
         };
         server
             .vm_runtime
@@ -1624,6 +1627,7 @@ mod tests {
             socket,
             std::path::PathBuf::from("/run/chv/nwd/api.sock"),
             None,
+            dir.path().to_path_buf(),
         );
 
         let req = proto::ApplyVolumeDesiredStateRequest {
