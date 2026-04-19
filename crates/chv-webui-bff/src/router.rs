@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::{routing::{get, post}, Router};
+use axum::{routing::{delete, get, post}, Router};
 use chv_controlplane_store::{
     AlertRepository, DesiredStateRepository, EventRepository, NodeRepository,
     ObservedStateRepository, OperationRepository, StorePool,
@@ -130,5 +130,25 @@ pub fn bff_router() -> Router<AppState> {
         .route(
             "/v1/users/delete",
             post(crate::handlers::users::delete_user),
+        )
+        // VM Templates
+        .route(
+            "/v1/vm-templates",
+            get(crate::handlers::templates::list_vm_templates)
+                .post(crate::handlers::templates::create_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/:id",
+            delete(crate::handlers::templates::delete_vm_template),
+        )
+        // Cloud-init Templates
+        .route(
+            "/v1/cloud-init-templates",
+            get(crate::handlers::templates::list_cloud_init_templates)
+                .post(crate::handlers::templates::create_cloud_init_template),
+        )
+        .route(
+            "/v1/cloud-init-templates/:id",
+            delete(crate::handlers::templates::delete_cloud_init_template),
         )
 }
