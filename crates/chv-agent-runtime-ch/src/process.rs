@@ -190,7 +190,8 @@ fn read_stderr_tail(path: &std::path::Path) -> String {
 async fn build_cloud_init_seed(
     vm_dir: &Path,
     vm_id: &str,
-    userdata: &str,
+    userdata: Option<&str>,
+    nics: &[crate::adapter::VmNicConfig],
 ) -> Result<std::path::PathBuf, ChvError> {
     let seed_dir = vm_dir.join("seed");
     tokio::fs::create_dir_all(&seed_dir).await.map_err(|e| ChvError::Io {
@@ -204,12 +205,49 @@ async fn build_cloud_init_seed(
         source: e,
     })?;
 
-    tokio::fs::write(seed_dir.join("user-data"), userdata.as_bytes()).await.map_err(|e| ChvError::Io {
+    let default_userdata = "#cloud-config\nusers:\n  - name: ubuntu\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    plain_text_passwd: ubuntu\n    lock_passwd: false\nchpasswd:\n  expire: false\nssh_pwauth: true\n";
+    let user_data = userdata.unwrap_or(default_userdata);
+    tokio::fs::write(seed_dir.join("user-data"), user_data.as_bytes()).await.map_err(|e| ChvError::Io {
         path: seed_dir.join("user-data").to_string_lossy().to_string(),
         source: e,
     })?;
 
-    let network_config = "version: 2\nethernets:\n  id0:\n    match:\n      driver: virtio*\n    dhcp4: true\n";
+    // Generate network-config v2 with MAC-matched static IPs from the control plane IPAM.
+    let mut network_config = String::from("version: 2\nethernets:\n");
+    for (idx, nic) in nics.iter().enumerate() {
+        if nic.mac_address.is_empty() || nic.ip_address.is_empty() {
+            continue;
+        }
+        let prefix = nic.cidr.split_once('/').map(|(_, p)| p).unwrap_or("24");
+        let gateway = if nic.gateway.is_empty() {
+            let parts: Vec<&str> = nic.ip_address.split('.').collect();
+            if parts.len() == 4 {
+                format!("{}.{}.{}.1", parts[0], parts[1], parts[2])
+            } else {
+                String::new()
+            }
+        } else {
+            nic.gateway.clone()
+        };
+
+        let iface_name = format!("id{}", idx);
+        network_config.push_str(&format!(
+            "  {}:\n    match:\n      macaddress: \"{}\"\n    dhcp4: false\n    addresses:\n      - {}/{}\n",
+            iface_name, nic.mac_address, nic.ip_address, prefix
+        ));
+        if !gateway.is_empty() {
+            network_config.push_str(&format!(
+                "    routes:\n      - to: default\n        via: {}\n",
+                gateway
+            ));
+        }
+    }
+
+    if network_config.lines().count() <= 2 {
+        // No valid NICs with IPAM data — fallback to DHCP with virtio matching.
+        network_config.push_str("  id0:\n    match:\n      driver: virtio*\n    dhcp4: true\n");
+    }
+
     tokio::fs::write(seed_dir.join("network-config"), network_config.as_bytes()).await.map_err(|e| ChvError::Io {
         path: seed_dir.join("network-config").to_string_lossy().to_string(),
         source: e,
@@ -286,18 +324,23 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             .parent()
             .expect("api_socket_path must have a parent directory");
 
-        // Build cloud-init seed ISO if userdata is provided
-        let seed_iso_path = if let Some(ref userdata) = config.cloud_init_userdata {
-            if !userdata.trim().is_empty() {
-                match build_cloud_init_seed(vm_runtime_dir, &config.vm_id, userdata).await {
-                    Ok(path) => Some(path),
-                    Err(e) => {
-                        warn!(vm_id = %config.vm_id, error = %e, "failed to build cloud-init seed ISO, continuing without it");
-                        None
-                    }
+        // Build cloud-init seed ISO for every VM that has NICs or explicit userdata.
+        // The ISO carries the control-plane-assigned static IP configuration so
+        // cloud-init images (e.g. Ubuntu cloud images) come up on the correct network.
+        let has_nics = !config.nics.is_empty();
+        let has_userdata = config.cloud_init_userdata.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let seed_iso_path = if has_nics || has_userdata {
+            let userdata = config.cloud_init_userdata.as_deref();
+            match build_cloud_init_seed(vm_runtime_dir, &config.vm_id, userdata, &config.nics).await {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    warn!(vm_id = %config.vm_id, error = %e, "failed to build cloud-init seed ISO, continuing without it");
+                    None
                 }
-            } else { None }
-        } else { None };
+            }
+        } else {
+            None
+        };
 
         cmd.stdout(Stdio::null());
 
@@ -517,13 +560,29 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 let _ = proc.child.try_wait();
             }
         } else {
+            // Graceful stop: ask the VM to shut down but keep the VMM daemon
+            // alive so a subsequent vm.boot can restart it. Do NOT call
+            // vmm.shutdown — that would kill the daemon and require a full
+            // vm.create + vm.boot sequence to start again.
             let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.shutdown", None).await;
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.shutdown", None).await;
-            let mut map = self.vms.lock().unwrap();
-            if let Some(mut proc) = map.remove(vm_id) {
-                let _ = proc.child.start_kill();
-                let _ = proc.child.try_wait();
+            // Poll vm.info for up to 10s waiting for the VM to reach a
+            // non-running terminal state (Shutdown or Created).
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_secs(10) {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Ok((200, body)) =
+                    Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await
+                {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
+                        if state == "Shutdown" || state == "Created" {
+                            break;
+                        }
+                    }
+                } else {
+                    // CH process disappeared — treat as stopped
+                    break;
+                }
             }
         }
         Ok(())

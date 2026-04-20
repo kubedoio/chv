@@ -832,13 +832,15 @@ mod tests {
     async fn local_backend_seed_qcow2_triggers_conversion() {
         let dir = tempfile::tempdir().unwrap();
         let seed = dir.path().join("seed-qcow2.img");
-        {
-            let mut f = std::fs::File::create(&seed).unwrap();
-            // Write qcow2 magic header followed by enough data to be a valid-looking file
-            let mut header = vec![0u8; 512];
-            header[0..4].copy_from_slice(b"QFI\xfb");
-            f.write_all(&header).unwrap();
-        }
+
+        // Create a valid minimal qcow2 file so qemu-img convert succeeds.
+        let qemu_img_ok = std::process::Command::new("qemu-img")
+            .args(["create", "-f", "qcow2"])
+            .arg(&seed)
+            .arg("4M")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let mut options = std::collections::HashMap::new();
@@ -854,7 +856,7 @@ mod tests {
             .open("vol-1", &locator, &DevicePolicy::default())
             .await;
 
-        if std::process::Command::new("qemu-img").arg("--version").status().is_ok() {
+        if qemu_img_ok {
             let export = result.unwrap();
             assert_eq!(export.export_kind, "raw");
         } else {

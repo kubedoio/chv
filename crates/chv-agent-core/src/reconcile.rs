@@ -149,15 +149,18 @@ impl Reconciler {
         // Falls back to the hardcoded default if the fragment has no cidr.
         const DEFAULT_CIDR: &str = "10.0.0.0/24";
 
-        let (desired_networks, network_cidrs, network_gateways) = {
+        let (desired_networks, network_cidrs, network_gateways, network_bridges) = {
             let cache = self.cache.lock().await;
             let mut desired_networks: BTreeSet<String> =
                 cache.vm_network_ids().into_iter().collect();
+            info!(desired_networks = ?desired_networks, "reconcile_networks: desired networks");
             desired_networks.extend(cache.network_fragments.keys().cloned());
 
             let mut network_cidrs: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
             let mut network_gateways: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut network_bridges: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
             for (net_id, frag) in &cache.network_fragments {
                 let spec = serde_json::from_slice::<serde_json::Value>(&frag.spec_json).ok();
@@ -177,17 +180,43 @@ impl Reconciler {
                             .map(|s| s.to_string())
                     })
                     .unwrap_or_default();
+                let bridge = spec
+                    .as_ref()
+                    .and_then(|v| {
+                        v.get("bridge_name")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| {
+                        // Default to the platform bridge name for the "default" network
+                        // so that deployments using a manually configured chvbr0 work.
+                        if net_id == "default" {
+                            "chvbr0".to_string()
+                        } else {
+                            format!("br-{}", net_id)
+                        }
+                    });
                 network_cidrs.insert(net_id.clone(), cidr);
                 network_gateways.insert(net_id.clone(), gateway);
+                network_bridges.insert(net_id.clone(), bridge);
             }
 
-            (desired_networks, network_cidrs, network_gateways)
+            (desired_networks, network_cidrs, network_gateways, network_bridges)
         };
         // Cache lock is dropped here — all subsequent operations are lock-free async I/O.
 
         let mut nwd = NwdClient::connect(&self.nwd_socket).await?;
         for net_id in &desired_networks {
-            let bridge = format!("br-{}", net_id);
+            let bridge = network_bridges
+                .get(net_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if net_id == "default" {
+                        "chvbr0".to_string()
+                    } else {
+                        format!("br-{}", net_id)
+                    }
+                });
             let cidr = network_cidrs
                 .get(net_id)
                 .map(|s| s.as_str())
@@ -197,11 +226,14 @@ impl Reconciler {
                 .map(|s| s.as_str())
                 .unwrap_or("");
             let op_id = format!("reconcile-network-ensure-{}", net_id);
+            info!(network_id = %net_id, bridge = %bridge, "reconcile_networks: calling ensure_network_topology");
             if let Err(e) = nwd
                 .ensure_network_topology(net_id, &bridge, cidr, gateway, Some(&op_id))
                 .await
             {
                 warn!(network_id = %net_id, error = %e, "failed to ensure network topology");
+            } else {
+                info!(network_id = %net_id, bridge = %bridge, "reconcile_networks: ensure_network_topology succeeded");
             }
         }
 
@@ -348,10 +380,15 @@ impl Reconciler {
                 nic.cidr.clone()
             };
             let nic_gateway = nic.gateway.clone();
+            let bridge = if nic.network_id == "default" {
+                "chvbr0".to_string()
+            } else {
+                format!("br-{}", nic.network_id)
+            };
             if let Err(e) = nwd
                 .ensure_network_topology(
                     &nic.network_id,
-                    &format!("br-{}", nic.network_id),
+                    &bridge,
                     &nic_cidr,
                     &nic_gateway,
                     Some(&nic_op_id),
@@ -375,6 +412,8 @@ impl Reconciler {
                 mac_address: nic.mac_address.clone(),
                 ip_address: nic.ip_address.clone(),
                 tap_name: tap_handle,
+                cidr: nic.cidr.clone(),
+                gateway: nic.gateway.clone(),
             });
             nic_attachments.push(VmNicAttachment {
                 nic_id,

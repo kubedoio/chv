@@ -6,6 +6,7 @@ use crate::vm_runtime::VmRuntime;
 use chv_agent_runtime_ch::adapter::VmConfig;
 use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -103,6 +104,12 @@ impl AgentServer {
             path: socket_path.to_string_lossy().to_string(),
             source: e,
         })?;
+        // Ensure the socket is group-writable so the control plane (running as a
+        // different user in the same group) can connect.
+        let _ = std::fs::set_permissions(
+            socket_path,
+            std::fs::Permissions::from_mode(0o775),
+        );
         let uds_stream = UnixListenerStream::new(uds);
         tonic::transport::Server::builder()
             .add_service(proto::reconcile_service_server::ReconcileServiceServer::new(self.clone()))
@@ -461,10 +468,15 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     nic.cidr.clone()
                 };
                 let nic_gateway = nic.gateway.clone();
+                let bridge = if nic.network_id == "default" {
+                    "chvbr0".to_string()
+                } else {
+                    format!("br-{}", nic.network_id)
+                };
                 if let Err(e) = nwd
                     .ensure_network_topology(
                         &nic.network_id,
-                        &format!("br-{}", nic.network_id),
+                        &bridge,
                         &nic_cidr,
                         &nic_gateway,
                         Some(op_id),
@@ -490,6 +502,8 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     mac_address: nic.mac_address.clone(),
                     ip_address: nic.ip_address.clone(),
                     tap_name: tap_handle,
+                    cidr: nic.cidr.clone(),
+                    gateway: nic.gateway.clone(),
                 });
             }
         }

@@ -809,7 +809,11 @@ Wants=chv-controlplane.service chv-stord.service chv-nwd.service
 
 [Service]
 Type=simple
+Group=chv
+UMask=002
 ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
+ExecStartPre=/bin/chown -R root:chv /run/chv
+ExecStartPre=/bin/chmod -R 775 /run/chv
 ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5

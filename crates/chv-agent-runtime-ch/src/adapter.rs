@@ -35,6 +35,8 @@ pub struct VmNicConfig {
     pub mac_address: String,
     pub ip_address: String,
     pub tap_name: String,
+    pub cidr: String,
+    pub gateway: String,
 }
 
 #[derive(Debug, Clone)]
