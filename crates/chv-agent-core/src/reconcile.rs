@@ -279,6 +279,12 @@ impl Reconciler {
                 open_options.insert("seed_from".to_string(), seed_from.to_string());
             }
             let disk_path = vm_dir.join(format!("{}.img", disk.volume_id));
+            tracing::info!(
+                vm_id = %vm_id,
+                volume_id = %disk.volume_id,
+                locator = %disk_path.display(),
+                "opening volume via stord"
+            );
             let (_volume_id, handle, export_path) = stord
                 .open_volume_with_options(
                     &disk.volume_id,
@@ -288,6 +294,12 @@ impl Reconciler {
                     Some(&open_op_id),
                 )
                 .await?;
+            tracing::info!(
+                vm_id = %vm_id,
+                volume_id = %disk.volume_id,
+                export_path = %export_path,
+                "stord returned export path"
+            );
             stord
                 .attach_volume_to_vm(&disk.volume_id, vm_id, &handle, Some(&open_op_id))
                 .await?;
