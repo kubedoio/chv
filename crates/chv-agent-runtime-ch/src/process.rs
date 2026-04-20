@@ -307,11 +307,22 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "booting vm via ch api");
 
-        // Auto-boot via CLI means VM is already running; send boot API for completeness.
+        let (info_status, info_body) =
+            Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
+        if info_status == 200 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
+                let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
+                if state == "Running" || state == "Paused" {
+                    info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
+                    return Ok(());
+                }
+            }
+        }
+
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
         if status != 200 && status != 204 {
-            warn!(status = status, "unexpected status from vm.boot");
+            warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
         }
         Ok(())
     }

@@ -22,3 +22,6 @@ bootstrap_token_path = "/etc/chv/bootstrap.token"
 tls_cert_path = "/run/chv/agent/agent.crt"
 tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "/etc/chv/certs/ca.crt"
+
+# JWT secret — MUST match controlplane.toml jwt_secret for console access
+jwt_secret = "<same-as-controlplane>"

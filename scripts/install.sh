@@ -648,6 +648,7 @@ tls_cert_path = "/run/chv/agent/agent.crt"
 tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 console_bind = "127.0.0.1:8444"
+jwt_secret = "${JWT_SECRET}"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/agent.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml"
