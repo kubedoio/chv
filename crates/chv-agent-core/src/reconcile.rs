@@ -277,7 +277,7 @@ impl Reconciler {
                 .open_volume_with_options(
                     &disk.volume_id,
                     "local",
-                    &format!("{}.img", disk.volume_id),
+                    &format!("vms/{}/{}.img", vm_id, disk.volume_id),
                     open_options,
                     Some(&open_op_id),
                 )
