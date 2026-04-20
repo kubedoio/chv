@@ -6,6 +6,7 @@
 	import { getVmConsoleUrl, mutateVm, deleteVm } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
+	import { onMount } from 'svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -25,6 +26,20 @@
 	let pendingAction = $state<string | null>(null);
 	let confirmingAction = $state<string | null>(null);
 	let actionError = $state<string | null>(null);
+	let liveConsoleUrl = $state<string | undefined>(undefined);
+	let consoleLoading = $state(false);
+
+	$effect(() => {
+		if (detail.currentTab === 'console' && detail.summary.vm_id) {
+			consoleLoading = true;
+			liveConsoleUrl = undefined;
+			const token = getStoredToken() ?? undefined;
+			getVmConsoleUrl(detail.summary.vm_id, token)
+				.then(res => { liveConsoleUrl = res.url; })
+				.catch(() => { liveConsoleUrl = undefined; })
+				.finally(() => { consoleLoading = false; });
+		}
+	});
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
@@ -175,10 +190,12 @@
 			{#if detail.currentTab === 'console'}
 				<section class="detail-main-span">
 					<SectionCard title="Serial Console" icon={Terminal}>
-						{#if detail.consoleUrl}
+						{#if consoleLoading}
+							<p class="empty-hint">Connecting to console...</p>
+						{:else if liveConsoleUrl}
 							<VmConsole
 								vmId={detail.summary.vm_id}
-								consoleUrl={detail.consoleUrl}
+								consoleUrl={liveConsoleUrl}
 								getConsoleUrl={async () => {
 									const res = await getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined);
 									return res.url;
