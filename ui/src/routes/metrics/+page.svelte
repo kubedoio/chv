@@ -9,6 +9,8 @@
   import ChartJS from '$lib/components/charts/ChartJS.svelte';
   import type { ChartData } from 'chart.js';
   import type { VM, Node } from '$lib/api/types';
+  import ErrorState from '$lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
   
   const client = createAPIClient();
   
@@ -189,9 +191,13 @@
       {/each}
     </div>
   {:else if error}
-    <div class="bg-red-50 border border-red-200 rounded-lg p-4 text-red-700">
-      {error}
-    </div>
+    <ErrorState />
+  {:else if vmStats.total === 0 && nodeHealth.length === 0}
+    <EmptyInfrastructureState
+      title="No metrics data available"
+      description="There are no VMs or nodes reporting metrics yet."
+      hint="Enroll a node and create virtual machines to start seeing metrics here."
+    />
   {:else}
     {#if activeTab === 'overview'}
       <!-- Stats Grid -->

@@ -359,7 +359,7 @@ impl CertificateIssuer for CaBackedCertificateIssuer {
                 .serial_number
                 .as_ref()
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                .unwrap_or_else(|| chv_common::gen_short_id()),
         })
     }
 }

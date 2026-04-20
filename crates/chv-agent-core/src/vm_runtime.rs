@@ -1,4 +1,4 @@
-use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig};
+use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig, VmInfo};
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -78,12 +78,7 @@ impl VmRuntime {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         self.adapter.stop_vm(vm_id, force, operation_id).await?;
-        let mut map = self.vms.lock().unwrap();
-        let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
-            resource: "vm".to_string(),
-            id: vm_id.to_string(),
-        })?;
-        rec.runtime_status = "Stopped".to_string();
+        self.vms.lock().unwrap().remove(vm_id);
         Ok(())
     }
 
@@ -102,6 +97,112 @@ impl VmRuntime {
         })?;
         rec.runtime_status = "Running".to_string();
         Ok(())
+    }
+
+    pub async fn resize_vm(
+        &self,
+        vm_id: &str,
+        cpus: Option<u32>,
+        memory_bytes: Option<u64>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter
+            .resize_vm(vm_id, cpus, memory_bytes, operation_id)
+            .await
+    }
+
+    pub async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
+        self.adapter.vm_info(vm_id).await
+    }
+
+    pub async fn snapshot_vm(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.snapshot_vm(vm_id, destination, operation_id).await
+    }
+
+    pub async fn restore_snapshot(
+        &self,
+        vm_id: &str,
+        source: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.restore_snapshot(vm_id, source, operation_id).await
+    }
+
+    pub async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        self.adapter.pause_vm(vm_id, operation_id).await?;
+        let mut map = self.vms.lock().unwrap();
+        if let Some(rec) = map.get_mut(vm_id) {
+            rec.runtime_status = "Paused".to_string();
+        }
+        Ok(())
+    }
+
+    pub async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        self.adapter.resume_vm(vm_id, operation_id).await?;
+        let mut map = self.vms.lock().unwrap();
+        if let Some(rec) = map.get_mut(vm_id) {
+            rec.runtime_status = "Running".to_string();
+        }
+        Ok(())
+    }
+
+    pub async fn power_button(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        self.adapter.power_button(vm_id, operation_id).await
+    }
+
+    pub async fn add_disk(
+        &self,
+        vm_id: &str,
+        params: &chv_agent_runtime_ch::adapter::AddDiskParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        self.adapter.add_disk(vm_id, params, operation_id).await
+    }
+
+    pub async fn remove_device(
+        &self,
+        vm_id: &str,
+        device_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.remove_device(vm_id, device_id, operation_id).await
+    }
+
+    pub async fn add_net(
+        &self,
+        vm_id: &str,
+        params: &chv_agent_runtime_ch::adapter::AddNetParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        self.adapter.add_net(vm_id, params, operation_id).await
+    }
+
+    pub async fn resize_disk(
+        &self,
+        vm_id: &str,
+        disk_id: &str,
+        new_size_bytes: u64,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.resize_disk(vm_id, disk_id, new_size_bytes, operation_id).await
+    }
+
+    pub async fn ping(&self, vm_id: &str) -> Result<bool, ChvError> {
+        self.adapter.ping(vm_id).await
+    }
+
+    pub async fn coredump(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.coredump(vm_id, destination, operation_id).await
     }
 
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
@@ -155,7 +256,8 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -177,7 +279,8 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -185,7 +288,7 @@ mod tests {
         rt.start_vm("vm-1", Some("op-2")).await.unwrap();
         assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Running");
         rt.stop_vm("vm-1", false, Some("op-3")).await.unwrap();
-        assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Stopped");
+        assert!(rt.get("vm-1").is_none(), "VM should be removed from map after stop");
     }
 
     #[tokio::test]
@@ -199,7 +302,8 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -219,7 +323,8 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await

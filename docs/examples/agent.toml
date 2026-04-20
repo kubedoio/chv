@@ -2,7 +2,7 @@
 # Place this file at /etc/chv/agent.toml
 
 socket_path = "/run/chv/agent/api.sock"
-runtime_dir = "/run/chv/agent"
+runtime_dir = "/var/lib/chv/agent"
 log_level = "info"
 control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
@@ -22,3 +22,6 @@ bootstrap_token_path = "/etc/chv/bootstrap.token"
 tls_cert_path = "/run/chv/agent/agent.crt"
 tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "/etc/chv/certs/ca.crt"
+
+# JWT secret — MUST match controlplane.toml jwt_secret for console access
+jwt_secret = "<same-as-controlplane>"

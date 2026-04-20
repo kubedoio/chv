@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
 
-use crate::adapter::{CloudHypervisorAdapter, VmConfig};
+use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmInfo};
 
 struct VmProcess {
     api_socket: std::path::PathBuf,
@@ -53,6 +53,16 @@ impl ProcessCloudHypervisorAdapter {
         path: &str,
         body: Option<&str>,
     ) -> Result<u16, ChvError> {
+        let (status, _body) = Self::ch_api_request_with_body(socket, method, path, body).await?;
+        Ok(status)
+    }
+
+    async fn ch_api_request_with_body(
+        socket: &Path,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), ChvError> {
         let mut stream = UnixStream::connect(socket)
             .await
             .map_err(|e| ChvError::Io {
@@ -79,14 +89,50 @@ impl ProcessCloudHypervisorAdapter {
                 source: e,
             })?;
 
-        let mut buf = [0u8; 1024];
-        let n = stream.read(&mut buf).await.map_err(|e| ChvError::Io {
-            path: socket.to_string_lossy().to_string(),
-            source: e,
-        })?;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let read_fut = async {
+            loop {
+                let n = stream.read(&mut tmp).await.map_err(|e| ChvError::Io {
+                    path: socket.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header_bytes = &buf[..header_end];
+                    let headers = String::from_utf8_lossy(header_bytes);
+                    let content_length = headers
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.splitn(2, ':').nth(1))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    if buf.len() >= body_start + content_length {
+                        break;
+                    }
+                }
+            }
+            Ok::<(), ChvError>(())
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), read_fut)
+            .await
+            .map_err(|_| ChvError::Io {
+                path: socket.to_string_lossy().to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::TimedOut, "socket read timed out"),
+            })??;
 
-        let status_code = parse_http_status(&buf[..n]).unwrap_or(0);
-        Ok(status_code)
+        let raw = String::from_utf8_lossy(&buf);
+        let status_code = parse_http_status(raw.as_bytes()).unwrap_or(0);
+        let response_body = if let Some(idx) = raw.find("\r\n\r\n") {
+            raw[idx + 4..].to_string()
+        } else {
+            String::new()
+        };
+        Ok((status_code, response_body))
     }
 
     fn validate_vm_config(&self, config: &VmConfig) -> Result<(), ChvError> {
@@ -192,6 +238,23 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             .arg("off")
             .arg("--serial")
             .arg(format!("tty={}", slave_path));
+
+        if let Some(ref userdata) = config.cloud_init_userdata {
+            if !userdata.trim().is_empty() {
+                let vm_runtime_dir = config.api_socket_path
+                    .parent()
+                    .expect("api_socket_path must have a parent directory");
+                let userdata_path = vm_runtime_dir.join("user-data.yaml");
+                tokio::fs::write(&userdata_path, userdata.as_bytes())
+                    .await
+                    .map_err(|e| ChvError::Io {
+                        path: userdata_path.to_string_lossy().to_string(),
+                        source: e,
+                    })?;
+                cmd.arg("--user-data").arg(&userdata_path);
+            }
+        }
+
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
         info!(
@@ -220,15 +283,54 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
+        let pty_fd_raw = pty_master.into_raw_fd();
         let mut map = self.vms.lock().unwrap();
         map.insert(
             config.vm_id.clone(),
             VmProcess {
                 api_socket: config.api_socket_path.clone(),
                 child,
-                pty_master: unsafe { OwnedFd::from_raw_fd(pty_master.into_raw_fd()) },
+                pty_master: unsafe { OwnedFd::from_raw_fd(pty_fd_raw) },
             },
         );
+        drop(map);
+
+        // Spawn background logger: tee PTY output to console.log
+        let log_path = config.api_socket_path
+            .parent()
+            .map(|p| p.join("console.log"))
+            .unwrap_or_default();
+        let logger_fd = unsafe { nix::libc::dup(pty_fd_raw) };
+        if logger_fd >= 0 {
+            let vm_id_log = config.vm_id.clone();
+            tokio::spawn(async move {
+                let std_file = unsafe { std::fs::File::from_raw_fd(logger_fd) };
+                let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
+                let log_file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .await;
+                let mut writer = match log_file {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::debug!(vm_id = %vm_id_log, error = %e, "failed to open console.log");
+                        return;
+                    }
+                };
+                let mut buf = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let _ = writer.write_all(&buf[..n]).await;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
         Ok(config.vm_id.clone())
     }
 
@@ -244,11 +346,22 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "booting vm via ch api");
 
-        // Auto-boot via CLI means VM is already running; send boot API for completeness.
+        let (info_status, info_body) =
+            Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
+        if info_status == 200 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
+                let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
+                if state == "Running" || state == "Paused" {
+                    info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
+                    return Ok(());
+                }
+            }
+        }
+
         let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.boot", None).await?;
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
         if status != 200 && status != 204 {
-            warn!(status = status, "unexpected status from vmm.boot");
+            warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
         }
         Ok(())
     }
@@ -272,21 +385,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         if force {
             let mut map = self.vms.lock().unwrap();
-            if let Some(proc) = map.get_mut(vm_id) {
+            if let Some(mut proc) = map.remove(vm_id) {
                 let _ = proc.child.start_kill();
+                let _ = proc.child.try_wait();
             }
         } else {
-            let status =
-                Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.shutdown", None).await?;
-            if status != 200 && status != 204 {
-                warn!(
-                    status = status,
-                    "graceful shutdown failed, falling back to kill"
-                );
-                let mut map = self.vms.lock().unwrap();
-                if let Some(proc) = map.get_mut(vm_id) {
-                    let _ = proc.child.start_kill();
-                }
+            let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.shutdown", None).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.shutdown", None).await;
+            let mut map = self.vms.lock().unwrap();
+            if let Some(mut proc) = map.remove(vm_id) {
+                let _ = proc.child.start_kill();
+                let _ = proc.child.try_wait();
             }
         }
         Ok(())
@@ -322,9 +432,382 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
 
         let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.reboot", None).await?;
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
         if status != 200 && status != 204 {
-            warn!(status = status, "unexpected status from vmm.reboot");
+            warn!(status = status, "unexpected status from vm.reboot");
+        }
+        Ok(())
+    }
+
+    async fn resize_vm(
+        &self,
+        vm_id: &str,
+        cpus: Option<u32>,
+        memory_bytes: Option<u64>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, ?cpus, ?memory_bytes, op = operation_id.unwrap_or("-"), "resizing vm via ch api");
+
+        let mut obj = serde_json::Map::new();
+        if let Some(c) = cpus {
+            obj.insert("desired_vcpus".to_string(), serde_json::Value::from(c));
+        }
+        if let Some(m) = memory_bytes {
+            obj.insert("desired_ram".to_string(), serde_json::Value::from(m));
+        }
+        let body = serde_json::Value::Object(obj).to_string();
+
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resize", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.resize returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        let (status, body) =
+            Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
+        if status != 200 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.info returned unexpected status {}", status),
+            });
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| ChvError::Internal {
+            reason: format!("failed to parse vm.info response: {}", e),
+        })?;
+
+        let state = v
+            .get("state")
+            .and_then(|s| s.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let cpus = v
+            .pointer("/config/cpus/boot_vcpus")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0) as u32;
+        let memory_bytes = v
+            .pointer("/config/memory/size")
+            .and_then(|m| m.as_u64())
+            .unwrap_or(0);
+
+        Ok(VmInfo {
+            state,
+            cpus,
+            memory_bytes,
+        })
+    }
+
+    async fn snapshot_vm(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "snapshotting vm via ch api");
+
+        let body = format!(r#"{{"destination_url":"file://{}"}}"#, destination);
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.snapshot", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.snapshot returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn restore_snapshot(
+        &self,
+        vm_id: &str,
+        source: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, source = %source, op = operation_id.unwrap_or("-"), "restoring snapshot via ch api");
+
+        let body = format!(r#"{{"source_url":"file://{}"}}"#, source);
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.restore", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.restore returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "pausing vm via ch api");
+
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.pause", None).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.pause returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "resuming vm via ch api");
+
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resume", None).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.resume returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn power_button(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "sending ACPI power button via ch api");
+
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.power-button", None).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.power-button returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn add_disk(
+        &self,
+        vm_id: &str,
+        params: &AddDiskParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, path = %params.path.display(), op = operation_id.unwrap_or("-"), "hot-adding disk via ch api");
+
+        let mut obj = serde_json::Map::new();
+        obj.insert("path".to_string(), serde_json::Value::from(params.path.to_string_lossy().to_string()));
+        obj.insert("readonly".to_string(), serde_json::Value::from(params.read_only));
+        if let Some(ref id) = params.id {
+            obj.insert("id".to_string(), serde_json::Value::from(id.clone()));
+        }
+        let body = serde_json::Value::Object(obj).to_string();
+
+        let (status, response_body) =
+            Self::ch_api_request_with_body(&api_socket, "PUT", "/api/v1/vm.add-disk", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.add-disk returned unexpected status {}", status),
+            });
+        }
+        Ok(response_body)
+    }
+
+    async fn remove_device(
+        &self,
+        vm_id: &str,
+        device_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, device_id = %device_id, op = operation_id.unwrap_or("-"), "hot-removing device via ch api");
+
+        let body = format!(r#"{{"id":"{}"}}"#, device_id);
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.remove-device", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.remove-device returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn add_net(
+        &self,
+        vm_id: &str,
+        params: &AddNetParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, tap = %params.tap_name, mac = %params.mac_address, op = operation_id.unwrap_or("-"), "hot-adding net via ch api");
+
+        let mut obj = serde_json::Map::new();
+        obj.insert("tap".to_string(), serde_json::Value::from(params.tap_name.clone()));
+        obj.insert("mac".to_string(), serde_json::Value::from(params.mac_address.clone()));
+        if let Some(ref id) = params.id {
+            obj.insert("id".to_string(), serde_json::Value::from(id.clone()));
+        }
+        let body = serde_json::Value::Object(obj).to_string();
+
+        let (status, response_body) =
+            Self::ch_api_request_with_body(&api_socket, "PUT", "/api/v1/vm.add-net", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.add-net returned unexpected status {}", status),
+            });
+        }
+        Ok(response_body)
+    }
+
+    async fn resize_disk(
+        &self,
+        vm_id: &str,
+        disk_id: &str,
+        new_size_bytes: u64,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, disk_id = %disk_id, new_size = new_size_bytes, op = operation_id.unwrap_or("-"), "resizing disk via ch api");
+
+        let body = format!(r#"{{"id":"{}","new_size":{}}}"#, disk_id, new_size_bytes);
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resize-zone", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.resize-zone returned unexpected status {}", status),
+            });
+        }
+        Ok(())
+    }
+
+    async fn ping(&self, vm_id: &str) -> Result<bool, ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        match Self::ch_api_request(&api_socket, "GET", "/api/v1/vmm.ping", None).await {
+            Ok(status) => Ok(status == 200),
+            Err(_) => Ok(false),
+        }
+    }
+
+    async fn coredump(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "generating coredump via ch api");
+
+        let body = format!(r#"{{"destination_url":"file://{}"}}"#, destination);
+        let status =
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.coredump", Some(&body)).await?;
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.coredump returned unexpected status {}", status),
+            });
         }
         Ok(())
     }
@@ -381,7 +864,8 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/tmp/chv-vm-1.sock"),
+            api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         let err = adapter.validate_vm_config(&cfg).unwrap_err();
         assert!(matches!(err, ChvError::InvalidArgument { field, .. } if field == "kernel_path"));
@@ -408,7 +892,8 @@ mod tests {
                 read_only: false,
             }],
             nics: vec![],
-            api_socket_path: PathBuf::from("/tmp/chv-vm-1.sock"),
+            api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         adapter.validate_vm_config(&cfg).unwrap();
     }

@@ -202,6 +202,7 @@ pub async fn mutate_volume(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let volume_id = payload
         .get("volume_id")
         .and_then(|v| v.as_str())

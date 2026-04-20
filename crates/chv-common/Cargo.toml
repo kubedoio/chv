@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-uuid = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }

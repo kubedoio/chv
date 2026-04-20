@@ -133,6 +133,44 @@ impl MutationService for ControlPlaneMutationService {
                     })
                     .await
             }
+            "pause" => {
+                self.lifecycle_service
+                    .pause_vm(proto::PauseVmRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        vm_id: vm_id.clone(),
+                    })
+                    .await
+            }
+            "resume" => {
+                self.lifecycle_service
+                    .resume_vm(proto::ResumeVmRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        vm_id: vm_id.clone(),
+                    })
+                    .await
+            }
+            "snapshot" => {
+                self.lifecycle_service
+                    .snapshot_vm(proto::SnapshotVmRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        vm_id: vm_id.clone(),
+                        destination: String::new(),
+                    })
+                    .await
+            }
+            "restore_snapshot" => {
+                self.lifecycle_service
+                    .restore_snapshot(proto::RestoreSnapshotRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        vm_id: vm_id.clone(),
+                        source: String::new(),
+                    })
+                    .await
+            }
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
 

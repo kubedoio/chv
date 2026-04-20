@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Cpu, HardDrive, Network, Server, Settings, AlertTriangle } from 'lucide-svelte';
-  import { createAPIClient, APIError } from '$lib/api/client';
+  import { createAPIClient, APIError, getStoredRole } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import QuotaSettingsModal from '$lib/components/modals/QuotaSettingsModal.svelte';
   import type { UsageWithQuota, Quota, UserInfo } from '$lib/api/types';
+  import ErrorState from '$lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 
   // State
   let usageData = $state<UsageWithQuota | null>(null);
@@ -14,7 +16,7 @@
   let error = $state<string | null>(null);
   let showSettingsModal = $state(false);
   let editingQuota = $state<Quota | null>(null);
-  let isAdmin = $state(false); // TODO: Get from auth context
+  let isAdmin = $state(getStoredRole() === 'admin');
 
   const client = createAPIClient();
 
@@ -131,6 +133,7 @@
       </p>
     </div>
     <div class="flex items-center gap-2">
+      {#if isAdmin}
       <button
         onclick={handleEditQuota}
         class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
@@ -138,6 +141,7 @@
         <Settings size={18} />
         Adjust Quota
       </button>
+      {/if}
       <button
         onclick={loadQuotaData}
         disabled={loading}
@@ -156,19 +160,14 @@
       <span class="ml-3 text-slate-500">Loading quota data...</span>
     </div>
   {:else if error}
-    <!-- Error State -->
-    <div class="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
-      <div class="text-red-500 text-lg font-medium mb-2">Failed to Load</div>
-      <p class="text-red-600 text-sm mb-4">{error}</p>
-      <button
-        onclick={loadQuotaData}
-        class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
-      >
-        Try Again
-      </button>
-    </div>
-  {:else if usageData}
-    <!-- Quota Status Banner -->
+    <ErrorState />
+  {:else if !usageData}
+    <EmptyInfrastructureState
+      title="No quota data available"
+      description="Quota information could not be loaded for your account."
+      hint="Contact your administrator to ensure quotas are configured for your user."
+    />
+  {:else}
     {@const criticalResources = resources.filter(r => getPercentage(r.key) >= 95)}
     {@const warningResources = resources.filter(r => {
       const p = getPercentage(r.key);

@@ -43,8 +43,10 @@ impl InventoryReporter {
             node_id: self.node_id.clone(),
             hostname: self.hostname.clone(),
             architecture: std::env::consts::ARCH.to_string(),
-            cpu_threads: 0,  // TODO: probe host
-            memory_bytes: 0, // TODO: probe host
+            cpu_threads: std::thread::available_parallelism()
+                .map(|n| n.get() as u64)
+                .unwrap_or(0),
+            memory_bytes: probe_memory_bytes(),
             storage_classes: Self::probe_storage_classes(&self.storage_base_dir),
             network_capabilities: vec![],
             labels: std::collections::HashMap::new(),
@@ -61,6 +63,26 @@ impl InventoryReporter {
             host_bundle_version: "".to_string(),
         }
     }
+}
+
+fn parse_meminfo_total(content: &str) -> u64 {
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let rest = rest.trim();
+            if let Some(kb_str) = rest.strip_suffix("kB") {
+                if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                    return kb * 1024;
+                }
+            }
+        }
+    }
+    0
+}
+
+fn probe_memory_bytes() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .map(|c| parse_meminfo_total(&c))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -91,5 +113,26 @@ mod tests {
         let reporter = InventoryReporter::with_storage_base_dir("n", "h", dir.path());
         let inventory = reporter.build_inventory();
         assert_eq!(inventory.storage_classes, vec!["localdisk"]);
+    }
+
+    #[test]
+    fn cpu_threads_is_nonzero() {
+        let reporter = InventoryReporter::new("node-x", "host-x");
+        let inventory = reporter.build_inventory();
+        assert!(inventory.cpu_threads > 0, "cpu_threads should be > 0 on any real machine");
+    }
+
+    #[test]
+    fn probe_memory_bytes_format() {
+        let mock_meminfo = "MemTotal:       16384000 kB\nMemFree:         8000000 kB\n";
+        let bytes = parse_meminfo_total(mock_meminfo);
+        assert_eq!(bytes, 16384000 * 1024);
+    }
+
+    #[test]
+    fn probe_memory_bytes_missing_entry_returns_zero() {
+        let mock_meminfo = "MemFree:         8000000 kB\nSwapTotal:       2048000 kB\n";
+        let bytes = parse_meminfo_total(mock_meminfo);
+        assert_eq!(bytes, 0);
     }
 }

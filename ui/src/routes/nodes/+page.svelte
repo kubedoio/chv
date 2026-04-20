@@ -7,16 +7,21 @@
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import AddNodeModal from '$lib/components/modals/AddNodeModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import { Plus, Bell, Activity, AlertCircle, ChevronRight } from 'lucide-svelte';
-	import { goto } from '$app/navigation';
+	import { goto, invalidateAll } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { enrollNode } from '$lib/bff/nodes';
+	import { createNode } from '$lib/bff/nodes';
+	import { getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
+	import type { CreateNodeInput, CreateNodeResponse } from '$lib/api/types';
 
 	let { data }: { data: PageData } = $props();
+
+	let addNodeOpen = $state(false);
 
 	const model = $derived(data.nodes);
 	const items = $derived(model.items);
@@ -100,22 +105,10 @@
 		{#snippet actions()}
 			<button
 				class="btn-primary"
-				onclick={async () => {
-					try {
-						const result = await enrollNode();
-						if (result.success) {
-							toast.success(result.message);
-						} else {
-							toast.error(result.message);
-						}
-					} catch (e) {
-						const msg = e instanceof Error ? e.message : 'Enrollment request failed';
-						toast.error(msg);
-					}
-				}}
+				onclick={() => (addNodeOpen = true)}
 			>
 				<Plus size={14} />
-				Enroll Node
+				Add Node
 			</button>
 		{/snippet}
 	</PageHeaderWithAction>
@@ -204,6 +197,28 @@
 		</aside>
 	</main>
 </div>
+
+<AddNodeModal
+	bind:open={addNodeOpen}
+	onClose={() => (addNodeOpen = false)}
+	onSubmit={async (data: CreateNodeInput): Promise<CreateNodeResponse> => {
+		const token = getStoredToken() ?? undefined;
+		const res = await createNode(data, token);
+		await invalidateAll();
+		// Map BFF response to the shape AddNodeModal expects
+		return {
+			id: res.id,
+			name: res.name,
+			hostname: res.hostname,
+			ip_address: res.ip_address,
+			status: (res.status as CreateNodeResponse['status']) ?? 'offline',
+			is_local: res.is_local ?? false,
+			agent_url: res.agent_url,
+			agent_token: res.agent_token,
+			created_at: res.created_at
+		};
+	}}
+/>
 
 <style>
 	.nodes-page {

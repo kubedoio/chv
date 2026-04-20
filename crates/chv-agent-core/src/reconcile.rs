@@ -15,6 +15,13 @@ pub struct Reconciler {
     pub vm_runtime: VmRuntime,
     pub stord_socket: PathBuf,
     pub nwd_socket: PathBuf,
+    pub runtime_dir: PathBuf,
+}
+
+/// Returns the per-VM runtime directory for the given VM.
+/// This directory holds the VM's socket, logs, PID file, and other runtime artifacts.
+pub fn vm_runtime_dir(base: &Path, vm_id: &str) -> PathBuf {
+    base.join("vms").join(vm_id)
 }
 
 impl Reconciler {
@@ -23,12 +30,14 @@ impl Reconciler {
         vm_runtime: VmRuntime,
         stord_socket: PathBuf,
         nwd_socket: PathBuf,
+        runtime_dir: PathBuf,
     ) -> Self {
         Self {
             cache,
             vm_runtime,
             stord_socket,
             nwd_socket,
+            runtime_dir,
         }
     }
 
@@ -248,6 +257,11 @@ impl Reconciler {
         vm_spec: &crate::spec::VmSpec,
         operation_id: &str,
     ) -> Result<VmConfig, ChvError> {
+        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+        tokio::fs::create_dir_all(&vm_dir)
+            .await
+            .map_err(|e| ChvError::Internal { reason: format!("failed to create vm dir: {}", e) })?;
+
         let mut disks = Vec::new();
         let mut volume_ids = Vec::new();
         for disk in &vm_spec.disks {
@@ -264,15 +278,28 @@ impl Reconciler {
             {
                 open_options.insert("seed_from".to_string(), seed_from.to_string());
             }
+            let disk_path = vm_dir.join(format!("{}.img", disk.volume_id));
+            tracing::info!(
+                vm_id = %vm_id,
+                volume_id = %disk.volume_id,
+                locator = %disk_path.display(),
+                "opening volume via stord"
+            );
             let (_volume_id, handle, export_path) = stord
                 .open_volume_with_options(
                     &disk.volume_id,
                     "local",
-                    &format!("{}.img", disk.volume_id),
+                    &disk_path.to_string_lossy(),
                     open_options,
                     Some(&open_op_id),
                 )
                 .await?;
+            tracing::info!(
+                vm_id = %vm_id,
+                volume_id = %disk.volume_id,
+                export_path = %export_path,
+                "stord returned export path"
+            );
             stord
                 .attach_volume_to_vm(&disk.volume_id, vm_id, &handle, Some(&open_op_id))
                 .await?;
@@ -344,7 +371,8 @@ impl Reconciler {
             firmware_path: vm_spec.firmware_path.as_ref().map(PathBuf::from),
             disks,
             nics,
-            api_socket_path: PathBuf::from(format!("/run/chv/agent/vm-{}.sock", vm_id)),
+            api_socket_path: vm_dir.join("vm.sock"),
+            cloud_init_userdata: vm_spec.cloud_init_userdata.clone(),
         })
     }
 
@@ -456,16 +484,18 @@ impl Reconciler {
         // Delete extra VMs
         for vm_id in actual.difference(&desired) {
             let op_id = format!("reconcile-vm-delete-{}", vm_id);
-            if let Err(e) = self.cleanup_vm(vm_id).await {
-                warn!(vm_id = %vm_id, error = %e, "cleanup vm failed");
-            }
             if let Err(e) = self.vm_runtime.stop_vm(vm_id, false, Some(&op_id)).await {
                 warn!(vm_id = %vm_id, error = %e, "failed to stop vm before delete");
+            }
+            if let Err(e) = self.cleanup_vm(vm_id).await {
+                warn!(vm_id = %vm_id, error = %e, "cleanup vm failed");
             }
             if let Err(e) = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await {
                 warn!(vm_id = %vm_id, error = %e, "failed to delete vm");
                 continue;
             }
+            let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+            let _ = tokio::fs::remove_dir_all(&vm_dir).await;
             let mut cache = self.cache.lock().await;
             cache.remove_vm_state(vm_id);
         }
@@ -511,12 +541,39 @@ impl Reconciler {
             if spec.desired_state == "Running" && record.runtime_status != "Running" {
                 let op_id = format!("reconcile-vm-start-{}", vm_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&op_id)).await {
-                    warn!(vm_id = %vm_id, error = %e, "failed to start vm");
-                    self.vm_runtime.record_failure(
-                        vm_id.to_string(),
-                        generation.clone(),
-                        e.to_string(),
-                    );
+                    let err_str = e.to_string();
+                    if err_str.contains("No such file or directory") || err_str.contains("Connection refused") {
+                        warn!(vm_id = %vm_id, "CH process dead, re-creating VM");
+                        let _ = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await;
+                        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+                        let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
+                        let _ = tokio::fs::remove_file(vm_dir.join("console.log")).await;
+                        let recreate_op_id = format!("reconcile-vm-recreate-{}", vm_id);
+                        let config = match self
+                            .prepare_vm(&mut stord, &mut nwd, vm_id, &spec, &recreate_op_id)
+                            .await
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                warn!(vm_id = %vm_id, error = %e, "failed to prepare vm for re-creation");
+                                self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                                continue;
+                            }
+                        };
+                        if let Err(e) = self.vm_runtime.create_vm(vm_id, &generation, &config, Some(&recreate_op_id)).await {
+                            warn!(vm_id = %vm_id, error = %e, "failed to re-create vm");
+                            self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                            continue;
+                        }
+                        let start_op_id = format!("{}-start", recreate_op_id);
+                        if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
+                            warn!(vm_id = %vm_id, error = %e, "failed to start re-created vm");
+                            self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                        }
+                    } else {
+                        warn!(vm_id = %vm_id, error = %e, "failed to start vm");
+                        self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    }
                     continue;
                 }
             } else if spec.desired_state == "Stopped" && record.runtime_status == "Running" {
@@ -665,6 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconciler_skips_when_not_tenant_ready() {
+        let dir = tempfile::tempdir().unwrap();
         let mut cache = test_cache();
         cache.node_state = "Bootstrapping".to_string();
         let mut rec = Reconciler::new(
@@ -674,6 +732,7 @@ mod tests {
             )),
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
         )
         .await;
         assert!(rec.run_once().await.is_ok());
@@ -681,6 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconciler_advances_from_discovered_to_bootstrapping() {
+        let dir = tempfile::tempdir().unwrap();
         let cache = NodeCache {
             node_state: "Discovered".to_string(),
             ..Default::default()
@@ -692,6 +752,7 @@ mod tests {
             )),
             PathBuf::from("/tmp/fake-stord-discovered.sock"),
             PathBuf::from("/tmp/fake-nwd-discovered.sock"),
+            dir.path().to_path_buf(),
         )
         .await;
         assert!(rec.run_once().await.is_ok());
@@ -700,6 +761,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconciler_uses_latest_cached_node_state() {
+        let dir = tempfile::tempdir().unwrap();
         let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
         let mock =
             std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
@@ -708,6 +770,7 @@ mod tests {
             VmRuntime::new(mock.clone()),
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
         )
         .await;
 
@@ -1021,6 +1084,7 @@ mod tests {
             VmRuntime::new(mock.clone()),
             stord_socket,
             nwd_socket,
+            dir.path().to_path_buf(),
         )
         .await;
         rec.reconcile_vms().await.unwrap();
@@ -1051,7 +1115,8 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-orphan.sock"),
+            api_socket_path: dir.path().join("vms/vm-orphan/vm.sock"),
+            cloud_init_userdata: None,
         };
         runtime
             .create_vm("vm-orphan", "1", &config, None)
@@ -1063,6 +1128,7 @@ mod tests {
             runtime,
             stord_socket,
             nwd_socket,
+            dir.path().to_path_buf(),
         )
         .await;
         rec.reconcile_vms().await.unwrap();
@@ -1089,17 +1155,19 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/vm-1.sock"),
+            api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
         };
         runtime.create_vm("vm-1", "1", &config, None).await.unwrap();
         runtime.stop_vm("vm-1", false, None).await.unwrap();
-        assert_eq!(runtime.get("vm-1").unwrap().runtime_status, "Stopped");
+        assert!(runtime.get("vm-1").is_none(), "VM removed from map after stop");
 
         let mut rec = Reconciler::new(
             Arc::new(tokio::sync::Mutex::new(test_cache())),
             runtime,
             stord_socket,
             nwd_socket,
+            dir.path().to_path_buf(),
         )
         .await;
         rec.reconcile_vms().await.unwrap();

@@ -180,6 +180,95 @@ message DeleteVmRequest {
   bool force = 4;
 }
 
+message ResizeVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  optional uint32 desired_vcpus = 4;
+  optional uint64 desired_memory_bytes = 5;
+}
+
+message PauseVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+}
+
+message ResumeVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+}
+
+message PowerButtonVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+}
+
+message AddDiskRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string disk_path = 4;
+  bool read_only = 5;
+  string disk_id = 6;
+}
+
+message RemoveDeviceRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string device_id = 4;
+}
+
+message AddNetRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string tap_name = 4;
+  string mac_address = 5;
+  string net_id = 6;
+}
+
+message ResizeDiskRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string disk_id = 4;
+  uint64 new_size_bytes = 5;
+}
+
+message SnapshotVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string destination = 4;
+}
+
+message RestoreSnapshotRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string source = 4;
+}
+
+message CoredumpVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string destination = 4;
+}
+
+message PingVmmRequest {
+  string node_id = 1;
+  string vm_id = 2;
+}
+
+message PingVmmResponse {
+  bool alive = 1;
+}
+
 message AttachVolumeRequest {
   RequestMeta meta = 1;
   string node_id = 2;
@@ -310,9 +399,21 @@ service LifecycleService {
   rpc StopVm(StopVmRequest) returns (AckResponse);
   rpc RebootVm(RebootVmRequest) returns (AckResponse);
   rpc DeleteVm(DeleteVmRequest) returns (AckResponse);
+  rpc ResizeVm(ResizeVmRequest) returns (AckResponse);
+  rpc PauseVm(PauseVmRequest) returns (AckResponse);
+  rpc ResumeVm(ResumeVmRequest) returns (AckResponse);
+  rpc PowerButtonVm(PowerButtonVmRequest) returns (AckResponse);
   rpc AttachVolume(AttachVolumeRequest) returns (AckResponse);
   rpc DetachVolume(DetachVolumeRequest) returns (AckResponse);
   rpc ResizeVolume(ResizeVolumeRequest) returns (AckResponse);
+  rpc AddDisk(AddDiskRequest) returns (AckResponse);
+  rpc RemoveDevice(RemoveDeviceRequest) returns (AckResponse);
+  rpc AddNet(AddNetRequest) returns (AckResponse);
+  rpc ResizeDisk(ResizeDiskRequest) returns (AckResponse);
+  rpc SnapshotVm(SnapshotVmRequest) returns (AckResponse);
+  rpc RestoreSnapshot(RestoreSnapshotRequest) returns (AckResponse);
+  rpc CoredumpVm(CoredumpVmRequest) returns (AckResponse);
+  rpc PingVmm(PingVmmRequest) returns (PingVmmResponse);
   rpc PauseNodeScheduling(PauseNodeSchedulingRequest) returns (AckResponse);
   rpc ResumeNodeScheduling(ResumeNodeSchedulingRequest) returns (AckResponse);
   rpc DrainNode(DrainNodeRequest) returns (AckResponse);

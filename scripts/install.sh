@@ -268,6 +268,33 @@ download_base_image() {
         return
     fi
 
+    # Check common locations for a pre-downloaded image
+    for candidate in \
+        "/root/noble-server-cloudimg-${CHV_ARCH}.img" \
+        "/root/ubuntu-noble-${CHV_ARCH}.img" \
+        "/tmp/noble-server-cloudimg-${CHV_ARCH}.img"; do
+        if [ -f "$candidate" ]; then
+            info "Found pre-downloaded image at ${candidate}, copying..."
+            cp "$candidate" "$BASE_IMAGE_PATH"
+            chown "${CHV_USER}:${CHV_USER}" "$BASE_IMAGE_PATH"
+            chmod 644 "$BASE_IMAGE_PATH"
+            # Convert qcow2 to raw if needed
+            if cmd_exists qemu-img; then
+                local img_fmt
+                img_fmt=$(qemu-img info --output=json "$BASE_IMAGE_PATH" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4 || true)
+                if [ "$img_fmt" = "qcow2" ]; then
+                    info "Converting qcow2 image to raw format..."
+                    local raw_path="${BASE_IMAGE_PATH}.raw"
+                    qemu-img convert -f qcow2 -O raw "$BASE_IMAGE_PATH" "$raw_path"
+                    mv "$raw_path" "$BASE_IMAGE_PATH"
+                    chown "${CHV_USER}:${CHV_USER}" "$BASE_IMAGE_PATH"
+                fi
+            fi
+            info "Base image ready -> ${BASE_IMAGE_PATH}"
+            return
+        fi
+    done
+
     info "Downloading Ubuntu Noble base image for ${CHV_ARCH}..."
     info "URL: ${BASE_IMAGE_URL}"
 
@@ -343,12 +370,14 @@ import_base_image() {
         return
     fi
 
-    info "Importing base image into control plane..."
+    info "Importing base image via API..."
 
-    # Wait for CP to be ready (should already be up from start_services)
+    local api_base="http://127.0.0.1:8080"
+
+    # Wait for CP to be ready
     local attempt=1
     while [ $attempt -le 30 ]; do
-        if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
+        if curl -sf "${api_base}/health" &>/dev/null; then
             break
         fi
         sleep 1
@@ -360,31 +389,43 @@ import_base_image() {
         return
     fi
 
-    # Check if image already imported
-    local existing
-    existing=$(sqlite3 "${CHV_DB_PATH}" \
-        "SELECT COUNT(*) FROM images WHERE display_name='ubuntu-noble' OR source_url='${BASE_IMAGE_URL}';" 2>/dev/null || echo "0")
-
-    if [ "${existing}" -gt 0 ] 2>/dev/null; then
-        info "Base image already imported, skipping."
+    # Login to get auth token
+    local login_response
+    login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
+        -H "Content-Type: application/json" \
+        -d '{"username":"admin","password":"admin"}' 2>/dev/null)
+    if [ -z "$login_response" ]; then
+        warn "Failed to login for image import."
         return
     fi
 
-    local image_id
-    image_id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-    local size_bytes
-    size_bytes=$(stat -c%s "$BASE_IMAGE_PATH" 2>/dev/null || stat -f%z "$BASE_IMAGE_PATH" 2>/dev/null || echo "0")
+    local token
+    token=$(echo "$login_response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"//')
+    if [ -z "$token" ]; then
+        warn "Failed to extract auth token for image import."
+        return
+    fi
 
-    if sqlite3 "${CHV_DB_PATH}" \
-        "INSERT INTO images
-         (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at)
-         VALUES ('${image_id}', 'ubuntu-noble', 'disk', 'raw', ${size_bytes}, NULL, '${BASE_IMAGE_PATH}', 'ubuntu', '24.04', 'available', NULL,
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'));" 2>/dev/null; then
-        info "Base image imported successfully (image_id: ${image_id})."
+    local auth_header="Authorization: Bearer ${token}"
+
+    # Import the image via BFF API
+    local import_response
+    import_response=$(curl -sf -X POST "${api_base}/v1/images/import" \
+        -H "Content-Type: application/json" \
+        -H "$auth_header" \
+        -d "{
+            \"name\": \"ubuntu-noble\",
+            \"source_url\": \"${BASE_IMAGE_PATH}\",
+            \"format\": \"raw\",
+            \"os\": \"ubuntu\"
+        }" 2>/dev/null)
+
+    if [ -n "$import_response" ]; then
+        local image_id
+        image_id=$(echo "$import_response" | grep -o '"image_id":"[^"]*"' | head -1 | sed 's/"image_id":"//;s/"//')
+        info "Base image imported via API (image_id: ${image_id})."
     else
-        warn "Failed to import base image into database."
-        warn "You can import it manually via: sqlite3 ${CHV_DB_PATH}"
+        info "Base image import skipped (may already exist)."
     fi
 }
 
@@ -392,126 +433,99 @@ import_base_image() {
 # Seed Dev Resources (default network + test VM)
 # -----------------------------------------------------------------------------
 seed_dev_resources() {
-    if ! cmd_exists sqlite3; then
-        warn "sqlite3 not available, skipping dev resource seeding."
+    local api_base="http://127.0.0.1:8080"
+
+    info "Seeding dev resources via API..."
+
+    # Wait for API to be healthy
+    local attempt=1
+    while [ $attempt -le 30 ]; do
+        if curl -sf "${api_base}/health" &>/dev/null; then
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+    if [ $attempt -gt 30 ]; then
+        warn "Control plane API not available, skipping dev resource seeding."
         return
     fi
 
-    if [ -z "$CHV_NODE_ID" ]; then
-        warn "CHV_NODE_ID not set, skipping dev resource seeding."
+    # Login as admin to get JWT token
+    local login_response
+    login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
+        -H "Content-Type: application/json" \
+        -d '{"username":"admin","password":"admin"}' 2>/dev/null)
+    if [ -z "$login_response" ]; then
+        warn "Failed to login as admin, skipping dev resource seeding."
         return
     fi
 
-    info "Seeding dev resources (default network + test-1 VM) for node ${CHV_NODE_ID}..."
+    local token
+    token=$(echo "$login_response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"//')
+    if [ -z "$token" ]; then
+        warn "Failed to extract auth token, skipping dev resource seeding."
+        return
+    fi
 
-    # Derive network CIDR from bridge CIDR (e.g. 10.200.0.1/24 -> 10.200.0.0/24)
+    local auth_header="Authorization: Bearer ${token}"
+
+    # Derive network CIDR from bridge CIDR
     local bridge_ip="${INSTALL_CHV_BRIDGE_CIDR%/*}"
     local bridge_prefix="${INSTALL_CHV_BRIDGE_CIDR#*/}"
     local network_cidr="${bridge_ip%.*}.0/${bridge_prefix}"
     local gateway_ip="${bridge_ip}"
 
-    local now
-    now=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')
+    # --- Create default network via API ---
+    local net_response
+    net_response=$(curl -sf -X POST "${api_base}/v1/networks/create" \
+        -H "Content-Type: application/json" \
+        -H "$auth_header" \
+        -d "{
+            \"name\": \"default\",
+            \"cidr\": \"${network_cidr}\",
+            \"gateway\": \"${gateway_ip}\",
+            \"dhcp_enabled\": true,
+            \"ipam_mode\": \"internal\",
+            \"is_default\": true
+        }" 2>/dev/null)
 
-    # --- Create default network ---
-    local net_exists
-    net_exists=$(sqlite3 "${CHV_DB_PATH}" \
-        "SELECT COUNT(*) FROM networks WHERE network_id='default';" 2>/dev/null || echo "0")
-    if [ "${net_exists}" -eq 0 ] 2>/dev/null; then
-        if sqlite3 "${CHV_DB_PATH}" <<EOF
-INSERT INTO networks (network_id, node_id, display_name, created_at, updated_at)
-VALUES ('default', '${CHV_NODE_ID}', 'default', '${now}', '${now}');
-
-INSERT INTO network_desired_state (
-    network_id, desired_generation, desired_status,
-    cidr, gateway, dhcp_enabled, ipam_mode, is_default,
-    requested_by, requested_at, updated_at
-)
-VALUES ('default', 1, 'Ready',
-        '${network_cidr}', '${gateway_ip}', 1, 'internal', 1,
-        'dev-install', '${now}', '${now}');
-
-INSERT INTO network_observed_state (
-    network_id, observed_generation, runtime_status, health_status, exposure_status,
-    observed_at, updated_at
-)
-VALUES ('default', 1, 'ready', 'healthy', 'private',
-        '${now}', '${now}');
-EOF
-        then
-            info "Default network created (${network_cidr}, gateway ${gateway_ip})."
-        else
-            warn "Failed to create default network in database."
-        fi
+    if [ -n "$net_response" ]; then
+        local net_id
+        net_id=$(echo "$net_response" | grep -o '"network_id":"[^"]*"' | head -1 | sed 's/"network_id":"//;s/"//')
+        info "Default network created via API (id=${net_id}, ${network_cidr}, gateway ${gateway_ip})."
     else
-        info "Default network already exists, skipping."
+        info "Default network creation skipped (may already exist)."
+        # Try to find existing default network ID for VM creation
+        net_id="default"
     fi
 
-    # --- Create test-1 VM ---
+    # --- Create test VM via API ---
     if [ ! -f "$BASE_IMAGE_PATH" ]; then
         warn "Base image not found at ${BASE_IMAGE_PATH}, skipping test VM creation."
         return
     fi
 
-    local vm_exists
-    vm_exists=$(sqlite3 "${CHV_DB_PATH}" \
-        "SELECT COUNT(*) FROM vms WHERE vm_id='test-1';" 2>/dev/null || echo "0")
-    if [ "${vm_exists}" -eq 0 ] 2>/dev/null; then
-        local memory_bytes=$((512 * 1024 * 1024))
-        local volume_size=$((10 * 1024 * 1024 * 1024))  # 10 GB
-        local volume_id="test-1-disk"
-        local nic_id="test-1-default"
-        local mac_address="02:00:00:00:00:01"
-        # First usable host IP after gateway (.2)
-        local ip_address="${bridge_ip%.*}.2"
+    local vm_response
+    vm_response=$(curl -sf -X POST "${api_base}/v1/vms/create" \
+        -H "Content-Type: application/json" \
+        -H "$auth_header" \
+        -d "{
+            \"display_name\": \"dev-vm-1\",
+            \"cpu_count\": 1,
+            \"memory_mb\": 512,
+            \"image_ref\": \"${BASE_IMAGE_PATH}\",
+            \"network_id\": \"${net_id:-default}\",
+            \"volume_size_gb\": 10,
+            \"requested_by\": \"dev-install\"
+        }" 2>/dev/null)
 
-        if sqlite3 "${CHV_DB_PATH}" <<EOF
-INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
-VALUES ('test-1', '${CHV_NODE_ID}', 'test-1', '${now}', '${now}');
-
-INSERT INTO vm_desired_state (
-    vm_id, desired_generation, desired_status, requested_by, target_node_id,
-    cpu_count, memory_bytes, image_ref, boot_mode, desired_power_state,
-    requested_at, updated_at
-)
-VALUES ('test-1', 1, 'Pending', 'dev-install', '${CHV_NODE_ID}',
-        1, ${memory_bytes}, '${BASE_IMAGE_PATH}', 'firmware', 'Running',
-        '${now}', '${now}');
-
-INSERT INTO vm_observed_state (
-    vm_id, observed_generation, runtime_status, health_status, node_id,
-    observed_at, updated_at
-)
-VALUES ('test-1', 1, 'stopped', 'unknown', '${CHV_NODE_ID}',
-        '${now}', '${now}');
-
-INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, volume_kind, created_at, updated_at)
-VALUES ('${volume_id}', '${CHV_NODE_ID}', 'test-1-disk', ${volume_size}, 'disk', '${now}', '${now}');
-
-INSERT INTO volume_desired_state (
-    volume_id, desired_generation, desired_status, requested_by, attached_vm_id,
-    device_name, read_only, requested_at, updated_at
-)
-VALUES ('${volume_id}', 1, 'Pending', 'dev-install', 'test-1',
-        'vda', 0, '${now}', '${now}');
-
-INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id, mac_address, ip_address, nic_model, created_at, updated_at)
-VALUES ('${nic_id}', 'test-1', 'default', '${mac_address}', '${ip_address}', 'virtio', '${now}', '${now}');
-
-INSERT INTO operations (
-    operation_id, idempotency_key, resource_kind, resource_id, operation_type, status,
-    requested_by, desired_generation, requested_at, created_at, updated_at
-)
-VALUES ('op-create-test-1', 'create-vm-test-1', 'vm', 'test-1', 'CreateVm', 'Accepted',
-        'dev-install', 1, '${now}', '${now}', '${now}');
-EOF
-        then
-            info "Test VM 'test-1' created (1 CPU, 512 MB, 10 GB disk, IP ${ip_address})."
-        else
-            warn "Failed to create test VM in database."
-        fi
+    if [ -n "$vm_response" ]; then
+        local vm_id
+        vm_id=$(echo "$vm_response" | grep -o '"vm_id":"[^"]*"' | head -1 | sed 's/"vm_id":"//;s/"//')
+        info "Test VM created via API (id=${vm_id}, 1 CPU, 512 MB, 10 GB disk)."
     else
-        info "Test VM 'test-1' already exists, skipping."
+        warn "Failed to create test VM via API."
     fi
 }
 
@@ -658,7 +672,7 @@ EOF
 
     cat > "$CHV_CONFIG_DIR/agent.toml" <<EOF
 socket_path = "/run/chv/agent/api.sock"
-runtime_dir = "/run/chv/agent"
+runtime_dir = "${CHV_DATA_DIR}/agent"
 log_level = "info"
 control_plane_addr = "http://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
@@ -675,6 +689,7 @@ tls_cert_path = "/run/chv/agent/agent.crt"
 tls_key_path = "/run/chv/agent/agent.key"
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 console_bind = "127.0.0.1:8444"
+jwt_secret = "${JWT_SECRET}"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/agent.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/agent.toml"
@@ -802,7 +817,7 @@ Wants=chv-controlplane.service chv-stord.service chv-nwd.service
 Type=simple
 User=chv
 Group=chv
-ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd
+ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
 ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
@@ -967,15 +982,9 @@ start_services() {
     while [ $attempt -le 60 ]; do
         local node_count
         node_count=0
-        if cmd_exists sqlite3; then
-            node_count=$(sqlite3 "${CHV_DB_PATH}" \
-                "SELECT COUNT(*) FROM nodes;" 2>/dev/null || echo "0")
-        else
-            # Fall back to HTTP API poll
-            node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
-                -X POST -H "Content-Type: application/json" -d '{}' 2>/dev/null \
-                | grep -o '"total_items":[0-9]*' | grep -o '[0-9]*' || echo "0")
-        fi
+        node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
+            -X POST -H "Content-Type: application/json" -d '{}' 2>/dev/null \
+            | grep -o '"total_items":[0-9]*' | grep -o '[0-9]*' || echo "0")
         if [ "${node_count}" -gt 0 ] 2>/dev/null; then
             info "Node enrolled successfully."
             break
@@ -1005,6 +1014,32 @@ trap cleanup EXIT
 
 install_dependencies
 setup_user_and_dirs
+
+# Clean up previous installation artifacts
+clean_previous_install() {
+    info "Cleaning previous installation..."
+    # Stop services if running
+    for svc in chv-agent chv-controlplane chv-stord chv-nwd; do
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+    done
+    # Remove old configs (will be regenerated)
+    rm -f "${CHV_CONFIG_DIR}/agent.toml" "${CHV_CONFIG_DIR}/controlplane.toml" \
+          "${CHV_CONFIG_DIR}/stord.toml" "${CHV_CONFIG_DIR}/nwd.toml" \
+          "${CHV_CONFIG_DIR}/bootstrap.token"
+    # Remove old runtime data (VMs, volumes, certs in agent dir)
+    rm -rf "${CHV_DATA_DIR}/agent/vms" "${CHV_DATA_DIR}/agent/"*.img \
+           "${CHV_DATA_DIR}/agent/agent.crt" "${CHV_DATA_DIR}/agent/agent.key" \
+           "${CHV_DATA_DIR}/agent/ca.crt" \
+           "${CHV_DATA_DIR}/agent/chv-nwd.toml" "${CHV_DATA_DIR}/agent/chv-stord.toml"
+    # Remove old database
+    rm -f "${CHV_DATA_DIR}/controlplane.db"*
+    # Remove old cache
+    rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
+    info "Previous installation cleaned."
+}
+clean_previous_install
+
 resolve_version
 download_release
 install_binaries_and_assets

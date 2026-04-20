@@ -14,6 +14,7 @@
 		setActiveContext
 	} from '$lib/stores/keyboard.svelte';
 	import { buildSearchIndex, loadRecentSearches } from '$lib/stores/search.svelte';
+	import { theme } from '$lib/stores/theme.svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
@@ -41,6 +42,7 @@
 	onMount(() => {
 		const token = getStoredToken();
 		syncAuthCookieFromLocalStorage();
+		theme.init();
 
 		if (!isPublicRoute && !getStoredToken()) {
 			goto('/login');

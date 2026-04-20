@@ -11,6 +11,8 @@
   import CloudInitEditor from '$lib/components/forms/CloudInitEditor.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
+  import ErrorState from '$lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });
@@ -297,12 +299,8 @@
 </div>
 
 {#if error}
-  <div class="mb-4 border border-danger bg-red-50 px-4 py-3 text-danger">
-    {error}
-  </div>
-{/if}
-
-{#if activeTab === 'vm'}
+  <ErrorState />
+{:else if activeTab === 'vm'}
   <section class="table-card">
     <DataTable
       data={vmTemplates}

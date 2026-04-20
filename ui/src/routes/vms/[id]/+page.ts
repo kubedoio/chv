@@ -28,6 +28,7 @@ function buildSections(summary: VmSummary | null): { id: string; label: string; 
 	return [
 		{ id: 'summary', label: 'Summary' },
 		{ id: 'console', label: 'Console' },
+		{ id: 'boot-log', label: 'Boot Log' },
 		{ id: 'volumes', label: 'Volumes' },
 		{ id: 'networks', label: 'Networks' },
 		{ id: 'tasks', label: 'Tasks', count: taskCount },

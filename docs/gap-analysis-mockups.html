@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CHV Gap Analysis — Missing Screen Mockups</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --primary: #8f5a2a;
+  --primary-light: #f5eadc;
+  --success: #3f6b45;
+  --success-light: #edf4ee;
+  --warning: #9a6a1f;
+  --warning-light: #f8efd9;
+  --danger: #9b4338;
+  --danger-light: #faece8;
+  --info: #49627d;
+  --neutral-50: #f7f3ec;
+  --neutral-100: #efe9df;
+  --neutral-200: #ddd5c8;
+  --neutral-300: #c7bcac;
+  --neutral-400: #9d917f;
+  --neutral-500: #75695b;
+  --neutral-700: #423b33;
+  --neutral-800: #29241f;
+  --neutral-900: #191612;
+  --font: 'IBM Plex Sans', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: var(--font); background: var(--neutral-50); color: var(--neutral-900); font-size: 14px; line-height: 1.5; }
+.page { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; }
+h2 { font-size: 1.25rem; font-weight: 600; margin: 2.5rem 0 1rem; border-bottom: 2px solid var(--primary); padding-bottom: 0.5rem; }
+h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: var(--neutral-700); }
+.subtitle { color: var(--neutral-500); margin-bottom: 2rem; }
+.priority { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+.p0 { background: var(--danger-light); color: var(--danger); }
+.p1 { background: var(--warning-light); color: var(--warning); }
+.p2 { background: var(--info); color: white; }
+
+/* Mockup frame */
+.mockup { border: 1px solid var(--neutral-200); border-radius: 8px; overflow: hidden; margin: 1rem 0 2rem; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.mockup-header { background: var(--neutral-100); padding: 0.5rem 1rem; border-bottom: 1px solid var(--neutral-200); display: flex; justify-content: space-between; align-items: center; }
+.mockup-title { font-size: 12px; font-weight: 600; color: var(--neutral-500); text-transform: uppercase; letter-spacing: 0.1em; }
+.mockup-route { font-family: var(--mono); font-size: 11px; color: var(--neutral-400); }
+.mockup-body { padding: 1.5rem; }
+
+/* UI Components */
+.stat-strip { display: flex; gap: 1rem; margin-bottom: 1.5rem; }
+.stat { padding: 0.75rem 1rem; background: var(--neutral-50); border: 1px solid var(--neutral-200); border-radius: 6px; flex: 1; }
+.stat-label { font-size: 11px; color: var(--neutral-500); text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-value { font-size: 1.25rem; font-weight: 600; margin-top: 2px; }
+.stat-value.healthy { color: var(--success); }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 12px; background: var(--neutral-50); border-bottom: 2px solid var(--neutral-200); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--neutral-500); font-weight: 600; }
+td { padding: 8px 12px; border-bottom: 1px solid var(--neutral-100); }
+tr:hover td { background: var(--primary-light); }
+.mono { font-family: var(--mono); font-size: 12px; color: var(--neutral-500); }
+
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; border: 1px solid transparent; cursor: pointer; }
+.btn-primary { background: var(--primary); color: white; }
+.btn-danger { background: white; border-color: var(--danger); color: var(--danger); }
+.btn-ghost { background: transparent; border-color: var(--neutral-300); color: var(--neutral-700); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 500; }
+.badge-success { background: var(--success-light); color: var(--success); }
+.badge-warning { background: var(--warning-light); color: var(--warning); }
+.badge-danger { background: var(--danger-light); color: var(--danger); }
+.badge-info { background: #edf1f6; color: var(--info); }
+
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+.actions { display: flex; gap: 8px; }
+
+.form-group { margin-bottom: 1rem; }
+.form-label { display: block; font-size: 12px; font-weight: 500; color: var(--neutral-500); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
+.form-input { width: 100%; padding: 8px 12px; border: 1px solid var(--neutral-200); border-radius: 6px; font-size: 14px; font-family: var(--font); }
+.form-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(143,90,42,0.1); }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+.card { border: 1px solid var(--neutral-200); border-radius: 8px; padding: 1rem; background: white; }
+.card + .card { margin-top: 0.75rem; }
+.card-title { font-weight: 600; margin-bottom: 0.5rem; }
+
+.section-label { font-size: 11px; font-weight: 600; color: var(--neutral-400); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.75rem; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+
+.prop-grid { display: grid; grid-template-columns: 140px 1fr; gap: 4px 16px; font-size: 13px; }
+.prop-label { color: var(--neutral-500); }
+.prop-value { color: var(--neutral-900); font-weight: 500; }
+
+.empty-state { text-align: center; padding: 3rem; color: var(--neutral-400); }
+.empty-state h4 { font-size: 1.1rem; color: var(--neutral-700); margin-bottom: 0.5rem; }
+
+.timeline { border-left: 2px solid var(--neutral-200); padding-left: 1rem; margin: 1rem 0; }
+.timeline-item { position: relative; padding-bottom: 1rem; }
+.timeline-item::before { content: ''; position: absolute; left: -1.35rem; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--primary); }
+.timeline-time { font-size: 11px; color: var(--neutral-400); font-family: var(--mono); }
+.timeline-text { font-size: 13px; margin-top: 2px; }
+
+.code-block { background: var(--neutral-800); color: #e8e2d8; padding: 1rem; border-radius: 6px; font-family: var(--mono); font-size: 12px; overflow-x: auto; white-space: pre; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>CHV Platform — Gap Analysis Mockups</h1>
+<p class="subtitle">Missing screens for enterprise readiness. Each mockup uses the actual CHV design system (IBM Plex Sans, warm earthy palette).</p>
+
+<!-- ============================================================ -->
+<h2><span class="priority p0">P0</span> User Management</h2>
+<p>Currently only a seeded admin user exists. No way to add users, change passwords, or manage roles.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">User Management</span>
+  <span class="mockup-route">/settings/users</span>
+</div>
+<div class="mockup-body">
+  <div class="toolbar">
+    <div>
+      <span style="font-size:1.1rem;font-weight:600">Users</span>
+      <span style="color:var(--neutral-400);margin-left:8px">3 users</span>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary">+ Add User</button>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th>Username</th><th>Display Name</th><th>Role</th><th>Last Login</th><th>Actions</th></tr></thead>
+    <tbody>
+      <tr><td><strong>admin</strong></td><td>Administrator</td><td><span class="badge badge-warning">admin</span></td><td class="mono">2026-04-19 18:27</td><td><button class="btn btn-ghost btn-sm">Edit</button> <button class="btn btn-danger btn-sm">Disable</button></td></tr>
+      <tr><td><strong>ops-team</strong></td><td>Operations Team</td><td><span class="badge badge-info">operator</span></td><td class="mono">2026-04-19 14:05</td><td><button class="btn btn-ghost btn-sm">Edit</button> <button class="btn btn-danger btn-sm">Disable</button></td></tr>
+      <tr><td><strong>viewer-01</strong></td><td>Read-Only Viewer</td><td><span class="badge badge-success">viewer</span></td><td class="mono">never</td><td><button class="btn btn-ghost btn-sm">Edit</button> <button class="btn btn-danger btn-sm">Disable</button></td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<h3>Add User Modal</h3>
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">Create User</span>
+  <span class="mockup-route">Modal overlay</span>
+</div>
+<div class="mockup-body" style="max-width:480px">
+  <div class="form-group"><label class="form-label">Username</label><input class="form-input" value="new-operator" /></div>
+  <div class="form-group"><label class="form-label">Display Name</label><input class="form-input" value="Jane Ops" /></div>
+  <div class="form-group"><label class="form-label">Email</label><input class="form-input" value="jane@infra.team" /></div>
+  <div class="form-row">
+    <div class="form-group"><label class="form-label">Password</label><input class="form-input" type="password" value="••••••••" /></div>
+    <div class="form-group"><label class="form-label">Role</label><select class="form-input"><option>admin</option><option selected>operator</option><option>viewer</option></select></div>
+  </div>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:1rem">
+    <button class="btn btn-ghost">Cancel</button>
+    <button class="btn btn-primary">Create User</button>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="priority p0">P0</span> Cloud-init Configuration</h2>
+<p>VMs boot without configuration. Cloud-init lets you set hostname, SSH keys, packages, and scripts on first boot.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">VM Creation — Cloud-init Tab</span>
+  <span class="mockup-route">/vms → Create VM Modal → Cloud-init</span>
+</div>
+<div class="mockup-body">
+  <div style="display:flex;gap:8px;margin-bottom:1rem">
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--primary);color:var(--primary)">General</button>
+    <button class="btn btn-ghost btn-sm" style="border-color:var(--primary);color:var(--primary);background:var(--primary-light)">Cloud-init</button>
+    <button class="btn btn-ghost btn-sm">Network</button>
+    <button class="btn btn-ghost btn-sm">Storage</button>
+  </div>
+  <div class="form-group"><label class="form-label">Hostname</label><input class="form-input" value="web-server-01" /></div>
+  <div class="form-group"><label class="form-label">SSH Authorized Keys</label><textarea class="form-input" rows="3" style="font-family:var(--mono);font-size:12px">ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGk... ops@infra.team</textarea></div>
+  <div class="form-group"><label class="form-label">User Data (YAML)</label>
+    <div class="code-block">#cloud-config
+packages:
+  - nginx
+  - htop
+
+runcmd:
+  - systemctl enable nginx
+  - systemctl start nginx
+
+write_files:
+  - path: /etc/motd
+    content: |
+      CHV Managed VM — web-server-01</div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="priority p1">P1</span> VM Snapshots</h2>
+<p>No way to save VM state before risky changes. Snapshots let you roll back to a known-good state.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">VM Detail — Snapshots Tab</span>
+  <span class="mockup-route">/vms/{id} → Snapshots</span>
+</div>
+<div class="mockup-body">
+  <div class="toolbar">
+    <span class="section-label">Snapshots (3)</span>
+    <button class="btn btn-primary btn-sm">+ Create Snapshot</button>
+  </div>
+  <table>
+    <thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Includes Memory</th><th>Actions</th></tr></thead>
+    <tbody>
+      <tr><td><strong>pre-upgrade</strong></td><td class="mono">2026-04-19 16:00</td><td class="mono">2.4 GiB</td><td><span class="badge badge-success">Yes</span></td><td><button class="btn btn-ghost btn-sm">Restore</button> <button class="btn btn-danger btn-sm">Delete</button></td></tr>
+      <tr><td><strong>after-nginx-config</strong></td><td class="mono">2026-04-18 09:30</td><td class="mono">1.8 GiB</td><td><span class="badge badge-info">Disk only</span></td><td><button class="btn btn-ghost btn-sm">Restore</button> <button class="btn btn-danger btn-sm">Delete</button></td></tr>
+      <tr><td><strong>initial-setup</strong></td><td class="mono">2026-04-15 11:00</td><td class="mono">1.2 GiB</td><td><span class="badge badge-info">Disk only</span></td><td><button class="btn btn-ghost btn-sm">Restore</button> <button class="btn btn-danger btn-sm">Delete</button></td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="priority p1">P1</span> Firewall Rules</h2>
+<p>No network security enforcement. Firewall rules control what traffic reaches each VM.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">Network Detail — Firewall Tab</span>
+  <span class="mockup-route">/networks/{id} → Firewall</span>
+</div>
+<div class="mockup-body">
+  <div class="toolbar">
+    <span class="section-label">Inbound Rules (4)</span>
+    <button class="btn btn-primary btn-sm">+ Add Rule</button>
+  </div>
+  <table>
+    <thead><tr><th>#</th><th>Action</th><th>Protocol</th><th>Port</th><th>Source</th><th>Description</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="mono">1</td><td><span class="badge badge-success">Allow</span></td><td>TCP</td><td class="mono">22</td><td class="mono">10.0.0.0/8</td><td>SSH from internal</td><td><button class="btn btn-ghost btn-sm">Edit</button></td></tr>
+      <tr><td class="mono">2</td><td><span class="badge badge-success">Allow</span></td><td>TCP</td><td class="mono">80, 443</td><td class="mono">0.0.0.0/0</td><td>HTTP/HTTPS public</td><td><button class="btn btn-ghost btn-sm">Edit</button></td></tr>
+      <tr><td class="mono">3</td><td><span class="badge badge-success">Allow</span></td><td>ICMP</td><td class="mono">—</td><td class="mono">10.0.0.0/8</td><td>Ping from internal</td><td><button class="btn btn-ghost btn-sm">Edit</button></td></tr>
+      <tr><td class="mono">4</td><td><span class="badge badge-danger">Deny</span></td><td>ALL</td><td class="mono">*</td><td class="mono">0.0.0.0/0</td><td>Default deny</td><td style="color:var(--neutral-400);font-size:11px">implicit</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="priority p1">P1</span> Metrics Dashboard</h2>
+<p>No performance visibility. Operators can't see CPU/memory/disk usage trends.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">Metrics</span>
+  <span class="mockup-route">/metrics</span>
+</div>
+<div class="mockup-body">
+  <div class="stat-strip">
+    <div class="stat"><div class="stat-label">Fleet CPU</div><div class="stat-value">47%</div></div>
+    <div class="stat"><div class="stat-label">Fleet Memory</div><div class="stat-value">62%</div></div>
+    <div class="stat"><div class="stat-label">Fleet Storage</div><div class="stat-value">38%</div></div>
+    <div class="stat"><div class="stat-label">Active VMs</div><div class="stat-value healthy">24</div></div>
+  </div>
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">CPU Usage (24h)</div>
+      <div style="height:120px;background:linear-gradient(180deg,var(--primary-light) 0%,white 100%);border-radius:4px;display:flex;align-items:flex-end;padding:0 4px">
+        <div style="display:flex;gap:2px;align-items:flex-end;width:100%;height:100%">
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:45%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:52%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:48%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:61%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:73%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:67%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:55%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.6;height:47%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--primary);opacity:0.8;height:42%;border-radius:2px 2px 0 0"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Memory Usage (24h)</div>
+      <div style="height:120px;background:linear-gradient(180deg,var(--success-light) 0%,white 100%);border-radius:4px;display:flex;align-items:flex-end;padding:0 4px">
+        <div style="display:flex;gap:2px;align-items:flex-end;width:100%;height:100%">
+          <div style="flex:1;background:var(--success);opacity:0.6;height:58%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.6;height:60%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.6;height:62%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.6;height:63%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.6;height:61%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.6;height:65%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.6;height:62%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.6;height:64%;border-radius:2px 2px 0 0"></div>
+          <div style="flex:1;background:var(--success);opacity:0.8;height:62%;border-radius:2px 2px 0 0"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <h3 style="margin-top:1.5rem">Top Resource Consumers</h3>
+  <table>
+    <thead><tr><th>VM</th><th>Node</th><th>CPU</th><th>Memory</th><th>Disk I/O</th></tr></thead>
+    <tbody>
+      <tr><td><strong>db-primary</strong></td><td class="mono">node-01</td><td>87%</td><td>14.2 / 16 GiB</td><td class="mono">245 MB/s</td></tr>
+      <tr><td><strong>api-gateway</strong></td><td class="mono">node-02</td><td>62%</td><td>3.8 / 4 GiB</td><td class="mono">12 MB/s</td></tr>
+      <tr><td><strong>build-runner</strong></td><td class="mono">node-01</td><td>54%</td><td>7.1 / 8 GiB</td><td class="mono">89 MB/s</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="priority p1">P1</span> VM Migration</h2>
+<p>Can't move running VMs between nodes for maintenance or load balancing.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">Migrate VM</span>
+  <span class="mockup-route">/vms/{id} → Actions → Migrate</span>
+</div>
+<div class="mockup-body" style="max-width:500px">
+  <div style="margin-bottom:1rem">
+    <div class="prop-grid">
+      <span class="prop-label">VM</span><span class="prop-value">web-server-01</span>
+      <span class="prop-label">Current Node</span><span class="prop-value">node-01 <span class="badge badge-success">Online</span></span>
+      <span class="prop-label">CPU / Memory</span><span class="prop-value mono">4 vCPU / 8 GiB</span>
+    </div>
+  </div>
+  <div class="form-group">
+    <label class="form-label">Target Node</label>
+    <select class="form-input">
+      <option>Select target node...</option>
+      <option>node-02 — 12 vCPU free, 48 GiB free</option>
+      <option>node-03 — 8 vCPU free, 32 GiB free</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label class="form-label">Migration Type</label>
+    <div style="display:flex;gap:1rem;margin-top:4px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="mig" checked /> Live (no downtime)</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="radio" name="mig" /> Cold (stop → move → start)</label>
+    </div>
+  </div>
+  <div style="background:var(--warning-light);border:1px solid var(--warning);border-radius:6px;padding:0.75rem;font-size:13px;margin:1rem 0">
+    Live migration transfers memory pages while the VM runs. Brief pause (~100ms) at switchover.
+  </div>
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button class="btn btn-ghost">Cancel</button>
+    <button class="btn btn-primary">Start Migration</button>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="priority p2">P2</span> Backup Jobs</h2>
+<p>No disaster recovery. Backup jobs let you schedule automatic VM and volume backups.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">Backup Jobs</span>
+  <span class="mockup-route">/backup-jobs</span>
+</div>
+<div class="mockup-body">
+  <div class="toolbar">
+    <div class="stat-strip" style="margin:0">
+      <div class="stat"><div class="stat-label">Active Jobs</div><div class="stat-value healthy">5</div></div>
+      <div class="stat"><div class="stat-label">Last 24h</div><div class="stat-value">12 runs</div></div>
+      <div class="stat"><div class="stat-label">Failed</div><div class="stat-value" style="color:var(--danger)">1</div></div>
+      <div class="stat"><div class="stat-label">Storage Used</div><div class="stat-value">147 GiB</div></div>
+    </div>
+  </div>
+  <table style="margin-top:1rem">
+    <thead><tr><th>Job Name</th><th>Target</th><th>Schedule</th><th>Last Run</th><th>Status</th><th>Retention</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Daily DB Backup</strong></td><td>db-primary</td><td class="mono">0 2 * * *</td><td class="mono">2026-04-19 02:00</td><td><span class="badge badge-success">OK</span></td><td>7 days</td></tr>
+      <tr><td><strong>Weekly Full</strong></td><td>All VMs</td><td class="mono">0 3 * * 0</td><td class="mono">2026-04-14 03:00</td><td><span class="badge badge-success">OK</span></td><td>4 weeks</td></tr>
+      <tr><td><strong>API Gateway Snap</strong></td><td>api-gateway</td><td class="mono">*/6h</td><td class="mono">2026-04-19 18:00</td><td><span class="badge badge-danger">Failed</span></td><td>48 hours</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="priority p2">P2</span> VM Templates</h2>
+<p>No reusable VM configurations. Templates let you define standard VM sizes with pre-configured cloud-init.</p>
+
+<div class="mockup">
+<div class="mockup-header">
+  <span class="mockup-title">VM Templates</span>
+  <span class="mockup-route">/templates</span>
+</div>
+<div class="mockup-body">
+  <div class="toolbar">
+    <span style="font-size:1.1rem;font-weight:600">Templates</span>
+    <button class="btn btn-primary">+ Create Template</button>
+  </div>
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-title">Web Server</div>
+      <div class="prop-grid" style="font-size:12px;margin-top:0.5rem">
+        <span class="prop-label">CPU</span><span class="prop-value mono">2 vCPU</span>
+        <span class="prop-label">Memory</span><span class="prop-value mono">4 GiB</span>
+        <span class="prop-label">Disk</span><span class="prop-value mono">20 GiB</span>
+        <span class="prop-label">Image</span><span class="prop-value">Ubuntu 24.04</span>
+        <span class="prop-label">Cloud-init</span><span class="prop-value"><span class="badge badge-success">nginx + certbot</span></span>
+      </div>
+      <div style="margin-top:0.75rem"><button class="btn btn-primary btn-sm">Deploy</button> <button class="btn btn-ghost btn-sm">Edit</button></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Database Server</div>
+      <div class="prop-grid" style="font-size:12px;margin-top:0.5rem">
+        <span class="prop-label">CPU</span><span class="prop-value mono">4 vCPU</span>
+        <span class="prop-label">Memory</span><span class="prop-value mono">16 GiB</span>
+        <span class="prop-label">Disk</span><span class="prop-value mono">100 GiB</span>
+        <span class="prop-label">Image</span><span class="prop-value">Ubuntu 24.04</span>
+        <span class="prop-label">Cloud-init</span><span class="prop-value"><span class="badge badge-success">postgres 16</span></span>
+      </div>
+      <div style="margin-top:0.75rem"><button class="btn btn-primary btn-sm">Deploy</button> <button class="btn btn-ghost btn-sm">Edit</button></div>
+    </div>
+    <div class="card">
+      <div class="card-title">CI Runner</div>
+      <div class="prop-grid" style="font-size:12px;margin-top:0.5rem">
+        <span class="prop-label">CPU</span><span class="prop-value mono">8 vCPU</span>
+        <span class="prop-label">Memory</span><span class="prop-value mono">8 GiB</span>
+        <span class="prop-label">Disk</span><span class="prop-value mono">50 GiB</span>
+        <span class="prop-label">Image</span><span class="prop-value">Ubuntu 24.04</span>
+        <span class="prop-label">Cloud-init</span><span class="prop-value"><span class="badge badge-success">docker + runner</span></span>
+      </div>
+      <div style="margin-top:0.75rem"><button class="btn btn-primary btn-sm">Deploy</button> <button class="btn btn-ghost btn-sm">Edit</button></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<div style="margin-top:3rem;padding:1.5rem;background:var(--primary-light);border-radius:8px;border:1px solid var(--primary)">
+  <h3 style="margin:0 0 0.5rem;color:var(--primary)">Summary</h3>
+  <p style="font-size:13px;color:var(--neutral-700)">
+    <strong>7 mockups</strong> covering the highest-priority gaps: User Management (P0), Cloud-init (P0), Snapshots (P1), Firewall Rules (P1), Metrics Dashboard (P1), VM Migration (P1), Backup Jobs (P2), VM Templates (P2). All use the CHV warm earthy design system with IBM Plex Sans typography.
+  </p>
+</div>
+
+</div>
+</body>
+</html>

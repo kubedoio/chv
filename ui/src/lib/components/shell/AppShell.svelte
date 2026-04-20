@@ -30,9 +30,7 @@
 		display: grid;
 		grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 		min-height: 100vh;
-		background:
-			radial-gradient(circle at top left, rgba(143, 90, 42, 0.06), transparent 22%),
-			linear-gradient(180deg, rgba(252, 250, 245, 0.98), rgba(244, 240, 232, 0.98));
+		background: var(--shell-bg);
 		color: var(--shell-text);
 	}
 
@@ -42,7 +40,7 @@
 		height: 100vh;
 		padding: 1.2rem 1rem;
 		border-right: 1px solid var(--shell-line);
-		background: rgba(251, 248, 242, 0.92);
+		background: var(--shell-surface);
 		backdrop-filter: blur(12px);
 	}
 

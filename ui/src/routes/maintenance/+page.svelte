@@ -8,6 +8,8 @@
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 	import { Wrench, ArrowUpFromLine, RefreshCcw, Activity, ShieldCheck, AlertCircle, ChevronRight, Clock } from 'lucide-svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -16,6 +18,13 @@
 
 	const activeWindows = $derived(maintenance.windows);
 	const drainingNodes = $derived(maintenance.nodes);
+
+	const isEmpty = $derived(
+		activeWindows.length === 0 &&
+		drainingNodes.length === 0 &&
+		!maintenance.pending_actions &&
+		!maintenance.upgrade_available
+	);
 
 	const upgradePostureProps = $derived([
 		{ label: 'Current Version', value: maintenance.current_version || 'Unavailable' },
@@ -46,7 +55,16 @@
 		<CompactStatStrip {stats} />
 	</div>
 
-	<main class="detail-grid">
+	{#if data.error}
+		<ErrorState />
+	{:else if isEmpty}
+		<EmptyInfrastructureState
+			title="No maintenance activity"
+			description="There are no active maintenance windows, draining nodes, or pending actions."
+			hint="Schedule a maintenance window to safely drain nodes and apply updates."
+		/>
+	{:else}
+		<main class="detail-grid">
 		<div class="detail-main-span">
 			<SectionCard title="Active Maintenance Windows" icon={Clock} badgeTone={activeWindows.length > 0 ? 'warning' : 'neutral'}>
 				{#if activeWindows.length === 0}
@@ -136,6 +154,7 @@
 			</SectionCard>
 		</aside>
 	</main>
+	{/if}
 </div>
 
 <style>

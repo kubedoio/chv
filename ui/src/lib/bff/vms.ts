@@ -9,8 +9,6 @@ import type {
 	CreateVmResponse,
 	MutateVmRequest,
 	MutateVmResponse,
-	GetVmConsoleRequest,
-	GetVmConsoleResponse,
 	GetVmConsoleUrlResponse
 } from './types';
 
@@ -53,19 +51,9 @@ export async function deleteVm(
 	req: { vm_id: string; requested_by: string },
 	token?: string
 ): Promise<{ vm_id: string; operation_id: string; status: string }> {
-	return bffFetch(BFFEndpoints.createVm, { method: 'POST', body: JSON.stringify(req), token });
+	return bffFetch(BFFEndpoints.deleteVm, { method: 'POST', body: JSON.stringify(req), token });
 }
 
-export async function getVmConsole(
-	req: GetVmConsoleRequest,
-	token?: string
-): Promise<GetVmConsoleResponse> {
-	return bffFetch<GetVmConsoleResponse>(BFFEndpoints.getVmConsole, {
-		method: 'POST',
-		body: JSON.stringify(req),
-		token
-	});
-}
 
 export async function getVmConsoleUrl(
 	vm_id: string,
@@ -73,6 +61,17 @@ export async function getVmConsoleUrl(
 ): Promise<GetVmConsoleUrlResponse> {
 	return bffFetch<GetVmConsoleUrlResponse>(`/v1/vms/${vm_id}/console-url`, {
 		method: 'GET',
+		token
+	});
+}
+
+export async function getVmBootLog(
+	vm_id: string,
+	token?: string
+): Promise<{ vm_id: string; content: string; lines: number }> {
+	return bffFetch(`/v1/vms/console`, {
+		method: 'POST',
+		body: JSON.stringify({ vm_id }),
 		token
 	});
 }

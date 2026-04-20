@@ -274,6 +274,18 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         Ok(Response::new(resp))
     }
 
+    async fn resize_vm(
+        &self,
+        request: Request<proto::ResizeVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .resize_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
     async fn attach_volume(
         &self,
         request: Request<proto::AttachVolumeRequest>,
@@ -368,6 +380,133 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
             .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
+    }
+
+    async fn pause_vm(
+        &self,
+        request: Request<proto::PauseVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .pause_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn resume_vm(
+        &self,
+        request: Request<proto::ResumeVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .resume_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn power_button_vm(
+        &self,
+        request: Request<proto::PowerButtonVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .power_button_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn add_disk(
+        &self,
+        request: Request<proto::AddDiskRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .add_disk(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn remove_device(
+        &self,
+        request: Request<proto::RemoveDeviceRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .remove_device(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn add_net(
+        &self,
+        request: Request<proto::AddNetRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .add_net(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn resize_disk(
+        &self,
+        request: Request<proto::ResizeDiskRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .resize_disk(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn snapshot_vm(
+        &self,
+        request: Request<proto::SnapshotVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .snapshot_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn restore_snapshot(
+        &self,
+        request: Request<proto::RestoreSnapshotRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .restore_snapshot(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn coredump_vm(
+        &self,
+        request: Request<proto::CoredumpVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .coredump_vm(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn ping_vmm(
+        &self,
+        _request: Request<proto::PingVmmRequest>,
+    ) -> Result<Response<proto::PingVmmResponse>, Status> {
+        Err(tonic::Status::unimplemented("ping_vmm not supported on control plane"))
     }
 }
 

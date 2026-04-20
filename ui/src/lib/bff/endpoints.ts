@@ -13,11 +13,11 @@ export const BFFEndpoints = {
 	listNodes: '/v1/nodes',
 	getNode: '/v1/nodes/get',
 	mutateNode: '/v1/nodes/mutate',
+	createNode: '/v1/nodes/create',
 	enrollNode: '/v1/nodes/enroll',
 	listVms: '/v1/vms',
 	getVm: '/v1/vms/get',
-	getVmConsole: '/v1/vms/console',
-	getVmConsoleUrl: '/v1/vms/console-url',
+	getVmConsoleUrl: '/v1/vms', // actual path: /v1/vms/:vm_id/console-url (constructed in vms.ts)
 	createVm: '/v1/vms/create',
 	mutateVm: '/v1/vms/mutate',
 	deleteVm: '/v1/vms/delete',
@@ -36,5 +36,8 @@ export const BFFEndpoints = {
 	listImages: '/v1/images',
 	importImage: '/v1/images/import',
 	getMaintenance: '/v1/maintenance',
-	getSettings: '/v1/settings'
+	getSettings: '/v1/settings',
+	listFirewallRules: '/v1/firewall-rules',
+	createFirewallRule: '/v1/firewall-rules/create',
+	deleteFirewallRule: '/v1/firewall-rules/delete'
 } as const;

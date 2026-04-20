@@ -1,8 +1,11 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
-	import type { PageData, ActionData } from './$types';
+	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
+	import { getStoredToken } from '$lib/api/client';
+	import { mutateNode } from '$lib/bff/nodes';
+	import { toast } from '$lib/stores/toast';
+	import { invalidateAll } from '$app/navigation';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -13,12 +16,12 @@
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle } from 'lucide-svelte';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
+	import NodeHealthDashboard from '$lib/components/NodeHealthDashboard.svelte';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
 
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
-	let actionInput = $state<HTMLInputElement | null>(null);
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
@@ -29,11 +32,20 @@
 		return 'unknown';
 	}
 
-	function submitAction(action: string) {
-		if (actionInput) {
-			actionInput.value = action;
+	async function executeAction(action: string) {
+		pendingAction = action;
+		const token = getStoredToken() ?? undefined;
+		const node_id = detail.summary.node_id;
+		try {
+			await mutateNode({ node_id, action }, token);
+			toast.success(`Node ${action.replace('_', ' ')} accepted`);
+			await invalidateAll();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Action failed';
+			toast.error(message);
+		} finally {
+			pendingAction = null;
 		}
-		actionInput?.form?.requestSubmit();
 	}
 
 	const postureProps = $derived([
@@ -88,50 +100,38 @@
 			description="Physical compute host providing hypervisor resources."
 		>
 			{#snippet actions()}
-				<form
-					method="POST"
-					use:enhance={() => {
-						return async ({ update }) => {
-							pendingAction = null;
-							await update();
-						};
-					}}
-					class="header-actions"
-				>
-					<input type="hidden" name="node_id" value={detail.summary.node_id} />
-					<input type="hidden" name="action" bind:this={actionInput} value="" />
-					
+				<div class="header-actions">
 					<ActionStrip>
 						{#if detail.summary.maintenance}
-							<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'exit_maintenance'; submitAction('exit_maintenance'); }}>
+							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('exit_maintenance')}>
 								<Wrench size={14} />
-								Exit Maintenance
+								{pendingAction === 'exit_maintenance' ? 'Exiting...' : 'Exit Maintenance'}
 							</button>
 						{:else}
-							<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'enter_maintenance'; submitAction('enter_maintenance'); }}>
+							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('enter_maintenance')}>
 								<Wrench size={14} />
-								Enter Maintenance
+								{pendingAction === 'enter_maintenance' ? 'Entering...' : 'Enter Maintenance'}
 							</button>
 						{/if}
 
 						{#if detail.summary.scheduling}
-							<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'pause_scheduling'; submitAction('pause_scheduling'); }}>
+							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('pause_scheduling')}>
 								<Pause size={14} />
-								Pause Scheduling
+								{pendingAction === 'pause_scheduling' ? 'Pausing...' : 'Pause Scheduling'}
 							</button>
 						{:else}
-							<button class="btn-primary btn-sm" onclick={() => { pendingAction = 'resume_scheduling'; submitAction('resume_scheduling'); }}>
+							<button class="btn-primary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('resume_scheduling')}>
 								<Play size={14} />
-								Resume Scheduling
+								{pendingAction === 'resume_scheduling' ? 'Resuming...' : 'Resume Scheduling'}
 							</button>
 						{/if}
 
-						<button class="btn-secondary btn-sm" onclick={() => { pendingAction = 'drain'; submitAction('drain'); }}>
+						<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('drain')}>
 							<ArrowUpFromLine size={14} />
-							Drain
+							{pendingAction === 'drain' ? 'Draining...' : 'Drain'}
 						</button>
 					</ActionStrip>
-				</form>
+				</div>
 			{/snippet}
 		</ResourceDetailHeader>
 
@@ -144,6 +144,10 @@
 				</div>
 
 				<div class="detail-sections">
+					<SectionCard title="Node Health" icon={Activity}>
+						<NodeHealthDashboard />
+					</SectionCard>
+
 					<SectionCard title="Hosted Workloads" icon={Box} badgeLabel={String(detail.hosted_vms.length)}>
 						{#if detail.hosted_vms.length === 0}
 							<p class="empty-hint">No virtual machines currently placed on this node.</p>

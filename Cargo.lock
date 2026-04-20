@@ -357,6 +357,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "hyper-util",
+ "jsonwebtoken",
  "libc",
  "nix",
  "prost",
@@ -379,6 +380,8 @@ dependencies = [
  "chv-common",
  "chv-errors",
  "nix",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -388,13 +391,17 @@ dependencies = [
 name = "chv-common"
 version = "0.1.0"
 dependencies = [
- "uuid",
+ "hex",
+ "rand 0.9.4",
+ "sha2",
 ]
 
 [[package]]
 name = "chv-config"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "rand 0.9.4",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -424,6 +431,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bcrypt",
+ "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-errors",
@@ -442,7 +450,6 @@ dependencies = [
  "tonic",
  "tower 0.5.3",
  "tracing",
- "uuid",
  "x509-parser",
 ]
 
@@ -592,18 +599,22 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "bcrypt",
  "chrono",
+ "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-webui-bff-api",
+ "hex",
  "jsonwebtoken",
+ "rand 0.9.4",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tokio-stream",
  "tracing",
- "uuid",
 ]
 
 [[package]]

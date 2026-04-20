@@ -2,10 +2,12 @@ use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
 use std::path::Path;
 
+use crate::auth::{require_admin, require_operator_or_admin, BearerToken};
 use crate::router::AppState;
 use crate::BffError;
 
 pub async fn list_nodes(
+    BearerToken(_claims): BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, BffError> {
@@ -113,6 +115,7 @@ pub async fn list_nodes(
 }
 
 pub async fn get_node(
+    BearerToken(_claims): BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, BffError> {
@@ -289,6 +292,7 @@ pub async fn mutate_node(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    require_operator_or_admin(&claims)?;
     let node_id = payload
         .get("node_id")
         .and_then(|v| v.as_str())
@@ -317,8 +321,10 @@ pub async fn mutate_node(
 /// Manual enrollment recovery: clears the agent cache so the next agent restart
 /// triggers a fresh enrollment bootstrap. Returns instructions for the operator.
 pub async fn enroll_node(
+    BearerToken(claims): BearerToken,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, BffError> {
+    require_admin(&claims)?;
     let cache_path = Path::new("/var/lib/chv/cache/agent-cache.json");
     let cache_existed = cache_path.exists();
 

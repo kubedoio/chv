@@ -5,6 +5,7 @@ use crate::router::AppState;
 use crate::BffError;
 
 pub async fn list_vms(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -104,6 +105,7 @@ pub async fn list_vms(
 }
 
 pub async fn get_vm(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -263,10 +265,11 @@ pub async fn get_vm(
 }
 
 pub async fn create_vm(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     tracing::info!("create_vm handler started");
 
     // Support both legacy BFF payload and CreateVMModal payload
@@ -300,12 +303,13 @@ pub async fn create_vm(
         .or_else(|| payload.get("vcpu").and_then(|v| v.as_i64()))
         .unwrap_or(2);
 
-    let memory_bytes = payload
-        .get("memory_bytes")
-        .and_then(|v| v.as_i64())
-        .or_else(|| payload.get("memory_mb").and_then(|v| v.as_i64()))
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(2 * 1024 * 1024 * 1024);
+    let memory_bytes = if let Some(bytes) = payload.get("memory_bytes").and_then(|v| v.as_i64()) {
+        bytes
+    } else if let Some(mb) = payload.get("memory_mb").and_then(|v| v.as_i64()) {
+        mb * 1024 * 1024
+    } else {
+        2 * 1024 * 1024 * 1024
+    };
 
     let mut image_ref = payload
         .get("image_ref")
@@ -327,8 +331,16 @@ pub async fn create_vm(
         .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?
         .flatten()
         {
-            tracing::info!(%source_url, "create_vm: resolved image_ref to source_url");
-            image_ref = source_url;
+            if source_url.starts_with('/') {
+                tracing::info!(%source_url, "create_vm: resolved image_ref to local path");
+                image_ref = source_url;
+            } else {
+                tracing::warn!(%source_url, "create_vm: image source_url is not a local path, cannot use as disk seed");
+                return Err(BffError::BadRequest(format!(
+                    "Image source is a remote URL ({}). Download the image to the node first.",
+                    source_url
+                )));
+            }
         } else {
             tracing::warn!(%image_ref, "create_vm: image not found in DB, keeping original image_ref");
         }
@@ -354,9 +366,15 @@ pub async fn create_vm(
         * 1024
         * 1024;
 
-    let vm_id = uuid::Uuid::new_v4().to_string();
-    let volume_id = uuid::Uuid::new_v4().to_string();
-    let operation_id = uuid::Uuid::new_v4().to_string();
+    let cloud_init_userdata = payload
+        .get("cloud_init_userdata")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+
+    let vm_id = chv_common::gen_short_id();
+    let volume_id = chv_common::gen_short_id();
+    let operation_id = chv_common::gen_short_id();
     tracing::info!(%vm_id, %volume_id, %operation_id, "create_vm: generated IDs, beginning transaction");
     let mut tx = state
         .pool
@@ -381,8 +399,8 @@ pub async fn create_vm(
     // Insert VM desired state
     sqlx::query(
         r#"
-        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, requested_at, updated_at)
-        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, cloud_init_userdata, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&vm_id)
@@ -391,6 +409,7 @@ pub async fn create_vm(
     .bind(cpu_count)
     .bind(memory_bytes)
     .bind(&image_ref)
+    .bind(&cloud_init_userdata)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
@@ -533,21 +552,18 @@ pub async fn create_vm(
 }
 
 pub async fn delete_vm(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?
         .to_string();
 
-    let requested_by = payload
-        .get("requested_by")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BffError::BadRequest("missing requested_by".into()))?
-        .to_string();
+    let requested_by = claims.sub.clone();
 
     // Check vm exists
     let exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
@@ -586,7 +602,7 @@ pub async fn delete_vm(
             .await
             .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
 
-    let operation_id = uuid::Uuid::new_v4().to_string();
+    let operation_id = chv_common::gen_short_id();
     let idempotency_key = format!("delete-vm-{}", vm_id);
     sqlx::query(
         r#"
@@ -619,6 +635,7 @@ pub async fn mutate_vm(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
@@ -650,6 +667,7 @@ pub async fn mutate_vm(
 }
 
 pub async fn get_vm_console(
+    State(state): State<AppState>,
     crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -658,7 +676,11 @@ pub async fn get_vm_console(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?;
 
-    let log_path = format!("/run/chv/agent/vm-{}-serial.log", vm_id);
+    if !chv_common::validate_id(vm_id) {
+        return Err(BffError::BadRequest("invalid vm_id format".into()));
+    }
+
+    let log_path = state.agent_runtime_dir.join("vms").join(vm_id).join("console.log");
     let log_content = tokio::fs::read_to_string(&log_path)
         .await
         .unwrap_or_default();
@@ -693,7 +715,7 @@ fn generate_console_token(
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let exp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or(std::time::Duration::ZERO)
         .as_secs()
         + 60;
     let claims = ConsoleTokenClaims {
@@ -714,6 +736,10 @@ pub async fn get_vm_console_url(
     State(state): State<AppState>,
     axum::extract::Path(vm_id): axum::extract::Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    if !chv_common::validate_id(&vm_id) {
+        return Err(BffError::BadRequest("invalid vm_id format".into()));
+    }
+
     let node_id: Option<String> =
         sqlx::query_scalar("SELECT node_id FROM vms WHERE vm_id = ?")
             .bind(&vm_id)

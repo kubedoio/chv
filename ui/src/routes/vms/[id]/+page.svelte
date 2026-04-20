@@ -1,8 +1,12 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
-	import type { PageData, ActionData } from './$types';
+	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
+	import { getStoredToken } from '$lib/api/client';
+	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
+	import { toast } from '$lib/stores/toast';
+	import { invalidateAll } from '$app/navigation';
+	import { onMount } from 'svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -11,16 +15,45 @@
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal } from 'lucide-svelte';
+	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal, FileText } from 'lucide-svelte';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import VmConsole from '$lib/components/vms/VmConsole.svelte';
+	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
 
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
 	let confirmingAction = $state<string | null>(null);
-	let actionInput = $state<HTMLInputElement | null>(null);
+	let actionError = $state<string | null>(null);
+	let liveConsoleUrl = $state<string | undefined>(undefined);
+	let consoleLoading = $state(false);
+	let bootLog = $state<string>('');
+	let bootLogLoading = $state(false);
+
+	$effect(() => {
+		if (detail.currentTab === 'console' && detail.summary.vm_id) {
+			consoleLoading = true;
+			liveConsoleUrl = undefined;
+			const token = getStoredToken() ?? undefined;
+			getVmConsoleUrl(detail.summary.vm_id, token)
+				.then(res => { liveConsoleUrl = res.url; })
+				.catch(() => { liveConsoleUrl = undefined; })
+				.finally(() => { consoleLoading = false; });
+		}
+	});
+
+	$effect(() => {
+		if (detail.currentTab === 'boot-log' && detail.summary.vm_id) {
+			bootLogLoading = true;
+			bootLog = '';
+			const token = getStoredToken() ?? undefined;
+			getVmBootLog(detail.summary.vm_id, token)
+				.then(res => { bootLog = res.content || '(no boot log available)'; })
+				.catch(() => { bootLog = '(failed to load boot log)'; })
+				.finally(() => { bootLogLoading = false; });
+		}
+	});
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
@@ -35,17 +68,33 @@
 		if (needsConfirm) {
 			confirmingAction = action;
 		} else {
-			submitAction(action);
+			executeAction(action);
 		}
 	}
 
-	function submitAction(action: string) {
+	async function executeAction(action: string) {
 		confirmingAction = null;
 		pendingAction = action;
-		if (actionInput) {
-			actionInput.value = action;
+		actionError = null;
+		const token = getStoredToken() ?? undefined;
+		const vm_id = detail.summary.vm_id;
+
+		try {
+			if (action === 'delete') {
+				await deleteVm({ vm_id, requested_by: 'webui' }, token);
+				toast.success(`VM ${vm_id} delete accepted`);
+			} else {
+				await mutateVm({ vm_id, action, force: false }, token);
+				toast.success(`VM ${action} accepted`);
+			}
+			await invalidateAll();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Action failed';
+			actionError = message;
+			toast.error(message);
+		} finally {
+			pendingAction = null;
 		}
-		actionInput?.form?.requestSubmit();
 	}
 
 	const postureProps = $derived([
@@ -117,48 +166,35 @@
 			description="Virtual machine workload."
 		>
 			{#snippet actions()}
-				<form
-					method="POST"
-					use:enhance={() => {
-						return async ({ update }) => {
-							pendingAction = null;
-							confirmingAction = null;
-							await update();
-						};
-					}}
-					class="header-actions"
-				>
-					<input type="hidden" name="vm_id" value={detail.summary.vm_id} />
-					<input type="hidden" name="action" bind:this={actionInput} value="" />
-					
+				<div class="header-actions">
 					<ActionStrip>
 						{#if confirmingAction}
 							<div class="confirm-group">
 								<span class="confirm-text">Confirm <strong>{confirmingAction}</strong>?</span>
-								<button class="btn-danger btn-sm" onclick={() => submitAction(confirmingAction!)}>Confirm</button>
+								<button class="btn-danger btn-sm" onclick={() => executeAction(confirmingAction!)}>Confirm</button>
 								<button class="btn-secondary btn-sm" onclick={() => confirmingAction = null}>Cancel</button>
 							</div>
 							{:else}
 								{@const ps = detail.summary.power_state.toLowerCase()}
-								<button class="btn-primary btn-sm" disabled={ps === 'running'} onclick={() => handleActionClick('start')}>
+								<button class="btn-primary btn-sm" disabled={ps === 'running' || pendingAction !== null} onclick={() => handleActionClick('start')}>
 									<Play size={14} />
-									Start
+									{pendingAction === 'start' ? 'Starting...' : 'Start'}
 								</button>
-								<button class="btn-secondary btn-sm" disabled={ps !== 'running'} onclick={() => handleActionClick('stop', true)}>
+								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('stop', true)}>
 									<Square size={14} />
-									Stop
+									{pendingAction === 'stop' ? 'Stopping...' : 'Stop'}
 								</button>
-								<button class="btn-secondary btn-sm" disabled={ps !== 'running'} onclick={() => handleActionClick('restart', true)}>
+								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('restart', true)}>
 									<RotateCcw size={14} />
-									Reboot
+									{pendingAction === 'restart' ? 'Restarting...' : 'Reboot'}
 								</button>
-								<button class="btn-secondary btn-sm" onclick={() => handleActionClick('delete', true)}>
+								<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => handleActionClick('delete', true)}>
 									<Trash2 size={14} />
-									Delete
+									{pendingAction === 'delete' ? 'Deleting...' : 'Delete'}
 								</button>
 						{/if}
 					</ActionStrip>
-				</form>
+				</div>
 			{/snippet}
 		</ResourceDetailHeader>
 
@@ -168,10 +204,29 @@
 			{#if detail.currentTab === 'console'}
 				<section class="detail-main-span">
 					<SectionCard title="Serial Console" icon={Terminal}>
-						{#if detail.consoleUrl}
-							<VmConsole vmId={detail.summary.vm_id} consoleUrl={detail.consoleUrl} />
+						{#if consoleLoading}
+							<p class="empty-hint">Connecting to console...</p>
+						{:else if liveConsoleUrl}
+							<VmConsole
+								vmId={detail.summary.vm_id}
+								consoleUrl={liveConsoleUrl}
+								getConsoleUrl={async () => {
+									const res = await getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined);
+									return res.url;
+								}}
+							/>
 						{:else}
 							<p class="empty-hint">Console URL unavailable. The VM may not be running.</p>
+						{/if}
+					</SectionCard>
+				</section>
+			{:else if detail.currentTab === 'boot-log'}
+				<section class="detail-main-span">
+					<SectionCard title="Boot Log" icon={FileText}>
+						{#if bootLogLoading}
+							<p class="empty-hint">Loading boot log...</p>
+						{:else}
+							<pre class="boot-log">{bootLog}</pre>
 						{/if}
 					</SectionCard>
 				</section>
@@ -184,6 +239,13 @@
 					</div>
 
 					<div class="detail-sections">
+						<VMMetricsWidget vms={{
+							total: 1,
+							running: detail.summary.power_state.toLowerCase() === 'running' ? 1 : 0,
+							stopped: detail.summary.power_state.toLowerCase() === 'stopped' ? 1 : 0,
+							error: detail.summary.health.toLowerCase() === 'error' ? 1 : 0
+						}} />
+
 						<SectionCard title="Storage Attachments" icon={Database} badgeLabel={String(detail.summary.attached_volumes?.length ?? 0)}>
 							{#if !detail.summary.attached_volumes || detail.summary.attached_volumes.length === 0}
 								<p class="empty-hint">No storage volumes attached to this guest.</p>
@@ -301,5 +363,21 @@
 		.detail-grid {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	.boot-log {
+		font-family: var(--font-mono);
+		font-size: var(--text-xs);
+		line-height: 1.5;
+		background: var(--color-neutral-50);
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-md);
+		padding: var(--space-4);
+		overflow-x: auto;
+		max-height: 600px;
+		overflow-y: auto;
+		white-space: pre;
+		color: var(--shell-text);
+		margin: 0;
 	}
 </style>

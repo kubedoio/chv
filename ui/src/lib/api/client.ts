@@ -76,6 +76,26 @@ export function clearToken(): void {
 }
 
 /**
+ * Decode the JWT role claim from the stored token.
+ * Handles base64url encoding (RFC 7515) by normalising before decoding.
+ * Returns the role string or null if the token is absent / malformed.
+ */
+export function getStoredRole(): string | null {
+  try {
+    const token = getStoredToken();
+    if (!token) return null;
+    const parts = token.split('.');
+    if (parts.length < 3) return null;
+    const segment = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = segment.padEnd(Math.ceil(segment.length / 4) * 4, '=');
+    const payload = JSON.parse(atob(padded));
+    return payload.role ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Custom API error class that preserves error details from the server.
  */
 export class APIError extends Error {
@@ -570,14 +590,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       if (timeout !== undefined) params.append('timeout', String(timeout));
       const query = params.toString() ? `?${params.toString()}` : '';
       return request<{ message: string; graceful: boolean; timeout: number }>(`/api/v1/vms/${id}/restart${query}`, { method: 'POST' });
-    },
-    getBootLogs(id: string, lines?: number) {
-      const query = lines ? `?lines=${lines}` : '';
-      return request<{
-        vm_id: string;
-        lines: { line_number: number; content: string; timestamp: string }[];
-        count: number;
-      }>(`/api/v1/vms/${id}/boot-logs${query}`);
     },
     // VM Templates
     listVMTemplates() {

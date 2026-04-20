@@ -131,6 +131,40 @@
 		formError = '';
 
 		const token = getStoredToken() ?? undefined;
+
+		// Build cloud-init userdata: merge user/ssh config with any custom user-data
+		let cloudInitUserdata: string | undefined;
+		const hasUser = username.trim() !== '';
+		const hasSshKey = sshKey.trim() !== '';
+		const hasCustomUserdata = userData.trim() !== '' && userData.trim() !== '#cloud-config';
+
+		if (hasUser || hasSshKey || hasCustomUserdata) {
+			let parts: string[] = ['#cloud-config'];
+			if (hasUser || hasSshKey) {
+				parts.push('users:');
+				parts.push(`  - name: ${username.trim() || 'admin'}`);
+				parts.push('    sudo: ALL=(ALL) NOPASSWD:ALL');
+				parts.push('    shell: /bin/bash');
+				if (hasSshKey) {
+					parts.push('    ssh_authorized_keys:');
+					for (const key of sshKey.trim().split('\n').filter(k => k.trim())) {
+						parts.push(`      - ${key.trim()}`);
+					}
+				}
+			}
+			// Append any additional cloud-config lines from the custom userData textarea
+			// (skip the #cloud-config header if present)
+			if (hasCustomUserdata) {
+				const customLines = userData.trim().split('\n');
+				const startIdx = customLines[0].trim() === '#cloud-config' ? 1 : 0;
+				const extra = customLines.slice(startIdx).join('\n').trim();
+				if (extra) {
+					parts.push(extra);
+				}
+			}
+			cloudInitUserdata = parts.join('\n') + '\n';
+		}
+
 		const data = {
 			name: name.trim(),
 			image_id: imageId,
@@ -138,7 +172,8 @@
 			vcpu,
 			memory_mb: memoryMb,
 			volume_size_gb: volumeSizeGb,
-			requested_by: 'webui'
+			requested_by: 'webui',
+			...(cloudInitUserdata ? { cloud_init_userdata: cloudInitUserdata } : {})
 		};
 
 		try {

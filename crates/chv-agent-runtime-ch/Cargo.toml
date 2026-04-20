@@ -10,6 +10,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 nix = { version = "0.29", features = ["term", "fs", "process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

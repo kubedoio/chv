@@ -24,6 +24,8 @@
   import StateBadge from '$lib/components/StateBadge.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import type { BackupJob, BackupJobResponse, BackupHistory, VM } from '$lib/api/types';
+  import ErrorState from '$lib/components/shell/ErrorState.svelte';
+  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 
   const token = getStoredToken();
   const client = createAPIClient({ token: token ?? undefined });
@@ -367,12 +369,8 @@
 </div>
 
 {#if error}
-  <div class="mb-4 border border-danger bg-red-50 px-4 py-3 text-danger">
-    {error}
-  </div>
-{/if}
-
-{#if activeTab === 'jobs'}
+  <ErrorState />
+{:else if activeTab === 'jobs'}
   <section class="table-card">
     <DataTable
       data={backupJobs}

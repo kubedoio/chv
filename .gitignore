@@ -59,4 +59,5 @@ dist/
 #Agent specific
 docs/superpowers
 .worktrees/
-.worktrees/
+.claude/worktrees/
+.claude/session-reads.txt

@@ -8,6 +8,7 @@ import {
 	Network,
 	Server,
 	Settings,
+	Users,
 	Wrench
 } from 'lucide-svelte';
 
@@ -59,33 +60,59 @@ export interface PageDefinition {
 	};
 }
 
+export interface NavGroup {
+	label: string;
+	items: NavItem[];
+}
+
+export const navigationGroups: NavGroup[] = [
+	{
+		label: 'Compute',
+		items: [
+			{ href: '/vms', label: 'Virtual Machines', shortLabel: 'VMs', icon: Box },
+			{ href: '/images', label: 'Images / Templates', shortLabel: 'Images', icon: Image }
+		]
+	},
+	{
+		label: 'Infrastructure',
+		items: [
+			{ href: '/nodes', label: 'Nodes', shortLabel: 'Nodes', icon: Server },
+			{
+				href: '/clusters',
+				label: 'Datacenters / Clusters',
+				shortLabel: 'Clusters',
+				icon: Blocks
+			},
+			{ href: '/networks', label: 'Networks', shortLabel: 'Networks', icon: Network },
+			{ href: '/volumes', label: 'Volumes', shortLabel: 'Volumes', icon: HardDrive }
+		]
+	},
+	{
+		label: 'Operations',
+		items: [
+			{ href: '/tasks', label: 'Tasks', shortLabel: 'Tasks', icon: Activity },
+			{ href: '/events', label: 'Events / Alerts', shortLabel: 'Events', icon: Activity },
+			{
+				href: '/maintenance',
+				label: 'Maintenance / Upgrades',
+				shortLabel: 'Maintenance',
+				icon: Wrench
+			}
+		]
+	},
+	{
+		label: 'Administration',
+		items: [
+			{ href: '/settings', label: 'Settings / Access', shortLabel: 'Settings', icon: Settings },
+			{ href: '/settings/users', label: 'User Management', shortLabel: 'Users', icon: Users }
+		]
+	}
+];
+
+// Backward-compatible flat list derived from groups (Overview excluded — it lives above the groups)
 export const navigationItems: NavItem[] = [
 	{ href: '/', label: 'Overview', shortLabel: 'Overview', icon: House },
-	{
-		href: '/clusters',
-		label: 'Datacenters / Clusters',
-		shortLabel: 'Clusters',
-		icon: Blocks
-	},
-	{ href: '/nodes', label: 'Nodes', shortLabel: 'Nodes', icon: Server },
-	{ href: '/vms', label: 'Virtual Machines', shortLabel: 'VMs', icon: Box },
-	{ href: '/volumes', label: 'Volumes', shortLabel: 'Volumes', icon: HardDrive },
-	{ href: '/networks', label: 'Networks', shortLabel: 'Networks', icon: Network },
-	{
-		href: '/images',
-		label: 'Images / Templates',
-		shortLabel: 'Images',
-		icon: Image
-	},
-	{ href: '/tasks', label: 'Tasks', shortLabel: 'Tasks', icon: Activity },
-	{ href: '/events', label: 'Events / Alerts', shortLabel: 'Events', icon: Activity },
-	{
-		href: '/maintenance',
-		label: 'Maintenance / Upgrades',
-		shortLabel: 'Maintenance',
-		icon: Wrench
-	},
-	{ href: '/settings', label: 'Settings / Access', shortLabel: 'Settings', icon: Settings }
+	...navigationGroups.flatMap((g) => g.items)
 ];
 
 const pageDefinitions: PageDefinition[] = [

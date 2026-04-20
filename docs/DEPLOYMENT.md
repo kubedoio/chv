@@ -332,7 +332,7 @@ ca_key_path = "/etc/chv/certs/ca.key"
 **`/etc/chv/agent.toml`**
 ```toml
 socket_path = "/run/chv/agent/api.sock"
-runtime_dir = "/run/chv/agent"
+runtime_dir = "/var/lib/chv/agent"
 log_level = "info"
 control_plane_addr = "http://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"

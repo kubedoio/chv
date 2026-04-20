@@ -357,6 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
         Some(config.cache_path.clone()),
+        config.runtime_dir.clone(),
     );
     let server_socket = config.socket_path.clone();
     tokio::spawn(async move {
@@ -366,7 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let console_bind = config.console_bind.clone();
-    let console_server = ConsoleServer::new(vm_runtime.clone());
+    let console_server = ConsoleServer::new(vm_runtime.clone(), config.jwt_secret.clone());
     tokio::spawn(async move {
         if let Err(e) = console_server.run(&console_bind).await {
             warn!(error = %e, bind = %console_bind, "console server exited");
@@ -378,6 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vm_runtime.clone(),
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
+        config.runtime_dir.clone(),
     )
     .await;
 
@@ -413,6 +415,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         InventoryReporter::with_storage_base_dir(&node_id, hostname, &config.storage_base_dir);
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
+    let mut consecutive_reconcile_failures: u32 = 0;
 
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     loop {
@@ -746,6 +749,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Err(e) = reconciler.run_once().await {
             warn!(error = %e, "reconcile tick failed");
+            consecutive_reconcile_failures += 1;
+            let backoff_secs = std::cmp::min(
+                1u64 << consecutive_reconcile_failures.min(6),
+                60,
+            );
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        } else {
+            consecutive_reconcile_failures = 0;
         }
 
         // Periodically persist cache so gRPC mutations are durable even without state transitions.
@@ -795,10 +806,13 @@ mod tests {
 
     #[test]
     fn certificate_rotation_due_respects_interval() {
+        let cert_file = tempfile::NamedTempFile::new().unwrap();
+        let key_file = tempfile::NamedTempFile::new().unwrap();
+
         let mut cache = NodeCache::new("node-1");
         cache.enrollment_complete = true;
-        cache.certificate_path = Some("/tmp/agent.crt".to_string());
-        cache.private_key_path = Some("/tmp/agent.key".to_string());
+        cache.certificate_path = Some(cert_file.path().to_str().unwrap().to_string());
+        cache.private_key_path = Some(key_file.path().to_str().unwrap().to_string());
         assert!(certificate_rotation_due(
             &cache,
             CERT_ROTATION_INTERVAL_SECS * 1000

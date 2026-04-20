@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { LogOut } from 'lucide-svelte';
-	import { navigationItems } from '$lib/shell/app-shell';
+	import { ChevronDown, House, LogOut, Moon, Sun } from 'lucide-svelte';
+	import { navigationGroups } from '$lib/shell/app-shell';
 	import { clearToken, createAPIClient } from '$lib/api/client';
+	import { theme } from '$lib/stores/theme.svelte';
 
 	function isActive(href: string, pathname: string): boolean {
 		if (href === '/') {
@@ -11,6 +12,26 @@
 		}
 
 		return pathname === href || pathname.startsWith(`${href}/`);
+	}
+
+	function groupContainsActive(items: { href: string }[], pathname: string): boolean {
+		return items.some((item) => isActive(item.href, pathname));
+	}
+
+	// Track open/closed state for each group. Auto-expand the group containing the current page.
+	let openGroups = $state<Record<string, boolean>>({});
+
+	$effect(() => {
+		const pathname = $page.url.pathname;
+		for (const group of navigationGroups) {
+			if (groupContainsActive(group.items, pathname)) {
+				openGroups[group.label] = true;
+			}
+		}
+	});
+
+	function toggleGroup(label: string) {
+		openGroups[label] = !openGroups[label];
 	}
 
 	async function handleLogout() {
@@ -34,22 +55,67 @@
 	</div>
 
 	<div class="app-nav__links">
-		{#each navigationItems as item}
-			<a
-				href={item.href}
-				class:app-nav__link--active={isActive(item.href, $page.url.pathname)}
-				class="app-nav__link"
-				aria-current={isActive(item.href, $page.url.pathname) ? 'page' : undefined}
-			>
-				<item.icon size={17}></item.icon>
-				<span>{item.label}</span>
-			</a>
+		<!-- Overview sits above all accordion groups -->
+		<a
+			href="/"
+			class:app-nav__link--active={isActive('/', $page.url.pathname)}
+			class="app-nav__link"
+			aria-current={isActive('/', $page.url.pathname) ? 'page' : undefined}
+		>
+			<House size={17} />
+			<span>Overview</span>
+		</a>
+
+		<!-- Accordion groups -->
+		{#each navigationGroups as group}
+			<div class="app-nav__group">
+				<button
+					type="button"
+					class="app-nav__group-toggle"
+					onclick={() => toggleGroup(group.label)}
+					aria-expanded={!!openGroups[group.label]}
+				>
+					<span class="app-nav__group-label">{group.label}</span>
+					<span
+						class="app-nav__group-chevron"
+						class:app-nav__group-chevron--open={openGroups[group.label]}
+					>
+						<ChevronDown size={13} />
+					</span>
+				</button>
+
+				<div
+					class="app-nav__group-items"
+					class:app-nav__group-items--open={openGroups[group.label]}
+				>
+					{#each group.items as item}
+						<a
+							href={item.href}
+							class:app-nav__link--active={isActive(item.href, $page.url.pathname)}
+							class="app-nav__link app-nav__link--grouped"
+							aria-current={isActive(item.href, $page.url.pathname) ? 'page' : undefined}
+						>
+							<item.icon size={17} />
+							<span>{item.label}</span>
+						</a>
+					{/each}
+				</div>
+			</div>
 		{/each}
 	</div>
 
 	<div class="app-nav__footer">
+		<button type="button" class="app-nav__logout app-nav__theme-toggle" onclick={() => theme.toggle()} aria-label="Toggle dark mode">
+			{#if theme.value === 'dark'}
+				<Sun size={15} />
+				<span>Light mode</span>
+			{:else}
+				<Moon size={15} />
+				<span>Dark mode</span>
+			{/if}
+		</button>
 		<button type="button" class="app-nav__logout" onclick={handleLogout} aria-label="Log out">
-			<LogOut size={15}></LogOut>
+			<LogOut size={15} />
 			<span>Log out</span>
 		</button>
 	</div>
@@ -82,18 +148,8 @@
 
 	.app-nav__brand-title {
 		line-height: 1.2;
-	}
-
-	.app-nav__brand-title {
 		font-weight: 600;
 		color: var(--shell-text);
-	}
-
-	.app-nav__footer-label {
-		font-size: 0.74rem;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
 	}
 
 	.app-nav__links {
@@ -101,6 +157,7 @@
 		gap: 0.15rem;
 	}
 
+	/* ── nav link (shared base) ── */
 	.app-nav__link {
 		display: flex;
 		align-items: center;
@@ -132,8 +189,78 @@
 		color: var(--shell-text);
 	}
 
-	.app-nav__footer {
+	/* ── grouped items indented ── */
+	.app-nav__link--grouped {
+		padding-left: calc(0.65rem + var(--space-3, 0.75rem));
+	}
+
+	/* ── accordion group ── */
+	.app-nav__group {
 		display: grid;
+	}
+
+	.app-nav__group-toggle {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+		padding: 0.35rem 0.65rem;
+		border: none;
+		border-radius: 0.35rem;
+		background: transparent;
+		cursor: pointer;
+		color: var(--shell-text-secondary, #75695b);
+		transition: color 140ms ease;
+	}
+
+	.app-nav__group-toggle:hover {
+		color: var(--shell-text);
+	}
+
+	.app-nav__group-label {
+		font-size: var(--text-xs, 0.72rem);
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: inherit;
+	}
+
+	.app-nav__group-chevron {
+		display: flex;
+		align-items: center;
+		color: inherit;
+		opacity: 0.6;
+		transform: rotate(-90deg);
+		transition: transform 150ms ease-out;
+	}
+
+	.app-nav__group-chevron--open {
+		transform: rotate(0deg);
+	}
+
+	/* ── collapse/expand ── */
+	.app-nav__group-items {
+		display: grid;
+		gap: 0.15rem;
+		overflow: hidden;
+		max-height: 0;
+		opacity: 0;
+		transition:
+			max-height 150ms ease-out,
+			opacity 150ms ease-out;
+	}
+
+	.app-nav__group-items--open {
+		/* large enough for any realistic number of items */
+		max-height: 40rem;
+		opacity: 1;
+	}
+
+	/* ── footer ── */
+	.app-nav__footer {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
 		border-top: 1px solid var(--shell-line);
 		padding-top: 0.75rem;
 	}

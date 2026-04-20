@@ -1,6 +1,49 @@
+use rand::Rng;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+
+fn generate_secure_secret() -> String {
+    let bytes: [u8; 32] = rand::rng().random();
+    hex::encode(bytes)
+}
+
+const SHARED_SECRET_PATH: &str = "/etc/chv/jwt_secret";
+
+fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
+    if current != "chv-dev-secret-change-in-production" && current.len() >= 32 {
+        return current.to_string();
+    }
+    if let Ok(secret) = std::fs::read_to_string(SHARED_SECRET_PATH) {
+        let secret = secret.trim().to_string();
+        if secret.len() >= 32 {
+            eprintln!("INFO: loaded jwt_secret from {}", SHARED_SECRET_PATH);
+            return secret;
+        }
+    }
+    let generated = generate_secure_secret();
+    if std::fs::write(SHARED_SECRET_PATH, &generated).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                SHARED_SECRET_PATH,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
+        eprintln!(
+            "INFO: generated jwt_secret and saved to {} (shared by all CHV services)",
+            SHARED_SECRET_PATH
+        );
+    } else {
+        eprintln!(
+            "WARNING: generated jwt_secret but could not write to {}. \
+             Set jwt_secret in {} config manually.",
+            SHARED_SECRET_PATH, service_name
+        );
+    }
+    generated
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -93,13 +136,15 @@ pub struct AgentConfig {
     pub storage_base_dir: PathBuf,
     #[serde(default = "default_console_bind")]
     pub console_bind: String,
+    #[serde(default = "default_agent_jwt_secret")]
+    pub jwt_secret: String,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             socket_path: PathBuf::from("/run/chv/agent/api.sock"),
-            runtime_dir: PathBuf::from("/run/chv/agent"),
+            runtime_dir: PathBuf::from("/var/lib/chv/agent"),
             log_level: "info".to_string(),
             control_plane_addr: "https://localhost:8443".to_string(),
             stord_socket: PathBuf::from("/run/chv/stord/api.sock"),
@@ -116,6 +161,7 @@ impl Default for AgentConfig {
             bootstrap_token_path: None,
             storage_base_dir: PathBuf::from("/var/lib/chv/storage"),
             console_bind: default_console_bind(),
+            jwt_secret: default_agent_jwt_secret(),
         }
     }
 }
@@ -128,11 +174,18 @@ fn default_console_bind() -> String {
     "127.0.0.1:8444".to_string()
 }
 
+fn default_agent_jwt_secret() -> String {
+    "chv-dev-secret-change-in-production".to_string()
+}
+
 pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError> {
     let mut cfg = AgentConfig::default();
     if let Some(p) = path {
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
+    }
+    if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
+        cfg.jwt_secret = resolve_jwt_secret(&cfg.jwt_secret, "agent");
     }
     Ok(cfg)
 }
@@ -180,6 +233,8 @@ pub struct ControlPlaneConfig {
     pub tls: ControlPlaneTlsConfig,
     #[serde(default = "default_agent_socket_pattern")]
     pub agent_socket_pattern: String,
+    #[serde(default = "default_agent_runtime_dir")]
+    pub agent_runtime_dir: PathBuf,
     #[serde(default = "default_kernel_path")]
     pub kernel_path: String,
     #[serde(default = "default_firmware_path")]
@@ -188,6 +243,10 @@ pub struct ControlPlaneConfig {
 
 fn default_jwt_secret() -> String {
     "chv-dev-secret-change-in-production".to_string()
+}
+
+fn default_agent_runtime_dir() -> PathBuf {
+    PathBuf::from("/var/lib/chv/agent")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -235,6 +294,7 @@ impl Default for ControlPlaneConfig {
             database: ControlPlaneDatabaseConfig::default(),
             tls: ControlPlaneTlsConfig::default(),
             agent_socket_pattern: default_agent_socket_pattern(),
+            agent_runtime_dir: default_agent_runtime_dir(),
             kernel_path: default_kernel_path(),
             firmware_path: default_firmware_path(),
         }
@@ -279,15 +339,8 @@ pub fn load_controlplane_config(path: Option<&Path>) -> Result<ControlPlaneConfi
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
     }
-    if cfg.jwt_secret == "chv-dev-secret-change-in-production" {
-        return Err(ConfigError::Invalid(
-            "jwt_secret is set to the insecure default; generate one with: openssl rand -base64 32 | tr -d '=+/'".to_string()
-        ));
-    }
-    if cfg.jwt_secret.len() < 32 {
-        return Err(ConfigError::Invalid(
-            "jwt_secret must be at least 32 characters".to_string(),
-        ));
+    if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
+        cfg.jwt_secret = resolve_jwt_secret(&cfg.jwt_secret, "controlplane");
     }
     Ok(cfg)
 }
@@ -297,9 +350,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_controlplane_config_rejects_insecure_default_without_file() {
-        let err = load_controlplane_config(None).unwrap_err();
-        assert!(err.to_string().contains("insecure default"));
+    fn load_agent_config_auto_generates_secret_when_default() {
+        let cfg = load_agent_config(None).expect("should succeed with auto-generated secret");
+        assert_ne!(cfg.jwt_secret, "chv-dev-secret-change-in-production");
+        assert!(cfg.jwt_secret.len() >= 32, "auto-generated secret should be at least 32 chars");
+    }
+
+    #[test]
+    fn load_agent_config_auto_generates_secret_when_short() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+socket_path = "/run/chv/agent/api.sock"
+runtime_dir = "/var/lib/chv/agent"
+log_level = "info"
+control_plane_addr = "https://localhost:8443"
+stord_socket = "/run/chv/stord/api.sock"
+nwd_socket = "/run/chv/nwd/api.sock"
+chv_binary_path = "/usr/bin/cloud-hypervisor"
+stord_binary_path = "/usr/bin/chv-stord"
+nwd_binary_path = "/usr/bin/chv-nwd"
+cache_path = "/var/lib/chv/cache/agent-cache.json"
+node_id = "test-node"
+jwt_secret = "tooshort"
+"#,
+        )
+        .expect("write config");
+
+        let cfg = load_agent_config(Some(&config_path)).expect("should succeed with auto-generated secret");
+        assert_ne!(cfg.jwt_secret, "tooshort");
+        assert!(cfg.jwt_secret.len() >= 32);
+    }
+
+    #[test]
+    fn load_controlplane_config_auto_generates_secret_when_default() {
+        let cfg = load_controlplane_config(None).expect("should succeed with auto-generated secret");
+        assert_ne!(cfg.jwt_secret, "chv-dev-secret-change-in-production");
+        assert!(cfg.jwt_secret.len() >= 32);
     }
 
     #[test]

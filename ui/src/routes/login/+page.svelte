@@ -87,20 +87,22 @@
 <div class="flex min-h-screen items-center justify-center bg-chrome p-6">
   <div class="w-full max-w-md table-card">
     <div class="card-header px-6 py-4">
-      <div class="text-[11px] uppercase tracking-[0.16em] text-muted">CHV</div>
-      <div class="mt-1 text-xl font-semibold">Sign In</div>
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
+        <div style="display:grid;place-items:center;width:2.8rem;height:2.8rem;border-radius:0.75rem;background:var(--color-primary, #8f5a2a);color:#fffaf3;font-size:0.9rem;font-weight:700;letter-spacing:0.08em">CHV</div>
+        <div>
+          <div style="font-weight:600;font-size:1.1rem">Cloud Hypervisor</div>
+          <div style="font-size:0.75rem;color:var(--color-neutral-400, #9d917f)">Virtualization Platform</div>
+        </div>
+      </div>
+      <div class="mt-1 text-xl font-semibold">Sign in to your account</div>
     </div>
 
     <div class="space-y-5 p-6">
-      <div class="text-sm text-muted">
-        Default credentials: admin / admin
-      </div>
-
       <label class="block">
         <span class="mb-2 block text-sm text-muted">Username</span>
-        <input 
-          bind:value={username} 
-          on:keydown={handleKeydown}
+        <input
+          bind:value={username}
+          onkeydown={handleKeydown}
           class="w-full border border-line px-3 py-2 text-sm"
           placeholder="Enter username"
           autocomplete="username"
@@ -109,9 +111,9 @@
 
       <label class="block">
         <span class="mb-2 block text-sm text-muted">Password</span>
-        <input 
-          bind:value={password} 
-          on:keydown={handleKeydown}
+        <input
+          bind:value={password}
+          onkeydown={handleKeydown}
           type="password"
           class="w-full border border-line px-3 py-2 text-sm"
           placeholder="Enter password"
@@ -123,9 +125,9 @@
         <div class="border border-danger bg-red-50 px-3 py-3 text-sm text-danger">{error}</div>
       {/if}
 
-      <button 
+      <button
         class="button-primary w-full px-4 py-2 text-sm font-medium"
-        on:click|preventDefault={handleLogin}
+        onclick={(e) => { e.preventDefault(); handleLogin(); }}
         disabled={loading}
       >
         {#if loading}
@@ -137,7 +139,7 @@
 
       <div class="border-t border-line pt-4">
         <div class="text-xs text-muted">
-          <p><strong>First time?</strong> Use the default credentials above.</p>
+          <p>Contact your administrator if you need access.</p>
         </div>
       </div>
     </div>

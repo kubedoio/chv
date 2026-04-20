@@ -11,6 +11,7 @@ chv-errors = { path = "../chv-errors" }
 chv-webui-bff = { path = "../chv-webui-bff" }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
+chv-common = { path = "../chv-common" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -19,7 +20,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio-rustls"] }
 thiserror = { workspace = true }
-uuid = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

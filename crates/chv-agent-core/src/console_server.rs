@@ -13,11 +13,13 @@ use tokio::net::TcpListener;
 #[derive(Clone)]
 pub struct ConsoleServer {
     vm_runtime: crate::vm_runtime::VmRuntime,
+    jwt_secret: String,
 }
 
 #[derive(Clone)]
 struct ConsoleState {
     vm_runtime: crate::vm_runtime::VmRuntime,
+    jwt_secret: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -31,14 +33,23 @@ struct ResizeMsg {
     rows: u16,
 }
 
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct Claims {
+    sub: String,
+    username: String,
+    exp: u64,
+}
+
 impl ConsoleServer {
-    pub fn new(vm_runtime: crate::vm_runtime::VmRuntime) -> Self {
-        Self { vm_runtime }
+    pub fn new(vm_runtime: crate::vm_runtime::VmRuntime, jwt_secret: String) -> Self {
+        Self { vm_runtime, jwt_secret }
     }
 
     pub async fn run(self, bind: &str) -> Result<(), chv_errors::ChvError> {
         let state = ConsoleState {
             vm_runtime: self.vm_runtime.clone(),
+            jwt_secret: self.jwt_secret.clone(),
         };
         let app = Router::new()
             .route("/vms/:vm_id/console", get(Self::ws_handler))
@@ -61,8 +72,13 @@ impl ConsoleServer {
         Path(vm_id): Path<String>,
         Query(params): Query<ConsoleParams>,
     ) -> Response {
-        if params.token.is_empty() {
-            return StatusCode::UNAUTHORIZED.into_response();
+        // Decode and validate JWT
+        match validate_console_token(&params.token, &state.jwt_secret) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "console token validation failed");
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
         }
         let vm_runtime = state.vm_runtime.clone();
         ws.on_upgrade(move |socket| Self::handle_socket(socket, vm_id, vm_runtime))
@@ -73,11 +89,21 @@ impl ConsoleServer {
         vm_id: String,
         vm_runtime: crate::vm_runtime::VmRuntime,
     ) {
-        let pty_fd = match vm_runtime.pty_master(&vm_id) {
-            Some(fd) => fd,
-            None => {
-                tracing::warn!(vm_id = %vm_id, "no pty master for vm");
-                return;
+        let pty_fd = {
+            let mut attempts = 0;
+            loop {
+                match vm_runtime.pty_master(&vm_id) {
+                    Some(fd) => break fd,
+                    None => {
+                        attempts += 1;
+                        if attempts >= 10 {
+                            tracing::warn!(vm_id = %vm_id, "no pty master for vm after 10 retries");
+                            return;
+                        }
+                        tracing::debug!(vm_id = %vm_id, attempt = attempts, "pty not ready, retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
             }
         };
 
@@ -97,7 +123,7 @@ impl ConsoleServer {
         let (mut ws_tx, mut ws_rx) = socket.split();
 
         // PTY → WebSocket
-        let read_task = tokio::spawn(async move {
+        let mut read_task = tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
                 match pty_reader.read(&mut buf).await {
@@ -117,7 +143,7 @@ impl ConsoleServer {
         });
 
         // WebSocket → PTY
-        let write_task = tokio::spawn(async move {
+        let mut write_task = tokio::spawn(async move {
             while let Some(result) = ws_rx.next().await {
                 match result {
                     Ok(axum::extract::ws::Message::Text(text)) => {
@@ -143,11 +169,14 @@ impl ConsoleServer {
         });
 
         tokio::select! {
-            _ = read_task => {},
-            _ = write_task => {},
+            _ = &mut read_task => {
+                write_task.abort();
+            },
+            _ = &mut write_task => {
+                read_task.abort();
+            },
         }
 
-        // Keep pty_fd alive until both tasks finish
         drop(pty_fd);
     }
 }
@@ -163,5 +192,83 @@ fn set_pty_size(fd: std::os::fd::RawFd, cols: u16, rows: u16) {
         if libc::ioctl(fd, libc::TIOCSWINSZ, &ws) < 0 {
             tracing::warn!(error = %std::io::Error::last_os_error(), "failed to set pty size");
         }
+    }
+}
+
+/// Validate a JWT token against the given secret using HS256.
+/// Returns Ok(Claims) if the token is valid and not expired, Err otherwise.
+fn validate_console_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    let decoding_key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.validate_aud = false;
+    jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation).map(|d| d.claims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_secret() -> String {
+        "test-secret-do-not-use-in-production".to_string()
+    }
+
+    fn encode_claims(sub: &str, username: &str, exp: u64, secret: &str) -> String {
+        #[derive(serde::Serialize)]
+        struct TestClaims<'a> {
+            sub: &'a str,
+            username: &'a str,
+            exp: u64,
+        }
+        let claims = TestClaims { sub, username, exp };
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encoding should succeed in tests")
+    }
+
+    fn future_exp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600
+    }
+
+    #[test]
+    fn valid_jwt_is_accepted() {
+        let token = encode_claims("user-1", "admin", future_exp(), &test_secret());
+        let result = validate_console_token(&token, &test_secret());
+        assert!(result.is_ok(), "valid JWT should be accepted, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn expired_jwt_is_rejected() {
+        // exp = 1 means epoch 1 second — long expired
+        let token = encode_claims("user-1", "admin", 1, &test_secret());
+        let result = validate_console_token(&token, &test_secret());
+        assert!(result.is_err(), "expired JWT should be rejected");
+    }
+
+    #[test]
+    fn empty_token_is_rejected() {
+        let result = validate_console_token("", &test_secret());
+        assert!(result.is_err(), "empty token should be rejected");
+    }
+
+    #[test]
+    fn malformed_token_is_rejected() {
+        let result = validate_console_token("not-a-valid-jwt", &test_secret());
+        assert!(result.is_err(), "malformed token should be rejected");
+    }
+
+    #[test]
+    fn wrong_secret_is_rejected() {
+        let token = encode_claims("user-1", "admin", future_exp(), "wrong-secret");
+        let result = validate_console_token(&token, &test_secret());
+        assert!(result.is_err(), "token signed with wrong secret should be rejected");
     }
 }

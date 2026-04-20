@@ -5,6 +5,7 @@ grpc_bind = "127.0.0.1:8443"
 http_bind = "127.0.0.1:8080"
 log_level = "info"
 runtime_dir = "/run/chv/controlplane"
+agent_runtime_dir = "/var/lib/chv/agent"
 
 # REQUIRED: generate with: openssl rand -base64 32 | tr -d '=+/'
 jwt_secret = "<replace-me>"

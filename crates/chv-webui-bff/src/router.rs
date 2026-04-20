@@ -1,6 +1,7 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::{routing::{get, post}, Router};
+use axum::{routing::{delete, get, post}, Router};
 use chv_controlplane_store::{
     AlertRepository, DesiredStateRepository, EventRepository, NodeRepository,
     ObservedStateRepository, OperationRepository, StorePool,
@@ -19,6 +20,7 @@ pub struct AppState {
     pub observed_state_repo: ObservedStateRepository,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
+    pub agent_runtime_dir: PathBuf,
 }
 
 pub fn bff_router() -> Router<AppState> {
@@ -30,6 +32,10 @@ pub fn bff_router() -> Router<AppState> {
         .route(
             "/v1/overview",
             post(crate::handlers::overview::get_overview),
+        )
+        .route(
+            "/v1/metrics",
+            post(crate::handlers::metrics::get_metrics),
         )
         .route("/v1/nodes", post(crate::handlers::nodes::list_nodes))
         .route("/v1/nodes/get", post(crate::handlers::nodes::get_node))
@@ -98,6 +104,10 @@ pub fn bff_router() -> Router<AppState> {
             post(crate::handlers::images::import_image),
         )
         .route(
+            "/v1/images/delete",
+            post(crate::handlers::images::delete_image),
+        )
+        .route(
             "/v1/maintenance",
             post(crate::handlers::maintenance::get_maintenance),
         )
@@ -113,5 +123,87 @@ pub fn bff_router() -> Router<AppState> {
         .route(
             "/v1/volumes/mutate",
             post(crate::handlers::volumes::mutate_volume),
+        )
+        .route("/v1/users", post(crate::handlers::users::list_users))
+        .route(
+            "/v1/users/create",
+            post(crate::handlers::users::create_user),
+        )
+        .route(
+            "/v1/users/update",
+            post(crate::handlers::users::update_user),
+        )
+        .route(
+            "/v1/users/delete",
+            post(crate::handlers::users::delete_user),
+        )
+        // Storage Pools
+        .route(
+            "/v1/storage-pools",
+            post(crate::handlers::storage::list_storage_pools),
+        )
+        .route(
+            "/v1/storage-pools/create",
+            post(crate::handlers::storage::create_storage_pool),
+        )
+        // VM Templates
+        .route(
+            "/v1/vm-templates",
+            get(crate::handlers::templates::list_vm_templates)
+                .post(crate::handlers::templates::create_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/:id",
+            delete(crate::handlers::templates::delete_vm_template),
+        )
+        // Cloud-init Templates
+        .route(
+            "/v1/cloud-init-templates",
+            get(crate::handlers::templates::list_cloud_init_templates)
+                .post(crate::handlers::templates::create_cloud_init_template),
+        )
+        .route(
+            "/v1/cloud-init-templates/:id",
+            delete(crate::handlers::templates::delete_cloud_init_template),
+        )
+        // Firewall Rules
+        .route(
+            "/v1/firewall-rules",
+            post(crate::handlers::firewall::list_firewall_rules),
+        )
+        .route(
+            "/v1/firewall-rules/create",
+            post(crate::handlers::firewall::create_firewall_rule),
+        )
+        .route(
+            "/v1/firewall-rules/delete",
+            post(crate::handlers::firewall::delete_firewall_rule),
+        )
+        // VM Snapshots
+        .route(
+            "/v1/vms/snapshots",
+            post(crate::handlers::snapshots::list_vm_snapshots),
+        )
+        .route(
+            "/v1/vms/snapshots/create",
+            post(crate::handlers::snapshots::create_snapshot),
+        )
+        .route(
+            "/v1/vms/snapshots/delete",
+            post(crate::handlers::snapshots::delete_snapshot),
+        )
+        .route(
+            "/v1/vms/snapshots/restore",
+            post(crate::handlers::snapshots::restore_snapshot),
+        )
+        // API Tokens
+        .route("/v1/tokens", post(crate::handlers::tokens::list_tokens))
+        .route(
+            "/v1/tokens/create",
+            post(crate::handlers::tokens::create_token),
+        )
+        .route(
+            "/v1/tokens/revoke",
+            post(crate::handlers::tokens::revoke_token),
         )
 }

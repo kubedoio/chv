@@ -2,8 +2,11 @@ use async_trait::async_trait;
 use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
+    Json,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::BffError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -11,6 +14,24 @@ pub struct Claims {
     pub username: String,
     pub role: String,
     pub exp: u64,
+}
+
+pub fn require_operator_or_admin(claims: &Claims) -> Result<(), BffError> {
+    if claims.role == "admin" || claims.role == "operator" {
+        Ok(())
+    } else {
+        Err(BffError::Unauthorized(
+            "operator or admin role required".into(),
+        ))
+    }
+}
+
+pub fn require_admin(claims: &Claims) -> Result<(), BffError> {
+    if claims.role == "admin" {
+        Ok(())
+    } else {
+        Err(BffError::Unauthorized("admin role required".into()))
+    }
 }
 
 pub fn validate_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
@@ -25,29 +46,93 @@ pub struct BearerToken(pub Claims);
 
 #[async_trait]
 impl FromRequestParts<crate::router::AppState> for BearerToken {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = (StatusCode, Json<serde_json::Value>);
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &crate::router::AppState,
     ) -> Result<Self, Self::Rejection> {
+        let reject = |msg: &'static str| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "message": msg, "code": 401 })),
+            )
+        };
+
         let auth = parts
             .headers
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?;
+            .ok_or_else(|| reject("missing authorization header"))?;
 
         if !auth.to_ascii_lowercase().starts_with("bearer ") {
-            return Err((StatusCode::UNAUTHORIZED, "invalid authorization scheme"));
+            return Err(reject("invalid authorization scheme"));
         }
         let token = &auth[7..];
 
-        let claims = validate_token(token, &state.jwt_secret).map_err(|e| {
-            tracing::warn!(error = %e, "token validation failed");
-            (StatusCode::UNAUTHORIZED, "invalid or expired token")
-        })?;
+        // Try JWT first
+        match validate_token(token, &state.jwt_secret) {
+            Ok(claims) => return Ok(BearerToken(claims)),
+            Err(e) => {
+                tracing::debug!(error = %e, "JWT validation failed, checking API token");
+            }
+        }
 
-        Ok(BearerToken(claims))
+        // Try API token (chv_ prefix)
+        if token.starts_with("chv_") {
+            let token_hash = chv_common::sha256_hex(token);
+
+            #[derive(sqlx::FromRow)]
+            struct ApiTokenUser {
+                user_id: String,
+                username: String,
+                role: String,
+            }
+
+            let result = sqlx::query_as::<_, ApiTokenUser>(
+                "SELECT u.user_id, u.username, u.role \
+                 FROM api_tokens t \
+                 JOIN users u ON t.user_id = u.user_id \
+                 WHERE t.token_hash = ? \
+                 AND (t.expires_at IS NULL OR t.expires_at > strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            )
+            .bind(&token_hash)
+            .fetch_optional(&state.pool)
+            .await;
+
+            match result {
+                Ok(Some(row)) => {
+                    // Update last_used_at in the background (best effort)
+                    let pool = state.pool.clone();
+                    let hash = token_hash.clone();
+                    tokio::spawn(async move {
+                        let _ = sqlx::query(
+                            "UPDATE api_tokens SET last_used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE token_hash = ?",
+                        )
+                        .bind(&hash)
+                        .execute(&pool)
+                        .await;
+                    });
+
+                    let claims = Claims {
+                        sub: row.user_id,
+                        username: row.username,
+                        role: row.role,
+                        // Far future expiry for API tokens — their expiry is managed by expires_at in DB
+                        exp: u64::MAX / 2,
+                    };
+                    return Ok(BearerToken(claims));
+                }
+                Ok(None) => {
+                    tracing::warn!("API token not found or expired");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "API token DB lookup failed");
+                }
+            }
+        }
+
+        Err(reject("invalid or expired token"))
     }
 }
 
@@ -134,4 +219,12 @@ mod tests {
         let result = validate_token("not-a-valid-jwt", &test_secret());
         assert!(result.is_err());
     }
+
+    #[test]
+    fn sha256_hex_is_correct_length() {
+        let hash = chv_common::sha256_hex("chv_test_token");
+        assert_eq!(hash.len(), 64);
+    }
 }
+
+

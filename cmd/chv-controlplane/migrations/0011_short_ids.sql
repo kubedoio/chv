@@ -1,0 +1,5 @@
+-- Migration 0011: Document short ID format
+-- All resource IDs are now 8-character lowercase hex strings
+-- Generated in Rust via chv_common::gen_short_id()
+-- SQLite default for auto-generated IDs: lower(hex(randomblob(4)))
+-- Existing full UUIDs remain valid (text columns accept any string)
