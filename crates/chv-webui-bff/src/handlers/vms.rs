@@ -331,8 +331,16 @@ pub async fn create_vm(
         .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?
         .flatten()
         {
-            tracing::info!(%source_url, "create_vm: resolved image_ref to source_url");
-            image_ref = source_url;
+            if source_url.starts_with('/') {
+                tracing::info!(%source_url, "create_vm: resolved image_ref to local path");
+                image_ref = source_url;
+            } else {
+                tracing::warn!(%source_url, "create_vm: image source_url is not a local path, cannot use as disk seed");
+                return Err(BffError::BadRequest(format!(
+                    "Image source is a remote URL ({}). Download the image to the node first.",
+                    source_url
+                )));
+            }
         } else {
             tracing::warn!(%image_ref, "create_vm: image not found in DB, keeping original image_ref");
         }
