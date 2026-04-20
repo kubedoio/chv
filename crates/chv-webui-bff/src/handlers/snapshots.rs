@@ -107,7 +107,8 @@ pub async fn create_snapshot(
     }
 
     let snapshot_id = chv_common::gen_short_id();
-    let snapshot_path = format!("/run/chv/agent/vms/{}/snapshots/{}", vm_id, snapshot_id);
+    let snapshot_path = state.agent_runtime_dir.join("vms").join(&vm_id).join("snapshots").join(&snapshot_id);
+    let snapshot_path = snapshot_path.to_string_lossy().to_string();
 
     sqlx::query(
         r#"

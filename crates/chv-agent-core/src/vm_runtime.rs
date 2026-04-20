@@ -189,7 +189,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
@@ -212,7 +212,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
@@ -235,7 +235,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
@@ -256,7 +256,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))

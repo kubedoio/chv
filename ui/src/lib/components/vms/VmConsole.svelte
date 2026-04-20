@@ -240,9 +240,9 @@
 <style>
 	.console-wrapper {
 		width: 100%;
-		background: var(--shell-surface, #1a1a1a);
+		background: var(--console-bg, #1a1a1a);
 		border-radius: 8px;
-		border: 1px solid var(--shell-line, #333);
+		border: 1px solid var(--console-line, #333);
 		overflow: hidden;
 	}
 
@@ -251,8 +251,8 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.5rem 0.75rem;
-		background: var(--shell-surface-raised, #252525);
-		border-bottom: 1px solid var(--shell-line, #333);
+		background: var(--console-surface, #252525);
+		border-bottom: 1px solid var(--console-line, #333);
 		font-size: 0.8rem;
 	}
 
@@ -272,22 +272,22 @@
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		color: var(--shell-text-secondary, #aaa);
+		color: var(--console-text-secondary, #aaa);
 	}
 
 	.status-dot {
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
-		background: #ef4444;
+		background: var(--console-disconnected, #ef4444);
 	}
 
 	.status-dot.connected {
-		background: #22c55e;
+		background: var(--console-connected, #22c55e);
 	}
 
 	.console-meta {
-		color: var(--shell-text-muted, #888);
+		color: var(--console-text-muted, #888);
 		font-family: monospace;
 	}
 
@@ -301,14 +301,14 @@
 		background: transparent;
 		border: none;
 		border-radius: 4px;
-		color: var(--shell-text-secondary, #aaa);
+		color: var(--console-text-secondary, #aaa);
 		cursor: pointer;
 		transition: background 0.15s ease;
 	}
 
 	.toolbar-btn:hover {
-		background: var(--shell-surface-hover, rgba(255, 255, 255, 0.08));
-		color: var(--shell-text-primary, #ddd);
+		background: rgba(255, 255, 255, 0.08);
+		color: var(--console-text, #ddd);
 	}
 
 	.terminal-container {
@@ -327,9 +327,9 @@
 
 	.console-error {
 		padding: 0.5rem 0.75rem;
-		background: #3b1111;
-		border-bottom: 1px solid #7f1d1d;
-		color: #fca5a5;
+		background: var(--console-error-bg, #3b1111);
+		border-bottom: 1px solid var(--console-error-border, #7f1d1d);
+		color: var(--console-error-text, #fca5a5);
 		font-size: 0.8rem;
 	}
 </style>

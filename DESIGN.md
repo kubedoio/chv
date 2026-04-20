@@ -121,7 +121,54 @@ No gradients, no decorative illustrations. Visual hierarchy comes from:
 | Failed | `--status-failed-bg` #faece8 | rgba(155,67,56,0.18) | `--status-failed-text` #6e2d25 |
 | Unknown | `--status-unknown-bg` #f1ede6 | rgba(117,105,91,0.18) | `--status-unknown-text` #5e5449 |
 
-**Dark mode:** Not default. Light mode is standard for enterprise virtualization consoles. Dark mode may be added later as user preference.
+### Dark Mode
+
+Dark mode is implemented via `[data-theme="dark"]` CSS override. Strategy: invert the neutral scale, warm up accent colors by ~10% luminance, reduce semantic color saturation by ~15% to avoid eye strain on dark backgrounds.
+
+| Token | Light | Dark | Notes |
+|-------|-------|------|-------|
+| `--color-primary` | #8f5a2a | #c4854e | Lightened for dark bg contrast |
+| `--color-primary-hover` | #9f6837 | #d49560 | |
+| `--color-primary-light` | #f5eadc | #2d2318 | Inverted: dark tint surface |
+| `--color-success` | #3f6b45 | #5a9e62 | Lightened |
+| `--color-success-light` | #edf4ee | #1a2e1c | Dark tint surface |
+| `--color-warning` | #9a6a1f | #c4922e | Lightened |
+| `--color-warning-light` | #f8efd9 | #2d2410 | Dark tint surface |
+| `--color-danger` | #9b4338 | #c46054 | Lightened |
+| `--color-danger-light` | #faece8 | #2d1a17 | Dark tint surface |
+| `--color-info` | #49627d | #6a8cad | Lightened |
+| `--color-info-light` | #edf1f6 | #1a2230 | Dark tint surface |
+
+**Dark neutral scale** (inverted, warm undertone preserved):
+
+| Token | Light | Dark |
+|-------|-------|------|
+| `--color-neutral-50` | #f7f3ec | #1a1816 |
+| `--color-neutral-100` | #efe9df | #222019 |
+| `--color-neutral-200` | #ddd5c8 | #2e2b24 |
+| `--color-neutral-300` | #c7bcac | #3d3930 |
+| `--color-neutral-400` | #9d917f | #6b6050 |
+| `--color-neutral-500` | #75695b | #9a8e7c |
+| `--color-neutral-600` | #5e5449 | #b5a998 |
+| `--color-neutral-700` | #423b33 | #d0c8ba |
+| `--color-neutral-800` | #29241f | #e8e2d8 |
+| `--color-neutral-900` | #191612 | #f5f2ec |
+
+**Dark shell tokens:**
+
+| Token | Dark Value |
+|-------|-----------|
+| `--shell-bg` | #1a1816 |
+| `--shell-surface` | rgba(30, 28, 24, 0.96) |
+| `--shell-surface-muted` | rgba(26, 24, 20, 0.96) |
+| `--shell-line` | rgba(180, 160, 130, 0.12) |
+| `--shell-line-strong` | rgba(180, 160, 130, 0.22) |
+| `--shell-text` | #f0ebe3 |
+| `--shell-text-secondary` | #b5a998 |
+| `--shell-accent` | #c4854e |
+| `--shell-accent-soft` | #2d2318 |
+
+**Toggle:** `data-theme="dark"` attribute on `<html>` element. Persisted via `theme` Svelte store in localStorage. Defaults to system preference via `prefers-color-scheme`.
 
 ---
 
@@ -273,6 +320,195 @@ No gradients, no decorative illustrations. Visual hierarchy comes from:
 
 ---
 
+## Data Visualization
+
+Colors for charts, sparklines, and metrics dashboards. The palette is derived from the semantic colors but tuned for visual distinction when multiple series appear together.
+
+### Chart Series Colors
+
+Use in order for multi-series charts. Each color has a 12% opacity fill variant for area charts.
+
+| Series | Hex | CSS Variable | Fill Opacity |
+|--------|-----|-------------|--------------|
+| Series 1 (primary) | #8f5a2a | `var(--color-primary)` | 0.12 |
+| Series 2 (info) | #49627d | `var(--color-info)` | 0.12 |
+| Series 3 (success) | #3f6b45 | `var(--color-success)` | 0.12 |
+| Series 4 (warning) | #9a6a1f | `var(--color-warning)` | 0.12 |
+| Series 5 (accent) | #6b4f7a | `--color-chart-purple` | 0.12 |
+| Series 6 (secondary) | #5e7a6b | `--color-chart-teal` | 0.12 |
+
+### Sparkline Defaults
+
+- Stroke: `var(--color-primary)` (#8f5a2a)
+- Fill gradient: primary color at 30% opacity (top) to 5% opacity (bottom)
+- Stroke width: 2px
+- Bezier smoothing (cubic, control point at 1/3 intervals)
+- Height: 40px inline, 120px in metric cards
+
+### Threshold Lines
+
+| Threshold | Color | Style |
+|-----------|-------|-------|
+| Warning | `var(--color-warning)` | Dashed (4px dash, 4px gap) |
+| Critical | `var(--color-danger)` | Solid |
+| Target/SLA | `var(--color-info)` | Dotted (2px dash, 2px gap) |
+
+### Chart Grid and Axes
+
+- Grid lines: `var(--shell-line)` (rgba(128, 112, 93, 0.18))
+- Axis labels: `var(--shell-text-secondary)` (#4b5865), `--text-xs` size
+- Tooltip background: `var(--shell-surface)` with `--shadow-md`
+- Tooltip border: `var(--shell-line-strong)`
+
+---
+
+## Serial Console / Terminal
+
+The serial console uses a dark theme regardless of the application's light/dark mode. Terminals are always dark. All colors use CSS variables with hardcoded fallbacks.
+
+### Console Tokens
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--console-bg` | #1a1a1a | Terminal background |
+| `--console-surface` | #252525 | Toolbar background |
+| `--console-line` | #333333 | Borders, dividers |
+| `--console-text` | #f0ebe3 | Primary terminal text |
+| `--console-text-secondary` | #aaaaaa | Status text, metadata |
+| `--console-text-muted` | #888888 | Inactive labels |
+| `--console-connected` | #22c55e | Connected status dot |
+| `--console-disconnected` | #ef4444 | Disconnected status dot |
+| `--console-error-bg` | #3b1111 | Error banner background |
+| `--console-error-border` | #7f1d1d | Error banner border |
+| `--console-error-text` | #fca5a5 | Error banner text |
+
+### xterm.js Configuration
+
+```
+fontSize: 14
+fontFamily: var(--font-mono)  // IBM Plex Mono
+cursorBlink: true
+theme: uses console tokens above
+```
+
+### Console Toolbar
+
+- Height: matches `--header-height` (40px)
+- Button size: 28px square, `--radius-sm` border radius
+- Button hover: rgba(255, 255, 255, 0.08) overlay
+- Status dot: 8px diameter circle
+- Font size: `--text-sm` (13px)
+
+---
+
+## Toast / Notifications
+
+Toast notifications use the design system's semantic colors, not hardcoded values.
+
+### Toast Variants
+
+| Type | Background | Border-Left | Icon Color | CSS Variables |
+|------|-----------|-------------|------------|---------------|
+| Success | `var(--color-success-light)` | `var(--color-success)` | `var(--color-success)` | #edf4ee / #3f6b45 |
+| Error | `var(--color-danger-light)` | `var(--color-danger)` | `var(--color-danger)` | #faece8 / #9b4338 |
+| Info | `var(--color-info-light)` | `var(--color-info)` | `var(--color-info)` | #edf1f6 / #49627d |
+| Warning | `var(--color-warning-light)` | `var(--color-warning)` | `var(--color-warning)` | #f8efd9 / #9a6a1f |
+
+### Toast Layout
+
+- Width: 320px max
+- Padding: `--space-4` (16px)
+- Border-left: 4px solid
+- Shadow: `--shadow-lg`
+- Border radius: `--radius-md` (8px)
+- Text: `--text-sm` (13px), `var(--shell-text)`
+- Dismiss button: 16px icon, hover `rgba(0,0,0,0.05)` overlay
+- Position: top-right, 16px from viewport edges
+- Auto-dismiss: 5s for success/info, manual dismiss for error/warning
+- Animation: slide in from right, `--duration-normal` (250ms), `--ease-out`
+
+**Note:** The current `Toast.svelte` uses hardcoded colors (#54B435, #E60000, #0066CC) that do not match the design system. These should be migrated to the CSS variables above.
+
+---
+
+## RBAC UI States
+
+CHV has three roles: `viewer` (read-only), `operator` (read+write), `admin` (read+write+admin). The UI must reflect what the current user can and cannot do.
+
+### Permission-Gated UI Patterns
+
+| Element | Viewer | Operator | Admin |
+|---------|--------|----------|-------|
+| Data tables | Full read access | Full read access | Full read access |
+| Create buttons | Hidden | Visible | Visible |
+| Delete buttons | Hidden | Visible | Visible |
+| Mutation actions (start/stop/restart) | Hidden | Visible | Visible |
+| Settings pages | Read-only view | Read-only view | Full access |
+| User management (`/settings/users`) | Redirected to `/settings` | Redirected to `/settings` | Full access |
+| API tokens page | Own tokens only | Own tokens only | All tokens |
+
+### Visual Treatment for Disabled/Gated Elements
+
+- **Hidden approach (default):** Don't render the button/action at all. Viewers see a clean read-only interface, not a field of disabled buttons.
+- **Disabled approach (when context helps):** Show the element at 50% opacity with `cursor: not-allowed` and a tooltip: "Requires operator or admin role". Use this only when hiding the element would make the interface confusing (e.g., a settings form where some fields are editable and some aren't).
+- **Role badge:** Show current role in the user menu. Format: pill badge using `--radius-full`, `--text-xs`, uppercase. Colors: viewer=`--color-neutral-400`, operator=`--color-info`, admin=`--color-primary`.
+
+### Server-Side Enforcement
+
+Role checks happen server-side (BearerToken + require_operator_or_admin / require_admin). The UI patterns above are progressive enhancement. A viewer who bypasses the UI still gets a 403 from the API.
+
+---
+
+## New Component Patterns (Sprint 8-10)
+
+Components that shipped after the original design system was written. Document their patterns here for consistency.
+
+### Snapshot Panel
+
+- Container: `SectionCard` with `--radius-md` border
+- Snapshot rows: property grid layout (label | value)
+- Actions: inline icon buttons (restore, delete) at row end
+- Restore requires VM stopped (disabled + tooltip if running)
+- Delete shows `ConfirmDialog` before proceeding
+
+### Firewall Rules Table
+
+- Standard `InventoryTable` component
+- CIDR values in `--font-mono`
+- Protocol/port in `--font-mono`
+- Action column: Allow (success badge) / Deny (danger badge)
+
+### Storage Pool Cards
+
+- Grid layout: 3 columns on desktop, 1 on mobile
+- Capacity bar: full width, `--radius-sm`, height 8px
+- Bar colors: `--color-success` (used), `--color-neutral-200` (free), `--color-danger` when >90% used
+- Pool name: `--text-lg`, `font-weight: 600`
+- Stats: `--font-mono` for sizes (GiB, TiB)
+
+### User Management Table
+
+- Admin-only page (server-side gate + client redirect)
+- Role column: colored pill badges (see RBAC section)
+- Created date: relative time format ("3 days ago")
+- Actions: edit role dropdown, delete with confirmation
+
+### API Token Display
+
+- Token shown once on creation in a `--font-mono` read-only input
+- "Copy" button with check icon feedback (2s timeout)
+- Token list shows SHA-256 prefix (first 8 chars) in `--font-mono`
+- Expiry: relative time, warning color if <7 days remaining
+
+### Cloud-Init Editor
+
+- Textarea with `--font-mono` font
+- Syntax highlighting: none (plain text YAML)
+- Min height: 200px, resizable vertically
+- Border: `--shell-line`, focus: `--color-primary` border
+
+---
+
 ## Reference Implementations
 
 **Primary inspiration:**
@@ -312,6 +548,12 @@ open docs/design-preview.html
 | 2026-04-19 | Warm earthy palette (#8f5a2a primary, cream neutrals) replaces cool blue (#0066CC) | CSS implementation diverged from original spec; aligning docs to match actual implementation |
 | 2026-04-19 | IBM Plex Sans / IBM Plex Mono replaces Roboto | CSS implementation uses IBM Plex family; docs aligned to match |
 | 2026-04-19 | Muted semantic colors (forest green, amber, terracotta) replace saturated originals | Earthy palette requires desaturated status colors for harmony |
+| 2026-04-20 | Dark mode tokens documented | CSS implementation existed since sprint 6, DESIGN.md now aligned |
+| 2026-04-20 | Data visualization color system added | Charts need consistent multi-series palette derived from semantic colors |
+| 2026-04-20 | Serial console terminal tokens added | Console always uses dark theme regardless of app mode |
+| 2026-04-20 | Toast notification spec updated | Migrate from hardcoded colors to design system semantic variables |
+| 2026-04-20 | RBAC UI state patterns documented | Three-role system (viewer/operator/admin) needs clear UI guidelines |
+| 2026-04-20 | Sprint 8-10 component patterns documented | Snapshots, firewall, storage, users, API tokens, cloud-init |
 
 ---
 

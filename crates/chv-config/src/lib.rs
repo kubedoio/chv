@@ -144,7 +144,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             socket_path: PathBuf::from("/run/chv/agent/api.sock"),
-            runtime_dir: PathBuf::from("/run/chv/agent"),
+            runtime_dir: PathBuf::from("/var/lib/chv/agent"),
             log_level: "info".to_string(),
             control_plane_addr: "https://localhost:8443".to_string(),
             stord_socket: PathBuf::from("/run/chv/stord/api.sock"),
@@ -233,6 +233,8 @@ pub struct ControlPlaneConfig {
     pub tls: ControlPlaneTlsConfig,
     #[serde(default = "default_agent_socket_pattern")]
     pub agent_socket_pattern: String,
+    #[serde(default = "default_agent_runtime_dir")]
+    pub agent_runtime_dir: PathBuf,
     #[serde(default = "default_kernel_path")]
     pub kernel_path: String,
     #[serde(default = "default_firmware_path")]
@@ -241,6 +243,10 @@ pub struct ControlPlaneConfig {
 
 fn default_jwt_secret() -> String {
     "chv-dev-secret-change-in-production".to_string()
+}
+
+fn default_agent_runtime_dir() -> PathBuf {
+    PathBuf::from("/var/lib/chv/agent")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,6 +294,7 @@ impl Default for ControlPlaneConfig {
             database: ControlPlaneDatabaseConfig::default(),
             tls: ControlPlaneTlsConfig::default(),
             agent_socket_pattern: default_agent_socket_pattern(),
+            agent_runtime_dir: default_agent_runtime_dir(),
             kernel_path: default_kernel_path(),
             firmware_path: default_firmware_path(),
         }
@@ -357,7 +364,7 @@ mod tests {
             &config_path,
             r#"
 socket_path = "/run/chv/agent/api.sock"
-runtime_dir = "/run/chv/agent"
+runtime_dir = "/var/lib/chv/agent"
 log_level = "info"
 control_plane_addr = "https://localhost:8443"
 stord_socket = "/run/chv/stord/api.sock"

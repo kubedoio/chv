@@ -11,21 +11,21 @@
 
 	const styles: Record<ToastType, { bg: string; border: string; iconColor: string; label: string }> = {
 		success: {
-			bg: 'bg-[#F0F9F0]',
-			border: 'border-l-[#54B435]',
-			iconColor: 'text-[#54B435]',
+			bg: 'bg-[var(--color-success-light)]',
+			border: 'border-l-[var(--color-success)]',
+			iconColor: 'text-[var(--color-success)]',
 			label: 'Success'
 		},
 		error: {
-			bg: 'bg-[#FFF0F0]',
-			border: 'border-l-[#E60000]',
-			iconColor: 'text-[#E60000]',
+			bg: 'bg-[var(--color-danger-light)]',
+			border: 'border-l-[var(--color-danger)]',
+			iconColor: 'text-[var(--color-danger)]',
 			label: 'Error'
 		},
 		info: {
-			bg: 'bg-[#E8F4FC]',
-			border: 'border-l-[#0066CC]',
-			iconColor: 'text-[#0066CC]',
+			bg: 'bg-[var(--color-info-light)]',
+			border: 'border-l-[var(--color-info)]',
+			iconColor: 'text-[var(--color-info)]',
 			label: 'Information'
 		}
 	};

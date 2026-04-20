@@ -52,7 +52,7 @@ COPY cmd/chv-controlplane/migrations /usr/local/share/chv/migrations
 
 # Runtime dirs
 RUN mkdir -p /run/chv/controlplane /run/chv/agent /run/chv/stord /run/chv/nwd \
-    /var/lib/chv/storage /var/lib/chv/images /etc/chv
+    /var/lib/chv/agent /var/lib/chv/storage /var/lib/chv/images /etc/chv
 
 # Default config (auto-generates jwt_secret on first run)
 RUN printf '[database]\nurl = "sqlite:///var/lib/chv/controlplane.db"\nmigrations_dir = "/usr/local/share/chv/migrations"\n' > /etc/chv/controlplane.toml

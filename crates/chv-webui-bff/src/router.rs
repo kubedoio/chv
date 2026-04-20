@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{routing::{delete, get, post}, Router};
@@ -19,6 +20,7 @@ pub struct AppState {
     pub observed_state_repo: ObservedStateRepository,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
+    pub agent_runtime_dir: PathBuf,
 }
 
 pub fn bff_router() -> Router<AppState> {

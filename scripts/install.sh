@@ -658,7 +658,7 @@ EOF
 
     cat > "$CHV_CONFIG_DIR/agent.toml" <<EOF
 socket_path = "/run/chv/agent/api.sock"
-runtime_dir = "/run/chv/agent"
+runtime_dir = "${CHV_DATA_DIR}/agent"
 log_level = "info"
 control_plane_addr = "http://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
@@ -802,7 +802,7 @@ Wants=chv-controlplane.service chv-stord.service chv-nwd.service
 Type=simple
 User=chv
 Group=chv
-ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd
+ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
 ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5

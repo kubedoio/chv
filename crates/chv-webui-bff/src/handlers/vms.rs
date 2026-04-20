@@ -659,6 +659,7 @@ pub async fn mutate_vm(
 }
 
 pub async fn get_vm_console(
+    State(state): State<AppState>,
     crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -671,7 +672,7 @@ pub async fn get_vm_console(
         return Err(BffError::BadRequest("invalid vm_id format".into()));
     }
 
-    let log_path = format!("/run/chv/agent/vms/{}/console.log", vm_id);
+    let log_path = state.agent_runtime_dir.join("vms").join(vm_id).join("console.log");
     let log_content = tokio::fs::read_to_string(&log_path)
         .await
         .unwrap_or_default();

@@ -941,7 +941,7 @@ mod tests {
             std::path::PathBuf::from("/run/chv/stord/api.sock"),
             std::path::PathBuf::from("/run/chv/nwd/api.sock"),
             None,
-            std::path::PathBuf::from("/run/chv/agent"),
+            std::path::PathBuf::from("/var/lib/chv/agent"),
         )
     }
 
@@ -1606,7 +1606,7 @@ mod tests {
             firmware_path: None,
             disks: vec![],
             nics: vec![],
-            api_socket_path: std::path::PathBuf::from("/run/chv/agent/vms/vm-1/vm.sock"),
+            api_socket_path: std::path::PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
         };
         server

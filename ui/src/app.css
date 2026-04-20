@@ -87,7 +87,24 @@
   --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
   --shadow-glow-primary: 0 0 14px rgba(143, 90, 42, 0.1);
   --shadow-glow-success: 0 0 8px rgba(63, 107, 69, 0.12);
-  
+
+  /* Chart / Data Visualization */
+  --color-chart-purple: #6b4f7a;
+  --color-chart-teal: #5e7a6b;
+
+  /* Console (always dark, regardless of theme) */
+  --console-bg: #1a1a1a;
+  --console-surface: #252525;
+  --console-line: #333333;
+  --console-text: #f0ebe3;
+  --console-text-secondary: #aaaaaa;
+  --console-text-muted: #888888;
+  --console-connected: #22c55e;
+  --console-disconnected: #ef4444;
+  --console-error-bg: #3b1111;
+  --console-error-border: #7f1d1d;
+  --console-error-text: #fca5a5;
+
   /* Border Radius */
   --radius-sm: 0.25rem;
   --radius-md: 0.5rem;

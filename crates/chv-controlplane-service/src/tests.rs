@@ -50,6 +50,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
             lifecycle_service,
         )),
         jwt_secret: "test-secret".to_string(),
+        agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
     }
 }
 
