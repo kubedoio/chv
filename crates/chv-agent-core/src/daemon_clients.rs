@@ -279,12 +279,18 @@ impl NwdClient {
                 options: std::collections::HashMap::new(),
             }),
         };
-        self.inner.ensure_network_topology(req).await.map_err(|e| {
+        let resp = self.inner.ensure_network_topology(req).await.map_err(|e| {
             ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
             }
-        })?;
+        })?.into_inner();
+        if !resp.status.eq_ignore_ascii_case("ok") {
+            return Err(ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: format!("ensure_network_topology failed: {} ({})", resp.human_summary, resp.error_code),
+            });
+        }
         Ok(())
     }
 
@@ -323,6 +329,20 @@ impl NwdClient {
                 reason: e.to_string(),
             })?
             .into_inner();
+        if let Some(ref result) = resp.result {
+            if !result.status.eq_ignore_ascii_case("ok") {
+                return Err(ChvError::NetworkUnavailable {
+                    resource: "nwd".to_string(),
+                    reason: format!("attach_vm_nic failed: {} ({})", result.human_summary, result.error_code),
+                });
+            }
+        }
+        if resp.tap_handle.is_empty() {
+            return Err(ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: "attach_vm_nic returned empty tap_handle".to_string(),
+            });
+        }
         Ok((resp.namespace_handle, resp.tap_handle))
     }
 
