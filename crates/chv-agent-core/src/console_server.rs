@@ -68,9 +68,9 @@ impl ConsoleServer {
 
     async fn ws_handler(
         State(state): State<ConsoleState>,
-        ws: WebSocketUpgrade,
         Path(vm_id): Path<String>,
         Query(params): Query<ConsoleParams>,
+        ws: WebSocketUpgrade,
     ) -> Response {
         // Decode and validate JWT
         match validate_console_token(&params.token, &state.jwt_secret) {
