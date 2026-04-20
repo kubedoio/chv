@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::io::{Read as _, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 use std::process::Stdio;
@@ -167,6 +168,25 @@ impl ProcessCloudHypervisorAdapter {
     }
 }
 
+fn read_stderr_tail(path: &std::path::Path) -> String {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let read_from = len.saturating_sub(4096);
+    if read_from > 0 {
+        let _ = file.seek(SeekFrom::Start(read_from));
+    }
+    let mut buf = Vec::new();
+    let _ = file.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    text.lines()
+        .last()
+        .unwrap_or("<empty>")
+        .to_string()
+}
+
 fn parse_http_status(response_bytes: &[u8]) -> Option<u16> {
     let response = String::from_utf8_lossy(response_bytes);
     let status_line = response.lines().next()?;
@@ -255,7 +275,23 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         }
 
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.stdout(Stdio::null());
+
+        let stderr_log_path = config.api_socket_path
+            .parent()
+            .expect("api_socket_path must have a parent directory")
+            .join("cloud-hypervisor.stderr.log");
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_log_path);
+        match stderr_file {
+            Ok(f) => { cmd.stderr(Stdio::from(f)); }
+            Err(e) => {
+                warn!(error = %e, path = %stderr_log_path.display(), "failed to open stderr log, falling back to null");
+                cmd.stderr(Stdio::null());
+            }
+        }
 
         info!(
             vm_id = %config.vm_id,
@@ -275,10 +311,22 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         {
             let _ = child.start_kill();
             let _ = child.wait().await;
+            let stderr_hint = read_stderr_tail(&stderr_log_path);
             return Err(ChvError::Internal {
                 reason: format!(
-                    "failed to start cloud-hypervisor for vm {}: {}",
-                    config.vm_id, e
+                    "failed to start cloud-hypervisor for vm {}: {} stderr: {}",
+                    config.vm_id, e, stderr_hint
+                ),
+            });
+        }
+
+        if let Ok(Some(exit_status)) = child.try_wait() {
+            let stderr_hint = read_stderr_tail(&stderr_log_path);
+            let _ = tokio::fs::remove_file(&config.api_socket_path).await;
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "cloud-hypervisor exited immediately for vm {} with {}: {}",
+                    config.vm_id, exit_status, stderr_hint
                 ),
             });
         }

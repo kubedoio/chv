@@ -10,10 +10,12 @@ pub struct VmRecord {
     pub observed_generation: String,
     pub runtime_status: String,
     pub last_error: Option<String>,
+    pub consecutive_failures: u32,
 }
 
 pub struct VmRuntime {
     vms: Arc<Mutex<HashMap<String, VmRecord>>>,
+    failure_counts: Arc<Mutex<HashMap<String, (u32, String)>>>,
     adapter: Arc<dyn CloudHypervisorAdapter>,
 }
 
@@ -21,6 +23,7 @@ impl Clone for VmRuntime {
     fn clone(&self) -> Self {
         Self {
             vms: self.vms.clone(),
+            failure_counts: self.failure_counts.clone(),
             adapter: self.adapter.clone(),
         }
     }
@@ -30,6 +33,7 @@ impl VmRuntime {
     pub fn new(adapter: Arc<dyn CloudHypervisorAdapter>) -> Self {
         Self {
             vms: Arc::new(Mutex::new(HashMap::new())),
+            failure_counts: Arc::new(Mutex::new(HashMap::new())),
             adapter,
         }
     }
@@ -47,6 +51,8 @@ impl VmRuntime {
     ) -> Result<(), ChvError> {
         let id = vm_id.into();
         self.adapter.create_vm(config, operation_id).await?;
+        let prior_failures = self.failure_counts.lock().unwrap()
+            .get(&id).map(|(c, _)| *c).unwrap_or(0);
         let mut map = self.vms.lock().unwrap();
         map.insert(
             id.clone(),
@@ -55,6 +61,7 @@ impl VmRuntime {
                 observed_generation: generation.into(),
                 runtime_status: "Created".to_string(),
                 last_error: None,
+                consecutive_failures: prior_failures,
             },
         );
         Ok(())
@@ -68,6 +75,9 @@ impl VmRuntime {
             id: vm_id.to_string(),
         })?;
         rec.runtime_status = "Running".to_string();
+        rec.consecutive_failures = 0;
+        drop(map);
+        self.failure_counts.lock().unwrap().remove(vm_id);
         Ok(())
     }
 
@@ -227,10 +237,37 @@ impl VmRuntime {
         // that were never successfully created. A phantom record causes the
         // reconciler to skip creation and try start/stop on a non-existent VM.
         if let Some(entry) = map.get_mut(&vm_id) {
-            entry.observed_generation = generation;
+            entry.observed_generation = generation.clone();
             entry.runtime_status = "Failed".to_string();
             entry.last_error = Some(error);
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+            let count = entry.consecutive_failures;
+            drop(map);
+            self.failure_counts.lock().unwrap().insert(vm_id, (count, generation));
+        } else {
+            drop(map);
+            let mut fc = self.failure_counts.lock().unwrap();
+            let entry = fc.entry(vm_id).or_insert((0, generation.clone()));
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = generation;
         }
+    }
+
+    pub fn consecutive_failures(&self, vm_id: &str) -> u32 {
+        self.failure_counts.lock().unwrap()
+            .get(vm_id).map(|(c, _)| *c).unwrap_or(0)
+    }
+
+    pub fn consecutive_failures_for_generation(&self, vm_id: &str, generation: &str) -> u32 {
+        self.failure_counts.lock().unwrap()
+            .get(vm_id)
+            .filter(|(_, gen)| gen == generation)
+            .map(|(c, _)| *c)
+            .unwrap_or(0)
+    }
+
+    pub fn clear_failure_count(&self, vm_id: &str) {
+        self.failure_counts.lock().unwrap().remove(vm_id);
     }
 }
 
@@ -334,6 +371,12 @@ mod tests {
         assert_eq!(rec.observed_generation, "7");
         assert_eq!(rec.runtime_status, "Failed");
         assert_eq!(rec.last_error.as_deref(), Some("kernel missing"));
+        assert_eq!(rec.consecutive_failures, 1);
+        assert_eq!(rt.consecutive_failures("vm-1"), 1);
+
+        rt.record_failure("vm-1", "7", "kernel missing again");
+        assert_eq!(rt.get("vm-1").unwrap().consecutive_failures, 2);
+        assert_eq!(rt.consecutive_failures("vm-1"), 2);
     }
 
     #[test]
@@ -341,5 +384,6 @@ mod tests {
         let (rt, _mock) = test_runtime();
         rt.record_failure("vm-phantom", "1", "prepare failed");
         assert!(rt.get("vm-phantom").is_none());
+        assert_eq!(rt.consecutive_failures("vm-phantom"), 1);
     }
 }
