@@ -64,6 +64,46 @@ impl LocalFileBackend {
         "raw".to_string()
     }
 
+    fn convert_qcow2_to_raw(path: &std::path::Path) -> Result<(), ChvError> {
+        let raw_path = path.with_extension("img.raw");
+        let status = std::process::Command::new("qemu-img")
+            .args(["convert", "-f", "qcow2", "-O", "raw"])
+            .arg(path)
+            .arg(&raw_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                std::fs::rename(&raw_path, path).map_err(|e| ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to rename converted image: {}", e),
+                })?;
+                info!(path = %path.display(), "converted qcow2 seed image to raw");
+                Ok(())
+            }
+            Ok(s) => {
+                let _ = std::fs::remove_file(&raw_path);
+                Err(ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("qemu-img convert failed with exit code {}", s),
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = std::fs::remove_file(path);
+                Err(ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: "seed image is qcow2 but qemu-img is not installed; install qemu-utils or convert the image to raw".to_string(),
+                })
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&raw_path);
+                Err(ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to run qemu-img: {}", e),
+                })
+            }
+        }
+    }
+
     async fn copy_volume(
         &self,
         volume_id: &str,
@@ -173,6 +213,16 @@ impl StorageBackend for LocalFileBackend {
                         backend: "local".to_string(),
                         reason: format!("failed to seed volume from image: {}", e),
                     })?;
+
+                    if Self::detect_kind(&path) == "qcow2" {
+                        info!(
+                            volume_id,
+                            path = %path.display(),
+                            seed = %seed_path.display(),
+                            "seed image is qcow2, converting to raw"
+                        );
+                        Self::convert_qcow2_to_raw(&path)?;
+                    }
 
                     let file = std::fs::File::options()
                         .write(true)
@@ -776,5 +826,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ChvError::InvalidArgument { .. }));
+    }
+
+    #[tokio::test]
+    async fn local_backend_seed_qcow2_triggers_conversion() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("seed-qcow2.img");
+        {
+            let mut f = std::fs::File::create(&seed).unwrap();
+            // Write qcow2 magic header followed by enough data to be a valid-looking file
+            let mut header = vec![0u8; 512];
+            header[0..4].copy_from_slice(b"QFI\xfb");
+            f.write_all(&header).unwrap();
+        }
+
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let mut options = std::collections::HashMap::new();
+        options.insert("seed_from".to_string(), seed.to_string_lossy().to_string());
+        options.insert("size_bytes".to_string(), "4096".to_string());
+        let locator = BackendLocator {
+            backend_class: "local".to_string(),
+            locator: "qcow2-seeded.img".to_string(),
+            options,
+        };
+
+        let result = backend
+            .open("vol-1", &locator, &DevicePolicy::default())
+            .await;
+
+        if std::process::Command::new("qemu-img").arg("--version").status().is_ok() {
+            let export = result.unwrap();
+            assert_eq!(export.export_kind, "raw");
+        } else {
+            let err = result.unwrap_err();
+            match err {
+                ChvError::BackendUnavailable { reason, .. } => {
+                    assert!(reason.contains("qemu-img"), "error should mention qemu-img: {}", reason);
+                }
+                other => panic!("expected BackendUnavailable, got {:?}", other),
+            }
+        }
     }
 }

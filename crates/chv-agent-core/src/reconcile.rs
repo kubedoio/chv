@@ -16,6 +16,7 @@ pub struct Reconciler {
     pub stord_socket: PathBuf,
     pub nwd_socket: PathBuf,
     pub runtime_dir: PathBuf,
+    reconcile_tick: u64,
 }
 
 /// Returns the per-VM runtime directory for the given VM.
@@ -38,6 +39,7 @@ impl Reconciler {
             stord_socket,
             nwd_socket,
             runtime_dir,
+            reconcile_tick: 0,
         }
     }
 
@@ -50,7 +52,29 @@ impl Reconciler {
         cache.transition_node_state(to)
     }
 
+    fn should_skip_vm(&self, failures: u32) -> bool {
+        if self.reconcile_tick <= 1 {
+            return false;
+        }
+        if failures >= 10 {
+            self.reconcile_tick % 60 != 0
+        } else if failures >= 3 {
+            self.reconcile_tick % 6 != 0
+        } else {
+            false
+        }
+    }
+
+    fn log_backoff_skip(&self, vm_id: &str, failures: u32) {
+        if failures >= 10 {
+            warn!(vm_id = %vm_id, failures = failures, "VM in persistent failure, retrying every ~5min");
+        } else {
+            warn!(vm_id = %vm_id, failures = failures, "VM failing repeatedly, retrying every ~30s");
+        }
+    }
+
     pub async fn run_once(&mut self) -> Result<(), ChvError> {
+        self.reconcile_tick = self.reconcile_tick.wrapping_add(1);
         info!(
             state = %self.current_state().await.as_str(),
             "reconcile tick"
@@ -406,14 +430,26 @@ impl Reconciler {
 
         // Create missing VMs
         for vm_id in desired.difference(&actual) {
+            let generation = {
+                let cache = self.cache.lock().await;
+                cache.vm_fragments.get(vm_id).map(|f| f.generation.clone())
+            };
+            let Some(generation) = generation else {
+                warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
+                continue;
+            };
+            let failures = self.vm_runtime.consecutive_failures_for_generation(vm_id, &generation);
+            if self.should_skip_vm(failures) {
+                self.log_backoff_skip(vm_id, failures);
+                continue;
+            }
             let op_id = format!("reconcile-vm-create-{}", vm_id);
-            let (generation, raw) = {
+            let raw = {
                 let cache = self.cache.lock().await;
                 let Some(fragment) = cache.vm_fragments.get(vm_id) else {
-                    warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
                     continue;
                 };
-                (fragment.generation.clone(), fragment.spec_json.clone())
+                fragment.spec_json.clone()
             };
             let raw = match std::str::from_utf8(&raw) {
                 Ok(r) => r,
@@ -496,6 +532,7 @@ impl Reconciler {
             }
             let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
             let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+            self.vm_runtime.clear_failure_count(vm_id);
             let mut cache = self.cache.lock().await;
             cache.remove_vm_state(vm_id);
         }
@@ -510,6 +547,11 @@ impl Reconciler {
                 };
                 (fragment.generation.clone(), fragment.spec_json.clone())
             };
+            let failures = self.vm_runtime.consecutive_failures_for_generation(vm_id, &generation);
+            if self.should_skip_vm(failures) {
+                self.log_backoff_skip(vm_id, failures);
+                continue;
+            }
             let raw = match std::str::from_utf8(&raw) {
                 Ok(r) => r,
                 Err(e) => {
