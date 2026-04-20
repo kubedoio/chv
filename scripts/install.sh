@@ -757,11 +757,6 @@ RestartSec=5
 RuntimeDirectory=chv/controlplane
 StateDirectory=chv
 LogsDirectory=chv
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/run/chv/controlplane /var/lib/chv
-ReadOnlyPaths=/etc/chv /usr/local/share/chv
 
 [Install]
 WantedBy=multi-user.target
@@ -783,10 +778,6 @@ RestartSec=5
 RuntimeDirectory=chv/stord
 StateDirectory=chv
 LogsDirectory=chv
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/run/chv/stord /var/lib/chv/storage
 
 [Install]
 WantedBy=multi-user.target
@@ -804,7 +795,6 @@ ExecStart=/usr/local/bin/chv-nwd /etc/chv/nwd.toml
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=chv/nwd
-StateDirectory=chv
 LogsDirectory=chv
 
 [Install]
@@ -824,7 +814,6 @@ ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=chv
-StateDirectory=chv
 LogsDirectory=chv
 
 [Install]
