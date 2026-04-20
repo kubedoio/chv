@@ -103,7 +103,7 @@ install_dependencies() {
     apt-get install -y -qq \
         nginx \
         qemu-kvm bridge-utils iproute2 iptables curl openssl \
-        dnsmasq coreutils tar gzip sqlite3
+        dnsmasq coreutils tar gzip sqlite3 genisoimage
 }
 
 # -----------------------------------------------------------------------------
@@ -799,8 +799,6 @@ After=network.target
 
 [Service]
 Type=simple
-User=chv
-Group=chv
 ExecStartPre=/bin/mkdir -p /run/chv/nwd
 ExecStart=/usr/local/bin/chv-nwd /etc/chv/nwd.toml
 Restart=on-failure
@@ -808,10 +806,6 @@ RestartSec=5
 RuntimeDirectory=chv/nwd
 StateDirectory=chv
 LogsDirectory=chv
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/run/chv/nwd
 
 [Install]
 WantedBy=multi-user.target
@@ -825,8 +819,6 @@ Wants=chv-controlplane.service chv-stord.service chv-nwd.service
 
 [Service]
 Type=simple
-User=chv
-Group=chv
 ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
 ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
@@ -834,13 +826,6 @@ RestartSec=5
 RuntimeDirectory=chv
 StateDirectory=chv
 LogsDirectory=chv
-DeviceAllow=/dev/kvm rw
-SupplementaryGroups=kvm
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/run/chv /var/lib/chv
-ReadOnlyPaths=/etc/chv /usr/local/bin /usr/bin
 
 [Install]
 WantedBy=multi-user.target

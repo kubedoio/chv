@@ -187,6 +187,57 @@ fn read_stderr_tail(path: &std::path::Path) -> String {
         .to_string()
 }
 
+async fn build_cloud_init_seed(
+    vm_dir: &Path,
+    vm_id: &str,
+    userdata: &str,
+) -> Result<std::path::PathBuf, ChvError> {
+    let seed_dir = vm_dir.join("seed");
+    tokio::fs::create_dir_all(&seed_dir).await.map_err(|e| ChvError::Io {
+        path: seed_dir.to_string_lossy().to_string(),
+        source: e,
+    })?;
+
+    let meta_data = format!("instance-id: {}\nlocal-hostname: {}\n", vm_id, vm_id);
+    tokio::fs::write(seed_dir.join("meta-data"), meta_data.as_bytes()).await.map_err(|e| ChvError::Io {
+        path: seed_dir.join("meta-data").to_string_lossy().to_string(),
+        source: e,
+    })?;
+
+    tokio::fs::write(seed_dir.join("user-data"), userdata.as_bytes()).await.map_err(|e| ChvError::Io {
+        path: seed_dir.join("user-data").to_string_lossy().to_string(),
+        source: e,
+    })?;
+
+    let network_config = "version: 2\nethernets:\n  id0:\n    match:\n      driver: virtio*\n    dhcp4: true\n";
+    tokio::fs::write(seed_dir.join("network-config"), network_config.as_bytes()).await.map_err(|e| ChvError::Io {
+        path: seed_dir.join("network-config").to_string_lossy().to_string(),
+        source: e,
+    })?;
+
+    let seed_iso = vm_dir.join("seed.iso");
+    let output = tokio::process::Command::new("genisoimage")
+        .arg("-output").arg(&seed_iso)
+        .arg("-volid").arg("cidata")
+        .arg("-joliet").arg("-rock")
+        .arg(seed_dir.join("user-data"))
+        .arg(seed_dir.join("meta-data"))
+        .arg(seed_dir.join("network-config"))
+        .output()
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to run genisoimage: {}", e),
+        })?;
+
+    if !output.status.success() {
+        return Err(ChvError::Internal {
+            reason: format!("genisoimage failed: {}", String::from_utf8_lossy(&output.stderr)),
+        });
+    }
+
+    Ok(seed_iso)
+}
+
 fn parse_http_status(response_bytes: &[u8]) -> Option<u16> {
     let response = String::from_utf8_lossy(response_bytes);
     let status_line = response.lines().next()?;
@@ -230,56 +281,27 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
         cmd.arg("--api-socket").arg(&config.api_socket_path);
-        cmd.arg("--cpus").arg(format!("boot={}", config.cpus));
-        cmd.arg("--memory")
-            .arg(format!("size={}", config.memory_bytes));
-        if let Some(ref fw) = config.firmware_path {
-            cmd.arg("--firmware").arg(fw);
-        } else {
-            cmd.arg("--kernel").arg(&config.kernel_path);
-        }
-        for disk in &config.disks {
-            let arg = if disk.read_only {
-                format!("path={},readonly=on", disk.path.display())
-            } else {
-                format!("path={}", disk.path.display())
-            };
-            cmd.arg("--disk").arg(arg);
-        }
-        for nic in &config.nics {
-            if nic.tap_name.is_empty() {
-                warn!(mac = %nic.mac_address, "skipping NIC with empty tap_name");
-                continue;
-            }
-            cmd.arg("--net")
-                .arg(format!("mac={},tap={}", nic.mac_address, nic.tap_name));
-        }
-        cmd.arg("--console")
-            .arg("off")
-            .arg("--serial")
-            .arg(format!("tty={}", slave_path));
 
-        if let Some(ref userdata) = config.cloud_init_userdata {
+        let vm_runtime_dir = config.api_socket_path
+            .parent()
+            .expect("api_socket_path must have a parent directory");
+
+        // Build cloud-init seed ISO if userdata is provided
+        let seed_iso_path = if let Some(ref userdata) = config.cloud_init_userdata {
             if !userdata.trim().is_empty() {
-                let vm_runtime_dir = config.api_socket_path
-                    .parent()
-                    .expect("api_socket_path must have a parent directory");
-                let userdata_path = vm_runtime_dir.join("user-data.yaml");
-                tokio::fs::write(&userdata_path, userdata.as_bytes())
-                    .await
-                    .map_err(|e| ChvError::Io {
-                        path: userdata_path.to_string_lossy().to_string(),
-                        source: e,
-                    })?;
-            }
-        }
+                match build_cloud_init_seed(vm_runtime_dir, &config.vm_id, userdata).await {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        warn!(vm_id = %config.vm_id, error = %e, "failed to build cloud-init seed ISO, continuing without it");
+                        None
+                    }
+                }
+            } else { None }
+        } else { None };
 
         cmd.stdout(Stdio::null());
 
-        let stderr_log_path = config.api_socket_path
-            .parent()
-            .expect("api_socket_path must have a parent directory")
-            .join("cloud-hypervisor.stderr.log");
+        let stderr_log_path = vm_runtime_dir.join("cloud-hypervisor.stderr.log");
         let stderr_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -331,6 +353,67 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
 
         let pty_fd_raw = pty_master.into_raw_fd();
+
+        // Build VM config JSON and create VM via REST API (supports multiple disks)
+        let mut disks_json = Vec::new();
+        for disk in &config.disks {
+            let mut d = serde_json::Map::new();
+            d.insert("path".into(), serde_json::Value::from(disk.path.to_string_lossy().to_string()));
+            if disk.read_only {
+                d.insert("readonly".into(), serde_json::Value::from(true));
+            }
+            disks_json.push(serde_json::Value::Object(d));
+        }
+        if let Some(ref seed_path) = seed_iso_path {
+            let mut d = serde_json::Map::new();
+            d.insert("path".into(), serde_json::Value::from(seed_path.to_string_lossy().to_string()));
+            d.insert("readonly".into(), serde_json::Value::from(true));
+            disks_json.push(serde_json::Value::Object(d));
+        }
+
+        let mut net_json = Vec::new();
+        for nic in &config.nics {
+            if nic.tap_name.is_empty() {
+                warn!(mac = %nic.mac_address, "skipping NIC with empty tap_name");
+                continue;
+            }
+            let mut n = serde_json::Map::new();
+            n.insert("mac".into(), serde_json::Value::from(nic.mac_address.clone()));
+            n.insert("tap".into(), serde_json::Value::from(nic.tap_name.clone()));
+            net_json.push(serde_json::Value::Object(n));
+        }
+
+        let mut payload = serde_json::Map::new();
+        if let Some(ref fw) = config.firmware_path {
+            payload.insert("firmware".into(), serde_json::Value::from(fw.to_string_lossy().to_string()));
+        } else {
+            payload.insert("kernel".into(), serde_json::Value::from(config.kernel_path.to_string_lossy().to_string()));
+        }
+
+        let vm_config_json = serde_json::json!({
+            "cpus": { "boot_vcpus": config.cpus, "max_vcpus": config.cpus },
+            "memory": { "size": config.memory_bytes },
+            "payload": payload,
+            "disks": disks_json,
+            "net": net_json,
+            "serial": { "mode": "Tty" },
+            "console": { "mode": "Off" }
+        });
+
+        let body = vm_config_json.to_string();
+        let (create_status, create_body) = Self::ch_api_request_with_body(
+            &config.api_socket_path, "PUT", "/api/v1/vm.create", Some(&body),
+        ).await?;
+
+        if create_status != 200 && create_status != 204 {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let _ = tokio::fs::remove_file(&config.api_socket_path).await;
+            return Err(ChvError::Internal {
+                reason: format!("vm.create returned status {} for vm {}: {}", create_status, config.vm_id, create_body),
+            });
+        }
+
         let mut map = self.vms.lock().unwrap();
         map.insert(
             config.vm_id.clone(),
@@ -343,10 +426,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         drop(map);
 
         // Spawn background logger: tee PTY output to console.log
-        let log_path = config.api_socket_path
-            .parent()
-            .map(|p| p.join("console.log"))
-            .unwrap_or_default();
+        let log_path = vm_runtime_dir.join("console.log");
         let logger_fd = unsafe { nix::libc::dup(pty_fd_raw) };
         if logger_fd >= 0 {
             let vm_id_log = config.vm_id.clone();
