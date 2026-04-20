@@ -385,20 +385,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         if force {
             let mut map = self.vms.lock().unwrap();
-            if let Some(proc) = map.get_mut(vm_id) {
+            if let Some(mut proc) = map.remove(vm_id) {
                 let _ = proc.child.start_kill();
+                let _ = proc.child.try_wait();
             }
         } else {
-            // Shut down the guest OS first, then terminate the VMM process
             let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.shutdown", None).await;
-            // Give CH a moment to clean up the guest
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            // Now shut down the VMM process itself
             let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vmm.shutdown", None).await;
-            // Ensure the child process is reaped
             let mut map = self.vms.lock().unwrap();
-            if let Some(proc) = map.get_mut(vm_id) {
+            if let Some(mut proc) = map.remove(vm_id) {
                 let _ = proc.child.start_kill();
+                let _ = proc.child.try_wait();
             }
         }
         Ok(())

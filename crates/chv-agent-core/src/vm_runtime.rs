@@ -78,12 +78,7 @@ impl VmRuntime {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         self.adapter.stop_vm(vm_id, force, operation_id).await?;
-        let mut map = self.vms.lock().unwrap();
-        let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
-            resource: "vm".to_string(),
-            id: vm_id.to_string(),
-        })?;
-        rec.runtime_status = "Stopped".to_string();
+        self.vms.lock().unwrap().remove(vm_id);
         Ok(())
     }
 
