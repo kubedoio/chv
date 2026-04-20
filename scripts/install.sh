@@ -1014,6 +1014,32 @@ trap cleanup EXIT
 
 install_dependencies
 setup_user_and_dirs
+
+# Clean up previous installation artifacts
+clean_previous_install() {
+    info "Cleaning previous installation..."
+    # Stop services if running
+    for svc in chv-agent chv-controlplane chv-stord chv-nwd; do
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+    done
+    # Remove old configs (will be regenerated)
+    rm -f "${CHV_CONFIG_DIR}/agent.toml" "${CHV_CONFIG_DIR}/controlplane.toml" \
+          "${CHV_CONFIG_DIR}/stord.toml" "${CHV_CONFIG_DIR}/nwd.toml" \
+          "${CHV_CONFIG_DIR}/bootstrap.token"
+    # Remove old runtime data (VMs, volumes, certs in agent dir)
+    rm -rf "${CHV_DATA_DIR}/agent/vms" "${CHV_DATA_DIR}/agent/"*.img \
+           "${CHV_DATA_DIR}/agent/agent.crt" "${CHV_DATA_DIR}/agent/agent.key" \
+           "${CHV_DATA_DIR}/agent/ca.crt" \
+           "${CHV_DATA_DIR}/agent/chv-nwd.toml" "${CHV_DATA_DIR}/agent/chv-stord.toml"
+    # Remove old database
+    rm -f "${CHV_DATA_DIR}/controlplane.db"*
+    # Remove old cache
+    rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
+    info "Previous installation cleaned."
+}
+clean_previous_install
+
 resolve_version
 download_release
 install_binaries_and_assets
