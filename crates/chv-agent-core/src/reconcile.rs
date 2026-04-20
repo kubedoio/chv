@@ -257,6 +257,11 @@ impl Reconciler {
         vm_spec: &crate::spec::VmSpec,
         operation_id: &str,
     ) -> Result<VmConfig, ChvError> {
+        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+        tokio::fs::create_dir_all(&vm_dir)
+            .await
+            .map_err(|e| ChvError::Internal { reason: format!("failed to create vm dir: {}", e) })?;
+
         let mut disks = Vec::new();
         let mut volume_ids = Vec::new();
         for disk in &vm_spec.disks {
@@ -273,11 +278,12 @@ impl Reconciler {
             {
                 open_options.insert("seed_from".to_string(), seed_from.to_string());
             }
+            let disk_path = vm_dir.join(format!("{}.img", disk.volume_id));
             let (_volume_id, handle, export_path) = stord
                 .open_volume_with_options(
                     &disk.volume_id,
                     "local",
-                    &format!("vms/{}/{}.img", vm_id, disk.volume_id),
+                    &disk_path.to_string_lossy(),
                     open_options,
                     Some(&open_op_id),
                 )
@@ -344,11 +350,6 @@ impl Reconciler {
             let mut cache = self.cache.lock().await;
             cache.observe_vm_attachment(vm_id, &volume_ids, &nic_attachments);
         }
-
-        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
-        tokio::fs::create_dir_all(&vm_dir)
-            .await
-            .map_err(|e| ChvError::Internal { reason: format!("failed to create vm dir: {}", e) })?;
 
         Ok(VmConfig {
             vm_id: vm_id.to_string(),
