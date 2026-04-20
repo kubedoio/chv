@@ -268,6 +268,33 @@ download_base_image() {
         return
     fi
 
+    # Check common locations for a pre-downloaded image
+    for candidate in \
+        "/root/noble-server-cloudimg-${CHV_ARCH}.img" \
+        "/root/ubuntu-noble-${CHV_ARCH}.img" \
+        "/tmp/noble-server-cloudimg-${CHV_ARCH}.img"; do
+        if [ -f "$candidate" ]; then
+            info "Found pre-downloaded image at ${candidate}, copying..."
+            cp "$candidate" "$BASE_IMAGE_PATH"
+            chown "${CHV_USER}:${CHV_USER}" "$BASE_IMAGE_PATH"
+            chmod 644 "$BASE_IMAGE_PATH"
+            # Convert qcow2 to raw if needed
+            if cmd_exists qemu-img; then
+                local img_fmt
+                img_fmt=$(qemu-img info --output=json "$BASE_IMAGE_PATH" 2>/dev/null | grep -o '"format":"[^"]*"' | cut -d'"' -f4 || true)
+                if [ "$img_fmt" = "qcow2" ]; then
+                    info "Converting qcow2 image to raw format..."
+                    local raw_path="${BASE_IMAGE_PATH}.raw"
+                    qemu-img convert -f qcow2 -O raw "$BASE_IMAGE_PATH" "$raw_path"
+                    mv "$raw_path" "$BASE_IMAGE_PATH"
+                    chown "${CHV_USER}:${CHV_USER}" "$BASE_IMAGE_PATH"
+                fi
+            fi
+            info "Base image ready -> ${BASE_IMAGE_PATH}"
+            return
+        fi
+    done
+
     info "Downloading Ubuntu Noble base image for ${CHV_ARCH}..."
     info "URL: ${BASE_IMAGE_URL}"
 
@@ -343,12 +370,14 @@ import_base_image() {
         return
     fi
 
-    info "Importing base image into control plane..."
+    info "Importing base image via API..."
 
-    # Wait for CP to be ready (should already be up from start_services)
+    local api_base="http://127.0.0.1:8080"
+
+    # Wait for CP to be ready
     local attempt=1
     while [ $attempt -le 30 ]; do
-        if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
+        if curl -sf "${api_base}/health" &>/dev/null; then
             break
         fi
         sleep 1
@@ -360,31 +389,43 @@ import_base_image() {
         return
     fi
 
-    # Check if image already imported
-    local existing
-    existing=$(sqlite3 "${CHV_DB_PATH}" \
-        "SELECT COUNT(*) FROM images WHERE display_name='ubuntu-noble' OR source_url='${BASE_IMAGE_URL}';" 2>/dev/null || echo "0")
-
-    if [ "${existing}" -gt 0 ] 2>/dev/null; then
-        info "Base image already imported, skipping."
+    # Login to get auth token
+    local login_response
+    login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
+        -H "Content-Type: application/json" \
+        -d '{"username":"admin","password":"admin"}' 2>/dev/null)
+    if [ -z "$login_response" ]; then
+        warn "Failed to login for image import."
         return
     fi
 
-    local image_id
-    image_id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-    local size_bytes
-    size_bytes=$(stat -c%s "$BASE_IMAGE_PATH" 2>/dev/null || stat -f%z "$BASE_IMAGE_PATH" 2>/dev/null || echo "0")
+    local token
+    token=$(echo "$login_response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"//')
+    if [ -z "$token" ]; then
+        warn "Failed to extract auth token for image import."
+        return
+    fi
 
-    if sqlite3 "${CHV_DB_PATH}" \
-        "INSERT INTO images
-         (image_id, display_name, image_type, format, size_bytes, checksum, source_url, os, version, status, node_id, created_at, updated_at)
-         VALUES ('${image_id}', 'ubuntu-noble', 'disk', 'raw', ${size_bytes}, NULL, '${BASE_IMAGE_PATH}', 'ubuntu', '24.04', 'available', NULL,
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'));" 2>/dev/null; then
-        info "Base image imported successfully (image_id: ${image_id})."
+    local auth_header="Authorization: Bearer ${token}"
+
+    # Import the image via BFF API
+    local import_response
+    import_response=$(curl -sf -X POST "${api_base}/v1/images/import" \
+        -H "Content-Type: application/json" \
+        -H "$auth_header" \
+        -d "{
+            \"name\": \"ubuntu-noble\",
+            \"source_url\": \"${BASE_IMAGE_PATH}\",
+            \"format\": \"raw\",
+            \"os\": \"ubuntu\"
+        }" 2>/dev/null)
+
+    if [ -n "$import_response" ]; then
+        local image_id
+        image_id=$(echo "$import_response" | grep -o '"image_id":"[^"]*"' | head -1 | sed 's/"image_id":"//;s/"//')
+        info "Base image imported via API (image_id: ${image_id})."
     else
-        warn "Failed to import base image into database."
-        warn "You can import it manually via: sqlite3 ${CHV_DB_PATH}"
+        info "Base image import skipped (may already exist)."
     fi
 }
 
