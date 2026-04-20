@@ -982,15 +982,9 @@ start_services() {
     while [ $attempt -le 60 ]; do
         local node_count
         node_count=0
-        if cmd_exists sqlite3; then
-            node_count=$(sqlite3 "${CHV_DB_PATH}" \
-                "SELECT COUNT(*) FROM nodes;" 2>/dev/null || echo "0")
-        else
-            # Fall back to HTTP API poll
-            node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
-                -X POST -H "Content-Type: application/json" -d '{}' 2>/dev/null \
-                | grep -o '"total_items":[0-9]*' | grep -o '[0-9]*' || echo "0")
-        fi
+        node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
+            -X POST -H "Content-Type: application/json" -d '{}' 2>/dev/null \
+            | grep -o '"total_items":[0-9]*' | grep -o '[0-9]*' || echo "0")
         if [ "${node_count}" -gt 0 ] 2>/dev/null; then
             info "Node enrolled successfully."
             break

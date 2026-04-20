@@ -283,15 +283,54 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
+        let pty_fd_raw = pty_master.into_raw_fd();
         let mut map = self.vms.lock().unwrap();
         map.insert(
             config.vm_id.clone(),
             VmProcess {
                 api_socket: config.api_socket_path.clone(),
                 child,
-                pty_master: unsafe { OwnedFd::from_raw_fd(pty_master.into_raw_fd()) },
+                pty_master: unsafe { OwnedFd::from_raw_fd(pty_fd_raw) },
             },
         );
+        drop(map);
+
+        // Spawn background logger: tee PTY output to console.log
+        let log_path = config.api_socket_path
+            .parent()
+            .map(|p| p.join("console.log"))
+            .unwrap_or_default();
+        let logger_fd = unsafe { nix::libc::dup(pty_fd_raw) };
+        if logger_fd >= 0 {
+            let vm_id_log = config.vm_id.clone();
+            tokio::spawn(async move {
+                let std_file = unsafe { std::fs::File::from_raw_fd(logger_fd) };
+                let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
+                let log_file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .await;
+                let mut writer = match log_file {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::debug!(vm_id = %vm_id_log, error = %e, "failed to open console.log");
+                        return;
+                    }
+                };
+                let mut buf = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let _ = writer.write_all(&buf[..n]).await;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
         Ok(config.vm_id.clone())
     }
 

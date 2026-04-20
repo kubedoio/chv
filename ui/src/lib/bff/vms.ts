@@ -64,3 +64,14 @@ export async function getVmConsoleUrl(
 		token
 	});
 }
+
+export async function getVmBootLog(
+	vm_id: string,
+	token?: string
+): Promise<{ vm_id: string; content: string; lines: number }> {
+	return bffFetch(`/v1/vms/console`, {
+		method: 'POST',
+		body: JSON.stringify({ vm_id }),
+		token
+	});
+}

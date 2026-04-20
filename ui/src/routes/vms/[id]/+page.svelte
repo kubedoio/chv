@@ -3,7 +3,7 @@
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import { getStoredToken } from '$lib/api/client';
-	import { getVmConsoleUrl, mutateVm, deleteVm } from '$lib/bff/vms';
+	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
 	import { onMount } from 'svelte';
@@ -15,7 +15,7 @@
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal } from 'lucide-svelte';
+	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal, FileText } from 'lucide-svelte';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import VmConsole from '$lib/components/vms/VmConsole.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
@@ -28,6 +28,8 @@
 	let actionError = $state<string | null>(null);
 	let liveConsoleUrl = $state<string | undefined>(undefined);
 	let consoleLoading = $state(false);
+	let bootLog = $state<string>('');
+	let bootLogLoading = $state(false);
 
 	$effect(() => {
 		if (detail.currentTab === 'console' && detail.summary.vm_id) {
@@ -38,6 +40,18 @@
 				.then(res => { liveConsoleUrl = res.url; })
 				.catch(() => { liveConsoleUrl = undefined; })
 				.finally(() => { consoleLoading = false; });
+		}
+	});
+
+	$effect(() => {
+		if (detail.currentTab === 'boot-log' && detail.summary.vm_id) {
+			bootLogLoading = true;
+			bootLog = '';
+			const token = getStoredToken() ?? undefined;
+			getVmBootLog(detail.summary.vm_id, token)
+				.then(res => { bootLog = res.content || '(no boot log available)'; })
+				.catch(() => { bootLog = '(failed to load boot log)'; })
+				.finally(() => { bootLogLoading = false; });
 		}
 	});
 
@@ -206,6 +220,16 @@
 						{/if}
 					</SectionCard>
 				</section>
+			{:else if detail.currentTab === 'boot-log'}
+				<section class="detail-main-span">
+					<SectionCard title="Boot Log" icon={FileText}>
+						{#if bootLogLoading}
+							<p class="empty-hint">Loading boot log...</p>
+						{:else}
+							<pre class="boot-log">{bootLog}</pre>
+						{/if}
+					</SectionCard>
+				</section>
 			{:else}
 				<section class="detail-main-span">
 					<div class="summary-top">
@@ -339,5 +363,21 @@
 		.detail-grid {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	.boot-log {
+		font-family: var(--font-mono);
+		font-size: var(--text-xs);
+		line-height: 1.5;
+		background: var(--color-neutral-50);
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-md);
+		padding: var(--space-4);
+		overflow-x: auto;
+		max-height: 600px;
+		overflow-y: auto;
+		white-space: pre;
+		color: var(--shell-text);
+		margin: 0;
 	}
 </style>
