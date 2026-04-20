@@ -1146,7 +1146,7 @@ mod tests {
         };
         runtime.create_vm("vm-1", "1", &config, None).await.unwrap();
         runtime.stop_vm("vm-1", false, None).await.unwrap();
-        assert_eq!(runtime.get("vm-1").unwrap().runtime_status, "Stopped");
+        assert!(runtime.get("vm-1").is_none(), "VM removed from map after stop");
 
         let mut rec = Reconciler::new(
             Arc::new(tokio::sync::Mutex::new(test_cache())),

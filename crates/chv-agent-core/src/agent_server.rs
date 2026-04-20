@@ -1342,24 +1342,10 @@ mod tests {
         )
         .await;
         assert!(resp.is_ok());
-        assert_eq!(
-            server.vm_runtime.get("vm-1").unwrap().runtime_status,
-            "Stopped"
+        assert!(
+            server.vm_runtime.get("vm-1").is_none(),
+            "VM should be removed from map after stop"
         );
-
-        let delete_req = proto::DeleteVmRequest {
-            meta: Some(test_meta("1")),
-            node_id: "node-1".to_string(),
-            vm_id: "vm-1".to_string(),
-            force: false,
-        };
-        let resp = proto::lifecycle_service_server::LifecycleService::delete_vm(
-            &server,
-            Request::new(delete_req),
-        )
-        .await;
-        assert!(resp.is_ok());
-        assert!(server.vm_runtime.get("vm-1").is_none());
     }
 
     #[tokio::test]

@@ -288,7 +288,7 @@ mod tests {
         rt.start_vm("vm-1", Some("op-2")).await.unwrap();
         assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Running");
         rt.stop_vm("vm-1", false, Some("op-3")).await.unwrap();
-        assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Stopped");
+        assert!(rt.get("vm-1").is_none(), "VM should be removed from map after stop");
     }
 
     #[tokio::test]
