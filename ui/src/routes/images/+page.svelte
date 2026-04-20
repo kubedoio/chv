@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getStoredToken } from '$lib/api/client';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
@@ -100,9 +101,13 @@
 		deleteError = null;
 
 		try {
-			const res = await fetch('/api/v1/images/delete', {
+			const token = getStoredToken() ?? undefined;
+			const res = await fetch('/v1/images/delete', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: {
+					'Content-Type': 'application/json',
+					...(token ? { 'Authorization': `Bearer ${token}` } : {})
+				},
 				body: JSON.stringify({ image_id: imageId })
 			});
 
@@ -166,7 +171,7 @@
 				<InventoryTable
 					{columns}
 					rows={tableRows}
-					rowHref={(row) => `/images/${row.image_id}`}
+					rowHref={() => undefined}
 				>
 					{#snippet cell({ column, row })}
 						{#if column.key === '_actions'}
@@ -179,7 +184,7 @@
 								<Trash2 size={13} />
 							</button>
 						{:else if column.key === 'name'}
-							<a href="/images/{row.image_id}" class="row-link">{row.name}</a>
+							<span class="image-name">{row.name}</span>
 						{:else if row[column.key] && typeof row[column.key] === 'object' && 'label' in row[column.key]}
 							<span class="cell-badge" data-tone={row[column.key].tone}>{row[column.key].label}</span>
 						{:else}
