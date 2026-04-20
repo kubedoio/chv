@@ -17,7 +17,7 @@ export const BFFEndpoints = {
 	enrollNode: '/v1/nodes/enroll',
 	listVms: '/v1/vms',
 	getVm: '/v1/vms/get',
-	getVmConsoleUrl: '/v1/vms/console-url',
+	getVmConsoleUrl: '/v1/vms', // actual path: /v1/vms/:vm_id/console-url (constructed in vms.ts)
 	createVm: '/v1/vms/create',
 	mutateVm: '/v1/vms/mutate',
 	deleteVm: '/v1/vms/delete',
