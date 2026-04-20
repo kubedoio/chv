@@ -528,12 +528,38 @@ impl Reconciler {
             if spec.desired_state == "Running" && record.runtime_status != "Running" {
                 let op_id = format!("reconcile-vm-start-{}", vm_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&op_id)).await {
-                    warn!(vm_id = %vm_id, error = %e, "failed to start vm");
-                    self.vm_runtime.record_failure(
-                        vm_id.to_string(),
-                        generation.clone(),
-                        e.to_string(),
-                    );
+                    let err_str = e.to_string();
+                    if err_str.contains("No such file or directory") || err_str.contains("Connection refused") {
+                        warn!(vm_id = %vm_id, "CH process dead, re-creating VM");
+                        let _ = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await;
+                        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+                        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+                        let recreate_op_id = format!("reconcile-vm-recreate-{}", vm_id);
+                        let config = match self
+                            .prepare_vm(&mut stord, &mut nwd, vm_id, &spec, &recreate_op_id)
+                            .await
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                warn!(vm_id = %vm_id, error = %e, "failed to prepare vm for re-creation");
+                                self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                                continue;
+                            }
+                        };
+                        if let Err(e) = self.vm_runtime.create_vm(vm_id, &generation, &config, Some(&recreate_op_id)).await {
+                            warn!(vm_id = %vm_id, error = %e, "failed to re-create vm");
+                            self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                            continue;
+                        }
+                        let start_op_id = format!("{}-start", recreate_op_id);
+                        if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
+                            warn!(vm_id = %vm_id, error = %e, "failed to start re-created vm");
+                            self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                        }
+                    } else {
+                        warn!(vm_id = %vm_id, error = %e, "failed to start vm");
+                        self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                    }
                     continue;
                 }
             } else if spec.desired_state == "Stopped" && record.runtime_status == "Running" {
