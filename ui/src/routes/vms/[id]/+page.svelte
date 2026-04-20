@@ -1,10 +1,11 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
-	import type { PageData, ActionData } from './$types';
+	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import { getStoredToken } from '$lib/api/client';
-	import { getVmConsoleUrl } from '$lib/bff/vms';
+	import { getVmConsoleUrl, mutateVm, deleteVm } from '$lib/bff/vms';
+	import { toast } from '$lib/stores/toast';
+	import { invalidateAll } from '$app/navigation';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -18,12 +19,12 @@
 	import VmConsole from '$lib/components/vms/VmConsole.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
 
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
 	let confirmingAction = $state<string | null>(null);
-	let actionInput = $state<HTMLInputElement | null>(null);
+	let actionError = $state<string | null>(null);
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
@@ -38,17 +39,33 @@
 		if (needsConfirm) {
 			confirmingAction = action;
 		} else {
-			submitAction(action);
+			executeAction(action);
 		}
 	}
 
-	function submitAction(action: string) {
+	async function executeAction(action: string) {
 		confirmingAction = null;
 		pendingAction = action;
-		if (actionInput) {
-			actionInput.value = action;
+		actionError = null;
+		const token = getStoredToken() ?? undefined;
+		const vm_id = detail.summary.vm_id;
+
+		try {
+			if (action === 'delete') {
+				await deleteVm({ vm_id, requested_by: 'webui' }, token);
+				toast.success(`VM ${vm_id} delete accepted`);
+			} else {
+				await mutateVm({ vm_id, action, force: false }, token);
+				toast.success(`VM ${action} accepted`);
+			}
+			await invalidateAll();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Action failed';
+			actionError = message;
+			toast.error(message);
+		} finally {
+			pendingAction = null;
 		}
-		actionInput?.form?.requestSubmit();
 	}
 
 	const postureProps = $derived([
@@ -120,48 +137,35 @@
 			description="Virtual machine workload."
 		>
 			{#snippet actions()}
-				<form
-					method="POST"
-					use:enhance={() => {
-						return async ({ update }) => {
-							pendingAction = null;
-							confirmingAction = null;
-							await update();
-						};
-					}}
-					class="header-actions"
-				>
-					<input type="hidden" name="vm_id" value={detail.summary.vm_id} />
-					<input type="hidden" name="action" bind:this={actionInput} value="" />
-					
+				<div class="header-actions">
 					<ActionStrip>
 						{#if confirmingAction}
 							<div class="confirm-group">
 								<span class="confirm-text">Confirm <strong>{confirmingAction}</strong>?</span>
-								<button class="btn-danger btn-sm" onclick={() => submitAction(confirmingAction!)}>Confirm</button>
+								<button class="btn-danger btn-sm" onclick={() => executeAction(confirmingAction!)}>Confirm</button>
 								<button class="btn-secondary btn-sm" onclick={() => confirmingAction = null}>Cancel</button>
 							</div>
 							{:else}
 								{@const ps = detail.summary.power_state.toLowerCase()}
-								<button class="btn-primary btn-sm" disabled={ps === 'running'} onclick={() => handleActionClick('start')}>
+								<button class="btn-primary btn-sm" disabled={ps === 'running' || pendingAction !== null} onclick={() => handleActionClick('start')}>
 									<Play size={14} />
-									Start
+									{pendingAction === 'start' ? 'Starting...' : 'Start'}
 								</button>
-								<button class="btn-secondary btn-sm" disabled={ps !== 'running'} onclick={() => handleActionClick('stop', true)}>
+								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('stop', true)}>
 									<Square size={14} />
-									Stop
+									{pendingAction === 'stop' ? 'Stopping...' : 'Stop'}
 								</button>
-								<button class="btn-secondary btn-sm" disabled={ps !== 'running'} onclick={() => handleActionClick('restart', true)}>
+								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('restart', true)}>
 									<RotateCcw size={14} />
-									Reboot
+									{pendingAction === 'restart' ? 'Restarting...' : 'Reboot'}
 								</button>
-								<button class="btn-secondary btn-sm" onclick={() => handleActionClick('delete', true)}>
+								<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => handleActionClick('delete', true)}>
 									<Trash2 size={14} />
-									Delete
+									{pendingAction === 'delete' ? 'Deleting...' : 'Delete'}
 								</button>
 						{/if}
 					</ActionStrip>
-				</form>
+				</div>
 			{/snippet}
 		</ResourceDetailHeader>
 

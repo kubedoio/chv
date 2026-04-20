@@ -1,8 +1,11 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
-	import type { PageData, ActionData } from './$types';
+	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
+	import { getStoredToken } from '$lib/api/client';
+	import { mutateVolume } from '$lib/bff/volumes';
+	import { toast } from '$lib/stores/toast';
+	import { invalidateAll } from '$app/navigation';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -12,12 +15,11 @@
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Link2, Unlink, Maximize2, Database, Box, Activity, Info, AlertTriangle } from 'lucide-svelte';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
 
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
 	let confirmingAction = $state<string | null>(null);
-	let actionInput = $state<HTMLInputElement | null>(null);
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
@@ -32,17 +34,25 @@
 		if (needsConfirm) {
 			confirmingAction = action;
 		} else {
-			submitAction(action);
+			executeAction(action);
 		}
 	}
 
-	function submitAction(action: string) {
+	async function executeAction(action: string) {
 		confirmingAction = null;
 		pendingAction = action;
-		if (actionInput) {
-			actionInput.value = action;
+		const token = getStoredToken() ?? undefined;
+		const volume_id = detail.summary.volume_id;
+		try {
+			await mutateVolume({ volume_id, action, force: false }, token);
+			toast.success(`Volume ${action} accepted`);
+			await invalidateAll();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Action failed';
+			toast.error(message);
+		} finally {
+			pendingAction = null;
 		}
-		actionInput?.form?.requestSubmit();
 	}
 
 	const postureProps = $derived([
@@ -83,43 +93,30 @@
 			description="Persistent block storage device."
 		>
 			{#snippet actions()}
-				<form
-					method="POST"
-					use:enhance={() => {
-						return async ({ update }) => {
-							pendingAction = null;
-							confirmingAction = null;
-							await update();
-						};
-					}}
-					class="header-actions"
-				>
-					<input type="hidden" name="volume_id" value={detail.summary.volume_id} />
-					<input type="hidden" name="action" bind:this={actionInput} value="" />
-					
+				<div class="header-actions">
 					<ActionStrip>
 						{#if confirmingAction}
 							<div class="confirm-group">
 								<span class="confirm-text">Confirm <strong>{confirmingAction}</strong>?</span>
-								<button class="btn-danger btn-sm" onclick={() => submitAction(confirmingAction!)}>Confirm</button>
+								<button class="btn-danger btn-sm" onclick={() => executeAction(confirmingAction!)}>Confirm</button>
 								<button class="btn-secondary btn-sm" onclick={() => confirmingAction = null}>Cancel</button>
 							</div>
 						{:else}
-							<button class="btn-primary btn-sm" disabled={!!detail.summary.attached_vm_id} onclick={() => handleActionClick('attach')}>
+							<button class="btn-primary btn-sm" disabled={!!detail.summary.attached_vm_id || pendingAction !== null} onclick={() => handleActionClick('attach')}>
 								<Link2 size={14} />
-								Attach
+								{pendingAction === 'attach' ? 'Attaching...' : 'Attach'}
 							</button>
-							<button class="btn-secondary btn-sm" disabled={!detail.summary.attached_vm_id} onclick={() => handleActionClick('detach', true)}>
+							<button class="btn-secondary btn-sm" disabled={!detail.summary.attached_vm_id || pendingAction !== null} onclick={() => handleActionClick('detach', true)}>
 								<Unlink size={14} />
-								Detach
+								{pendingAction === 'detach' ? 'Detaching...' : 'Detach'}
 							</button>
-							<button class="btn-secondary btn-sm" onclick={() => handleActionClick('resize', true)}>
+							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => handleActionClick('resize', true)}>
 								<Maximize2 size={14} />
-								Resize
+								{pendingAction === 'resize' ? 'Resizing...' : 'Resize'}
 							</button>
 						{/if}
 					</ActionStrip>
-				</form>
+				</div>
 			{/snippet}
 		</ResourceDetailHeader>
 
