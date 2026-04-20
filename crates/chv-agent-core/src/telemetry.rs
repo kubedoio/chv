@@ -31,6 +31,27 @@ impl TelemetryReporter {
         }
     }
 
+    pub fn vm_state_report(
+        &self,
+        vm_id: &str,
+        runtime_status: &str,
+        observed_generation: &str,
+        health_status: &str,
+    ) -> proto::VmStateReport {
+        proto::VmStateReport {
+            node_id: self.node_id.clone(),
+            vm_id: vm_id.to_string(),
+            runtime_status: runtime_status.to_string(),
+            observed_generation: observed_generation.to_string(),
+            health_status: health_status.to_string(),
+            last_error: "".to_string(),
+            reported_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+        }
+    }
+
     pub fn volume_state_report(
         &self,
         volume_id: &str,
