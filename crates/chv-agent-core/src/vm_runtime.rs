@@ -138,6 +138,78 @@ impl VmRuntime {
         self.adapter.restore_snapshot(vm_id, source, operation_id).await
     }
 
+    pub async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        self.adapter.pause_vm(vm_id, operation_id).await?;
+        let mut map = self.vms.lock().unwrap();
+        if let Some(rec) = map.get_mut(vm_id) {
+            rec.runtime_status = "Paused".to_string();
+        }
+        Ok(())
+    }
+
+    pub async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        self.adapter.resume_vm(vm_id, operation_id).await?;
+        let mut map = self.vms.lock().unwrap();
+        if let Some(rec) = map.get_mut(vm_id) {
+            rec.runtime_status = "Running".to_string();
+        }
+        Ok(())
+    }
+
+    pub async fn power_button(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        self.adapter.power_button(vm_id, operation_id).await
+    }
+
+    pub async fn add_disk(
+        &self,
+        vm_id: &str,
+        params: &chv_agent_runtime_ch::adapter::AddDiskParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        self.adapter.add_disk(vm_id, params, operation_id).await
+    }
+
+    pub async fn remove_device(
+        &self,
+        vm_id: &str,
+        device_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.remove_device(vm_id, device_id, operation_id).await
+    }
+
+    pub async fn add_net(
+        &self,
+        vm_id: &str,
+        params: &chv_agent_runtime_ch::adapter::AddNetParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        self.adapter.add_net(vm_id, params, operation_id).await
+    }
+
+    pub async fn resize_disk(
+        &self,
+        vm_id: &str,
+        disk_id: &str,
+        new_size_bytes: u64,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.resize_disk(vm_id, disk_id, new_size_bytes, operation_id).await
+    }
+
+    pub async fn ping(&self, vm_id: &str) -> Result<bool, ChvError> {
+        self.adapter.ping(vm_id).await
+    }
+
+    pub async fn coredump(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter.coredump(vm_id, destination, operation_id).await
+    }
+
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
         self.vms.lock().unwrap().get(vm_id).cloned()
     }

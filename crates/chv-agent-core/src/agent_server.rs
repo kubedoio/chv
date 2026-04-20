@@ -922,6 +922,318 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             }),
         }))
     }
+
+    async fn pause_vm(
+        &self,
+        req: Request<proto::PauseVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .pause_vm(&inner.vm_id, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "vm paused".to_string(),
+            }),
+        }))
+    }
+
+    async fn resume_vm(
+        &self,
+        req: Request<proto::ResumeVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .resume_vm(&inner.vm_id, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "vm resumed".to_string(),
+            }),
+        }))
+    }
+
+    async fn power_button_vm(
+        &self,
+        req: Request<proto::PowerButtonVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .power_button(&inner.vm_id, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "vm power button pressed".to_string(),
+            }),
+        }))
+    }
+
+    async fn add_disk(
+        &self,
+        req: Request<proto::AddDiskRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        let params = chv_agent_runtime_ch::adapter::AddDiskParams {
+            path: std::path::PathBuf::from(&inner.disk_path),
+            read_only: inner.read_only,
+            id: if inner.disk_id.is_empty() { None } else { Some(inner.disk_id.clone()) },
+        };
+        self.vm_runtime
+            .add_disk(&inner.vm_id, &params, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "disk added".to_string(),
+            }),
+        }))
+    }
+
+    async fn remove_device(
+        &self,
+        req: Request<proto::RemoveDeviceRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .remove_device(&inner.vm_id, &inner.device_id, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "device removed".to_string(),
+            }),
+        }))
+    }
+
+    async fn add_net(
+        &self,
+        req: Request<proto::AddNetRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        let params = chv_agent_runtime_ch::adapter::AddNetParams {
+            tap_name: inner.tap_name.clone(),
+            mac_address: inner.mac_address.clone(),
+            id: if inner.net_id.is_empty() { None } else { Some(inner.net_id.clone()) },
+        };
+        self.vm_runtime
+            .add_net(&inner.vm_id, &params, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "network interface added".to_string(),
+            }),
+        }))
+    }
+
+    async fn resize_disk(
+        &self,
+        req: Request<proto::ResizeDiskRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .resize_disk(&inner.vm_id, &inner.disk_id, inner.new_size_bytes, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "disk resized".to_string(),
+            }),
+        }))
+    }
+
+    async fn snapshot_vm(
+        &self,
+        req: Request<proto::SnapshotVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .snapshot_vm(&inner.vm_id, &inner.destination, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "vm snapshot taken".to_string(),
+            }),
+        }))
+    }
+
+    async fn restore_snapshot(
+        &self,
+        req: Request<proto::RestoreSnapshotRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .restore_snapshot(&inner.vm_id, &inner.source, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "snapshot restored".to_string(),
+            }),
+        }))
+    }
+
+    async fn coredump_vm(
+        &self,
+        req: Request<proto::CoredumpVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+        self.vm_runtime
+            .coredump(&inner.vm_id, &inner.destination, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "vm coredump complete".to_string(),
+            }),
+        }))
+    }
+
+    async fn ping_vmm(
+        &self,
+        req: Request<proto::PingVmmRequest>,
+    ) -> Result<Response<proto::PingVmmResponse>, Status> {
+        let inner = req.into_inner();
+        let result = self.vm_runtime
+            .ping(&inner.vm_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::PingVmmResponse { alive: result }))
+    }
 }
 
 #[cfg(test)]

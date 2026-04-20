@@ -37,8 +37,23 @@ pub struct VmNicConfig {
     pub tap_name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AddDiskParams {
+    pub path: PathBuf,
+    pub read_only: bool,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddNetParams {
+    pub tap_name: String,
+    pub mac_address: String,
+    pub id: Option<String>,
+}
+
 #[async_trait]
 pub trait CloudHypervisorAdapter: Send + Sync + 'static {
+    // --- VM Lifecycle ---
     async fn create_vm(
         &self,
         config: &VmConfig,
@@ -53,51 +68,76 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
     ) -> Result<(), ChvError>;
     async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError>;
     async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError>;
+    async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError>;
+    async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError>;
+    async fn power_button(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError>;
 
+    // --- Resource Management ---
     async fn resize_vm(
         &self,
         vm_id: &str,
         cpus: Option<u32>,
         memory_bytes: Option<u64>,
         operation_id: Option<&str>,
-    ) -> Result<(), ChvError> {
-        let _ = (vm_id, cpus, memory_bytes, operation_id);
-        Err(ChvError::Internal {
-            reason: "resize_vm not implemented".to_string(),
-        })
-    }
+    ) -> Result<(), ChvError>;
 
-    async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
-        let _ = vm_id;
-        Err(ChvError::Internal {
-            reason: "vm_info not implemented".to_string(),
-        })
-    }
+    async fn add_disk(
+        &self,
+        vm_id: &str,
+        params: &AddDiskParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError>;
 
+    async fn remove_device(
+        &self,
+        vm_id: &str,
+        device_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError>;
+
+    async fn add_net(
+        &self,
+        vm_id: &str,
+        params: &AddNetParams,
+        operation_id: Option<&str>,
+    ) -> Result<String, ChvError>;
+
+    async fn resize_disk(
+        &self,
+        vm_id: &str,
+        disk_id: &str,
+        new_size_bytes: u64,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError>;
+
+    // --- Introspection ---
+    async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError>;
+    async fn ping(&self, vm_id: &str) -> Result<bool, ChvError>;
+
+    // --- Snapshots ---
     async fn snapshot_vm(
         &self,
         vm_id: &str,
         destination: &str,
         operation_id: Option<&str>,
-    ) -> Result<(), ChvError> {
-        let _ = (vm_id, destination, operation_id);
-        Err(ChvError::Internal {
-            reason: "snapshot_vm not implemented".to_string(),
-        })
-    }
+    ) -> Result<(), ChvError>;
 
     async fn restore_snapshot(
         &self,
         vm_id: &str,
         source: &str,
         operation_id: Option<&str>,
-    ) -> Result<(), ChvError> {
-        let _ = (vm_id, source, operation_id);
-        Err(ChvError::Internal {
-            reason: "restore_snapshot not implemented".to_string(),
-        })
-    }
+    ) -> Result<(), ChvError>;
 
+    // --- Diagnostics ---
+    async fn coredump(
+        &self,
+        vm_id: &str,
+        destination: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError>;
+
+    // --- PTY ---
     fn pty_master(&self, _vm_id: &str) -> Option<OwnedFd> {
         None
     }

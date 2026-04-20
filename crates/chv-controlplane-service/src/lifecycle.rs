@@ -86,6 +86,56 @@ pub trait LifecycleService: Send + Sync {
         &self,
         request: proto::ExitMaintenanceRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn pause_vm(
+        &self,
+        request: proto::PauseVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn resume_vm(
+        &self,
+        request: proto::ResumeVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn power_button_vm(
+        &self,
+        request: proto::PowerButtonVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn add_disk(
+        &self,
+        request: proto::AddDiskRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn remove_device(
+        &self,
+        request: proto::RemoveDeviceRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn add_net(
+        &self,
+        request: proto::AddNetRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn resize_disk(
+        &self,
+        request: proto::ResizeDiskRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn snapshot_vm(
+        &self,
+        request: proto::SnapshotVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn restore_snapshot(
+        &self,
+        request: proto::RestoreSnapshotRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn coredump_vm(
+        &self,
+        request: proto::CoredumpVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
 #[derive(Clone)]
@@ -936,5 +986,293 @@ impl LifecycleService for LifecycleServiceImplementation {
         .await?;
 
         Ok(Self::ok_ack(&operation_id, "exit maintenance accepted"))
+    }
+
+    async fn pause_vm(
+        &self,
+        request: proto::PauseVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "PauseVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                None,
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_power_state(&VmPowerStatePatchInput {
+                    vm_id: vm_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    desired_power_state: Some("Paused".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "pause vm accepted"))
+    }
+
+    async fn resume_vm(
+        &self,
+        request: proto::ResumeVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "ResumeVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                None,
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_power_state(&VmPowerStatePatchInput {
+                    vm_id: vm_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    desired_power_state: Some("Running".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "resume vm accepted"))
+    }
+
+    async fn power_button_vm(
+        &self,
+        request: proto::PowerButtonVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "PowerButtonVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                None,
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_power_state(&VmPowerStatePatchInput {
+                    vm_id: vm_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    target_node_id: Some(node_id.clone()),
+                    desired_power_state: Some("Stopped".into()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "power button vm accepted"))
+    }
+
+    async fn add_disk(
+        &self,
+        request: proto::AddDiskRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "AddDisk",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("disk_id={}", request.disk_id)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "add disk accepted"))
+    }
+
+    async fn remove_device(
+        &self,
+        request: proto::RemoveDeviceRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "RemoveDevice",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("device_id={}", request.device_id)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "remove device accepted"))
+    }
+
+    async fn add_net(
+        &self,
+        request: proto::AddNetRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "AddNet",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("net_id={}", request.net_id)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "add net accepted"))
+    }
+
+    async fn resize_disk(
+        &self,
+        request: proto::ResizeDiskRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "ResizeDisk",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("disk_id={}:size={}", request.disk_id, request.new_size_bytes)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "resize disk accepted"))
+    }
+
+    async fn snapshot_vm(
+        &self,
+        request: proto::SnapshotVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "SnapshotVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("destination={}", request.destination)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "snapshot vm accepted"))
+    }
+
+    async fn restore_snapshot(
+        &self,
+        request: proto::RestoreSnapshotRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "RestoreSnapshot",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("source={}", request.source)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "restore snapshot accepted"))
+    }
+
+    async fn coredump_vm(
+        &self,
+        request: proto::CoredumpVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "CoredumpVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!("destination={}", request.destination)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "coredump vm accepted"))
     }
 }

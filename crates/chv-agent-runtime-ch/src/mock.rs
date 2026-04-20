@@ -3,7 +3,7 @@ use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmInfo};
+use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmInfo};
 
 #[derive(Debug, Clone, Default)]
 pub struct MockCloudHypervisorAdapter {
@@ -46,6 +46,18 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
         Ok(())
     }
 
+    async fn pause_vm(&self, _vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn resume_vm(&self, _vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn power_button(&self, _vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
+        Ok(())
+    }
+
     async fn resize_vm(
         &self,
         vm_id: &str,
@@ -64,6 +76,43 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
         if let Some(m) = memory_bytes {
             config.memory_bytes = m;
         }
+        Ok(())
+    }
+
+    async fn add_disk(
+        &self,
+        _vm_id: &str,
+        _params: &AddDiskParams,
+        _operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        Ok("mock-disk-id".to_string())
+    }
+
+    async fn remove_device(
+        &self,
+        _vm_id: &str,
+        _device_id: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn add_net(
+        &self,
+        _vm_id: &str,
+        _params: &AddNetParams,
+        _operation_id: Option<&str>,
+    ) -> Result<String, ChvError> {
+        Ok("mock-net-id".to_string())
+    }
+
+    async fn resize_disk(
+        &self,
+        _vm_id: &str,
+        _disk_id: &str,
+        _new_size_bytes: u64,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
         Ok(())
     }
 
@@ -96,5 +145,18 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
             cpus: config.cpus,
             memory_bytes: config.memory_bytes,
         })
+    }
+
+    async fn ping(&self, _vm_id: &str) -> Result<bool, ChvError> {
+        Ok(true)
+    }
+
+    async fn coredump(
+        &self,
+        _vm_id: &str,
+        _destination: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        Ok(())
     }
 }
