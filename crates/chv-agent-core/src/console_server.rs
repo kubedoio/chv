@@ -89,11 +89,21 @@ impl ConsoleServer {
         vm_id: String,
         vm_runtime: crate::vm_runtime::VmRuntime,
     ) {
-        let pty_fd = match vm_runtime.pty_master(&vm_id) {
-            Some(fd) => fd,
-            None => {
-                tracing::warn!(vm_id = %vm_id, "no pty master for vm");
-                return;
+        let pty_fd = {
+            let mut attempts = 0;
+            loop {
+                match vm_runtime.pty_master(&vm_id) {
+                    Some(fd) => break fd,
+                    None => {
+                        attempts += 1;
+                        if attempts >= 10 {
+                            tracing::warn!(vm_id = %vm_id, "no pty master for vm after 10 retries");
+                            return;
+                        }
+                        tracing::debug!(vm_id = %vm_id, attempt = attempts, "pty not ready, retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
             }
         };
 
