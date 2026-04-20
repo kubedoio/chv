@@ -550,18 +550,22 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let cache = self.cache.lock().await;
+        let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        cache.update_vm_desired_state(&inner.vm_id, "Running");
+        self.persist_cache(&cache).await;
+        drop(cache);
         self.vm_runtime
             .start_vm(&inner.vm_id, Some(&meta.operation_id))
             .await
             .map_err(|e| Status::not_found(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "vm started".to_string(),
             }),
@@ -577,18 +581,22 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let cache = self.cache.lock().await;
+        let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        cache.update_vm_desired_state(&inner.vm_id, "Stopped");
+        self.persist_cache(&cache).await;
+        drop(cache);
         self.vm_runtime
             .stop_vm(&inner.vm_id, inner.force, Some(&meta.operation_id))
             .await
             .map_err(|e| Status::not_found(e.to_string()))?;
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "vm stopped".to_string(),
             }),
@@ -1342,9 +1350,9 @@ mod tests {
         )
         .await;
         assert!(resp.is_ok());
-        assert!(
-            server.vm_runtime.get("vm-1").is_none(),
-            "VM should be removed from map after stop"
+        assert_eq!(
+            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            "Stopped"
         );
     }
 

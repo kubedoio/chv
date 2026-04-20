@@ -405,6 +405,19 @@ impl NodeCache {
         seen.into_iter().collect()
     }
 
+    pub fn update_vm_desired_state(&mut self, vm_id: &str, desired_state: &str) {
+        if let Some(frag) = self.vm_fragments.get_mut(vm_id) {
+            if let Ok(mut spec) =
+                serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
+            {
+                spec["desired_state"] = serde_json::Value::String(desired_state.to_string());
+                if let Ok(bytes) = serde_json::to_vec(&spec) {
+                    frag.spec_json = bytes;
+                }
+            }
+        }
+    }
+
     pub fn vm_volume_handles(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for (vm_id, frag) in &self.vm_fragments {
@@ -612,6 +625,35 @@ mod tests {
         let ids: std::collections::HashSet<String> = cache.vm_network_ids().into_iter().collect();
         assert_eq!(ids.len(), 1);
         assert!(ids.contains("net-1"));
+    }
+
+    #[test]
+    fn update_vm_desired_state_patches_spec_json() {
+        let mut cache = NodeCache::new("node-1");
+        cache.store_fragment("vm", "vm-1", DesiredStateFragment {
+            id: "vm-1".to_string(),
+            kind: "vm".to_string(),
+            generation: "1".to_string(),
+            spec_json: br#"{"name":"vm-1","cpus":1,"memory_bytes":1024,"kernel_path":"/dev/null","disks":[],"nics":[],"desired_state":"Running"}"#.to_vec(),
+            policy_json: vec![],
+            updated_at: String::new(),
+            updated_by: String::new(),
+        });
+        cache.update_vm_desired_state("vm-1", "Stopped");
+        let frag = cache.get_fragment("vm", "vm-1").unwrap();
+        let spec: serde_json::Value = serde_json::from_slice(&frag.spec_json).unwrap();
+        assert_eq!(spec["desired_state"], "Stopped");
+
+        cache.update_vm_desired_state("vm-1", "Running");
+        let frag = cache.get_fragment("vm", "vm-1").unwrap();
+        let spec: serde_json::Value = serde_json::from_slice(&frag.spec_json).unwrap();
+        assert_eq!(spec["desired_state"], "Running");
+    }
+
+    #[test]
+    fn update_vm_desired_state_noop_for_missing_vm() {
+        let mut cache = NodeCache::new("node-1");
+        cache.update_vm_desired_state("nonexistent", "Stopped");
     }
 
     #[test]

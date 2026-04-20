@@ -228,6 +228,16 @@ install_cloud_hypervisor() {
     chmod +x /usr/local/bin/cloud-hypervisor
     ln -sf /usr/local/bin/cloud-hypervisor /usr/bin/cloud-hypervisor
     info "Cloud Hypervisor installed: $(cloud-hypervisor --version)"
+
+    if ! cmd_exists ch-remote; then
+        info "Downloading ch-remote v${chv_version}..."
+        curl -fsSL "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${chv_version}/ch-remote-static" \
+            -o /usr/local/bin/ch-remote
+        chmod +x /usr/local/bin/ch-remote
+        info "ch-remote installed: $(ch-remote --version 2>/dev/null || echo v${chv_version})"
+    else
+        info "ch-remote already installed: $(ch-remote --version 2>/dev/null || true)"
+    fi
 }
 
 # -----------------------------------------------------------------------------

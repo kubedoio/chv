@@ -88,7 +88,10 @@ impl VmRuntime {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         self.adapter.stop_vm(vm_id, force, operation_id).await?;
-        self.vms.lock().unwrap().remove(vm_id);
+        let mut map = self.vms.lock().unwrap();
+        if let Some(rec) = map.get_mut(vm_id) {
+            rec.runtime_status = "Stopped".to_string();
+        }
         Ok(())
     }
 
@@ -325,7 +328,7 @@ mod tests {
         rt.start_vm("vm-1", Some("op-2")).await.unwrap();
         assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Running");
         rt.stop_vm("vm-1", false, Some("op-3")).await.unwrap();
-        assert!(rt.get("vm-1").is_none(), "VM should be removed from map after stop");
+        assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Stopped");
     }
 
     #[tokio::test]

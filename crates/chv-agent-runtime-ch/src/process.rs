@@ -271,7 +271,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                         path: userdata_path.to_string_lossy().to_string(),
                         source: e,
                     })?;
-                cmd.arg("--user-data").arg(&userdata_path);
             }
         }
 
