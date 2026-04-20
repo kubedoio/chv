@@ -546,7 +546,8 @@ impl Reconciler {
                         warn!(vm_id = %vm_id, "CH process dead, re-creating VM");
                         let _ = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await;
                         let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
-                        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+                        let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
+                        let _ = tokio::fs::remove_file(vm_dir.join("console.log")).await;
                         let recreate_op_id = format!("reconcile-vm-recreate-{}", vm_id);
                         let config = match self
                             .prepare_vm(&mut stord, &mut nwd, vm_id, &spec, &recreate_op_id)
