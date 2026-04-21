@@ -256,7 +256,7 @@
 				</section>
 			{:else if detail.currentTab === 'snapshots'}
 				<section class="detail-main-span">
-					<VmSnapshots vmId={detail.summary.vm_id} {snapshots} />
+					<VmSnapshots vmId={detail.summary.vm_id} {snapshots} loading={snapshotsLoading} error={snapshotsError} />
 				</section>
 			{:else}
 				<section class="detail-main-span">

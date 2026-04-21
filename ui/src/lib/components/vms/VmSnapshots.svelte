@@ -7,6 +7,7 @@
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import LoadingState from '$lib/components/shell/LoadingState.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import Modal from '$lib/components/modals/Modal.svelte';
 	import ConfirmAction from '$lib/components/modals/ConfirmAction.svelte';
 	import { Camera, RotateCcw, Trash2, MemoryStick, LoaderCircle } from 'lucide-svelte';
@@ -15,13 +16,23 @@
 	interface Props {
 		vmId: string;
 		snapshots?: VMSnapshot[];
+		loading?: boolean;
+		error?: string | null;
 	}
 
-	let { vmId, snapshots: propSnapshots = [] }: Props = $props();
+	let {
+		vmId,
+		snapshots: propSnapshots = [],
+		loading: propLoading = false,
+		error: propError = null
+	}: Props = $props();
 
 	let snapshots = $state<VMSnapshot[]>([]);
-	let loading = $state(false);
-	let error = $state<string | null>(null);
+	let localLoading = $state(false);
+	let localError = $state<string | null>(null);
+
+	let loading = $derived(propLoading || localLoading);
+	let error = $derived(propError || localError);
 
 	$effect(() => {
 		snapshots = propSnapshots;
@@ -64,15 +75,15 @@
 
 	async function loadSnapshots() {
 		if (!vmId) return;
-		loading = true;
-		error = null;
+		localLoading = true;
+		localError = null;
 		try {
 			const client = createAPIClient();
 			snapshots = await client.listVMSnapshots(vmId);
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to load snapshots';
+			localError = err instanceof Error ? err.message : 'Failed to load snapshots';
 		} finally {
-			loading = false;
+			localLoading = false;
 		}
 	}
 
@@ -156,12 +167,19 @@
 	{:else if snapshots.length === 0}
 		<EmptyInfrastructureState title="No Snapshots" description="This VM has no snapshots." hint="Create a snapshot to preserve the current VM state." />
 	{:else}
+		{#if loading}
+			<div class="refresh-indicator">
+				<span class="animate-spin"><LoaderCircle size={14} /></span>
+				<span>Refreshing snapshots…</span>
+			</div>
+		{/if}
 		<InventoryTable {columns} {rows}>
 			{#snippet cell({ column, row })}
 				{#if column.key === 'actions'}
 					<div class="action-cell">
 						<button
 							class="btn-icon btn-icon-sm"
+							aria-label="Restore snapshot"
 							title="Restore snapshot"
 							onclick={() => { restoreTarget = row; restoreOpen = true; }}
 						>
@@ -169,6 +187,7 @@
 						</button>
 						<button
 							class="btn-icon btn-icon-danger btn-icon-sm"
+							aria-label="Delete snapshot"
 							title="Delete snapshot"
 							onclick={() => { deleteTarget = row; deleteOpen = true; }}
 						>
@@ -177,6 +196,8 @@
 					</div>
 				{:else if column.key === 'name'}
 					<span class="cell-name">{row.name}</span>
+				{:else if column.key === 'status'}
+					<StatusBadge label={row.status.label} tone={row.status.tone} />
 				{:else}
 					<span class="cell-text">{row[column.key]}</span>
 				{/if}
@@ -196,6 +217,12 @@
 				bind:value={createName}
 				placeholder="e.g. pre-upgrade"
 				class="form-input"
+				onkeydown={(e) => {
+					if (e.key === 'Enter' && createName.trim() && !createSubmitting) {
+						e.preventDefault();
+						handleCreate();
+					}
+				}}
 			/>
 		</div>
 		<div class="space-y-1">
@@ -416,6 +443,19 @@
 
 	.border-line {
 		border-color: var(--shell-line);
+	}
+
+	.refresh-indicator {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		padding: 0.35rem 0.5rem;
+		margin-bottom: 0.5rem;
+		background: var(--shell-surface-muted);
+		border-radius: 0.25rem;
+		width: fit-content;
 	}
 
 	.animate-spin {

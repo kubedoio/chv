@@ -228,6 +228,10 @@ export interface VMSnapshot {
   id: string;
   vm_id: string;
   name: string;
+  description?: string;
+  size_bytes?: number;
+  includes_memory?: boolean;
+  snapshot_path?: string;
   created_at: string;
   status: string;
 }
