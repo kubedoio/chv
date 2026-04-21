@@ -19,6 +19,11 @@ struct VmRow {
     display_name: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct VolumeRow {
+    volume_id: String,
+}
+
 pub async fn export_vm(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
@@ -40,38 +45,48 @@ pub async fn export_vm(
     .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
     .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
 
-    // Find attached volume
-    let volume_id: Option<String> = sqlx::query_scalar(
-        "SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ? LIMIT 1",
+    // Find ALL attached volumes
+    let volumes: Vec<VolumeRow> = sqlx::query_as(
+        "SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ?",
     )
     .bind(&vm_id)
-    .fetch_optional(&state.pool)
+    .fetch_all(&state.pool)
     .await
-    .map_err(|e| BffError::Internal(format!("failed to find volume: {}", e)))?;
+    .map_err(|e| BffError::Internal(format!("failed to find volumes: {}", e)))?;
 
-    let volume_id =
-        volume_id.ok_or_else(|| BffError::BadRequest("vm has no attached volumes".into()))?;
-
-    // Construct source disk path
-    let vm_dir = state.agent_runtime_dir.join("vms").join(&vm_id);
-    let disk_path = vm_dir.join(format!("{}.img", volume_id));
-
-    if !disk_path.exists() {
-        return Err(BffError::NotFound("disk image not found".into()));
+    if volumes.is_empty() {
+        return Err(BffError::BadRequest("vm has no attached volumes".into()));
     }
 
-    // Path traversal check: ensure resolved disk path is under agent_runtime_dir/vms
-    let canonical_disk = tokio::fs::canonicalize(&disk_path)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to resolve disk path: {}", e)))?;
+    let vm_dir = state.agent_runtime_dir.join("vms").join(&vm_id);
     let expected_base = tokio::fs::canonicalize(&state.agent_runtime_dir.join("vms"))
         .await
         .unwrap_or_else(|_| state.agent_runtime_dir.join("vms"));
 
-    if !canonical_disk.starts_with(&expected_base) {
-        return Err(BffError::BadRequest(
-            "disk path is outside expected directory".into(),
-        ));
+    // Validate all disk paths exist and are within the expected directory
+    let mut disk_paths = Vec::new();
+    for vol in &volumes {
+        let disk_path = vm_dir.join(format!("{}.img", vol.volume_id));
+        if !disk_path.exists() {
+            return Err(BffError::NotFound(format!(
+                "disk image not found for volume {}",
+                vol.volume_id
+            )));
+        }
+        let canonical = tokio::fs::canonicalize(&disk_path)
+            .await
+            .map_err(|e| {
+                BffError::Internal(format!(
+                    "failed to resolve disk path for {}: {}",
+                    vol.volume_id, e
+                ))
+            })?;
+        if !canonical.starts_with(&expected_base) {
+            return Err(BffError::BadRequest(
+                "disk path is outside expected directory".into(),
+            ));
+        }
+        disk_paths.push(canonical);
     }
 
     let export_id = chv_common::gen_short_id();
@@ -80,26 +95,53 @@ pub async fn export_vm(
         .await
         .map_err(|e| BffError::Internal(format!("failed to create export dir: {}", e)))?;
 
-    let filename = format!("{}-export.qcow2", vm.display_name);
-    let export_path = export_dir.join(&filename);
+    // Copy all disks into the export directory with descriptive names
+    for (i, disk_path) in disk_paths.iter().enumerate() {
+        let vol = &volumes[i];
+        let dest = export_dir.join(format!("{}-{}.img", vm.display_name, vol.volume_id));
+        tokio::fs::copy(disk_path, dest)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to copy disk image: {}", e)))?;
+    }
 
-    tokio::fs::copy(&canonical_disk, &export_path)
+    // Create a tar archive of the export directory
+    let filename = format!("{}-export.tar.gz", vm.display_name);
+    let archive_path = export_dir.join(&filename);
+    let tar_status = tokio::process::Command::new("tar")
+        .arg("czf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&export_dir)
+        .arg(".")
+        .status()
         .await
-        .map_err(|e| BffError::Internal(format!("failed to copy disk image: {}", e)))?;
+        .map_err(|e| BffError::Internal(format!("failed to run tar: {}", e)))?;
 
+    if !tar_status.success() {
+        let _ = tokio::fs::remove_dir_all(&export_dir).await;
+        return Err(BffError::Internal("tar archive creation failed".into()));
+    }
+
+    // Insert export record as 'creating' first, then update to 'ready'
     sqlx::query(
         r#"
         INSERT INTO vm_exports (export_id, vm_id, filename, export_path, status)
-        VALUES (?, ?, ?, ?, 'ready')
+        VALUES (?, ?, ?, ?, 'creating')
         "#,
     )
     .bind(&export_id)
     .bind(&vm_id)
     .bind(&filename)
-    .bind(export_path.to_string_lossy().to_string())
+    .bind(archive_path.to_string_lossy().to_string())
     .execute(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert export record: {}", e)))?;
+
+    sqlx::query("UPDATE vm_exports SET status = 'ready' WHERE export_id = ?")
+        .bind(&export_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to update export status: {}", e)))?;
 
     let download_url = format!("/api/v1/exports/{}/download", export_id);
 
@@ -140,7 +182,7 @@ pub async fn download_export(
     let body = axum::body::Body::from_stream(stream);
 
     let response = axum::response::Response::builder()
-        .header("Content-Type", "application/octet-stream")
+        .header("Content-Type", "application/gzip")
         .header(
             "Content-Disposition",
             format!("attachment; filename=\"{}\"", row.filename),
@@ -149,4 +191,27 @@ pub async fn download_export(
         .map_err(|e| BffError::Internal(format!("failed to build response: {}", e)))?;
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_traversal_detected() {
+        let base = PathBuf::from("/var/lib/chv/vms");
+        let bad = PathBuf::from("/var/lib/chv/vms/../etc/passwd");
+        // Note: PathBuf::starts_with compares components, so canonicalize first
+        // as the production code does. Here we simulate the canonicalized result.
+        let canonical_bad = PathBuf::from("/var/lib/chv/etc/passwd");
+        assert!(!canonical_bad.starts_with(&base));
+    }
+
+    #[test]
+    fn valid_path_inside_base() {
+        let base = PathBuf::from("/var/lib/chv/vms");
+        let good = PathBuf::from("/var/lib/chv/vms/vm-123/disk.img");
+        assert!(good.starts_with(&base));
+    }
 }

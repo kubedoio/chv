@@ -19,8 +19,7 @@ pub async fn import_vm(
     crate::auth::require_operator_or_admin(&claims)?;
 
     let mut name: Option<String> = None;
-    let mut vm_id: Option<String> = None;
-    let mut file_handle: Option<tokio::fs::File> = None;
+    let mut tmp_path: Option<std::path::PathBuf> = None;
     let mut header_buf = Vec::new();
     let mut total_size: u64 = 0;
 
@@ -48,12 +47,15 @@ pub async fn import_vm(
         })? {
             total_size += chunk.len() as u64;
             if total_size > MAX_FILE_SIZE {
+                if let Some(ref p) = tmp_path {
+                    let _ = tokio::fs::remove_file(p).await;
+                }
                 return Err(BffError::BadRequest(
                     "file exceeds maximum size of 100 GiB".into(),
                 ));
             }
 
-            if file_handle.is_none() {
+            if tmp_path.is_none() {
                 header_buf.extend_from_slice(&chunk);
                 if header_buf.len() >= 4 {
                     if &header_buf[0..4] != QCOW2_MAGIC {
@@ -61,59 +63,83 @@ pub async fn import_vm(
                             "file is not a valid qcow2 image".into(),
                         ));
                     }
-                    let id = chv_common::gen_short_id();
-                    let vm_dir = state.agent_runtime_dir.join("vms").join(&id);
-                    tokio::fs::create_dir_all(&vm_dir)
+                    let tmp_file = state
+                        .agent_runtime_dir
+                        .join(format!(".import-tmp-{}", chv_common::gen_short_id()));
+                    let mut f = tokio::fs::File::create(&tmp_file)
                         .await
                         .map_err(|e| {
-                            BffError::Internal(format!("failed to create vm dir: {}", e))
+                            BffError::Internal(format!("failed to create temp file: {}", e))
                         })?;
-                    let f = tokio::fs::File::create(vm_dir.join("disk.qcow2"))
-                        .await
-                        .map_err(|e| {
-                            BffError::Internal(format!("failed to create disk file: {}", e))
-                        })?;
-                    file_handle = Some(f);
-                    vm_id = Some(id);
+                    tmp_path = Some(tmp_file);
 
-                    if let Some(ref mut f) = file_handle {
-                        f.write_all(&header_buf).await.map_err(|e| {
-                            BffError::Internal(format!("failed to write disk: {}", e))
-                        })?;
-                    }
+                    f.write_all(&header_buf).await.map_err(|e| {
+                        BffError::Internal(format!("failed to write temp file: {}", e))
+                    })?;
                     header_buf.clear();
                 }
-            } else if let Some(ref mut f) = file_handle {
+            } else if let Some(ref p) = tmp_path {
+                let mut f = tokio::fs::OpenOptions::new()
+                    .append(true)
+                    .open(p)
+                    .await
+                    .map_err(|e| {
+                        BffError::Internal(format!("failed to open temp file: {}", e))
+                    })?;
                 f.write_all(&chunk).await.map_err(|e| {
-                    BffError::Internal(format!("failed to write disk: {}", e))
+                    BffError::Internal(format!("failed to write temp file: {}", e))
                 })?;
             }
         }
     }
 
-    let name = name.ok_or_else(|| BffError::BadRequest("missing name".into()))?;
-    let vm_id = vm_id.ok_or_else(|| {
-        BffError::BadRequest("missing file or file too small to be qcow2".into())
-    })?;
+    let name = match name {
+        Some(n) => n,
+        None => {
+            if let Some(ref p) = tmp_path {
+                let _ = tokio::fs::remove_file(p).await;
+            }
+            return Err(BffError::BadRequest("missing name".into()));
+        }
+    };
 
-    let disk_path = state
-        .agent_runtime_dir
-        .join("vms")
-        .join(&vm_id)
-        .join("disk.qcow2");
+    let tmp_file = match tmp_path {
+        Some(p) => p,
+        None => {
+            return Err(BffError::BadRequest(
+                "missing file or file too small to be qcow2".into(),
+            ));
+        }
+    };
+
+    let vm_id = chv_common::gen_short_id();
+    let vm_dir = state.agent_runtime_dir.join("vms").join(&vm_id);
+    let disk_path = vm_dir.join("disk.qcow2");
+
+    // Move temp file to final location
+    if let Err(e) = tokio::fs::create_dir_all(&vm_dir).await {
+        let _ = tokio::fs::remove_file(&tmp_file).await;
+        return Err(BffError::Internal(format!("failed to create vm dir: {}", e)));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp_file, &disk_path).await {
+        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+        let _ = tokio::fs::remove_file(&tmp_file).await;
+        return Err(BffError::Internal(format!("failed to move disk file: {}", e)));
+    }
+
     let file_size = tokio::fs::metadata(&disk_path)
         .await
         .map_err(|e| BffError::Internal(format!("failed to get file metadata: {}", e)))?
         .len() as i64;
 
-    // Pick default node
+    // Pick a healthy node
     let node_id = sqlx::query_scalar::<_, String>(
-        "SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1",
+        "SELECT node_id FROM nodes WHERE health_status = 'healthy' ORDER BY enrolled_at DESC LIMIT 1",
     )
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to query nodes: {}", e)))?
-    .ok_or_else(|| BffError::BadRequest("no nodes enrolled".into()))?;
+    .ok_or_else(|| BffError::BadRequest("no healthy nodes available".into()))?;
 
     let volume_id = chv_common::gen_short_id();
     let operation_id = chv_common::gen_short_id();
@@ -124,8 +150,10 @@ pub async fn import_vm(
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
+    let disk_path_str = disk_path.to_string_lossy().to_string();
+
     // Insert VM
-    sqlx::query(
+    let insert_vm = sqlx::query(
         r#"
         INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
         VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -135,12 +163,15 @@ pub async fn import_vm(
     .bind(&node_id)
     .bind(&name)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
+    .await;
+
+    if let Err(e) = insert_vm {
+        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+        return Err(BffError::Internal(format!("failed to insert vm: {}", e)));
+    }
 
     // Insert VM desired state
-    let disk_path_str = disk_path.to_string_lossy().to_string();
-    sqlx::query(
+    let insert_vds = sqlx::query(
         r#"
         INSERT INTO vm_desired_state (
             vm_id, desired_generation, desired_status, desired_power_state,
@@ -157,11 +188,18 @@ pub async fn import_vm(
     .bind(512i64 * 1024i64 * 1024i64)
     .bind(&disk_path_str)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
+    .await;
+
+    if let Err(e) = insert_vds {
+        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+        return Err(BffError::Internal(format!(
+            "failed to insert vm_desired_state: {}",
+            e
+        )));
+    }
 
     // Insert volume
-    sqlx::query(
+    let insert_vol = sqlx::query(
         r#"
         INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, updated_at)
         VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -172,11 +210,15 @@ pub async fn import_vm(
     .bind(format!("{}-disk", name))
     .bind(file_size)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to insert volume: {}", e)))?;
+    .await;
+
+    if let Err(e) = insert_vol {
+        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+        return Err(BffError::Internal(format!("failed to insert volume: {}", e)));
+    }
 
     // Insert volume desired state
-    sqlx::query(
+    let insert_volds = sqlx::query(
         r#"
         INSERT INTO volume_desired_state (
             volume_id, desired_generation, desired_status, requested_by,
@@ -189,12 +231,19 @@ pub async fn import_vm(
     .bind(&claims.sub)
     .bind(&vm_id)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to insert volume_desired_state: {}", e)))?;
+    .await;
+
+    if let Err(e) = insert_volds {
+        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+        return Err(BffError::Internal(format!(
+            "failed to insert volume_desired_state: {}",
+            e
+        )));
+    }
 
     // Insert operation
     let idempotency_key = format!("import-vm-{}", vm_id);
-    sqlx::query(
+    let insert_op = sqlx::query(
         r#"
         INSERT INTO operations (
             operation_id, idempotency_key, resource_kind, resource_id,
@@ -209,8 +258,12 @@ pub async fn import_vm(
     .bind(&vm_id)
     .bind(&claims.sub)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+    .await;
+
+    if let Err(e) = insert_op {
+        let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+        return Err(BffError::Internal(format!("failed to insert operation: {}", e)));
+    }
 
     tx.commit()
         .await
@@ -230,4 +283,27 @@ pub async fn import_vm(
         "seed_iso_path": "",
         "workspace_path": "",
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QCOW2_MAGIC;
+
+    #[test]
+    fn qcow2_magic_matches() {
+        let header = b"QFI\xfb\x00\x00\x00\x03";
+        assert_eq!(&header[0..4], QCOW2_MAGIC);
+    }
+
+    #[test]
+    fn non_qcow2_rejected() {
+        let header = b"\x00\x00\x00\x00";
+        assert_ne!(&header[0..4], QCOW2_MAGIC);
+    }
+
+    #[test]
+    fn raw_img_rejected() {
+        let header = b"\x7fELF";
+        assert_ne!(&header[0..4], QCOW2_MAGIC);
+    }
 }
