@@ -632,7 +632,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
         for vm in reconciler.vm_runtime.list() {
-            let vm_report = control_plane_node_api::control_plane_node_api::VmStateReport {
+            let mut counters = control_plane_node_api::control_plane_node_api::VmStateReport {
                 node_id: node_id.clone(),
                 vm_id: vm.vm_id.clone(),
                 runtime_status: vm.runtime_status.clone(),
@@ -640,13 +640,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 health_status: "Healthy".to_string(),
                 last_error: vm.last_error.unwrap_or_default(),
                 reported_unix_ms: now_unix_ms(),
+                cpu_percent: 0.0,
+                memory_bytes_used: 0,
+                memory_bytes_total: 0,
+                disk_bytes_read: 0,
+                disk_bytes_written: 0,
+                net_bytes_rx: 0,
+                net_bytes_tx: 0,
             };
+
+            if vm.runtime_status == "Running" {
+                if let Ok(c) = reconciler.vm_runtime.vm_counters(&vm.vm_id).await {
+                    counters.cpu_percent = c.cpu_percent;
+                    counters.memory_bytes_used = c.memory_bytes_used as i64;
+                    counters.memory_bytes_total = c.memory_bytes_total as i64;
+                    counters.disk_bytes_read = c.disk_bytes_read as i64;
+                    counters.disk_bytes_written = c.disk_bytes_written as i64;
+                    counters.net_bytes_rx = c.net_bytes_rx as i64;
+                    counters.net_bytes_tx = c.net_bytes_tx as i64;
+                }
+            }
+
             send_or_defer_control_plane_message(
                 &cache,
                 &config.cache_path,
                 &config,
                 &mut telemetry,
-                PendingControlPlaneMessage::vm_state(vm_report),
+                PendingControlPlaneMessage::vm_state(counters),
             )
             .await;
         }

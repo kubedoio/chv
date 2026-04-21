@@ -49,6 +49,13 @@ impl TelemetryReporter {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64,
+            cpu_percent: 0.0,
+            memory_bytes_used: 0,
+            memory_bytes_total: 0,
+            disk_bytes_read: 0,
+            disk_bytes_written: 0,
+            net_bytes_rx: 0,
+            net_bytes_tx: 0,
         }
     }
 

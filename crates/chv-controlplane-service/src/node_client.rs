@@ -309,6 +309,68 @@ impl NodeClient {
             })
             .map(|r| r.into_inner())
     }
+
+    pub async fn snapshot_vm(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        generation: &str,
+        destination: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::SnapshotVmRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+            destination: destination.to_string(),
+        };
+        self.lifecycle
+            .snapshot_vm(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("snapshot_vm failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn restore_snapshot(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        generation: &str,
+        source: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::RestoreSnapshotRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+            source: source.to_string(),
+        };
+        self.lifecycle
+            .restore_snapshot(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("restore_snapshot failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
 }
 
 fn now_unix_ms() -> i64 {

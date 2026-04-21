@@ -1,0 +1,429 @@
+<script lang="ts">
+	import type { VMSnapshot } from '$lib/api/types';
+	import { createAPIClient } from '$lib/api/client';
+	import { toast } from '$lib/stores/toast';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import LoadingState from '$lib/components/shell/LoadingState.svelte';
+	import ErrorState from '$lib/components/shell/ErrorState.svelte';
+	import Modal from '$lib/components/modals/Modal.svelte';
+	import ConfirmAction from '$lib/components/modals/ConfirmAction.svelte';
+	import { Camera, RotateCcw, Trash2, MemoryStick, LoaderCircle } from 'lucide-svelte';
+	import { formatDateTimeLabel } from '$lib/webui/formatters';
+
+	interface Props {
+		vmId: string;
+		snapshots?: VMSnapshot[];
+	}
+
+	let { vmId, snapshots: propSnapshots = [] }: Props = $props();
+
+	let snapshots = $state<VMSnapshot[]>([]);
+	let loading = $state(false);
+	let error = $state<string | null>(null);
+
+	$effect(() => {
+		snapshots = propSnapshots;
+	});
+
+	let createOpen = $state(false);
+	let createName = $state('');
+	let createDescription = $state('');
+	let createIncludesMemory = $state(false);
+	let createSubmitting = $state(false);
+
+	let restoreOpen = $state(false);
+	let restoreTarget = $state<VMSnapshot | null>(null);
+	let restoreSubmitting = $state(false);
+
+	let deleteOpen = $state(false);
+	let deleteTarget = $state<VMSnapshot | null>(null);
+	let deleteSubmitting = $state(false);
+
+	const columns = [
+		{ key: 'name', label: 'Name' },
+		{ key: 'created_at', label: 'Created' },
+		{ key: 'status', label: 'Status' },
+		{ key: 'actions', label: 'Actions', align: 'right' as const }
+	];
+
+	const rows = $derived(snapshots.map(s => ({
+		...s,
+		created_at: formatDateTimeLabel(new Date(s.created_at).getTime()),
+		status: { label: s.status, tone: normalizeTone(s.status) }
+	})));
+
+	function normalizeTone(status: string): import('$lib/shell/app-shell').ShellTone {
+		const s = status.toLowerCase();
+		if (['ready', 'completed', 'success'].includes(s)) return 'healthy';
+		if (['creating', 'pending', 'restoring'].includes(s)) return 'warning';
+		if (['failed', 'error'].includes(s)) return 'failed';
+		return 'unknown';
+	}
+
+	async function loadSnapshots() {
+		if (!vmId) return;
+		loading = true;
+		error = null;
+		try {
+			const client = createAPIClient();
+			snapshots = await client.listVMSnapshots(vmId);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to load snapshots';
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function handleCreate() {
+		if (!createName.trim()) {
+			toast.error('Snapshot name is required');
+			return;
+		}
+		createSubmitting = true;
+		try {
+			const client = createAPIClient();
+			await client.createVMSnapshot(vmId, {
+				name: createName.trim(),
+				description: createDescription.trim() || undefined,
+				includes_memory: createIncludesMemory
+			});
+			toast.success('Snapshot creation started');
+			createOpen = false;
+			createName = '';
+			createDescription = '';
+			createIncludesMemory = false;
+			await loadSnapshots();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Failed to create snapshot';
+			toast.error(message);
+		} finally {
+			createSubmitting = false;
+		}
+	}
+
+	async function handleRestore() {
+		if (!restoreTarget) return;
+		restoreSubmitting = true;
+		try {
+			const client = createAPIClient();
+			await client.restoreVMSnapshot(vmId, restoreTarget.id);
+			toast.success('Snapshot restore started');
+			restoreOpen = false;
+			restoreTarget = null;
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Failed to restore snapshot';
+			toast.error(message);
+		} finally {
+			restoreSubmitting = false;
+		}
+	}
+
+	async function handleDelete() {
+		if (!deleteTarget) return;
+		deleteSubmitting = true;
+		try {
+			const client = createAPIClient();
+			await client.deleteVMSnapshot(vmId, deleteTarget.id);
+			toast.success('Snapshot deleted');
+			deleteOpen = false;
+			deleteTarget = null;
+			await loadSnapshots();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Failed to delete snapshot';
+			toast.error(message);
+		} finally {
+			deleteSubmitting = false;
+		}
+	}
+
+
+</script>
+
+<SectionCard title="VM Snapshots" icon={Camera} badgeLabel={String(snapshots.length)}>
+	<div class="snapshot-header">
+		<button class="btn-primary btn-sm" onclick={() => { createOpen = true; }}>
+			<Camera size={14} />
+			Create Snapshot
+		</button>
+	</div>
+
+	{#if loading && snapshots.length === 0}
+		<LoadingState title="Loading snapshots..." description="Fetching snapshot inventory from control plane." />
+	{:else if error && snapshots.length === 0}
+		<ErrorState title="Failed to Load Snapshots" description={error} hint="Try refreshing the page." />
+	{:else if snapshots.length === 0}
+		<EmptyInfrastructureState title="No Snapshots" description="This VM has no snapshots." hint="Create a snapshot to preserve the current VM state." />
+	{:else}
+		<InventoryTable {columns} {rows}>
+			{#snippet cell({ column, row })}
+				{#if column.key === 'actions'}
+					<div class="action-cell">
+						<button
+							class="btn-icon btn-icon-sm"
+							title="Restore snapshot"
+							onclick={() => { restoreTarget = row; restoreOpen = true; }}
+						>
+							<RotateCcw size={14} />
+						</button>
+						<button
+							class="btn-icon btn-icon-danger btn-icon-sm"
+							title="Delete snapshot"
+							onclick={() => { deleteTarget = row; deleteOpen = true; }}
+						>
+							<Trash2 size={14} />
+						</button>
+					</div>
+				{:else if column.key === 'name'}
+					<span class="cell-name">{row.name}</span>
+				{:else}
+					<span class="cell-text">{row[column.key]}</span>
+				{/if}
+			{/snippet}
+		</InventoryTable>
+	{/if}
+</SectionCard>
+
+<!-- Create Snapshot Modal -->
+<Modal bind:open={createOpen} title="Create Snapshot">
+	<div class="space-y-4">
+		<div class="space-y-1">
+			<label for="snap-name" class="form-label">Name</label>
+			<input
+				id="snap-name"
+				type="text"
+				bind:value={createName}
+				placeholder="e.g. pre-upgrade"
+				class="form-input"
+			/>
+		</div>
+		<div class="space-y-1">
+			<label for="snap-desc" class="form-label">Description</label>
+			<textarea
+				id="snap-desc"
+				bind:value={createDescription}
+				placeholder="Optional description"
+				rows={3}
+				class="form-input"
+			></textarea>
+		</div>
+		<label class="flex items-center gap-2 text-sm text-ink cursor-pointer">
+			<input type="checkbox" bind:checked={createIncludesMemory} class="rounded border-line" />
+			<MemoryStick size={14} />
+			Include memory state
+		</label>
+	</div>
+	{#snippet footer()}
+		<button type="button" class="btn-secondary btn-sm" onclick={() => { createOpen = false; }}>Cancel</button>
+		<button
+			type="button"
+			class="btn-primary btn-sm"
+			disabled={createSubmitting || !createName.trim()}
+			onclick={handleCreate}
+		>
+			{#if createSubmitting}
+				<span class="animate-spin"><LoaderCircle size={14} /></span>
+			{/if}
+			Create Snapshot
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Restore Confirm -->
+<ConfirmAction
+	bind:open={restoreOpen}
+	title="Restore Snapshot"
+	description="VM must be stopped to restore a snapshot. The restore operation will revert the VM to the selected snapshot state."
+	actionType="restore"
+	confirmText="Restore"
+	onConfirm={handleRestore}
+/>
+
+<!-- Delete Confirm -->
+<ConfirmAction
+	bind:open={deleteOpen}
+	title="Delete Snapshot"
+	description="This snapshot will be permanently deleted. This action cannot be undone."
+	actionType="delete"
+	confirmText="Delete"
+	onConfirm={handleDelete}
+/>
+
+<style>
+	.snapshot-header {
+		display: flex;
+		justify-content: flex-end;
+		margin-bottom: 0.75rem;
+	}
+
+	.action-cell {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.35rem;
+	}
+
+	.btn-primary {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		background: var(--shell-accent);
+		color: white;
+		border: none;
+		border-radius: 0.35rem;
+		padding: 0.45rem 0.9rem;
+		font-size: var(--text-sm);
+		font-weight: 600;
+		cursor: pointer;
+		transition: opacity 0.15s;
+	}
+
+	.btn-primary:hover {
+		opacity: 0.9;
+	}
+
+	.btn-primary:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.btn-secondary {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		background: white;
+		color: var(--shell-text);
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		padding: 0.45rem 0.9rem;
+		font-size: var(--text-sm);
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 0.15s;
+	}
+
+	.btn-secondary:hover {
+		background: var(--shell-surface-muted);
+	}
+
+	.btn-sm {
+		padding: 0.35rem 0.65rem;
+		font-size: var(--text-xs);
+	}
+
+	.btn-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.75rem;
+		height: 1.75rem;
+		border-radius: 0.3rem;
+		border: 1px solid var(--shell-line);
+		background: white;
+		color: var(--shell-text-secondary);
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+
+	.btn-icon:hover {
+		background: var(--shell-surface-muted);
+		color: var(--shell-text);
+	}
+
+	.btn-icon-danger:hover {
+		border-color: var(--color-danger);
+		color: var(--color-danger);
+		background: var(--color-danger-light);
+	}
+
+	.btn-icon-sm {
+		width: 1.5rem;
+		height: 1.5rem;
+	}
+
+	.form-label {
+		display: block;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--shell-text);
+	}
+
+	.form-input {
+		width: 100%;
+		padding: 0.5rem 0.75rem;
+		font-size: var(--text-sm);
+		color: var(--shell-text);
+		background: white;
+		border: 1px solid var(--shell-line);
+		border-radius: 0.35rem;
+		outline: none;
+		transition: border-color 0.15s, box-shadow 0.15s;
+	}
+
+	.form-input:focus {
+		border-color: var(--shell-accent);
+		box-shadow: 0 0 0 2px var(--shell-accent-soft);
+	}
+
+	.cell-name {
+		font-weight: 600;
+		color: var(--shell-text);
+	}
+
+	.cell-text {
+		color: var(--shell-text-secondary);
+	}
+
+	.space-y-1 {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.space-y-4 {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.flex {
+		display: flex;
+	}
+
+	.items-center {
+		align-items: center;
+	}
+
+	.gap-2 {
+		gap: 0.5rem;
+	}
+
+	.cursor-pointer {
+		cursor: pointer;
+	}
+
+	.text-sm {
+		font-size: var(--text-sm);
+	}
+
+	.text-ink {
+		color: var(--shell-text);
+	}
+
+	.rounded {
+		border-radius: 0.25rem;
+	}
+
+	.border-line {
+		border-color: var(--shell-line);
+	}
+
+	.animate-spin {
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
+	}
+</style>

@@ -10,6 +10,17 @@ pub struct VmInfo {
     pub memory_bytes: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct VmCounters {
+    pub cpu_percent: f64,
+    pub memory_bytes_used: u64,
+    pub memory_bytes_total: u64,
+    pub disk_bytes_read: u64,
+    pub disk_bytes_written: u64,
+    pub net_bytes_rx: u64,
+    pub net_bytes_tx: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct VmConfig {
     pub vm_id: String,
@@ -114,6 +125,7 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
 
     // --- Introspection ---
     async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError>;
+    async fn vm_counters(&self, vm_id: &str) -> Result<VmCounters, ChvError>;
     async fn ping(&self, vm_id: &str) -> Result<bool, ChvError>;
 
     // --- Snapshots ---

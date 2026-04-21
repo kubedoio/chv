@@ -112,6 +112,31 @@ ON CONFLICT (volume_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 "#;
 
+const INSERT_VM_METRICS_SQL: &str = r#"
+INSERT INTO vm_metrics (
+    vm_id,
+    collected_at,
+    cpu_percent,
+    memory_bytes_used,
+    memory_bytes_total,
+    disk_bytes_read,
+    disk_bytes_written,
+    net_bytes_rx,
+    net_bytes_tx
+)
+VALUES (
+    $1,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $2 / 1000.0, 'unixepoch'),
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9
+)
+"#;
+
 const UPSERT_NETWORK_OBSERVED_STATE_SQL: &str = r#"
 INSERT INTO network_observed_state (
     network_id,
@@ -389,6 +414,22 @@ impl ObservedStateRepository {
         Ok(())
     }
 
+    pub async fn insert_vm_metrics(&self, input: &VmMetricsInput) -> Result<(), StoreError> {
+        sqlx::query(INSERT_VM_METRICS_SQL)
+            .bind(input.vm_id.as_str())
+            .bind(input.collected_unix_ms)
+            .bind(input.cpu_percent)
+            .bind(input.memory_bytes_used)
+            .bind(input.memory_bytes_total)
+            .bind(input.disk_bytes_read)
+            .bind(input.disk_bytes_written)
+            .bind(input.net_bytes_rx)
+            .bind(input.net_bytes_tx)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn upsert_network(
         &self,
         input: &NetworkObservedStateInput,
@@ -488,6 +529,19 @@ pub struct NetworkObservedStateInput {
     pub exposure_status: Option<String>,
     pub applied_unix_ms: Option<i64>,
     pub observed_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct VmMetricsInput {
+    pub vm_id: ResourceId,
+    pub collected_unix_ms: i64,
+    pub cpu_percent: f64,
+    pub memory_bytes_used: i64,
+    pub memory_bytes_total: i64,
+    pub disk_bytes_read: i64,
+    pub disk_bytes_written: i64,
+    pub net_bytes_rx: i64,
+    pub net_bytes_tx: i64,
 }
 
 fn generation_to_i64(generation: Generation) -> Result<i64, StoreError> {

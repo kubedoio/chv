@@ -127,10 +127,16 @@ pub async fn get_vm(
                  WHEN vds.memory_bytes >= 1073741824 THEN printf('%.1f GiB', CAST(vds.memory_bytes AS REAL)/1073741824.0)
                  WHEN vds.memory_bytes >= 1048576 THEN printf('%.1f MiB', CAST(vds.memory_bytes AS REAL)/1048576.0)
                  WHEN vds.memory_bytes >= 1024 THEN printf('%.1f KiB', CAST(vds.memory_bytes AS REAL)/1024.0)
-                 ELSE printf('%d B', vds.memory_bytes) END AS memory
+                 ELSE printf('%d B', vds.memory_bytes) END AS memory,
+            COALESCE(snapshot_counts.snapshot_count, 0) AS snapshot_count
         FROM vms v
         LEFT JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
         LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id
+        LEFT JOIN (
+            SELECT vm_id, COUNT(*) AS snapshot_count
+            FROM vm_snapshots
+            GROUP BY vm_id
+        ) snapshot_counts ON v.vm_id = snapshot_counts.vm_id
         WHERE v.vm_id = $1
         "#,
     )
@@ -257,6 +263,7 @@ pub async fn get_vm(
                     "recent_tasks": tasks_json,
                     "attached_volumes": volumes_json,
                     "attached_nics": nics_json,
+                    "snapshot_count": r.snapshot_count,
                 }
             })))
         }
@@ -786,6 +793,7 @@ struct VmSummaryRow {
     health: String,
     cpu: String,
     memory: String,
+    snapshot_count: i32,
 }
 
 #[derive(sqlx::FromRow)]

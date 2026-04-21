@@ -204,6 +204,7 @@ export type VmSummary = {
 	recent_tasks: RelatedTask[];
 	attached_volumes?: AttachedVolume[];
 	attached_nics?: AttachedNic[];
+	snapshot_count?: number;
 };
 
 export type GetVmResponse = {

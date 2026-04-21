@@ -1223,6 +1223,14 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
+        if !request.destination.is_empty() {
+            let _ = sqlx::query("UPDATE operations SET correlation_id = ? WHERE operation_id = ?")
+                .bind(&request.destination)
+                .bind(operation_id.as_str())
+                .execute(self.operation_repo.pool())
+                .await;
+        }
+
         self.accept_operation(&operation_id).await?;
 
         Ok(Self::ok_ack(&operation_id, "snapshot vm accepted"))
@@ -1246,6 +1254,14 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("source={}", request.source)),
             )
             .await?;
+
+        if !request.source.is_empty() {
+            let _ = sqlx::query("UPDATE operations SET correlation_id = ? WHERE operation_id = ?")
+                .bind(&request.source)
+                .bind(operation_id.as_str())
+                .execute(self.operation_repo.pool())
+                .await;
+        }
 
         self.accept_operation(&operation_id).await?;
 

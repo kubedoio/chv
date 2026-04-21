@@ -61,6 +61,18 @@ pub fn bff_router() -> Router<AppState> {
             get(crate::handlers::vms::get_vm_console_url),
         )
         .route(
+            "/v1/vms/:vm_id/export",
+            post(crate::handlers::exports::export_vm),
+        )
+        .route(
+            "/v1/exports/:export_id/download",
+            get(crate::handlers::exports::download_export),
+        )
+        .route(
+            "/v1/vms/import",
+            post(crate::handlers::imports::import_vm),
+        )
+        .route(
             "/v1/vms/events",
             post(crate::handlers::events::list_events_for_vm),
         )

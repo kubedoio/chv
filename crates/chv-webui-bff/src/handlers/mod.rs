@@ -1,8 +1,10 @@
 pub mod auth;
 pub mod clusters;
 pub mod events;
+pub mod exports;
 pub mod firewall;
 pub mod images;
+pub mod imports;
 pub mod maintenance;
 pub mod metrics;
 pub mod networks;

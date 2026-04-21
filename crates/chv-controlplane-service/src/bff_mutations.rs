@@ -151,28 +151,84 @@ impl MutationService for ControlPlaneMutationService {
                     })
                     .await
             }
-            "snapshot" => {
-                self.lifecycle_service
-                    .snapshot_vm(proto::SnapshotVmRequest {
-                        meta,
-                        node_id: node_id.clone(),
-                        vm_id: vm_id.clone(),
-                        destination: String::new(),
-                    })
-                    .await
-            }
-            "restore_snapshot" => {
-                self.lifecycle_service
-                    .restore_snapshot(proto::RestoreSnapshotRequest {
-                        meta,
-                        node_id: node_id.clone(),
-                        vm_id: vm_id.clone(),
-                        source: String::new(),
-                    })
-                    .await
-            }
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
+
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+
+        Ok(MutateVmResponse {
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
+            vm_id,
+            summary: result.human_summary,
+        })
+    }
+
+    async fn snapshot_vm(
+        &self,
+        vm_id: String,
+        destination: String,
+        requested_by: String,
+    ) -> Result<MutateVmResponse, BffError> {
+        let node_id =
+            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = $1")
+                .bind(&vm_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
+                .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+
+        let meta = self.build_meta(node_id.clone(), requested_by);
+        let ack = self
+            .lifecycle_service
+            .snapshot_vm(proto::SnapshotVmRequest {
+                meta,
+                node_id: node_id.clone(),
+                vm_id: vm_id.clone(),
+                destination,
+            })
+            .await;
+
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+
+        Ok(MutateVmResponse {
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
+            vm_id,
+            summary: result.human_summary,
+        })
+    }
+
+    async fn restore_snapshot(
+        &self,
+        vm_id: String,
+        source: String,
+        requested_by: String,
+    ) -> Result<MutateVmResponse, BffError> {
+        let node_id =
+            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = $1")
+                .bind(&vm_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
+                .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+
+        let meta = self.build_meta(node_id.clone(), requested_by);
+        let ack = self
+            .lifecycle_service
+            .restore_snapshot(proto::RestoreSnapshotRequest {
+                meta,
+                node_id: node_id.clone(),
+                vm_id: vm_id.clone(),
+                source,
+            })
+            .await;
 
         let ack = self.map_ack(ack)?;
         let result = ack

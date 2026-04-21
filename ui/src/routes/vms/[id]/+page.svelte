@@ -2,7 +2,7 @@
 	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
-	import { getStoredToken } from '$lib/api/client';
+	import { getStoredToken, createAPIClient } from '$lib/api/client';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
@@ -19,6 +19,7 @@
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import VmConsole from '$lib/components/vms/VmConsole.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
+	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -30,6 +31,9 @@
 	let consoleLoading = $state(false);
 	let bootLog = $state<string>('');
 	let bootLogLoading = $state(false);
+	let snapshots = $state<import('$lib/api/types').VMSnapshot[]>([]);
+	let snapshotsLoading = $state(false);
+	let snapshotsError = $state<string | null>(null);
 
 	$effect(() => {
 		if (detail.currentTab === 'console' && detail.summary.vm_id) {
@@ -52,6 +56,26 @@
 				.then(res => { bootLog = res.content || '(no boot log available)'; })
 				.catch(() => { bootLog = '(failed to load boot log)'; })
 				.finally(() => { bootLogLoading = false; });
+		}
+	});
+
+	async function loadSnapshots() {
+		if (!detail.summary.vm_id) return;
+		snapshotsLoading = true;
+		snapshotsError = null;
+		try {
+			const client = createAPIClient();
+			snapshots = await client.listVMSnapshots(detail.summary.vm_id);
+		} catch (err) {
+			snapshotsError = err instanceof Error ? err.message : 'Failed to load snapshots';
+		} finally {
+			snapshotsLoading = false;
+		}
+	}
+
+	$effect(() => {
+		if (detail.currentTab === 'snapshots' && detail.summary.vm_id) {
+			loadSnapshots();
 		}
 	});
 
@@ -229,6 +253,10 @@
 							<pre class="boot-log">{bootLog}</pre>
 						{/if}
 					</SectionCard>
+				</section>
+			{:else if detail.currentTab === 'snapshots'}
+				<section class="detail-main-span">
+					<VmSnapshots vmId={detail.summary.vm_id} {snapshots} />
 				</section>
 			{:else}
 				<section class="detail-main-span">

@@ -3,7 +3,7 @@ use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmInfo};
+use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo};
 
 #[derive(Debug, Clone, Default)]
 pub struct MockCloudHypervisorAdapter {
@@ -145,6 +145,10 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
             cpus: config.cpus,
             memory_bytes: config.memory_bytes,
         })
+    }
+
+    async fn vm_counters(&self, _vm_id: &str) -> Result<VmCounters, ChvError> {
+        Ok(VmCounters::default())
     }
 
     async fn ping(&self, _vm_id: &str) -> Result<bool, ChvError> {

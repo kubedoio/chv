@@ -489,17 +489,30 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     getCurrentUser() {
       return request<UserInfo>('/api/v1/auth/me');
     },
-    listVMSnapshots(id: string) {
-      return request<VMSnapshot[]>(`/api/v1/vms/${id}/snapshots`);
+    async listVMSnapshots(id: string) {
+      const res = await request<{ items: VMSnapshot[] }>('/api/v1/vms/snapshots', {
+        method: 'POST',
+        body: JSON.stringify({ vm_id: id })
+      });
+      return res.items ?? [];
     },
-    createVMSnapshot(id: string) {
-      return request<VMSnapshot>(`/api/v1/vms/${id}/snapshots`, { method: 'POST' });
+    createVMSnapshot(id: string, data?: { name?: string; description?: string; includes_memory?: boolean }) {
+      return request<VMSnapshot>('/api/v1/vms/snapshots/create', {
+        method: 'POST',
+        body: JSON.stringify({ vm_id: id, ...(data ?? {}) })
+      });
     },
-    restoreVMSnapshot(vmId: string, snapId: string) {
-      return request<{ success: boolean }>(`/api/v1/vms/${vmId}/snapshots/${snapId}/restore`, { method: 'POST' });
+    restoreVMSnapshot(_vmId: string, snapId: string) {
+      return request<{ status: string }>('/api/v1/vms/snapshots/restore', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_id: snapId })
+      });
     },
-    deleteVMSnapshot(vmId: string, snapId: string) {
-      return request<{ success: boolean }>(`/api/v1/vms/${vmId}/snapshots/${snapId}`, { method: 'DELETE' });
+    deleteVMSnapshot(_vmId: string, snapId: string) {
+      return request<{ status: string }>('/api/v1/vms/snapshots/delete', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_id: snapId })
+      });
     },
     // Node management endpoints
     listNodes() {

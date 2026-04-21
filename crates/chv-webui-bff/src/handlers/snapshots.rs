@@ -46,6 +46,7 @@ pub async fn list_vm_snapshots(
         .into_iter()
         .map(|r| {
             json!({
+                "id": r.snapshot_id,
                 "snapshot_id": r.snapshot_id,
                 "vm_id": r.vm_id,
                 "name": r.name,
@@ -127,6 +128,20 @@ pub async fn create_snapshot(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert snapshot: {}", e)))?;
 
+    // Dispatch snapshot operation through control plane
+    let response = state
+        .mutations
+        .snapshot_vm(vm_id.clone(), snapshot_path.clone(), claims.username.clone())
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to dispatch snapshot: {:?}", e)))?;
+
+    tracing::info!(
+        snapshot_id = %snapshot_id,
+        vm_id = %vm_id,
+        task_id = %response.task_id,
+        "snapshot dispatched"
+    );
+
     Ok(Json(json!({
         "snapshot_id": snapshot_id,
         "vm_id": vm_id,
@@ -135,6 +150,7 @@ pub async fn create_snapshot(
         "includes_memory": includes_memory,
         "snapshot_path": snapshot_path,
         "status": "creating",
+        "task_id": response.task_id,
     })))
 }
 
@@ -238,23 +254,29 @@ pub async fn restore_snapshot(
         ));
     }
 
-    // Mark VM as restoring
-    sqlx::query(
-        r#"
-        UPDATE vm_desired_state
-        SET desired_status = 'Restoring', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-        WHERE vm_id = ?
-        "#,
-    )
-    .bind(&snapshot.vm_id)
-    .execute(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to update vm status: {}", e)))?;
+    // Dispatch restore operation through control plane
+    let response = state
+        .mutations
+        .restore_snapshot(
+            snapshot.vm_id.clone(),
+            snapshot.snapshot_path.clone(),
+            claims.username.clone(),
+        )
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to dispatch restore: {:?}", e)))?;
+
+    tracing::info!(
+        snapshot_id = %snapshot_id,
+        vm_id = %snapshot.vm_id,
+        task_id = %response.task_id,
+        "restore dispatched"
+    );
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,
         "vm_id": snapshot.vm_id,
         "snapshot_path": snapshot.snapshot_path,
         "status": "restoring",
+        "task_id": response.task_id,
     })))
 }

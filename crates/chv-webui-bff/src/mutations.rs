@@ -15,6 +15,20 @@ pub trait MutationService: Send + Sync {
         requested_by: String,
     ) -> Result<MutateVmResponse, BffError>;
 
+    async fn snapshot_vm(
+        &self,
+        vm_id: String,
+        destination: String,
+        requested_by: String,
+    ) -> Result<MutateVmResponse, BffError>;
+
+    async fn restore_snapshot(
+        &self,
+        vm_id: String,
+        source: String,
+        requested_by: String,
+    ) -> Result<MutateVmResponse, BffError>;
+
     async fn mutate_node(
         &self,
         node_id: String,

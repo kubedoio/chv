@@ -16,6 +16,7 @@ export type VmDetailModel = {
 		memory: string;
 		attached_volumes?: AttachedVolume[];
 		attached_nics?: AttachedNic[];
+		snapshot_count?: number;
 	};
 	sections: { id: string; label: string; count?: number }[];
 	recent_tasks: RelatedTask[];
@@ -33,6 +34,7 @@ function buildSections(summary: VmSummary | null): { id: string; label: string; 
 		{ id: 'networks', label: 'Networks' },
 		{ id: 'tasks', label: 'Tasks', count: taskCount },
 		{ id: 'events', label: 'Events' },
+		{ id: 'snapshots', label: 'Snapshots', count: summary?.snapshot_count ?? 0 },
 		{ id: 'configuration', label: 'Configuration' }
 	];
 }
@@ -83,7 +85,8 @@ function buildDetailModel(summary: VmSummary | null, currentTab: string, console
 			cpu: summary.cpu,
 			memory: summary.memory,
 			attached_volumes: summary.attached_volumes ?? [],
-			attached_nics: summary.attached_nics ?? []
+			attached_nics: summary.attached_nics ?? [],
+			snapshot_count: summary.snapshot_count ?? 0
 		},
 		sections: buildSections(summary),
 		recent_tasks: summary.recent_tasks ?? [],

@@ -334,6 +334,15 @@ message VmStateReport {
   string health_status = 5;
   string last_error = 6;
   int64 reported_unix_ms = 7;
+
+  // Optional runtime counters from CH /api/v1/vm.counters
+  double cpu_percent = 8;
+  int64 memory_bytes_used = 9;
+  int64 memory_bytes_total = 10;
+  int64 disk_bytes_read = 11;
+  int64 disk_bytes_written = 12;
+  int64 net_bytes_rx = 13;
+  int64 net_bytes_tx = 14;
 }
 
 message VolumeStateReport {

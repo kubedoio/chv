@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chv_controlplane_store::{
     AlertCreateInput, AlertRepository, EventAppendInput, EventRepository,
     NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository,
-    VmObservedStateInput, VolumeObservedStateInput,
+    VmMetricsInput, VmObservedStateInput, VolumeObservedStateInput,
 };
 use chv_controlplane_types::domain::{
     EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, ResourceId,
@@ -148,7 +148,7 @@ impl TelemetryService for TelemetryServiceImplementation {
         self.observed_state_repo
             .upsert_vm(&VmObservedStateInput {
                 node_id: Some(node_id),
-                vm_id,
+                vm_id: vm_id.clone(),
                 observed_generation: gen,
                 runtime_status: request.runtime_status,
                 health_status: Some(request.health_status),
@@ -163,6 +163,29 @@ impl TelemetryService for TelemetryServiceImplementation {
                 observed_unix_ms: request.reported_unix_ms,
             })
             .await?;
+
+        // Store runtime counters if any are present (non-zero).
+        if request.memory_bytes_total > 0
+            || request.disk_bytes_read > 0
+            || request.disk_bytes_written > 0
+            || request.net_bytes_rx > 0
+            || request.net_bytes_tx > 0
+        {
+            let _ = self
+                .observed_state_repo
+                .insert_vm_metrics(&VmMetricsInput {
+                    vm_id: vm_id.clone(),
+                    collected_unix_ms: request.reported_unix_ms,
+                    cpu_percent: request.cpu_percent,
+                    memory_bytes_used: request.memory_bytes_used,
+                    memory_bytes_total: request.memory_bytes_total,
+                    disk_bytes_read: request.disk_bytes_read,
+                    disk_bytes_written: request.disk_bytes_written,
+                    net_bytes_rx: request.net_bytes_rx,
+                    net_bytes_tx: request.net_bytes_tx,
+                })
+                .await;
+        }
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {

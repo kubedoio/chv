@@ -206,6 +206,32 @@ impl Orchestrator {
                     )
                     .await
             }
+            "SnapshotVm" => {
+                let destination = row.correlation_id.as_deref().unwrap_or("");
+                client
+                    .snapshot_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        destination,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "RestoreSnapshot" => {
+                let source = row.correlation_id.as_deref().unwrap_or("");
+                client
+                    .restore_snapshot(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        source,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
             other => {
                 return Err(ChvError::Internal {
                     reason: format!("unsupported operation_type for dispatch: {other}"),
@@ -474,6 +500,7 @@ struct AcceptedOperationRow {
     resource_id: String,
     desired_generation: Option<i64>,
     node_id: Option<String>,
+    correlation_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

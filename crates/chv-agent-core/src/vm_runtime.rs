@@ -1,4 +1,4 @@
-use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig, VmInfo};
+use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo};
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -126,6 +126,10 @@ impl VmRuntime {
 
     pub async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
         self.adapter.vm_info(vm_id).await
+    }
+
+    pub async fn vm_counters(&self, vm_id: &str) -> Result<VmCounters, ChvError> {
+        self.adapter.vm_counters(vm_id).await
     }
 
     pub async fn snapshot_vm(

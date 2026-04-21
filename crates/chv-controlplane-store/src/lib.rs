@@ -27,7 +27,7 @@ pub use nodes::{
 };
 pub use observed_state::{
     NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository,
-    VmObservedStateInput, VolumeObservedStateInput,
+    VmMetricsInput, VmObservedStateInput, VolumeObservedStateInput,
 };
 pub use operations::{OperationCreateInput, OperationRepository, OperationStatusUpdateInput};
 

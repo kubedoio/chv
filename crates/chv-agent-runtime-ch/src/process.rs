@@ -12,7 +12,7 @@ use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
 
-use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmInfo};
+use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo};
 
 struct VmProcess {
     api_socket: std::path::PathBuf,
@@ -702,6 +702,77 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             state,
             cpus,
             memory_bytes,
+        })
+    }
+
+    async fn vm_counters(&self, vm_id: &str) -> Result<VmCounters, ChvError> {
+        let api_socket = {
+            let map = self.vms.lock().unwrap();
+            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })?;
+            proc.api_socket.clone()
+        };
+
+        let (status, body) =
+            Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.counters", None).await?;
+        if status != 200 {
+            return Err(ChvError::Internal {
+                reason: format!("vm.counters returned unexpected status {}", status),
+            });
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| ChvError::Internal {
+            reason: format!("failed to parse vm.counters response: {}", e),
+        })?;
+
+        // CPU usage is reported in seconds; we report raw value and let downstream compute %
+        let _cpu_seconds = v
+            .pointer("/cpus/usage/cpu_seconds")
+            .and_then(|c| c.as_f64())
+            .unwrap_or(0.0);
+        // Rough cpu_percent placeholder — agent tick interval is ~2s, so we’d need delta.
+        // For now return 0.0 and let control plane compute from deltas if desired.
+        let cpu_percent = 0.0;
+
+        let mut net_rx = 0u64;
+        let mut net_tx = 0u64;
+        if let Some(net) = v.get("net").and_then(|n| n.as_object()) {
+            for (_iface, counters) in net {
+                if let Some(obj) = counters.as_object() {
+                    net_rx += obj.get("rx_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+                    net_tx += obj.get("tx_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+                }
+            }
+        }
+
+        let mut disk_read = 0u64;
+        let mut disk_written = 0u64;
+        if let Some(block) = v.get("block").and_then(|b| b.as_object()) {
+            for (_dev, counters) in block {
+                if let Some(obj) = counters.as_object() {
+                    disk_read += obj.get("read_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+                    disk_written += obj.get("write_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+                }
+            }
+        }
+
+        // Memory counters are not exposed by vm.counters; use vm.info config as total
+        // and report 0 for used (CH does not expose guest memory usage).
+        let memory_total = v
+            .pointer("/memory/available")
+            .and_then(|m| m.as_u64())
+            .unwrap_or(0);
+
+        Ok(VmCounters {
+            cpu_percent,
+            memory_bytes_used: 0,
+            memory_bytes_total: memory_total,
+            disk_bytes_read: disk_read,
+            disk_bytes_written: disk_written,
+            net_bytes_rx: net_rx,
+            net_bytes_tx: net_tx,
         })
     }
 
