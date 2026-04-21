@@ -18,6 +18,7 @@ struct VmProcess {
     api_socket: std::path::PathBuf,
     child: Child,
     pty_master: OwnedFd,
+    pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     last_cpu_seconds: f64,
     last_cpu_at: Option<std::time::Instant>,
 }
@@ -314,6 +315,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             path: "pty".to_string(),
             source: std::io::Error::from_raw_os_error(e as i32),
         })?;
+        let pty_raw = pty_master.as_raw_fd();
+        let _ = nix::fcntl::fcntl(pty_raw, nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC));
         let slave_path = unsafe { nix::pty::ptsname(&pty_master) }.map_err(|e| ChvError::Io {
             path: "pty".to_string(),
             source: std::io::Error::from_raw_os_error(e as i32),
@@ -407,12 +410,19 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             if disk.read_only {
                 d.insert("readonly".into(), serde_json::Value::from(true));
             }
+            let image_type = if disk.path.extension().map(|e| e == "qcow2").unwrap_or(false) {
+                "Qcow2"
+            } else {
+                "Raw"
+            };
+            d.insert("image_type".into(), serde_json::Value::from(image_type));
             disks_json.push(serde_json::Value::Object(d));
         }
         if let Some(ref seed_path) = seed_iso_path {
             let mut d = serde_json::Map::new();
             d.insert("path".into(), serde_json::Value::from(seed_path.to_string_lossy().to_string()));
             d.insert("readonly".into(), serde_json::Value::from(true));
+            d.insert("image_type".into(), serde_json::Value::from("Raw"));
             disks_json.push(serde_json::Value::Object(d));
         }
 
@@ -441,7 +451,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             "payload": payload,
             "disks": disks_json,
             "net": net_json,
-            "serial": { "mode": "Tty" },
+            "serial": { "mode": "File", "file": slave_path },
             "console": { "mode": "Off" }
         });
 
@@ -459,6 +469,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+
         let mut map = self.vms.lock().unwrap();
         map.insert(
             config.vm_id.clone(),
@@ -466,44 +478,69 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 api_socket: config.api_socket_path.clone(),
                 child,
                 pty_master: unsafe { OwnedFd::from_raw_fd(pty_fd_raw) },
+                pty_tx: pty_tx.clone(),
                 last_cpu_seconds: 0.0,
                 last_cpu_at: None,
             },
         );
         drop(map);
 
-        // Spawn background logger: tee PTY output to console.log
-        let log_path = vm_runtime_dir.join("console.log");
-        let logger_fd = unsafe { nix::libc::dup(pty_fd_raw) };
-        if logger_fd >= 0 {
-            let vm_id_log = config.vm_id.clone();
+        // Spawn background broadcaster: read PTY output and fan out via broadcast channel
+        let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
+        if broadcaster_fd >= 0 {
+            let vm_id_bc = config.vm_id.clone();
+            let pty_tx_bc = pty_tx.clone();
             tokio::spawn(async move {
-                let std_file = unsafe { std::fs::File::from_raw_fd(logger_fd) };
+                let std_file = unsafe { std::fs::File::from_raw_fd(broadcaster_fd) };
                 let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
-                let log_file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                    .await;
-                let mut writer = match log_file {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::debug!(vm_id = %vm_id_log, error = %e, "failed to open console.log");
-                        return;
-                    }
-                };
                 let mut buf = [0u8; 4096];
                 loop {
                     match reader.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
-                            let _ = writer.write_all(&buf[..n]).await;
+                            let data = buf[..n].to_vec();
+                            let _ = pty_tx_bc.send(data);
                         }
-                        Err(_) => break,
+                        Err(e) => {
+                            tracing::debug!(vm_id = %vm_id_bc, error = %e, "pty broadcaster read error");
+                            break;
+                        }
                     }
                 }
+                tracing::debug!(vm_id = %vm_id_bc, "pty broadcaster exited");
             });
         }
+
+        // Subscribe to broadcast channel and persist to console.log
+        let log_path = vm_runtime_dir.join("console.log");
+        let vm_id_log = config.vm_id.clone();
+        let mut pty_rx_log = pty_tx.subscribe();
+        tokio::spawn(async move {
+            let log_file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&log_path)
+                .await;
+            let mut writer = match log_file {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::debug!(vm_id = %vm_id_log, error = %e, "failed to open console.log");
+                    return;
+                }
+            };
+            loop {
+                match pty_rx_log.recv().await {
+                    Ok(data) => {
+                        let _ = writer.write_all(&data).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // If lagged, just continue reading
+                    }
+                }
+            }
+        });
 
         Ok(config.vm_id.clone())
     }
@@ -1097,6 +1134,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let fd = nix::unistd::dup(proc.pty_master.as_raw_fd()).ok()?;
         Some(unsafe { OwnedFd::from_raw_fd(fd) })
     }
+
+    fn pty_output_rx(&self, vm_id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        let map = self.vms.lock().ok()?;
+        let proc = map.get(vm_id)?;
+        Some(proc.pty_tx.subscribe())
+    }
 }
 
 #[cfg(test)]
@@ -1169,6 +1212,7 @@ mod tests {
             disks: vec![VmDiskConfig {
                 path: disk,
                 read_only: false,
+                id: None,
             }],
             nics: vec![],
             api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),

@@ -11,6 +11,7 @@ export type VolumeDetailModel = {
 		name: string;
 		node_id: string;
 		size: string;
+		capacity_bytes?: number;
 		status: string;
 		health: string;
 		attached_vm_id: string;
@@ -83,6 +84,7 @@ function buildDetailModel(summary: VolumeSummary | null, currentTab: string): Vo
 			name: summary.name,
 			node_id: summary.node_id,
 			size: summary.size,
+			capacity_bytes: summary.capacity_bytes,
 			status: summary.status,
 			health: summary.health,
 			attached_vm_id: summary.attached_vm_id,

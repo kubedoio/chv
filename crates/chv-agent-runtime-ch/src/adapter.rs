@@ -38,6 +38,7 @@ pub struct VmConfig {
 pub struct VmDiskConfig {
     pub path: PathBuf,
     pub read_only: bool,
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +154,10 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
 
     // --- PTY ---
     fn pty_master(&self, _vm_id: &str) -> Option<OwnedFd> {
+        None
+    }
+
+    fn pty_output_rx(&self, _vm_id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
         None
     }
 }

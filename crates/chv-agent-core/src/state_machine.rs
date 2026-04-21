@@ -101,6 +101,8 @@ impl StateMachine {
             (TenantReady, Degraded) => true,
             (Degraded, TenantReady) => true,
             (Degraded, Failed) => true,
+            (Failed, Degraded) => true,
+            (Failed, HostReady) => true,
             (Degraded, HostReady) => true,
             (HostReady, Degraded) => true,
             // Operator modes
@@ -159,5 +161,19 @@ mod tests {
         let mut sm = StateMachine::new(NodeState::Degraded);
         assert!(sm.transition(NodeState::Failed).is_ok());
         assert_eq!(sm.current(), NodeState::Failed);
+    }
+
+    #[test]
+    fn failed_to_degraded_transition() {
+        let mut sm = StateMachine::new(NodeState::Failed);
+        assert!(sm.transition(NodeState::Degraded).is_ok());
+        assert_eq!(sm.current(), NodeState::Degraded);
+    }
+
+    #[test]
+    fn failed_to_host_ready_transition() {
+        let mut sm = StateMachine::new(NodeState::Failed);
+        assert!(sm.transition(NodeState::HostReady).is_ok());
+        assert_eq!(sm.current(), NodeState::HostReady);
     }
 }

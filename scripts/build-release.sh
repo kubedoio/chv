@@ -37,6 +37,13 @@ cargo build --workspace --release
 # 3. Build Web UI
 # -----------------------------------------------------------------------------
 echo "[3/6] Building Web UI..."
+
+# Ensure npm is available (nvm installs may not be on PATH when running via sudo)
+if ! command -v npm &>/dev/null && [ -d "$HOME/.nvm/versions/node" ]; then
+    NODE_BIN_DIR=$(find "$HOME/.nvm/versions/node" -maxdepth 1 -type d | sort -V | tail -n 1)/bin
+    export PATH="$NODE_BIN_DIR:$PATH"
+fi
+
 cd ui
 npm install
 npm run build

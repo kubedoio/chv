@@ -262,6 +262,7 @@ export type MutateVolumeRequest = {
 	action: string;
 	force: boolean;
 	resize_bytes?: number;
+	vm_id?: string;
 };
 
 export type MutateVolumeResponse = {
@@ -308,6 +309,7 @@ export type VolumeSummary = {
 	node_id: string;
 	health: string;
 	size: string;
+	capacity_bytes?: number;
 	status: string;
 	attached_vm_id: string;
 	attached_vm_name: string;

@@ -54,6 +54,7 @@ impl Orchestrator {
                 o.resource_kind,
                 o.resource_id,
                 o.desired_generation,
+                o.correlation_id,
                 COALESCE(vds.target_node_id, vol.node_id, net.node_id) as node_id
             FROM operations o
             LEFT JOIN vm_desired_state vds ON o.resource_id = vds.vm_id
@@ -232,6 +233,57 @@ impl Orchestrator {
                     )
                     .await
             }
+            "AttachVolume" => {
+                let corr = row.correlation_id.as_deref().unwrap_or("");
+                let vm_id = corr.strip_prefix("vm=").unwrap_or(corr);
+                client
+                    .attach_volume(
+                        node_id,
+                        &row.resource_id,
+                        vm_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "DetachVolume" => {
+                let corr = row.correlation_id.as_deref().unwrap_or("");
+                let vm_id = corr
+                    .strip_prefix("vm=")
+                    .and_then(|s| s.split(':').next())
+                    .unwrap_or(corr);
+                let force = corr.contains("force=true");
+                client
+                    .detach_volume(
+                        node_id,
+                        &row.resource_id,
+                        vm_id,
+                        &generation,
+                        force,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "ResizeVolume" => {
+                let new_size = row
+                    .correlation_id
+                    .as_deref()
+                    .and_then(|s| s.strip_prefix("size="))
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                client
+                    .resize_volume(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        new_size,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
             other => {
                 return Err(ChvError::Internal {
                     reason: format!("unsupported operation_type for dispatch: {other}"),
@@ -275,6 +327,32 @@ impl Orchestrator {
                     .map_err(|e| ChvError::Internal {
                         reason: format!("failed to mark operation terminal: {e}"),
                     })?;
+
+                // For successful resize, apply the new size to volumes.capacity_bytes
+                if accepted && row.operation_type == "ResizeVolume" {
+                    if let Some(new_size) = row
+                        .correlation_id
+                        .as_deref()
+                        .and_then(|s| s.strip_prefix("size="))
+                        .and_then(|s| s.parse::<i64>().ok())
+                    {
+                        let volume_id = &row.resource_id;
+                        let _ = sqlx::query(
+                            "UPDATE volumes SET capacity_bytes = ? WHERE volume_id = ?"
+                        )
+                        .bind(new_size)
+                        .bind(volume_id)
+                        .execute(&self.pool)
+                        .await;
+                        let _ = sqlx::query(
+                            "UPDATE volume_desired_state SET resize_to_bytes = NULL WHERE volume_id = ?"
+                        )
+                        .bind(volume_id)
+                        .execute(&self.pool)
+                        .await;
+                    }
+                }
+
                 info!(
                     operation_id = %row.operation_id,
                     operation_type = %row.operation_type,

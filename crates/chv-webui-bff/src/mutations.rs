@@ -42,6 +42,7 @@ pub trait MutationService: Send + Sync {
         action: String,
         force: bool,
         resize_bytes: Option<u64>,
+        vm_id: Option<String>,
         requested_by: String,
     ) -> Result<MutateVolumeResponse, BffError>;
 

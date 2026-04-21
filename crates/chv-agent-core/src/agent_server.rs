@@ -447,6 +447,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 disks.push(chv_agent_runtime_ch::adapter::VmDiskConfig {
                     path: std::path::PathBuf::from(export_path),
                     read_only: disk.read_only,
+                    id: Some(disk.volume_id.clone()),
                 });
                 {
                     let mut cache = self.cache.lock().await;
@@ -815,9 +816,62 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
 
     async fn resize_volume(
         &self,
-        _req: Request<proto::ResizeVolumeRequest>,
+        req: Request<proto::ResizeVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
-        Err(Status::unimplemented("resize_volume in Phase 4"))
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        stord
+            .resize_volume(&inner.volume_id, inner.new_size_bytes, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(format!("resize_volume failed: {}", e)))?;
+
+        // Find which VM (if any) has this volume attached and notify CH
+        let attached_vm = {
+            let cache = self.cache.lock().await;
+            cache
+                .vm_attachments
+                .iter()
+                .find(|(_, state)| state.volume_ids.contains(&inner.volume_id))
+                .map(|(vm_id, _)| vm_id.clone())
+        };
+
+        if let Some(vm_id) = attached_vm {
+            if let Err(e) = self
+                .vm_runtime
+                .resize_disk(&vm_id, &inner.volume_id, inner.new_size_bytes, Some(&meta.operation_id))
+                .await
+            {
+                tracing::warn!(
+                    vm_id = %vm_id,
+                    volume_id = %inner.volume_id,
+                    error = %e,
+                    "vm.resize-zone failed; volume resized on disk but VM may need restart"
+                );
+            }
+        }
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "volume resized".to_string(),
+            }),
+        }))
     }
 
     async fn pause_node_scheduling(

@@ -362,6 +362,7 @@ impl Reconciler {
             disks.push(VmDiskConfig {
                 path: PathBuf::from(export_path),
                 read_only: disk.read_only,
+                id: Some(disk.volume_id.clone()),
             });
             volume_ids.push(disk.volume_id.clone());
             let mut cache = self.cache.lock().await;

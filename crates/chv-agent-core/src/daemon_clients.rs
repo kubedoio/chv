@@ -7,7 +7,7 @@ use chv_nwd_api::chv_nwd_api::{
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
-    DetachVolumeFromVmRequest, ListVolumeSessionsRequest, OpenVolumeRequest,
+    DetachVolumeFromVmRequest, ListVolumeSessionsRequest, OpenVolumeRequest, ResizeVolumeRequest,
 };
 use std::path::Path;
 use tokio::net::UnixStream;
@@ -201,13 +201,29 @@ impl StordClient {
 
     pub async fn resize_volume(
         &mut self,
-        _volume_id: &str,
-        _new_size_bytes: u64,
-        _operation_id: Option<&str>,
+        volume_id: &str,
+        new_size_bytes: u64,
+        operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        Err(ChvError::Internal {
-            reason: "resize_volume not implemented in Phase 1".to_string(),
-        })
+        let req = ResizeVolumeRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            new_size_bytes,
+        };
+        self.inner
+            .resize_volume(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
     }
 }
 
@@ -743,7 +759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stord_resize_volume_stub_returns_error() {
+    async fn stord_resize_volume_propagates_backend_error() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("stord.sock");
 
@@ -763,7 +779,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let mut client = StordClient::connect(&socket).await.unwrap();
         let result = client.resize_volume("vol-1", 1024, Some("op-1")).await;
-        assert!(matches!(result, Err(ChvError::Internal { .. })));
+        assert!(matches!(result, Err(ChvError::BackendUnavailable { .. })));
     }
 
     #[tokio::test]

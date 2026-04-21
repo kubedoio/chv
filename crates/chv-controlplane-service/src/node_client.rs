@@ -371,6 +371,104 @@ impl NodeClient {
             })
             .map(|r| r.into_inner())
     }
+
+    pub async fn attach_volume(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        vm_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::AttachVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            volume: Some(proto::VolumeMutationSpec {
+                volume_id: volume_id.to_string(),
+                vm_id: vm_id.to_string(),
+                volume_spec_json: vec![],
+            }),
+        };
+        self.lifecycle
+            .attach_volume(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("attach_volume failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn detach_volume(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        vm_id: &str,
+        generation: &str,
+        force: bool,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::DetachVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+            volume_id: volume_id.to_string(),
+            force,
+        };
+        self.lifecycle
+            .detach_volume(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("detach_volume failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn resize_volume(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        generation: &str,
+        new_size_bytes: u64,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::ResizeVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            volume_id: volume_id.to_string(),
+            new_size_bytes,
+        };
+        self.lifecycle
+            .resize_volume(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("resize_volume failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
 }
 
 fn now_unix_ms() -> i64 {

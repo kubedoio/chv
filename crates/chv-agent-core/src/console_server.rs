@@ -7,7 +7,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use std::os::fd::{AsRawFd, FromRawFd};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 #[derive(Clone)]
@@ -109,34 +109,39 @@ impl ConsoleServer {
 
         let raw_fd = pty_fd.as_raw_fd();
 
-        // Dup fd for tokio async file (keep original for ioctl)
-        let dup_fd = unsafe { libc::dup(raw_fd) };
-        if dup_fd < 0 {
-            tracing::warn!(error = %std::io::Error::last_os_error(), "failed to dup pty fd");
-            return;
-        }
-
-        let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-        let tokio_file = tokio::fs::File::from_std(std_file);
-        let (mut pty_reader, mut pty_writer) = tokio::io::split(tokio_file);
+        // Obtain broadcast channel for PTY output
+        let mut pty_rx = {
+            let mut attempts = 0;
+            loop {
+                match vm_runtime.pty_output_rx(&vm_id) {
+                    Some(rx) => break rx,
+                    None => {
+                        attempts += 1;
+                        if attempts >= 10 {
+                            tracing::warn!(vm_id = %vm_id, "no pty broadcast channel for vm after 10 retries");
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        };
 
         let (mut ws_tx, mut ws_rx) = socket.split();
 
-        // PTY → WebSocket
+        // PTY broadcast → WebSocket
         let mut read_task = tokio::spawn(async move {
-            let mut buf = [0u8; 4096];
             loop {
-                match pty_reader.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let msg = axum::extract::ws::Message::Binary(buf[..n].to_vec());
+                match pty_rx.recv().await {
+                    Ok(data) => {
+                        let msg = axum::extract::ws::Message::Binary(data);
                         if ws_tx.send(msg).await.is_err() {
                             break;
                         }
                     }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "pty read error");
-                        break;
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // If lagged, continue reading latest data
                     }
                 }
             }
@@ -144,6 +149,16 @@ impl ConsoleServer {
 
         // WebSocket → PTY
         let mut write_task = tokio::spawn(async move {
+            // Dup fd for tokio async write
+            let dup_fd = unsafe { libc::dup(raw_fd) };
+            if dup_fd < 0 {
+                tracing::warn!(error = %std::io::Error::last_os_error(), "failed to dup pty fd for write");
+                return;
+            }
+            let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+            let tokio_file = tokio::fs::File::from_std(std_file);
+            let mut pty_writer = tokio_file;
+
             while let Some(result) = ws_rx.next().await {
                 match result {
                     Ok(axum::extract::ws::Message::Text(text)) => {

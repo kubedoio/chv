@@ -525,7 +525,17 @@ impl NetworkExecutor for LinuxExecutor {
     ) -> Result<(String, String), ChvError> {
         let tap_name = Self::tap_name_for_nic(nic_id);
 
-        Self::run_ip(&["tuntap", "add", "dev", &tap_name, "mode", "tap"]).await?;
+        // Check if tap already exists; if so, just ensure it's on the right bridge and up.
+        let tap_exists = Command::new("ip")
+            .args(["link", "show", "dev", &tap_name])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !tap_exists {
+            Self::run_ip(&["tuntap", "add", "dev", &tap_name, "mode", "tap"]).await?;
+        }
         Self::run_ip(&["link", "set", "dev", &tap_name, "master", bridge_name]).await?;
         Self::run_ip(&["link", "set", "dev", &tap_name, "up"]).await?;
 

@@ -112,6 +112,7 @@ pub async fn get_volume(
                  WHEN v.capacity_bytes >= 1048576 THEN printf('%.1f MiB', CAST(v.capacity_bytes AS REAL)/1048576.0)
                  WHEN v.capacity_bytes >= 1024 THEN printf('%.1f KiB', CAST(v.capacity_bytes AS REAL)/1024.0)
                  ELSE printf('%d B', v.capacity_bytes) END AS size,
+            v.capacity_bytes,
             COALESCE(vds.desired_status, vos.runtime_status, 'Unknown') AS status,
             COALESCE(vds.attached_vm_id, '') AS attached_vm_id,
             COALESCE(vms.display_name, '') AS attached_vm_name,
@@ -178,6 +179,7 @@ pub async fn get_volume(
                     "node_id": r.node_id,
                     "health": r.health,
                     "size": r.size,
+                    "capacity_bytes": r.capacity_bytes,
                     "status": r.status,
                     "attached_vm_id": r.attached_vm_id,
                     "attached_vm_name": r.attached_vm_name,
@@ -220,10 +222,11 @@ pub async fn mutate_volume(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let resize_bytes = payload.get("resize_bytes").and_then(|v| v.as_u64());
+    let vm_id = payload.get("vm_id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     let response = state
         .mutations
-        .mutate_volume(volume_id, action, force, resize_bytes, claims.username)
+        .mutate_volume(volume_id, action, force, resize_bytes, vm_id, claims.username)
         .await?;
 
     Ok(Json(json!({
@@ -254,6 +257,7 @@ struct VolumeSummaryRow {
     node_id: Option<String>,
     health: String,
     size: String,
+    capacity_bytes: Option<i64>,
     status: String,
     attached_vm_id: String,
     attached_vm_name: String,

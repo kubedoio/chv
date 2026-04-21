@@ -412,16 +412,41 @@ impl StorageBackend for LocalFileBackend {
 
         let kind = Self::detect_kind(&path);
         if kind == "qcow2" {
-            warn!(
-                volume_id,
-                handle,
-                path = %path.display(),
-                "qcow2 resize is not yet implemented"
-            );
-            return Err(ChvError::InvalidArgument {
-                field: "new_size_bytes".to_string(),
-                reason: "qcow2 resize not supported".to_string(),
-            });
+            let status = std::process::Command::new("qemu-img")
+                .args(["resize", "-f", "qcow2"])
+                .arg(&path)
+                .arg(format!("{}", new_size_bytes))
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    info!(
+                        volume_id,
+                        handle,
+                        path = %path.display(),
+                        new_size_bytes,
+                        "resized qcow2 volume"
+                    );
+                    return Ok(());
+                }
+                Ok(s) => {
+                    return Err(ChvError::BackendUnavailable {
+                        backend: "local".to_string(),
+                        reason: format!("qemu-img resize failed with exit code {}", s),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ChvError::BackendUnavailable {
+                        backend: "local".to_string(),
+                        reason: "qemu-img is not installed; install qemu-utils to resize qcow2 volumes".to_string(),
+                    });
+                }
+                Err(e) => {
+                    return Err(ChvError::BackendUnavailable {
+                        backend: "local".to_string(),
+                        reason: format!("failed to run qemu-img: {}", e),
+                    });
+                }
+            }
         }
 
         let file = std::fs::File::options()
@@ -678,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_backend_resize_qcow2_returns_error() {
+    async fn local_backend_resize_malformed_qcow2_returns_backend_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vol.qcow2");
         {
@@ -689,7 +714,7 @@ mod tests {
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let res = backend.resize("vol-1", "local-vol-1-vol.qcow2", 1024).await;
-        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+        assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
 
     #[tokio::test]

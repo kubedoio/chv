@@ -42,6 +42,10 @@ impl VmRuntime {
         self.adapter.pty_master(vm_id)
     }
 
+    pub fn pty_output_rx(&self, vm_id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        self.adapter.pty_output_rx(vm_id)
+    }
+
     pub async fn create_vm(
         &self,
         vm_id: impl Into<String>,

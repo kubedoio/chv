@@ -316,6 +316,7 @@ impl MutationService for ControlPlaneMutationService {
         action: String,
         force: bool,
         resize_bytes: Option<u64>,
+        vm_id: Option<String>,
         requested_by: String,
     ) -> Result<MutateVolumeResponse, BffError> {
         // Look up the volume's node_id from volumes and attachment/size from volume_desired_state/volumes.
@@ -340,13 +341,14 @@ impl MutationService for ControlPlaneMutationService {
 
         let ack = match action.as_str() {
             "attach" => {
+                let target_vm_id = vm_id.unwrap_or_else(|| row.vm_id.unwrap_or_default());
                 self.lifecycle_service
                     .attach_volume(proto::AttachVolumeRequest {
                         meta,
                         node_id: row.node_id.clone(),
                         volume: Some(proto::VolumeMutationSpec {
                             volume_id: volume_id.clone(),
-                            vm_id: row.vm_id.unwrap_or_default(),
+                            vm_id: target_vm_id,
                             volume_spec_json: vec![],
                         }),
                     })

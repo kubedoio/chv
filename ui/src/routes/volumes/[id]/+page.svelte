@@ -4,6 +4,7 @@
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import { getStoredToken } from '$lib/api/client';
 	import { mutateVolume } from '$lib/bff/volumes';
+	import { listVms } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
@@ -13,6 +14,9 @@
 	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import Modal from '$lib/components/modals/Modal.svelte';
+	import FormField from '$lib/components/forms/FormField.svelte';
+	import Input from '$lib/components/Input.svelte';
 	import { Link2, Unlink, Maximize2, Database, Box, Activity, Info, AlertTriangle } from 'lucide-svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -20,6 +24,17 @@
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
 	let confirmingAction = $state<string | null>(null);
+
+	// Attach modal state
+	let attachModalOpen = $state(false);
+	let availableVms = $state<{ vm_id: string; name: string; node_id: string }[]>([]);
+	let selectedVmId = $state('');
+	let loadingVms = $state(false);
+
+	// Resize modal state
+	let resizeModalOpen = $state(false);
+	let resizeSizeGb = $state(10);
+	let resizeError = $state('');
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
@@ -33,8 +48,90 @@
 	function handleActionClick(action: string, needsConfirm = false) {
 		if (needsConfirm) {
 			confirmingAction = action;
+		} else if (action === 'attach') {
+			openAttachModal();
+		} else if (action === 'resize') {
+			openResizeModal();
 		} else {
 			executeAction(action);
+		}
+	}
+
+	async function openAttachModal() {
+		selectedVmId = '';
+		attachModalOpen = true;
+		loadingVms = true;
+		try {
+			const token = getStoredToken() ?? undefined;
+			const res = await listVms({ page: 1, page_size: 200, filters: {} }, token);
+			const allVms = (res.items as any[]).map((v) => ({
+				vm_id: v.vm_id as string,
+				name: v.name as string,
+				node_id: v.node_id as string
+			}));
+			// Filter VMs on the same node as the volume, excluding already-attached
+			availableVms = allVms.filter(
+				(v) => v.node_id === detail.summary.node_id && v.vm_id !== detail.summary.attached_vm_id
+			);
+		} catch (err) {
+			toast.error('Failed to load VMs');
+		} finally {
+			loadingVms = false;
+		}
+	}
+
+	function openResizeModal() {
+		const currentBytes = detail.summary.capacity_bytes ?? 0;
+		resizeSizeGb = currentBytes > 0 ? Math.ceil(currentBytes / (1024 * 1024 * 1024)) : 10;
+		resizeError = '';
+		resizeModalOpen = true;
+	}
+
+	async function executeAttach() {
+		if (!selectedVmId) {
+			toast.error('Please select a VM');
+			return;
+		}
+		attachModalOpen = false;
+		pendingAction = 'attach';
+		const token = getStoredToken() ?? undefined;
+		const volume_id = detail.summary.volume_id;
+		try {
+			await mutateVolume({ volume_id, action: 'attach', force: false, vm_id: selectedVmId }, token);
+			toast.success('Volume attach accepted');
+			await invalidateAll();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Attach failed';
+			toast.error(message);
+		} finally {
+			pendingAction = null;
+		}
+	}
+
+	async function executeResize() {
+		if (resizeSizeGb < 1) {
+			resizeError = 'Size must be at least 1 GB';
+			return;
+		}
+		const currentBytes = detail.summary.capacity_bytes ?? 0;
+		const newBytes = resizeSizeGb * 1024 * 1024 * 1024;
+		if (newBytes <= currentBytes) {
+			resizeError = 'New size must be larger than current size';
+			return;
+		}
+		resizeModalOpen = false;
+		pendingAction = 'resize';
+		const token = getStoredToken() ?? undefined;
+		const volume_id = detail.summary.volume_id;
+		try {
+			await mutateVolume({ volume_id, action: 'resize', force: false, resize_bytes: newBytes }, token);
+			toast.success('Volume resize accepted');
+			await invalidateAll();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Resize failed';
+			toast.error(message);
+		} finally {
+			pendingAction = null;
 		}
 	}
 
@@ -110,7 +207,7 @@
 								<Unlink size={14} />
 								{pendingAction === 'detach' ? 'Detaching...' : 'Detach'}
 							</button>
-							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => handleActionClick('resize', true)}>
+							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => handleActionClick('resize')}>
 								<Maximize2 size={14} />
 								{pendingAction === 'resize' ? 'Resizing...' : 'Resize'}
 							</button>
@@ -141,11 +238,11 @@
 					</SectionCard>
 
 					<SectionCard title="Recent Activity" icon={Activity}>
-						<TaskTimeline tasks={timelineTasks} />SectionCard>
+						<TaskTimeline tasks={timelineTasks} />
 					</SectionCard>
 
 					<SectionCard title="Metadata & Config" icon={Info}>
-						<PropertyGrid properties={configProps} columns={2} />SectionCard>
+						<PropertyGrid properties={configProps} columns={2} />
 					</SectionCard>
 				</div>
 			</section>
@@ -177,6 +274,53 @@
 	{/if}
 </div>
 
+<!-- Attach Modal -->
+<Modal bind:open={attachModalOpen} title="Attach Volume to VM">
+	{#snippet children()}
+		<div class="modal-body">
+			<p class="modal-desc">Select a VM on node <strong>{detail.summary.node_id}</strong> to attach this volume to.</p>
+			<FormField label="Target VM" required>
+				{#if loadingVms}
+					<p class="text-sm text-muted">Loading VMs...</p>
+				{:else if availableVms.length === 0}
+					<p class="text-sm text-muted">No available VMs on this node.</p>
+				{:else}
+					<select bind:value={selectedVmId} class="vm-select">
+						<option value="">-- Select a VM --</option>
+						{#each availableVms as vm}
+							<option value={vm.vm_id}>{vm.name} ({vm.vm_id})</option>
+						{/each}
+					</select>
+				{/if}
+			</FormField>
+		</div>
+	{/snippet}
+	{#snippet footer()}
+		<div class="modal-footer">
+			<button class="btn-secondary btn-sm" onclick={() => attachModalOpen = false}>Cancel</button>
+			<button class="btn-primary btn-sm" disabled={!selectedVmId || loadingVms} onclick={executeAttach}>Attach</button>
+		</div>
+	{/snippet}
+</Modal>
+
+<!-- Resize Modal -->
+<Modal bind:open={resizeModalOpen} title="Resize Volume">
+	{#snippet children()}
+		<div class="modal-body">
+			<p class="modal-desc">Current size: <strong>{detail.summary.size}</strong>. Enter the new size below.</p>
+			<FormField label="New Size (GB)" required error={resizeError}>
+				<Input type="number" bind:value={resizeSizeGb} min={1} />
+			</FormField>
+		</div>
+	{/snippet}
+	{#snippet footer()}
+		<div class="modal-footer">
+			<button class="btn-secondary btn-sm" onclick={() => resizeModalOpen = false}>Cancel</button>
+			<button class="btn-primary btn-sm" onclick={executeResize}>Resize</button>
+		</div>
+	{/snippet}
+</Modal>
+
 <style>
 	.resource-detail {
 		display: flex;
@@ -199,31 +343,30 @@
 	}
 
 	.confirm-text {
-		font-size: var(--text-xs);
-		color: var(--color-danger-dark);
-		font-weight: 600;
+		font-size: 0.875rem;
+		color: var(--color-ink);
 	}
 
 	.detail-grid {
 		display: grid;
-		grid-template-columns: 1fr 300px;
-		gap: 1rem;
-		align-items: start;
+		grid-template-columns: 1fr 320px;
+		gap: 1.5rem;
+		padding: 1.5rem;
 	}
 
 	.detail-main-span {
 		display: flex;
 		flex-direction: column;
-		gap: 1rem;
+		gap: 1.5rem;
 	}
 
 	.detail-sections {
-		display: grid;
-		grid-template-columns: 1fr;
-		gap: 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 1.5rem;
 	}
 
-	.detail-side-span {
+	.summary-top {
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
@@ -231,51 +374,62 @@
 
 	.attachment-info {
 		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border-radius: 0.25rem;
-	}
-
-	.attachment-info p {
-		margin: 0;
-		font-size: var(--text-sm);
+		flex-direction: column;
+		gap: 0.75rem;
 	}
 
 	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		text-align: center;
-		padding: 1rem 0;
+		color: var(--color-muted);
+		font-size: 0.875rem;
 	}
 
 	.alert-box {
 		padding: 0.75rem;
-		border-radius: 0.25rem;
+		border-radius: 0.375rem;
+		border: 1px solid;
+	}
+
+	.alert-box.tone-warning {
 		background: var(--color-warning-light);
-		border: 1px solid var(--color-warning-dark);
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
+		border-color: var(--color-warning);
 	}
 
 	.alert-label {
-		font-weight: 700;
-		font-size: var(--text-xs);
-		color: var(--color-warning-dark);
+		font-weight: 600;
+		font-size: 0.875rem;
+		color: var(--color-ink);
 	}
 
 	.alert-desc {
-		font-size: var(--text-xs);
-		color: var(--color-warning-dark);
-		margin: 0;
+		font-size: 0.875rem;
+		color: var(--color-muted);
+		margin-top: 0.25rem;
 	}
 
-	@media (max-width: 1200px) {
-		.detail-grid {
-			grid-template-columns: 1fr;
-		}
+	.modal-body {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.modal-desc {
+		font-size: 0.875rem;
+		color: var(--color-muted);
+	}
+
+	.modal-footer {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+	}
+
+	.vm-select {
+		height: 2.25rem;
+		width: 100%;
+		border-radius: 0.375rem;
+		border: 1px solid var(--color-border, #ccc);
+		padding: 0 0.75rem;
+		font-size: 0.875rem;
+		background: white;
 	}
 </style>
