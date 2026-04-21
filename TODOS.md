@@ -74,7 +74,7 @@
 **Priority:** P2
 **Depends on:** TODO #4
 
-### Remaining gaps from eng review
+### Remaining gaps from eng review ✅ DONE
 
 **What:** `cpu_percent` is hardcoded to 0.0 in `process.rs` because CH exposes CPU usage in seconds, not percentage. Delta computation requires tracking previous tick values per VM.
 
