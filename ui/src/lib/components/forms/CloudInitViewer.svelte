@@ -103,8 +103,9 @@
           <div class="grid grid-cols-2 gap-3">
             {#each template.variables as varName}
               <div>
-                <label class="block text-xs text-muted mb-1">{varName}</label>
+                <label for={`preview-${varName}`} class="block text-xs text-muted mb-1">{varName}</label>
                 <input
+                  id={`preview-${varName}`}
                   type="text"
                   value={previewVariables[varName] || ''}
                   oninput={(e) => {

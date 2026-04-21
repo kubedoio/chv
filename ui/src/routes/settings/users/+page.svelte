@@ -19,9 +19,14 @@
 	const token = getStoredToken() ?? undefined;
 
 	// Users state
-	let users: UserItem[] = $state(data.model?.users ?? []);
+	let users: UserItem[] = $state([]);
 	let loading = $state(false);
-	let error = $state(data.model?.state === 'error');
+	let error = $state(false);
+
+	$effect(() => {
+		users = data.model?.users ?? [];
+		error = data.model?.state === 'error';
+	});
 
 	// Modal state
 	let createOpen = $state(false);
@@ -321,8 +326,8 @@
 		{#if selectedUser}
 			<form onsubmit={(e) => { e.preventDefault(); handleEdit(); }} class="form-fields">
 				<div class="field">
-					<label>Username</label>
-					<input type="text" value={selectedUser.username} disabled class="disabled-input" />
+					<label for="edit-username">Username</label>
+					<input id="edit-username" type="text" value={selectedUser.username} disabled class="disabled-input" />
 				</div>
 				<div class="field">
 					<label for="edit-role">Role</label>

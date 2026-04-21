@@ -129,7 +129,6 @@
 		id="mobile-nav-menu"
 		class="menu-panel"
 		transition:slide={{ duration: 200, axis: 'x' }}
-		role="navigation"
 		aria-label="Mobile navigation"
 	>
 		<div class="menu-header">

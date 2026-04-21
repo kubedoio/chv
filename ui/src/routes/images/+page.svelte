@@ -171,7 +171,7 @@
 				<InventoryTable
 					{columns}
 					rows={tableRows}
-					rowHref={() => undefined}
+					rowHref={() => null}
 				>
 					{#snippet cell({ column, row })}
 						{#if column.key === '_actions'}
@@ -371,17 +371,6 @@
 
 	.dismiss-btn:hover {
 		color: var(--shell-text);
-	}
-
-	.row-link {
-		color: var(--shell-text);
-		font-weight: 600;
-		text-decoration: none;
-	}
-
-	.row-link:hover {
-		color: var(--shell-accent);
-		text-decoration: underline;
 	}
 
 	.cell-text {

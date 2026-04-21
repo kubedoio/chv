@@ -448,6 +448,7 @@
   <div 
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" 
     role="dialog"
+    tabindex="-1"
     aria-modal="true"
     aria-labelledby="create-job-title"
     onclick={(e) => {
@@ -575,6 +576,7 @@
   <div 
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" 
     role="dialog"
+    tabindex="-1"
     aria-modal="true"
     aria-labelledby="import-vm-title"
     onclick={(e) => {

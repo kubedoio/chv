@@ -162,6 +162,8 @@
     class:flex-1={fullscreen}
     onkeydown={handleKeydown}
     tabindex="0"
+    role="application"
+    aria-label="Terminal"
   ></div>
 </div>
 

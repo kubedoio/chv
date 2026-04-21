@@ -139,10 +139,10 @@ sudo systemctl enable --now chv-agent
       </div>
 
       <div class="space-y-2">
-        <label class="block text-sm font-medium text-slate-700">
+        <p class="block text-sm font-medium text-slate-700">
           Agent Token <span class="text-red-500">*</span>
           <span class="text-xs font-normal text-slate-500 ml-2">Copy and save this token - it will not be shown again</span>
-        </label>
+        </p>
         <div class="flex gap-2">
           <code class="flex-1 bg-slate-900 text-green-400 px-4 py-3 rounded-lg text-sm font-mono break-all">
             {result.agent_token}
@@ -166,7 +166,7 @@ sudo systemctl enable --now chv-agent
 
       {#if result.agent_url}
         <div class="space-y-2">
-          <label class="block text-sm font-medium text-slate-700">Agent URL</label>
+          <p class="block text-sm font-medium text-slate-700">Agent URL</p>
           <div class="flex gap-2">
             <code class="flex-1 bg-slate-100 text-slate-700 px-4 py-3 rounded-lg text-sm font-mono">
               {result.agent_url}
