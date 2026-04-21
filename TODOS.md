@@ -74,5 +74,19 @@
 **Priority:** P2
 **Depends on:** TODO #4
 
+### Remaining gaps from eng review
+
+**What:** `cpu_percent` is hardcoded to 0.0 in `process.rs` because CH exposes CPU usage in seconds, not percentage. Delta computation requires tracking previous tick values per VM.
+
+**Why:** The `vm_metrics` table has a `cpu_percent` column that always contains zeros. Users will see 0% CPU in metrics.
+
+**Context:** `crates/chv-agent-runtime-ch/src/process.rs:740`. Agent tick interval is ~2s. Could compute `(current_seconds - previous_seconds) / 2 * 100` per VM and store in `VmRuntime` HashMap.
+
+**Effort:** S → CC: S
+**Priority:** P2
+**Depends on:** None
+
+---
+
 ## Completed
 
