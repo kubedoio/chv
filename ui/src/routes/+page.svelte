@@ -215,27 +215,6 @@
 		gap: 0.75rem;
 	}
 
-	.header-activity-hint {
-		display: flex;
-		align-items: center;
-		gap: 0.35rem;
-		font-size: 10px;
-		font-weight: 700;
-		text-transform: uppercase;
-		color: var(--color-success);
-		letter-spacing: 0.05em;
-	}
-
-	.pulse {
-		animation: pulse 2s infinite;
-	}
-
-	@keyframes pulse {
-		0% { opacity: 0.4; }
-		50% { opacity: 1; }
-		100% { opacity: 0.4; }
-	}
-
 	.posture-strip-wrapper {
 		margin-top: -0.25rem;
 	}

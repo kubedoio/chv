@@ -319,34 +319,6 @@
 		font-weight: 500;
 	}
 
-	.history-preview {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.h-item {
-		display: flex;
-		justify-content: space-between;
-		font-size: var(--text-xs);
-		padding: 0.25rem 0;
-	}
-
-	.h-lbl { color: var(--shell-text); }
-	.h-time { color: var(--shell-text-muted); }
-
-	.view-all {
-		margin-top: 0.5rem;
-		font-size: 11px;
-		font-weight: 700;
-		text-transform: uppercase;
-		text-decoration: none;
-		color: var(--shell-accent);
-		display: flex;
-		align-items: center;
-		gap: 0.25rem;
-	}
-
 	.empty-hint {
 		font-size: var(--text-xs);
 		color: var(--shell-text-muted);

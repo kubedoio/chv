@@ -237,28 +237,6 @@
 		padding: 1rem 0;
 	}
 
-	.alert-box {
-		padding: 0.75rem;
-		border-radius: 0.25rem;
-		background: var(--color-warning-light);
-		border: 1px solid var(--color-warning-dark);
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-	}
-
-	.alert-label {
-		font-weight: 700;
-		font-size: var(--text-xs);
-		color: var(--color-warning-dark);
-	}
-
-	.alert-desc {
-		font-size: var(--text-xs);
-		color: var(--color-warning-dark);
-		margin: 0;
-	}
-
 	@media (max-width: 1200px) {
 		.detail-grid {
 			grid-template-columns: 1fr;
