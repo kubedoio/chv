@@ -18,6 +18,8 @@ struct VmProcess {
     api_socket: std::path::PathBuf,
     child: Child,
     pty_master: OwnedFd,
+    last_cpu_seconds: f64,
+    last_cpu_at: Option<std::time::Instant>,
 }
 
 pub struct ProcessCloudHypervisorAdapter {
@@ -464,6 +466,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 api_socket: config.api_socket_path.clone(),
                 child,
                 pty_master: unsafe { OwnedFd::from_raw_fd(pty_fd_raw) },
+                last_cpu_seconds: 0.0,
+                last_cpu_at: None,
             },
         );
         drop(map);
@@ -727,14 +731,32 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             reason: format!("failed to parse vm.counters response: {}", e),
         })?;
 
-        // CPU usage is reported in seconds; we report raw value and let downstream compute %
-        let _cpu_seconds = v
+        // CPU usage is reported in seconds; compute percentage from delta across ticks.
+        let cpu_seconds = v
             .pointer("/cpus/usage/cpu_seconds")
             .and_then(|c| c.as_f64())
             .unwrap_or(0.0);
-        // Rough cpu_percent placeholder — agent tick interval is ~2s, so we’d need delta.
-        // For now return 0.0 and let control plane compute from deltas if desired.
-        let cpu_percent = 0.0;
+
+        let mut cpu_percent = 0.0;
+        {
+            let mut map = self.vms.lock().unwrap();
+            if let Some(proc) = map.get_mut(vm_id) {
+                if let Some(last_at) = proc.last_cpu_at {
+                    let delta_secs = cpu_seconds - proc.last_cpu_seconds;
+                    let elapsed = last_at.elapsed().as_secs_f64();
+                    if elapsed > 0.0 && delta_secs >= 0.0 {
+                        // CH reports CPU time across all vCPUs.
+                        // Normalize to a percentage of wall-clock time.
+                        cpu_percent = (delta_secs / elapsed) * 100.0;
+                        // Clamp to a sane max (e.g. 100% per vCPU is unrealistic for long
+                        // intervals, but possible for short ones). Let downstream clamp if
+                        // they want per-vCPU percentages.
+                    }
+                }
+                proc.last_cpu_seconds = cpu_seconds;
+                proc.last_cpu_at = Some(std::time::Instant::now());
+            }
+        }
 
         let mut net_rx = 0u64;
         let mut net_tx = 0u64;
