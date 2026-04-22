@@ -15,7 +15,7 @@
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal, FileText } from 'lucide-svelte';
+	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal, FileText, Power } from 'lucide-svelte';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import VmConsole from '$lib/components/vms/VmConsole.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
@@ -108,7 +108,9 @@
 				await deleteVm({ vm_id, requested_by: 'webui' }, token);
 				toast.success(`VM ${vm_id} delete accepted`);
 			} else {
-				await mutateVm({ vm_id, action, force: false }, token);
+				const force = action === 'stop';
+				const apiAction = action === 'shutdown' ? 'stop' : action;
+				await mutateVm({ vm_id, action: apiAction, force }, token);
 				toast.success(`VM ${action} accepted`);
 			}
 			await invalidateAll();
@@ -204,7 +206,11 @@
 									<Play size={14} />
 									{pendingAction === 'start' ? 'Starting...' : 'Start'}
 								</button>
-								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('stop', true)}>
+								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('shutdown', true)}>
+									<Power size={14} />
+									{pendingAction === 'shutdown' ? 'Shutting down...' : 'Shutdown'}
+								</button>
+								<button class="btn-danger btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('stop', true)}>
 									<Square size={14} />
 									{pendingAction === 'stop' ? 'Stopping...' : 'Stop'}
 								</button>
@@ -234,6 +240,7 @@
 							<VmConsole
 								vmId={detail.summary.vm_id}
 								consoleUrl={liveConsoleUrl}
+								running={detail.summary.power_state.toLowerCase() === 'running'}
 								getConsoleUrl={async () => {
 									const res = await getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined);
 									return res.url;

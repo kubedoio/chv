@@ -525,9 +525,10 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
+        let operation_type = if request.force { "ForceStopVm" } else { "StopVm" };
         let operation_id = self
             .create_operation_and_emit(
-                "StopVm",
+                operation_type,
                 node_id.clone(),
                 ResourceKind::Vm,
                 Some(vm_id.clone()),

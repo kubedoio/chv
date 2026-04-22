@@ -327,12 +327,11 @@ impl LinuxExecutor {
         let (range_start, range_end, netmask) = Self::derive_dhcp_range(cidr)?;
 
         let config = format!(
-            "interface={}\nbind-interfaces\ndhcp-range={},{},{},12h\ndhcp-option=3,{}\ndhcp-option=6,{}\ndhcp-hostsfile={}\nexcept-interface=lo\nno-resolv\nserver=1.1.1.1\n",
+            "interface={}\nbind-interfaces\nport=0\ndhcp-range={},{},{},12h\ndhcp-option=3,{}\ndhcp-option=6,1.1.1.1\ndhcp-hostsfile={}\nexcept-interface=lo\nno-resolv\n",
             bridge_name,
             range_start,
             range_end,
             netmask,
-            gateway_ip,
             gateway_ip,
             hosts_path.display()
         );

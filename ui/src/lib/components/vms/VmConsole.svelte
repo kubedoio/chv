@@ -9,9 +9,10 @@
 		vmId: string;
 		consoleUrl: string;
 		getConsoleUrl?: () => Promise<string>;
+		running?: boolean;
 	}
 
-	let { vmId, consoleUrl, getConsoleUrl }: Props = $props();
+	let { vmId, consoleUrl, getConsoleUrl, running = true }: Props = $props();
 
 	let terminalEl: HTMLDivElement;
 	let terminal: Terminal;
@@ -52,7 +53,11 @@
 			return;
 		}
 		wsError = '';
-		if (socket) socket.close();
+		if (socket) {
+			socket.close();
+			// Clear terminal on reconnect so scrollback isn't duplicated
+			terminal.clear();
+		}
 		const wsUrl = buildWsUrl(url);
 		socket = new WebSocket(wsUrl);
 		socket.binaryType = 'arraybuffer';
@@ -148,12 +153,40 @@
 		URL.revokeObjectURL(url);
 	}
 
+	function showNotRunning() {
+		terminal.clear();
+		terminal.write('\r\n');
+		terminal.writeln('\x1b[33m╔════════════════════════════════════════╗\x1b[0m');
+		terminal.writeln('\x1b[33m║                                        ║\x1b[0m');
+		terminal.writeln('\x1b[33m║\x1b[0m  \x1b[1mInstance is not running\x1b[0m             \x1b[33m║\x1b[0m');
+		terminal.writeln('\x1b[33m║\x1b[0m  Start the VM to access the console.  \x1b[33m║\x1b[0m');
+		terminal.writeln('\x1b[33m║                                        ║\x1b[0m');
+		terminal.writeln('\x1b[33m╚════════════════════════════════════════╝\x1b[0m');
+		terminal.write('\r\n');
+	}
+
+	$effect(() => {
+		if (!terminal) return;
+		if (running && consoleUrl) {
+			connectWith(consoleUrl);
+		} else {
+			if (socket) {
+				socket.close();
+				socket = undefined as any;
+			}
+			connected = false;
+			statusText = running ? 'Disconnected' : 'Instance not running';
+			showNotRunning();
+		}
+	});
+
 	onMount(() => {
 		terminal = new Terminal({
 			cursorBlink: true,
 			fontSize: 14,
 			fontFamily: 'monospace',
-			allowProposedApi: true
+			allowProposedApi: true,
+			scrollback: 10000
 		});
 		fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
@@ -172,7 +205,9 @@
 			}
 		});
 
-		connectWith(consoleUrl);
+		if (!running) {
+			showNotRunning();
+		}
 	});
 
 	onDestroy(() => {

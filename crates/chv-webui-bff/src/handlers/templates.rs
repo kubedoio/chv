@@ -198,6 +198,320 @@ pub async fn delete_vm_template(
 }
 
 // ---------------------------------------------------------------------------
+// VM Template Clone / Preview
+// ---------------------------------------------------------------------------
+
+pub async fn preview_vm_template(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    Path(template_id): Path<String>,
+) -> Result<Json<Value>, BffError> {
+    let row = sqlx::query_as::<_, VMTemplateRow>(
+        r#"
+        SELECT
+            template_id,
+            name,
+            description,
+            cpu_count,
+            memory_bytes,
+            image_id,
+            network_id,
+            cloud_init_userdata,
+            created_at
+        FROM vm_templates
+        WHERE template_id = ?
+        "#,
+    )
+    .bind(&template_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to fetch vm_template: {}", e)))?;
+
+    let row = row.ok_or_else(|| BffError::NotFound(format!("vm template {} not found", template_id)))?;
+
+    Ok(Json(json!({
+        "id": row.template_id,
+        "name": row.name,
+        "description": row.description.unwrap_or_default(),
+        "vcpu": row.cpu_count,
+        "memory_mb": row.memory_bytes / (1024 * 1024),
+        "image_id": row.image_id.unwrap_or_default(),
+        "network_id": row.network_id.unwrap_or_default(),
+        "cloud_init_config": row.cloud_init_userdata,
+        "created_at": row.created_at,
+    })))
+}
+
+pub async fn clone_vm_template(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    Path(template_id): Path<String>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
+
+    let display_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing name".into()))?
+        .to_string();
+
+    // Fetch template
+    let template = sqlx::query_as::<_, VMTemplateRow>(
+        r#"
+        SELECT
+            template_id,
+            name,
+            description,
+            cpu_count,
+            memory_bytes,
+            image_id,
+            network_id,
+            cloud_init_userdata,
+            created_at
+        FROM vm_templates
+        WHERE template_id = ?
+        "#,
+    )
+    .bind(&template_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to fetch vm_template: {}", e)))?
+    .ok_or_else(|| BffError::NotFound(format!("vm template {} not found", template_id)))?;
+
+    // Pick default node
+    let node_id = sqlx::query_scalar::<_, String>(
+        "SELECT node_id FROM nodes ORDER BY enrolled_at DESC LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to query nodes: {}", e)))?
+    .ok_or_else(|| BffError::BadRequest("no nodes enrolled".into()))?;
+
+    // Resolve image_ref
+    let mut image_ref = template.image_id.clone().unwrap_or_default();
+    if !image_ref.is_empty() && image_ref != "default" {
+        if let Some(source_url) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT source_url FROM images WHERE image_id = ?"
+        )
+        .bind(&image_ref)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up image: {}", e)))?
+        .flatten()
+        {
+            if source_url.starts_with('/') {
+                image_ref = source_url;
+            }
+        }
+    }
+    if image_ref.is_empty() {
+        image_ref = "default".to_string();
+    }
+
+    // Cloud-init: custom_user_data > rendered template variables > template default
+    let cloud_init_userdata = if let Some(custom) = payload.get("custom_user_data").and_then(|v| v.as_str()) {
+        Some(custom.to_string())
+    } else {
+        let vars = payload.get("variables").and_then(|v| v.as_object());
+        if let (Some(base), Some(vars)) = (template.cloud_init_userdata.as_ref(), vars) {
+            let mut rendered = base.clone();
+            for (key, value) in vars {
+                let placeholder = format!("{{{{{}}}}}", key);
+                rendered = rendered.replace(&placeholder, value.as_str().unwrap_or(""));
+            }
+            Some(rendered)
+        } else {
+            template.cloud_init_userdata.clone()
+        }
+    };
+
+    let network_id = template.network_id.clone().unwrap_or_else(|| "default".to_string());
+    let volume_size_bytes = payload
+        .get("volume_size_gb")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(10)
+        * 1024
+        * 1024
+        * 1024;
+
+    // Enforce quota before creating anything
+    crate::handlers::vms::enforce_user_quota(
+        &state.pool,
+        &claims.username,
+        template.cpu_count,
+        template.memory_bytes,
+        volume_size_bytes,
+    )
+    .await?;
+
+    let vm_id = chv_common::gen_short_id();
+    let volume_id = chv_common::gen_short_id();
+    let operation_id = chv_common::gen_short_id();
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    // Insert VM
+    sqlx::query(
+        r#"
+        INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&vm_id)
+    .bind(&node_id)
+    .bind(&display_name)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
+
+    // Insert VM desired state
+    sqlx::query(
+        r#"
+        INSERT INTO vm_desired_state (vm_id, desired_generation, desired_status, desired_power_state, requested_by, target_node_id, cpu_count, memory_bytes, image_ref, cloud_init_userdata, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', 'Running', ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&vm_id)
+    .bind(&claims.username)
+    .bind(&node_id)
+    .bind(template.cpu_count)
+    .bind(template.memory_bytes)
+    .bind(&image_ref)
+    .bind(&cloud_init_userdata)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
+
+    // Insert volume
+    sqlx::query(
+        r#"
+        INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, updated_at)
+        VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&volume_id)
+    .bind(&node_id)
+    .bind(format!("{}-disk", display_name))
+    .bind(volume_size_bytes)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert volume: {}", e)))?;
+
+    // Insert volume desired state
+    sqlx::query(
+        r#"
+        INSERT INTO volume_desired_state (volume_id, desired_generation, desired_status, requested_by, attached_vm_id, device_name, read_only, requested_at, updated_at)
+        VALUES (?, 1, 'Pending', ?, ?, 'vda', 0, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&volume_id)
+    .bind(&claims.username)
+    .bind(&vm_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert volume_desired_state: {}", e)))?;
+
+    // Ensure network exists
+    let network_exists: Option<String> =
+        sqlx::query_scalar("SELECT network_id FROM networks WHERE network_id = ?")
+            .bind(&network_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check network: {}", e)))?;
+
+    if network_exists.is_none() {
+        sqlx::query(
+            r#"
+            INSERT INTO networks (network_id, node_id, display_name, updated_at)
+            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            "#,
+        )
+        .bind(&network_id)
+        .bind(&node_id)
+        .bind(format!("network-{}", network_id))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to insert network: {}", e)))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO network_desired_state (
+                network_id, desired_generation, desired_status,
+                cidr, gateway, dhcp_enabled, ipam_mode, is_default,
+                requested_by, requested_at, updated_at
+            )
+            VALUES (?, 1, 'Pending', '10.200.0.0/24', '10.200.0.1', 1, 'internal', 0, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            "#,
+        )
+        .bind(&network_id)
+        .bind(&claims.username)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
+    }
+
+    // Fetch network CIDR for IP generation
+    let network_cidr: String = sqlx::query_scalar(
+        "SELECT COALESCE(cidr, '') FROM network_desired_state WHERE network_id = ?"
+    )
+    .bind(&network_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to fetch network cidr: {}", e)))?;
+
+    // Insert NIC
+    let nic_id = format!("{}-{}", vm_id, network_id);
+    let mac_address = crate::handlers::vms::generate_mac(&vm_id, &network_id);
+    let ip_address = crate::handlers::vms::generate_ip(&vm_id, &network_id, &network_cidr);
+
+    sqlx::query(
+        r#"
+        INSERT INTO vm_nic_desired_state (nic_id, vm_id, network_id, mac_address, ip_address, nic_model, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'virtio', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&nic_id)
+    .bind(&vm_id)
+    .bind(&network_id)
+    .bind(&mac_address)
+    .bind(&ip_address)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert vm_nic_desired_state: {}", e)))?;
+
+    // Insert operation
+    let idempotency_key = format!("clone-vm-{}", vm_id);
+    sqlx::query(
+        r#"
+        INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
+        VALUES (?, ?, 'vm', ?, 'CreateVm', 'Accepted', ?, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&operation_id)
+    .bind(&idempotency_key)
+    .bind(&vm_id)
+    .bind(&claims.username)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
+
+    Ok(Json(json!({
+        "vm_id": vm_id,
+        "name": display_name,
+        "operation_id": operation_id,
+        "status": "Accepted",
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // Cloud-init Templates
 // ---------------------------------------------------------------------------
 
@@ -327,6 +641,45 @@ pub async fn delete_cloud_init_template(
     Ok(Json(json!({
         "deleted": true,
         "id": template_id,
+    })))
+}
+
+pub async fn render_cloud_init_template(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    Path(template_id): Path<String>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let row = sqlx::query_as::<_, CloudInitTemplateRow>(
+        r#"
+        SELECT
+            template_id,
+            name,
+            description,
+            content,
+            created_at
+        FROM cloud_init_templates
+        WHERE template_id = ?
+        "#,
+    )
+    .bind(&template_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to fetch cloud_init_template: {}", e)))?
+    .ok_or_else(|| BffError::NotFound(format!("cloud-init template {} not found", template_id)))?;
+
+    let mut rendered = row.content;
+    if let Some(vars) = payload.get("variables").and_then(|v| v.as_object()) {
+        for (key, value) in vars {
+            let placeholder = format!("{{{{{}}}}}", key);
+            rendered = rendered.replace(&placeholder, value.as_str().unwrap_or(""));
+        }
+    }
+
+    Ok(Json(json!({
+        "rendered": rendered,
+        "template_id": template_id,
+        "template_name": row.name,
     })))
 }
 

@@ -340,6 +340,16 @@ button,
   border-color: var(--shell-line-strong);
 }
 
+.btn-danger {
+  background-color: var(--color-danger);
+  color: white;
+  border-color: var(--color-danger);
+}
+
+.btn-danger:hover {
+  opacity: 0.9;
+}
+
 .btn-sm {
   padding: 0.25rem 0.5rem;
   font-size: var(--text-xs);

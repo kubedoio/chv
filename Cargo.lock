@@ -394,6 +394,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "rand 0.9.4",
+ "serde",
  "sha2",
 ]
 
@@ -432,6 +433,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bcrypt",
+ "chv-agent-core",
  "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",

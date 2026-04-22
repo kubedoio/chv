@@ -6,7 +6,10 @@ use axum::{
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
@@ -14,12 +17,14 @@ use tokio::net::TcpListener;
 pub struct ConsoleServer {
     vm_runtime: crate::vm_runtime::VmRuntime,
     jwt_secret: String,
+    rate_limiter: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[derive(Clone)]
 struct ConsoleState {
     vm_runtime: crate::vm_runtime::VmRuntime,
     jwt_secret: String,
+    rate_limiter: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -43,13 +48,18 @@ struct Claims {
 
 impl ConsoleServer {
     pub fn new(vm_runtime: crate::vm_runtime::VmRuntime, jwt_secret: String) -> Self {
-        Self { vm_runtime, jwt_secret }
+        Self {
+            vm_runtime,
+            jwt_secret,
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn run(self, bind: &str) -> Result<(), chv_errors::ChvError> {
         let state = ConsoleState {
             vm_runtime: self.vm_runtime.clone(),
             jwt_secret: self.jwt_secret.clone(),
+            rate_limiter: self.rate_limiter.clone(),
         };
         let app = Router::new()
             .route("/vms/:vm_id/console", get(Self::ws_handler))
@@ -72,6 +82,20 @@ impl ConsoleServer {
         Query(params): Query<ConsoleParams>,
         ws: WebSocketUpgrade,
     ) -> Response {
+        // Per-VM rate limiting: max 1 connection attempt per 2 seconds
+        const RATE_LIMIT_SECS: u64 = 2;
+        {
+            let mut limits = state.rate_limiter.lock().unwrap();
+            let now = Instant::now();
+            if let Some(last) = limits.get(&vm_id) {
+                if now.duration_since(*last) < Duration::from_secs(RATE_LIMIT_SECS) {
+                    tracing::warn!(vm_id = %vm_id, "console connection rate limited");
+                    return StatusCode::TOO_MANY_REQUESTS.into_response();
+                }
+            }
+            limits.insert(vm_id.clone(), now);
+        }
+
         // Decode and validate JWT
         match validate_console_token(&params.token, &state.jwt_secret) {
             Ok(_) => {}
@@ -128,6 +152,19 @@ impl ConsoleServer {
         };
 
         let (mut ws_tx, mut ws_rx) = socket.split();
+
+        // Send scrollback history before subscribing to live feed so the
+        // client sees previous console output immediately on connect.
+        if let Some(scrollback) = vm_runtime.pty_scrollback(&vm_id) {
+            const CHUNK_SIZE: usize = 32 * 1024;
+            for chunk in scrollback.chunks(CHUNK_SIZE) {
+                let msg = axum::extract::ws::Message::Binary(chunk.to_vec());
+                if ws_tx.send(msg).await.is_err() {
+                    drop(pty_fd);
+                    return;
+                }
+            }
+        }
 
         // PTY broadcast → WebSocket
         let mut read_task = tokio::spawn(async move {

@@ -606,47 +606,47 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     },
     // VM Templates
     listVMTemplates() {
-      return request<VMTemplate[]>('/api/v1/vm-templates');
+      return request<VMTemplate[]>('/v1/vm-templates');
     },
     createVMTemplate(data: CreateVMTemplateInput) {
-      return request<VMTemplate>('/api/v1/vm-templates', {
+      return request<VMTemplate>('/v1/vm-templates', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     getVMTemplate(id: string) {
-      return request<VMTemplate>(`/api/v1/vm-templates/${id}`);
+      return request<VMTemplate>(`/v1/vm-templates/${id}`);
     },
     deleteVMTemplate(id: string) {
-      return request<void>(`/api/v1/vm-templates/${id}`, { method: 'DELETE' });
+      return request<void>(`/v1/vm-templates/${id}`, { method: 'DELETE' });
     },
     cloneFromTemplate(templateId: string, data: CloneFromTemplateInput) {
-      return request<VM>(`/api/v1/vm-templates/${templateId}/clone`, {
+      return request<VM>(`/v1/vm-templates/${templateId}/clone`, {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     previewVMTemplate(id: string) {
-      return request<VMTemplate>(`/api/v1/vm-templates/${id}/preview`);
+      return request<VMTemplate>(`/v1/vm-templates/${id}/preview`);
     },
     // Cloud-init Templates
     listCloudInitTemplates() {
-      return request<CloudInitTemplate[]>('/api/v1/cloud-init-templates');
+      return request<CloudInitTemplate[]>('/v1/cloud-init-templates');
     },
     getCloudInitTemplate(id: string) {
-      return request<CloudInitTemplate>(`/api/v1/cloud-init-templates/${id}`);
+      return request<CloudInitTemplate>(`/v1/cloud-init-templates/${id}`);
     },
     createCloudInitTemplate(data: CreateCloudInitTemplateInput) {
-      return request<CloudInitTemplate>('/api/v1/cloud-init-templates', {
+      return request<CloudInitTemplate>('/v1/cloud-init-templates', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     deleteCloudInitTemplate(id: string) {
-      return request<void>(`/api/v1/cloud-init-templates/${id}`, { method: 'DELETE' });
+      return request<void>(`/v1/cloud-init-templates/${id}`, { method: 'DELETE' });
     },
     renderCloudInitTemplate(templateId: string, data: RenderCloudInitTemplateInput) {
-      return request<RenderCloudInitTemplateResponse>(`/api/v1/cloud-init-templates/${templateId}/render`, {
+      return request<RenderCloudInitTemplateResponse>(`/v1/cloud-init-templates/${templateId}/render`, {
         method: 'POST',
         body: JSON.stringify(data)
       });
@@ -753,40 +753,40 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     },
     // Quota endpoints
     listQuotas() {
-      return request<Quota[]>('/api/v1/quotas');
+      return request<Quota[]>('/v1/quotas');
     },
     createQuota(data: SetQuotaInput) {
-      return request<Quota>('/api/v1/quotas', {
+      return request<Quota>('/v1/quotas/create', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     getQuota(userId: string) {
-      return request<Quota>(`/api/v1/quotas/${userId}`);
+      return request<Quota>(`/v1/quotas/${userId}`);
     },
     getMyQuota() {
-      return request<Quota>('/api/v1/quotas/me');
+      return request<Quota>('/v1/quotas/me');
     },
     updateQuota(userId: string, data: UpdateQuotaInput) {
-      return request<Quota>(`/api/v1/quotas/${userId}`, {
+      return request<Quota>(`/v1/quotas/${userId}`, {
         method: 'PATCH',
         body: JSON.stringify(data)
       });
     },
     getUsage() {
-      return request<UsageWithQuota>('/api/v1/usage');
+      return request<UsageWithQuota>('/v1/usage');
     },
     getUserUsage(userId: string) {
-      return request<UsageWithQuota>(`/api/v1/quotas/${userId}/usage`);
+      return request<UsageWithQuota>(`/v1/quotas/${userId}/usage`);
     },
     checkQuota(data: CheckQuotaRequest) {
-      return request<CheckQuotaResponse>('/api/v1/quotas/check', {
+      return request<CheckQuotaResponse>('/v1/quotas/check', {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
     deleteQuota(userId: string) {
-      return request<{ success: boolean }>(`/api/v1/quotas/${userId}`, {
+      return request<{ success: boolean }>(`/v1/quotas/${userId}`, {
         method: 'DELETE'
       });
     }
