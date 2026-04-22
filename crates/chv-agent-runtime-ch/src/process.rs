@@ -363,6 +363,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             .parent()
             .expect("api_socket_path must have a parent directory");
 
+        // Ensure the VM runtime directory exists so CHV can create its API socket
+        // and we can capture stderr logs even when cloud-init seeding is skipped.
+        if let Err(e) = tokio::fs::create_dir_all(vm_runtime_dir).await {
+            warn!(vm_id = %config.vm_id, error = %e, path = %vm_runtime_dir.display(), "failed to create vm runtime dir");
+        }
+
         // Build cloud-init seed ISO for every VM that has NICs or explicit userdata.
         // The ISO carries the control-plane-assigned static IP configuration so
         // cloud-init images (e.g. Ubuntu cloud images) come up on the correct network.
@@ -482,9 +488,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             "boot_vcpus": config.cpus,
             "max_vcpus": config.cpus,
         });
-        if let Some(true) = hv.and_then(|h| h.cpu_nested) {
-            cpus["topology"] = serde_json::json!({ "threads_per_core": 1 });
-        }
         if let Some(true) = hv.and_then(|h| h.cpu_amx) {
             cpus["features"] = serde_json::json!({ "amx": true });
         }
@@ -539,11 +542,19 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             vm_config_json["rng"] = serde_json::json!({ "src": src });
         }
         if let Some(ref tpm_type) = hv.and_then(|h| h.tpm_type.as_ref()) {
-            let mut tpm = serde_json::json!({ "type": tpm_type });
-            if let Some(ref path) = hv.and_then(|h| h.tpm_socket_path.as_ref()) {
-                tpm["socket"] = serde_json::json!(path);
-            }
-            vm_config_json["tpm"] = tpm;
+            let tpm_socket = hv
+                .and_then(|h| h.tpm_socket_path.as_ref())
+                .cloned()
+                .unwrap_or_else(|| {
+                    vm_runtime_dir
+                        .join("tpm.sock")
+                        .to_string_lossy()
+                        .to_string()
+                });
+            vm_config_json["tpm"] = serde_json::json!({
+                "type": tpm_type,
+                "socket": tpm_socket,
+            });
         }
 
         let body = vm_config_json.to_string();
