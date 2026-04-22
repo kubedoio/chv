@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+chv-agent-core = { path = "../chv-agent-core" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-errors = { path = "../chv-errors" }

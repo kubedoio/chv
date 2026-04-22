@@ -37,6 +37,10 @@ export const BFFEndpoints = {
 	importImage: '/v1/images/import',
 	getMaintenance: '/v1/maintenance',
 	getSettings: '/v1/settings',
+	getHypervisorSettings: '/v1/settings/hypervisor',
+	updateHypervisorSettings: '/v1/settings/hypervisor/update',
+	applyHypervisorProfile: '/v1/settings/hypervisor/apply-profile',
+	listHypervisorProfiles: '/v1/settings/hypervisor/profiles',
 	listFirewallRules: '/v1/firewall-rules',
 	createFirewallRule: '/v1/firewall-rules/create',
 	deleteFirewallRule: '/v1/firewall-rules/delete'

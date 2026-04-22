@@ -539,6 +539,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             nics,
             api_socket_path: vm_dir.join("vm.sock"),
             cloud_init_userdata: vm_spec.cloud_init_userdata.clone(),
+            hypervisor_overrides: vm_spec.hypervisor_overrides.clone(),
         };
         self.vm_runtime
             .create_vm(&vm.vm_id, &meta.desired_state_version, &config, Some(op_id))
@@ -1905,6 +1906,7 @@ mod tests {
             nics: vec![],
             api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         runtime
             .create_vm("vm-1", "1", &config, Some("op-1"))
@@ -1982,6 +1984,7 @@ mod tests {
             nics: vec![],
             api_socket_path: std::path::PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         server
             .vm_runtime

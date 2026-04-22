@@ -7,3 +7,4 @@ edition = "2021"
 rand = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
+serde = { workspace = true }

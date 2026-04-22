@@ -1,9 +1,12 @@
+use chv_common::hypervisor;
 use chv_errors::ChvError;
 use serde::Deserialize;
 
 fn default_running() -> String {
     "Running".to_string()
 }
+
+pub use chv_common::hypervisor::HypervisorOverrides;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct VmSpec {
@@ -21,6 +24,8 @@ pub struct VmSpec {
     pub desired_state: String,
     #[serde(default)]
     pub cloud_init_userdata: Option<String>,
+    #[serde(default)]
+    pub hypervisor_overrides: Option<HypervisorOverrides>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -71,6 +76,38 @@ impl VmSpec {
                 return Err(ChvError::InvalidArgument {
                     field: "mac_address".to_string(),
                     reason: "mac_address is required".to_string(),
+                });
+            }
+        }
+        if let Some(ref hv) = self.hypervisor_overrides {
+            if let Some(ref src) = hv.rng_src {
+                hypervisor::validate_rng_src(src).map_err(|e| ChvError::InvalidArgument {
+                    field: "rng_src".to_string(),
+                    reason: e,
+                })?;
+            }
+            if let Some(ref mode) = hv.serial_mode {
+                hypervisor::validate_serial_mode(mode).map_err(|e| ChvError::InvalidArgument {
+                    field: "serial_mode".to_string(),
+                    reason: e,
+                })?;
+            }
+            if let Some(ref mode) = hv.console_mode {
+                hypervisor::validate_console_mode(mode).map_err(|e| ChvError::InvalidArgument {
+                    field: "console_mode".to_string(),
+                    reason: e,
+                })?;
+            }
+            if let Some(ref tpm) = hv.tpm_type {
+                hypervisor::validate_tpm_type(tpm).map_err(|e| ChvError::InvalidArgument {
+                    field: "tpm_type".to_string(),
+                    reason: e,
+                })?;
+            }
+            if hv.tpm_type.is_none() && hv.tpm_socket_path.is_some() {
+                return Err(ChvError::InvalidArgument {
+                    field: "tpm_socket_path".to_string(),
+                    reason: "tpm_socket_path cannot be set without tpm_type".to_string(),
                 });
             }
         }
@@ -131,6 +168,7 @@ mod tests {
             nics: vec![],
             desired_state: "Running".to_string(),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         let err = spec.validate().unwrap_err();
         match err {
@@ -152,6 +190,7 @@ mod tests {
             nics: vec![],
             desired_state: "Running".to_string(),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         let err = spec.validate().unwrap_err();
         match err {
@@ -180,6 +219,7 @@ mod tests {
             }],
             desired_state: "Running".to_string(),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         let err = spec.validate().unwrap_err();
         match err {

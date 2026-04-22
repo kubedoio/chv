@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod hypervisor;
+
 pub mod types {
     use std::collections::HashMap;
 

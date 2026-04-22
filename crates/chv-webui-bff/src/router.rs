@@ -127,6 +127,22 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/settings",
             post(crate::handlers::settings::get_settings),
         )
+        .route(
+            "/v1/settings/hypervisor",
+            post(crate::handlers::hypervisor_settings::get_settings),
+        )
+        .route(
+            "/v1/settings/hypervisor/update",
+            post(crate::handlers::hypervisor_settings::update_settings),
+        )
+        .route(
+            "/v1/settings/hypervisor/apply-profile",
+            post(crate::handlers::hypervisor_settings::apply_profile),
+        )
+        .route(
+            "/v1/settings/hypervisor/profiles",
+            post(crate::handlers::hypervisor_settings::list_profiles),
+        )
         .route("/v1/volumes", post(crate::handlers::volumes::list_volumes))
         .route(
             "/v1/volumes/get",
@@ -166,7 +182,12 @@ pub fn bff_router() -> Router<AppState> {
         )
         .route(
             "/v1/vm-templates/:id",
-            delete(crate::handlers::templates::delete_vm_template),
+            get(crate::handlers::templates::preview_vm_template)
+                .delete(crate::handlers::templates::delete_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/:id/clone",
+            post(crate::handlers::templates::clone_vm_template),
         )
         // Cloud-init Templates
         .route(
@@ -177,6 +198,10 @@ pub fn bff_router() -> Router<AppState> {
         .route(
             "/v1/cloud-init-templates/:id",
             delete(crate::handlers::templates::delete_cloud_init_template),
+        )
+        .route(
+            "/v1/cloud-init-templates/:id/render",
+            post(crate::handlers::templates::render_cloud_init_template),
         )
         // Firewall Rules
         .route(
@@ -208,6 +233,31 @@ pub fn bff_router() -> Router<AppState> {
             "/v1/vms/snapshots/restore",
             post(crate::handlers::snapshots::restore_snapshot),
         )
+        // Quotas
+        .route("/v1/quotas", post(crate::handlers::quotas::list_quotas))
+        .route("/api/v1/quotas", post(crate::handlers::quotas::list_quotas))
+        .route("/v1/quotas/me", post(crate::handlers::quotas::get_my_quota))
+        .route("/api/v1/quotas/me", post(crate::handlers::quotas::get_my_quota))
+        .route("/v1/quotas/create", post(crate::handlers::quotas::create_quota))
+        .route("/api/v1/quotas/create", post(crate::handlers::quotas::create_quota))
+        .route(
+            "/v1/quotas/:user_id",
+            get(crate::handlers::quotas::get_quota)
+                .patch(crate::handlers::quotas::update_quota)
+                .delete(crate::handlers::quotas::delete_quota),
+        )
+        .route(
+            "/api/v1/quotas/:user_id",
+            get(crate::handlers::quotas::get_quota)
+                .patch(crate::handlers::quotas::update_quota)
+                .delete(crate::handlers::quotas::delete_quota),
+        )
+        .route("/v1/quotas/:user_id/usage", post(crate::handlers::quotas::get_usage))
+        .route("/api/v1/quotas/:user_id/usage", post(crate::handlers::quotas::get_usage))
+        .route("/v1/usage", post(crate::handlers::quotas::get_usage))
+        .route("/api/v1/usage", post(crate::handlers::quotas::get_usage))
+        .route("/v1/quotas/check", post(crate::handlers::quotas::check_quota))
+        .route("/api/v1/quotas/check", post(crate::handlers::quotas::check_quota))
         // API Tokens
         .route("/v1/tokens", post(crate::handlers::tokens::list_tokens))
         .route(

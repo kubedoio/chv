@@ -7,6 +7,7 @@
 	import { listNetworks } from '$lib/bff/networks';
 	import { getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
+	import type { HypervisorSettings } from '$lib/bff/types';
 
 	interface Props {
 		open?: boolean;
@@ -38,6 +39,10 @@
 	let username = $state('admin');
 	let sshKey = $state('');
 
+	// Advanced hypervisor overrides
+	let advancedOpen = $state(false);
+	let hvOverrides = $state<Record<string, boolean | undefined>>({});
+
 	let submitting = $state(false);
 	let formError = $state('');
 
@@ -57,6 +62,8 @@
 		userData = '#cloud-config\n';
 		username = 'admin';
 		sshKey = '';
+		advancedOpen = false;
+		hvOverrides = {};
 		formError = '';
 		nameError = '';
 	}
@@ -165,6 +172,11 @@
 			cloudInitUserdata = parts.join('\n') + '\n';
 		}
 
+		const overrides: Record<string, boolean> = {};
+		for (const [key, value] of Object.entries(hvOverrides)) {
+			if (value !== undefined) overrides[key] = value;
+		}
+
 		const data = {
 			name: name.trim(),
 			image_id: imageId,
@@ -173,7 +185,8 @@
 			memory_mb: memoryMb,
 			volume_size_gb: volumeSizeGb,
 			requested_by: 'webui',
-			...(cloudInitUserdata ? { cloud_init_userdata: cloudInitUserdata } : {})
+			...(cloudInitUserdata ? { cloud_init_userdata: cloudInitUserdata } : {}),
+			...(Object.keys(overrides).length > 0 ? { hypervisor_overrides: overrides } : {})
 		};
 
 		try {
@@ -193,6 +206,16 @@
 	// Get selected items for review
 	const selectedImage = $derived(images.find((i) => i.image_id === imageId) ?? { name: imageId || '—' });
 	const selectedNetwork = $derived(networks.find((n) => n.network_id === networkId) ?? { name: networkId || '—' });
+
+	// Hypervisor override summary
+	const overrideCount = $derived(Object.values(hvOverrides).filter((v) => v !== undefined).length);
+	const overrideSummary = $derived(() => {
+		if (overrideCount === 0) return 'Inherit global settings';
+		const entries = Object.entries(hvOverrides)
+			.filter(([, v]) => v !== undefined)
+			.map(([k, v]) => `${k}=${v}`);
+		return `Custom (${overrideCount} override${overrideCount === 1 ? '' : 's'}): ${entries.join(', ')}`;
+	});
 
 	// Reset form when modal closes; load data when it opens
 	$effect(() => {
@@ -311,6 +334,56 @@
 					disabled={submitting}
 				/>
 			</FormField>
+
+			<!-- Advanced hypervisor overrides -->
+			<div class="pt-2">
+				<button
+					type="button"
+					onclick={() => (advancedOpen = !advancedOpen)}
+					class="flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
+					disabled={submitting}
+				>
+					<span>Advanced Hypervisor Overrides</span>
+					{#if advancedOpen}
+						<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+					{:else}
+						<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+					{/if}
+				</button>
+
+				{#if advancedOpen}
+					<div class="mt-3 space-y-3 rounded border border-line bg-chrome/40 p-3">
+						<p class="text-xs text-muted">Select "Inherit" to use the global setting, or explicitly override for this VM.</p>
+
+						{#each [
+							{ key: 'cpu_nested', label: 'Nested Virtualization' },
+							{ key: 'memory_hugepages', label: 'Hugepages' },
+							{ key: 'iommu', label: 'IOMMU' },
+							{ key: 'watchdog', label: 'Watchdog' }
+						] as item}
+							<div class="flex items-center justify-between gap-3">
+								<span class="text-sm text-ink">{item.label}</span>
+								<select
+									value={hvOverrides[item.key] === undefined ? '' : String(hvOverrides[item.key])}
+									onchange={(e) => {
+										const val = e.currentTarget.value;
+										hvOverrides = {
+											...hvOverrides,
+											[item.key]: val === '' ? undefined : val === 'true'
+										};
+									}}
+									class="h-8 rounded border border-[#CCCCCC] bg-white px-2 py-1 text-sm"
+									disabled={submitting}
+								>
+									<option value="">Inherit global</option>
+									<option value="true">On</option>
+									<option value="false">Off</option>
+								</select>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		</form>
 	{:else if step === 2}
 		<form id="create-vm-step2" class="space-y-5">
@@ -372,6 +445,10 @@
 				<div class="flex justify-between border-b border-line pb-2">
 					<span class="text-muted">Username:</span>
 					<span class="font-medium text-ink">{username}</span>
+				</div>
+				<div class="flex justify-between border-b border-line pb-2">
+					<span class="text-muted">Hypervisor:</span>
+					<span class="font-medium text-ink">{overrideSummary()}</span>
 				</div>
 			</div>
 

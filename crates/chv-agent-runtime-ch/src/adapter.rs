@@ -32,6 +32,7 @@ pub struct VmConfig {
     pub nics: Vec<VmNicConfig>,
     pub api_socket_path: PathBuf,
     pub cloud_init_userdata: Option<String>,
+    pub hypervisor_overrides: Option<chv_common::hypervisor::HypervisorOverrides>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +159,10 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
     }
 
     fn pty_output_rx(&self, _vm_id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        None
+    }
+
+    fn pty_scrollback(&self, _vm_id: &str) -> Option<Vec<u8>> {
         None
     }
 }

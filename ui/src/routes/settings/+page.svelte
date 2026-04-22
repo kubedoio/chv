@@ -12,7 +12,8 @@
 		History, 
 		Lock,
 		Terminal,
-		User
+		User,
+		Cpu
 	} from 'lucide-svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
@@ -90,6 +91,10 @@
 							<Lock size={14} />
 							Rotate Root Keys
 						</button>
+						<a href="/settings/hypervisor" class="btn-secondary w-full justify-start">
+							<Cpu size={14} />
+							Hypervisor Settings
+						</a>
 						<button class="btn-secondary w-full justify-start">
 							<UsersIcon size={14} />
 							Invite Operator

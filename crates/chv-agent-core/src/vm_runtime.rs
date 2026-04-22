@@ -46,6 +46,10 @@ impl VmRuntime {
         self.adapter.pty_output_rx(vm_id)
     }
 
+    pub fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
+        self.adapter.pty_scrollback(vm_id)
+    }
+
     pub async fn create_vm(
         &self,
         vm_id: impl Into<String>,
@@ -306,6 +310,7 @@ mod tests {
             nics: vec![],
             api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -329,6 +334,7 @@ mod tests {
             nics: vec![],
             api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -352,6 +358,7 @@ mod tests {
             nics: vec![],
             api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
@@ -373,6 +380,7 @@ mod tests {
             nics: vec![],
             api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await

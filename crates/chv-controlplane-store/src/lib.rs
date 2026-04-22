@@ -3,6 +3,7 @@ mod bootstrap_tokens;
 mod db;
 mod desired_state;
 mod events;
+mod hypervisor_settings;
 mod network_exposures;
 mod nodes;
 mod observed_state;
@@ -19,6 +20,7 @@ pub use desired_state::{
     VolumeAttachmentPatchInput, VolumeDesiredStateInput, VolumeResizePatchInput,
 };
 pub use events::{EventAppendInput, EventRepository};
+pub use hypervisor_settings::{HypervisorSettingsPatchInput, HypervisorSettingsRepository, HypervisorProfileRow, HypervisorSettingsRow};
 pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
 pub use nodes::{
     NodeBootstrapResultInput, NodeDrainIntentInput, NodeInventoryInput, NodeRepository,

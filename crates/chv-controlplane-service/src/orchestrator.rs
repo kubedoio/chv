@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
+use chv_common::hypervisor::HypervisorOverrides;
+
 /// Background task that polls for accepted operations and dispatches them to node agents.
 pub struct Orchestrator {
     pool: StorePool,
@@ -178,6 +180,18 @@ impl Orchestrator {
                         &row.resource_id,
                         &generation,
                         false,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "ForceStopVm" => {
+                client
+                    .stop_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        true,
                         &row.operation_id,
                         None,
                     )
@@ -403,7 +417,23 @@ impl Orchestrator {
                 vds.memory_bytes,
                 vds.image_ref,
                 vds.desired_power_state,
-                vds.cloud_init_userdata
+                vds.cloud_init_userdata,
+                v.hv_cpu_nested,
+                v.hv_cpu_amx,
+                v.hv_cpu_kvm_hyperv,
+                v.hv_memory_mergeable,
+                v.hv_memory_hugepages,
+                v.hv_memory_shared,
+                v.hv_memory_prefault,
+                v.hv_iommu,
+                v.hv_rng_src,
+                v.hv_watchdog,
+                v.hv_landlock_enable,
+                v.hv_serial_mode,
+                v.hv_console_mode,
+                v.hv_pvpanic,
+                v.hv_tpm_type,
+                v.hv_tpm_socket_path
             FROM vms v
             JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
             WHERE v.vm_id = ?
@@ -419,6 +449,30 @@ impl Orchestrator {
             resource: "vm_desired_state".to_string(),
             id: vm_id.to_string(),
         })?;
+
+        let global = sqlx::query_as::<_, HypervisorSettingsRow>(
+            "SELECT * FROM hypervisor_settings WHERE id = 1"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or_else(|_| HypervisorSettingsRow {
+            cpu_nested: chv_common::hypervisor::DEFAULT_CPU_NESTED,
+            cpu_amx: chv_common::hypervisor::DEFAULT_CPU_AMX,
+            cpu_kvm_hyperv: chv_common::hypervisor::DEFAULT_CPU_KVM_HYPERV,
+            memory_mergeable: chv_common::hypervisor::DEFAULT_MEMORY_MERGEABLE,
+            memory_hugepages: chv_common::hypervisor::DEFAULT_MEMORY_HUGEPAGES,
+            memory_shared: chv_common::hypervisor::DEFAULT_MEMORY_SHARED,
+            memory_prefault: chv_common::hypervisor::DEFAULT_MEMORY_PREFAULT,
+            iommu: chv_common::hypervisor::DEFAULT_IOMMU,
+            rng_src: chv_common::hypervisor::DEFAULT_RNG_SRC.to_string(),
+            watchdog: chv_common::hypervisor::DEFAULT_WATCHDOG,
+            landlock_enable: chv_common::hypervisor::DEFAULT_LANDLOCK_ENABLE,
+            serial_mode: chv_common::hypervisor::DEFAULT_SERIAL_MODE.to_string(),
+            console_mode: chv_common::hypervisor::DEFAULT_CONSOLE_MODE.to_string(),
+            pvpanic: chv_common::hypervisor::DEFAULT_PVPANIC,
+            tpm_type: None,
+            tpm_socket_path: None,
+        });
 
         let volume_rows = sqlx::query_as::<_, VolumeDesiredStateRow>(
             r#"
@@ -520,6 +574,25 @@ impl Orchestrator {
             .desired_power_state
             .unwrap_or_else(|| "Running".to_string());
 
+        let overrides = HypervisorOverrides {
+            cpu_nested: Some(vm_row.hv_cpu_nested.unwrap_or(global.cpu_nested)),
+            cpu_amx: Some(vm_row.hv_cpu_amx.unwrap_or(global.cpu_amx)),
+            cpu_kvm_hyperv: Some(vm_row.hv_cpu_kvm_hyperv.unwrap_or(global.cpu_kvm_hyperv)),
+            memory_mergeable: Some(vm_row.hv_memory_mergeable.unwrap_or(global.memory_mergeable)),
+            memory_hugepages: Some(vm_row.hv_memory_hugepages.unwrap_or(global.memory_hugepages)),
+            memory_shared: Some(vm_row.hv_memory_shared.unwrap_or(global.memory_shared)),
+            memory_prefault: Some(vm_row.hv_memory_prefault.unwrap_or(global.memory_prefault)),
+            iommu: Some(vm_row.hv_iommu.unwrap_or(global.iommu)),
+            rng_src: Some(vm_row.hv_rng_src.unwrap_or_else(|| global.rng_src.clone())),
+            watchdog: Some(vm_row.hv_watchdog.unwrap_or(global.watchdog)),
+            landlock_enable: Some(vm_row.hv_landlock_enable.unwrap_or(global.landlock_enable)),
+            serial_mode: Some(vm_row.hv_serial_mode.unwrap_or_else(|| global.serial_mode.clone())),
+            console_mode: Some(vm_row.hv_console_mode.unwrap_or_else(|| global.console_mode.clone())),
+            pvpanic: Some(vm_row.hv_pvpanic.unwrap_or(global.pvpanic)),
+            tpm_type: vm_row.hv_tpm_type.clone().or_else(|| global.tpm_type.clone()),
+            tpm_socket_path: vm_row.hv_tpm_socket_path.clone().or_else(|| global.tpm_socket_path.clone()),
+        };
+
         let spec = AgentVmSpec {
             name: vm_row.display_name.unwrap_or_else(|| vm_id.to_string()),
             cpus: vm_row.cpu_count.unwrap_or(1) as u32,
@@ -531,6 +604,7 @@ impl Orchestrator {
             nics,
             desired_state,
             cloud_init_userdata: vm_row.cloud_init_userdata,
+            hypervisor_overrides: Some(overrides),
         };
 
         serde_json::to_string(&spec).map_err(|e| ChvError::Internal {
@@ -589,6 +663,42 @@ struct VmDesiredStateRow {
     image_ref: Option<String>,
     desired_power_state: Option<String>,
     cloud_init_userdata: Option<String>,
+    hv_cpu_nested: Option<bool>,
+    hv_cpu_amx: Option<bool>,
+    hv_cpu_kvm_hyperv: Option<bool>,
+    hv_memory_mergeable: Option<bool>,
+    hv_memory_hugepages: Option<bool>,
+    hv_memory_shared: Option<bool>,
+    hv_memory_prefault: Option<bool>,
+    hv_iommu: Option<bool>,
+    hv_rng_src: Option<String>,
+    hv_watchdog: Option<bool>,
+    hv_landlock_enable: Option<bool>,
+    hv_serial_mode: Option<String>,
+    hv_console_mode: Option<String>,
+    hv_pvpanic: Option<bool>,
+    hv_tpm_type: Option<String>,
+    hv_tpm_socket_path: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct HypervisorSettingsRow {
+    cpu_nested: bool,
+    cpu_amx: bool,
+    cpu_kvm_hyperv: bool,
+    memory_mergeable: bool,
+    memory_hugepages: bool,
+    memory_shared: bool,
+    memory_prefault: bool,
+    iommu: bool,
+    rng_src: String,
+    watchdog: bool,
+    landlock_enable: bool,
+    serial_mode: String,
+    console_mode: String,
+    pvpanic: bool,
+    tpm_type: Option<String>,
+    tpm_socket_path: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -626,6 +736,8 @@ struct AgentVmSpec {
     desired_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     cloud_init_userdata: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hypervisor_overrides: Option<HypervisorOverrides>,
 }
 
 #[derive(serde::Serialize)]

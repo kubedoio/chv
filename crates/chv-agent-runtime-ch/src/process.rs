@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -14,11 +16,23 @@ use tracing::{info, warn};
 
 use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo};
 
+const CONSOLE_SCROLLBACK_BYTES: usize = 256 * 1024;
+
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 struct VmProcess {
     api_socket: std::path::PathBuf,
     child: Child,
     pty_master: OwnedFd,
     pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    pty_scrollback: Arc<std::sync::Mutex<Vec<u8>>>,
+    broadcaster_alive: Arc<AtomicBool>,
     last_cpu_seconds: f64,
     last_cpu_at: Option<std::time::Instant>,
 }
@@ -286,6 +300,45 @@ fn parse_http_status(response_bytes: &[u8]) -> Option<u16> {
     parts.get(1)?.parse::<u16>().ok()
 }
 
+impl ProcessCloudHypervisorAdapter {
+    fn spawn_pty_broadcaster(
+        vm_id: String,
+        pty_fd: std::os::fd::RawFd,
+        pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+        pty_scrollback: Arc<std::sync::Mutex<Vec<u8>>>,
+        broadcaster_alive: Arc<AtomicBool>,
+    ) {
+        tokio::spawn(async move {
+            let _guard = AliveGuard(broadcaster_alive);
+            let std_file = unsafe { std::fs::File::from_raw_fd(pty_fd) };
+            let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let data = buf[..n].to_vec();
+                        {
+                            let mut sb = pty_scrollback.lock().unwrap();
+                            sb.extend_from_slice(&data);
+                            if sb.len() > CONSOLE_SCROLLBACK_BYTES {
+                                let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
+                                sb.drain(0..excess);
+                            }
+                        }
+                        let _ = pty_tx.send(data);
+                    }
+                    Err(e) => {
+                        tracing::debug!(vm_id = %vm_id, error = %e, "pty broadcaster read error");
+                        break;
+                    }
+                }
+            }
+            tracing::debug!(vm_id = %vm_id, "pty broadcaster exited");
+        });
+    }
+}
+
 #[async_trait]
 impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     async fn create_vm(
@@ -302,25 +355,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     source: e,
                 })?;
         }
-
-        let pty_master = nix::pty::posix_openpt(nix::fcntl::OFlag::O_RDWR).map_err(|e| ChvError::Io {
-            path: "pty".to_string(),
-            source: std::io::Error::from_raw_os_error(e as i32),
-        })?;
-        nix::pty::grantpt(&pty_master).map_err(|e| ChvError::Io {
-            path: "pty".to_string(),
-            source: std::io::Error::from_raw_os_error(e as i32),
-        })?;
-        nix::pty::unlockpt(&pty_master).map_err(|e| ChvError::Io {
-            path: "pty".to_string(),
-            source: std::io::Error::from_raw_os_error(e as i32),
-        })?;
-        let pty_raw = pty_master.as_raw_fd();
-        let _ = nix::fcntl::fcntl(pty_raw, nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC));
-        let slave_path = unsafe { nix::pty::ptsname(&pty_master) }.map_err(|e| ChvError::Io {
-            path: "pty".to_string(),
-            source: std::io::Error::from_raw_os_error(e as i32),
-        })?;
 
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
         cmd.arg("--api-socket").arg(&config.api_socket_path);
@@ -365,7 +399,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         info!(
             vm_id = %config.vm_id,
             socket = %config.api_socket_path.display(),
-            pty = %slave_path,
             op = operation_id.unwrap_or("-"),
             "spawning cloud-hypervisor"
         );
@@ -399,8 +432,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 ),
             });
         }
-
-        let pty_fd_raw = pty_master.into_raw_fd();
 
         // Build VM config JSON and create VM via REST API (supports multiple disks)
         let mut disks_json = Vec::new();
@@ -445,15 +476,75 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             payload.insert("kernel".into(), serde_json::Value::from(config.kernel_path.to_string_lossy().to_string()));
         }
 
-        let vm_config_json = serde_json::json!({
-            "cpus": { "boot_vcpus": config.cpus, "max_vcpus": config.cpus },
-            "memory": { "size": config.memory_bytes },
+        let hv = config.hypervisor_overrides.as_ref();
+
+        let mut cpus = serde_json::json!({
+            "boot_vcpus": config.cpus,
+            "max_vcpus": config.cpus,
+        });
+        if let Some(true) = hv.and_then(|h| h.cpu_nested) {
+            cpus["topology"] = serde_json::json!({ "threads_per_core": 1 });
+        }
+        if let Some(true) = hv.and_then(|h| h.cpu_amx) {
+            cpus["features"] = serde_json::json!({ "amx": true });
+        }
+
+        let mut memory = serde_json::json!({ "size": config.memory_bytes });
+        if let Some(v) = hv.and_then(|h| h.memory_mergeable) {
+            memory["mergeable"] = serde_json::json!(v);
+        }
+        if let Some(v) = hv.and_then(|h| h.memory_hugepages) {
+            memory["hugepages"] = serde_json::json!(v);
+        }
+        if let Some(v) = hv.and_then(|h| h.memory_shared) {
+            memory["shared"] = serde_json::json!(v);
+        }
+        if let Some(v) = hv.and_then(|h| h.memory_prefault) {
+            memory["prefault"] = serde_json::json!(v);
+        }
+
+        let serial_mode = hv
+            .and_then(|h| h.serial_mode.as_deref())
+            .unwrap_or("Pty");
+        let console_mode = hv
+            .and_then(|h| h.console_mode.as_deref())
+            .unwrap_or("Off");
+
+        let mut vm_config_json = serde_json::json!({
+            "cpus": cpus,
+            "memory": memory,
             "payload": payload,
             "disks": disks_json,
             "net": net_json,
-            "serial": { "mode": "File", "file": slave_path },
-            "console": { "mode": "Off" }
+            "serial": { "mode": serial_mode },
+            "console": { "mode": console_mode },
         });
+
+        if let Some(true) = hv.and_then(|h| h.cpu_kvm_hyperv) {
+            vm_config_json["platform"] = serde_json::json!({ "kvm_hyperv": true });
+        }
+        if let Some(v) = hv.and_then(|h| h.iommu) {
+            vm_config_json["iommu"] = serde_json::json!(v);
+        }
+        if let Some(v) = hv.and_then(|h| h.watchdog) {
+            vm_config_json["watchdog"] = serde_json::json!(v);
+        }
+        if let Some(v) = hv.and_then(|h| h.pvpanic) {
+            vm_config_json["pvpanic"] = serde_json::json!(v);
+        }
+        if let Some(v) = hv.and_then(|h| h.landlock_enable) {
+            vm_config_json["landlock"] = serde_json::json!(v);
+        }
+        if let Some(ref src) = hv.and_then(|h| h.rng_src.as_ref()) {
+            vm_config_json["rng"] = serde_json::json!({ "src": src });
+        }
+        if let Some(ref tpm_type) = hv.and_then(|h| h.tpm_type.as_ref()) {
+            let mut tpm = serde_json::json!({ "type": tpm_type });
+            if let Some(ref path) = hv.and_then(|h| h.tpm_socket_path.as_ref()) {
+                tpm["socket"] = serde_json::json!(path);
+            }
+            vm_config_json["tpm"] = tpm;
+        }
 
         let body = vm_config_json.to_string();
         let (create_status, create_body) = Self::ch_api_request_with_body(
@@ -469,7 +560,58 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
+        // Query CHV for the PTY slave path it created for the serial device.
+        let (info_status, info_body) = Self::ch_api_request_with_body(
+            &config.api_socket_path, "GET", "/api/v1/vm.info", None,
+        ).await?;
+        let slave_path = if info_status == 200 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
+                v.pointer("/config/serial/file")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }.ok_or_else(|| {
+            let _ = child.start_kill();
+            ChvError::Internal {
+                reason: format!("vm.info did not return serial PTY path for vm {}", config.vm_id),
+            }
+        })?;
+
+        // Open the PTY slave that CHV created.  This is the I/O endpoint
+        // for the guest serial console — we read guest output from it and
+        // write user keystrokes to it.
+        let pty_slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NOCTTY)
+            .open(&slave_path)
+            .map_err(|e| ChvError::Io {
+                path: slave_path.clone(),
+                source: e,
+            })?;
+        // Set raw mode so the host line discipline doesn't buffer or echo
+        // keystrokes — we want every byte forwarded to the guest immediately.
+        if let Ok(mut term) = nix::sys::termios::tcgetattr(&pty_slave) {
+            nix::sys::termios::cfmakeraw(&mut term);
+            let _ = nix::sys::termios::tcsetattr(&pty_slave, nix::sys::termios::SetArg::TCSANOW, &term);
+        }
+        let pty_fd_raw = pty_slave.into_raw_fd();
+        let _ = nix::fcntl::fcntl(pty_fd_raw, nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC));
+
+        info!(
+            vm_id = %config.vm_id,
+            pty = %slave_path,
+            op = operation_id.unwrap_or("-"),
+            "chv serial pty ready"
+        );
+
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let broadcaster_alive = Arc::new(AtomicBool::new(true));
 
         let mut map = self.vms.lock().unwrap();
         map.insert(
@@ -479,6 +621,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 child,
                 pty_master: unsafe { OwnedFd::from_raw_fd(pty_fd_raw) },
                 pty_tx: pty_tx.clone(),
+                pty_scrollback: pty_scrollback.clone(),
+                broadcaster_alive: broadcaster_alive.clone(),
                 last_cpu_seconds: 0.0,
                 last_cpu_at: None,
             },
@@ -488,27 +632,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Spawn background broadcaster: read PTY output and fan out via broadcast channel
         let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
         if broadcaster_fd >= 0 {
-            let vm_id_bc = config.vm_id.clone();
-            let pty_tx_bc = pty_tx.clone();
-            tokio::spawn(async move {
-                let std_file = unsafe { std::fs::File::from_raw_fd(broadcaster_fd) };
-                let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
-                let mut buf = [0u8; 4096];
-                loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let data = buf[..n].to_vec();
-                            let _ = pty_tx_bc.send(data);
-                        }
-                        Err(e) => {
-                            tracing::debug!(vm_id = %vm_id_bc, error = %e, "pty broadcaster read error");
-                            break;
-                        }
-                    }
-                }
-                tracing::debug!(vm_id = %vm_id_bc, "pty broadcaster exited");
-            });
+            Self::spawn_pty_broadcaster(
+                config.vm_id.clone(),
+                broadcaster_fd,
+                pty_tx.clone(),
+                pty_scrollback.clone(),
+                broadcaster_alive.clone(),
+            );
         }
 
         // Subscribe to broadcast channel and persist to console.log
@@ -546,13 +676,19 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = {
+        let (api_socket, pty_master_fd, pty_tx, pty_scrollback, broadcaster_alive) = {
             let map = self.vms.lock().unwrap();
             let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
                 id: vm_id.to_string(),
             })?;
-            proc.api_socket.clone()
+            (
+                proc.api_socket.clone(),
+                proc.pty_master.as_raw_fd(),
+                proc.pty_tx.clone(),
+                proc.pty_scrollback.clone(),
+                proc.broadcaster_alive.clone(),
+            )
         };
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "booting vm via ch api");
@@ -574,6 +710,23 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         if status != 200 && status != 204 {
             warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
         }
+
+        // Respawn broadcaster if it died during a previous graceful shutdown
+        if !broadcaster_alive.load(Ordering::SeqCst) {
+            info!(vm_id = %vm_id, "respawning pty broadcaster after vm start");
+            let broadcaster_fd = unsafe { nix::libc::dup(pty_master_fd) };
+            if broadcaster_fd >= 0 {
+                broadcaster_alive.store(true, Ordering::SeqCst);
+                Self::spawn_pty_broadcaster(
+                    vm_id.to_string(),
+                    broadcaster_fd,
+                    pty_tx,
+                    pty_scrollback,
+                    broadcaster_alive.clone(),
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -1140,6 +1293,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let proc = map.get(vm_id)?;
         Some(proc.pty_tx.subscribe())
     }
+
+    fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
+        let map = self.vms.lock().ok()?;
+        let proc = map.get(vm_id)?;
+        let sb = proc.pty_scrollback.lock().ok()?;
+        Some(sb.clone())
+    }
 }
 
 #[cfg(test)]
@@ -1188,6 +1348,7 @@ mod tests {
             nics: vec![],
             api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         let err = adapter.validate_vm_config(&cfg).unwrap_err();
         assert!(matches!(err, ChvError::InvalidArgument { field, .. } if field == "kernel_path"));
@@ -1217,6 +1378,7 @@ mod tests {
             nics: vec![],
             api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
             cloud_init_userdata: None,
+            hypervisor_overrides: None,
         };
         adapter.validate_vm_config(&cfg).unwrap();
     }

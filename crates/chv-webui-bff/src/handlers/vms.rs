@@ -1,6 +1,8 @@
 use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
 
+use crate::handlers::hypervisor_settings::validate_vm_overrides;
+use chv_common::hypervisor::HypervisorOverrides;
 use crate::router::AppState;
 use crate::BffError;
 
@@ -379,6 +381,16 @@ pub async fn create_vm(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
+    // Enforce quota before creating anything
+    enforce_user_quota(
+        &state.pool,
+        &claims.username,
+        cpu_count,
+        memory_bytes,
+        volume_size_bytes,
+    )
+    .await?;
+
     let vm_id = chv_common::gen_short_id();
     let volume_id = chv_common::gen_short_id();
     let operation_id = chv_common::gen_short_id();
@@ -420,6 +432,58 @@ pub async fn create_vm(
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm_desired_state: {}", e)))?;
+
+    // Persist hypervisor overrides if provided
+    if let Some(hv_payload) = payload.get("hypervisor_overrides") {
+        let overrides: HypervisorOverrides = serde_json::from_value(hv_payload.clone())
+            .map_err(|e| BffError::BadRequest(format!("invalid hypervisor_overrides: {}", e)))?;
+        if let Err(msg) = validate_vm_overrides(&overrides) {
+            return Err(BffError::BadRequest(msg));
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE vms SET
+                hv_cpu_nested = COALESCE(?, hv_cpu_nested),
+                hv_cpu_amx = COALESCE(?, hv_cpu_amx),
+                hv_cpu_kvm_hyperv = COALESCE(?, hv_cpu_kvm_hyperv),
+                hv_memory_mergeable = COALESCE(?, hv_memory_mergeable),
+                hv_memory_hugepages = COALESCE(?, hv_memory_hugepages),
+                hv_memory_shared = COALESCE(?, hv_memory_shared),
+                hv_memory_prefault = COALESCE(?, hv_memory_prefault),
+                hv_iommu = COALESCE(?, hv_iommu),
+                hv_rng_src = COALESCE(?, hv_rng_src),
+                hv_watchdog = COALESCE(?, hv_watchdog),
+                hv_landlock_enable = COALESCE(?, hv_landlock_enable),
+                hv_serial_mode = COALESCE(?, hv_serial_mode),
+                hv_console_mode = COALESCE(?, hv_console_mode),
+                hv_pvpanic = COALESCE(?, hv_pvpanic),
+                hv_tpm_type = COALESCE(?, hv_tpm_type),
+                hv_tpm_socket_path = COALESCE(?, hv_tpm_socket_path)
+            WHERE vm_id = ?
+            "#,
+        )
+        .bind(overrides.cpu_nested)
+        .bind(overrides.cpu_amx)
+        .bind(overrides.cpu_kvm_hyperv)
+        .bind(overrides.memory_mergeable)
+        .bind(overrides.memory_hugepages)
+        .bind(overrides.memory_shared)
+        .bind(overrides.memory_prefault)
+        .bind(overrides.iommu)
+        .bind(overrides.rng_src)
+        .bind(overrides.watchdog)
+        .bind(overrides.landlock_enable)
+        .bind(overrides.serial_mode)
+        .bind(overrides.console_mode)
+        .bind(overrides.pvpanic)
+        .bind(overrides.tpm_type)
+        .bind(overrides.tpm_socket_path)
+        .bind(&vm_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to persist hypervisor overrides: {}", e)))?;
+    }
 
     // Insert volume
     sqlx::query(
@@ -827,9 +891,94 @@ struct VmNicRow {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+/// Check if creating a VM would exceed the user's quota.
+/// Returns Ok(()) if allowed, Err(BffError) if quota would be exceeded.
+pub(crate) async fn enforce_user_quota(
+    pool: &sqlx::SqlitePool,
+    user_id: &str,
+    requested_cpu: i64,
+    requested_memory_bytes: i64,
+    requested_storage_bytes: i64,
+) -> Result<(), BffError> {
+    let quota_row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, Option<i64>)>(
+        "SELECT max_vms, max_cpu, max_memory_bytes, max_storage_bytes FROM quotas WHERE user_id = ?"
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to check quota: {}", e)))?;
+
+    let quota = match quota_row {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    let vm_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM vms v
+           JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
+           WHERE vds.requested_by = ?"#
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to count vms: {}", e)))?;
+
+    let usage_row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>)>(
+        r#"SELECT
+             COALESCE(SUM(vds.cpu_count), 0),
+             COALESCE(SUM(vds.memory_bytes), 0),
+             COALESCE(SUM(vol.capacity_bytes), 0)
+           FROM vm_desired_state vds
+           LEFT JOIN volume_desired_state vd ON vd.attached_vm_id = vds.vm_id
+           LEFT JOIN volumes vol ON vol.volume_id = vd.volume_id
+           WHERE vds.requested_by = ?"#
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to compute usage: {}", e)))?;
+
+    let current_cpu = usage_row.0.unwrap_or(0);
+    let current_memory = usage_row.1.unwrap_or(0);
+    let current_storage = usage_row.2.unwrap_or(0);
+
+    if let Some(max) = quota.0 {
+        if vm_count + 1 > max {
+            return Err(BffError::BadRequest(format!(
+                "VM quota exceeded: {} of {} VMs used",
+                vm_count, max
+            )));
+        }
+    }
+    if let Some(max) = quota.1 {
+        if current_cpu + requested_cpu > max {
+            return Err(BffError::BadRequest(format!(
+                "CPU quota exceeded: {} + {} = {} cores, limit is {}",
+                current_cpu, requested_cpu, current_cpu + requested_cpu, max
+            )));
+        }
+    }
+    if let Some(max) = quota.2 {
+        if current_memory + requested_memory_bytes > max {
+            return Err(BffError::BadRequest(
+                "Memory quota exceeded".into()
+            ));
+        }
+    }
+    if let Some(max) = quota.3 {
+        if current_storage + requested_storage_bytes > max {
+            return Err(BffError::BadRequest(
+                "Storage quota exceeded".into()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Deterministically generate a MAC address from vm_id + network_id.
 /// Sets the locally-administered bit to avoid conflicts with OUI space.
-fn generate_mac(vm_id: &str, network_id: &str) -> String {
+pub(crate) fn generate_mac(vm_id: &str, network_id: &str) -> String {
     let input = format!("{}:{}", vm_id, network_id);
     let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
     for byte in input.bytes() {
@@ -852,7 +1001,7 @@ fn generate_mac(vm_id: &str, network_id: &str) -> String {
 
 /// Deterministically generate an IP within the given CIDR from vm_id + network_id.
 /// Skips .0 (network), .1 (gateway), and .255 (broadcast for /24).
-fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
+pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
     if cidr.is_empty() {
         // Fallback to deterministic 10.x.x.x when no CIDR is configured
         let input = vm_id;
