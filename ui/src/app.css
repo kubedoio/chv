@@ -6,68 +6,66 @@
 
 :root {
   /* ==========================================================================
-     CHV Design System Tokens
+     CHV Design System Tokens: Rust Carbon Cockpit
      ========================================================================== */
   
-  /* Primary Colors */
-  --color-primary: #8f5a2a;
+  /* Palette: IBM Rust + Carbon Hybrid */
+  --bg-base: #f9f5ee;           /* Off-white cream */
+  --bg-sidebar: #2d2926;        /* Deep charcoal-brown */
+  --bg-surface: #ffffff;        /* Card background */
+  --bg-surface-muted: #f1ede4;
+  
+  --color-primary: #8f5a2a;     /* Rust Brown */
   --color-primary-hover: #9f6837;
   --color-primary-active: #76471f;
   --color-primary-light: #f5eadc;
   --color-primary-dark: #5e3513;
   --color-primary-glow: rgba(143, 90, 42, 0.12);
   
-  /* Semantic Colors */
-  --color-success: #3f6b45;
-  --color-success-light: #edf4ee;
-  --color-success-dark: #27462d;
-  --color-success-glow: rgba(63, 107, 69, 0.12);
+  --color-accent: #9a6a1f;      /* Amber / Warning Focus */
+  --color-accent-soft: #f0dfcb;
   
-  --color-warning: #9a6a1f;
-  --color-warning-light: #f8efd9;
-  --color-warning-dark: #744d0f;
-  --color-warning-glow: rgba(154, 106, 31, 0.12);
+  /* Semantic Colors (IBM Carbon Tones) */
+  --color-success: #198038;
+  --color-success-light: #defbe6;
+  --color-success-dark: #0e4a21;
   
-  --color-danger: #9b4338;
-  --color-danger-light: #faece8;
-  --color-danger-dark: #6e2d25;
-  --color-danger-glow: rgba(155, 67, 56, 0.12);
+  --color-warning: #f1c21b;
+  --color-warning-light: #fcf4d6;
+  --color-warning-dark: #8a6a00;
   
-  --color-info: #49627d;
-  --color-info-light: #edf1f6;
-  --color-info-dark: #304255;
-  --color-info-glow: rgba(73, 98, 125, 0.12);
+  --color-danger: #da1e28;
+  --color-danger-light: #fff1f1;
+  --color-danger-dark: #750e13;
   
-  /* Neutral Scale */
-  --color-neutral-50: #f7f3ec;
-  --color-neutral-100: #efe9df;
-  --color-neutral-200: #ddd5c8;
-  --color-neutral-300: #c7bcac;
-  --color-neutral-400: #9d917f;
-  --color-neutral-500: #75695b;
-  --color-neutral-600: #5e5449;
-  --color-neutral-700: #423b33;
-  --color-neutral-800: #29241f;
-  --color-neutral-900: #191612;
+  --color-info: #0043ce;
+  --color-info-light: #edf5ff;
+  --color-info-dark: #001d6c;
   
-  /* Dark Theme (Sidebar) */
-  --color-sidebar-bg: #f9f5ee;
-  --color-sidebar-dark: #f1eadf;
-  --color-sidebar-border: #ddd5c8;
-  --color-sidebar-text: #75695b;
-  --color-sidebar-text-active: #191612;
+  /* Neutral Scale (Technical Grays) */
+  --color-neutral-50: #f4f1ea;
+  --color-neutral-100: #e0ddd5;
+  --color-neutral-200: #c7c4bc;
+  --color-neutral-300: #aead9f;
+  --color-neutral-400: #8d8d81;
+  --color-neutral-500: #6f6f61;
+  --color-neutral-600: #525252;
+  --color-neutral-700: #393939;
+  --color-neutral-800: #262626;
+  --color-neutral-900: #161616;
   
   /* Typography */
-  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', 'Consolas', monospace;
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', monospace;
   
-  --text-xs: 0.6875rem;
-  --text-sm: 0.8125rem;
-  --text-base: 0.875rem;
-  --text-lg: 1rem;
-  --text-xl: 1.125rem;
-  --text-2xl: 1.5rem;
-  --text-3xl: 1.75rem;
+  /* High Density Scale */
+  --text-xs: 0.625rem;   /* 10px */
+  --text-sm: 0.75rem;     /* 12px - Main UI Font */
+  --text-base: 0.8125rem; /* 13px */
+  --text-lg: 0.875rem;    /* 14px */
+  --text-xl: 1rem;       /* 16px */
+  --text-2xl: 1.25rem;    /* 20px */
+  --text-3xl: 1.5rem;     /* 24px */
   
   /* Spacing (4px base) */
   --space-1: 0.25rem;
@@ -76,83 +74,30 @@
   --space-4: 1rem;
   --space-5: 1.25rem;
   --space-6: 1.5rem;
-  --space-8: 2rem;
-  --space-10: 2.5rem;
-  --space-12: 3rem;
   
-  /* Shadows */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  /* Shadows (Technical/Flat) */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.1);
   --shadow-glow-primary: 0 0 14px rgba(143, 90, 42, 0.1);
-  --shadow-glow-success: 0 0 8px rgba(63, 107, 69, 0.12);
 
-  /* Chart / Data Visualization */
-  --color-chart-purple: #6b4f7a;
-  --color-chart-teal: #5e7a6b;
+  /* Borders & Radii */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --border-subtle: #e0ddd5;
+  --border-strong: #8d8d8d;
+  --dot-grid: rgba(0, 0, 0, 0.05);
 
-  /* Console (always dark, regardless of theme) */
-  --console-bg: #1a1a1a;
-  --console-surface: #252525;
-  --console-line: #333333;
-  --console-text: #f0ebe3;
-  --console-text-secondary: #aaaaaa;
-  --console-text-muted: #888888;
-  --console-connected: #22c55e;
-  --console-disconnected: #ef4444;
-  --console-error-bg: #3b1111;
-  --console-error-border: #7f1d1d;
-  --console-error-text: #fca5a5;
-
-  /* Border Radius */
-  --radius-sm: 0.25rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
-  --radius-full: 9999px;
-  
-  /* Animation */
-  --duration-instant: 0ms;
-  --duration-fast: 150ms;
-  --duration-normal: 250ms;
-  --duration-slow: 350ms;
-  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-in: cubic-bezier(0.4, 0, 1, 1);
-  --ease-out: cubic-bezier(0, 0, 0.2, 1);
-  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
-  
-  /* Shell Tokens */
-  --shell-bg: #f3efe7;
-  --shell-surface: rgba(252, 249, 244, 0.96);
-  --shell-surface-muted: rgba(247, 242, 234, 0.96);
-  --shell-line: rgba(128, 112, 93, 0.18);
-  --shell-line-strong: rgba(128, 112, 93, 0.3);
-  --shell-text: #1f262d;
-  --shell-text-secondary: #4b5865;
-  --shell-text-muted: #7c8793;
-  --shell-accent: #8f5a2a;
-  --shell-accent-soft: #f0dfcb;
-  --status-healthy-bg: #edf4ee;
-  --status-healthy-border: rgba(63, 107, 69, 0.18);
-  --status-healthy-text: #27462d;
-  --status-warning-bg: #f8efd9;
-  --status-warning-border: rgba(154, 106, 31, 0.18);
-  --status-warning-text: #744d0f;
-  --status-degraded-bg: #eef2f4;
-  --status-degraded-border: rgba(73, 98, 125, 0.18);
-  --status-degraded-text: #304255;
-  --status-failed-bg: #faece8;
-  --status-failed-border: rgba(155, 67, 56, 0.18);
-  --status-failed-text: #6e2d25;
-  --status-unknown-bg: #f1ede6;
-  --status-unknown-border: rgba(117, 105, 91, 0.18);
-  --status-unknown-text: #5e5449;
-
-  /* Layout */
-  --sidebar-width: 15.5rem;
-  --header-height: 2.5rem;
-  --content-max-width: 1600px;
+  /* Shell / Cockpit Layout */
+  --sidebar-width: 280px;
+  --inspector-width: 320px;
+  --header-height: 48px;
+  --shell-bg: var(--bg-base);
+  --shell-surface: var(--bg-surface);
+  --shell-line: var(--border-subtle);
+  --shell-text: var(--color-neutral-900);
+  --shell-accent: var(--color-primary);
 }
 
 [data-theme="dark"] {
@@ -453,26 +398,23 @@ button,
 }
 
 /* ==========================================================================
-   Global Animations
+   Utilities
    ========================================================================== */
 
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+.dot-grid {
+  background-image: radial-gradient(var(--dot-grid) 1px, transparent 0);
+  background-size: 24px 24px;
 }
 
-@keyframes slideUp {
-  from { 
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to { 
-    opacity: 1;
-    transform: translateY(0);
-  }
+.technical-surface {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+.glass-panel {
+  background: rgba(252, 249, 244, 0.72);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--shell-line);
 }

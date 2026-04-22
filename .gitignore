@@ -61,3 +61,4 @@ docs/superpowers
 .worktrees/
 .claude/worktrees/
 .claude/session-reads.txt
+.gstack/

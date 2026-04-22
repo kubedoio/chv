@@ -2,136 +2,331 @@
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import ProgressBar from '$lib/components/shell/ProgressBar.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import LoadingState from '$lib/components/shell/LoadingState.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { 
-		Blocks, 
-		Activity, 
-		AlertTriangle, 
-		Zap, 
-		Server,
-		History,
-		ExternalLink
+		Blocks, Activity, AlertTriangle, Zap, Server, 
+		History, ExternalLink, ShieldCheck, Gauge
 	} from 'lucide-svelte';
-	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
+	import type { ShellTone } from '$lib/shell/app-shell';
 
 	let { data }: { data: PageData } = $props();
 
-	const page = getPageDefinition('/clusters');
 	const detail = $derived(data.detail);
 	const summary = $derived(detail.summary);
 
+	function normalizeTone(status: string): ShellTone {
+		const s = status.toLowerCase();
+		if (['healthy', 'ready', 'active', 'online'].includes(s)) return 'healthy';
+		if (['warning', 'maintenance', 'degraded'].includes(s)) return 'warning';
+		if (['failed', 'error', 'critical', 'offline'].includes(s)) return 'failed';
+		return 'unknown';
+	}
+
 	const basicProps = $derived([
 		{ label: 'Datacenter', value: summary.datacenter },
-		{ label: 'Cluster ID', value: summary.clusterId, isMono: true },
-		{ label: 'Node Count', value: String(summary.nodeCount) },
-		{ label: 'Version', value: summary.version + (summary.versionSkew ? ' (skew)' : '') }
+		{ label: 'Fabric ID', value: summary.clusterId },
+		{ label: 'Managed Nodes', value: String(summary.nodeCount) },
+		{ label: 'Version Skew', value: summary.versionSkew ? 'NON_UNIFORM' : 'NOMINAL' }
 	]);
-
-	function capacityTone(val: number): 'healthy' | 'warning' | 'failed' {
-		if (val >= 85) return 'failed';
-		if (val >= 70) return 'failed';
-		if (val >= 55) return 'warning';
-		return 'healthy';
-	}
 </script>
 
-<div class="detail-page">
+<div class="inventory-page">
 	{#if detail.state === 'error'}
-		<ErrorState title="Cluster Detail Unavailable" description="Failed to retrieve cluster metrics from the control plane." />
+		<ErrorState title="Fabric record unreachable" description="Failed to retrieve aggregate cluster metrics from the control plane." />
 	{:else}
 		<ResourceDetailHeader
-			eyebrow={summary.datacenter}
 			title={summary.name}
-			description="Compute cluster governing {summary.nodeCount} nodes"
+			eyebrow="COMPUTE_FABRIC // {summary.clusterId}"
 			statusLabel={summary.state}
-			tone={summary.state === 'healthy' ? 'healthy' : 'degraded'}
+			tone={normalizeTone(summary.state)}
+			parentLabel="Clusters"
+			parentHref="/clusters"
 		>
 			{#snippet actions()}
-				<button class="btn-secondary">
-					<ExternalLink size={14} />
-					Provider Console
-				</button>
+				<div class="header-actions">
+					<button class="btn-secondary">
+						<ExternalLink size={14} />
+						FABRIC_CONSOLE
+					</button>
+				</div>
 			{/snippet}
 		</ResourceDetailHeader>
 
-		<main class="detail-grid">
-			<div class="detail-main-span">
-				<SectionCard title="Cluster Summary" icon={Blocks}>
+		<div class="inventory-metrics">
+			<CompactMetricCard 
+				label="Aggregate CPU" 
+				value="{summary.cpuPercent}%" 
+				color={summary.cpuPercent > 80 ? 'warning' : 'primary'} 
+			/>
+			<CompactMetricCard 
+				label="Aggregate RAM" 
+				value="{summary.memoryPercent}%" 
+				color={summary.memoryPercent > 80 ? 'warning' : 'primary'} 
+			/>
+			<CompactMetricCard 
+				label="Fabric Storage" 
+				value="{summary.storagePercent}%" 
+				color={summary.storagePercent > 80 ? 'warning' : 'primary'} 
+			/>
+			<CompactMetricCard 
+				label="Anomaly Count" 
+				value={summary.alerts} 
+				color={summary.alerts > 0 ? 'warning' : 'neutral'} 
+			/>
+		</div>
+
+		<main class="inventory-main">
+			<div class="detail-content">
+				<SectionCard title="System Parameters" icon={Blocks}>
 					<PropertyGrid properties={basicProps} columns={2} />
 				</SectionCard>
 
-				<SectionCard title="Compute & Storage Capacity" icon={Zap}>
-					<div class="capacity-segments">
-						<div class="cap-segment">
-							<div class="cap-info">
-								<span class="cap-label">Aggregate CPU</span>
-								<span class="cap-val">{summary.cpuPercent}%</span>
+				<SectionCard title="Resource Pressure Audit" icon={Gauge}>
+					<div class="capacity-audit">
+						<div class="audit-row">
+							<div class="audit-info">
+								<span class="label">CPU_CLUSTER_PRESSURE</span>
+								<span class="val">{summary.cpuPercent}%</span>
 							</div>
-							<ProgressBar progress={summary.cpuPercent} tone={capacityTone(summary.cpuPercent)} />
+							<div class="audit-bar-track">
+								<div class="audit-bar-fill" style="width: {summary.cpuPercent}%" class:high={summary.cpuPercent > 80}></div>
+							</div>
 						</div>
-						<div class="cap-segment">
-							<div class="cap-info">
-								<span class="cap-label">Aggregate Memory</span>
-								<span class="cap-val">{summary.memoryPercent}%</span>
+						<div class="audit-row">
+							<div class="audit-info">
+								<span class="label">MEMORY_CLUSTER_PRESSURE</span>
+								<span class="val">{summary.memoryPercent}%</span>
 							</div>
-							<ProgressBar progress={summary.memoryPercent} tone={capacityTone(summary.memoryPercent)} />
+							<div class="audit-bar-track">
+								<div class="audit-bar-fill" style="width: {summary.memoryPercent}%" class:high={summary.memoryPercent > 80}></div>
+							</div>
 						</div>
-						<div class="cap-segment">
-							<div class="cap-info">
-								<span class="cap-label">Distributed Storage</span>
-								<span class="cap-val">{summary.storagePercent}%</span>
+						<div class="audit-row">
+							<div class="audit-info">
+								<span class="label">STORAGE_GRID_PRESSURE</span>
+								<span class="val">{summary.storagePercent}%</span>
 							</div>
-							<ProgressBar progress={summary.storagePercent} tone={capacityTone(summary.storagePercent)} />
+							<div class="audit-bar-track">
+								<div class="audit-bar-fill" style="width: {summary.storagePercent}%" class:high={summary.storagePercent > 80}></div>
+							</div>
 						</div>
 					</div>
 				</SectionCard>
 
-				<SectionCard title="Active Workloads" icon={Server}>
+				<SectionCard title="Distributed Workloads" icon={Server}>
 					<div class="workload-summary">
 						<div class="w-stat">
-							<span class="val">{summary.vmCount ?? '—'}</span>
-							<span class="lbl">Total VMs</span>
+							<span class="val">{summary.vmCount ?? '0'}</span>
+							<span class="lbl">TOTAL_INSTANCES</span>
 						</div>
 						<div class="w-stat">
-							<span class="val">{summary.vmHealthy ?? '—'}</span>
-							<span class="lbl">Healthy</span>
+							<span class="val">{summary.vmHealthy ?? '0'}</span>
+							<span class="lbl">SLA_COMPLIANT</span>
 						</div>
-						{#if summary.vmCount === undefined}
-							<p class="w-hint">Workload rollups are currently being calculated for this cluster.</p>
-						{/if}
 					</div>
 				</SectionCard>
 			</div>
 
-			<aside class="detail-side-span">
-				<SectionCard title="Recent Tasks" icon={History} badgeLabel={String(summary.activeTasks)}>
+			<aside class="support-area">
+				<SectionCard title="Operational Sync" icon={History} badgeLabel={String(summary.activeTasks)}>
 					{#if summary.activeTasks === 0}
-						<p class="empty-hint">No active tasks for this cluster.</p>
+						<p class="empty-hint">No active mutation tasks for this cluster fabric.</p>
 					{:else}
 						<div class="mini-activity">
-							<p>Multiple operations are currently running or recently completed.</p>
-							<a href="/tasks?query={summary.clusterId}" class="view-link">Open Cluster Tasks</a>
+							<p>Multiple concurrent operations detected.</p>
+							<a href="/tasks?query={summary.clusterId}" class="view-link">OPEN_TASK_AUDIT</a>
 						</div>
 					{/if}
 				</SectionCard>
 
-				<SectionCard title="Unresolved Alerts" icon={AlertTriangle} badgeLabel={String(summary.alerts)} badgeTone={summary.alerts > 0 ? 'warning' : 'neutral'}>
+				<SectionCard title="Health Propagation" icon={AlertTriangle} badgeLabel={String(summary.alerts)} badgeTone={summary.alerts > 0 ? 'warning' : 'neutral'}>
 					{#if summary.alerts === 0}
-						<p class="empty-hint">Cluster reporting nominal health signals.</p>
+						<div class="safety-sign">
+							<ShieldCheck size={16} />
+							<span>CLUSTER_NOMINAL</span>
+						</div>
 					{:else}
 						<div class="mini-activity">
-							<p>{summary.alerts} signals require operator inspection.</p>
-							<a href="/events?query={summary.clusterId}" class="view-link">Open Cluster Events</a>
+							<p>{summary.alerts} active anomalies requiring inspection.</p>
+							<a href="/events?query={summary.clusterId}" class="view-link">OPEN_INCIDENT_LOG</a>
 						</div>
 					{/if}
+				</SectionCard>
+
+				<SectionCard title="Placement Rules" icon={ShieldCheck}>
+					<div class="rule-list">
+						<div class="rule-item">HA_STRATEGY: BALANCED</div>
+						<div class="rule-item">PLACEMENT: PACKED</div>
+					</div>
 				</SectionCard>
 			</aside>
 		</main>
 	{/if}
 </div>
+
+<style>
+	.inventory-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.header-actions {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
+	}
+
+	.inventory-main {
+		display: grid;
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.detail-content {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.support-area {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.capacity-audit {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.audit-row {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.audit-info {
+		display: flex;
+		justify-content: space-between;
+		font-size: 10px;
+		font-weight: 800;
+	}
+
+	.audit-info .label {
+		color: var(--color-neutral-500);
+	}
+
+	.audit-info .val {
+		color: var(--color-neutral-900);
+		font-family: var(--font-mono);
+	}
+
+	.audit-bar-track {
+		height: 3px;
+		background: var(--bg-surface-muted);
+		border-radius: 2px;
+		overflow: hidden;
+	}
+
+	.audit-bar-fill {
+		height: 100%;
+		background: var(--color-primary);
+		transition: width 0.3s ease;
+	}
+
+	.audit-bar-fill.high {
+		background: var(--color-warning);
+	}
+
+	.workload-summary {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.75rem;
+	}
+
+	.w-stat {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding: 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+	}
+
+	.w-stat .val { font-size: 18px; font-weight: 800; color: var(--color-neutral-900); }
+	.w-stat .lbl { font-size: 9px; font-weight: 800; color: var(--color-neutral-500); text-transform: uppercase; letter-spacing: 0.05em; }
+
+	.mini-activity {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.mini-activity p {
+		font-size: 11px;
+		color: var(--color-neutral-600);
+		margin: 0;
+	}
+
+	.view-link {
+		font-size: 9px;
+		font-weight: 800;
+		text-transform: uppercase;
+		text-decoration: none;
+		color: var(--color-primary);
+	}
+
+	.safety-sign {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.5rem;
+		background: rgba(var(--color-success-rgb), 0.1);
+		color: var(--color-success);
+		font-size: 10px;
+		font-weight: 800;
+		border-radius: var(--radius-xs);
+	}
+
+	.rule-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.rule-item {
+		font-size: 10px;
+		font-weight: 700;
+		color: var(--color-neutral-600);
+		padding: 0.25rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: 2px;
+	}
+
+	.empty-hint {
+		font-size: 11px;
+		color: var(--color-neutral-400);
+		padding: 1rem 0;
+		text-align: center;
+	}
+
+	@media (max-width: 1200px) {
+		.inventory-main {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>
 
 <style>
 	.detail-page {

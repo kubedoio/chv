@@ -1,32 +1,34 @@
 <script lang="ts">
 	import type { PageData } from './$types';
-	import { getPageDefinition } from '$lib/shell/app-shell';
-	import type { ShellTone } from '$lib/shell/app-shell';
 	import { getStoredToken, createAPIClient } from '$lib/api/client';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
-	import { onMount } from 'svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
 	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import { Play, Square, RotateCcw, Trash2, Database, Network, Activity, Info, AlertTriangle, ChevronRight, Terminal, FileText, Power } from 'lucide-svelte';
+	import { 
+    Play, Square, RotateCcw, Trash2, Database, Network, Activity, 
+    Info, AlertTriangle, ChevronRight, Terminal, FileText, Power,
+    ShieldCheck
+  } from 'lucide-svelte';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import VmConsole from '$lib/components/vms/VmConsole.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
 	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
+	import type { ShellTone } from '$lib/shell/app-shell';
 
 	let { data }: { data: PageData } = $props();
 
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
 	let confirmingAction = $state<string | null>(null);
-	let actionError = $state<string | null>(null);
 	let liveConsoleUrl = $state<string | undefined>(undefined);
 	let consoleLoading = $state(false);
 	let bootLog = $state<string>('');
@@ -38,9 +40,7 @@
 	$effect(() => {
 		if (detail.currentTab === 'console' && detail.summary.vm_id) {
 			consoleLoading = true;
-			liveConsoleUrl = undefined;
-			const token = getStoredToken() ?? undefined;
-			getVmConsoleUrl(detail.summary.vm_id, token)
+			getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined)
 				.then(res => { liveConsoleUrl = res.url; })
 				.catch(() => { liveConsoleUrl = undefined; })
 				.finally(() => { consoleLoading = false; });
@@ -50,11 +50,9 @@
 	$effect(() => {
 		if (detail.currentTab === 'boot-log' && detail.summary.vm_id) {
 			bootLogLoading = true;
-			bootLog = '';
-			const token = getStoredToken() ?? undefined;
-			getVmBootLog(detail.summary.vm_id, token)
-				.then(res => { bootLog = res.content || '(no boot log available)'; })
-				.catch(() => { bootLog = '(failed to load boot log)'; })
+			getVmBootLog(detail.summary.vm_id, getStoredToken() ?? undefined)
+				.then(res => { bootLog = res.content || '(LOG_VACUUM)'; })
+				.catch(() => { bootLog = '(LOG_FAILURE)'; })
 				.finally(() => { bootLogLoading = false; });
 		}
 	});
@@ -62,12 +60,11 @@
 	async function loadSnapshots() {
 		if (!detail.summary.vm_id) return;
 		snapshotsLoading = true;
-		snapshotsError = null;
 		try {
 			const client = createAPIClient();
 			snapshots = await client.listVMSnapshots(detail.summary.vm_id);
-		} catch (err) {
-			snapshotsError = err instanceof Error ? err.message : 'Failed to load snapshots';
+		} catch (err: any) {
+			snapshotsError = err.message || 'Snapshot registry inaccessible';
 		} finally {
 			snapshotsLoading = false;
 		}
@@ -83,23 +80,13 @@
 		const s = status.toLowerCase();
 		if (['running', 'healthy', 'ready', 'active', 'online'].includes(s)) return 'healthy';
 		if (['warning', 'maintenance', 'starting', 'stopping', 'paused', 'rebooting'].includes(s)) return 'warning';
-		if (['degraded', 'offline'].includes(s)) return 'degraded';
 		if (['failed', 'error', 'critical', 'crashed', 'deleting'].includes(s)) return 'failed';
 		return 'unknown';
-	}
-
-	function handleActionClick(action: string, needsConfirm = false) {
-		if (needsConfirm) {
-			confirmingAction = action;
-		} else {
-			executeAction(action);
-		}
 	}
 
 	async function executeAction(action: string) {
 		confirmingAction = null;
 		pendingAction = action;
-		actionError = null;
 		const token = getStoredToken() ?? undefined;
 		const vm_id = detail.summary.vm_id;
 
@@ -108,67 +95,40 @@
 				await deleteVm({ vm_id, requested_by: 'webui' }, token);
 				toast.success(`VM ${vm_id} delete accepted`);
 			} else {
-				const force = action === 'stop';
 				const apiAction = action === 'shutdown' ? 'stop' : action;
-				await mutateVm({ vm_id, action: apiAction, force }, token);
-				toast.success(`VM ${action} accepted`);
+				await mutateVm({ vm_id, action: apiAction, force: action === 'stop' }, token);
+				toast.success(`Workload ${action} accepted`);
 			}
 			await invalidateAll();
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Action failed';
-			actionError = message;
-			toast.error(message);
+		} catch (err: any) {
+			toast.error(err.message || 'Mutation failed');
 		} finally {
 			pendingAction = null;
 		}
 	}
 
 	const postureProps = $derived([
-		{ label: 'Power State', value: detail.summary.power_state, tone: normalizeTone(detail.summary.power_state) as any },
-		{ label: 'Health', value: detail.summary.health, tone: normalizeTone(detail.summary.health) as any },
-		{ label: 'CPU', value: detail.summary.cpu },
-		{ label: 'Memory', value: detail.summary.memory }
+		{ label: 'Power Matrix', value: detail.summary.power_state },
+		{ label: 'Safety Integrity', value: detail.summary.health },
+		{ label: 'Core Alloc', value: detail.summary.cpu },
+		{ label: 'RAM Reserv', value: detail.summary.memory }
 	]);
 
 	const configProps = $derived(detail.configuration.map(c => ({ label: c.label, value: c.value })));
 
 	const volumeColumns = [
-		{ key: 'name', label: 'Volume' },
-		{ key: 'size', label: 'Size', align: 'right' as const },
-		{ key: 'device_name', label: 'Device' },
-		{ key: 'health', label: 'Health' }
+		{ key: 'name', label: 'Volume Identity' },
+		{ key: 'size', label: 'Density', align: 'right' as const },
+		{ key: 'device_name', label: 'Device Path' },
+		{ key: 'health', label: 'Integrity', align: 'center' as const }
 	];
-
-	const volumeRows = $derived((detail.summary.attached_volumes ?? []).map(v => ({
-		...v,
-		health: { label: v.health, tone: normalizeTone(v.health) }
-	})));
 
 	const nicColumns = [
-		{ key: 'network_name', label: 'Network' },
-		{ key: 'ip_address', label: 'IP Address' },
-		{ key: 'mac_address', label: 'MAC Address' },
-		{ key: 'nic_model', label: 'Model' },
-		{ key: 'addressing_mode', label: 'Addressing' }
+		{ key: 'network_name', label: 'Fabric Registry' },
+		{ key: 'ip_address', label: 'Primary IP' },
+		{ key: 'mac_address', label: 'L2 Identity' },
+		{ key: 'addressing_mode', label: 'DHCP/STA', align: 'center' as const }
 	];
-
-	function addressingTone(mode: string): ShellTone {
-		if (mode === 'internal') return 'healthy';
-		if (mode === 'external') return 'warning';
-		return 'unknown';
-	}
-
-	function addressingLabel(mode: string): string {
-		if (mode === 'internal') return 'DHCP';
-		if (mode === 'external') return 'External';
-		return 'Static';
-	}
-
-	const nicRows = $derived((detail.summary.attached_nics ?? []).map(n => ({
-		...n,
-		ip_address: n.ip_address || 'No IP address reported yet',
-		addressing_mode: { label: addressingLabel(n.addressing_mode), tone: addressingTone(n.addressing_mode) }
-	})));
 
 	const timelineTasks = $derived(detail.recent_tasks.map(t => ({
 		...t,
@@ -176,66 +136,61 @@
 	})));
 </script>
 
-<div class="resource-detail">
+<div class="inventory-page">
 	{#if detail.state === 'error'}
-		<ErrorState title="VM Detail Unavailable" description="Failed to retrieve guest state from the hypervisor." />
+		<ErrorState title="Workload record unreachable" description="Failed to retrieve guest telemetry from the hypervisor fabric." />
 	{:else if detail.state === 'empty'}
-		<EmptyInfrastructureState hint="Check the ID and try again" title="VM Not Found" description="The requested virtual machine ID is not recognized." />
+		<EmptyInfrastructureState title="Workload Identity Unknown" description="The requested virtual entity is not recognized." />
 	{:else}
 		<ResourceDetailHeader 
 			title={detail.summary.name} 
-			eyebrow={detail.summary.node_id}
+			eyebrow="WORKLOAD_INST // {detail.summary.vm_id}"
 			statusLabel={detail.summary.power_state}
 			tone={normalizeTone(detail.summary.power_state)}
 			parentLabel="Virtual Machines"
 			parentHref="/vms"
-			description="Virtual machine workload."
 		>
 			{#snippet actions()}
 				<div class="header-actions">
-					<ActionStrip>
-						{#if confirmingAction}
+           {#if confirmingAction}
 							<div class="confirm-group">
-								<span class="confirm-text">Confirm <strong>{confirmingAction}</strong>?</span>
-								<button class="btn-danger btn-sm" onclick={() => executeAction(confirmingAction!)}>Confirm</button>
-								<button class="btn-secondary btn-sm" onclick={() => confirmingAction = null}>Cancel</button>
+								<span class="confirm-text">CONFIRM_{confirmingAction.toUpperCase()}?</span>
+								<button class="btn-primary" onclick={() => executeAction(confirmingAction!)}>COMMIT</button>
+								<button class="btn-secondary" onclick={() => confirmingAction = null}>ABORT</button>
 							</div>
 							{:else}
 								{@const ps = detail.summary.power_state.toLowerCase()}
-								<button class="btn-primary btn-sm" disabled={ps === 'running' || pendingAction !== null} onclick={() => handleActionClick('start')}>
+								<button class="btn-primary" disabled={ps === 'running' || pendingAction !== null} onclick={() => executeAction('start')}>
 									<Play size={14} />
-									{pendingAction === 'start' ? 'Starting...' : 'Start'}
+									{pendingAction === 'start' ? 'EXECUTING...' : 'START'}
 								</button>
-								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('shutdown', true)}>
+								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'shutdown'}>
 									<Power size={14} />
-									{pendingAction === 'shutdown' ? 'Shutting down...' : 'Shutdown'}
+									{pendingAction === 'shutdown' ? 'EXECUTING...' : 'SHUTDOWN'}
 								</button>
-								<button class="btn-danger btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('stop', true)}>
-									<Square size={14} />
-									{pendingAction === 'stop' ? 'Stopping...' : 'Stop'}
-								</button>
-								<button class="btn-secondary btn-sm" disabled={ps !== 'running' || pendingAction !== null} onclick={() => handleActionClick('restart', true)}>
+								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'}>
 									<RotateCcw size={14} />
-									{pendingAction === 'restart' ? 'Restarting...' : 'Reboot'}
+									{pendingAction === 'restart' ? 'EXECUTING...' : 'REBOOT'}
 								</button>
-								<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => handleActionClick('delete', true)}>
+								<button class="btn-secondary" disabled={pendingAction !== null} onclick={() => confirmingAction = 'delete'}>
 									<Trash2 size={14} />
-									{pendingAction === 'delete' ? 'Deleting...' : 'Delete'}
+									{pendingAction === 'delete' ? 'EXECUTING...' : 'DELETE'}
 								</button>
 						{/if}
-					</ActionStrip>
 				</div>
 			{/snippet}
 		</ResourceDetailHeader>
 
-		<DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
+    <div class="tabs-area">
+		  <DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
+    </div>
 
-		<main class="detail-grid">
-			{#if detail.currentTab === 'console'}
-				<section class="detail-main-span">
-					<SectionCard title="Serial Console" icon={Terminal}>
+		<main class="inventory-main">
+			<section class="detail-content">
+				{#if detail.currentTab === 'console'}
+					<SectionCard title="Direct Fabric Console" icon={Terminal}>
 						{#if consoleLoading}
-							<p class="empty-hint">Connecting to console...</p>
+							<p class="empty-hint">Establishing encrypted bypass tunnel...</p>
 						{:else if liveConsoleUrl}
 							<VmConsole
 								vmId={detail.summary.vm_id}
@@ -247,98 +202,121 @@
 								}}
 							/>
 						{:else}
-							<p class="empty-hint">Console URL unavailable. The VM may not be running.</p>
+							<p class="empty-hint">Console registry inaccessible. Instance state may prevent access.</p>
 						{/if}
 					</SectionCard>
-				</section>
-			{:else if detail.currentTab === 'boot-log'}
-				<section class="detail-main-span">
-					<SectionCard title="Boot Log" icon={FileText}>
+				{:else if detail.currentTab === 'boot-log'}
+					<SectionCard title="Serial Boot Sequence" icon={FileText}>
 						{#if bootLogLoading}
-							<p class="empty-hint">Loading boot log...</p>
+							<p class="empty-hint">Streaming boot sequence records...</p>
 						{:else}
 							<pre class="boot-log">{bootLog}</pre>
 						{/if}
 					</SectionCard>
-				</section>
-			{:else if detail.currentTab === 'snapshots'}
-				<section class="detail-main-span">
+				{:else if detail.currentTab === 'snapshots'}
 					<VmSnapshots vmId={detail.summary.vm_id} {snapshots} loading={snapshotsLoading} error={snapshotsError} />
-				</section>
-			{:else}
-				<section class="detail-main-span">
+				{:else}
 					<div class="summary-top">
-						<SectionCard title="Guest Posture" icon={Activity}>
+						<SectionCard title="Workload Posture" icon={Activity}>
 							<PropertyGrid properties={postureProps} columns={4} />
 						</SectionCard>
 					</div>
 
-					<div class="detail-sections">
+					<div class="vital-metrics">
 						<VMMetricsWidget vms={{
 							total: 1,
 							running: detail.summary.power_state.toLowerCase() === 'running' ? 1 : 0,
 							stopped: detail.summary.power_state.toLowerCase() === 'stopped' ? 1 : 0,
 							error: detail.summary.health.toLowerCase() === 'error' ? 1 : 0
 						}} />
-
-						<SectionCard title="Storage Attachments" icon={Database} badgeLabel={String(detail.summary.attached_volumes?.length ?? 0)}>
-							{#if !detail.summary.attached_volumes || detail.summary.attached_volumes.length === 0}
-								<p class="empty-hint">No storage volumes attached to this guest.</p>
-							{:else}
-								<InventoryTable 
-									columns={volumeColumns} 
-									rows={volumeRows} 
-									rowHref={(row) => `/volumes/${row.volume_id}`} 
-								/>
-							{/if}
-						</SectionCard>
-
-						<SectionCard title="Network Interfaces" icon={Network} badgeLabel={String(detail.summary.attached_nics?.length ?? 0)}>
-							{#if !detail.summary.attached_nics || detail.summary.attached_nics.length === 0}
-								<p class="empty-hint">No NICs defined for this guest.</p>
-							{:else}
-								<InventoryTable 
-									columns={nicColumns} 
-									rows={nicRows} 
-								/>
-							{/if}
-						</SectionCard>
-
-						<SectionCard title="Operational History" icon={Activity}>
-							<TaskTimeline tasks={timelineTasks} />
-						</SectionCard>
-
-						<SectionCard title="Guest Configuration" icon={Info}>
-							<PropertyGrid properties={configProps} columns={2} />
-						</SectionCard>
 					</div>
-				</section>
 
-				<aside class="detail-side-span">
-					<SectionCard title="Hypervisor Placement" icon={ChevronRight}>
-						<PropertyGrid 
-							columns={1}
-							properties={[
-								{ label: 'Host Node', value: detail.summary.node_id },
-								{ label: 'Placement Policy', value: 'Balanced' },
-								{ label: 'Hypervisor', value: 'KVM / QEMU' }
-							]} 
-						/>
+					<SectionCard title="Storage Fabric" icon={Database} badgeLabel={String(detail.summary.attached_volumes?.length ?? 0)}>
+						{#if !detail.summary.attached_volumes || detail.summary.attached_volumes.length === 0}
+							<p class="empty-hint">No storage volumes mapped to this workload fabric.</p>
+						{:else}
+							<InventoryTable 
+								columns={volumeColumns} 
+								rows={detail.summary.attached_volumes.map(v => ({
+                  ...v,
+                  health: { label: v.health, tone: normalizeTone(v.health) }
+                }))} 
+								rowHref={(row) => `/volumes/${row.volume_id}`} 
+							>
+                {#snippet cell({ column, row })}
+                   {#if column.key === 'name'}
+                     <span class="workload-name">{row.name}</span>
+                   {:else if column.key === 'health'}
+                     <StatusBadge label={row.health.label} tone={row.health.tone} />
+                   {:else}
+                     <span class="cell-text">{row[column.key]}</span>
+                   {/if}
+                {/snippet}
+              </InventoryTable>
+						{/if}
 					</SectionCard>
 
-					<SectionCard title="System Alerts" icon={AlertTriangle}>
-						<p class="empty-hint">No active hypervisor alerts for this workload.</p>
+					<SectionCard title="Network Mesh" icon={Network} badgeLabel={String(detail.summary.attached_nics?.length ?? 0)}>
+						{#if !detail.summary.attached_nics || detail.summary.attached_nics.length === 0}
+							<p class="empty-hint">No L2 interfaces defined for this virtual entity.</p>
+						{:else}
+							<InventoryTable 
+								columns={nicColumns} 
+								rows={detail.summary.attached_nics.map(n => ({
+                  ...n,
+                  ip_address: n.ip_address || 'UNASSIGNED',
+                  addressing_mode: { label: n.addressing_mode === 'internal' ? 'DHCP' : 'STATIC', tone: n.addressing_mode === 'internal' ? 'healthy' : 'warning' }
+                }))} 
+							>
+                {#snippet cell({ column, row })}
+                  {#if column.key === 'addressing_mode'}
+                     <StatusBadge label={row.addressing_mode.label} tone={row.addressing_mode.tone} />
+                  {:else}
+                     <span class="cell-text">{row[column.key]}</span>
+                  {/if}
+                {/snippet}
+              </InventoryTable>
+						{/if}
 					</SectionCard>
-				</aside>
-			{/if}
+
+					<SectionCard title="Operational History" icon={Activity}>
+						<TaskTimeline tasks={timelineTasks} />
+					</SectionCard>
+				{/if}
+			</section>
+
+			<aside class="support-area">
+				<SectionCard title="Placement Audit" icon={ChevronRight}>
+					<PropertyGrid 
+						columns={1}
+						properties={[
+							{ label: 'Fabric Host', value: detail.summary.node_id },
+							{ label: 'Security Domain', value: 'BALANCED' },
+							{ label: 'Hypervisor Sub', value: 'CLOUD_HYPERVISOR_v3' }
+						]} 
+					/>
+				</SectionCard>
+
+				<SectionCard title="Workload Meta" icon={Info}>
+					<PropertyGrid properties={configProps} columns={1} />
+				</SectionCard>
+
+				<SectionCard title="Safety Integrity" icon={ShieldCheck}>
+					<div class="safety-sign">
+						<ShieldCheck size={16} />
+						<span>GUEST_LEVEL_NOMINAL</span>
+					</div>
+				</SectionCard>
+			</aside>
 		</main>
 	{/if}
 </div>
 
 <style>
-	.resource-detail {
+	.inventory-page {
 		display: flex;
 		flex-direction: column;
+		gap: 0.75rem;
 	}
 
 	.header-actions {

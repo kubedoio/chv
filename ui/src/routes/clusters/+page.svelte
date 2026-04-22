@@ -1,15 +1,15 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/FilterBar.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Blocks, AlertTriangle, Activity, Server, Plus, ChevronRight } from 'lucide-svelte';
+	import { Blocks, AlertTriangle, Activity, Plus, LayoutGrid } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
 
@@ -18,14 +18,6 @@
 	const page = getPageDefinition('/clusters');
 	const model = $derived(data.clusters);
 	const items = $derived(model.items);
-
-	const stats = $derived([
-		{ label: 'Total Clusters', value: String(items.length) },
-		{ label: 'Healthy', value: String(items.filter(c => c.state === 'healthy').length), status: 'healthy' as const },
-		{ label: 'Degraded', value: String(items.filter(c => c.state === 'degraded' || c.state === 'failed').length), status: 'critical' as const },
-		{ label: 'Maintenance', value: String(items.filter(c => c.maintenance).length), status: 'warning' as const },
-		{ label: 'Total Alerts', value: String(items.reduce((sum, c) => sum + (c.alerts || 0), 0)), status: 'neutral' as const }
-	]);
 
 	const filters = [
 		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Cluster or DC name...' },
@@ -53,13 +45,12 @@
 	}
 
 	const columns = [
-		{ key: 'name', label: 'Cluster' },
-		{ key: 'datacenter', label: 'Datacenter' },
-		{ key: 'node_count', label: 'Nodes', align: 'center' as const },
+		{ key: 'name', label: 'Compute Fabric' },
+		{ key: 'datacenter', label: 'Zone' },
+		{ key: 'node_count', label: 'Enrolled Nodes', align: 'center' as const },
 		{ key: 'state', label: 'Readiness' },
-		{ key: 'capacity', label: 'Peak Load' },
-		{ key: 'active_tasks', label: 'Tasks', align: 'right' as const },
-		{ key: 'alerts', label: 'Alerts', align: 'right' as const }
+		{ key: 'capacity', label: 'Peak Pressure' },
+		{ key: 'active_tasks', label: 'Ops', align: 'right' as const }
 	];
 
 	const rows = $derived(
@@ -68,7 +59,7 @@
 			return {
 				...item,
 				capacity: { 
-					label: `${peak}% peak`, 
+					label: `${peak}% PRESSURE`, 
 					tone: peak >= 85 ? 'failed' : peak >= 70 ? 'degraded' : peak >= 50 ? 'warning' : 'healthy' 
 				},
 				state: {
@@ -87,13 +78,27 @@
 		{#snippet actions()}
 			<button class="btn-primary">
 				<Plus size={14} />
-				Enroll Cluster
+				Enroll Fabric
 			</button>
 		{/snippet}
 	</PageHeaderWithAction>
 
-	<div class="posture-strip-wrapper">
-		<CompactStatStrip {stats} />
+	<div class="inventory-metrics">
+		<CompactMetricCard 
+			label="Total Fabrics" 
+			value={items.length} 
+			color="neutral"
+		/>
+		<CompactMetricCard 
+			label="Nominal Load" 
+			value={items.filter(c => c.state === 'healthy').length} 
+			color="primary"
+		/>
+		<CompactMetricCard 
+			label="System Alerts" 
+			value={items.reduce((sum, c) => sum + (c.alerts || 0), 0)} 
+			color={items.reduce((sum, c) => sum + (c.alerts || 0), 0) > 0 ? 'warning' : 'neutral'}
+		/>
 	</div>
 
 	<div class="inventory-controls">
@@ -111,39 +116,48 @@
 				<ErrorState />
 			{:else if model.state === 'empty'}
 				<EmptyInfrastructureState 
-					title="No clusters enrolled" 
-					description="Connect a compute provider to the control plane." 
-					hint="Enrollment will populate this inventory with health and capacity metrics."
+					title="No fabrics cataloged" 
+					description="Adjust your search criteria or enroll a new cluster fabric." 
+					hint="Fabrics represent logical groupings of heterogeneous compute resources."
 				/>
 			{:else}
 				<InventoryTable 
 					{columns} 
 					rows={rows}
 					rowHref={(row) => `/clusters/${row.cluster_id}`}
-				/>
+				>
+					{#snippet cell({ column, row })}
+						{@const val = row[column.key]}
+						{#if column.key === 'name'}
+							<div class="fabric-identity">
+								<span class="fabric-name">{row.name}</span>
+								{#if row.is_local}
+									<span class="fabric-tag">EDGE</span>
+								{/if}
+							</div>
+						{:else if typeof val === 'object' && val?.tone}
+							<StatusBadge label={val.label} tone={val.tone} />
+						{:else}
+							<span class="cell-text">{val}</span>
+						{/if}
+					{/snippet}
+				</InventoryTable>
 			{/if}
 		</section>
 
 		<aside class="support-area">
-			<SectionCard title="Priority Inspection" icon={AlertTriangle} badgeTone={attentionClusters.length > 0 ? 'warning' : 'neutral'}>
+			<SectionCard title="Priority Inspection" icon={AlertTriangle} badgeLabel={String(attentionClusters.length)}>
 				{#if attentionClusters.length === 0}
-					<p class="empty-hint">All clusters reporting nominal readiness.</p>
+					<p class="empty-hint">All cluster fabrics reporting nominal readiness.</p>
 				{:else}
-					<ul class="priority-list">
+					<ul class="attention-list">
 						{#each attentionClusters as cluster}
 							<li>
-								<div class="priority-item">
-									<div class="priority-main">
-										<span class="p-name">{cluster.name}</span>
-										<div class="p-meta">
-											<span class="p-dc">{cluster.datacenter}</span>
-											<span class="dot">·</span>
-											<span class="p-stat" class:degraded={cluster.state !== 'healthy'}>{cluster.state}</span>
-										</div>
+								<div class="attention-card">
+									<div class="attention-card__main">
+										<span class="res-name">{cluster.name}</span>
+										<span class="res-issue">{cluster.alerts} anomaly detections</span>
 									</div>
-									<a href="/clusters/{cluster.cluster_id}" class="p-link">
-										<ChevronRight size={14} />
-									</a>
 								</div>
 							</li>
 						{/each}
@@ -151,17 +165,15 @@
 				{/if}
 			</SectionCard>
 
-			<SectionCard title="Fleet Capacity" icon={Activity}>
-				<div class="capacity-stat">
-					<div class="cap-header">
-						<span>Total Compute Nodes</span>
+			<SectionCard title="Fabric Telemetry" icon={LayoutGrid}>
+				<div class="audit-summary">
+					<div class="summary-row">
+						<span>Total Compute Blocks</span>
 						<span>{items.reduce((sum, c) => sum + c.node_count, 0)}</span>
 					</div>
-					<div class="cap-header">
-						<span>Hotspots (>80%)</span>
-						<span class={items.filter(c => Math.max(c.cpu_percent, c.memory_percent) > 80).length > 0 ? 'failed' : ''}>
-							{items.filter(c => Math.max(c.cpu_percent, c.memory_percent) > 80).length}
-						</span>
+					<div class="summary-row">
+						<span>Load Balancing</span>
+						<span>Automatic</span>
 					</div>
 				</div>
 			</SectionCard>
@@ -176,13 +188,16 @@
 		gap: 0.75rem;
 	}
 
-	.posture-strip-wrapper {
-		margin-top: -0.25rem;
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
 	}
 
 	.inventory-controls {
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
 		overflow: hidden;
 	}
 
@@ -193,82 +208,111 @@
 		align-items: start;
 	}
 
-	.priority-list {
-		list-style: none;
-		padding: 0;
-		margin: 0;
+	.support-area {
 		display: flex;
 		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.fabric-identity {
+		display: flex;
+		align-items: center;
 		gap: 0.5rem;
 	}
 
-	.priority-item {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.25rem;
+	.fabric-name {
+		font-weight: 800;
+		color: var(--color-neutral-900);
 	}
 
-	.priority-main {
+	.fabric-tag {
+		font-size: 8px;
+		font-weight: 800;
+		color: #ffffff;
+		background: var(--color-primary);
+		padding: 1px 4px;
+		border-radius: 2px;
+	}
+
+	.cell-text {
+		font-size: 11px;
+		color: var(--color-neutral-600);
+	}
+
+	.audit-summary {
 		display: flex;
 		flex-direction: column;
-		min-width: 0;
+		gap: 0.35rem;
 	}
 
-	.p-name {
-		font-weight: 600;
-		font-size: var(--text-sm);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.p-meta {
+	.summary-row {
 		display: flex;
-		align-items: center;
-		gap: 0.25rem;
+		justify-content: space-between;
 		font-size: 10px;
-		color: var(--shell-text-muted);
+		color: var(--color-neutral-600);
+		padding: 0.35rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
 	}
 
-	.p-stat.degraded {
-		color: var(--color-danger);
-		font-weight: 700;
-	}
-
-	.p-link {
-		color: var(--shell-text-muted);
-	}
-
-	.capacity-stat {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.cap-header {
-		display: flex;
-		justify-content: space-between;
-		font-size: var(--text-xs);
-		font-weight: 500;
-	}
-
-	.cap-header .failed {
-		color: var(--color-danger);
-		font-weight: 700;
+	.summary-row span:last-child {
+		font-weight: 800;
+		color: var(--color-neutral-900);
 	}
 
 	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
+		font-size: 10px;
+		font-weight: 700;
+		color: var(--color-neutral-400);
+		padding: 1rem;
 		text-align: center;
-		padding: 0.5rem 0;
+		text-transform: uppercase;
 	}
 
-	@media (max-width: 1200px) {
+	.attention-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.attention-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-800);
+    border-left: 2px solid transparent;
+	}
+
+  .attention-card:has(.res-issue) {
+    border-left-color: var(--color-warning);
+  }
+
+	.attention-card__main {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+	}
+
+	.res-name {
+		font-size: 11px;
+		font-weight: 800;
+    color: var(--color-neutral-900);
+	}
+
+	.res-issue {
+		font-size: 9px;
+		color: var(--color-warning);
+		font-weight: 700;
+		text-transform: uppercase;
+	}
+
+	@media (max-width: 1100px) {
 		.inventory-main {
 			grid-template-columns: 1fr;
 		}

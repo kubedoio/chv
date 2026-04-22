@@ -37,108 +37,111 @@
 	.state-panel {
 		display: grid;
 		grid-template-columns: auto 1fr;
-		gap: 0.75rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.5rem;
-		background: var(--shell-surface-muted);
-		padding: 0.75rem;
+		gap: 1rem;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		padding: 2rem;
+		position: relative;
+		overflow: hidden;
+		box-shadow: var(--shadow-sm);
+	}
+
+	.state-panel::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background-image: radial-gradient(var(--dot-grid) 1px, transparent 0);
+		background-size: 20px 20px;
+		opacity: 0.5;
+		pointer-events: none;
 	}
 
 	.state-panel__icon {
 		display: grid;
 		place-items: center;
-		width: 1.5rem;
-		height: 1.5rem;
-		border-radius: 999px;
-		background: var(--shell-surface);
-		border: 1px solid var(--shell-line);
-		color: var(--shell-text-secondary);
+		width: 3rem;
+		height: 3rem;
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface-muted);
+		border: 1px solid var(--border-subtle);
+		color: var(--color-neutral-400);
+		position: relative;
+		z-index: 1;
 	}
 
-	.state-panel--loading .state-panel__icon {
-		color: var(--status-unknown-text);
-	}
-
-	.state-panel--empty .state-panel__icon {
-		color: var(--status-healthy-text);
-	}
-
-	.state-panel--error .state-panel__icon {
-		color: var(--status-failed-text);
-	}
+	.state-panel--loading .state-panel__icon { color: var(--color-primary); }
+	.state-panel--empty .state-panel__icon { color: var(--color-neutral-300); }
+	.state-panel--error .state-panel__icon { color: var(--color-danger); border-color: var(--color-danger); }
 
 	.state-panel__icon--spinning {
 		animation: shell-spin 1s linear infinite;
 	}
 
 	.state-panel__content {
-		min-width: 0;
+		position: relative;
+		z-index: 1;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
 	}
 
 	.state-panel__title {
 		font-size: var(--text-base);
-		font-weight: 600;
-		color: var(--shell-text);
-	}
-
-	.state-panel__description,
-	.state-panel__hint {
-		margin-top: 0.3rem;
-		font-size: var(--text-sm);
-		line-height: 1.45;
+		font-weight: 700;
+		color: var(--color-neutral-900);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
 	}
 
 	.state-panel__description {
-		color: var(--shell-text-secondary);
+		margin-top: 0.5rem;
+		font-size: var(--text-sm);
+		color: var(--color-neutral-600);
+		max-width: 400px;
 	}
 
 	.state-panel__hint {
-		color: var(--shell-text-muted);
+		margin-top: 0.75rem;
+		font-size: 11px;
+		color: var(--color-neutral-400);
+		font-style: italic;
 	}
 
 	.state-panel__skeletons {
 		display: grid;
-		gap: 0.4rem;
-		margin-top: 0.8rem;
+		gap: 0.5rem;
+		margin-top: 1rem;
+		width: 100%;
+		max-width: 300px;
 	}
 
 	.state-panel__skeletons span {
 		display: block;
-		height: 0.55rem;
-		border-radius: 999px;
-		background: linear-gradient(
-			90deg,
-			rgba(169, 160, 147, 0.16),
-			rgba(169, 160, 147, 0.34),
-			rgba(169, 160, 147, 0.16)
-		);
-		background-size: 200% 100%;
-		animation: shell-shimmer 1.5s ease-in-out infinite;
+		height: 4px;
+		border-radius: 2px;
+		background: var(--color-neutral-100);
+		position: relative;
+		overflow: hidden;
 	}
 
-	.state-panel__skeletons span:nth-child(2) {
-		width: 82%;
-	}
-
-	.state-panel__skeletons span:nth-child(3) {
-		width: 68%;
+	.state-panel__skeletons span::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(90deg, transparent, var(--color-neutral-200), transparent);
+		animation: shell-shimmer 1.5s infinite;
 	}
 
 	@keyframes shell-spin {
-		to {
-			transform: rotate(360deg);
-		}
+		to { transform: rotate(360deg); }
 	}
 
 	@keyframes shell-shimmer {
-		0% {
-			background-position: 200% 0;
-		}
-
-		100% {
-			background-position: -200% 0;
-		}
+		0% { transform: translateX(-100%); }
+		100% { transform: translateX(100%); }
 	}
+</style>
 
 	@media (prefers-reduced-motion: reduce) {
 		.state-panel__icon--spinning,

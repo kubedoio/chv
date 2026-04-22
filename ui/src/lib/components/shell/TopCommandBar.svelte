@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { PageDefinition } from '$lib/shell/app-shell';
+  import { Search } from 'lucide-svelte';
 
 	interface Props {
 		page: PageDefinition;
@@ -9,95 +10,119 @@
 </script>
 
 <div class="command-bar">
-	<div class="command-bar__scope">
-		<div class="command-bar__scope-label">CHV WebUI</div>
-		<div class="command-bar__scope-value">{page.navLabel}</div>
+	<div class="command-bar__context">
+		<div class="context-label">CHV_PROTOCOL_SHELL</div>
+		<div class="context-value">{page.navLabel}</div>
 	</div>
 
-	<label class="command-bar__search" aria-label="Command search">
-		<span>/</span>
+	<div class="command-bar__search">
+		<Search size={14} class="search-icon" />
 		<input
-			type="search"
-			value=""
-			placeholder="Jump to nodes, workloads, volumes, or tasks"
+			type="text"
+			placeholder="ACTIVATE_COMMAND_PALETTE (⌘K)"
 			readonly
 		/>
-		<kbd>⌘K</kbd>
-	</label>
+		<div class="search-kbd">/</div>
+	</div>
 </div>
 
 <style>
 	.command-bar {
-		display: grid;
-		grid-template-columns: auto minmax(16rem, 24rem);
+		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.9rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.5rem;
-		background: var(--shell-surface);
-		padding: 0.5rem 0.75rem;
-		min-height: var(--header-height);
+		gap: 1.5rem;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		padding: 0.5rem 1rem;
+		min-height: 48px;
 	}
 
-	.command-bar__scope {
-		display: grid;
-		gap: 0.1rem;
+	.command-bar__context {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
 	}
 
-	.command-bar__scope-label {
-		font-size: 0.72rem;
-		font-weight: 600;
-		letter-spacing: 0.12em;
+	.context-label {
+		font-size: 8px;
+		font-weight: 800;
+		letter-spacing: 0.15em;
 		text-transform: uppercase;
-		color: var(--shell-text-muted);
+		color: var(--color-neutral-400);
 	}
 
-	.command-bar__scope-value {
-		font-size: 0.92rem;
-		font-weight: 600;
-		color: var(--shell-text);
+	.context-value {
+		font-size: 11px;
+		font-weight: 800;
+		color: var(--color-neutral-900);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
 	}
 
 	.command-bar__search {
-		display: grid;
-		grid-template-columns: auto 1fr auto;
+		display: flex;
 		align-items: center;
 		gap: 0.75rem;
-		height: 2rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		background: var(--shell-surface-muted);
-		padding: 0 0.5rem;
+		height: 28px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
+		background: var(--bg-surface-muted);
+		padding: 0 0.75rem;
+    width: 320px;
+    transition: border-color 0.15s ease;
 	}
 
-	.command-bar__search span,
-	.command-bar__search kbd {
-		font-size: 0.8rem;
-		color: var(--shell-text-muted);
-	}
+  .command-bar__search:hover {
+    border-color: var(--color-primary);
+  }
+
+  .search-icon {
+    color: var(--color-neutral-400);
+  }
 
 	.command-bar__search input {
-		width: 100%;
+		flex: 1;
 		border: 0;
 		background: transparent;
 		padding: 0;
-		font-size: 0.95rem;
-		color: var(--shell-text);
+		font-size: 10px;
+    font-weight: 700;
+		color: var(--color-neutral-900);
+    font-family: var(--font-mono);
 	}
 
 	.command-bar__search input::placeholder {
-		color: var(--shell-text-muted);
+		color: var(--color-neutral-400);
+    opacity: 0.6;
 	}
 
 	.command-bar__search input:focus {
 		outline: none;
 	}
 
+  .search-kbd {
+    font-size: 10px;
+    font-weight: 800;
+    color: var(--color-neutral-400);
+    background: var(--bg-surface);
+    width: 16px;
+    height: 16px;
+    display: grid;
+    place-items: center;
+    border-radius: 2px;
+    border: 1px solid var(--border-subtle);
+  }
 
 	@media (max-width: 960px) {
 		.command-bar {
-			grid-template-columns: 1fr;
+			flex-direction: column;
+      align-items: stretch;
+      gap: 0.75rem;
 		}
+    .command-bar__search {
+      width: 100%;
+    }
 	}
 </style>

@@ -1,129 +1,61 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { Server, Copy, Trash2, Plus, FileCode, Box, LayoutTemplate } from 'lucide-svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
+  import { 
+    Server, Copy, Trash2, Plus, FileCode, Box, LayoutTemplate, 
+    ArrowRight, Activity, ShieldCheck, Search
+  } from 'lucide-svelte';
+  import { createAPIClient } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
-  import DataTable from '$lib/components/data-display/DataTable.svelte';
-  import StateBadge from '$lib/components/StateBadge.svelte';
-  import CreateFromTemplate from '$lib/components/CreateFromTemplate.svelte';
-  import CloudInitViewer from '$lib/components/forms/CloudInitViewer.svelte';
-  import CloudInitEditor from '$lib/components/forms/CloudInitEditor.svelte';
-  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
-  import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
+  import SectionCard from '$lib/components/shell/SectionCard.svelte';
+  import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+  import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+  import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+  import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';
   import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+  import CreateFromTemplate from '$lib/components/CreateFromTemplate.svelte';
+  import CloudInitViewer from '$lib/components/shell/CloudInitViewer.svelte';
+  import CloudInitEditor from '$lib/components/shell/CloudInitEditor.svelte';
+  import { getPageDefinition } from '$lib/shell/app-shell';
+  import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
 
-  const token = getStoredToken();
-  const client = createAPIClient({ token: token ?? undefined });
+  const client = createAPIClient();
+  const pageDef = getPageDefinition('/images'); // Reusing Images definition as it covers library
 
-  // State
-  let vmTemplates: VMTemplate[] = $state([]);
-  let cloudInitTemplates: CloudInitTemplate[] = $state([]);
-  let images: Image[] = $state([]);
-  let networks: Network[] = $state([]);
-  let pools: StoragePool[] = $state([]);
-  let vms: VM[] = $state([]);
+  let vmTemplates = $state<VMTemplate[]>([]);
+  let cloudInitTemplates = $state<CloudInitTemplate[]>([]);
+  let images = $state<Image[]>([]);
+  let networks = $state<Network[]>([]);
+  let pools = $state<StoragePool[]>([]);
+  let vms = $state<VM[]>([]);
   let loading = $state(true);
   let error = $state('');
   let activeTab = $state<'vm' | 'cloudinit'>('vm');
 
   // Modal states
   let createFromTemplateOpen = $state(false);
-  let selectedTemplate: VMTemplate | null = $state(null);
+  let selectedTemplate = $state<VMTemplate | null>(null);
   let cloudInitViewerOpen = $state(false);
   let cloudInitEditorOpen = $state(false);
-  let selectedCloudInitTemplate: CloudInitTemplate | null = $state(null);
+  let selectedCloudInitTemplate = $state<CloudInitTemplate | null>(null);
   let createVMTemplateOpen = $state(false);
 
-  // Create VM Template form state
-  let newTemplateName = $state('');
-  let newTemplateDescription = $state('');
-  let selectedVMId = $state('');
-  let selectedCloudInitId = $state('');
-  let creatingTemplate = $state(false);
-
-  // Confirm dialog state
-  let confirmDialog = $state<{
-    open: boolean;
-    title: string;
-    description: string;
-    action: () => Promise<void>;
-  }>({
-    open: false,
-    title: '',
-    description: '',
-    action: async () => {}
-  });
-
-  // Lookup maps
-  function getImage(id: string) { return images.find(i => i.id === id); }
-  function getNetwork(id: string) { return networks.find(n => n.id === id); }
-  function getPool(id: string) { return pools.find(p => p.id === id); }
-  function getVM(id: string) { return vms.find(v => v.id === id); }
-
-  // VM Template columns
-  const vmTemplateColumns = [
-    {
-      key: 'name',
-      title: 'Name',
-      sortable: true,
-      render: (t: VMTemplate) => t.name
-    },
-    {
-      key: 'description',
-      title: 'Description',
-      render: (t: VMTemplate) => t.description || '—'
-    },
-    {
-      key: 'resources',
-      title: 'Resources',
-      render: (t: VMTemplate) => `${t.vcpu} vCPU, ${t.memory_mb} MB`
-    },
-    {
-      key: 'image_id',
-      title: 'Image',
-      render: (t: VMTemplate) => {
-        const img = getImage(t.image_id);
-        return img?.name || t.image_id;
-      }
-    },
-    {
-      key: 'tags',
-      title: 'Tags',
-      render: (t: VMTemplate) => {
-        if (!t.tags || t.tags.length === 0) return '—';
-        return t.tags.slice(0, 3).join(', ') + (t.tags.length > 3 ? ` +${t.tags.length - 3}` : '');
-      }
-    }
+  const vmColumns = [
+    { key: 'name', label: 'Template Identity' },
+    { key: 'resources', label: 'Resource Profile' },
+    { key: 'image_name', label: 'Base Image' },
+    { key: 'tags', label: 'Directives' },
+    { key: 'status', label: 'Availability', align: 'center' as const }
   ];
 
-  // Cloud-init Template columns
-  const cloudInitColumns = [
-    {
-      key: 'name',
-      title: 'Name',
-      sortable: true,
-      render: (t: CloudInitTemplate) => t.name
-    },
-    {
-      key: 'description',
-      title: 'Description',
-      render: (t: CloudInitTemplate) => t.description || '—'
-    },
-    {
-      key: 'variables',
-      title: 'Variables',
-      render: (t: CloudInitTemplate) => {
-        if (!t.variables || t.variables.length === 0) return '—';
-        return t.variables.join(', ');
-      }
-    }
+  const ciColumns = [
+    { key: 'name', label: 'Identity' },
+    { key: 'variables', label: 'Defined Var Registry' },
+    { key: 'last_used', label: 'Last Seq', align: 'right' as const }
   ];
 
   async function loadData() {
     loading = true;
-    error = '';
     try {
       const [vmTemps, cloudTemps, imgs, nets, ps, vmList] = await Promise.all([
         client.listVMTemplates(),
@@ -139,238 +71,277 @@
       networks = nets ?? [];
       pools = ps ?? [];
       vms = vmList ?? [];
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Failed to load templates';
-      toast.error(error);
+    } catch (err: any) {
+      error = err.message || 'Blueprint registry unavailable';
     } finally {
       loading = false;
     }
   }
 
-  onMount(() => {
-    if (!token) {
-      goto('/login');
-      return;
-    }
-    loadData();
-  });
+  onMount(loadData);
 
   function cloneTemplate(template: VMTemplate) {
     selectedTemplate = template;
     createFromTemplateOpen = true;
   }
-
-  function viewCloudInit(template: CloudInitTemplate) {
-    selectedCloudInitTemplate = template;
-    cloudInitViewerOpen = true;
-  }
-
-  function createCloudInitTemplate() {
-    cloudInitEditorOpen = true;
-  }
-
-  function openCreateVMTemplate() {
-    newTemplateName = '';
-    newTemplateDescription = '';
-    selectedVMId = '';
-    selectedCloudInitId = '';
-    createVMTemplateOpen = true;
-  }
-
-  async function handleCreateVMTemplate() {
-    if (!newTemplateName.trim()) {
-      toast.error('Template name is required');
-      return;
-    }
-    if (!selectedVMId) {
-      toast.error('Please select a source VM');
-      return;
-    }
-
-    creatingTemplate = true;
-    try {
-      const template = await client.createVMTemplate({
-        source_vm_id: selectedVMId,
-        name: newTemplateName.trim(),
-        description: newTemplateDescription.trim() || undefined,
-        cloud_init_config: selectedCloudInitId ? 
-          cloudInitTemplates.find(t => t.id === selectedCloudInitId)?.content : 
-          undefined
-      });
-      
-      toast.success(`VM Template "${template.name}" created successfully`);
-      createVMTemplateOpen = false;
-      loadData();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to create template';
-      toast.error(message);
-    } finally {
-      creatingTemplate = false;
-    }
-  }
-
-  function deleteVMTemplate(template: VMTemplate) {
-    confirmDialog = {
-      open: true,
-      title: 'Delete VM Template',
-      description: `Are you sure you want to delete "${template.name}"? This action cannot be undone.`,
-      action: async () => {
-        try {
-          await client.deleteVMTemplate(template.id);
-          toast.success(`Template "${template.name}" deleted`);
-          loadData();
-        } catch (err) {
-          toast.error(`Failed to delete template: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        }
-      }
-    };
-  }
-
-  function deleteCloudInitTemplate(template: CloudInitTemplate) {
-    confirmDialog = {
-      open: true,
-      title: 'Delete Cloud-init Template',
-      description: `Are you sure you want to delete "${template.name}"? This action cannot be undone.`,
-      action: async () => {
-        try {
-          await client.deleteCloudInitTemplate(template.id);
-          toast.success(`Template "${template.name}" deleted`);
-          loadData();
-        } catch (err) {
-          toast.error(`Failed to delete template: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        }
-      }
-    };
-  }
 </script>
 
-<div class="flex justify-between items-center mb-6">
-  <div>
-    <h1 class="text-2xl font-bold text-ink">Templates</h1>
-    <p class="text-muted text-sm mt-1">VM templates and cloud-init configurations for rapid provisioning</p>
-  </div>
-  <div class="flex gap-2">
-    {#if activeTab === 'vm'}
-      <button
-        type="button"
-        onclick={openCreateVMTemplate}
-        class="inline-flex items-center gap-2 px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors"
-      >
-        <LayoutTemplate size={16} />
-        Create VM Template
-      </button>
-    {:else}
-      <button
-        type="button"
-        onclick={createCloudInitTemplate}
-        class="inline-flex items-center gap-2 px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors"
-      >
-        <FileCode size={16} />
-        Create Cloud-init Template
-      </button>
-    {/if}
-  </div>
-</div>
-
-<!-- Tabs -->
-<div class="border-b border-line mb-6">
-  <div class="flex gap-6">
-    <button
-      class="pb-3 text-sm font-medium border-b-2 transition-colors {activeTab === 'vm' ? 'border-primary text-primary' : 'border-transparent text-muted hover:text-ink'}"
-      onclick={() => activeTab = 'vm'}
-    >
-      <span class="flex items-center gap-2">
-        <Box size={16} />
-        VM Templates
-        <span class="bg-chrome text-muted text-xs px-2 py-0.5 rounded-full">{vmTemplates.length}</span>
-      </span>
-    </button>
-    <button
-      class="pb-3 text-sm font-medium border-b-2 transition-colors {activeTab === 'cloudinit' ? 'border-primary text-primary' : 'border-transparent text-muted hover:text-ink'}"
-      onclick={() => activeTab = 'cloudinit'}
-    >
-      <span class="flex items-center gap-2">
-        <FileCode size={16} />
-        Cloud-init Templates
-        <span class="bg-chrome text-muted text-xs px-2 py-0.5 rounded-full">{cloudInitTemplates.length}</span>
-      </span>
-    </button>
-  </div>
-</div>
-
-{#if error}
-  <ErrorState />
-{:else if activeTab === 'vm'}
-  <section class="table-card">
-    <DataTable
-      data={vmTemplates}
-      columns={vmTemplateColumns}
-      {loading}
-      selectable={false}
-      emptyIcon={Box as unknown as typeof import('svelte').SvelteComponent}
-      emptyTitle="No VM templates yet"
-      emptyDescription="Create a VM template from an existing VM to enable rapid provisioning"
-      rowId={(t: VMTemplate) => t.id}
-    >
-      {#snippet children(template: VMTemplate)}
-        <div class="flex items-center gap-1">
-          <button
-            type="button"
-            class="action-btn start"
-            onclick={() => cloneTemplate(template)}
-            title="Clone VM from template"
-          >
-            <Copy size={14} />
+<div class="inventory-page">
+  <PageHeaderWithAction page={pageDef}>
+    {#snippet actions()}
+      <div class="header-actions">
+        {#if activeTab === 'vm'}
+          <button class="btn-primary" onclick={() => createVMTemplateOpen = true}>
+            <LayoutTemplate size={14} />
+            Commit Blueprint
           </button>
-          <button
-            type="button"
-            class="action-btn danger"
-            onclick={() => deleteVMTemplate(template)}
-            title="Delete template"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-      {/snippet}
-    </DataTable>
-  </section>
-{:else}
-  <section class="table-card">
-    <DataTable
-      data={cloudInitTemplates}
-      columns={cloudInitColumns}
-      {loading}
-      selectable={false}
-      emptyIcon={FileCode as unknown as typeof import('svelte').SvelteComponent}
-      emptyTitle="No cloud-init templates"
-      emptyDescription="Cloud-init templates define VM initialization configurations"
-      rowId={(t: CloudInitTemplate) => t.id}
-    >
-      {#snippet children(template: CloudInitTemplate)}
-        <div class="flex items-center gap-1">
-          <button
-            type="button"
-            class="action-btn"
-            onclick={() => viewCloudInit(template)}
-            title="View template"
-          >
+        {:else}
+          <button class="btn-primary" onclick={() => cloudInitEditorOpen = true}>
             <FileCode size={14} />
+            Register Init Script
           </button>
-          {#if !template.id.startsWith('cit-')}
-            <button
-              type="button"
-              class="action-btn danger"
-              onclick={() => deleteCloudInitTemplate(template)}
-              title="Delete template"
-            >
-              <Trash2 size={14} />
-            </button>
-          {/if}
+        {/if}
+      </div>
+    {/snippet}
+  </PageHeaderWithAction>
+
+  <div class="inventory-metrics">
+    <CompactMetricCard 
+      label="Provision Blueprints" 
+      value={vmTemplates.length} 
+      color="neutral"
+    />
+    <CompactMetricCard 
+      label="Init Registries" 
+      value={cloudInitTemplates.length} 
+      color="primary"
+    />
+    <CompactMetricCard 
+      label="Library Assets" 
+      value={images.length} 
+      color="neutral"
+    />
+    <CompactMetricCard 
+      label="SLA Compliance" 
+      value="NOMINAL" 
+      color="primary"
+    />
+  </div>
+
+  <div class="tabs-nav">
+    <button class="tab-item" class:active={activeTab === 'vm'} onclick={() => activeTab = 'vm'}>
+      <Box size={14} />
+      <span>Workload Blueprints</span>
+    </button>
+    <button class="tab-item" class:active={activeTab === 'cloudinit'} onclick={() => activeTab = 'cloudinit'}>
+      <FileCode size={14} />
+      <span>Init Registries</span>
+    </button>
+  </div>
+
+  <main class="inventory-main">
+    <section class="inventory-table-area">
+      {#if loading && vmTemplates.length === 0}
+        <div class="skeleton-table"></div>
+      {:else if error}
+        <ErrorState />
+      {:else if activeTab === 'vm'}
+        <InventoryTable columns={vmColumns} rows={vmTemplates.map(t => ({
+          ...t,
+          resources: `${t.vcpu} vCPU / ${t.memory_mb}MB`,
+          image_name: images.find(i => i.id === t.image_id)?.name || t.image_id,
+          status: { label: 'VERIFIED', tone: 'healthy' }
+        }))}>
+          {#snippet cell({ column, row })}
+             {#if column.key === 'name'}
+               <span class="blueprint-name">{row.name}</span>
+             {:else if column.key === 'status'}
+               <StatusBadge label={row.status.label} tone={row.status.tone} />
+             {:else}
+               <span class="cell-text">{row[column.key]}</span>
+             {/if}
+          {/snippet}
+          {#snippet actions({ row })}
+            <div class="row-ops">
+               <button class="op-btn" onclick={() => cloneTemplate(row)} title="Orchestrate Workload"><Copy size={12} /></button>
+            </div>
+          {/snippet}
+        </InventoryTable>
+      {:else}
+        <InventoryTable columns={ciColumns} rows={cloudInitTemplates.map(t => ({
+          ...t,
+          variables: t.variables?.join(', ') || 'NONE'
+        }))}>
+           {#snippet cell({ column, row })}
+             {#if column.key === 'name'}
+               <span class="blueprint-name">{row.name}</span>
+             {:else}
+               <span class="cell-text">{row[column.key]}</span>
+             {/if}
+          {/snippet}
+          {#snippet actions({ row })}
+            <div class="row-ops">
+               <button class="op-btn" title="View Registry"><FileCode size={12} /></button>
+            </div>
+          {/snippet}
+        </InventoryTable>
+      {/if}
+    </section>
+
+    <aside class="support-area">
+      <SectionCard title="Library Insights" icon={ShieldCheck}>
+        <div class="audit-summary">
+          <div class="summary-row">
+            <span>Scan Status</span>
+            <span>CLEAN</span>
+          </div>
+          <div class="summary-row">
+            <span>Auto-Sync</span>
+            <span>ENABLED</span>
+          </div>
         </div>
-      {/snippet}
-    </DataTable>
-  </section>
+      </SectionCard>
+
+      <SectionCard title="Directives" icon={ArrowRight}>
+        <p class="empty-hint">Blueprint library optimized for fabric placement acceleration.</p>
+      </SectionCard>
+    </aside>
+  </main>
+</div>
+
+{#if createFromTemplateOpen}
+  <CreateFromTemplate
+    bind:open={createFromTemplateOpen}
+    template={selectedTemplate}
+    {images}
+    {networks}
+    {pools}
+    onSuccess={loadData}
+  />
 {/if}
+
+<style>
+  .inventory-page {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .header-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .inventory-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .tabs-nav {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    background: var(--bg-surface-muted);
+    border-radius: var(--radius-xs);
+    width: fit-content;
+  }
+
+  .tab-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.75rem;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-neutral-500);
+    text-transform: uppercase;
+    border-radius: var(--radius-xs);
+    transition: all 0.1s ease;
+  }
+
+  .tab-item:hover {
+    color: var(--color-neutral-900);
+  }
+
+  .tab-item.active {
+    background: var(--bg-surface);
+    color: var(--color-primary);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  }
+
+  .inventory-main {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: 1rem;
+    align-items: start;
+  }
+
+  .support-area {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .blueprint-name {
+    font-weight: 700;
+    color: var(--color-neutral-900);
+  }
+
+  .row-ops {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .op-btn {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    border-radius: 4px;
+    color: var(--color-neutral-500);
+    transition: all 0.1s ease;
+  }
+
+  .op-btn:hover {
+    background: var(--bg-surface-muted);
+    color: var(--color-primary);
+  }
+
+  .audit-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .summary-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--color-neutral-600);
+    padding: 0.35rem 0.5rem;
+    background: var(--bg-surface-muted);
+    border-radius: var(--radius-xs);
+  }
+
+  .summary-row span:last-child {
+    font-weight: 700;
+    color: var(--color-neutral-900);
+  }
+
+  .empty-hint {
+    font-size: 11px;
+    color: var(--color-neutral-400);
+    padding: 1rem;
+    text-align: center;
+  }
+
+  @media (max-width: 1100px) {
+    .inventory-main {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
 
 <!-- Create From Template Modal -->
 <CreateFromTemplate

@@ -1,22 +1,21 @@
 <script lang="ts">
 	import type { PageData } from './$types';
-	import { getPageDefinition } from '$lib/shell/app-shell';
-	import type { ShellTone } from '$lib/shell/app-shell';
 	import { getStoredToken } from '$lib/api/client';
 	import { mutateNode } from '$lib/bff/nodes';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
-	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
 	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle } from 'lucide-svelte';
-	import { getTaskStatusMeta } from '$lib/webui/tasks';
+	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle, ShieldCheck } from 'lucide-svelte';
 	import NodeHealthDashboard from '$lib/components/NodeHealthDashboard.svelte';
+	import type { ShellTone } from '$lib/shell/app-shell';
 
 	let { data }: { data: PageData } = $props();
 
@@ -25,10 +24,9 @@
 
 	function normalizeTone(status: string): ShellTone {
 		const s = status.toLowerCase();
-		if (['healthy', 'ready', 'active', 'completed', 'success', 'online'].includes(s)) return 'healthy';
-		if (['warning', 'maintenance', 'bootstrapping', 'draining', 'starting', 'stopping', 'paused'].includes(s)) return 'warning';
-		if (['degraded', 'offline'].includes(s)) return 'degraded';
-		if (['failed', 'error', 'critical', 'crashed'].includes(s)) return 'failed';
+		if (['healthy', 'ready', 'active', 'online'].includes(s)) return 'healthy';
+		if (['warning', 'maintenance', 'draining', 'starting', 'paused'].includes(s)) return 'warning';
+		if (['degraded', 'offline', 'failed', 'error'].includes(s)) return 'failed';
 		return 'unknown';
 	}
 
@@ -40,36 +38,28 @@
 			await mutateNode({ node_id, action }, token);
 			toast.success(`Node ${action.replace('_', ' ')} accepted`);
 			await invalidateAll();
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Action failed';
-			toast.error(message);
+		} catch (err: any) {
+			toast.error(err.message || 'Action failed');
 		} finally {
 			pendingAction = null;
 		}
 	}
 
 	const postureProps = $derived([
-		{ label: 'State', value: detail.summary.state, tone: normalizeTone(detail.summary.state) as any },
-		{ label: 'Health', value: detail.summary.health, tone: normalizeTone(detail.summary.health) as any },
-		{ label: 'Storage', value: detail.summary.storage },
-		{ label: 'Network', value: detail.summary.network }
-	]);
-
-	const capacityProps = $derived([
-		{ label: 'CPU Usage', value: detail.summary.cpu, subtext: 'Total allocated' },
-		{ label: 'Memory Usage', value: detail.summary.memory, subtext: 'Total reserved' },
-		{ label: 'Scheduling', value: detail.summary.scheduling ? 'Active' : 'Paused', tone: (detail.summary.scheduling ? 'healthy' : 'warning') as any },
-		{ label: 'Maintenance', value: detail.summary.maintenance ? 'Enabled' : 'Disabled', tone: (detail.summary.maintenance ? 'warning' : 'healthy') as any }
+		{ label: 'Control State', value: detail.summary.state },
+		{ label: 'Safety Integrity', value: detail.summary.health },
+		{ label: 'Storage Fabric', value: detail.summary.storage },
+		{ label: 'Network Fabric', value: detail.summary.network }
 	]);
 
 	const configProps = $derived(detail.configuration.map(c => ({ label: c.label, value: c.value })));
 
 	const vmColumns = [
-		{ key: 'name', label: 'VM' },
+		{ key: 'name', label: 'Workload Identity' },
 		{ key: 'power_state', label: 'Power', align: 'center' as const },
-		{ key: 'health', label: 'Health' },
-		{ key: 'cpu', label: 'CPU', align: 'right' as const },
-		{ key: 'memory', label: 'Memory', align: 'right' as const }
+		{ key: 'health', label: 'Safety', align: 'center' as const },
+		{ key: 'cpu', label: 'Core Alloc', align: 'right' as const },
+		{ key: 'memory', label: 'RAM Reserv', align: 'right' as const }
 	];
 
 	const vmRows = $derived(detail.hosted_vms.map(v => ({
@@ -84,110 +74,114 @@
 	})));
 </script>
 
-<div class="resource-detail">
+<div class="inventory-page">
 	{#if detail.state === 'error'}
-		<ErrorState title="Node Detail Unavailable" description="The control plane could not assemble the requested host details." />
+		<ErrorState title="Host record unreachable" description="The control plane could not assemble host telemetry." />
 	{:else if detail.state === 'empty'}
-		<EmptyInfrastructureState title="Node Not Found" description="The requested node ID does not exist in the current inventory." hint="Verify the Node ID is correct and the node has been enrolled." />
+		<EmptyInfrastructureState title="Host Identity Unknown" description="The requested node ID does not exist." />
 	{:else}
 		<ResourceDetailHeader 
 			title={detail.summary.name} 
-			eyebrow={detail.summary.cluster}
+			eyebrow="PHYSICAL_NODE // {detail.summary.node_id}"
 			statusLabel={detail.summary.state}
 			tone={normalizeTone(detail.summary.state)}
 			parentLabel="Nodes"
 			parentHref="/nodes"
-			description="Physical compute host providing hypervisor resources."
 		>
 			{#snippet actions()}
 				<div class="header-actions">
-					<ActionStrip>
-						{#if detail.summary.maintenance}
-							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('exit_maintenance')}>
+           {#if detail.summary.maintenance}
+							<button class="btn-secondary" disabled={pendingAction !== null} onclick={() => executeAction('exit_maintenance')}>
 								<Wrench size={14} />
-								{pendingAction === 'exit_maintenance' ? 'Exiting...' : 'Exit Maintenance'}
+								{pendingAction === 'exit_maintenance' ? 'EXECUTING...' : 'EXIT_MAINTENANCE'}
 							</button>
 						{:else}
-							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('enter_maintenance')}>
+							<button class="btn-secondary" disabled={pendingAction !== null} onclick={() => executeAction('enter_maintenance')}>
 								<Wrench size={14} />
-								{pendingAction === 'enter_maintenance' ? 'Entering...' : 'Enter Maintenance'}
+								{pendingAction === 'enter_maintenance' ? 'EXECUTING...' : 'ENTER_MAINTENANCE'}
 							</button>
 						{/if}
 
-						{#if detail.summary.scheduling}
-							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('pause_scheduling')}>
-								<Pause size={14} />
-								{pendingAction === 'pause_scheduling' ? 'Pausing...' : 'Pause Scheduling'}
-							</button>
-						{:else}
-							<button class="btn-primary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('resume_scheduling')}>
-								<Play size={14} />
-								{pendingAction === 'resume_scheduling' ? 'Resuming...' : 'Resume Scheduling'}
-							</button>
-						{/if}
-
-						<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => executeAction('drain')}>
+						<button class="btn-primary" disabled={pendingAction !== null} onclick={() => executeAction('drain')}>
 							<ArrowUpFromLine size={14} />
-							{pendingAction === 'drain' ? 'Draining...' : 'Drain'}
+							{pendingAction === 'drain' ? 'EXECUTING...' : 'DRAIN_FABRIC'}
 						</button>
-					</ActionStrip>
 				</div>
 			{/snippet}
 		</ResourceDetailHeader>
 
-		<main class="detail-grid">
-			<section class="detail-main-span">
-				<div class="summary-top">
-					<SectionCard title="Current Posture" icon={Activity}>
-						<PropertyGrid properties={[...postureProps, ...capacityProps]} columns={4} />SectionCard>
-					</SectionCard>
-				</div>
+		<div class="inventory-metrics">
+			<CompactMetricCard label="CPU Pressure" value={detail.summary.cpu} color="primary" />
+			<CompactMetricCard label="Memory Entropy" value={detail.summary.memory} color="primary" />
+			<CompactMetricCard label="IOPS Density" value={detail.summary.storage} color="neutral" />
+			<CompactMetricCard label="Net Throughput" value={detail.summary.network} color="neutral" />
+		</div>
 
-				<div class="detail-sections">
-					<SectionCard title="Node Health" icon={Activity}>
-						<NodeHealthDashboard />
-					</SectionCard>
+		<main class="inventory-main">
+			<section class="detail-content">
+				<SectionCard title="Compute Posture" icon={Activity}>
+					<PropertyGrid properties={postureProps} columns={2} />
+				</SectionCard>
 
-					<SectionCard title="Hosted Workloads" icon={Box} badgeLabel={String(detail.hosted_vms.length)}>
-						{#if detail.hosted_vms.length === 0}
-							<p class="empty-hint">No virtual machines currently placed on this node.</p>
-						{:else}
-							<InventoryTable 
-								columns={vmColumns} 
-								rows={vmRows} 
-								rowHref={(row) => `/vms/${row.vm_id}`} 
-							/>
-						{/if}
-					</SectionCard>
+				<SectionCard title="Hardware Fabric" icon={Activity}>
+					<NodeHealthDashboard />
+				</SectionCard>
 
-					<SectionCard title="Recent History" icon={Activity}>
-						<TaskTimeline tasks={timelineTasks} />
-					</SectionCard>
-
-					<SectionCard title="Configuration" icon={Info}>
-						<PropertyGrid properties={configProps} columns={2} />
-					</SectionCard>
-				</div>
-			</section>
-
-			<aside class="detail-side-span">
-				<SectionCard title="Attention Required" icon={AlertTriangle} badgeTone={detail.summary.health !== 'healthy' ? 'warning' : 'neutral'}>
-					{#if detail.summary.health === 'healthy'}
-						<p class="empty-hint">No active alerts or hardware degradation detected.</p>
+				<SectionCard title="Resident Workloads" icon={Box} badgeLabel={String(detail.hosted_vms.length)}>
+					{#if detail.hosted_vms.length === 0}
+						<p class="empty-hint">No virtual instances currently pinned to this host fabric.</p>
 					{:else}
-						<p class="empty-hint">Host infrastructure signals indicate degradation. Review events for details.</p>
+						<InventoryTable 
+							columns={vmColumns} 
+							rows={vmRows} 
+							rowHref={(row) => `/vms/${row.vm_id}`} 
+						>
+               {#snippet cell({ column, row })}
+                 {#if column.key === 'name'}
+                   <span class="workload-name">{row.name}</span>
+                 {:else if column.key === 'power_state' || column.key === 'health'}
+                   <StatusBadge label={row[column.key].label} tone={row[column.key].tone} />
+                 {:else}
+                    <span class="cell-text">{row[column.key]}</span>
+                 {/if}
+               {/snippet}
+            </InventoryTable>
 					{/if}
 				</SectionCard>
 
-				<SectionCard title="Node Metadata">
+				<SectionCard title="Mutation Audit" icon={Activity}>
+					<TaskTimeline tasks={timelineTasks} />
+				</SectionCard>
+			</section>
+
+			<aside class="support-area">
+				<SectionCard title="Safety Integrity" icon={ShieldCheck}>
+					{#if detail.summary.health === 'healthy'}
+						<div class="safety-sign">
+							<ShieldCheck size={16} />
+							<span>HOST_LEVEL_VERIFIED</span>
+						</div>
+					{:else}
+						<div class="safety-sign alert">
+							<AlertTriangle size={16} />
+							<span>DEGRADATION_DETECTED</span>
+						</div>
+					{/if}
+				</SectionCard>
+
+				<SectionCard title="Host Metadata">
 					<PropertyGrid 
 						columns={1}
 						properties={[
-							{ label: 'OS Version', value: detail.summary.version },
-							{ label: 'Uptime', value: detail.summary.uptime || '—' },
-							{ label: 'Last Check-in', value: detail.summary.last_checkin || '—' }
+							{ label: 'OS Build', value: detail.summary.version },
+							{ label: 'Uptime Seq', value: detail.summary.uptime || '—' },
+							{ label: 'Last Sync', value: detail.summary.last_checkin || '—' }
 						]} 
 					/>
+				</SectionCard>
+
+				<SectionCard title="Configuration" icon={Info}>
+					<PropertyGrid properties={configProps} columns={1} />
 				</SectionCard>
 			</aside>
 		</main>
@@ -195,9 +189,10 @@
 </div>
 
 <style>
-	.resource-detail {
+	.inventory-page {
 		display: flex;
 		flex-direction: column;
+		gap: 0.75rem;
 	}
 
 	.header-actions {

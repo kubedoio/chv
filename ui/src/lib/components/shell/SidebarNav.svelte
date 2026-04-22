@@ -1,44 +1,57 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { ChevronDown, House, LogOut, Moon, Sun } from 'lucide-svelte';
+	import { 
+		ChevronDown, 
+		House, 
+		LogOut, 
+		Moon, 
+		Sun,
+		Database,
+		Blocks,
+		Server,
+		Box,
+		Activity,
+		Settings,
+		Search,
+		Loader2,
+		ShieldCheck
+	} from 'lucide-svelte';
 	import { navigationGroups } from '$lib/shell/app-shell';
-	import { clearToken, createAPIClient } from '$lib/api/client';
+	import { clearToken, createAPIClient, getStoredToken } from '$lib/api/client';
 	import { theme } from '$lib/stores/theme.svelte';
+	import { inventory } from '$lib/stores/inventory.svelte';
+	import { selection } from '$lib/stores/selection.svelte';
 
 	function isActive(href: string, pathname: string): boolean {
-		if (href === '/') {
-			return pathname === '/';
-		}
-
+		if (href === '/') return pathname === '/';
 		return pathname === href || pathname.startsWith(`${href}/`);
 	}
 
-	function groupContainsActive(items: { href: string }[], pathname: string): boolean {
-		return items.some((item) => isActive(item.href, pathname));
-	}
+	let openGroups = $state<Record<string, boolean>>({
+		'dc-1': true,
+		'cl-1': true,
+		'nodes': true
+	});
 
-	// Track open/closed state for each group. Auto-expand the group containing the current page.
-	let openGroups = $state<Record<string, boolean>>({});
-
-	$effect(() => {
-		const pathname = $page.url.pathname;
-		for (const group of navigationGroups) {
-			if (groupContainsActive(group.items, pathname)) {
-				openGroups[group.label] = true;
-			}
-		}
+	onMount(() => {
+		inventory.fetch();
 	});
 
 	function toggleGroup(label: string) {
 		openGroups[label] = !openGroups[label];
 	}
 
+	function handleSelection(type: any, id: string, label: string) {
+		selection.select(type, id, label);
+	}
+
 	async function handleLogout() {
 		try {
 			await createAPIClient().logout();
 		} catch {
-			// Best-effort remote logout; local token removal is authoritative for WebUI.
+			// Best-effort
 		} finally {
 			clearToken();
 			goto('/login');
@@ -48,258 +61,362 @@
 
 <nav class="app-nav" aria-label="Primary">
 	<div class="app-nav__brand">
-		<div class="app-nav__brand-mark">CHV</div>
-		<div>
+		<div class="app-nav__brand-mark">
+			<Database size={16} />
+		</div>
+		<div class="app-nav__brand-text">
 			<div class="app-nav__brand-title">Control Plane</div>
+			<div class="app-nav__brand-subtitle">Topology First</div>
 		</div>
 	</div>
 
-	<div class="app-nav__links">
-		<!-- Overview sits above all accordion groups -->
-		<a
-			href="/"
-			class:app-nav__link--active={isActive('/', $page.url.pathname)}
-			class="app-nav__link"
-			aria-current={isActive('/', $page.url.pathname) ? 'page' : undefined}
-		>
-			<House size={17} />
-			<span>Overview</span>
-		</a>
+	<div class="app-nav__search">
+		<Search size={12} class="app-nav__search-icon" />
+		<input type="text" placeholder="Search fleet..." class="app-nav__search-input" />
+		<kbd class="app-nav__search-kbd">⌘K</kbd>
+	</div>
 
-		<!-- Accordion groups -->
-		{#each navigationGroups as group}
-			<div class="app-nav__group">
-				<button
-					type="button"
-					class="app-nav__group-toggle"
-					onclick={() => toggleGroup(group.label)}
-					aria-expanded={!!openGroups[group.label]}
-				>
-					<span class="app-nav__group-label">{group.label}</span>
-					<span
-						class="app-nav__group-chevron"
-						class:app-nav__group-chevron--open={openGroups[group.label]}
-					>
-						<ChevronDown size={13} />
-					</span>
-				</button>
+	<div class="app-nav__scrollbox">
+		<div class="app-nav__section">
+			<a href="/" class="app-nav__item" class:app-nav__item--active={isActive('/', $page.url.pathname)}>
+				<House size={14} />
+				<span>Fleet Overview</span>
+			</a>
+		</div>
 
-				<div
-					class="app-nav__group-items"
-					class:app-nav__group-items--open={openGroups[group.label]}
-				>
-					{#each group.items as item}
-						<a
-							href={item.href}
-							class:app-nav__link--active={isActive(item.href, $page.url.pathname)}
-							class="app-nav__link app-nav__link--grouped"
-							aria-current={isActive(item.href, $page.url.pathname) ? 'page' : undefined}
-						>
-							<item.icon size={17} />
-							<span>{item.label}</span>
-						</a>
-					{/each}
-				</div>
+		<div class="app-nav__section">
+			<div class="app-nav__section-header">Infrastructure</div>
+			
+			<div class="app-nav__tree">
+				{#if inventory.isLoading}
+					<div class="app-nav__loading">
+						<Loader2 size={12} class="animate-spin" />
+						<span>Syncing fleet...</span>
+					</div>
+				{:else if inventory.nodes.length === 0}
+					<div class="app-nav__empty">No nodes index.</div>
+				{:else}
+					<!-- Live Datacenter (Placeholder for multi-dc expansion) -->
+					<div class="app-nav__tree-node app-nav__tree-node--dc">
+						<button class="app-nav__tree-toggle" onclick={() => toggleGroup('dc-1')}>
+							<ChevronDown size={10} class:is-closed={!openGroups['dc-1']} />
+							<Database size={12} />
+							<span>Default-DC</span>
+						</button>
+						
+						{#if openGroups['dc-1']}
+							<div class="app-nav__tree-children">
+								{#each inventory.nodes as node}
+									<div class="app-nav__tree-node app-nav__tree-node--node">
+										<a 
+											href="/nodes/{node.id}" 
+											class="app-nav__tree-link" 
+											class:app-nav__tree-link--active={selection.active.id === node.id}
+											onclick={() => handleSelection('node', node.id, node.name)}
+										>
+											<div class="status-status-orb" class:status-status-orb--healthy={node.status === 'online'}></div>
+											<Server size={12} />
+											<span>{node.name}</span>
+										</a>
+										
+										<div class="app-nav__tree-children">
+											{#each inventory.vms.filter(v => v.node_id === node.id) as vm}
+												<a 
+													href="/vms/{vm.id}" 
+													class="app-nav__tree-link app-nav__tree-link--vm"
+													class:app-nav__tree-link--active={selection.active.id === vm.id}
+													onclick={() => handleSelection('vm', vm.id, vm.name)}
+												>
+													<div class="status-status-orb" class:status-status-orb--healthy={vm.actual_state === 'running'} class:status-status-orb--warning={vm.actual_state !== 'running'}></div>
+													<Box size={10} />
+													<span>{vm.name}</span>
+												</a>
+											{/each}
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				{/if}
 			</div>
-		{/each}
+		</div>
+
+		<div class="app-nav__section">
+			<div class="app-nav__section-header">Resources</div>
+			<a href="/networks" class="app-nav__item" class:app-nav__item--active={isActive('/networks', $page.url.pathname)}>
+				<Activity size={14} />
+				<span>Network Fabric</span>
+			</a>
+			<a href="/storage" class="app-nav__item" class:app-nav__item--active={isActive('/storage', $page.url.pathname)}>
+				<Database size={14} />
+				<span>Storage Pools</span>
+			</a>
+			<a href="/images" class="app-nav__item" class:app-nav__item--active={isActive('/images', $page.url.pathname)}>
+				<Blocks size={14} />
+				<span>Image Library</span>
+			</a>
+		</div>
+
+		<div class="app-nav__section">
+			<div class="app-nav__section-header">Operations</div>
+			<a href="/tasks" class="app-nav__item" class:app-nav__item--active={isActive('/tasks', $page.url.pathname)}>
+				<Activity size={14} />
+				<span>Operation Pipeline</span>
+			</a>
+			<a href="/events" class="app-nav__item" class:app-nav__item--active={isActive('/events', $page.url.pathname)}>
+				<AlertCircle size={14} />
+				<span>Incident Log</span>
+			</a>
+			<a href="/backups" class="app-nav__item" class:app-nav__item--active={isActive('/backups', $page.url.pathname)}>
+				<ShieldCheck size={14} />
+				<span>Data Protection</span>
+			</a>
+		</div>
 	</div>
 
 	<div class="app-nav__footer">
-		<button type="button" class="app-nav__logout app-nav__theme-toggle" onclick={() => theme.toggle()} aria-label="Toggle dark mode">
-			{#if theme.value === 'dark'}
-				<Sun size={15} />
-				<span>Light mode</span>
-			{:else}
-				<Moon size={15} />
-				<span>Dark mode</span>
-			{/if}
+		<button type="button" class="app-nav__footer-btn" onclick={() => theme.toggle()}>
+			{#if theme.value === 'dark'}<Sun size={12} />{:else}<Moon size={12} />{/if}
 		</button>
-		<button type="button" class="app-nav__logout" onclick={handleLogout} aria-label="Log out">
-			<LogOut size={15} />
-			<span>Log out</span>
-		</button>
+		<a href="/settings" class="app-nav__footer-btn"><Settings size={12} /></a>
+		<button type="button" class="app-nav__footer-btn" onclick={handleLogout}><LogOut size={12} /></button>
 	</div>
 </nav>
 
 <style>
 	.app-nav {
-		display: grid;
-		gap: 1.25rem;
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		gap: 1rem;
+		user-select: none;
 	}
 
 	.app-nav__brand {
 		display: flex;
 		align-items: center;
-		gap: 0.9rem;
+		gap: 0.75rem;
+		padding: 0.5rem 0.25rem;
 	}
 
 	.app-nav__brand-mark {
 		display: grid;
 		place-items: center;
-		width: 2.6rem;
-		height: 2.6rem;
-		border-radius: 0.9rem;
-		background: var(--shell-accent);
-		color: #fffaf3;
-		font-size: 0.86rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
+		width: 2rem;
+		height: 2rem;
+		border-radius: var(--radius-sm);
+		background: var(--color-primary);
+		color: #ffffff;
+	}
+
+	.app-nav__brand-text {
+		display: flex;
+		flex-direction: column;
 	}
 
 	.app-nav__brand-title {
-		line-height: 1.2;
-		font-weight: 600;
-		color: var(--shell-text);
+		font-size: 0.875rem;
+		font-weight: 700;
+		color: #ffffff;
 	}
 
-	.app-nav__links {
-		display: grid;
-		gap: 0.15rem;
-	}
-
-	/* ── nav link (shared base) ── */
-	.app-nav__link {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-		border: 1px solid transparent;
-		border-radius: 0.5rem;
-		padding: 0.5rem 0.65rem;
-		font-size: 0.85rem;
-		font-weight: 500;
-		color: var(--shell-text-secondary);
-		text-decoration: none;
-		transition:
-			background-color 140ms ease,
-			border-color 140ms ease,
-			color 140ms ease,
-			transform 140ms ease;
-	}
-
-	.app-nav__link:hover {
-		background: var(--shell-surface);
-		border-color: var(--shell-line);
-		color: var(--shell-text);
-		transform: translateX(2px);
-	}
-
-	.app-nav__link--active {
-		background: var(--shell-surface);
-		border-color: var(--shell-line-strong);
-		color: var(--shell-text);
-	}
-
-	/* ── grouped items indented ── */
-	.app-nav__link--grouped {
-		padding-left: calc(0.65rem + var(--space-3, 0.75rem));
-	}
-
-	/* ── accordion group ── */
-	.app-nav__group {
-		display: grid;
-	}
-
-	.app-nav__group-toggle {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		width: 100%;
-		padding: 0.35rem 0.65rem;
-		border: none;
-		border-radius: 0.35rem;
-		background: transparent;
-		cursor: pointer;
-		color: var(--shell-text-secondary, #75695b);
-		transition: color 140ms ease;
-	}
-
-	.app-nav__group-toggle:hover {
-		color: var(--shell-text);
-	}
-
-	.app-nav__group-label {
-		font-size: var(--text-xs, 0.72rem);
-		font-weight: 600;
-		letter-spacing: 0.05em;
+	.app-nav__brand-subtitle {
+		font-size: 0.625rem;
+		color: var(--color-neutral-400);
 		text-transform: uppercase;
-		color: inherit;
+		letter-spacing: 0.05em;
 	}
 
-	.app-nav__group-chevron {
+	.app-nav__search {
+		position: relative;
+		margin: 0 0.25rem;
+	}
+
+	.app-nav__search-icon {
+		position: absolute;
+		left: 0.625rem;
+		top: 50%;
+		transform: translateY(-50%);
+		color: var(--color-neutral-400);
+	}
+
+	.app-nav__search-input {
+		width: 100%;
+		background: var(--color-neutral-800);
+		border: 1px solid var(--color-neutral-700);
+		border-radius: var(--radius-xs);
+		padding: 0.35rem 2rem;
+		font-size: var(--text-xs);
+		color: #ffffff;
+	}
+
+	.app-nav__search-kbd {
+		position: absolute;
+		right: 0.625rem;
+		top: 50%;
+		transform: translateY(-50%);
+		font-size: 9px;
+		background: var(--color-neutral-700);
+		color: var(--color-neutral-400);
+		padding: 1px 3px;
+		border-radius: 2px;
+	}
+
+	.app-nav__scrollbox {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 1.5rem;
+		overflow-y: auto;
+		padding-right: 0.5rem;
+	}
+
+	.app-nav__section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.app-nav__section-header {
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		color: var(--color-neutral-500);
+		margin-bottom: 0.25rem;
+		padding-left: 0.5rem;
+	}
+
+	.app-nav__item {
 		display: flex;
 		align-items: center;
-		color: inherit;
-		opacity: 0.6;
-		transform: rotate(-90deg);
-		transition: transform 150ms ease-out;
+		gap: 0.625rem;
+		padding: 0.35rem 0.5rem;
+		font-size: var(--text-sm);
+		color: var(--color-neutral-300);
+		text-decoration: none;
+		border-radius: var(--radius-xs);
+		transition: all 120ms ease;
 	}
 
-	.app-nav__group-chevron--open {
-		transform: rotate(0deg);
+	.app-nav__item:hover {
+		background: var(--color-neutral-800);
+		color: #ffffff;
 	}
 
-	/* ── collapse/expand ── */
-	.app-nav__group-items {
-		display: grid;
-		gap: 0.15rem;
-		overflow: hidden;
-		max-height: 0;
-		opacity: 0;
-		transition:
-			max-height 150ms ease-out,
-			opacity 150ms ease-out;
+	.app-nav__item--active {
+		background: var(--color-primary);
+		color: #ffffff;
 	}
 
-	.app-nav__group-items--open {
-		/* large enough for any realistic number of items */
-		max-height: 40rem;
-		opacity: 1;
-	}
-
-	/* ── footer ── */
-	.app-nav__footer {
+	/* Tree View */
+	.app-nav__tree {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.4rem;
-		border-top: 1px solid var(--shell-line);
-		padding-top: 0.75rem;
+		flex-direction: column;
 	}
 
-	.app-nav__logout {
-		display: inline-flex;
+	.app-nav__tree-node {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.app-nav__tree-toggle,
+	.app-nav__tree-link {
+		display: flex;
 		align-items: center;
-		gap: 0.45rem;
-		width: fit-content;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.75rem;
-		padding: 0.5rem 0.65rem;
-		background: var(--shell-surface);
-		color: var(--shell-text-secondary);
-		font-size: 0.82rem;
-		font-weight: 600;
+		gap: 0.5rem;
+		padding: 0.25rem 0.5rem;
+		font-size: var(--text-sm);
+		color: var(--color-neutral-400);
+		text-decoration: none;
+		background: transparent;
+		border: none;
 		cursor: pointer;
-		transition:
-			background-color 140ms ease,
-			border-color 140ms ease,
-			color 140ms ease;
+		border-radius: var(--radius-xs);
+		text-align: left;
 	}
 
-	.app-nav__logout:hover {
-		background: color-mix(in srgb, var(--shell-surface) 72%, var(--status-failed-bg) 28%);
-		border-color: color-mix(in srgb, var(--shell-line) 60%, var(--status-failed-border) 40%);
-		color: color-mix(in srgb, var(--shell-text) 62%, var(--status-failed-text) 38%);
+	.app-nav__tree-toggle:hover,
+	.app-nav__tree-link:hover {
+		background: var(--color-neutral-800);
+		color: #ffffff;
 	}
 
-	@media (max-width: 960px) {
-		.app-nav__links {
-			grid-auto-flow: column;
-			grid-auto-columns: minmax(10rem, 1fr);
-			overflow-x: auto;
-			padding-bottom: 0.35rem;
-		}
+	.app-nav__tree-children {
+		margin-left: 0.75rem;
+		padding-left: 0.5rem;
+		border-left: 1px solid var(--color-neutral-700);
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+	}
 
-		.app-nav__footer {
-			display: none;
-		}
+	.status-pulse {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--color-neutral-500);
+		position: relative;
+	}
+
+	.app-nav__tree-link--active {
+		background: rgba(143, 90, 42, 0.15) !important;
+		color: var(--color-primary) !important;
+		border-left: 2px solid var(--color-primary);
+		padding-left: calc(0.5rem - 2px);
+	}
+
+	.status-status-orb {
+		width: 4px;
+		height: 4px;
+		border-radius: 50%;
+		background: var(--color-neutral-600);
+	}
+
+	.status-status-orb--healthy { background: var(--color-success); }
+	.status-status-orb--warning { background: var(--color-warning); }
+
+	.app-nav__scrollbox::-webkit-scrollbar {
+		width: 4px;
+	}
+	.app-nav__loading,
+	.app-nav__empty {
+		padding: 0.5rem 1rem;
+		font-size: 10px;
+		color: var(--color-neutral-500);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.animate-spin {
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
+	}
+
+	.is-closed {
+		transform: rotate(-90deg);
+	}
+
+	.app-nav__footer-btn {
+		width: 1.75rem;
+		height: 1.75rem;
+		display: grid;
+		place-items: center;
+		background: var(--color-neutral-800);
+		border: 1px solid var(--color-neutral-700);
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-400);
+		cursor: pointer;
+		transition: all 120ms ease;
+	}
+
+	.app-nav__footer-btn:hover {
+		background: var(--color-neutral-700);
+		color: #ffffff;
 	}
 </style>

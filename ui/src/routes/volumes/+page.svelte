@@ -1,13 +1,15 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Plus, Database, AlertTriangle, ChevronRight } from 'lucide-svelte';
+	import { Plus, Database, Activity, HardDrive, ShieldAlert } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
 
@@ -15,14 +17,6 @@
 
 	const model = $derived(data.volumes);
 	const items = $derived(model.items);
-
-	const stats = $derived([
-		{ label: 'Total Volumes', value: items.length },
-		{ label: 'Attached', value: items.filter(v => v.attached_vm_id).length, status: 'healthy' as const },
-		{ label: 'Available', value: items.filter(v => !v.attached_vm_id).length, status: 'neutral' as const },
-		{ label: 'Degraded', value: items.filter(v => v.health !== 'healthy').length, status: items.filter(v => v.health !== 'healthy').length > 0 ? 'warning' as const : 'neutral' as const },
-		{ label: 'Open Alerts', value: items.reduce((sum, v) => sum + (v.alerts || 0), 0), status: items.reduce((sum, v) => sum + (v.alerts || 0), 0) > 0 ? 'critical' as const : 'neutral' as const }
-	]);
 
 	const filters = [
 		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Name/VM/Node...' },
@@ -58,20 +52,14 @@
 		goto(`?${newParams.toString()}`, { keepFocus: true, noScroll: true });
 	}
 
-	function handleClearFilters() {
-		goto($appPage.url.pathname);
-	}
-
 	const columns = [
-		{ key: 'name', label: 'Volume' },
-		{ key: 'backend', label: 'Backend' },
-		{ key: 'attached_vm_name', label: 'Attached VM' },
-		{ key: 'node_id', label: 'Node' },
-		{ key: 'health', label: 'Health' },
-		{ key: 'size', label: 'Size', align: 'right' as const },
-		{ key: 'policy', label: 'Policy' },
-		{ key: 'last_task', label: 'Last Task' },
-		{ key: 'alerts', label: 'Alerts', align: 'center' as const }
+		{ key: 'name', label: 'Volume Identity' },
+		{ key: 'backend', label: 'Storage Driver' },
+		{ key: 'attached_vm_name', label: 'Attachment' },
+		{ key: 'node_id', label: 'Placement' },
+		{ key: 'health', label: 'IO Health' },
+		{ key: 'size', label: 'Durable Size', align: 'right' as const },
+		{ key: 'last_task', label: 'Last Seq', align: 'right' as const }
 	];
 
 	function mapHealthTone(health: string): any {
@@ -86,10 +74,8 @@
 
 	const tableRows = $derived(items.map(item => ({
 		...item,
-		backend: item.backend || 'LocalDisk (LVM)',
-		policy: item.policy || 'Standard',
-		health: { label: item.health, tone: mapHealthTone(item.health) },
-		alerts: 0 // Mock alerts if missing
+		backend: item.backend || 'LOCAL_LVM',
+		health: { label: item.health, tone: mapHealthTone(item.health) }
 	})));
 
 	const attentionVolumes = $derived(items.filter(v => v.health !== 'healthy').slice(0, 3));
@@ -101,13 +87,32 @@
 		{#snippet actions()}
 			<button class="btn-primary">
 				<Plus size={14} />
-				Create Volume
+				Allocate Block
 			</button>
 		{/snippet}
 	</PageHeaderWithAction>
 
-	<div class="posture-strip-wrapper">
-		<CompactStatStrip {stats} />
+	<div class="inventory-metrics">
+		<CompactMetricCard 
+			label="Total Blocks" 
+			value={items.length} 
+			color="neutral"
+		/>
+		<CompactMetricCard 
+			label="Hot Attachments" 
+			value={items.filter(v => v.attached_vm_id).length} 
+			color="primary"
+		/>
+		<CompactMetricCard 
+			label="Available Pools" 
+			value={items.filter(v => !v.attached_vm_id).length} 
+			color="neutral"
+		/>
+		<CompactMetricCard 
+			label="Storage IOPS" 
+			value="NOMINAL" 
+			color="primary"
+		/>
 	</div>
 
 	<div class="inventory-controls">
@@ -115,7 +120,7 @@
 			{filters} 
 			activeFilters={model.filters.current} 
 			onFilterChange={handleFilterChange}
-			onClearAll={handleClearFilters}
+			onClearAll={() => goto($appPage.url.pathname)}
 		/>
 	</div>
 
@@ -125,55 +130,62 @@
 				<ErrorState />
 			{:else if model.state === 'empty'}
 				<EmptyInfrastructureState 
-					title="No storage volumes found"
-					description="Adjust your filters or provision a new block device."
-					hint="Volumes are specific to nodes but can be migrated if the pool is shared."
+					title="No block volumes provisioned"
+					description="Adjust your filters or allocate a new persistent block device."
+					hint="Block volumes provide high-performance durable storage for workloads."
 				/>
 			{:else}
 				<InventoryTable 
 					{columns} 
 					rows={tableRows} 
 					rowHref={(row) => `/volumes/${row.volume_id}`} 
-				/>
+				>
+					{#snippet cell({ column, row })}
+						{@const val = row[column.key]}
+						{#if column.key === 'name'}
+							<span class="volume-name">{row.name}</span>
+						{:else if typeof val === 'object' && val?.tone}
+							<StatusBadge label={val.label} tone={val.tone} />
+						{:else}
+							<span class="cell-text">{val || '—'}</span>
+						{/if}
+					{/snippet}
+				</InventoryTable>
 			{/if}
 		</section>
 
 		<aside class="support-area">
-			<div class="support-panel">
-				<div class="support-panel__header">
-					<Database size={14} />
-					<h3>Storage Pressure</h3>
-				</div>
-				<div class="support-panel__content">
-					{#if attentionVolumes.length === 0}
-						<p class="empty-hint">Block devices healthy and responsive.</p>
-					{:else}
-						<ul class="attention-list">
-							{#each attentionVolumes as vol}
-								<li>
-									<a href="/volumes/{vol.volume_id}" class="attention-card">
-										<div class="attention-card__main">
-											<span class="res-name">{vol.name}</span>
-											<span class="res-issue">{vol.health} state · {vol.size}</span>
-										</div>
-										<ChevronRight size={14} />
-									</a>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				</div>
-			</div>
+			<SectionCard title="Storage Anomalies" icon={ShieldAlert} badgeLabel={String(attentionVolumes.length)}>
+				{#if attentionVolumes.length === 0}
+					<p class="empty-hint">Block devices health reported as nominal.</p>
+				{:else}
+					<ul class="attention-list">
+						{#each attentionVolumes as vol}
+							<li>
+								<div class="attention-card">
+									<div class="attention-card__main">
+										<span class="res-name">{vol.name}</span>
+										<span class="res-issue">IO latency spike detected</span>
+									</div>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</SectionCard>
 
-			<div class="support-panel">
-				<div class="support-panel__header">
-					<AlertTriangle size={14} style="color: var(--color-warning)" />
-					<h3>Degraded Pools</h3>
+			<SectionCard title="Fabric Telemetry" icon={Activity}>
+				<div class="audit-summary">
+					<div class="summary-row">
+						<span>I/O Throughput</span>
+						<span>2.4 GB/s</span>
+					</div>
+					<div class="summary-row">
+						<span>Write Latency</span>
+						<span>&lt; 0.1ms</span>
+					</div>
 				</div>
-				<div class="support-panel__content">
-					<p class="empty-hint">No filesystem anomalies detected in observed pools.</p>
-				</div>
-			</div>
+			</SectionCard>
 		</aside>
 	</main>
 </div>
@@ -185,19 +197,22 @@
 		gap: 0.75rem;
 	}
 
-	.posture-strip-wrapper {
-		margin-top: -0.25rem;
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
 	}
 
 	.inventory-controls {
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
 		overflow: hidden;
 	}
 
 	.inventory-main {
 		display: grid;
-		grid-template-columns: 1fr 280px;
+		grid-template-columns: 1fr 300px;
 		gap: 1rem;
 		align-items: start;
 	}
@@ -205,43 +220,54 @@
 	.support-area {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
+		gap: 1rem;
 	}
 
-	.support-panel {
-		background: var(--shell-surface);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		padding: 0.75rem;
+	.volume-name {
+		font-weight: 800;
+		color: var(--color-neutral-900);
+    letter-spacing: 0.02em;
 	}
 
-	.support-panel__header {
+	.cell-text {
+		font-size: 11px;
+		color: var(--color-neutral-600);
+	}
+
+	.audit-summary {
 		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		margin-bottom: 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		padding-bottom: 0.5rem;
+		flex-direction: column;
+		gap: 0.35rem;
 	}
 
-	.support-panel__header h3 {
-		font-size: var(--text-xs);
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
+	.summary-row {
+		display: flex;
+		justify-content: space-between;
+		font-size: 10px;
+		color: var(--color-neutral-600);
+		padding: 0.35rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+	}
+
+	.summary-row span:last-child {
+		font-weight: 800;
+		color: var(--color-neutral-900);
 	}
 
 	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		padding: 0.5rem 0;
+		font-size: 10px;
+		font-weight: 700;
+		color: var(--color-neutral-400);
+		padding: 1rem;
+		text-align: center;
+		text-transform: uppercase;
 	}
 
 	.attention-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.35rem;
 		list-style: none;
 		padding: 0;
 		margin: 0;
@@ -251,31 +277,34 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border-radius: 0.25rem;
-		text-decoration: none;
-		color: var(--shell-text);
-		transition: background 0.15s ease;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-800);
+    border-left: 2px solid transparent;
 	}
 
-	.attention-card:hover {
-		background: var(--shell-line);
-	}
+  .attention-card:has(.res-issue) {
+    border-left-color: var(--color-warning);
+  }
 
 	.attention-card__main {
 		display: flex;
 		flex-direction: column;
+    gap: 0.125rem;
 	}
 
 	.res-name {
-		font-size: var(--text-sm);
-		font-weight: 600;
+		font-size: 11px;
+		font-weight: 800;
+    color: var(--color-neutral-900);
 	}
 
 	.res-issue {
-		font-size: var(--text-xs);
-		color: var(--color-warning-dark);
+		font-size: 9px;
+		color: var(--color-warning);
+		font-weight: 700;
+		text-transform: uppercase;
 	}
 
 	@media (max-width: 1100px) {

@@ -1,14 +1,15 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import CreateVMModal from '$lib/components/modals/CreateVMModal.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Plus, Activity, AlertCircle, ChevronRight } from 'lucide-svelte';
+	import { Plus, Activity, AlertCircle, ShieldCheck } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
 	import { invalidateAll } from '$app/navigation';
@@ -19,14 +20,6 @@
 
 	const model = $derived(data.vms);
 	const items = $derived(model.items);
-
-	const stats = $derived([
-		{ label: 'Total VMs', value: items.length },
-		{ label: 'Running', value: items.filter(v => v.power_state.toLowerCase() === 'running').length, status: 'healthy' as const },
-		{ label: 'Stopped', value: items.filter(v => v.power_state.toLowerCase() === 'stopped').length, status: 'neutral' as const },
-		{ label: 'Degraded', value: items.filter(v => v.health !== 'healthy').length, status: items.filter(v => v.health !== 'healthy').length > 0 ? 'warning' as const : 'neutral' as const },
-		{ label: 'Open Alerts', value: items.reduce((sum, v) => sum + (v.alerts || 0), 0), status: items.reduce((sum, v) => sum + (v.alerts || 0), 0) > 0 ? 'critical' as const : 'neutral' as const }
-	]);
 
 	const filters = [
 		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Name or node...' },
@@ -68,25 +61,22 @@
 	}
 
 	const columns = [
-		{ key: 'name', label: 'VM' },
-		{ key: 'node_id', label: 'Node' },
-		{ key: 'power_state', label: 'Power', align: 'center' as const },
-		{ key: 'health', label: 'Health' },
+		{ key: 'name', label: 'Workload' },
+		{ key: 'node_id', label: 'Host Node' },
+		{ key: 'power_state', label: 'State', align: 'center' as const },
+		{ key: 'health', label: 'Posture' },
 		{ key: 'cpu', label: 'CPU', align: 'right' as const },
 		{ key: 'memory', label: 'Memory', align: 'right' as const },
-		{ key: 'volume_count', label: 'Volumes', align: 'center' as const },
-		{ key: 'nic_count', label: 'NICs', align: 'center' as const },
-		{ key: 'last_task', label: 'Last Task' },
-		{ key: 'alerts', label: 'Alerts', align: 'center' as const }
+		{ key: 'last_task', label: 'Recent Operation' }
 	];
 
 	function mapPowerTone(state: string): any {
 		switch (state) {
 			case 'running': return 'healthy';
-			case 'stopped': return 'unknown';
+			case 'stopped': return 'neutral';
 			case 'paused': return 'warning';
 			case 'crashed': return 'failed';
-			default: return 'unknown';
+			default: return 'neutral';
 		}
 	}
 
@@ -95,7 +85,7 @@
 			case 'healthy': return 'healthy';
 			case 'warning': return 'warning';
 			case 'critical': return 'failed';
-			default: return 'unknown';
+			default: return 'neutral';
 		}
 	}
 
@@ -114,15 +104,30 @@
 		{#snippet actions()}
 			<button class="btn-primary" onclick={() => (modalOpen = true)}>
 				<Plus size={14} />
-				Create VM
+				Deploy Workload
 			</button>
 		{/snippet}
 	</PageHeaderWithAction>
 
 	<CreateVMModal bind:open={modalOpen} onSuccess={() => invalidateAll()} />
 
-	<div class="posture-strip-wrapper">
-		<CompactStatStrip {stats} />
+	<div class="inventory-metrics">
+		<CompactMetricCard 
+			label="Total Catalog" 
+			value={items.length} 
+			color="neutral"
+		/>
+		<CompactMetricCard 
+			label="Active Runs" 
+			value={items.filter(v => v.power_state.toLowerCase() === 'running').length} 
+			trend={+1}
+			color="primary"
+		/>
+		<CompactMetricCard 
+			label="Posture Alert" 
+			value={items.filter(v => v.health !== 'healthy').length} 
+			color={items.filter(v => v.health !== 'healthy').length > 0 ? 'warning' : 'neutral'}
+		/>
 	</div>
 
 	<div class="inventory-controls">
@@ -140,9 +145,9 @@
 				<ErrorState />
 			{:else if model.state === 'empty'}
 				<EmptyInfrastructureState 
-					title="No virtual machines match your query"
-					description="Adjust your search criteria or create a new instance."
-					hint="You can use 'Enroll Node' to add more compute capacity first."
+					title="Discovery Filter Active"
+					description="No workloads match the current projection."
+					hint="Refine your search parameters or check archived objects."
 				/>
 			{:else}
 				<InventoryTable 
@@ -154,54 +159,37 @@
 		</section>
 
 		<aside class="support-area">
-			<div class="support-panel">
-				<div class="support-panel__header">
-					<AlertCircle size={14} style="color: var(--color-danger)" />
-					<h3>System Alerts</h3>
-				</div>
-				<div class="support-panel__content">
-					{#if attentionVms.length === 0}
-						<p class="empty-hint">Workloads behaving as expected.</p>
-					{:else}
-						<ul class="attention-list">
-							{#each attentionVms as vm}
-								<li>
-									<a href="/vms/{vm.vm_id}" class="attention-card">
-										<div class="attention-card__main">
-											<span class="res-name">{vm.name}</span>
-											<span class="res-issue">{vm.alerts} alerts · {vm.health}</span>
-										</div>
-										<ChevronRight size={14} />
-									</a>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				</div>
-			</div>
-
-			<div class="support-panel">
-				<div class="support-panel__header">
-					<Activity size={14} />
-					<h3>Workload Tasks</h3>
-				</div>
-				<div class="support-panel__content">
-					<ul class="task-list">
-						<li>
-							<div class="task-item">
-								<span class="task-label">Replication</span>
-								<span class="task-time">Just now</span>
-							</div>
-						</li>
-						<li>
-							<div class="task-item">
-								<span class="task-label">Live Migration</span>
-								<span class="task-time">5m ago</span>
-							</div>
-						</li>
+			<SectionCard title="Anomaly Detection" icon={AlertCircle} badgeLabel={String(attentionVms.length)}>
+				{#if attentionVms.length === 0}
+					<p class="empty-hint">Signals nominal. Posture is stable.</p>
+				{:else}
+					<ul class="attention-list">
+						{#each attentionVms as vm}
+							<li>
+								<a href="/vms/{vm.vm_id}" class="attention-card">
+									<div class="attention-card__main">
+										<span class="res-name">{vm.name}</span>
+										<span class="res-issue">{vm.alerts || 0} signals / {vm.health}</span>
+									</div>
+								</a>
+							</li>
+						{/each}
 					</ul>
-				</div>
-			</div>
+				{/if}
+			</SectionCard>
+
+			<SectionCard title="Provisioning Log" icon={ShieldCheck}>
+				<ul class="task-list">
+					<li class="task-item">
+						<span class="task-label">Replication Engine</span>
+						<span class="task-time">Online</span>
+					</li>
+					<li class="task-item">
+						<span class="task-label">Migration Target Sync</span>
+						<span class="task-time">Active</span>
+					</li>
+				</ul>
+			</SectionCard>
 		</aside>
 	</main>
 </div>
@@ -213,19 +201,22 @@
 		gap: 0.75rem;
 	}
 
-	.posture-strip-wrapper {
-		margin-top: -0.25rem;
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
 	}
 
 	.inventory-controls {
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
 		overflow: hidden;
 	}
 
 	.inventory-main {
 		display: grid;
-		grid-template-columns: 1fr 280px;
+		grid-template-columns: 1fr 300px;
 		gap: 1rem;
 		align-items: start;
 	}
@@ -233,43 +224,20 @@
 	.support-area {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.support-panel {
-		background: var(--shell-surface);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		padding: 0.75rem;
-	}
-
-	.support-panel__header {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		margin-bottom: 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		padding-bottom: 0.5rem;
-	}
-
-	.support-panel__header h3 {
-		font-size: var(--text-xs);
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
+		gap: 1rem;
 	}
 
 	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		padding: 0.5rem 0;
+		font-size: 11px;
+		color: var(--color-neutral-400);
+		padding: 1rem;
+		text-align: center;
 	}
 
-	.attention-list, .task-list {
+	.attention-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.35rem;
 		list-style: none;
 		padding: 0;
 		margin: 0;
@@ -279,16 +247,16 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border-radius: 0.25rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
 		text-decoration: none;
-		color: var(--shell-text);
-		transition: background 0.15s ease;
+		color: var(--color-neutral-800);
+		transition: background 0.1s ease;
 	}
 
 	.attention-card:hover {
-		background: var(--shell-line);
+		background: var(--bg-surface-hover);
 	}
 
 	.attention-card__main {
@@ -297,25 +265,45 @@
 	}
 
 	.res-name {
-		font-size: var(--text-sm);
-		font-weight: 600;
+		font-size: 11px;
+		font-weight: 700;
 	}
 
 	.res-issue {
-		font-size: var(--text-xs);
-		color: var(--color-danger-dark);
+		font-size: 9px;
+		color: var(--color-danger);
+		font-weight: 600;
+		text-transform: uppercase;
+	}
+
+	.task-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
 	}
 
 	.task-item {
 		display: flex;
 		justify-content: space-between;
-		font-size: var(--text-sm);
-		padding: 0.25rem 0.5rem;
+		font-size: 10px;
+		padding: 0.35rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+	}
+
+	.task-label {
+		font-weight: 600;
+		color: var(--color-neutral-700);
 	}
 
 	.task-time {
-		color: var(--shell-text-muted);
-		font-size: var(--text-xs);
+		color: var(--color-success);
+		font-weight: 700;
+		text-transform: uppercase;
+		font-size: 9px;
 	}
 
 	@media (max-width: 1100px) {

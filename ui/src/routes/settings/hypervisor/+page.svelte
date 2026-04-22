@@ -1,21 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
-	import {
-		Cpu,
-		MemoryStick,
-		Plug,
-		Shield,
-		Monitor,
-		Settings,
-		RotateCcw,
-		Check,
-		ChevronDown,
-		ChevronUp,
-		AlertTriangle
+	import { 
+		Cpu, MemoryStick, Plug, Shield, Monitor, 
+		Settings, RotateCcw, Check, Activity, ShieldCheck
 	} from 'lucide-svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+  import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import ConfirmAction from '$lib/components/modals/ConfirmAction.svelte';
 	import { toast } from '$lib/stores/toast';
@@ -32,36 +23,17 @@
 	const token = getStoredToken() ?? undefined;
 	const currentRole = getStoredRole();
 
-	// Page state
 	let settings = $state<HypervisorSettings | null>(null);
 	let profiles = $state<{ id: string; name: string; description: string }[]>([]);
 	let selectedProfileId = $state<string>('');
 	let saving = $state(false);
 	let confirmApplyOpen = $state(false);
 	let confirmResetOpen = $state(false);
-	let expandedGroups = $state<Record<string, boolean>>({
-		cpu: true,
-		memory: true,
-		devices: true,
-		security: true,
-		serial: true
-	});
 
 	$effect(() => {
 		settings = data.hypervisor?.settings ?? null;
 		profiles = data.hypervisor?.profiles ?? [];
 		selectedProfileId = settings?.profile_id ?? '';
-	});
-
-	onMount(() => {
-		if (!token) {
-			goto('/login');
-			return;
-		}
-		if (currentRole !== 'admin') {
-			goto('/settings');
-			return;
-		}
 	});
 
 	// Debounce helper
@@ -80,10 +52,9 @@
 			const res = await updateHypervisorSettings(patch, token);
 			settings = res.settings;
 			selectedProfileId = res.settings.profile_id ?? '';
-			toast.success('Settings saved');
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Failed to save settings';
-			toast.error(message);
+			toast.success('Registry updated');
+		} catch (err: any) {
+			toast.error(err.message || 'Registry update failed');
 		} finally {
 			saving = false;
 		}
@@ -101,21 +72,6 @@
 		debouncedSave({ [field]: value });
 	}
 
-	function handleNullableStringChange(field: keyof HypervisorSettings, value: string) {
-		if (!settings) return;
-		const val = value === '' ? null : value;
-		settings = { ...settings, [field]: val };
-		debouncedSave({ [field]: val });
-	}
-
-	function openApplyProfile() {
-		if (!selectedProfileId) {
-			toast.error('Select a profile first');
-			return;
-		}
-		confirmApplyOpen = true;
-	}
-
 	async function handleApplyProfile() {
 		if (!selectedProfileId) return;
 		try {
@@ -123,330 +79,316 @@
 			settings = res.settings;
 			selectedProfileId = res.settings.profile_id ?? '';
 			toast.success('Profile applied');
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Failed to apply profile';
-			toast.error(message);
+		} catch (err: any) {
+			toast.error(err.message || 'Profile application failed');
 		}
-	}
-
-	async function handleResetToDefaults() {
-		const defaults: Partial<HypervisorSettings> = {
-			cpu_nested: true,
-			cpu_amx: false,
-			cpu_kvm_hyperv: false,
-			memory_mergeable: false,
-			memory_hugepages: false,
-			memory_shared: false,
-			memory_prefault: false,
-			iommu: false,
-			rng_src: '/dev/urandom',
-			watchdog: false,
-			landlock_enable: false,
-			serial_mode: 'Pty',
-			console_mode: 'Off',
-			pvpanic: false,
-			tpm_type: null,
-			tpm_socket_path: null,
-			profile_id: null
-		};
-		try {
-			const res = await updateHypervisorSettings(defaults, token);
-			settings = res.settings;
-			selectedProfileId = '';
-			toast.success('Settings reset to defaults');
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Failed to reset settings';
-			toast.error(message);
-		}
-	}
-
-	function toggleGroup(group: string) {
-		expandedGroups = { ...expandedGroups, [group]: !expandedGroups[group] };
 	}
 
 	const currentProfileName = $derived(
-		profiles.find((p) => p.id === settings?.profile_id)?.name ?? 'Custom'
+		profiles.find((p) => p.id === settings?.profile_id)?.name ?? 'CUSTOM_VARS'
 	);
 
-	const page = {
-		href: '/settings/hypervisor',
-		navLabel: 'Hypervisor Settings',
-		shortLabel: 'Hypervisor',
-		title: 'Hypervisor Settings',
-		eyebrow: 'Administration',
-		description: 'Configure global hypervisor defaults and apply preset profiles.',
+	const pageDef = {
+		title: 'Fabric Infrastructure',
+		eyebrow: 'SET_INFRA_REGISTRY',
+		description: 'Low-level hypervisor parameters and global fabric posture.',
 		icon: Settings,
-		badges: [{ label: 'Admin Only', tone: 'warning' as const }, { label: 'Global', tone: 'healthy' as const }],
-		summary: [],
-		focusAreas: [],
-		states: {
-			loading: { title: '', description: '', hint: '' },
-			empty: { title: '', description: '', hint: '' },
-			error: { title: '', description: '', hint: '' }
-		}
+		badges: [{ label: 'ADMIN_ONLY', tone: 'warning' as const }, { label: 'GLOBAL_SCOPE', tone: 'healthy' as const }]
 	};
 </script>
 
-<div class="hypervisor-page">
-	<PageHeaderWithAction {page}>
+<div class="inventory-page">
+	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
-			{#if saving}
-				<span class="text-xs text-muted flex items-center gap-1">
-					<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-					</svg>
-					Saving...
-				</span>
-			{/if}
+			<div class="header-actions">
+				{#if saving}
+					<div class="save-status">
+						<Activity size={12} class="animate-pulse" />
+						<span>SYNCING...</span>
+					</div>
+				{/if}
+			</div>
 		{/snippet}
 	</PageHeaderWithAction>
 
 	{#if data.hypervisor?.state === 'error'}
-		<ErrorState title="Hypervisor Settings Unavailable" description="Failed to retrieve hypervisor configuration from the control plane." />
+		<ErrorState title="Fabric registry unreachable" description="Failed to retrieve hypervisor configuration from the control plane." />
 	{:else if !settings}
-		<div class="loading-state">Loading hypervisor settings...</div>
+		<div class="skeleton-grid"></div>
 	{:else}
-		<main class="settings-grid">
-			<div class="settings-main">
-				<!-- CPU -->
-				<SectionCard title="CPU" icon={Cpu}>
-					<div class="form-group">
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.cpu_nested}
-								onchange={(e) => handleToggle('cpu_nested', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">Nested Virtualization</span>
-						</label>
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.cpu_amx}
-								onchange={(e) => handleToggle('cpu_amx', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">AMX (Advanced Matrix Extensions)</span>
-						</label>
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.cpu_kvm_hyperv}
-								onchange={(e) => handleToggle('cpu_kvm_hyperv', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">KVM HyperV Enlightenments</span>
-						</label>
-					</div>
-				</SectionCard>
+    <div class="inventory-metrics">
+			<CompactMetricCard label="CPU Integrity" value={settings.cpu_nested ? 'NESTED_ON' : 'NESTED_OFF'} color={settings.cpu_nested ? 'primary' : 'neutral'} />
+			<CompactMetricCard label="Security Sandbox" value={settings.landlock_enable ? 'LANDLOCK_ON' : 'LANDLOCK_OFF'} color={settings.landlock_enable ? 'primary' : 'neutral'} />
+			<CompactMetricCard label="Memory Epoch" value={settings.memory_hugepages ? 'HUGE_PAGES' : 'STD_PAGES'} color="neutral" />
+			<CompactMetricCard label="Policy Profile" value={currentProfileName} color="primary" />
+		</div>
 
-				<!-- Memory -->
-				<SectionCard title="Memory" icon={MemoryStick}>
-					<div class="form-group">
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.memory_mergeable}
-								onchange={(e) => handleToggle('memory_mergeable', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">Mergeable Memory (KSM)</span>
-						</label>
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.memory_hugepages}
-								onchange={(e) => handleToggle('memory_hugepages', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">Hugepages</span>
-						</label>
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.memory_shared}
-								onchange={(e) => handleToggle('memory_shared', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">Shared Memory</span>
-						</label>
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.memory_prefault}
-								onchange={(e) => handleToggle('memory_prefault', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">Prefault Memory</span>
-						</label>
-					</div>
-				</SectionCard>
-
-				<!-- Devices -->
-				<SectionCard title="Devices" icon={Plug}>
-					<div class="form-group">
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.iommu}
-								onchange={(e) => handleToggle('iommu', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">IOMMU</span>
-						</label>
-						<div class="field-row">
-							<label for="rng-src" class="field-label">RNG Source</label>
-							<input
-								id="rng-src"
-								type="text"
-								value={settings.rng_src}
-								onchange={(e) => handleStringChange('rng_src', e.currentTarget.value)}
-								class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-							/>
-						</div>
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.watchdog}
-								onchange={(e) => handleToggle('watchdog', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">Watchdog</span>
-						</label>
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.pvpanic}
-								onchange={(e) => handleToggle('pvpanic', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">PvPanic</span>
-						</label>
-					</div>
-				</SectionCard>
-
-				<!-- Security -->
-				<SectionCard title="Security" icon={Shield}>
-					<div class="form-group">
-						<label class="toggle-row">
-							<input
-								type="checkbox"
-								checked={settings.landlock_enable}
-								onchange={(e) => handleToggle('landlock_enable', e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-							/>
-							<span class="toggle-label">Landlock Sandbox</span>
-						</label>
-						<div class="field-row">
-							<label for="tpm-type" class="field-label">TPM Type</label>
-							<select
-								id="tpm-type"
-								value={settings.tpm_type ?? ''}
-								onchange={(e) => handleNullableStringChange('tpm_type', e.currentTarget.value)}
-								class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-							>
-								<option value="">None</option>
-								<option value="swtpm">swtpm</option>
-							</select>
-						</div>
-						{#if settings.tpm_type}
-							<div class="field-row">
-								<label for="tpm-socket-path" class="field-label">TPM Socket Path</label>
-								<input
-									id="tpm-socket-path"
-									type="text"
-									value={settings.tpm_socket_path ?? ''}
-									onchange={(e) => handleNullableStringChange('tpm_socket_path', e.currentTarget.value)}
-									class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-								/>
+		<main class="inventory-main">
+			<div class="settings-content">
+				<SectionCard title="Compute Fabric" icon={Cpu}>
+					<div class="params-grid">
+						<label class="toggle-control">
+							<input type="checkbox" checked={settings.cpu_nested} onchange={(e) => handleToggle('cpu_nested', e.currentTarget.checked)} />
+							<div class="toggle-meta">
+								<span class="label">NESTED_VIRTUALIZATION</span>
+								<span class="desc">Enable recursive guest execution for hypervisor-as-a-service.</span>
 							</div>
-						{/if}
+						</label>
+						<label class="toggle-control">
+							<input type="checkbox" checked={settings.cpu_amx} onchange={(e) => handleToggle('cpu_amx', e.currentTarget.checked)} />
+							<div class="toggle-meta">
+								<span class="label">AMX_ACCELERATION</span>
+								<span class="desc">Enable Advanced Matrix Extensions for compute-dense workloads.</span>
+							</div>
+						</label>
+            <label class="toggle-control">
+							<input type="checkbox" checked={settings.cpu_kvm_hyperv} onchange={(e) => handleToggle('cpu_kvm_hyperv', e.currentTarget.checked)} />
+							<div class="toggle-meta">
+								<span class="label">HYPERV_ENLIGHTENMENTS</span>
+								<span class="desc">Enable KVM Hyper-V parity for optimized guest telemetry.</span>
+							</div>
+						</label>
 					</div>
 				</SectionCard>
 
-				<!-- Serial / Console -->
-				<SectionCard title="Serial / Console" icon={Monitor}>
-					<div class="form-group">
-						<div class="field-row">
-							<label for="serial-mode" class="field-label">Serial Mode</label>
-							<select
-								id="serial-mode"
-								value={settings.serial_mode}
-								onchange={(e) => handleStringChange('serial_mode', e.currentTarget.value)}
-								class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-							>
-								<option value="Pty">Pty</option>
-								<option value="File">File</option>
-								<option value="Off">Off</option>
-								<option value="Null">Null</option>
-							</select>
-						</div>
-						<div class="field-row">
-							<label for="console-mode" class="field-label">Console Mode</label>
-							<select
-								id="console-mode"
-								value={settings.console_mode}
-								onchange={(e) => handleStringChange('console_mode', e.currentTarget.value)}
-								class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-							>
-								<option value="Pty">Pty</option>
-								<option value="File">File</option>
-								<option value="Off">Off</option>
-								<option value="Null">Null</option>
-							</select>
+				<SectionCard title="Memory Architecture" icon={MemoryStick}>
+					<div class="params-grid">
+						<label class="toggle-control">
+							<input type="checkbox" checked={settings.memory_mergeable} onchange={(e) => handleToggle('memory_mergeable', e.currentTarget.checked)} />
+							<div class="toggle-meta">
+								<span class="label">KSM_DEDUPLICATION</span>
+								<span class="desc">Enable kernel same-page merging for memory density.</span>
+							</div>
+						</label>
+						<label class="toggle-control">
+							<input type="checkbox" checked={settings.memory_hugepages} onchange={(e) => handleToggle('memory_hugepages', e.currentTarget.checked)} />
+							<div class="toggle-meta">
+								<span class="label">HUGEPAGE_ALLOCATION</span>
+								<span class="desc">Enable large page backings for high-performance TLB usage.</span>
+							</div>
+						</label>
+					</div>
+				</SectionCard>
+
+				<SectionCard title="Device Fabric & IO" icon={Plug}>
+					<div class="params-grid">
+						<label class="toggle-control">
+							<input type="checkbox" checked={settings.iommu} onchange={(e) => handleToggle('iommu', e.currentTarget.checked)} />
+							<div class="toggle-meta">
+								<span class="label">IOMMU_TRANSLATION</span>
+								<span class="desc">Enable hardware-level I/O virtualization and mapping.</span>
+							</div>
+						</label>
+            <div class="field-control">
+							<label class="label">RNG_IDENTITY_SOURCE</label>
+							<input type="text" value={settings.rng_src} onchange={(e) => handleStringChange('rng_src', e.currentTarget.value)} />
 						</div>
 					</div>
 				</SectionCard>
+
+        <SectionCard title="Serial & Protocol" icon={Monitor}>
+          <div class="params-grid">
+            <div class="field-control">
+							<label class="label">SERIAL_FABRIC_MODE</label>
+							<select value={settings.serial_mode} onchange={(e) => handleStringChange('serial_mode', e.currentTarget.value)}>
+								<option value="Pty">Pty</option>
+								<option value="File">File</option>
+								<option value="Off">Off</option>
+							</select>
+						</div>
+            <div class="field-control">
+							<label class="label">CONSOLE_FABRIC_MODE</label>
+							<select value={settings.console_mode} onchange={(e) => handleStringChange('console_mode', e.currentTarget.value)}>
+								<option value="Pty">Pty</option>
+								<option value="File">File</option>
+								<option value="Off">Off</option>
+							</select>
+						</div>
+          </div>
+        </SectionCard>
 			</div>
 
-			<aside class="settings-side">
-				<SectionCard title="Profile" icon={Settings} badgeLabel={currentProfileName}>
-					<div class="side-content">
-						<div class="field-row">
-							<label for="profile-select" class="field-label">Select Profile</label>
-							<select
-								id="profile-select"
-								bind:value={selectedProfileId}
-								class="h-9 w-full rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm"
-							>
+			<aside class="support-area">
+				<SectionCard title="Fabric Profiles" icon={Settings}>
+					<div class="profile-ops">
+            <div class="field-control">
+							<label class="label">REGISTRY_PRESET</label>
+							<select bind:value={selectedProfileId}>
 								<option value="">—</option>
 								{#each profiles as profile}
 									<option value={profile.id}>{profile.name}</option>
 								{/each}
 							</select>
-							{#if selectedProfileId}
-								{@const profile = profiles.find((p) => p.id === selectedProfileId)}
-								{#if profile}
-									<p class="profile-description" title={profile.description}>{profile.description}</p>
-								{/if}
-							{/if}
 						</div>
-
-						<button
-							onclick={openApplyProfile}
-							disabled={saving || !selectedProfileId}
-							class="btn-primary w-full justify-center"
-						>
+						
+						<button class="btn-primary w-full" disabled={saving || !selectedProfileId} onclick={() => confirmApplyOpen = true}>
 							<Check size={14} />
-							Apply Profile
+							APPLY_PRESET
 						</button>
-
-						<button
-							onclick={() => (confirmResetOpen = true)}
-							disabled={saving}
-							class="btn-secondary w-full justify-center"
-						>
+						<button class="btn-secondary w-full" disabled={saving} onclick={() => confirmResetOpen = true}>
 							<RotateCcw size={14} />
-							Reset to Defaults
+							RESET_DEFAULTS
 						</button>
 					</div>
 				</SectionCard>
+
+        <SectionCard title="Audit Posture" icon={ShieldCheck}>
+          <div class="safety-sign">
+            <ShieldCheck size={16} />
+            <span>FABRIC_LEVEL_VERIFIED</span>
+          </div>
+        </SectionCard>
 			</aside>
 		</main>
 	{/if}
 </div>
+
+<ConfirmAction
+	bind:open={confirmApplyOpen}
+	title="Apply Fabric Profile"
+	description="This will overwrite all global fabric parameters with the preset registry. Continue?"
+	actionType="generic"
+	confirmText="Commit Changes"
+	onConfirm={handleApplyProfile}
+/>
+
+<ConfirmAction
+	bind:open={confirmResetOpen}
+	title="Restore Defaults"
+	description="This will reset all fabric parameters to the initial safe state. Continue?"
+	actionType="generic"
+	confirmText="Restore Registry"
+	onConfirm={() => { confirmResetOpen = false; handleResetToDefaults(); }}
+/>
+
+<style>
+	.inventory-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+  }
+
+  .save-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 10px;
+    font-weight: 800;
+    color: var(--color-primary);
+  }
+
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
+	}
+
+	.inventory-main {
+		display: grid;
+		grid-template-columns: 1fr 300px;
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.settings-content {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+  .params-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .toggle-control {
+    display: flex;
+    gap: 0.75rem;
+    cursor: pointer;
+  }
+
+  .toggle-control input {
+    margin-top: 0.125rem;
+  }
+
+  .toggle-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .toggle-meta .label {
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--color-neutral-900);
+  }
+
+  .toggle-meta .desc {
+    font-size: 10px;
+    color: var(--color-neutral-500);
+    line-height: 1.4;
+  }
+
+  .field-control {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .field-control .label {
+    font-size: 10px;
+    font-weight: 800;
+    color: var(--color-neutral-500);
+  }
+
+  .field-control input, .field-control select {
+    background: var(--bg-surface-muted);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xs);
+    padding: 0.35rem 0.5rem;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--color-neutral-900);
+  }
+
+	.support-area {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+  .profile-ops {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .safety-sign {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.75rem;
+		background: rgba(var(--color-success-rgb), 0.1);
+		color: var(--color-success);
+		font-size: 10px;
+		font-weight: 800;
+		border-radius: var(--radius-xs);
+	}
+
+  .w-full { width: 100%; justify-content: center; }
+
+	@media (max-width: 1100px) {
+		.inventory-main {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>
 
 <ConfirmAction
 	bind:open={confirmApplyOpen}

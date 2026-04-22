@@ -1,18 +1,19 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import CreateNetworkModal from '$lib/components/modals/CreateNetworkModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Plus, Shield, ChevronRight } from 'lucide-svelte';
+	import { Plus, Shield, Globe, Lock } from 'lucide-svelte';
 	import { goto, invalidateAll } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
-	import CreateNetworkModal from '$lib/components/modals/CreateNetworkModal.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -20,14 +21,6 @@
 
 	const model = $derived(data.networks);
 	const items = $derived(model.items);
-
-	const stats = $derived([
-		{ label: 'Total Networks', value: items.length },
-		{ label: 'Public', value: items.filter(n => n.exposure === 'public').length, status: items.filter(n => n.exposure === 'public').length > 0 ? 'warning' as const : 'neutral' as const },
-		{ label: 'NAT/Private', value: items.filter(n => n.exposure !== 'public').length, status: 'healthy' as const },
-		{ label: 'Connected VMs', value: items.reduce((sum, n) => sum + (n.attached_vms || 0), 0), status: 'neutral' as const },
-		{ label: 'Open Alerts', value: items.reduce((sum, n) => sum + (n.alerts || 0), 0), status: items.reduce((sum, n) => sum + (n.alerts || 0), 0) > 0 ? 'critical' as const : 'neutral' as const }
-	]);
 
 	const filters = [
 		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Name/Scope...' },
@@ -68,14 +61,12 @@
 	}
 
 	const columns = [
-		{ key: 'name', label: 'Network' },
+		{ key: 'name', label: 'Network Fabric' },
 		{ key: 'scope', label: 'Scope' },
-		{ key: 'health', label: 'Health' },
-		{ key: 'attached_vms', label: 'Attached VMs', align: 'center' as const },
+		{ key: 'health', label: 'Fabric Posture' },
+		{ key: 'attached_vms', label: 'Workloads', align: 'center' as const },
 		{ key: 'exposure', label: 'Exposure', align: 'center' as const },
-		{ key: 'policy', label: 'Policy' },
-		{ key: 'last_task', label: 'Last Task' },
-		{ key: 'alerts', label: 'Alerts', align: 'center' as const }
+		{ key: 'policy', label: 'Policy Index' }
 	];
 
 	function mapHealthTone(health: string): any {
@@ -83,16 +74,16 @@
 			case 'healthy': return 'healthy';
 			case 'warning': return 'warning';
 			case 'degraded': return 'degraded';
-			default: return 'unknown';
+			default: return 'neutral';
 		}
 	}
 
 	function mapExposureTone(exposure: string): any {
 		switch (exposure) {
 			case 'public': return 'warning';
-			case 'nat': return 'unknown';
+			case 'nat': return 'neutral';
 			case 'private': return 'healthy';
-			default: return 'unknown';
+			default: return 'neutral';
 		}
 	}
 
@@ -115,13 +106,27 @@
 		{#snippet actions()}
 			<button class="btn-primary" onclick={() => createOpen = true}>
 				<Plus size={14} />
-				Create Network
+				Define Fabric
 			</button>
 		{/snippet}
 	</PageHeaderWithAction>
 
-	<div class="posture-strip-wrapper">
-		<CompactStatStrip {stats} />
+	<div class="inventory-metrics">
+		<CompactMetricCard 
+			label="Total Segments" 
+			value={items.length} 
+			color="neutral"
+		/>
+		<CompactMetricCard 
+			label="External Gateways" 
+			value={items.filter(n => n.exposure === 'public').length} 
+			color={items.filter(n => n.exposure === 'public').length > 0 ? 'warning' : 'neutral'}
+		/>
+		<CompactMetricCard 
+			label="Fabric Errors" 
+			value={items.filter(n => n.health !== 'healthy').length} 
+			color={items.filter(n => n.health !== 'healthy').length > 0 ? 'danger' : 'neutral'}
+		/>
 	</div>
 
 	<div class="inventory-controls">
@@ -139,9 +144,9 @@
 				<ErrorState />
 			{:else if model.state === 'empty'}
 				<EmptyInfrastructureState 
-					title="No networks defined"
-					description="Adjust your search filters or define a new subnetwork."
-					hint="Networks can be cluster-local or span multiple datacenters via VXLAN."
+					title="No fabrics detected"
+					description="Adjust your search criteria or define a new network segment."
+					hint="Fabrics can be VXLAN-backed for multi-host isolation."
 				/>
 			{:else}
 				<InventoryTable
@@ -152,12 +157,12 @@
 					{#snippet cell({ column, row })}
 						{@const val = row[column.key]}
 						{#if column.key === 'name'}
-							<a href={`/networks/${row.network_id}`} class="row-link">
-								{row.name}
-							</a>
-							{#if row.is_default}
-								<StatusBadge label="Default" tone="unknown" />
-							{/if}
+							<div class="fabric-identity">
+								<span class="fabric-name">{row.name}</span>
+								{#if row.is_default}
+									<span class="fabric-tag">CORE</span>
+								{/if}
+							</div>
 						{:else if isBadge(val)}
 							<StatusBadge label={val.label} tone={val.tone} />
 						{:else}
@@ -169,31 +174,38 @@
 		</section>
 
 		<aside class="support-area">
-			<div class="support-panel">
-				<div class="support-panel__header">
-					<Shield size={14} />
-					<h3>Exposure Audit</h3>
-				</div>
-				<div class="support-panel__content">
-					{#if vulnerableNetworks.length === 0}
-						<p class="empty-hint">All ingress paths currently behind NAT/VPC.</p>
-					{:else}
-						<ul class="attention-list">
-							{#each vulnerableNetworks as net}
-								<li>
-									<a href="/networks/{net.network_id}" class="attention-card">
-										<div class="attention-card__main">
-											<span class="res-name">{net.name}</span>
-											<span class="res-issue">Public visibility · {net.attached_vms} VMs</span>
-										</div>
-										<ChevronRight size={14} />
-									</a>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				</div>
-			</div>
+			<SectionCard title="Exposure Audit" icon={Shield} badgeLabel={String(vulnerableNetworks.length)}>
+				{#if vulnerableNetworks.length === 0}
+					<p class="empty-hint">All ingress points are isolated within VPC/NAT.</p>
+				{:else}
+					<ul class="attention-list">
+						{#each vulnerableNetworks as net}
+							<li>
+								<div class="attention-card">
+									<div class="attention-card__main">
+										<span class="res-name">{net.name}</span>
+										<span class="res-issue">Public Traffic Active</span>
+									</div>
+									<Globe size={12} class="text-warning" />
+								</div>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</SectionCard>
+
+			<SectionCard title="Fabric Topology" icon={Lock}>
+				<ul class="task-list">
+					<li class="task-item">
+						<span class="task-label">SDN Controller</span>
+						<span class="task-time">Synchronized</span>
+					</li>
+					<li class="task-item">
+						<span class="task-label">BGP Peer Status</span>
+						<span class="task-time">Established</span>
+					</li>
+				</ul>
+			</SectionCard>
 		</aside>
 	</main>
 </div>
@@ -207,19 +219,22 @@
 		gap: 0.75rem;
 	}
 
-	.posture-strip-wrapper {
-		margin-top: -0.25rem;
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
 	}
 
 	.inventory-controls {
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
 		overflow: hidden;
 	}
 
 	.inventory-main {
 		display: grid;
-		grid-template-columns: 1fr 280px;
+		grid-template-columns: 1fr 300px;
 		gap: 1rem;
 		align-items: start;
 	}
@@ -227,43 +242,40 @@
 	.support-area {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
+		gap: 1rem;
 	}
 
-	.support-panel {
-		background: var(--shell-surface);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		padding: 0.75rem;
-	}
-
-	.support-panel__header {
+	.fabric-identity {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		margin-bottom: 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		padding-bottom: 0.5rem;
 	}
 
-	.support-panel__header h3 {
-		font-size: var(--text-xs);
+	.fabric-name {
 		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
+		color: var(--color-neutral-900);
+	}
+
+	.fabric-tag {
+		font-size: 8px;
+		font-weight: 800;
+		color: #ffffff;
+		background: var(--color-primary);
+		padding: 1px 3px;
+		border-radius: 2px;
 	}
 
 	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		padding: 0.5rem 0;
+		font-size: 11px;
+		color: var(--color-neutral-400);
+		padding: 1rem;
+		text-align: center;
 	}
 
 	.attention-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.35rem;
 		list-style: none;
 		padding: 0;
 		margin: 0;
@@ -273,16 +285,10 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border-radius: 0.25rem;
-		text-decoration: none;
-		color: var(--shell-text);
-		transition: background 0.15s ease;
-	}
-
-	.attention-card:hover {
-		background: var(--shell-line);
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-800);
 	}
 
 	.attention-card__main {
@@ -291,13 +297,45 @@
 	}
 
 	.res-name {
-		font-size: var(--text-sm);
-		font-weight: 600;
+		font-size: 11px;
+		font-weight: 700;
 	}
 
 	.res-issue {
-		font-size: var(--text-xs);
-		color: var(--color-warning-dark);
+		font-size: 9px;
+		color: var(--color-warning);
+		font-weight: 600;
+		text-transform: uppercase;
+	}
+
+	.task-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.task-item {
+		display: flex;
+		justify-content: space-between;
+		font-size: 10px;
+		padding: 0.35rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+	}
+
+	.task-label {
+		font-weight: 600;
+		color: var(--color-neutral-700);
+	}
+
+	.task-time {
+		color: var(--color-success);
+		font-weight: 700;
+		text-transform: uppercase;
+		font-size: 9px;
 	}
 
 	@media (max-width: 1100px) {

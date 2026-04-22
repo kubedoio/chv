@@ -1,6 +1,5 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
@@ -8,9 +7,11 @@
 	import ResourceLink from '$lib/components/shell/ResourceLink.svelte';
 	import SeverityShield from '$lib/components/shell/SeverityShield.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Bell, AlertTriangle, Info, ShieldAlert, ChevronRight, Activity } from 'lucide-svelte';
+	import { Bell, AlertTriangle, ShieldAlert, Activity, Filter } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
 
@@ -19,13 +20,6 @@
 	const page = getPageDefinition('/events');
 	const model = $derived(data.events);
 	const items = $derived(model.items);
-
-	const stats = $derived([
-		{ label: 'Total Events', value: items.length },
-		{ label: 'Critical', value: items.filter(e => e.severity === 'critical' && e.state !== 'resolved').length, status: 'critical' as const },
-		{ label: 'Warning', value: items.filter(e => e.severity === 'warning' && e.state !== 'resolved').length, status: 'warning' as const },
-		{ label: 'Unresolved', value: items.filter(e => e.state !== 'resolved').length, status: 'neutral' as const }
-	]);
 
 	const filters = [
 		{ key: 'query', label: 'Search', type: 'text' as const, placeholder: 'Summary or resource...' },
@@ -64,22 +58,19 @@
 	}
 
 	const columns = [
-		{ key: 'severity', label: 'Sev', align: 'center' as const },
-		{ key: 'summary', label: 'Event Summary' },
-		{ key: 'resource', label: 'Affected Resource' },
-		{ key: 'type', label: 'Category' },
-		{ key: 'state', label: 'State' },
-		{ key: 'occurred', label: 'Time', align: 'right' as const }
+		{ key: 'severity', label: 'Priority', align: 'center' as const },
+		{ key: 'summary', label: 'Anomaly Summary' },
+		{ key: 'resource', label: 'Detected Resource' },
+		{ key: 'type', label: 'Domain' },
+		{ key: 'state', label: 'Audit State' },
+		{ key: 'occurred', label: 'Sequence Time', align: 'right' as const }
 	];
 
 	const rows = $derived(
 		items.map((item) => ({
 			...item,
 			occurred: new Date(item.occurred_at).toLocaleString('en-US', {
-				month: 'short',
-				day: 'numeric',
-				hour: 'numeric',
-				minute: '2-digit'
+				month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
 			})
 		}))
 	);
@@ -90,8 +81,27 @@
 <div class="inventory-page">
 	<PageHeaderWithAction page={page} />
 
-	<div class="posture-strip-wrapper">
-		<CompactStatStrip {stats} />
+	<div class="inventory-metrics">
+		<CompactMetricCard 
+			label="Incident Count" 
+			value={items.length} 
+			color="neutral"
+		/>
+		<CompactMetricCard 
+			label="Unresolved Faults" 
+			value={items.filter(e => e.severity === 'critical' && e.state !== 'resolved').length} 
+			color={items.filter(e => e.severity === 'critical' && e.state !== 'resolved').length > 0 ? 'danger' : 'neutral'}
+		/>
+		<CompactMetricCard 
+			label="Active Warnings" 
+			value={items.filter(e => e.severity === 'warning' && e.state !== 'resolved').length} 
+			color="warning"
+		/>
+		<CompactMetricCard 
+			label="Audit Pipeline" 
+			value="NOMINAL" 
+			color="primary"
+		/>
 	</div>
 
 	<div class="inventory-controls">
@@ -109,24 +119,26 @@
 				<ErrorState />
 			{:else if model.state === 'empty'}
 				<EmptyInfrastructureState 
-					title="No events match your criteria" 
-					description="Adjust filters to view diagnostic history." 
-					hint="System-level events are kept until resolved or rotated."
+					title="Incidence registry clear" 
+					description="Adjust your search criteria or domain filters." 
+					hint="System incidents are recorded in the central diagnostic registry."
 				/>
 			{:else}
-				<InventoryTable 
-					{columns} 
-					rows={rows}
-				>
+				<InventoryTable {columns} rows={rows}>
 					{#snippet cell({ column, row })}
 						{#if column.key === 'severity'}
 							<SeverityShield severity={row.severity} />
 						{:else if column.key === 'resource'}
 							<ResourceLink kind={row.resource_kind} id={row.resource_id} name={row.resource_name} compact />
 						{:else if column.key === 'state'}
-							<span class="state-label state-{row.state}">{row.state}</span>
+							<StatusBadge 
+								label={row.state} 
+								tone={row.state === 'resolved' ? 'healthy' : row.state === 'open' ? 'failed' : 'warning'} 
+							/>
+						{:else if column.key === 'summary'}
+							<span class="summary-text">{row.summary}</span>
 						{:else}
-							{row[column.key]}
+							<span class="cell-text">{row[column.key]}</span>
 						{/if}
 					{/snippet}
 				</InventoryTable>
@@ -134,25 +146,18 @@
 		</section>
 
 		<aside class="support-area">
-			<SectionCard title="Priority Inspection" icon={ShieldAlert} badgeTone={criticalEvents.length > 0 ? 'failed' : 'neutral'}>
+			<SectionCard title="Anomaly Priority" icon={ShieldAlert} badgeLabel={String(criticalEvents.length)}>
 				{#if criticalEvents.length === 0}
-					<p class="empty-hint">No unresolved critical alerts.</p>
+					<p class="empty-hint">All systems reporting nominal telemetry.</p>
 				{:else}
-					<ul class="priority-list">
+					<ul class="attention-list">
 						{#each criticalEvents as event}
 							<li>
-								<div class="priority-item">
-									<div class="priority-main">
-										<span class="p-summary">{event.summary}</span>
-										<div class="p-meta">
-											<span class="p-time">{new Date(event.occurred_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-											<span class="dot">·</span>
-											<span class="p-res">{event.resource_name}</span>
-										</div>
+								<div class="attention-card">
+									<div class="attention-card__main">
+										<span class="res-name">{event.summary}</span>
+										<span class="res-issue">{event.resource_name} (Fault)</span>
 									</div>
-									<a href="/events?query={event.event_id}" class="p-link">
-										<ChevronRight size={14} />
-									</a>
 								</div>
 							</li>
 						{/each}
@@ -160,15 +165,15 @@
 				{/if}
 			</SectionCard>
 
-			<SectionCard title="Resource Posture" icon={Activity}>
-				<div class="resource-summary">
-					<div class="res-stat">
-						<span class="val">{items.filter(e => e.severity === 'warning').length}</span>
-						<span class="lbl">Warnings</span>
+			<SectionCard title="Entropy Tracking" icon={Activity}>
+				<div class="audit-summary">
+					<div class="summary-row">
+						<span>Incidents (24h)</span>
+						<span>{items.filter(e => new Date(e.occurred_at).getTime() > Date.now() - 86400000).length}</span>
 					</div>
-					<div class="res-stat">
-						<span class="val">{items.filter(e => e.state === 'resolved').length}</span>
-						<span class="lbl">Resolved</span>
+					<div class="summary-row">
+						<span>Resolution Ratio</span>
+						<span>{items.length ? Math.round((items.filter(e => e.state === 'resolved').length / items.length) * 100) : 100}%</span>
 					</div>
 				</div>
 			</SectionCard>
@@ -183,13 +188,16 @@
 		gap: 0.75rem;
 	}
 
-	.posture-strip-wrapper {
-		margin-top: -0.25rem;
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
 	}
 
 	.inventory-controls {
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
 		overflow: hidden;
 	}
 
@@ -200,97 +208,97 @@
 		align-items: start;
 	}
 
-	.state-label {
-		font-size: 10px;
-		font-weight: 700;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-	}
-
-	.state-open { color: var(--color-danger); }
-	.state-acknowledged { color: var(--color-warning-dark); }
-	.state-resolved { color: var(--color-success); }
-
-	.priority-list {
-		list-style: none;
-		padding: 0;
-		margin: 0;
+	.support-area {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 1rem;
 	}
 
-	.priority-item {
+	.summary-text {
+		font-weight: 800;
+		color: var(--color-neutral-900);
+    font-size: 11px;
+	}
+
+  .cell-text {
+    font-size: 11px;
+    color: var(--color-neutral-600);
+  }
+
+	.audit-summary {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.summary-row {
 		display: flex;
 		justify-content: space-between;
-		align-items: center;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.25rem;
-	}
-
-	.priority-main {
-		display: flex;
-		flex-direction: column;
-		min-width: 0;
-	}
-
-	.p-summary {
-		font-weight: 600;
-		font-size: var(--text-sm);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.p-meta {
-		display: flex;
-		align-items: center;
-		gap: 0.25rem;
 		font-size: 10px;
-		color: var(--shell-text-muted);
+		color: var(--color-neutral-600);
+		padding: 0.35rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
 	}
 
-	.p-link {
-		color: var(--shell-text-muted);
-	}
-
-	.resource-summary {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 0.5rem;
-	}
-
-	.res-stat {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border-radius: 0.25rem;
-	}
-
-	.res-stat .val {
-		font-size: var(--text-lg);
-		font-weight: 700;
-	}
-
-	.res-stat .lbl {
-		font-size: 10px;
-		color: var(--shell-text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
+	.summary-row span:last-child {
+		font-weight: 800;
+		color: var(--color-neutral-900);
 	}
 
 	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
+		font-size: 10px;
+		font-weight: 700;
+		color: var(--color-neutral-400);
+		padding: 1rem;
 		text-align: center;
-		padding: 0.5rem 0;
+		text-transform: uppercase;
 	}
 
-	@media (max-width: 1200px) {
+	.attention-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.attention-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-800);
+    border-left: 2px solid transparent;
+	}
+
+  .attention-card:has(.res-issue) {
+    border-left-color: var(--color-danger);
+  }
+
+	.attention-card__main {
+		display: flex;
+		flex-direction: column;
+    gap: 0.125rem;
+	}
+
+	.res-name {
+		font-size: 11px;
+		font-weight: 800;
+    color: var(--color-neutral-900);
+	}
+
+	.res-issue {
+		font-size: 9px;
+		color: var(--color-danger);
+		font-weight: 700;
+		text-transform: uppercase;
+	}
+
+	@media (max-width: 1100px) {
 		.inventory-main {
 			grid-template-columns: 1fr;
 		}

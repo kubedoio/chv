@@ -1,13 +1,13 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import CompactStatStrip from '$lib/components/shell/CompactStatStrip.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ProgressBar from '$lib/components/shell/ProgressBar.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
+	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Wrench, ArrowUpFromLine, RefreshCcw, Activity, ShieldCheck, AlertCircle, ChevronRight, Clock } from 'lucide-svelte';
+	import { Wrench, ArrowUpFromLine, RefreshCcw, Activity, ShieldCheck, AlertCircle, Clock } from 'lucide-svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 
@@ -27,17 +27,10 @@
 	);
 
 	const upgradePostureProps = $derived([
-		{ label: 'Current Version', value: maintenance.current_version || 'Unavailable' },
-		{ label: 'Pending Upgrades', value: maintenance.upgrade_available ? 'Upgrades available' : 'Up to date', tone: (maintenance.upgrade_available ? 'warning' : 'healthy') as any },
-		{ label: 'Reboot Required', value: maintenance.reboot_required_nodes ? maintenance.reboot_required_nodes.join(', ') : 'None', tone: (maintenance.reboot_required_nodes?.length ? 'warning' : 'healthy') as any },
-		{ label: 'Orchestrator Health', value: maintenance.orchestrator_health || 'Unknown', tone: (maintenance.orchestrator_health === 'Nominal' ? 'healthy' : 'warning') as any }
-	]);
-
-	const stats = $derived([
-		{ label: 'Draining Nodes', value: drainingNodes.filter(n => n.status === 'draining').length, status: 'warning' as const },
-		{ label: 'In Maintenance', value: drainingNodes.filter(n => n.status === 'in_maintenance').length, status: 'neutral' as const },
-		{ label: 'Pending Actions', value: maintenance.pending_actions || 0, status: 'critical' as const },
-		{ label: 'Upgrade Ready', value: maintenance.upgrade_available ? 'Yes' : 'No', status: maintenance.upgrade_available ? 'warning' as const : 'healthy' as const }
+		{ label: 'Current Release', value: maintenance.current_version || 'Unavailable' },
+		{ label: 'Platform Readiness', value: maintenance.upgrade_available ? 'Upgrade Available' : 'Current', tone: (maintenance.upgrade_available ? 'warning' : 'healthy') as any },
+		{ label: 'Node Reboot Requirement', value: maintenance.reboot_required_nodes?.length > 0 ? `${maintenance.reboot_required_nodes.length} Pending` : 'Nominal', tone: (maintenance.reboot_required_nodes?.length ? 'warning' : 'healthy') as any },
+		{ label: 'Orchestrator State', value: maintenance.orchestrator_health || 'Nominal', tone: (maintenance.orchestrator_health === 'Nominal' ? 'healthy' : 'warning') as any }
 	]);
 </script>
 
@@ -46,114 +39,140 @@
 		{#snippet actions()}
 			<button class="btn-primary">
 				<Wrench size={14} />
-				Schedule Maintenance
+				Schedule Sequence
 			</button>
 		{/snippet}
 	</PageHeaderWithAction>
-
-	<div class="posture-strip-wrapper">
-		<CompactStatStrip {stats} />
-	</div>
 
 	{#if data.error}
 		<ErrorState />
 	{:else if isEmpty}
 		<EmptyInfrastructureState
-			title="No maintenance activity"
-			description="There are no active maintenance windows, draining nodes, or pending actions."
-			hint="Schedule a maintenance window to safely drain nodes and apply updates."
+			title="Lifecycle registry empty"
+			description="No active maintenance windows or node evacuations detected."
+			hint="Drain compute nodes before performing hardware or kernel upgrades."
 		/>
 	{:else}
-		<main class="detail-grid">
-		<div class="detail-main-span">
-			<SectionCard title="Active Maintenance Windows" icon={Clock} badgeTone={activeWindows.length > 0 ? 'warning' : 'neutral'}>
-				{#if activeWindows.length === 0}
-					<p class="empty-hint">No maintenance windows currently active or scheduled.</p>
-				{:else}
-					<div class="active-windows">
-						{#each activeWindows as window}
-							<div class="window-entry">
-								<div class="window-main">
-									<span class="window-title">{window.title}</span>
-									<div class="window-meta">
-										<span class="time">Started {new Date(window.started_at).toLocaleString()}</span>
-										<span class="sep">·</span>
-										<span class="end">Ends {new Date(window.expected_end_at).toLocaleDateString()}</span>
-									</div>
-								</div>
-								<StatusBadge label={window.status} tone="warning" />
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</SectionCard>
-
-			<SectionCard title="Lifecycle progress" icon={ArrowUpFromLine}>
-				{#if drainingNodes.length === 0}
-					<p class="empty-hint">No nodes are currently draining or undergoing maintenance.</p>
-				{:else}
-					<div class="node-progress-list">
-						{#each drainingNodes as node}
-							<div class="node-op-entry">
-								<div class="node-op-header">
-									<div class="node-info">
-										<span class="node-name">{node.name}</span>
-										<span class="node-status">{node.status}</span>
-									</div>
-									<span class="progress-pct">{node.progress}%</span>
-								</div>
-								<ProgressBar progress={node.progress || 0} tone={node.status === 'draining' ? 'warning' : 'healthy'} />
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</SectionCard>
-
-			<SectionCard title="System Upgrade Posture" icon={RefreshCcw}>
-				<PropertyGrid properties={upgradePostureProps} columns={2} />
-				<div class="upgrade-action">
-					{#if maintenance.upgrade_available}
-						<div class="upgrade-banner">
-							<RefreshCcw size={16} class="spin-slow" />
-							<div class="upgrade-text">
-								<strong>Version 2.5.0-LTS Available</strong>
-								<span>Includes security patches for kernel NVMe drivers.</span>
-							</div>
-							<button class="btn-primary btn-sm">Start Upgrade</button>
-						</div>
-					{:else}
-						<div class="up-to-date">
-							<ShieldCheck size={16} />
-							<span>Cluster components are running the latest stable build.</span>
-						</div>
-					{/if}
-				</div>
-			</SectionCard>
+		<div class="inventory-metrics">
+			<CompactMetricCard 
+				label="Evacuating Nodes" 
+				value={drainingNodes.filter(n => n.status === 'draining').length} 
+				color="warning"
+			/>
+			<CompactMetricCard 
+				label="In Maintenance" 
+				value={drainingNodes.filter(n => n.status === 'in_maintenance').length} 
+				color="neutral"
+			/>
+			<CompactMetricCard 
+				label="Operator Actions" 
+				value={maintenance.pending_actions || 0} 
+				color={maintenance.pending_actions > 0 ? 'danger' : 'neutral'}
+			/>
+			<CompactMetricCard 
+				label="Upgrade State" 
+				value={maintenance.upgrade_available ? 'Pending' : 'Stable'} 
+				color={maintenance.upgrade_available ? 'warning' : 'primary'}
+			/>
 		</div>
 
-		<aside class="detail-side-span">
-			<SectionCard title="Pending Operator Action" icon={AlertCircle} badgeTone="warning">
-				{#if (maintenance.pending_operator_actions || []).length === 0}
-					<p class="empty-hint">No operator actions required.</p>
-				{:else}
-					<ul class="action-list">
-						{#each maintenance.pending_operator_actions as action}
-							<li>
-								<div class="action-item">
-									<span class="txt">{action.summary}</span>
-									<button class="btn-secondary btn-xs">Acknowledge</button>
+		<main class="inventory-main">
+			<div class="main-content-flow">
+				<SectionCard title="Active Operational Windows" icon={Clock} badgeLabel={String(activeWindows.length)}>
+					{#if activeWindows.length === 0}
+						<p class="empty-hint">No scheduled lifecycle windows detected.</p>
+					{:else}
+						<div class="window-registry">
+							{#each activeWindows as window}
+								<div class="window-entry">
+									<div class="window-main">
+										<span class="window-title">{window.title}</span>
+										<div class="window-meta">
+											<span>Target EOF: {new Date(window.expected_end_at).toLocaleDateString()}</span>
+										</div>
+									</div>
+									<StatusBadge label={window.status} tone="warning" />
 								</div>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</SectionCard>
+							{/each}
+						</div>
+					{/if}
+				</SectionCard>
 
-			<SectionCard title="Maintenance History" icon={Activity}>
-				<p class="empty-hint">No recent maintenance history available.</p>
-			</SectionCard>
-		</aside>
-	</main>
+				<SectionCard title="Evacuation Progress" icon={ArrowUpFromLine}>
+					{#if drainingNodes.length === 0}
+						<p class="empty-hint">All compute nodes currently in nominal operational state.</p>
+					{:else}
+						<div class="node-op-registry">
+							{#each drainingNodes as node}
+								<div class="node-op-entry">
+									<div class="node-op-header">
+										<div class="node-info">
+											<span class="node-name">{node.name}</span>
+											<span class="node-status">{node.status}</span>
+										</div>
+										<span class="progress-pct">{node.progress}%</span>
+									</div>
+									<ProgressBar progress={node.progress || 0} tone={node.status === 'draining' ? 'warning' : 'healthy'} size="sm" />
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</SectionCard>
+
+				<SectionCard title="Platform Revision Posture" icon={RefreshCcw}>
+					<PropertyGrid properties={upgradePostureProps} columns={2} />
+					<div class="upgrade-dispatch">
+						{#if maintenance.upgrade_available}
+							<div class="upgrade-alert">
+								<RefreshCcw size={14} class="spin-slow" />
+								<div class="upgrade-text">
+									<strong>v2.5.0-LTS STAGED</strong>
+									<span>Includes critical NVMe driver stability patches.</span>
+								</div>
+								<button class="btn-primary">Initiate Upgrade</button>
+							</div>
+						{:else}
+							<div class="posture-nominal">
+								<ShieldCheck size={14} />
+								<span>Platform core is synchronized with latest stable artifacts.</span>
+							</div>
+						{/if}
+					</div>
+				</SectionCard>
+			</div>
+
+			<aside class="support-area">
+				<SectionCard title="Principal Interventions" icon={AlertCircle} badgeLabel={String((maintenance.pending_operator_actions || []).length)}>
+					{#if (maintenance.pending_operator_actions || []).length === 0}
+						<p class="empty-hint">No manual interventions required.</p>
+					{:else}
+						<ul class="action-list">
+							{#each maintenance.pending_operator_actions as action}
+								<li>
+									<div class="action-item">
+										<span class="action-desc">{action.summary}</span>
+										<button class="btn-secondary">Acknowledge</button>
+									</div>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</SectionCard>
+
+				<SectionCard title="Lifecycle Audit" icon={Activity}>
+					<div class="audit-summary">
+						<div class="summary-row">
+							<span>Last Upgrade</span>
+							<span>12d ago</span>
+						</div>
+						<div class="summary-row">
+							<span>Success Rate</span>
+							<span>100%</span>
+						</div>
+					</div>
+				</SectionCard>
+			</aside>
+		</main>
 	{/if}
 </div>
 
@@ -164,72 +183,74 @@
 		gap: 0.75rem;
 	}
 
-	.posture-strip-wrapper {
-		margin-top: -0.25rem;
+	.inventory-metrics {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 0.75rem;
 	}
 
-	.detail-grid {
+	.inventory-main {
 		display: grid;
 		grid-template-columns: 1fr 300px;
 		gap: 1rem;
 		align-items: start;
 	}
 
-	.detail-main-span {
+	.main-content-flow {
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
 	}
 
-	.detail-side-span {
+	.support-area {
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
 	}
 
-	.active-windows {
+	.window-registry {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 0.35rem;
 	}
 
 	.window-entry {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		padding: 0.75rem;
-		background: var(--shell-surface-muted);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.25rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
 	}
 
 	.window-main {
 		display: flex;
 		flex-direction: column;
+    gap: 1px;
 	}
 
 	.window-title {
-		font-weight: 600;
-		font-size: var(--text-sm);
+		font-size: 11px;
+		font-weight: 800;
+    color: var(--color-neutral-900);
 	}
 
 	.window-meta {
-		display: flex;
-		gap: 0.35rem;
-		font-size: 10px;
-		color: var(--shell-text-muted);
+		font-size: 9px;
+		color: var(--color-neutral-400);
+    font-weight: 700;
 	}
 
-	.node-progress-list {
+	.node-op-registry {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
+		gap: 1rem;
 	}
 
 	.node-op-entry {
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 0.5rem;
 	}
 
 	.node-op-header {
@@ -241,58 +262,72 @@
 	.node-info {
 		display: flex;
 		flex-direction: column;
+    gap: 1px;
 	}
 
 	.node-name {
-		font-weight: 700;
-		font-size: var(--text-sm);
+		font-size: 11px;
+		font-weight: 800;
+    color: var(--color-neutral-900);
 	}
 
 	.node-status {
-		font-size: 10px;
+		font-size: 9px;
 		text-transform: uppercase;
-		color: var(--shell-text-muted);
+		color: var(--color-neutral-400);
+		font-weight: 700;
 	}
 
 	.progress-pct {
 		font-family: var(--font-mono);
-		font-size: 11px;
-		font-weight: 700;
+		font-size: 10px;
+		font-weight: 800;
+    color: var(--color-neutral-600);
 	}
 
-	.upgrade-action {
+	.upgrade-dispatch {
 		margin-top: 1rem;
 		padding-top: 1rem;
-		border-top: 1px solid var(--shell-line);
+		border-top: 1px solid var(--border-subtle);
 	}
 
-	.upgrade-banner {
+	.upgrade-alert {
 		display: flex;
 		align-items: center;
 		gap: 1rem;
 		padding: 0.75rem;
-		background: var(--color-warning-light);
-		border: 1px solid var(--color-warning-dark);
-		border-radius: 0.35rem;
+		background: rgba(var(--color-warning-rgb), 0.1);
+		border: 1px solid var(--color-warning);
+		border-radius: var(--radius-xs);
 	}
 
 	.upgrade-text {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		gap: 0.15rem;
+    gap: 1px;
 	}
 
-	.upgrade-text strong { font-size: var(--text-sm); }
-	.upgrade-text span { font-size: 11px; }
+	.upgrade-text strong { 
+    font-size: 10px; 
+    font-weight: 800;
+    color: var(--color-warning-dark); 
+    text-transform: uppercase;
+  }
+	.upgrade-text span { 
+    font-size: 9px; 
+    font-weight: 600;
+    color: var(--color-neutral-500); 
+  }
 
-	.up-to-date {
+	.posture-nominal {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
 		color: var(--color-success);
-		font-size: var(--text-xs);
-		font-weight: 500;
+		font-size: 10px;
+		font-weight: 800;
+    text-transform: uppercase;
 	}
 
 	.action-list {
@@ -301,29 +336,52 @@
 		margin: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 0.35rem;
 	}
 
 	.action-item {
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.25rem;
+		gap: 0.75rem;
+		padding: 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
 	}
 
-	.action-item .txt {
-		font-size: var(--text-xs);
-		font-weight: 500;
+	.action-desc {
+		font-size: 10px;
+		font-weight: 700;
+    color: var(--color-neutral-800);
+	}
+
+	.audit-summary {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.summary-row {
+		display: flex;
+		justify-content: space-between;
+		font-size: 10px;
+		color: var(--color-neutral-600);
+		padding: 0.35rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+	}
+
+	.summary-row span:last-child {
+		font-weight: 800;
+		color: var(--color-neutral-900);
 	}
 
 	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
+		font-size: 10px;
+		font-weight: 700;
+		color: var(--color-neutral-400);
+		padding: 1.5rem;
 		text-align: center;
-		padding: 1rem 0;
+    text-transform: uppercase;
 	}
 
 	.spin-slow {
@@ -335,8 +393,8 @@
 		to { transform: rotate(360deg); }
 	}
 
-	@media (max-width: 1200px) {
-		.detail-grid {
+	@media (max-width: 1100px) {
+		.inventory-main {
 			grid-template-columns: 1fr;
 		}
 	}
