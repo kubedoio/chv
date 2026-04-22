@@ -6,7 +6,7 @@ use crate::router::AppState;
 use crate::BffError;
 
 // ------------------------------------------------------------------
-// Local types & validation (mirrors controlplane-service validator)
+// Local types & validation (uses chv_common::hypervisor)
 // ------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
@@ -30,42 +30,29 @@ pub struct HypervisorSettingsPatchInput {
     pub profile_id: Option<String>,
 }
 
-
-const VALID_SERIAL_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
-const VALID_CONSOLE_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
-const VALID_TPM_TYPES: &[&str] = &["swtpm"];
-
 fn validate_settings_patch(input: &HypervisorSettingsPatchInput) -> Result<(), String> {
     if let Some(ref mode) = input.serial_mode {
-        if !VALID_SERIAL_MODES.contains(&mode.as_str()) {
-            return Err(format!(
-                "invalid serial_mode: {}, must be one of {:?}",
-                mode, VALID_SERIAL_MODES
-            ));
-        }
+        chv_common::hypervisor::validate_serial_mode(mode)
+            .map_err(|e| format!("serial_mode: {}", e))?;
     }
     if let Some(ref mode) = input.console_mode {
-        if !VALID_CONSOLE_MODES.contains(&mode.as_str()) {
-            return Err(format!(
-                "invalid console_mode: {}, must be one of {:?}",
-                mode, VALID_CONSOLE_MODES
-            ));
-        }
+        chv_common::hypervisor::validate_console_mode(mode)
+            .map_err(|e| format!("console_mode: {}", e))?;
     }
     if let Some(ref t) = input.tpm_type {
-        if !VALID_TPM_TYPES.contains(&t.as_str()) {
-            return Err(format!(
-                "invalid tpm_type: {}, must be one of {:?}",
-                t, VALID_TPM_TYPES
-            ));
-        }
+        chv_common::hypervisor::validate_tpm_type(t)
+            .map_err(|e| format!("tpm_type: {}", e))?;
     }
     if input.tpm_type.is_none() && input.tpm_socket_path.is_some() {
         return Err("tpm_socket_path requires tpm_type to be set".into());
     }
     if let Some(ref src) = input.rng_src {
-        if !src.starts_with('/') {
-            return Err("rng_src must be an absolute path".into());
+        chv_common::hypervisor::validate_rng_src(src)
+            .map_err(|e| format!("rng_src: {}", e))?;
+    }
+    if let Some(ref path) = input.tpm_socket_path {
+        if !path.starts_with('/') {
+            return Err("tpm_socket_path must be an absolute path".into());
         }
     }
     if input.iommu == Some(true) && input.memory_shared != Some(true) {
@@ -76,35 +63,27 @@ fn validate_settings_patch(input: &HypervisorSettingsPatchInput) -> Result<(), S
 
 pub fn validate_vm_overrides(overrides: &chv_common::hypervisor::HypervisorOverrides) -> Result<(), String> {
     if let Some(ref mode) = overrides.serial_mode {
-        if !VALID_SERIAL_MODES.contains(&mode.as_str()) {
-            return Err(format!(
-                "invalid serial_mode: {}, must be one of {:?}",
-                mode, VALID_SERIAL_MODES
-            ));
-        }
+        chv_common::hypervisor::validate_serial_mode(mode)
+            .map_err(|e| format!("serial_mode: {}", e))?;
     }
     if let Some(ref mode) = overrides.console_mode {
-        if !VALID_CONSOLE_MODES.contains(&mode.as_str()) {
-            return Err(format!(
-                "invalid console_mode: {}, must be one of {:?}",
-                mode, VALID_CONSOLE_MODES
-            ));
-        }
+        chv_common::hypervisor::validate_console_mode(mode)
+            .map_err(|e| format!("console_mode: {}", e))?;
     }
     if let Some(ref t) = overrides.tpm_type {
-        if !VALID_TPM_TYPES.contains(&t.as_str()) {
-            return Err(format!(
-                "invalid tpm_type: {}, must be one of {:?}",
-                t, VALID_TPM_TYPES
-            ));
-        }
+        chv_common::hypervisor::validate_tpm_type(t)
+            .map_err(|e| format!("tpm_type: {}", e))?;
     }
     if overrides.tpm_type.is_none() && overrides.tpm_socket_path.is_some() {
         return Err("tpm_socket_path requires tpm_type to be set".into());
     }
     if let Some(ref src) = overrides.rng_src {
-        if !src.starts_with('/') {
-            return Err("rng_src must be an absolute path".into());
+        chv_common::hypervisor::validate_rng_src(src)
+            .map_err(|e| format!("rng_src: {}", e))?;
+    }
+    if let Some(ref path) = overrides.tpm_socket_path {
+        if !path.starts_with('/') {
+            return Err("tpm_socket_path must be an absolute path".into());
         }
     }
     if overrides.iommu == Some(true) && overrides.memory_shared != Some(true) {

@@ -455,7 +455,9 @@ impl Orchestrator {
         )
         .fetch_one(&self.pool)
         .await
-        .unwrap_or_else(|_| HypervisorSettingsRow {
+        .unwrap_or_else(|e| {
+            tracing::warn!(vm_id = %vm_id, error = %e, "failed to fetch hypervisor_settings, using defaults");
+            HypervisorSettingsRow {
             cpu_nested: chv_common::hypervisor::DEFAULT_CPU_NESTED,
             cpu_amx: chv_common::hypervisor::DEFAULT_CPU_AMX,
             cpu_kvm_hyperv: chv_common::hypervisor::DEFAULT_CPU_KVM_HYPERV,
@@ -472,7 +474,7 @@ impl Orchestrator {
             pvpanic: chv_common::hypervisor::DEFAULT_PVPANIC,
             tpm_type: None,
             tpm_socket_path: None,
-        });
+        }});
 
         let volume_rows = sqlx::query_as::<_, VolumeDesiredStateRow>(
             r#"
