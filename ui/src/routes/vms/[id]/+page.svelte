@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import type { PageData } from './$types';
 	import { getStoredToken, createAPIClient } from '$lib/api/client';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
@@ -19,7 +20,6 @@
     ShieldCheck
   } from 'lucide-svelte';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
-	import VmConsole from '$lib/components/vms/VmConsole.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
 	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
@@ -30,6 +30,7 @@
 	let pendingAction = $state<string | null>(null);
 	let confirmingAction = $state<string | null>(null);
 	let liveConsoleUrl = $state<string | undefined>(undefined);
+	let VmConsoleComponent = $state<typeof import('$lib/components/vms/VmConsole.svelte').default | null>(null);
 	let consoleLoading = $state(false);
 	let bootLog = $state<string>('');
 	let bootLogLoading = $state(false);
@@ -37,8 +38,15 @@
 	let snapshotsLoading = $state(false);
 	let snapshotsError = $state<string | null>(null);
 
+	async function ensureVmConsole() {
+		if (!browser || VmConsoleComponent) return;
+		const module = await import('$lib/components/vms/VmConsole.svelte');
+		VmConsoleComponent = module.default;
+	}
+
 	$effect(() => {
 		if (detail.currentTab === 'console' && detail.summary.vm_id) {
+			ensureVmConsole();
 			consoleLoading = true;
 			getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined)
 				.then(res => { liveConsoleUrl = res.url; })
@@ -145,19 +153,19 @@
 	{:else}
 		<ResourceDetailHeader 
 			title={detail.summary.name} 
-			eyebrow="WORKLOAD_INST // {detail.summary.vm_id}"
+			eyebrow={`VM ID ${detail.summary.vm_id}`}
 			statusLabel={detail.summary.power_state}
 			tone={normalizeTone(detail.summary.power_state)}
-			parentLabel="Virtual Machines"
+			parentLabel="Virtual machines"
 			parentHref="/vms"
 		>
 			{#snippet actions()}
 				<div class="header-actions">
            {#if confirmingAction}
 							<div class="confirm-group">
-								<span class="confirm-text">CONFIRM_{confirmingAction.toUpperCase()}?</span>
-								<button class="btn-primary" onclick={() => executeAction(confirmingAction!)}>COMMIT</button>
-								<button class="btn-secondary" onclick={() => confirmingAction = null}>ABORT</button>
+								<span class="confirm-text">Confirm {confirmingAction}?</span>
+								<button class="btn-primary" onclick={() => executeAction(confirmingAction!)}>Confirm</button>
+								<button class="btn-secondary" onclick={() => confirmingAction = null}>Cancel</button>
 							</div>
 							{:else}
 								{@const ps = detail.summary.power_state.toLowerCase()}
@@ -196,8 +204,8 @@
 					<SectionCard title="Direct Fabric Console" icon={Terminal}>
 						{#if consoleLoading}
 							<p class="empty-hint">Establishing encrypted bypass tunnel...</p>
-						{:else if liveConsoleUrl}
-							<VmConsole
+						{:else if liveConsoleUrl && VmConsoleComponent}
+							<VmConsoleComponent
 								vmId={detail.summary.vm_id}
 								consoleUrl={liveConsoleUrl}
 								running={detail.summary.power_state.toLowerCase() === 'running'}
@@ -206,6 +214,8 @@
 									return res.url;
 								}}
 							/>
+						{:else if liveConsoleUrl}
+							<p class="empty-hint">Loading console workspace...</p>
 						{:else}
 							<p class="empty-hint">Console registry inaccessible. Instance state may prevent access.</p>
 						{/if}
@@ -321,53 +331,55 @@
 	.inventory-page {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
+		gap: 1rem;
 	}
 
 	.header-actions {
 		display: flex;
+		flex-wrap: wrap;
 		gap: 0.5rem;
+	}
+
+	.tabs-area {
+		margin-top: -0.25rem;
+	}
+
+	.inventory-main {
+		display: grid;
+		grid-template-columns: minmax(0, 1.65fr) minmax(17rem, 0.9fr);
+		gap: 1rem;
+		align-items: start;
+	}
+
+	.detail-content,
+	.support-area {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		min-width: 0;
+	}
+
+	.summary-top,
+	.vital-metrics {
+		display: flex;
+		flex-direction: column;
 	}
 
 	.confirm-group {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: 0.5rem;
 		background: var(--color-danger-light);
-		padding: 0.25rem 0.5rem;
-		border-radius: 0.25rem;
+		padding: 0.45rem 0.65rem;
+		border-radius: var(--radius-sm);
 		border: 1px solid var(--color-danger);
 	}
 
 	.confirm-text {
-		font-size: var(--text-xs);
+		font-size: var(--text-sm);
 		color: var(--color-danger-dark);
 		font-weight: 600;
-	}
-
-	.detail-grid {
-		display: grid;
-		grid-template-columns: 1fr 300px;
-		gap: 1rem;
-		align-items: start;
-	}
-
-	.detail-main-span {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.detail-sections {
-		display: grid;
-		grid-template-columns: 1fr;
-		gap: 1rem;
-	}
-
-	.detail-side-span {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
 	}
 
 	.empty-hint {
@@ -377,9 +389,40 @@
 		padding: 1rem 0;
 	}
 
+	.safety-sign {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.65rem 0.75rem;
+		border-radius: var(--radius-sm);
+		background: var(--color-success-light);
+		color: var(--color-success-dark);
+		font-size: var(--text-sm);
+		font-weight: 600;
+	}
+
 	@media (max-width: 1200px) {
-		.detail-grid {
+		.inventory-main {
 			grid-template-columns: 1fr;
+		}
+
+		.support-area {
+			order: -1;
+		}
+	}
+
+	@media (max-width: 720px) {
+		.tabs-area {
+			margin-top: 0;
+		}
+
+		.confirm-group {
+			align-items: stretch;
+		}
+
+		.header-actions :global(button),
+		.confirm-group :global(button) {
+			flex: 1 1 10rem;
 		}
 	}
 

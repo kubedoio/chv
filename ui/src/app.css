@@ -61,17 +61,17 @@
   --color-neutral-900: #161616;
   
   /* Typography */
-  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-sans: 'IBM Plex Sans', 'Segoe UI', sans-serif;
   --font-mono: 'IBM Plex Mono', 'SFMono-Regular', monospace;
   
-  /* High Density Scale */
-  --text-xs: 0.625rem;   /* 10px */
-  --text-sm: 0.75rem;     /* 12px - Main UI Font */
-  --text-base: 0.8125rem; /* 13px */
-  --text-lg: 0.875rem;    /* 14px */
-  --text-xl: 1rem;       /* 16px */
-  --text-2xl: 1.25rem;    /* 20px */
-  --text-3xl: 1.5rem;     /* 24px */
+  /* Type scale */
+  --text-xs: 0.6875rem;   /* 11px */
+  --text-sm: 0.8125rem;   /* 13px */
+  --text-base: 0.875rem;  /* 14px */
+  --text-lg: 1rem;        /* 16px */
+  --text-xl: 1.125rem;    /* 18px */
+  --text-2xl: 1.5rem;     /* 24px */
+  --text-3xl: 1.75rem;    /* 28px */
   
   /* Spacing (4px base) */
   --space-1: 0.25rem;
@@ -96,14 +96,19 @@
   --dot-grid: rgba(0, 0, 0, 0.05);
 
   /* Shell / Cockpit Layout */
-  --sidebar-width: 280px;
+  --sidebar-width: 248px;
   --inspector-width: 320px;
-  --header-height: 48px;
+  --header-height: 40px;
   --shell-bg: var(--bg-base);
   --shell-surface: var(--bg-surface);
+  --shell-surface-muted: var(--bg-surface-muted);
   --shell-line: var(--border-subtle);
+  --shell-line-strong: var(--border-strong);
   --shell-text: var(--color-neutral-900);
+  --shell-text-secondary: var(--color-neutral-600);
+  --shell-text-muted: var(--color-neutral-500);
   --shell-accent: var(--color-primary);
+  --shell-accent-soft: var(--color-primary-light);
 }
 
 [data-theme="dark"] {

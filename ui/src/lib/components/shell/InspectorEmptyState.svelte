@@ -6,7 +6,7 @@
 	<div class="empty-icon">
 		<Database size={32} />
 	</div>
-	<p>SELECT_INFRA_ENTITY_TO_INSPECT_TELEMETRY</p>
+	<p>Select a node or VM to inspect its live status and metadata.</p>
 </div>
 
 <style>
@@ -26,11 +26,10 @@
 	}
 
 	.empty-state p {
-		font-size: 10px;
-		font-weight: 800;
-		color: var(--color-neutral-300);
-		letter-spacing: 0.05em;
-		max-width: 200px;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--shell-text-muted);
+		max-width: 16rem;
 		line-height: 1.5;
 	}
 </style>

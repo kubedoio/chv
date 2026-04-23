@@ -56,21 +56,25 @@ import type {
 const DEFAULT_BASE_URL = env.PUBLIC_CHV_API_BASE_URL || ''; // Empty string means same origin
 const TOKEN_STORAGE_KEY = 'chv-api-token';
 
+function canUseStorage(): boolean {
+  return typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function';
+}
+
 export function getStoredToken(): string | null {
-  if (typeof localStorage === 'undefined') {
+  if (!canUseStorage()) {
     return null;
   }
   return localStorage.getItem(TOKEN_STORAGE_KEY);
 }
 
 export function storeToken(token: string): void {
-  if (typeof localStorage !== 'undefined') {
+  if (canUseStorage() && typeof localStorage.setItem === 'function') {
     localStorage.setItem(TOKEN_STORAGE_KEY, token);
   }
 }
 
 export function clearToken(): void {
-  if (typeof localStorage !== 'undefined') {
+  if (canUseStorage() && typeof localStorage.removeItem === 'function') {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   }
 }

@@ -25,14 +25,16 @@
 
 <div class="command-bar">
 	<div class="command-bar__context">
-		<div class="context-label">CHV_PROTOCOL_SHELL</div>
+		<div class="context-label">Control plane</div>
 		<div class="context-value">{page.navLabel}</div>
 	</div>
 
 	<button class="command-bar__search" onclick={openCommandPalette} aria-label="Open command palette">
-		<Search size={14} class="search-icon" />
-		<span class="search-placeholder">ACTIVATE_COMMAND_PALETTE (⌘K)</span>
-		<div class="search-kbd">/</div>
+		<span class="search-icon" aria-hidden="true">
+			<Search size={14} />
+		</span>
+		<span class="search-placeholder">Search commands or jump to a resource</span>
+		<div class="search-kbd">⌘K</div>
 	</button>
 </div>
 
@@ -56,42 +58,52 @@
 	}
 
 	.context-label {
-		font-size: 8px;
-		font-weight: 800;
-		letter-spacing: 0.15em;
+		font-size: var(--text-xs);
+		font-weight: 700;
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--color-neutral-400);
+		color: var(--shell-text-muted);
 	}
 
 	.context-value {
-		font-size: 11px;
-		font-weight: 800;
-		color: var(--color-neutral-900);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
+		font-size: var(--text-sm);
+		font-weight: 700;
+		color: var(--shell-text);
 	}
 
 	.command-bar__search {
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
-		height: 28px;
+		gap: 0.625rem;
+		min-height: 36px;
 		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-xs);
+		border-radius: var(--radius-sm);
 		background: var(--bg-surface-muted);
 		padding: 0 0.75rem;
-		width: 320px;
-		transition: border-color 0.15s ease;
+		width: min(28rem, 100%);
+		transition:
+			border-color 0.15s ease,
+			box-shadow 0.15s ease,
+			background-color 0.15s ease;
 		cursor: pointer;
 		font-family: inherit;
 	}
 
 	.command-bar__search:hover {
 		border-color: var(--color-primary);
+		background: color-mix(in srgb, var(--bg-surface-muted) 82%, var(--color-primary-light));
+	}
+
+	.command-bar__search:focus-visible {
+		outline: none;
+		border-color: var(--color-primary);
+		box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.14);
 	}
 
 	.search-icon {
-		color: var(--color-neutral-400);
+		display: inline-flex;
+		flex-shrink: 0;
+		color: var(--shell-text-muted);
 	}
 
 	.search-placeholder {
@@ -99,23 +111,24 @@
 		border: 0;
 		background: transparent;
 		padding: 0;
-		font-size: 10px;
-		font-weight: 700;
-		color: var(--color-neutral-900);
-		font-family: var(--font-mono);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--shell-text-secondary);
 		text-align: left;
 	}
 
 	.search-kbd {
-		font-size: 10px;
-		font-weight: 800;
-		color: var(--color-neutral-400);
+		flex-shrink: 0;
+		font-size: var(--text-xs);
+		font-weight: 700;
+		color: var(--shell-text-muted);
 		background: var(--bg-surface);
-		width: 16px;
-		height: 16px;
+		min-width: 2.5rem;
+		height: 1.5rem;
+		padding: 0 0.45rem;
 		display: grid;
 		place-items: center;
-		border-radius: 2px;
+		border-radius: var(--radius-xs);
 		border: 1px solid var(--border-subtle);
 	}
 

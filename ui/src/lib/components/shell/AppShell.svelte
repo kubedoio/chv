@@ -1,32 +1,41 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { page } from '$app/stores';
+	import MobileNav from '$lib/components/navigation/MobileNav.svelte';
 	import SidebarNav from '$lib/components/shell/SidebarNav.svelte';
 	import TopCommandBar from '$lib/components/shell/TopCommandBar.svelte';
 	import InspectDrawer from '$lib/components/shell/InspectDrawer.svelte';
+	import { selection } from '$lib/stores/selection.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 
 	let { children }: { children?: Snippet } = $props();
 
 	const currentPage = $derived(getPageDefinition($page.url.pathname));
+	const showInspector = $derived(Boolean(selection.active.id));
 </script>
 
 <a class="shell-skip-link" href="#shell-main">Skip to content</a>
 
 <div class="app-shell dot-grid">
+	<div class="app-shell__mobile-nav">
+		<MobileNav />
+	</div>
+
 	<aside class="app-shell__nav">
 		<SidebarNav />
 	</aside>
 
 	<div class="app-shell__main">
 		<TopCommandBar page={currentPage} />
-		<div class="app-shell__body">
+		<div class="app-shell__body" class:app-shell__body--with-inspector={showInspector}>
 			<main id="shell-main" class="app-shell__content">
 				{@render children?.()}
 			</main>
-			<aside class="app-shell__inspector">
-				<InspectDrawer />
-			</aside>
+			{#if showInspector}
+				<aside class="app-shell__inspector">
+					<InspectDrawer />
+				</aside>
+			{/if}
 		</div>
 	</div>
 </div>
@@ -60,27 +69,29 @@
 	.app-shell__body {
 		flex: 1;
 		display: grid;
-		grid-template-columns: 1fr var(--inspector-width, 320px);
+		grid-template-columns: minmax(0, 1fr);
 		min-height: 0;
 	}
 
+	.app-shell__body--with-inspector {
+		grid-template-columns: minmax(0, 1fr) minmax(18rem, var(--inspector-width, 320px));
+	}
+
 	.app-shell__content {
-		padding: 1rem;
+		min-width: 0;
+		padding: 1rem 1.25rem 1.5rem;
 		overflow-y: auto;
 	}
 
 	.app-shell__inspector {
 		border-left: 1px solid var(--shell-line);
 		background: var(--shell-surface);
+		min-width: 0;
 		overflow-y: auto;
 	}
 
-	.inspector-placeholder {
-		padding: 1rem;
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
+	.app-shell__mobile-nav {
+		display: none;
 	}
 
 	.shell-skip-link {
@@ -99,16 +110,35 @@
 		top: 1rem;
 	}
 
+	@media (max-width: 1279px) {
+		.app-shell__body--with-inspector {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.app-shell__inspector {
+			display: none;
+		}
+	}
+
 	@media (max-width: 960px) {
 		.app-shell {
 			grid-template-columns: 1fr;
 		}
 
 		.app-shell__nav {
-			position: static;
-			height: auto;
-			border-right: 0;
-			border-bottom: 1px solid var(--shell-line);
+			display: none;
+		}
+
+		.app-shell__mobile-nav {
+			display: block;
+		}
+
+		.app-shell__main {
+			padding-top: 56px;
+		}
+
+		.app-shell__content {
+			padding: 0.875rem 0.875rem 1.25rem;
 		}
 	}
 </style>

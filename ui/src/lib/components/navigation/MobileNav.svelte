@@ -229,8 +229,8 @@
 		right: 0;
 		z-index: 50;
 		height: 56px;
-		background: #252532;
-		border-bottom: 1px solid #1e1e28;
+		background: var(--bg-sidebar);
+		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 	}
 
 	.header-content {
@@ -251,7 +251,7 @@
 		width: 32px;
 		height: 32px;
 		border-radius: 8px;
-		background: linear-gradient(135deg, #e57035, #d14a28);
+		background: var(--color-primary);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -266,7 +266,7 @@
 
 	.logo-subtitle {
 		font-size: 0.625rem;
-		color: #64748b;
+		color: var(--color-neutral-400);
 	}
 
 	.menu-button {
@@ -276,7 +276,7 @@
 		align-items: center;
 		justify-content: center;
 		border-radius: 8px;
-		color: #94a3b8;
+		color: var(--color-neutral-400);
 		background: transparent;
 		border: none;
 		cursor: pointer;
@@ -285,11 +285,11 @@
 
 	.menu-button:hover {
 		background: rgba(255, 255, 255, 0.1);
-		color: white;
+		color: var(--color-neutral-50);
 	}
 
 	.menu-button:focus-visible {
-		outline: 2px solid #e57035;
+		outline: 2px solid var(--color-primary);
 		outline-offset: -2px;
 	}
 
@@ -307,17 +307,17 @@
 		bottom: 0;
 		width: 280px;
 		max-width: 80vw;
-		background: #252532;
+		background: var(--bg-sidebar);
 		z-index: 41;
 		display: flex;
 		flex-direction: column;
-		border-right: 1px solid #1e1e28;
+		border-right: 1px solid rgba(255, 255, 255, 0.08);
 	}
 
 	.menu-header {
 		padding: 1rem;
-		border-bottom: 1px solid #1e1e28;
-		background: #1e1e28;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(0, 0, 0, 0.14);
 	}
 
 	.menu-content {
@@ -337,7 +337,7 @@
 		align-items: center;
 		gap: 0.75rem;
 		padding: 0.75rem 1rem;
-		color: #94a3b8;
+		color: var(--color-neutral-300);
 		text-decoration: none;
 		font-size: 0.875rem;
 		transition: all 0.15s ease;
@@ -346,12 +346,12 @@
 
 	.nav-item:hover {
 		background: rgba(255, 255, 255, 0.05);
-		color: white;
+		color: var(--color-neutral-50);
 	}
 
 	.nav-item.active {
-		background: rgba(229, 112, 53, 0.15);
-		color: #ff9a65;
+		background: rgba(var(--color-primary-rgb), 0.16);
+		color: #fff7ef;
 	}
 
 	.nav-item.active::before {
@@ -362,18 +362,18 @@
 		transform: translateY(-50%);
 		width: 3px;
 		height: 20px;
-		background: #e57035;
+		background: var(--color-primary);
 		border-radius: 0 2px 2px 0;
 	}
 
 	.nav-item:focus-visible {
-		outline: 2px solid #e57035;
+		outline: 2px solid var(--color-primary);
 		outline-offset: -2px;
 	}
 
 	.section-divider {
 		height: 1px;
-		background: #1e1e28;
+		background: rgba(255, 255, 255, 0.08);
 		margin: 0.5rem 1rem;
 	}
 
@@ -383,7 +383,7 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
-		color: #64748b;
+		color: var(--color-neutral-400);
 	}
 
 	.status-indicator {
@@ -395,13 +395,13 @@
 	}
 
 	.status-indicator.online {
-		background: #22c55e;
+		background: var(--color-success);
 	}
 
 	.menu-footer {
 		padding: 1rem;
-		border-top: 1px solid #1e1e28;
-		background: #1e1e28;
+		border-top: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(0, 0, 0, 0.14);
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -417,7 +417,7 @@
 		width: 36px;
 		height: 36px;
 		border-radius: 50%;
-		background: #334155;
+		background: rgba(255, 255, 255, 0.12);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -441,7 +441,7 @@
 
 	.user-email {
 		font-size: 0.75rem;
-		color: #64748b;
+		color: var(--color-neutral-400);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -454,7 +454,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: #94a3b8;
+		color: var(--color-neutral-400);
 		background: transparent;
 		border: none;
 		cursor: pointer;
@@ -462,17 +462,17 @@
 	}
 
 	.logout-button:hover {
-		background: rgba(239, 68, 68, 0.1);
-		color: #ef4444;
+		background: rgba(var(--color-danger-rgb), 0.12);
+		color: var(--color-danger);
 	}
 
 	.logout-button:focus-visible {
-		outline: 2px solid #e57035;
+		outline: 2px solid var(--color-primary);
 		outline-offset: -2px;
 	}
 
 	/* Show mobile header only on small screens */
-	@media (max-width: 768px) {
+	@media (max-width: 960px) {
 		.mobile-header {
 			display: block;
 		}

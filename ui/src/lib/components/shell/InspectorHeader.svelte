@@ -6,7 +6,7 @@
 <header class="drawer-header">
 	<div class="header-title">
 		<Info size={12} />
-		<span>TECH_INSPECTOR</span>
+		<span>Quick inspector</span>
 	</div>
 	<button class="btn-close" onclick={() => selection.clear()} aria-label="Close inspector">
 		<X size={12} />
@@ -27,10 +27,11 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		font-size: 10px;
-		font-weight: 800;
-		color: var(--color-neutral-500);
-		letter-spacing: 0.1em;
+		font-size: var(--text-xs);
+		font-weight: 700;
+		color: var(--shell-text-secondary);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
 	}
 
 	.btn-close {
