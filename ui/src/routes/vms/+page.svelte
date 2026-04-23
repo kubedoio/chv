@@ -94,9 +94,9 @@
 	const attentionVms = $derived(items.filter(v => v.health !== 'healthy' || (v.alerts ?? 0) > 0).slice(0, 3));
 
 	const metrics = $derived([
-		{ label: 'Total Catalog', value: items.length, color: 'neutral' as const },
-		{ label: 'Active Runs', value: items.filter(v => v.power_state.toLowerCase() === 'running').length, trend: +1, color: 'primary' as const },
-		{ label: 'Posture Alert', value: items.filter(v => v.health !== 'healthy').length, color: items.filter(v => v.health !== 'healthy').length > 0 ? 'warning' as const : 'neutral' as const }
+		{ label: 'Catalog', value: items.length, color: 'neutral' as const },
+		{ label: 'Running', value: items.filter(v => v.power_state.toLowerCase() === 'running').length, trend: +1, color: 'primary' as const },
+		{ label: 'Attention', value: items.filter(v => v.health !== 'healthy').length, color: items.filter(v => v.health !== 'healthy').length > 0 ? 'warning' as const : 'neutral' as const }
 	]);
 </script>
 
@@ -123,6 +123,19 @@
 	{/snippet}
 
 	{#snippet sidebar()}
+		<SectionCard title="Dispatch Cue" icon={Activity} badgeLabel={items.length > 0 ? 'Live' : 'Idle'}>
+			<div class="dispatch-cue">
+				<p>Use this page as the operator queue, not a vanity dashboard.</p>
+				<span>
+					{#if items.length > 0}
+						{items.filter((vm) => vm.power_state.toLowerCase() === 'running').length} workloads are currently active across the indexed fleet.
+					{:else}
+						No workloads are currently indexed.
+					{/if}
+				</span>
+			</div>
+		</SectionCard>
+
 		<SectionCard title="Anomaly Detection" icon={AlertCircle} badgeLabel={String(attentionVms.length)}>
 			{#if attentionVms.length === 0}
 				<p class="empty-hint">Signals nominal. Posture is stable.</p>
@@ -160,4 +173,67 @@
 <CreateVMModal bind:open={modalOpen} onSuccess={() => invalidateAll()} />
 
 <style>
+	.dispatch-cue {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+		padding: 0.1rem 0;
+	}
+
+	.dispatch-cue p {
+		margin: 0;
+		font-size: var(--text-sm);
+		line-height: 1.45;
+		color: var(--shell-text);
+	}
+
+	.dispatch-cue span {
+		font-size: var(--text-xs);
+		line-height: 1.5;
+		color: var(--shell-text-muted);
+	}
+
+	:global(.inventory-page) {
+		gap: 0.625rem;
+	}
+
+	:global(.inventory-page .section-header) {
+		gap: 0.5rem;
+	}
+
+	:global(.inventory-page .section-header h1) {
+		font-size: clamp(2.1rem, 3vw, 2.65rem);
+	}
+
+	:global(.inventory-page .section-header__meta) {
+		gap: 0.65rem 1rem;
+	}
+
+	:global(.inventory-page .section-header__meta p) {
+		max-width: 38rem;
+		line-height: 1.5;
+	}
+
+	:global(.inventory-metrics) {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	:global(.inventory-main) {
+		grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 18.5rem);
+		gap: 0.75rem;
+	}
+
+	:global(.inventory-controls) {
+		border-radius: var(--radius-sm);
+	}
+
+	:global(.inventory-table-area) {
+		min-width: 0;
+	}
+
+	@media (max-width: 900px) {
+		:global(.inventory-metrics) {
+			grid-template-columns: 1fr;
+		}
+	}
 </style>

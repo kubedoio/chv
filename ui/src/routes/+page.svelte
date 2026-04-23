@@ -1,6 +1,5 @@
 <script lang="ts">
 	import type { PageData } from './$types';
-	import { getPageDefinition } from '$lib/shell/app-shell';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
 	import SeverityShield from '$lib/components/shell/SeverityShield.svelte';
@@ -12,6 +11,8 @@
 	import { 
 		Activity, 
 		AlertCircle, 
+		Server,
+		ShieldCheck,
 		Zap
 	} from 'lucide-svelte';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
@@ -19,7 +20,6 @@
 
 	let { data }: { data: PageData } = $props();
 
-	const page = getPageDefinition('/');
 	const overview = $derived(data.overview);
 
 	const recentTasks = $derived(overview.recent_tasks.map(t => {
@@ -33,6 +33,51 @@
 			tone: meta.tone as any
 		};
 	}));
+
+	const fleetBriefing = $derived([
+		{
+			label: 'Control-plane reach',
+			value: `${inventory.nodes.length} reporting nodes`,
+			note:
+				overview.nodes_degraded > 0
+					? `${overview.nodes_degraded} node signals need review`
+					: 'Fleet reporting is stable'
+		},
+		{
+			label: 'Workload posture',
+			value: `${overview.vms_running} active of ${overview.vms_total || inventory.vms.length}`,
+			note:
+				overview.unresolved_alerts > 0
+					? `${overview.unresolved_alerts} unresolved operator alerts`
+					: 'No blocking workload alarms'
+		},
+		{
+			label: 'Execution queue',
+			value: `${overview.active_tasks || recentTasks.length} active operations`,
+			note:
+				recentTasks.length > 0
+					? `Latest activity: ${recentTasks[0].operation}`
+					: 'No recent task churn'
+		}
+	]);
+
+	const pressureCards = $derived([
+		{
+			label: 'CPU envelope',
+			value: `${Math.round(overview.cpu_usage_percent || 0)}%`,
+			width: overview.cpu_usage_percent || 0
+		},
+		{
+			label: 'Memory envelope',
+			value: `${Math.round(overview.memory_usage_percent || 0)}%`,
+			width: overview.memory_usage_percent || 0
+		},
+		{
+			label: 'Storage pressure',
+			value: `${Math.round(overview.storage_usage_percent || 0)}%`,
+			width: overview.storage_usage_percent || 0
+		}
+	]);
 </script>
 
 <div class="cockpit-dashboard">
@@ -48,7 +93,6 @@
 		/>
 	{:else}
 		<div class="cockpit-layout">
-			<!-- TOP BAR: REAL-TIME METRICS -->
 			<div class="cockpit-metrics">
 				<CompactMetricCard 
 					label="Managed Nodes" 
@@ -82,44 +126,73 @@
 				/>
 			</div>
 
-			<!-- MAIN AREA: TOPOLOGY CANVAS -->
-			<div class="cockpit-main">
-				<TopologyCanvas />
-			</div>
-
-			<!-- LOWER STRIP: RECENT TASKS & ALERTS -->
-			<div class="cockpit-bottom-grid">
-				<SectionCard title="Operation Pipeline" icon={Activity} badgeLabel="Live">
-					<TaskTimeline tasks={recentTasks.slice(0, 3)} />
+			<div class="cockpit-briefing-grid">
+				<SectionCard title="Fleet Briefing" icon={ShieldCheck} badgeLabel="Shift View">
+					<div class="briefing-grid">
+						{#each fleetBriefing as item}
+							<article class="briefing-card">
+								<p class="briefing-label">{item.label}</p>
+								<p class="briefing-value">{item.value}</p>
+								<p class="briefing-note">{item.note}</p>
+							</article>
+						{/each}
+					</div>
 				</SectionCard>
 
-				<SectionCard title="Active Incidents" icon={AlertCircle} badgeLabel={String(overview.unresolved_alerts)}>
-					<ul class="micro-alert-list">
-						{#each overview.alerts.slice(0, 3) as alert}
-							<li class="micro-alert-compact">
-								<SeverityShield severity={alert.severity} />
-								<span class="alert-txt">{alert.summary}</span>
-								<span class="alert-scope">{alert.scope}</span>
+				<SectionCard
+					title="Immediate Attention"
+					icon={AlertCircle}
+					badgeLabel={overview.unresolved_alerts > 0 ? String(overview.unresolved_alerts) : 'Clear'}
+					badgeTone={overview.unresolved_alerts > 0 ? 'warning' : 'healthy'}
+				>
+					<ul class="attention-list">
+						{#each overview.alerts.slice(0, 4) as alert}
+							<li class="attention-item">
+								<div class="attention-item__header">
+									<SeverityShield severity={alert.severity} />
+									<span class="attention-scope">{alert.scope}</span>
+								</div>
+								<p>{alert.summary}</p>
 							</li>
 						{/each}
 						{#if overview.alerts.length === 0}
-							<li class="empty-signals">Signals Nominal. No active incidents.</li>
+							<li class="attention-item attention-item--quiet">
+								<Server size={15} />
+								<div>
+									<p>Signals nominal across the indexed fleet.</p>
+									<span>No active incidents are crowding the queue.</span>
+								</div>
+							</li>
 						{/if}
 					</ul>
 				</SectionCard>
+			</div>
 
-				<SectionCard title="Resource Saturation" icon={Zap}>
-					<div class="capacity-preview">
-						<div class="cap-item">
-							<div class="cap-header"><span>Storage Pool Utilization</span><span>{Math.round(overview.storage_usage_percent || 0)}%</span></div>
-							<div class="cap-bar"><div class="cap-fill" style="width: {overview.storage_usage_percent || 0}%"></div></div>
+			<div class="cockpit-workspace">
+				<section class="cockpit-topology">
+					<TopologyCanvas />
+				</section>
+
+				<aside class="cockpit-rail">
+					<SectionCard title="Operation Pipeline" icon={Activity} badgeLabel="Live">
+						<TaskTimeline tasks={recentTasks.slice(0, 4)} />
+					</SectionCard>
+
+					<SectionCard title="Capacity Pressure" icon={Zap}>
+						<div class="capacity-preview">
+							{#each pressureCards as item}
+								<div class="cap-item">
+									<div class="cap-header"><span>{item.label}</span><span>{item.value}</span></div>
+									<div class="cap-bar"><div class="cap-fill" style={`width: ${item.width}%`}></div></div>
+								</div>
+							{/each}
+							<div class="capacity-footnote">
+								<span>Network throughput index</span>
+								<strong>Nominal</strong>
+							</div>
 						</div>
-						<div class="cap-item">
-							<div class="cap-header"><span>Network Throughput Index</span><span>Nominal</span></div>
-							<div class="cap-bar"><div class="cap-fill" style="width: 35%"></div></div>
-						</div>
-					</div>
-				</SectionCard>
+					</SectionCard>
+				</aside>
 			</div>
 		</div>
 	{/if}
@@ -145,66 +218,119 @@
 		gap: 0.75rem;
 	}
 
-	.cockpit-main {
-		flex: 1;
-		min-height: 450px;
-	}
-
-	.cockpit-bottom-grid {
+	.cockpit-briefing-grid {
 		display: grid;
-		grid-template-columns: 1fr;
+		grid-template-columns: minmax(0, 1.3fr) minmax(18rem, 0.9fr);
 		gap: 0.75rem;
 	}
 
-	@media (min-width: 768px) {
-		.cockpit-bottom-grid {
-			grid-template-columns: 1fr 1fr;
-		}
+	.briefing-grid {
+		display: grid;
+		gap: 0.75rem;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
-	@media (min-width: 1200px) {
-		.cockpit-bottom-grid {
-			grid-template-columns: 1fr 1fr 1fr;
-		}
+	.briefing-card {
+		padding: 0.85rem 0.9rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--shell-line);
+		background: var(--shell-surface-muted);
 	}
 
-	.micro-alert-list {
+	.briefing-label {
+		margin: 0;
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--shell-text-muted);
+	}
+
+	.briefing-value {
+		margin: 0.45rem 0 0;
+		font-size: var(--text-lg);
+		font-weight: 700;
+		color: var(--shell-text);
+	}
+
+	.briefing-note {
+		margin: 0.3rem 0 0;
+		font-size: var(--text-xs);
+		line-height: 1.5;
+		color: var(--shell-text-secondary);
+	}
+
+	.cockpit-workspace {
+		display: grid;
+		grid-template-columns: minmax(0, 1.65fr) minmax(19rem, 0.85fr);
+		gap: 0.75rem;
+		align-items: start;
+		flex: 1;
+		min-height: 0;
+	}
+
+	.cockpit-topology {
+		min-width: 0;
+	}
+
+	.cockpit-topology :global(.topology-canvas) {
+		min-height: 34rem;
+	}
+
+	.cockpit-topology :global(.svg-container) {
+		min-height: 28rem;
+	}
+
+	.cockpit-rail {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		min-width: 0;
+	}
+
+	.attention-list {
 		list-style: none;
 		padding: 0;
 		margin: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 0.5rem;
 	}
 
-	.micro-alert-compact {
+	.attention-item {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		padding: 0.7rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+	}
+
+	.attention-item__header {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
-		padding: 0.35rem 0.5rem;
-		background: var(--bg-surface-muted);
-		border-radius: var(--radius-xs);
-		font-size: 11px;
+		gap: 0.45rem;
 	}
 
-	.alert-txt {
-		flex: 1;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		color: var(--color-neutral-800);
+	.attention-item p {
+		margin: 0;
+		font-size: var(--text-sm);
+		line-height: 1.45;
+		color: var(--shell-text);
 	}
 
-	.alert-scope {
-		color: var(--color-neutral-400);
-		font-size: 9px;
+	.attention-scope,
+	.attention-item span {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
 	}
 
-	.empty-signals {
-		padding: 1rem;
-		text-align: center;
-		font-size: 11px;
-		color: var(--color-neutral-400);
+	.attention-item--quiet {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		align-items: start;
+		color: var(--color-success);
 	}
 
 	.capacity-preview {
@@ -228,6 +354,15 @@
 		text-transform: uppercase;
 	}
 
+	.capacity-footnote {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding-top: 0.25rem;
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+	}
+
 	.cap-bar {
 		height: 4px;
 		background: var(--color-neutral-100);
@@ -238,5 +373,20 @@
 	.cap-fill {
 		height: 100%;
 		background: var(--color-primary);
+	}
+
+	@media (max-width: 1100px) {
+		.cockpit-briefing-grid,
+		.cockpit-workspace {
+			grid-template-columns: 1fr;
+		}
+
+		.briefing-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.cockpit-topology :global(.topology-canvas) {
+			min-height: 28rem;
+		}
 	}
 </style>
