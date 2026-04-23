@@ -61,6 +61,15 @@ impl InventoryService for InventoryServiceImplementation {
 
         let now = self.now_ms();
 
+        self.node_repo
+            .ensure_node_record(
+                &node_id,
+                Some(inventory.hostname.as_str()),
+                Some(inventory.hostname.as_str()),
+                now,
+            )
+            .await?;
+
         // Convert lists to JSONB
         let storage_classes = if inventory.storage_classes.is_empty() {
             None
@@ -160,6 +169,10 @@ impl InventoryService for InventoryServiceImplementation {
         })?;
 
         let now = self.now_ms();
+
+        self.node_repo
+            .ensure_node_record(&node_id, None, None, now)
+            .await?;
 
         let components = [
             (COMPONENT_AGENT, versions.chv_agent_version),

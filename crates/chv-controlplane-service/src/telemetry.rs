@@ -2,8 +2,8 @@ use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
     AlertCreateInput, AlertRepository, EventAppendInput, EventRepository,
-    NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository,
-    VmMetricsInput, VmObservedStateInput, VolumeObservedStateInput,
+    NetworkObservedStateInput, NodeObservedStateInput, NodeRepository,
+    ObservedStateRepository, VmMetricsInput, VmObservedStateInput, VolumeObservedStateInput,
 };
 use chv_controlplane_types::domain::{
     EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, ResourceId,
@@ -47,6 +47,7 @@ pub trait TelemetryService: Send + Sync {
 
 #[derive(Clone)]
 pub struct TelemetryServiceImplementation {
+    node_repo: NodeRepository,
     observed_state_repo: ObservedStateRepository,
     event_repo: EventRepository,
     alert_repo: AlertRepository,
@@ -54,15 +55,28 @@ pub struct TelemetryServiceImplementation {
 
 impl TelemetryServiceImplementation {
     pub fn new(
+        node_repo: NodeRepository,
         observed_state_repo: ObservedStateRepository,
         event_repo: EventRepository,
         alert_repo: AlertRepository,
     ) -> Self {
         Self {
+            node_repo,
             observed_state_repo,
             event_repo,
             alert_repo,
         }
+    }
+
+    async fn ensure_reporting_node(
+        &self,
+        node_id: &NodeId,
+        observed_unix_ms: i64,
+    ) -> Result<(), ControlPlaneServiceError> {
+        self.node_repo
+            .ensure_node_record(node_id, None, None, observed_unix_ms)
+            .await?;
+        Ok(())
     }
 }
 
@@ -96,6 +110,9 @@ impl TelemetryService for TelemetryServiceImplementation {
                 request.state
             ))
         })?;
+
+        self.ensure_reporting_node(&node_id, request.reported_unix_ms)
+            .await?;
 
         self.observed_state_repo
             .upsert_node(&NodeObservedStateInput {
@@ -144,6 +161,9 @@ impl TelemetryService for TelemetryServiceImplementation {
                 ControlPlaneServiceError::InvalidArgument("invalid observed_generation".into())
             })?
         };
+
+        self.ensure_reporting_node(&node_id, request.reported_unix_ms)
+            .await?;
 
         self.observed_state_repo
             .upsert_vm(&VmObservedStateInput {
@@ -316,6 +336,9 @@ impl TelemetryService for TelemetryServiceImplementation {
             ))
         })?;
 
+        self.ensure_reporting_node(&node_id, meta.request_unix_ms)
+            .await?;
+
         if let Err(e) = self
             .event_repo
             .append(&EventAppendInput {
@@ -382,6 +405,9 @@ impl TelemetryService for TelemetryServiceImplementation {
                 request.severity
             ))
         })?;
+
+        self.ensure_reporting_node(&node_id, meta.request_unix_ms)
+            .await?;
 
         // CREATE PERSISTENT ALERT
         if let Err(e) = self

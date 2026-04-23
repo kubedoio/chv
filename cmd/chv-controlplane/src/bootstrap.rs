@@ -103,6 +103,7 @@ pub async fn build_service(
         EnrollmentServiceImplementation::new(node_repo.clone(), token_repo.clone(), cert_issuer);
     let inventory_service = InventoryServiceImplementation::new(node_repo.clone());
     let telemetry_service = TelemetryServiceImplementation::new(
+        node_repo.clone(),
         observed_state_repo.clone(),
         event_repo.clone(),
         alert_repo.clone(),

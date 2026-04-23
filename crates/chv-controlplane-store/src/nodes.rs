@@ -35,6 +35,36 @@ ON CONFLICT (node_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 "#;
 
+const ENSURE_NODE_RECORD_SQL: &str = r#"
+INSERT INTO nodes (
+    node_id,
+    hostname,
+    display_name,
+    enrolled_at,
+    last_seen_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $4 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $4 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $4 / 1000.0, 'unixepoch')
+)
+ON CONFLICT (node_id) DO UPDATE SET
+    hostname = CASE
+        WHEN nodes.hostname = nodes.node_id OR nodes.hostname = '' THEN EXCLUDED.hostname
+        ELSE nodes.hostname
+    END,
+    display_name = CASE
+        WHEN nodes.display_name = nodes.node_id OR nodes.display_name = '' THEN EXCLUDED.display_name
+        ELSE nodes.display_name
+    END,
+    last_seen_at = EXCLUDED.last_seen_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
 const UPSERT_NODE_INVENTORY_SQL: &str = r#"
 INSERT INTO node_inventory (
     node_id,
@@ -294,6 +324,24 @@ impl NodeRepository {
             .bind(&input.control_plane_version)
             .bind(input.enrolled_unix_ms)
             .bind(input.last_seen_unix_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn ensure_node_record(
+        &self,
+        node_id: &NodeId,
+        hostname: Option<&str>,
+        display_name: Option<&str>,
+        seen_unix_ms: i64,
+    ) -> Result<(), StoreError> {
+        let fallback = node_id.as_str();
+        sqlx::query(ENSURE_NODE_RECORD_SQL)
+            .bind(fallback)
+            .bind(hostname.unwrap_or(fallback))
+            .bind(display_name.unwrap_or(fallback))
+            .bind(seen_unix_ms)
             .execute(&self.pool)
             .await?;
         Ok(())

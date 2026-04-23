@@ -150,8 +150,14 @@ async fn test_publish_alert_persistence() {
     let observed_state_repo = ObservedStateRepository::new(pool.clone());
     let event_repo = EventRepository::new(pool.clone());
     let alert_repo = AlertRepository::new(pool.clone());
+    let node_repo = NodeRepository::new(pool.clone());
 
-    let service = TelemetryServiceImplementation::new(observed_state_repo, event_repo, alert_repo);
+    let service = TelemetryServiceImplementation::new(
+        node_repo,
+        observed_state_repo,
+        event_repo,
+        alert_repo,
+    );
 
     let op_id = "op-123-custom-string";
     let request_ok = proto::PublishAlertRequest {
@@ -168,14 +174,6 @@ async fn test_publish_alert_persistence() {
         summary: "disk is full".into(),
         details_json: b"{\"usage\": 99}".to_vec(),
     };
-
-    // Before we publish, we need the node and operation to exist due to FK constraints
-    sqlx::query(
-        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-1', 'host-1', 'host-1')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
 
     sqlx::query("INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_at) VALUES (?, ?, 'node', 'node-1', 'Test', 'Pending', strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
         .bind(op_id)
@@ -229,6 +227,52 @@ async fn test_publish_alert_persistence() {
 }
 
 #[tokio::test]
+async fn test_report_node_state_auto_creates_missing_node_row() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let service = TelemetryServiceImplementation::new(
+        NodeRepository::new(pool.clone()),
+        ObservedStateRepository::new(pool.clone()),
+        EventRepository::new(pool.clone()),
+        AlertRepository::new(pool.clone()),
+    );
+
+    let request = proto::NodeStateReport {
+        node_id: "node-missing".into(),
+        state: "TenantReady".into(),
+        observed_generation: "7".into(),
+        health_status: "Healthy".into(),
+        last_error: "".into(),
+        reported_unix_ms: 1_710_000_000_000,
+    };
+
+    let result = service.report_node_state(request).await.expect("report should succeed");
+    assert_eq!(result.result.unwrap().status, "ok");
+
+    let node = sqlx::query("SELECT hostname, display_name FROM nodes WHERE node_id = ?")
+        .bind("node-missing")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let hostname: String = sqlx::Row::get(&node, "hostname");
+    let display_name: String = sqlx::Row::get(&node, "display_name");
+    assert_eq!(hostname, "node-missing");
+    assert_eq!(display_name, "node-missing");
+
+    let observed = sqlx::query(
+        "SELECT observed_generation, observed_state FROM node_observed_state WHERE node_id = ?",
+    )
+    .bind("node-missing")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let generation: i64 = sqlx::Row::get(&observed, "observed_generation");
+    let observed_state: String = sqlx::Row::get(&observed, "observed_state");
+    assert_eq!(generation, 7);
+    assert_eq!(observed_state, "TenantReady");
+}
+
+#[tokio::test]
 async fn test_enrollment_extended_inventory_persistence() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
@@ -258,6 +302,7 @@ async fn test_enrollment_extended_inventory_persistence() {
             memory_bytes: 32 * 1024 * 1024 * 1024,
             storage_classes: vec!["ssd".into()],
             network_capabilities: vec!["vxlan".into()],
+            hypervisor_capabilities: vec![],
             labels,
         }),
         versions: Some(proto::ServiceVersions {
@@ -452,6 +497,7 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
             memory_bytes: 1024,
             storage_classes: vec![],
             network_capabilities: vec![],
+            hypervisor_capabilities: vec![],
             labels: Default::default(),
         }),
         versions: Some(proto::ServiceVersions {
