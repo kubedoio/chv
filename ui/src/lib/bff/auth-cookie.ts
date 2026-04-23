@@ -11,10 +11,11 @@ export function syncAuthCookieFromLocalStorage(): void {
 		const token = localStorage.getItem('chv-api-token');
 		const secureFlag = window.location.protocol === 'https:' ? '; Secure' : '';
 		if (token) {
-			document.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/; max-age=${COOKIE_MAX_AGE}; SameSite=Lax; HttpOnly${secureFlag}`;
+			// HttpOnly cookies cannot be created from client-side JavaScript.
+			document.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/; max-age=${COOKIE_MAX_AGE}; SameSite=Lax${secureFlag}`;
 		} else {
 			// Clear cookie if token removed
-			document.cookie = `${COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax; HttpOnly${secureFlag}`;
+			document.cookie = `${COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax${secureFlag}`;
 		}
 	} catch {
 		// ignore
