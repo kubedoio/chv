@@ -39,6 +39,36 @@
   let cloudInitEditorOpen = $state(false);
   let selectedCloudInitTemplate = $state<CloudInitTemplate | null>(null);
   let createVMTemplateOpen = $state(false);
+  let newTemplateName = $state('');
+  let newTemplateDescription = $state('');
+  let selectedVMId = $state('');
+  let selectedCloudInitId = $state('');
+  let creatingTemplate = $state(false);
+  let confirmDialog = $state({ open: false, title: '', description: '', action: () => {} });
+
+  async function handleCreateVMTemplate() {
+    if (!newTemplateName.trim() || !selectedVMId) return;
+    creatingTemplate = true;
+    try {
+      await client.createVMTemplate({
+        name: newTemplateName.trim(),
+        description: newTemplateDescription.trim() || undefined,
+        source_vm_id: selectedVMId,
+        cloud_init_config: selectedCloudInitId ? undefined : undefined
+      });
+      toast.success('Template created successfully');
+      createVMTemplateOpen = false;
+      newTemplateName = '';
+      newTemplateDescription = '';
+      selectedVMId = '';
+      selectedCloudInitId = '';
+      await loadData();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to create template');
+    } finally {
+      creatingTemplate = false;
+    }
+  }
 
   const vmColumns = [
     { key: 'name', label: 'Template Identity' },
@@ -220,128 +250,7 @@
   />
 {/if}
 
-<style>
-  .inventory-page {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
 
-  .header-actions {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  .inventory-metrics {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 0.75rem;
-  }
-
-  .tabs-nav {
-    display: flex;
-    gap: 0.25rem;
-    padding: 0.25rem;
-    background: var(--bg-surface-muted);
-    border-radius: var(--radius-xs);
-    width: fit-content;
-  }
-
-  .tab-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.35rem 0.75rem;
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--color-neutral-500);
-    text-transform: uppercase;
-    border-radius: var(--radius-xs);
-    transition: all 0.1s ease;
-  }
-
-  .tab-item:hover {
-    color: var(--color-neutral-900);
-  }
-
-  .tab-item.active {
-    background: var(--bg-surface);
-    color: var(--color-primary);
-    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-  }
-
-  .inventory-main {
-    display: grid;
-    grid-template-columns: 1fr 300px;
-    gap: 1rem;
-    align-items: start;
-  }
-
-  .support-area {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .blueprint-name {
-    font-weight: 700;
-    color: var(--color-neutral-900);
-  }
-
-  .row-ops {
-    display: flex;
-    gap: 0.25rem;
-  }
-
-  .op-btn {
-    width: 24px;
-    height: 24px;
-    display: grid;
-    place-items: center;
-    border-radius: 4px;
-    color: var(--color-neutral-500);
-    transition: all 0.1s ease;
-  }
-
-  .op-btn:hover {
-    background: var(--bg-surface-muted);
-    color: var(--color-primary);
-  }
-
-  .audit-summary {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .summary-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 10px;
-    color: var(--color-neutral-600);
-    padding: 0.35rem 0.5rem;
-    background: var(--bg-surface-muted);
-    border-radius: var(--radius-xs);
-  }
-
-  .summary-row span:last-child {
-    font-weight: 700;
-    color: var(--color-neutral-900);
-  }
-
-  .empty-hint {
-    font-size: 11px;
-    color: var(--color-neutral-400);
-    padding: 1rem;
-    text-align: center;
-  }
-
-  @media (max-width: 1100px) {
-    .inventory-main {
-      grid-template-columns: 1fr;
-    }
-  }
-</style>
 
 <!-- Create From Template Modal -->
 <CreateFromTemplate
@@ -500,6 +409,127 @@
 />
 
 <style>
+  .inventory-page {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .header-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .inventory-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .tabs-nav {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    background: var(--bg-surface-muted);
+    border-radius: var(--radius-xs);
+    width: fit-content;
+  }
+
+  .tab-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.75rem;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-neutral-500);
+    text-transform: uppercase;
+    border-radius: var(--radius-xs);
+    transition: all 0.1s ease;
+  }
+
+  .tab-item:hover {
+    color: var(--color-neutral-900);
+  }
+
+  .tab-item.active {
+    background: var(--bg-surface);
+    color: var(--color-primary);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  }
+
+  .inventory-main {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: 1rem;
+    align-items: start;
+  }
+
+  .support-area {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .blueprint-name {
+    font-weight: 700;
+    color: var(--color-neutral-900);
+  }
+
+  .row-ops {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .op-btn {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    border-radius: 4px;
+    color: var(--color-neutral-500);
+    transition: all 0.1s ease;
+  }
+
+  .op-btn:hover {
+    background: var(--bg-surface-muted);
+    color: var(--color-primary);
+  }
+
+  .audit-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .summary-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--color-neutral-600);
+    padding: 0.35rem 0.5rem;
+    background: var(--bg-surface-muted);
+    border-radius: var(--radius-xs);
+  }
+
+  .summary-row span:last-child {
+    font-weight: 700;
+    color: var(--color-neutral-900);
+  }
+
+  .empty-hint {
+    font-size: 11px;
+    color: var(--color-neutral-400);
+    padding: 1rem;
+    text-align: center;
+  }
+
+  @media (max-width: 1100px) {
+    .inventory-main {
+      grid-template-columns: 1fr;
+    }
+  }
+
   .action-btn {
     display: inline-flex;
     align-items: center;

@@ -49,7 +49,8 @@
 		{ label: 'Control State', value: detail.summary.state },
 		{ label: 'Safety Integrity', value: detail.summary.health },
 		{ label: 'Storage Fabric', value: detail.summary.storage },
-		{ label: 'Network Fabric', value: detail.summary.network }
+		{ label: 'Network Fabric', value: detail.summary.network },
+		{ label: 'KVM Capability', value: detail.summary.hypervisor_capabilities?.includes('kvm') ? 'Enabled' : 'Unavailable' }
 	]);
 
 	const configProps = $derived(detail.configuration.map(c => ({ label: c.label, value: c.value })));

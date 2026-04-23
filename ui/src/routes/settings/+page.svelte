@@ -136,6 +136,8 @@
 	{/if}
 </div>
 
+
+
 <style>
 	.inventory-page {
 		display: flex;
@@ -274,9 +276,7 @@
 			grid-template-columns: 1fr;
 		}
 	}
-</style>
 
-<style>
 	.settings-page {
 		display: flex;
 		flex-direction: column;

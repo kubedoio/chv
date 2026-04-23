@@ -69,7 +69,7 @@
     <div class="grid grid-cols-2 gap-4">
       <div class="bg-[var(--shell-surface-muted)] rounded-lg p-4">
         <div class="flex items-center gap-2 mb-2">
-          <Cpu size={18} class="text-[var(--color-info)]" />
+          <Cpu size={18} class="text-[var(--shell-text-muted)]" />
           <span class="text-sm font-medium text-[var(--shell-text-secondary)]">CPU Usage</span>
         </div>
         <div class="text-2xl font-semibold text-[var(--shell-text)]">
@@ -86,7 +86,7 @@
       
       <div class="bg-[var(--shell-surface-muted)] rounded-lg p-4">
         <div class="flex items-center gap-2 mb-2">
-          <MemoryStick size={18} class="text-[var(--color-info)]" />
+          <MemoryStick size={18} class="text-[var(--shell-text-muted)]" />
           <span class="text-sm font-medium text-[var(--shell-text-secondary)]">Memory</span>
         </div>
         <div class="text-2xl font-semibold text-[var(--shell-text)]">
@@ -156,9 +156,9 @@
           <div class="text-2xl font-semibold text-[var(--shell-text-secondary)]">{vms.stopped}</div>
           <div class="text-xs text-[var(--shell-text-secondary)] mt-1">Inactive</div>
         </div>
-        <div class="p-3 bg-[var(--color-info-light)] rounded-lg">
-          <div class="text-2xl font-semibold text-[var(--color-info)]">{vms.total}</div>
-          <div class="text-xs text-[var(--color-info-dark)] mt-1">Total</div>
+        <div class="p-3 bg-[var(--shell-surface-muted)] rounded-lg">
+          <div class="text-2xl font-semibold text-[var(--shell-text)]">{vms.total}</div>
+          <div class="text-xs text-[var(--shell-text-secondary)] mt-1">Total</div>
         </div>
       </div>
     </div>

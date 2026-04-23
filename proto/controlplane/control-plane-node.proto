@@ -30,6 +30,7 @@ message NodeInventory {
   repeated string storage_classes = 6;
   repeated string network_capabilities = 7;
   map<string, string> labels = 8;
+  repeated string hypervisor_capabilities = 9;
 }
 
 message ServiceVersions {

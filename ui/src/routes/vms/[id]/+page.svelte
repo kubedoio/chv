@@ -96,7 +96,8 @@
 				toast.success(`VM ${vm_id} delete accepted`);
 			} else {
 				const apiAction = action === 'shutdown' ? 'stop' : action;
-				await mutateVm({ vm_id, action: apiAction, force: action === 'stop' }, token);
+				const isForce = action === 'poweroff';
+				await mutateVm({ vm_id, action: apiAction, force: isForce }, token);
 				toast.success(`Workload ${action} accepted`);
 			}
 			await invalidateAll();
@@ -167,6 +168,10 @@
 								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'shutdown'}>
 									<Power size={14} />
 									{pendingAction === 'shutdown' ? 'EXECUTING...' : 'SHUTDOWN'}
+								</button>
+								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'poweroff'}>
+									<Square size={14} />
+									{pendingAction === 'poweroff' ? 'EXECUTING...' : 'POWEROFF'}
 								</button>
 								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'}>
 									<RotateCcw size={14} />

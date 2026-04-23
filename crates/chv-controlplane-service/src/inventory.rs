@@ -88,6 +88,19 @@ impl InventoryService for InventoryServiceImplementation {
             )
         };
 
+        let hypervisor_capabilities = if inventory.hypervisor_capabilities.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_value(&inventory.hypervisor_capabilities).map_err(|e| {
+                    ControlPlaneServiceError::Internal(format!(
+                        "failed to serialize hypervisor_capabilities: {}",
+                        e
+                    ))
+                })?,
+            )
+        };
+
         let labels = if inventory.labels.is_empty() {
             None
         } else {
@@ -114,6 +127,7 @@ impl InventoryService for InventoryServiceImplementation {
                 storage_classes,
                 network_capabilities,
                 labels,
+                hypervisor_capabilities,
                 reported_unix_ms: now,
             })
             .await?;

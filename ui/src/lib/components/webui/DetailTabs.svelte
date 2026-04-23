@@ -63,7 +63,7 @@
 		height: 1.35rem;
 		padding: 0 0.35rem;
 		border-radius: 999px;
-		background: rgba(31, 38, 45, 0.08);
+		background: rgba(143, 90, 42, 0.08);
 		font-size: 0.76rem;
 	}
 </style>

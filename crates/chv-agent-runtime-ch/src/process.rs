@@ -160,6 +160,18 @@ impl ProcessCloudHypervisorAdapter {
                 reason: format!("binary not found: {}", self.chv_binary.display()),
             });
         }
+        if config.api_socket_path.as_os_str().is_empty() {
+            return Err(ChvError::InvalidArgument {
+                field: "api_socket_path".to_string(),
+                reason: "api_socket_path is empty".to_string(),
+            });
+        }
+        if config.api_socket_path.parent().is_none() {
+            return Err(ChvError::InvalidArgument {
+                field: "api_socket_path".to_string(),
+                reason: format!("api_socket_path has no parent directory: {}", config.api_socket_path.display()),
+            });
+        }
         if let Some(ref fw) = config.firmware_path {
             if !fw.exists() {
                 return Err(ChvError::InvalidArgument {
@@ -198,10 +210,13 @@ fn read_stderr_tail(path: &std::path::Path) -> String {
     let mut buf = Vec::new();
     let _ = file.read_to_end(&mut buf);
     let text = String::from_utf8_lossy(&buf);
-    text.lines()
-        .last()
-        .unwrap_or("<empty>")
-        .to_string()
+    // Return all non-empty lines from the tail, joined, so we see the full
+    // error context instead of just the last line (which is often "try --help").
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return "<empty>".to_string();
+    }
+    lines.join(" | ")
 }
 
 async fn build_cloud_init_seed(
@@ -346,6 +361,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         config: &VmConfig,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            return Err(ChvError::Internal {
+                reason: "Host does not have KVM capability (/dev/kvm missing). VMs require hardware virtualization.".into(),
+            });
+        }
         self.validate_vm_config(config)?;
         if config.api_socket_path.exists() {
             tokio::fs::remove_file(&config.api_socket_path)
@@ -405,6 +425,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         info!(
             vm_id = %config.vm_id,
             socket = %config.api_socket_path.display(),
+            binary = %self.chv_binary.display(),
             op = operation_id.unwrap_or("-"),
             "spawning cloud-hypervisor"
         );
@@ -420,6 +441,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             let _ = child.start_kill();
             let _ = child.wait().await;
             let stderr_hint = read_stderr_tail(&stderr_log_path);
+            warn!(
+                vm_id = %config.vm_id,
+                stderr = %stderr_hint,
+                "cloud-hypervisor failed to create api socket within 10s"
+            );
             return Err(ChvError::Internal {
                 reason: format!(
                     "failed to start cloud-hypervisor for vm {}: {} stderr: {}",
@@ -759,17 +785,34 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         info!(vm_id = %vm_id, force = force, op = operation_id.unwrap_or("-"), "stopping vm");
 
         if force {
-            let mut map = self.vms.lock().unwrap();
-            if let Some(mut proc) = map.remove(vm_id) {
-                let _ = proc.child.start_kill();
-                let _ = proc.child.try_wait();
+            let log_path = {
+                let mut map = self.vms.lock().unwrap();
+                if let Some(mut proc) = map.remove(vm_id) {
+                    // Clear in-memory scrollback before dropping the process.
+                    if let Ok(mut sb) = proc.pty_scrollback.lock() {
+                        sb.clear();
+                    }
+                    let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
+                    let _ = proc.child.start_kill();
+                    let _ = proc.child.try_wait();
+                    log_path
+                } else {
+                    None
+                }
+            };
+            if let Some(path) = log_path {
+                let _ = tokio::fs::remove_file(&path).await;
+                info!(vm_id = %vm_id, path = %path.display(), "removed console.log on force stop");
             }
         } else {
             // Graceful stop: ask the VM to shut down but keep the VMM daemon
             // alive so a subsequent vm.boot can restart it. Do NOT call
             // vmm.shutdown — that would kill the daemon and require a full
             // vm.create + vm.boot sequence to start again.
-            let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.shutdown", None).await;
+            // Graceful stop: send ACPI power button so the guest OS can shut
+            // itself down cleanly. Then poll vm.info for up to 10s waiting for
+            // the VM to reach a non-running terminal state (Shutdown or Created).
+            let _ = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.power-button", None).await;
             // Poll vm.info for up to 10s waiting for the VM to reach a
             // non-running terminal state (Shutdown or Created).
             let start = std::time::Instant::now();
@@ -787,6 +830,35 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 } else {
                     // CH process disappeared — treat as stopped
                     break;
+                }
+            }
+
+            // Clear console caches after graceful shutdown. The VmProcess stays
+            // in the map so a later vm.boot can restart it; we truncate the
+            // on-disk log so the existing writer task can continue appending.
+            let (pty_scrollback, log_path) = {
+                let map = self.vms.lock().unwrap();
+                let proc = map.get(vm_id);
+                (
+                    proc.map(|p| p.pty_scrollback.clone()),
+                    proc.and_then(|p| p.api_socket.parent().map(|d| d.join("console.log"))),
+                )
+            };
+            if let Some(sb) = pty_scrollback {
+                if let Ok(mut buf) = sb.lock() {
+                    buf.clear();
+                }
+            }
+            if let Some(path) = log_path {
+                match tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&path)
+                    .await
+                {
+                    Ok(_) => info!(vm_id = %vm_id, path = %path.display(), "truncated console.log on graceful stop"),
+                    Err(e) => warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to truncate console.log"),
                 }
             }
         }
@@ -1317,9 +1389,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 mod tests {
     use super::parse_http_status;
     use super::ProcessCloudHypervisorAdapter;
-    use crate::adapter::{VmConfig, VmDiskConfig};
+    use super::VmProcess;
+    use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig};
     use chv_errors::ChvError;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     #[test]
     fn parse_http_status_extracts_200() {
@@ -1392,5 +1467,123 @@ mod tests {
             hypervisor_overrides: None,
         };
         adapter.validate_vm_config(&cfg).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_vm_force_clears_console_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm_dir = dir.path().join("vm-test");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+
+        // Create a dummy console.log with some content.
+        let console_log = vm_dir.join("console.log");
+        std::fs::write(&console_log, b"boot log line 1\nboot log line 2\n").unwrap();
+
+        // Spawn a short-lived child process that we can kill.
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+
+        // Create a fake VmProcess directly in the adapter's map.
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(std::sync::Mutex::new(Vec::from(b"scrollback data")));
+        let pty_master = std::fs::File::open("/dev/null").unwrap().into();
+
+        {
+            let mut map = adapter.vms.lock().unwrap();
+            map.insert(
+                "vm-test".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child,
+                    pty_master,
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        // Pre-stop assertions.
+        assert_eq!(
+            adapter.pty_scrollback("vm-test").unwrap(),
+            b"scrollback data"
+        );
+        assert!(console_log.exists());
+
+        // Force stop should clear scrollback and remove console.log.
+        adapter.stop_vm("vm-test", true, Some("op-test")).await.unwrap();
+
+        // Post-stop assertions.
+        assert!(adapter.pty_scrollback("vm-test").is_none());
+        assert!(!console_log.exists(), "console.log should be removed on force stop");
+    }
+
+    #[tokio::test]
+    async fn stop_vm_graceful_clears_console_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm_dir = dir.path().join("vm-test");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+
+        // Create a dummy console.log with some content.
+        let console_log = vm_dir.join("console.log");
+        std::fs::write(&console_log, b"boot log line 1\nboot log line 2\n").unwrap();
+
+        // For graceful stop we need a real CHV process or we skip the API part.
+        // Since we can't spawn real CHV, we test the cache-clear path by
+        // simulating what happens after the API shutdown succeeds: the VmProcess
+        // stays in the map and we clear its scrollback and truncate the log.
+        // We test this by manually exercising the internal logic via the adapter.
+        let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
+        let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
+        let pty_scrollback = Arc::new(std::sync::Mutex::new(Vec::from(b"scrollback data")));
+        let pty_master = std::fs::File::open("/dev/null").unwrap().into();
+
+        // Spawn a child that exits immediately so the graceful shutdown loop
+        // breaks early (CH process disappeared).
+        let mut child = tokio::process::Command::new("true")
+            .spawn()
+            .unwrap();
+        let _ = child.wait().await;
+
+        {
+            let mut map = adapter.vms.lock().unwrap();
+            map.insert(
+                "vm-test".to_string(),
+                VmProcess {
+                    api_socket: vm_dir.join("vm.sock"),
+                    child,
+                    pty_master,
+                    pty_tx: pty_tx.clone(),
+                    pty_scrollback: pty_scrollback.clone(),
+                    broadcaster_alive: Arc::new(AtomicBool::new(false)),
+                    last_cpu_seconds: 0.0,
+                    last_cpu_at: None,
+                },
+            );
+        }
+
+        // Pre-stop assertions.
+        assert_eq!(
+            adapter.pty_scrollback("vm-test").unwrap(),
+            b"scrollback data"
+        );
+        assert!(console_log.exists());
+        let pre_size = std::fs::metadata(&console_log).unwrap().len();
+        assert!(pre_size > 0);
+
+        // Graceful stop: the CH API calls will fail (no real socket), so the
+        // loop breaks with "CH process disappeared" and then clears caches.
+        adapter.stop_vm("vm-test", false, Some("op-test")).await.unwrap();
+
+        // Post-stop assertions: scrollback cleared, log truncated.
+        assert_eq!(adapter.pty_scrollback("vm-test").unwrap(), b"");
+        assert!(console_log.exists(), "console.log should still exist after graceful stop");
+        let post_size = std::fs::metadata(&console_log).unwrap().len();
+        assert_eq!(post_size, 0, "console.log should be truncated on graceful stop");
     }
 }

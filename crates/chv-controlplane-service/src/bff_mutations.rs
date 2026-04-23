@@ -113,6 +113,16 @@ impl MutationService for ControlPlaneMutationService {
                     })
                     .await
             }
+            "poweroff" => {
+                self.lifecycle_service
+                    .stop_vm(proto::StopVmRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        vm_id: vm_id.clone(),
+                        force: true,
+                    })
+                    .await
+            }
             "restart" => {
                 self.lifecycle_service
                     .reboot_vm(proto::RebootVmRequest {

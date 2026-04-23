@@ -100,6 +100,17 @@ export async function bffFetch<T>(
 
 		const message = payload?.message ?? `Request failed with status ${response.status}`;
 		const code = payload?.code ?? 'UNKNOWN_ERROR';
+		
+		// Clear stale tokens so the user can re-authenticate
+		if (response.status === 401) {
+			try {
+				const { clearToken } = await import('$lib/api/client');
+				clearToken();
+			} catch {
+				// ignore import failure
+			}
+		}
+		
 		throw new BFFError(message, response.status, code);
 	}
 

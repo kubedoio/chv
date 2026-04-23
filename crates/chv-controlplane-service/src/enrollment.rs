@@ -178,6 +178,16 @@ impl EnrollmentService for EnrollmentServiceImplementation {
                         ))
                     })?)
                 },
+                hypervisor_capabilities: if inventory.hypervisor_capabilities.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_value(&inventory.hypervisor_capabilities).map_err(|e| {
+                        ControlPlaneServiceError::Internal(format!(
+                            "failed to serialize hypervisor_capabilities: {}",
+                            e
+                        ))
+                    })?)
+                },
                 reported_unix_ms: now,
             })
             .await?;

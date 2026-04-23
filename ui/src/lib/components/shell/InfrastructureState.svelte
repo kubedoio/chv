@@ -10,14 +10,14 @@
 
 	let { variant, title, description, hint }: Props = $props();
 
-	const icon = $derived(
+	const Icon = $derived(
 		variant === 'loading' ? LoaderCircle : variant === 'error' ? AlertTriangle : Inbox
 	);
 </script>
 
 <article class={`state-panel state-panel--${variant}`}>
 	<div class="state-panel__icon" aria-hidden="true">
-		<icon size={18} class={variant === 'loading' ? 'state-panel__icon--spinning' : undefined}></icon>
+		<Icon size={18} class={variant === 'loading' ? 'state-panel__icon--spinning' : undefined} />
 	</div>
 	<div class="state-panel__content">
 		<div class="state-panel__title">{title}</div>
@@ -103,7 +103,7 @@
 
 	.state-panel__hint {
 		margin-top: 0.75rem;
-		font-size: 11px;
+		font-size: var(--text-xs);
 		color: var(--color-neutral-400);
 		font-style: italic;
 	}
@@ -141,7 +141,6 @@
 		0% { transform: translateX(-100%); }
 		100% { transform: translateX(100%); }
 	}
-</style>
 
 	@media (prefers-reduced-motion: reduce) {
 		.state-panel__icon--spinning,

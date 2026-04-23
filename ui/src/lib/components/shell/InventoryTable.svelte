@@ -14,18 +14,18 @@
 		tone: ShellTone;
 	}
 
-	interface Props {
+	interface Props<T = Record<string, unknown>> {
 		columns: Column[];
-		rows: any[];
-		rowHref?: (row: any) => string | null;
+		rows: T[];
+		rowHref?: (row: T) => string | null;
 		emptySnippet?: Snippet;
-		cell?: Snippet<[{ column: Column, row: any }]>;
+		cell?: Snippet<[{ column: Column, row: T }]>
 	}
 
 	let { columns, rows, rowHref, emptySnippet, cell }: Props = $props();
 
-	function isBadge(val: any): val is BadgeData {
-		return val && typeof val === 'object' && 'tone' in val && 'label' in val;
+	function isBadge(val: unknown): val is BadgeData {
+		return val !== null && typeof val === 'object' && 'tone' in val && 'label' in val;
 	}
 </script>
 
@@ -34,14 +34,14 @@
 		{#if emptySnippet}
 			{@render emptySnippet()}
 		{:else}
-			<div class="empty-placeholder">No inventory matched current filters.</div>
+			<div class="empty-placeholder" role="status">No inventory matched current filters.</div>
 		{/if}
 	{:else}
 		<table class="inventory-table">
 			<thead>
 				<tr>
 					{#each columns as col}
-						<th class="align-{col.align ?? 'left'}">{col.label}</th>
+						<th class="align-{col.align ?? 'left'}" scope="col">{col.label}</th>
 					{/each}
 				</tr>
 			</thead>
@@ -49,7 +49,7 @@
 				{#each rows as row}
 					<tr class:has-link={!!rowHref?.(row)}>
 						{#each columns as col, i}
-							{@const val = row[col.key]}
+							{@const val = (row as Record<string, unknown>)[col.key]}
 							<td class="align-{col.align ?? 'left'}">
 								{#if cell}
 									{@render cell({ column: col, row })}

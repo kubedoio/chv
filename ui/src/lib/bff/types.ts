@@ -70,6 +70,7 @@ export type NodeListItem = {
 	maintenance: boolean;
 	active_tasks: number;
 	alerts: number;
+	hypervisor_capabilities?: string[];
 };
 
 export type ListNodesResponse = {
@@ -104,6 +105,7 @@ export type NodeSummary = {
 	uptime?: string;
 	last_checkin?: string;
 	recent_tasks: RelatedTask[];
+	hypervisor_capabilities?: string[];
 };
 
 export type NodeHostedVm = {

@@ -28,6 +28,10 @@ impl InventoryReporter {
         }
     }
 
+    fn probe_kvm_available() -> bool {
+        std::path::Path::new("/dev/kvm").exists()
+    }
+
     fn probe_storage_classes(base: &Path) -> Vec<String> {
         // Known storage class subdirectory names mirroring the stord backend names.
         const KNOWN: &[&str] = &["localdisk", "ceph", "nfs"];
@@ -39,6 +43,11 @@ impl InventoryReporter {
     }
 
     pub fn build_inventory(&self) -> proto::NodeInventory {
+        let mut hypervisor_capabilities = Vec::new();
+        if Self::probe_kvm_available() {
+            hypervisor_capabilities.push("kvm".to_string());
+        }
+
         proto::NodeInventory {
             node_id: self.node_id.clone(),
             hostname: self.hostname.clone(),
@@ -50,6 +59,7 @@ impl InventoryReporter {
             storage_classes: Self::probe_storage_classes(&self.storage_base_dir),
             network_capabilities: vec![],
             labels: std::collections::HashMap::new(),
+            hypervisor_capabilities,
         }
     }
 

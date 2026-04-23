@@ -16,7 +16,8 @@
 		Settings,
 		Search,
 		Loader2,
-		ShieldCheck
+		ShieldCheck,
+		AlertCircle
 	} from 'lucide-svelte';
 	import { navigationGroups } from '$lib/shell/app-shell';
 	import { clearToken, createAPIClient, getStoredToken } from '$lib/api/client';
@@ -34,6 +35,7 @@
 		'cl-1': true,
 		'nodes': true
 	});
+	let searchQuery = $state('');
 
 	onMount(() => {
 		inventory.fetch();
@@ -45,6 +47,22 @@
 
 	function handleSelection(type: any, id: string, label: string) {
 		selection.select(type, id, label);
+	}
+
+	const filteredNodes = $derived(
+		searchQuery.trim() === ''
+			? inventory.nodes
+			: inventory.nodes.filter(n =>
+					n.name.toLowerCase().includes(searchQuery.toLowerCase())
+				)
+	);
+
+	function filteredVms(nodeId: string) {
+		const vms = inventory.vms.filter(v => v.node_id === nodeId);
+		if (searchQuery.trim() === '') return vms;
+		return vms.filter(v =>
+			v.name.toLowerCase().includes(searchQuery.toLowerCase())
+		);
 	}
 
 	async function handleLogout() {
@@ -70,15 +88,20 @@
 		</div>
 	</div>
 
-	<div class="app-nav__search">
-		<Search size={12} class="app-nav__search-icon" />
-		<input type="text" placeholder="Search fleet..." class="app-nav__search-input" />
-		<kbd class="app-nav__search-kbd">⌘K</kbd>
-	</div>
+		<div class="app-nav__search">
+			<Search size={12} class="app-nav__search-icon" />
+			<input
+				type="text"
+				placeholder="Search fleet..."
+				class="app-nav__search-input"
+				bind:value={searchQuery}
+				aria-label="Search fleet nodes and VMs"
+			/>
+		</div>
 
 	<div class="app-nav__scrollbox">
 		<div class="app-nav__section">
-			<a href="/" class="app-nav__item" class:app-nav__item--active={isActive('/', $page.url.pathname)}>
+			<a href="/" class="app-nav__item" class:app-nav__item--active={isActive('/', $page.url.pathname)} aria-current={isActive('/', $page.url.pathname) ? 'page' : undefined}>
 				<House size={14} />
 				<span>Fleet Overview</span>
 			</a>
@@ -98,15 +121,15 @@
 				{:else}
 					<!-- Live Datacenter (Placeholder for multi-dc expansion) -->
 					<div class="app-nav__tree-node app-nav__tree-node--dc">
-						<button class="app-nav__tree-toggle" onclick={() => toggleGroup('dc-1')}>
-							<ChevronDown size={10} class:is-closed={!openGroups['dc-1']} />
+						<button class="app-nav__tree-toggle" aria-expanded={openGroups['dc-1']} onclick={() => toggleGroup('dc-1')}>
+							<ChevronDown size={10} class={!openGroups['dc-1'] ? 'is-closed' : ''} />
 							<Database size={12} />
 							<span>Default-DC</span>
 						</button>
 						
 						{#if openGroups['dc-1']}
 							<div class="app-nav__tree-children">
-								{#each inventory.nodes as node}
+								{#each filteredNodes as node}
 									<div class="app-nav__tree-node app-nav__tree-node--node">
 										<a 
 											href="/nodes/{node.id}" 
@@ -120,7 +143,7 @@
 										</a>
 										
 										<div class="app-nav__tree-children">
-											{#each inventory.vms.filter(v => v.node_id === node.id) as vm}
+											{#each filteredVms(node.id) as vm}
 												<a 
 													href="/vms/{vm.id}" 
 													class="app-nav__tree-link app-nav__tree-link--vm"
@@ -144,15 +167,15 @@
 
 		<div class="app-nav__section">
 			<div class="app-nav__section-header">Resources</div>
-			<a href="/networks" class="app-nav__item" class:app-nav__item--active={isActive('/networks', $page.url.pathname)}>
+			<a href="/networks" class="app-nav__item" class:app-nav__item--active={isActive('/networks', $page.url.pathname)} aria-current={isActive('/networks', $page.url.pathname) ? 'page' : undefined}>
 				<Activity size={14} />
 				<span>Network Fabric</span>
 			</a>
-			<a href="/storage" class="app-nav__item" class:app-nav__item--active={isActive('/storage', $page.url.pathname)}>
+			<a href="/storage" class="app-nav__item" class:app-nav__item--active={isActive('/storage', $page.url.pathname)} aria-current={isActive('/storage', $page.url.pathname) ? 'page' : undefined}>
 				<Database size={14} />
 				<span>Storage Pools</span>
 			</a>
-			<a href="/images" class="app-nav__item" class:app-nav__item--active={isActive('/images', $page.url.pathname)}>
+			<a href="/images" class="app-nav__item" class:app-nav__item--active={isActive('/images', $page.url.pathname)} aria-current={isActive('/images', $page.url.pathname) ? 'page' : undefined}>
 				<Blocks size={14} />
 				<span>Image Library</span>
 			</a>
@@ -160,15 +183,15 @@
 
 		<div class="app-nav__section">
 			<div class="app-nav__section-header">Operations</div>
-			<a href="/tasks" class="app-nav__item" class:app-nav__item--active={isActive('/tasks', $page.url.pathname)}>
+			<a href="/tasks" class="app-nav__item" class:app-nav__item--active={isActive('/tasks', $page.url.pathname)} aria-current={isActive('/tasks', $page.url.pathname) ? 'page' : undefined}>
 				<Activity size={14} />
 				<span>Operation Pipeline</span>
 			</a>
-			<a href="/events" class="app-nav__item" class:app-nav__item--active={isActive('/events', $page.url.pathname)}>
+			<a href="/events" class="app-nav__item" class:app-nav__item--active={isActive('/events', $page.url.pathname)} aria-current={isActive('/events', $page.url.pathname) ? 'page' : undefined}>
 				<AlertCircle size={14} />
 				<span>Incident Log</span>
 			</a>
-			<a href="/backups" class="app-nav__item" class:app-nav__item--active={isActive('/backups', $page.url.pathname)}>
+			<a href="/backups" class="app-nav__item" class:app-nav__item--active={isActive('/backups', $page.url.pathname)} aria-current={isActive('/backups', $page.url.pathname) ? 'page' : undefined}>
 				<ShieldCheck size={14} />
 				<span>Data Protection</span>
 			</a>
@@ -207,7 +230,7 @@
 		height: 2rem;
 		border-radius: var(--radius-sm);
 		background: var(--color-primary);
-		color: #ffffff;
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
 	.app-nav__brand-text {
@@ -218,7 +241,7 @@
 	.app-nav__brand-title {
 		font-size: 0.875rem;
 		font-weight: 700;
-		color: #ffffff;
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
 	.app-nav__brand-subtitle {
@@ -248,7 +271,7 @@
 		border-radius: var(--radius-xs);
 		padding: 0.35rem 2rem;
 		font-size: var(--text-xs);
-		color: #ffffff;
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
 	.app-nav__search-kbd {
@@ -301,18 +324,19 @@
 
 	.app-nav__item:hover {
 		background: var(--color-neutral-800);
-		color: #ffffff;
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
 	.app-nav__item--active {
 		background: var(--color-primary);
-		color: #ffffff;
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
 	/* Tree View */
 	.app-nav__tree {
 		display: flex;
 		flex-direction: column;
+		padding-left: 0.5rem;
 	}
 
 	.app-nav__tree-node {
@@ -325,7 +349,6 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		padding: 0.25rem 0.5rem;
 		font-size: var(--text-sm);
 		color: var(--color-neutral-400);
 		text-decoration: none;
@@ -336,14 +359,22 @@
 		text-align: left;
 	}
 
+	.app-nav__tree-toggle {
+		padding: 0.25rem 0.5rem 0.25rem 0;
+	}
+
+	.app-nav__tree-link {
+		padding: 0.25rem 0.5rem;
+	}
+
 	.app-nav__tree-toggle:hover,
 	.app-nav__tree-link:hover {
 		background: var(--color-neutral-800);
-		color: #ffffff;
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
 	.app-nav__tree-children {
-		margin-left: 0.75rem;
+		margin-left: 0.5rem;
 		padding-left: 0.5rem;
 		border-left: 1px solid var(--color-neutral-700);
 		display: flex;
@@ -417,6 +448,6 @@
 
 	.app-nav__footer-btn:hover {
 		background: var(--color-neutral-700);
-		color: #ffffff;
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 </style>

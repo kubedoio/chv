@@ -240,6 +240,8 @@
 	</main>
 </div>
 
+
+
 <style>
 	.inventory-page {
 		display: flex;
@@ -402,9 +404,7 @@
 			grid-template-columns: 1fr;
 		}
 	}
-</style>
 
-<style>
 	.inventory-page {
 		display: flex;
 		flex-direction: column;

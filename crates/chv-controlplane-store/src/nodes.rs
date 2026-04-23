@@ -53,6 +53,7 @@ INSERT INTO node_inventory (
     storage_classes,
     network_capabilities,
     labels,
+    hypervisor_capabilities,
     last_reported_at,
     updated_at
 )
@@ -73,8 +74,9 @@ VALUES (
     $14,
     $15,
     $16,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $17 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $17 / 1000.0, 'unixepoch')
+    $17,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $18 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $18 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     architecture = EXCLUDED.architecture,
@@ -92,6 +94,7 @@ ON CONFLICT (node_id) DO UPDATE SET
     storage_classes = EXCLUDED.storage_classes,
     network_capabilities = EXCLUDED.network_capabilities,
     labels = EXCLUDED.labels,
+    hypervisor_capabilities = EXCLUDED.hypervisor_capabilities,
     last_reported_at = EXCLUDED.last_reported_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -314,6 +317,7 @@ impl NodeRepository {
             .bind(&input.storage_classes)
             .bind(&input.network_capabilities)
             .bind(&input.labels)
+            .bind(&input.hypervisor_capabilities)
             .bind(input.reported_unix_ms)
             .execute(&self.pool)
             .await?;
@@ -471,6 +475,7 @@ pub struct NodeInventoryInput {
     pub storage_classes: Option<serde_json::Value>,
     pub network_capabilities: Option<serde_json::Value>,
     pub labels: Option<serde_json::Value>,
+    pub hypervisor_capabilities: Option<serde_json::Value>,
     pub reported_unix_ms: i64,
 }
 

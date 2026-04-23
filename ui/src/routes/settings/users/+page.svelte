@@ -339,6 +339,102 @@
 	onConfirm={handleDelete}
 />
 
+
+
+<!-- Create User Modal -->
+<Modal bind:open={createOpen} title="Create User">
+	{#snippet children()}
+		<form onsubmit={(e) => { e.preventDefault(); handleCreate(); }} class="form-fields">
+			<div class="field">
+				<label for="create-username">Username</label>
+				<input id="create-username" type="text" bind:value={createForm.username} placeholder="e.g. jdoe" autocomplete="off" />
+			</div>
+			<div class="field">
+				<label for="create-password">Password</label>
+				<input id="create-password" type="password" bind:value={createForm.password} placeholder="Min 8 characters" autocomplete="new-password" />
+			</div>
+			<div class="field">
+				<label for="create-role">Role</label>
+				<select id="create-role" bind:value={createForm.role}>
+					<option value="viewer">Viewer</option>
+					<option value="operator">Operator</option>
+					<option value="admin">Admin</option>
+				</select>
+			</div>
+			<div class="field">
+				<label for="create-display-name">Display Name (optional)</label>
+				<input id="create-display-name" type="text" bind:value={createForm.display_name} placeholder="e.g. Jane Doe" autocomplete="off" />
+			</div>
+			<div class="field">
+				<label for="create-email">Email (optional)</label>
+				<input id="create-email" type="email" bind:value={createForm.email} placeholder="user@example.com" autocomplete="off" />
+			</div>
+			{#if createForm.error}
+				<div class="form-error">{createForm.error}</div>
+			{/if}
+		</form>
+	{/snippet}
+	{#snippet footer()}
+		<button type="button" onclick={() => createOpen = false} class="btn-secondary">Cancel</button>
+		<button type="button" onclick={handleCreate} disabled={createForm.submitting} class="btn-primary">
+			{createForm.submitting ? 'Creating...' : 'Create User'}
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Edit User Modal -->
+<Modal bind:open={editOpen} title="Edit User">
+	{#snippet children()}
+		{#if selectedUser}
+			<form onsubmit={(e) => { e.preventDefault(); handleEdit(); }} class="form-fields">
+				<div class="field">
+					<label for="edit-username">Username</label>
+					<input id="edit-username" type="text" value={selectedUser.username} disabled class="disabled-input" />
+				</div>
+				<div class="field">
+					<label for="edit-role">Role</label>
+					<select id="edit-role" bind:value={editForm.role}>
+						<option value="viewer">Viewer</option>
+						<option value="operator">Operator</option>
+						<option value="admin">Admin</option>
+					</select>
+				</div>
+				<div class="field">
+					<label for="edit-display-name">Display Name</label>
+					<input id="edit-display-name" type="text" bind:value={editForm.display_name} placeholder="e.g. Jane Doe" />
+				</div>
+				<div class="field">
+					<label for="edit-email">Email</label>
+					<input id="edit-email" type="email" bind:value={editForm.email} placeholder="user@example.com" />
+				</div>
+				<div class="field">
+					<label for="edit-password">New Password (leave blank to keep current)</label>
+					<input id="edit-password" type="password" bind:value={editForm.password} placeholder="Min 8 characters" autocomplete="new-password" />
+				</div>
+				{#if editForm.error}
+					<div class="form-error">{editForm.error}</div>
+				{/if}
+			</form>
+		{/if}
+	{/snippet}
+	{#snippet footer()}
+		<button type="button" onclick={() => editOpen = false} class="btn-secondary">Cancel</button>
+		<button type="button" onclick={handleEdit} disabled={editForm.submitting} class="btn-primary">
+			{editForm.submitting ? 'Saving...' : 'Save Changes'}
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Delete Confirmation -->
+<ConfirmAction
+	bind:open={deleteOpen}
+	title="Delete User"
+	description={selectedUser ? `Delete user "${selectedUser.username}"? This action cannot be undone.` : ''}
+	actionType="delete"
+	confirmText="Delete User"
+	onConfirm={handleDelete}
+/>
+
 <style>
 	.inventory-page {
 		display: flex;
@@ -529,103 +625,7 @@
 			grid-template-columns: 1fr;
 		}
 	}
-</style>
 
-<!-- Create User Modal -->
-<Modal bind:open={createOpen} title="Create User">
-	{#snippet children()}
-		<form onsubmit={(e) => { e.preventDefault(); handleCreate(); }} class="form-fields">
-			<div class="field">
-				<label for="create-username">Username</label>
-				<input id="create-username" type="text" bind:value={createForm.username} placeholder="e.g. jdoe" autocomplete="off" />
-			</div>
-			<div class="field">
-				<label for="create-password">Password</label>
-				<input id="create-password" type="password" bind:value={createForm.password} placeholder="Min 8 characters" autocomplete="new-password" />
-			</div>
-			<div class="field">
-				<label for="create-role">Role</label>
-				<select id="create-role" bind:value={createForm.role}>
-					<option value="viewer">Viewer</option>
-					<option value="operator">Operator</option>
-					<option value="admin">Admin</option>
-				</select>
-			</div>
-			<div class="field">
-				<label for="create-display-name">Display Name (optional)</label>
-				<input id="create-display-name" type="text" bind:value={createForm.display_name} placeholder="e.g. Jane Doe" autocomplete="off" />
-			</div>
-			<div class="field">
-				<label for="create-email">Email (optional)</label>
-				<input id="create-email" type="email" bind:value={createForm.email} placeholder="user@example.com" autocomplete="off" />
-			</div>
-			{#if createForm.error}
-				<div class="form-error">{createForm.error}</div>
-			{/if}
-		</form>
-	{/snippet}
-	{#snippet footer()}
-		<button type="button" onclick={() => createOpen = false} class="btn-secondary">Cancel</button>
-		<button type="button" onclick={handleCreate} disabled={createForm.submitting} class="btn-primary">
-			{createForm.submitting ? 'Creating...' : 'Create User'}
-		</button>
-	{/snippet}
-</Modal>
-
-<!-- Edit User Modal -->
-<Modal bind:open={editOpen} title="Edit User">
-	{#snippet children()}
-		{#if selectedUser}
-			<form onsubmit={(e) => { e.preventDefault(); handleEdit(); }} class="form-fields">
-				<div class="field">
-					<label for="edit-username">Username</label>
-					<input id="edit-username" type="text" value={selectedUser.username} disabled class="disabled-input" />
-				</div>
-				<div class="field">
-					<label for="edit-role">Role</label>
-					<select id="edit-role" bind:value={editForm.role}>
-						<option value="viewer">Viewer</option>
-						<option value="operator">Operator</option>
-						<option value="admin">Admin</option>
-					</select>
-				</div>
-				<div class="field">
-					<label for="edit-display-name">Display Name</label>
-					<input id="edit-display-name" type="text" bind:value={editForm.display_name} placeholder="e.g. Jane Doe" />
-				</div>
-				<div class="field">
-					<label for="edit-email">Email</label>
-					<input id="edit-email" type="email" bind:value={editForm.email} placeholder="user@example.com" />
-				</div>
-				<div class="field">
-					<label for="edit-password">New Password (leave blank to keep current)</label>
-					<input id="edit-password" type="password" bind:value={editForm.password} placeholder="Min 8 characters" autocomplete="new-password" />
-				</div>
-				{#if editForm.error}
-					<div class="form-error">{editForm.error}</div>
-				{/if}
-			</form>
-		{/if}
-	{/snippet}
-	{#snippet footer()}
-		<button type="button" onclick={() => editOpen = false} class="btn-secondary">Cancel</button>
-		<button type="button" onclick={handleEdit} disabled={editForm.submitting} class="btn-primary">
-			{editForm.submitting ? 'Saving...' : 'Save Changes'}
-		</button>
-	{/snippet}
-</Modal>
-
-<!-- Delete Confirmation -->
-<ConfirmAction
-	bind:open={deleteOpen}
-	title="Delete User"
-	description={selectedUser ? `Delete user "${selectedUser.username}"? This action cannot be undone.` : ''}
-	actionType="delete"
-	confirmText="Delete User"
-	onConfirm={handleDelete}
-/>
-
-<style>
 	.users-page {
 		display: flex;
 		flex-direction: column;

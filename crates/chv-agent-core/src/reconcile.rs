@@ -621,39 +621,14 @@ impl Reconciler {
                 warn!(vm_id = %vm_id, "vm runtime record missing during reconcile");
                 continue;
             };
-            if spec.desired_state == "Running" && record.runtime_status == "Stopped" {
-                let recreate_op_id = format!("reconcile-vm-recreate-{}", vm_id);
-                info!(vm_id = %vm_id, "re-creating stopped VM for desired state Running");
-                let _ = self.vm_runtime.delete_vm(vm_id, Some(&recreate_op_id)).await;
-                let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
-                let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
-                let _ = tokio::fs::remove_file(vm_dir.join("console.log")).await;
-                let config = match self
-                    .prepare_vm(&mut stord, &mut nwd, vm_id, &spec, &recreate_op_id)
-                    .await
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(vm_id = %vm_id, error = %e, "failed to prepare vm for re-creation");
-                        self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
-                        continue;
-                    }
-                };
-                if let Err(e) = self.vm_runtime.create_vm(vm_id, &generation, &config, Some(&recreate_op_id)).await {
-                    warn!(vm_id = %vm_id, error = %e, "failed to re-create vm");
-                    self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
-                    continue;
-                }
-                let start_op_id = format!("{}-start", recreate_op_id);
-                if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
-                    warn!(vm_id = %vm_id, error = %e, "failed to start re-created vm");
-                    self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
-                }
-            } else if spec.desired_state == "Running" && record.runtime_status != "Running" {
+            if spec.desired_state == "Running" && record.runtime_status != "Running" {
                 let op_id = format!("reconcile-vm-start-{}", vm_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&op_id)).await {
                     let err_str = e.to_string();
-                    if err_str.contains("No such file or directory") || err_str.contains("Connection refused") {
+                    if err_str.contains("No such file or directory")
+                        || err_str.contains("Connection refused")
+                        || err_str.contains("not found")
+                    {
                         warn!(vm_id = %vm_id, "CH process dead, re-creating VM");
                         let _ = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await;
                         let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);

@@ -41,6 +41,12 @@
   --color-info: #0043ce;
   --color-info-light: #edf5ff;
   --color-info-dark: #001d6c;
+  --color-primary-rgb: 143, 90, 42;
+  --color-accent-rgb: 154, 106, 31;
+  --color-success-rgb: 25, 128, 56;
+  --color-warning-rgb: 241, 194, 27;
+  --color-danger-rgb: 218, 30, 40;
+  --color-info-rgb: 0, 67, 206;
   
   /* Neutral Scale (Technical Grays) */
   --color-neutral-50: #f4f1ea;
@@ -126,6 +132,12 @@
   --color-info: #6a8cad;
   --color-info-light: #1a2230;
   --color-info-dark: #8ab0d0;
+  --color-primary-rgb: 196, 133, 78;
+  --color-accent-rgb: 196, 146, 46;
+  --color-success-rgb: 90, 158, 98;
+  --color-warning-rgb: 196, 146, 46;
+  --color-danger-rgb: 196, 96, 84;
+  --color-info-rgb: 106, 140, 173;
   --color-info-glow: rgba(106, 140, 173, 0.15);
 
   --color-neutral-50: #1a1816;

@@ -11,10 +11,29 @@
   let loading = false;
   const client = createAPIClient();
 
-  // Redirect if already logged in
-  onMount(() => {
-    if (getStoredToken()) {
-      goto('/');
+  // Redirect if already logged in with a valid token
+  onMount(async () => {
+    const token = getStoredToken();
+    if (!token) return;
+    
+    try {
+      // Validate token by making a lightweight API call
+      const response = await fetch('/v1/overview', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({})
+      });
+      if (response.ok) {
+        goto('/');
+      } else {
+        // Token is invalid — clear it so user can log in again
+        client.clearToken();
+      }
+    } catch {
+      // Network or other error — stay on login page
     }
   });
 

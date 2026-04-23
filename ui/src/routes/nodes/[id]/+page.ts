@@ -21,6 +21,7 @@ export type NodeDetailModel = {
 		scheduling: boolean;
 		uptime?: string;
 		last_checkin?: string;
+		hypervisor_capabilities?: string[];
 	};
 	sections: { id: string; label: string; count?: number }[];
 	hosted_vms: {
@@ -84,7 +85,8 @@ function mapDetail(res: GetNodeResponse | null, currentTab: string, fallbackId: 
 			maintenance: (summary as unknown as { maintenance?: boolean }).maintenance ?? false,
 			scheduling: (summary as unknown as { scheduling?: boolean }).scheduling ?? false,
 			uptime: summary.uptime,
-			last_checkin: summary.last_checkin
+			last_checkin: summary.last_checkin,
+			hypervisor_capabilities: summary.hypervisor_capabilities
 		},
 		sections: res.sections ?? [
 			{ id: 'summary', label: 'Summary' },

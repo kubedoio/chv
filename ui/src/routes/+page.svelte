@@ -152,8 +152,20 @@
 
 	.cockpit-bottom-grid {
 		display: grid;
-		grid-template-columns: 1fr 1fr 1fr;
+		grid-template-columns: 1fr;
 		gap: 0.75rem;
+	}
+
+	@media (min-width: 768px) {
+		.cockpit-bottom-grid {
+			grid-template-columns: 1fr 1fr;
+		}
+	}
+
+	@media (min-width: 1200px) {
+		.cockpit-bottom-grid {
+			grid-template-columns: 1fr 1fr 1fr;
+		}
 	}
 
 	.micro-alert-list {
@@ -204,7 +216,7 @@
 	.cap-item {
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: var(--space-1);
 	}
 
 	.cap-header {

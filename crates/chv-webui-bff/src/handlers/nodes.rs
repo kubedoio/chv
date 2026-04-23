@@ -51,7 +51,8 @@ pub async fn list_nodes(
             COALESCE(nds.desired_state = 'Maintenance', false) AS maintenance,
             COALESCE(nds.scheduling_paused, false) AS scheduling_paused,
             COALESCE(task_counts.active_tasks, 0) AS active_tasks,
-            COALESCE(alert_counts.alerts, 0) AS alerts
+            COALESCE(alert_counts.alerts, 0) AS alerts,
+            COALESCE(ni.hypervisor_capabilities, '') AS hypervisor_capabilities
         FROM nodes n
         LEFT JOIN node_observed_state nos ON n.node_id = nos.node_id
         LEFT JOIN node_desired_state nds ON n.node_id = nds.node_id
@@ -96,6 +97,7 @@ pub async fn list_nodes(
                 "maintenance": r.maintenance,
                 "active_tasks": r.active_tasks,
                 "alerts": r.alerts,
+                "hypervisor_capabilities": parse_caps(&r.hypervisor_capabilities),
             })
         })
         .collect();
@@ -147,7 +149,8 @@ pub async fn get_node(
             COALESCE(nds.desired_state = 'Maintenance', false) AS maintenance,
             COALESCE(nds.scheduling_paused, false) AS scheduling_paused,
             COALESCE(task_counts.active_tasks, 0) AS active_tasks,
-            COALESCE(alert_counts.alerts, 0) AS alerts
+            COALESCE(alert_counts.alerts, 0) AS alerts,
+            COALESCE(ni.hypervisor_capabilities, '') AS hypervisor_capabilities
         FROM nodes n
         LEFT JOIN node_observed_state nos ON n.node_id = nos.node_id
         LEFT JOIN node_desired_state nds ON n.node_id = nds.node_id
@@ -252,6 +255,7 @@ pub async fn get_node(
                 json!({"label": "CPU", "value": r.cpu.clone()}),
                 json!({"label": "Memory", "value": r.memory.clone()}),
                 json!({"label": "Storage backend", "value": "zfs"}),
+                json!({"label": "Hypervisor Capabilities", "value": parse_caps(&r.hypervisor_capabilities).join(", ")}),
             ];
 
             let sections = vec![
@@ -276,6 +280,7 @@ pub async fn get_node(
                     "network": r.network,
                     "maintenance": r.maintenance,
                     "scheduling": !r.scheduling_paused,
+                    "hypervisor_capabilities": parse_caps(&r.hypervisor_capabilities),
                 },
                 "sections": sections,
                 "hostedVms": hosted_vms_json,
@@ -375,6 +380,14 @@ struct NodeRow {
     scheduling_paused: bool,
     active_tasks: i32,
     alerts: i32,
+    hypervisor_capabilities: String,
+}
+
+fn parse_caps(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str(raw).unwrap_or_else(|_| vec![raw.to_string()])
 }
 
 #[derive(sqlx::FromRow)]
