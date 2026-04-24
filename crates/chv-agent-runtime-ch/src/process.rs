@@ -517,6 +517,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         if let Some(true) = hv.and_then(|h| h.cpu_amx) {
             cpus["features"] = serde_json::json!({ "amx": true });
         }
+        if let Some(true) = hv.and_then(|h| h.cpu_nested) {
+            cpus["topology"] = serde_json::json!({ "threads_per_core": 1 });
+        }
 
         let mut memory = serde_json::json!({ "size": config.memory_bytes });
         if let Some(v) = hv.and_then(|h| h.memory_mergeable) {
@@ -549,7 +552,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             "console": { "mode": console_mode },
         });
 
-        if let Some(true) = hv.and_then(|h| h.cpu_kvm_hyperv) {
+        if let Some(true) = hv.and_then(|h| h.cpu_kvm_hyperv).or_else(|| hv.and_then(|h| h.cpu_nested)) {
             vm_config_json["platform"] = serde_json::json!({ "kvm_hyperv": true });
         }
         if let Some(v) = hv.and_then(|h| h.iommu) {

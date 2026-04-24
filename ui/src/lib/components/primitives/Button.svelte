@@ -26,7 +26,7 @@
 
 	const variantClasses = {
 		primary:
-			'bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-active)] text-white shadow-[0_2px_8px_var(--color-primary-glow)] hover:shadow-[0_4px_12px_rgba(143,90,42,0.35)] hover:-translate-y-px active:translate-y-0',
+			'bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-active)] text-white shadow-[0_2px_8px_var(--color-primary-glow)] hover:shadow-[0_4px_12px_rgba(var(--color-primary-rgb),0.35)] hover:-translate-y-px active:translate-y-0',
 		secondary:
 			'bg-white text-[var(--color-neutral-700)] border border-[var(--color-neutral-300)] hover:bg-[var(--color-neutral-50)] hover:border-[var(--color-neutral-400)]',
 		ghost:

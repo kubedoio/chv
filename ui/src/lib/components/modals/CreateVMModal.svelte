@@ -41,7 +41,7 @@
 
 	// Advanced hypervisor overrides
 	let advancedOpen = $state(false);
-	let hvOverrides = $state<Record<string, boolean | undefined>>({});
+	let hvOverrides = $state<Record<string, boolean | string | undefined>>({});
 
 	let submitting = $state(false);
 	let formError = $state('');
@@ -172,7 +172,7 @@
 			cloudInitUserdata = parts.join('\n') + '\n';
 		}
 
-		const overrides: Record<string, boolean> = {};
+		const overrides: Record<string, boolean | string> = {};
 		for (const [key, value] of Object.entries(hvOverrides)) {
 			if (value !== undefined) overrides[key] = value;
 		}
@@ -357,9 +357,16 @@
 
 						{#each [
 							{ key: 'cpu_nested', label: 'Nested Virtualization' },
+							{ key: 'cpu_amx', label: 'AMX Acceleration' },
+							{ key: 'cpu_kvm_hyperv', label: 'Hyper-V Enlightenments' },
+							{ key: 'memory_mergeable', label: 'KSM Deduplication' },
 							{ key: 'memory_hugepages', label: 'Hugepages' },
+							{ key: 'memory_shared', label: 'Shared Memory' },
+							{ key: 'memory_prefault', label: 'Memory Prefault' },
 							{ key: 'iommu', label: 'IOMMU' },
-							{ key: 'watchdog', label: 'Watchdog' }
+							{ key: 'watchdog', label: 'Watchdog' },
+							{ key: 'landlock_enable', label: 'Landlock Sandbox' },
+							{ key: 'pvpanic', label: 'PvPanic Device' }
 						] as item}
 							<div class="flex items-center justify-between gap-3">
 								<span class="text-sm text-ink">{item.label}</span>
@@ -381,6 +388,34 @@
 								</select>
 							</div>
 						{/each}
+
+						<div class="pt-2 space-y-3">
+							{#each [
+								{ key: 'rng_src', label: 'RNG Source' },
+								{ key: 'serial_mode', label: 'Serial Mode' },
+								{ key: 'console_mode', label: 'Console Mode' },
+								{ key: 'tpm_type', label: 'TPM Type' },
+								{ key: 'tpm_socket_path', label: 'TPM Socket Path' }
+							] as item}
+								<div class="flex items-center justify-between gap-3">
+									<span class="text-sm text-ink">{item.label}</span>
+									<input
+										type="text"
+										value={String(hvOverrides[item.key] ?? '')}
+										oninput={(e) => {
+											const val = e.currentTarget.value;
+											hvOverrides = {
+												...hvOverrides,
+												[item.key]: val.trim() === '' ? undefined : val.trim()
+												};
+											}}
+										placeholder="Inherit global"
+										class="h-8 rounded border border-[#CCCCCC] bg-white px-2 py-1 text-sm w-48"
+										disabled={submitting}
+									/>
+								</div>
+							{/each}
+						</div>
 					</div>
 				{/if}
 			</div>
