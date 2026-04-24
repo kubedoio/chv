@@ -328,6 +328,8 @@
 										<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
 											{#each filteredNodes as node}
 												{@const hostExpanded = openGroups[getNodeExpandedKey(node.id)] ?? true}
+												{@const instExpanded = openGroups[getInstanceExpandedKey(node.id)] ?? true}
+												{@const hostVms = vmsByNode.get(node.id) ?? []}
 												<div class="flex flex-col">
 													<button
 														class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
@@ -346,7 +348,6 @@
 														<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
 															<!-- Instances under host -->
 															<div class="flex flex-col">
-																{@const instExpanded = openGroups[getInstanceExpandedKey(node.id)] ?? true}
 																<button
 																	class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
 																	aria-expanded={instExpanded}
@@ -355,7 +356,6 @@
 																	<ChevronDown size={10} class={!instExpanded ? '-rotate-90' : ''} />
 																	<Box size={12} />
 																	<span class="flex-1">Instances</span>
-																	{@const hostVms = vmsByNode.get(node.id) ?? []}
 																	{#if hostVms.length > 0}
 																		<span class="text-[10px] text-[var(--color-neutral-500)]">{hostVms.length}</span>
 																	{/if}
@@ -363,7 +363,6 @@
 
 																{#if instExpanded}
 																	<div class="flex flex-col gap-[0.125rem]">
-																		{@const hostVms = vmsByNode.get(node.id) ?? []}
 																		{#if hostVms.length === 0}
 																			<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No instances.</div>
 																		{:else}
@@ -431,6 +430,8 @@
 														</a>
 												</div>
 											{/if}
+										</div>
+									{/each}
 										</div>
 									{/if}
 								</div>
