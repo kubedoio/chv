@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{routing::{delete, get, post}, Router};
 use chv_controlplane_store::{
-    AlertRepository, DesiredStateRepository, EventRepository, NodeRepository,
+    AlertRepository, BackupJobRepository, DesiredStateRepository, EventRepository, NodeRepository,
     ObservedStateRepository, OperationRepository, StorePool,
 };
 
@@ -18,6 +18,7 @@ pub struct AppState {
     pub alert_repo: AlertRepository,
     pub desired_state_repo: DesiredStateRepository,
     pub observed_state_repo: ObservedStateRepository,
+    pub backup_job_repo: BackupJobRepository,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
@@ -267,5 +268,13 @@ pub fn bff_router() -> Router<AppState> {
         .route(
             "/v1/tokens/revoke",
             post(crate::handlers::tokens::revoke_token),
+        )
+        .route(
+            "/v1/backup-jobs",
+            post(crate::handlers::backups::list_backup_jobs),
+        )
+        .route(
+            "/v1/backup-history",
+            post(crate::handlers::backups::list_backup_history),
         )
 }

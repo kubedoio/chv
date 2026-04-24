@@ -5,6 +5,7 @@ use crate::router::AppState;
 use crate::BffError;
 
 pub async fn get_settings(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(_state): State<AppState>,
     _payload: axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {

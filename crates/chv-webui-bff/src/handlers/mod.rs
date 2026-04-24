@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod backups;
 pub mod clusters;
 pub mod events;
 pub mod exports;

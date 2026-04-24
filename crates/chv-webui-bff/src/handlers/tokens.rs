@@ -24,6 +24,7 @@ pub async fn list_tokens(
     State(state): State<AppState>,
     BearerToken(claims): BearerToken,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let rows = sqlx::query_as::<_, TokenRow>(
         "SELECT token_id, name, scope, expires_at, last_used_at, created_at FROM api_tokens WHERE user_id = ? ORDER BY created_at",
     )
@@ -61,6 +62,7 @@ pub async fn create_token(
     BearerToken(claims): BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let name = payload
         .get("name")
         .and_then(|v| v.as_str())
@@ -116,6 +118,7 @@ pub async fn revoke_token(
     BearerToken(claims): BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let token_id = payload
         .get("token_id")
         .and_then(|v| v.as_str())

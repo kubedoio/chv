@@ -8,6 +8,7 @@ publish = false
 test-util = []
 
 [dependencies]
+chv-common = { path = "../chv-common" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 hex = "0.4"
@@ -17,4 +18,5 @@ sha2 = "0.10"
 sqlx = { workspace = true, features = ["uuid", "chrono"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }

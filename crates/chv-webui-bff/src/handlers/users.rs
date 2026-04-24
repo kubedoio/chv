@@ -20,9 +20,7 @@ pub async fn list_users(
     State(state): State<AppState>,
     BearerToken(claims): BearerToken,
 ) -> Result<Json<Value>, BffError> {
-    if claims.role != "admin" {
-        return Err(BffError::Unauthorized("admin access required".into()));
-    }
+    crate::auth::require_operator_or_admin(&claims)?;
 
     let rows = sqlx::query_as::<_, UserRow>(
         "SELECT user_id, username, display_name, role, email, created_at, last_login_at FROM users ORDER BY created_at",
@@ -61,9 +59,7 @@ pub async fn create_user(
     BearerToken(claims): BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    if claims.role != "admin" {
-        return Err(BffError::Unauthorized("admin access required".into()));
-    }
+    crate::auth::require_admin(&claims)?;
 
     let username = payload
         .get("username")
@@ -145,6 +141,8 @@ pub async fn update_user(
     BearerToken(claims): BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_admin(&claims)?;
+
     let user_id = payload
         .get("user_id")
         .and_then(|v| v.as_str())
@@ -155,20 +153,6 @@ pub async fn update_user(
     let new_password = payload.get("password").and_then(|v| v.as_str());
     let new_display_name = payload.get("display_name").and_then(|v| v.as_str());
     let new_email = payload.get("email").and_then(|v| v.as_str());
-
-    // Role changes require admin
-    if new_role.is_some() && claims.role != "admin" {
-        return Err(BffError::Unauthorized(
-            "admin access required to change role".into(),
-        ));
-    }
-
-    // Non-admins can only update their own record (password/display_name/email)
-    if claims.role != "admin" && claims.sub != user_id {
-        return Err(BffError::Unauthorized(
-            "you can only update your own account".into(),
-        ));
-    }
 
     // Validate role value if provided
     if let Some(r) = new_role {
@@ -262,9 +246,7 @@ pub async fn delete_user(
     BearerToken(claims): BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    if claims.role != "admin" {
-        return Err(BffError::Unauthorized("admin access required".into()));
-    }
+    crate::auth::require_admin(&claims)?;
 
     let user_id = payload
         .get("user_id")

@@ -11,6 +11,7 @@ use crate::router::AppState;
 use crate::BffError;
 
 pub async fn list_tasks(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -137,6 +138,7 @@ pub async fn list_tasks(
 }
 
 pub async fn stream_tasks(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {

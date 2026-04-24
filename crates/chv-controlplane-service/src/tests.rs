@@ -31,6 +31,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
     let alert_repo = AlertRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
     let observed_state_repo = ObservedStateRepository::new(pool.clone());
+    let backup_job_repo = BackupJobRepository::new(pool.clone());
     let lifecycle_service = Arc::new(crate::lifecycle::LifecycleServiceImplementation::new(
         node_repo.clone(),
         operation_repo.clone(),
@@ -45,6 +46,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         alert_repo,
         desired_state_repo,
         observed_state_repo,
+        backup_job_repo,
         mutations: Arc::new(crate::ControlPlaneMutationService::new(
             pool_for_mutations,
             lifecycle_service,

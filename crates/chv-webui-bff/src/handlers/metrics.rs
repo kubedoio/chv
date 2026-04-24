@@ -6,6 +6,7 @@ use crate::router::AppState;
 use crate::BffError;
 
 pub async fn get_metrics(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(_payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {

@@ -461,6 +461,7 @@ name = "chv-controlplane-store"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chv-common",
  "chv-controlplane-types",
  "hex",
  "serde",
@@ -469,6 +470,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

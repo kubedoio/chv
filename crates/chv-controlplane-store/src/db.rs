@@ -92,6 +92,28 @@ pub async fn run_migrations(
     pool: &StorePool,
     config: Option<&ControlPlaneStoreConfig>,
 ) -> Result<(), StoreError> {
+    if let Some(config) = config {
+        if config.database_url.starts_with("sqlite://") && !config.database_url.contains(":memory:")
+        {
+            let db_path = &config.database_url["sqlite://".len()..];
+            if std::path::Path::new(db_path).exists() {
+                let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+                let backup_path = format!("{}.backup.{}", db_path, timestamp);
+                if let Err(e) = std::fs::copy(db_path, &backup_path) {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to create pre-migration backup of database"
+                    );
+                } else {
+                    tracing::info!(
+                        backup_path = %backup_path,
+                        "created pre-migration database backup"
+                    );
+                }
+            }
+        }
+    }
+
     let migrator = migrator(config).await?;
     migrator.run(pool).await?;
     Ok(())

@@ -1,4 +1,5 @@
 mod alerts;
+mod backup_jobs;
 mod bootstrap_tokens;
 mod db;
 mod desired_state;
@@ -10,6 +11,7 @@ mod observed_state;
 mod operations;
 
 pub use alerts::{AlertCreateInput, AlertRepository};
+pub use backup_jobs::{BackupJobCreateInput, BackupJobRepository, BackupJobRow, BackupJobUpdateInput, BackupHistoryRow};
 pub use bootstrap_tokens::{BootstrapTokenRepository, BootstrapTokenValidation};
 pub use db::{
     connect_pool, migrations_path, migrator, run_migrations, ControlPlaneStoreConfig, StoreError,
