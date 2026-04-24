@@ -67,7 +67,7 @@ impl ConsoleServer {
         })
     }
 
-    pub async fn run(self, listener: TcpListener) -> Result<(), chv_errors::ChvError> {
+    fn router(self) -> Router {
         let state = ConsoleState {
             vm_runtime: self.vm_runtime.clone(),
             jwt_secret: self.jwt_secret.clone(),
@@ -93,14 +93,46 @@ impl ConsoleServer {
             }
         });
 
-        let app = Router::new()
+        Router::new()
             .route("/vms/:vm_id/console", get(Self::ws_handler))
-            .with_state(state);
+            .with_state(state)
+    }
 
+    pub async fn run(self, listener: TcpListener) -> Result<(), chv_errors::ChvError> {
+        let app = self.router();
         axum::serve(listener, app).await.map_err(|e| chv_errors::ChvError::Internal {
             reason: format!("console server error: {}", e),
         })?;
         Ok(())
+    }
+
+    fn check_rate_limit(
+        vm_id: &str,
+        rate_limiter: &Arc<Mutex<HashMap<String, Instant>>>,
+    ) -> Option<Response> {
+        const RATE_LIMIT_SECS: u64 = 2;
+        let mut limits = rate_limiter.lock().unwrap();
+        let now = Instant::now();
+        if let Some(last) = limits.get(vm_id) {
+            if now.duration_since(*last) < Duration::from_secs(RATE_LIMIT_SECS) {
+                tracing::warn!(vm_id = %vm_id, "console connection rate limited");
+                return Some(StatusCode::TOO_MANY_REQUESTS.into_response());
+            }
+        }
+        limits.insert(vm_id.to_string(), now);
+        None
+    }
+
+    fn check_replay(
+        token: &str,
+        consumed_tokens: &Arc<Mutex<HashMap<String, Instant>>>,
+    ) -> Option<Response> {
+        let mut tokens = consumed_tokens.lock().unwrap();
+        if tokens.contains_key(token) {
+            return Some(StatusCode::UNAUTHORIZED.into_response());
+        }
+        tokens.insert(token.to_string(), Instant::now());
+        None
     }
 
     async fn ws_handler(
@@ -109,37 +141,18 @@ impl ConsoleServer {
         Query(params): Query<ConsoleParams>,
         ws: WebSocketUpgrade,
     ) -> Response {
-        // Per-VM rate limiting: max 1 connection attempt per 2 seconds
-        const RATE_LIMIT_SECS: u64 = 2;
-        {
-            let mut limits = state.rate_limiter.lock().unwrap();
-            let now = Instant::now();
-            if let Some(last) = limits.get(&vm_id) {
-                if now.duration_since(*last) < Duration::from_secs(RATE_LIMIT_SECS) {
-                    tracing::warn!(vm_id = %vm_id, "console connection rate limited");
-                    return StatusCode::TOO_MANY_REQUESTS.into_response();
-                }
-            }
-            limits.insert(vm_id.clone(), now);
+        if let Some(response) = Self::check_rate_limit(&vm_id, &state.rate_limiter) {
+            return response;
         }
 
-        // Decode and validate JWT
-        match validate_console_token(&params.token, &state.jwt_secret) {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "console token validation failed");
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
+        if let Err(e) = validate_console_token(&params.token, &state.jwt_secret) {
+            tracing::warn!(error = %e, "console token validation failed");
+            return StatusCode::UNAUTHORIZED.into_response();
         }
 
-        // Replay prevention: reject tokens that have already been used
-        {
-            let mut tokens = state.consumed_tokens.lock().unwrap();
-            if tokens.contains_key(&params.token) {
-                tracing::warn!(vm_id = %vm_id, "console token replay detected");
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            tokens.insert(params.token.clone(), Instant::now());
+        if let Some(response) = Self::check_replay(&params.token, &state.consumed_tokens) {
+            tracing::warn!(vm_id = %vm_id, "console token replay detected");
+            return response;
         }
 
         let vm_runtime = state.vm_runtime.clone();
@@ -381,5 +394,90 @@ mod tests {
             "error should indicate address in use, got: {}",
             err_str
         );
+    }
+
+    fn test_console_server() -> ConsoleServer {
+        let adapter: Arc<dyn chv_agent_runtime_ch::CloudHypervisorAdapter> =
+            Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let vm_runtime = crate::vm_runtime::VmRuntime::new(adapter);
+        ConsoleServer::new(vm_runtime, test_secret())
+    }
+
+    fn ws_upgrade_request(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::get(uri)
+            .header("upgrade", "websocket")
+            .header("connection", "upgrade")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn missing_token_returns_bad_request() {
+        use tower::ServiceExt;
+        let app = test_console_server().router();
+        let response = app
+            .oneshot(ws_upgrade_request("/vms/test-vm/console"))
+            .await
+            .unwrap();
+        // Axum's Query<ConsoleParams> fails to deserialize when token is missing
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn valid_token_without_ws_headers_returns_bad_request() {
+        use tower::ServiceExt;
+        let app = test_console_server().router();
+        let token = encode_claims("test-vm", "admin", future_exp(), &test_secret());
+        let response = app
+            .oneshot(
+                axum::http::Request::get(&format!("/vms/test-vm/console?token={}", token))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // WebSocketUpgrade extractor requires upgrade headers
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rate_limit_blocks_rapid_requests() {
+        let rate_limiter = Arc::new(Mutex::new(HashMap::new()));
+        // First request should pass
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
+        // Immediate second request should be blocked
+        assert!(
+            ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_some(),
+            "rapid request should be rate limited"
+        );
+        // Different VM should pass
+        assert!(ConsoleServer::check_rate_limit("vm-2", &rate_limiter).is_none());
+    }
+
+    #[test]
+    fn rate_limit_allows_after_cooldown() {
+        let rate_limiter = Arc::new(Mutex::new(HashMap::new()));
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_some());
+        // Manually expire the entry
+        rate_limiter.lock().unwrap().insert("vm-1".to_string(), Instant::now() - Duration::from_secs(10));
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
+    }
+
+    #[test]
+    fn replay_prevention_blocks_reused_token() {
+        let consumed = Arc::new(Mutex::new(HashMap::new()));
+        let token = "token-abc";
+        // First use should pass
+        assert!(ConsoleServer::check_replay(token, &consumed).is_none());
+        // Reuse should be blocked
+        assert!(
+            ConsoleServer::check_replay(token, &consumed).is_some(),
+            "reused token should be blocked"
+        );
+        // Different token should pass
+        assert!(ConsoleServer::check_replay("token-def", &consumed).is_none());
     }
 }
