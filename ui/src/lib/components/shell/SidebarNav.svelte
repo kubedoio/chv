@@ -88,12 +88,12 @@
 		</div>
 	</div>
 
-	<div class="relative mx-1">
-		<Search size={12} class="absolute left-[0.625rem] top-1/2 -translate-y-1/2 text-[var(--color-neutral-400)]" />
+	<div class="mx-1 flex min-h-8 items-center gap-2 rounded-[var(--radius-xs)] border border-[var(--color-neutral-700)] bg-[var(--color-neutral-800)] px-[0.625rem] text-[var(--color-neutral-400)] transition-colors duration-[120ms] ease-in-out focus-within:border-[var(--color-primary)] focus-within:text-[var(--color-sidebar-text-active,#ffffff)]">
+		<Search size={12} class="shrink-0" />
 		<input
-			type="text"
+			type="search"
 			placeholder="Search fleet..."
-			class="w-full bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-[var(--radius-xs)] py-[0.35rem] pr-2 pl-8 text-[length:var(--text-xs)] text-[var(--color-sidebar-text-active,#ffffff)]"
+			class="min-w-0 flex-1 border-0 bg-transparent py-[0.35rem] px-0 text-[length:var(--text-xs)] text-[var(--color-sidebar-text-active,#ffffff)] placeholder:text-[var(--color-neutral-500)]"
 			bind:value={searchQuery}
 			aria-label="Search fleet nodes and VMs"
 		/>
