@@ -1,7 +1,7 @@
 [Unit]
 Description=CHV Node Agent
-After=network.target chv-controlplane.service chv-stord.service chv-nwd.service
-Wants=chv-controlplane.service chv-stord.service chv-nwd.service
+After=network.target chv-controlplane.service
+Wants=chv-controlplane.service
 
 [Service]
 Type=simple
@@ -12,8 +12,8 @@ ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/c
 ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
-KillMode=mixed
-TimeoutStopSec=5
+KillMode=control-group
+TimeoutStopSec=10
 RuntimeDirectory=chv
 StateDirectory=chv
 LogsDirectory=chv
@@ -28,6 +28,9 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/run/chv /var/lib/chv
 ReadOnlyPaths=/etc/chv /usr/local/bin /usr/bin
+
+# Clean up stale sockets if the agent exits uncleanly
+ExecStopPost=-/bin/rm -f /run/chv/agent/api.sock
 
 [Install]
 WantedBy=multi-user.target

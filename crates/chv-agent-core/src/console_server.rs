@@ -60,7 +60,14 @@ impl ConsoleServer {
         }
     }
 
-    pub async fn run(self, bind: &str) -> Result<(), chv_errors::ChvError> {
+    pub async fn try_bind(bind: &str) -> Result<TcpListener, chv_errors::ChvError> {
+        TcpListener::bind(bind).await.map_err(|e| chv_errors::ChvError::Io {
+            path: bind.to_string(),
+            source: e,
+        })
+    }
+
+    pub async fn run(self, listener: TcpListener) -> Result<(), chv_errors::ChvError> {
         let state = ConsoleState {
             vm_runtime: self.vm_runtime.clone(),
             jwt_secret: self.jwt_secret.clone(),
@@ -89,11 +96,6 @@ impl ConsoleServer {
         let app = Router::new()
             .route("/vms/:vm_id/console", get(Self::ws_handler))
             .with_state(state);
-
-        let listener = TcpListener::bind(bind).await.map_err(|e| chv_errors::ChvError::Io {
-            path: bind.to_string(),
-            source: e,
-        })?;
 
         axum::serve(listener, app).await.map_err(|e| chv_errors::ChvError::Internal {
             reason: format!("console server error: {}", e),
@@ -358,5 +360,26 @@ mod tests {
         let token = encode_claims("user-1", "admin", future_exp(), "wrong-secret");
         let result = validate_console_token(&token, &test_secret());
         assert!(result.is_err(), "token signed with wrong secret should be rejected");
+    }
+
+    #[tokio::test]
+    async fn try_bind_fails_when_port_in_use() {
+        // Bind a temporary listener to occupy the port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // try_bind should fail because the port is already occupied
+        let result = ConsoleServer::try_bind(&addr.to_string()).await;
+        assert!(
+            result.is_err(),
+            "try_bind should fail when port is already in use"
+        );
+        let err = result.unwrap_err();
+        let err_str = format!("{}", err);
+        assert!(
+            err_str.contains("Address already in use") || err_str.contains("io error"),
+            "error should indicate address in use, got: {}",
+            err_str
+        );
     }
 }

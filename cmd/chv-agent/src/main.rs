@@ -20,6 +20,7 @@ use chv_observability::init_logger;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
 const FAILED_THRESHOLD: u32 = 6; // 6 ticks * 5s = 30s
@@ -367,9 +368,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let console_bind = config.console_bind.clone();
+    let console_listener = ConsoleServer::try_bind(&console_bind).await.map_err(|e| {
+        eprintln!("FATAL: console server cannot bind to {}: {}", console_bind, e);
+        e
+    })?;
     let console_server = ConsoleServer::new(vm_runtime.clone(), config.jwt_secret.clone());
     tokio::spawn(async move {
-        if let Err(e) = console_server.run(&console_bind).await {
+        if let Err(e) = console_server.run(console_listener).await {
             warn!(error = %e, bind = %console_bind, "console server exited");
         }
     });
@@ -417,9 +422,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut consecutive_health_failures = 0u32;
     let mut consecutive_reconcile_failures: u32 = 0;
 
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, shutting down gracefully");
+                supervisor.shutdown().await;
+                break;
+            }
+            _ = sigint.recv() => {
+                info!("received SIGINT, shutting down gracefully");
+                supervisor.shutdown().await;
+                break;
+            }
+        }
 
         if let Err(e) = supervisor.restart_if_needed().await {
             warn!(error = %e, "supervisor restart failed");
@@ -787,6 +807,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
