@@ -30,7 +30,7 @@
 	});
 </script>
 
-<form class="filter-panel" method="GET">
+<form class="grid gap-[0.85rem] items-end border border-[var(--shell-line)] rounded-[1.15rem] bg-[var(--shell-surface)] p-4 max-[980px]:!grid-cols-1" style="grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 0.9fr)) auto;" method="GET">
 	{#if otherParams}
 		{#each otherParams.split('&') as pair}
 			{#if pair.includes('=')}
@@ -40,12 +40,12 @@
 		{/each}
 	{/if}
 	{#each filters as filter}
-		<label class="filter-panel__field">
-			<span>{filter.label}</span>
+		<label class="grid gap-[0.35rem]">
+			<span class="text-[0.74rem] font-bold tracking-[0.12em] uppercase text-[var(--shell-text-muted)]">{filter.label}</span>
 			{#if filter.type === 'search'}
-				<input type="search" name={filter.name} value={values[filter.name] ?? ''} placeholder="Search…" />
+				<input type="search" name={filter.name} value={values[filter.name] ?? ''} placeholder="Search…" class="min-h-[2.75rem] rounded-[0.85rem] border border-[var(--shell-line-strong)] bg-[var(--shell-surface-muted)] px-[0.8rem] py-[0.7rem] text-[var(--shell-text)] text-[0.92rem]" />
 			{:else if filter.type === 'select'}
-				<select name={filter.name}>
+				<select name={filter.name} class="min-h-[2.75rem] rounded-[0.85rem] border border-[var(--shell-line-strong)] bg-[var(--shell-surface-muted)] px-[0.8rem] py-[0.7rem] text-[var(--shell-text)] text-[0.92rem]">
 					{#each filter.options ?? [] as option}
 						<option value={option.value} selected={values[filter.name] === option.value}>
 							{option.label}
@@ -55,85 +55,8 @@
 			{/if}
 		</label>
 	{/each}
-	<div class="filter-panel__actions">
-		<button type="submit">Apply</button>
-		<a href={otherParams ? `?${otherParams}` : '?'}>Reset</a>
+	<div class="flex items-center gap-[0.7rem] max-[980px]:justify-start">
+		<button type="submit" class="inline-flex items-center justify-center min-h-[2.75rem] px-4 rounded-full text-[0.9rem] font-semibold border border-transparent bg-[var(--shell-accent)] text-[#fff9f2] cursor-pointer">Apply</button>
+		<a href={otherParams ? `?${otherParams}` : '?'} class="inline-flex items-center justify-center min-h-[2.75rem] px-4 rounded-full text-[0.9rem] font-semibold no-underline text-[var(--shell-text-secondary)]">Reset</a>
 	</div>
 </form>
-
-<style>
-	.filter-panel {
-		display: grid;
-		grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 0.9fr)) auto;
-		gap: 0.85rem;
-		align-items: end;
-		border: 1px solid var(--shell-line);
-		border-radius: 1.15rem;
-		background: var(--shell-surface);
-		padding: 1rem;
-	}
-
-	.filter-panel__field {
-		display: grid;
-		gap: 0.35rem;
-	}
-
-	.filter-panel__field span {
-		font-size: 0.74rem;
-		font-weight: 700;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-	}
-
-	.filter-panel__field input,
-	.filter-panel__field select {
-		min-height: 2.75rem;
-		border-radius: 0.85rem;
-		border: 1px solid var(--shell-line-strong);
-		background: var(--shell-surface-muted);
-		padding: 0.7rem 0.8rem;
-		color: var(--shell-text);
-		font-size: 0.92rem;
-	}
-
-	.filter-panel__actions {
-		display: flex;
-		align-items: center;
-		gap: 0.7rem;
-	}
-
-	.filter-panel__actions button,
-	.filter-panel__actions a {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-height: 2.75rem;
-		padding: 0 1rem;
-		border-radius: 999px;
-		font-size: 0.9rem;
-		font-weight: 600;
-		text-decoration: none;
-	}
-
-	.filter-panel__actions button {
-		border: 1px solid transparent;
-		background: var(--shell-accent);
-		color: #fff9f2;
-		cursor: pointer;
-	}
-
-	.filter-panel__actions a {
-		color: var(--shell-text-secondary);
-	}
-
-	@media (max-width: 980px) {
-		.filter-panel {
-			grid-template-columns: 1fr;
-		}
-
-		.filter-panel__actions {
-			justify-content: flex-start;
-		}
-	}
-</style>

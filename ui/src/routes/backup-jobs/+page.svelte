@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import { 
     Database, Plus, Trash2, Play, Pause, Clock, Calendar, 
@@ -153,14 +154,14 @@
   <PageHeaderWithAction page={pageDef}>
     {#snippet actions()}
       <div class="operation-tools">
-        <button class="btn-secondary" onclick={() => importVMOpen = true}>
+        <Button variant="secondary" onclick={() => importVMOpen = true}>
           <Upload size={14} />
           <span>Import Workload</span>
-        </button>
-        <button class="btn-primary" onclick={() => createJobOpen = true}>
+        </Button>
+        <Button variant="primary" onclick={() => createJobOpen = true}>
           <Plus size={14} />
           <span>Define Policy</span>
-        </button>
+        </Button>
       </div>
     {/snippet}
   </PageHeaderWithAction>
@@ -312,10 +313,10 @@
   </div>
 
   {#snippet footer()}
-    <button class="btn-secondary" onclick={() => createJobOpen = false}>CANCEL</button>
-    <button class="btn-primary" onclick={handleCreateJob} disabled={creatingJob || !newJobName || !selectedVMId}>
+    <Button variant="secondary" onclick={() => createJobOpen = false}>CANCEL</Button>
+    <Button variant="primary" onclick={handleCreateJob} disabled={creatingJob || !newJobName || !selectedVMId}>
       {creatingJob ? 'COMMITTING...' : 'COMMIT_POLICY'}
-    </button>
+    </Button>
   {/snippet}
 </Modal>
 
@@ -339,10 +340,10 @@
   </div>
 
   {#snippet footer()}
-    <button class="btn-secondary" onclick={() => importVMOpen = false}>CANCEL</button>
-    <button class="btn-primary" onclick={handleImportVM} disabled={importing || !importFile || !importName}>
+    <Button variant="secondary" onclick={() => importVMOpen = false}>CANCEL</Button>
+    <Button variant="primary" onclick={handleImportVM} disabled={importing || !importFile || !importName}>
       {importing ? 'TRANSMITTING...' : 'INITIATE_INGESTION'}
-    </button>
+    </Button>
   {/snippet}
 </Modal>
 

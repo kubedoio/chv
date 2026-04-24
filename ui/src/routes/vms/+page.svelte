@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import InventoryListPage from '$lib/components/shell/InventoryListPage.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
@@ -116,10 +117,10 @@
 	rowHref={(row) => `/vms/${row.vm_id}`}
 >
 	{#snippet headerActions()}
-		<button class="btn-primary" onclick={() => (modalOpen = true)}>
+		<Button variant="primary" onclick={() => (modalOpen = true)}>
 			<Plus size={14} />
 			Deploy Workload
-		</button>
+		</Button>
 	{/snippet}
 
 	{#snippet sidebar()}

@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import type { PageData } from './$types';
@@ -161,14 +162,14 @@
 		>
 			{#snippet actions()}
 				<div class="header-actions">
-					<button class="btn-secondary" onclick={() => goto('/vms')}>
+					<Button variant="secondary" onclick={() => goto('/vms')}>
 						<ArrowLeft size={14} />
 						Back to Catalog
-					</button>
-					<button class="btn-primary" onclick={retryDetailLoad}>
+					</Button>
+					<Button variant="primary" onclick={retryDetailLoad}>
 						<RotateCcw size={14} />
 						Retry Lookup
-					</button>
+					</Button>
 				</div>
 			{/snippet}
 		</ResourceDetailHeader>
@@ -251,31 +252,31 @@
            {#if confirmingAction}
 							<div class="confirm-group">
 								<span class="confirm-text">Confirm {confirmingAction}?</span>
-								<button class="btn-primary" onclick={() => executeAction(confirmingAction!)}>Confirm</button>
-								<button class="btn-secondary" onclick={() => confirmingAction = null}>Cancel</button>
+								<Button variant="primary" onclick={() => executeAction(confirmingAction!)}>Confirm</Button>
+								<Button variant="secondary" onclick={() => confirmingAction = null}>Cancel</Button>
 							</div>
 							{:else}
 								{@const ps = detail.summary.power_state.toLowerCase()}
-								<button class="btn-primary" disabled={ps === 'running' || pendingAction !== null} onclick={() => executeAction('start')}>
+								<Button variant="primary" disabled={ps === 'running' || pendingAction !== null} onclick={() => executeAction('start')}>
 									<Play size={14} />
 									{pendingAction === 'start' ? 'EXECUTING...' : 'START'}
-								</button>
-								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'shutdown'}>
+								</Button>
+								<Button variant="secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'shutdown'}>
 									<Power size={14} />
 									{pendingAction === 'shutdown' ? 'EXECUTING...' : 'SHUTDOWN'}
-								</button>
-								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'poweroff'}>
+								</Button>
+								<Button variant="secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'poweroff'}>
 									<Square size={14} />
 									{pendingAction === 'poweroff' ? 'EXECUTING...' : 'POWEROFF'}
-								</button>
-								<button class="btn-secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'}>
+								</Button>
+								<Button variant="secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'}>
 									<RotateCcw size={14} />
 									{pendingAction === 'restart' ? 'EXECUTING...' : 'REBOOT'}
-								</button>
-								<button class="btn-secondary" disabled={pendingAction !== null} onclick={() => confirmingAction = 'delete'}>
+								</Button>
+								<Button variant="secondary" disabled={pendingAction !== null} onclick={() => confirmingAction = 'delete'}>
 									<Trash2 size={14} />
 									{pendingAction === 'delete' ? 'EXECUTING...' : 'DELETE'}
-								</button>
+								</Button>
 						{/if}
 				</div>
 			{/snippet}

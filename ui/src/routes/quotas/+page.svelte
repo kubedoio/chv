@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import { Cpu, HardDrive, Network, Server, Settings, AlertTriangle, Activity, ShieldCheck, RefreshCcw } from 'lucide-svelte';
   import { createAPIClient, getStoredRole } from '$lib/api/client';
@@ -79,15 +80,15 @@
     {#snippet actions()}
       <div class="header-actions">
         {#if isAdmin}
-          <button class="btn-secondary" onclick={() => { editingQuota = usageData?.quota || null; showSettingsModal = true; }}>
+          <Button variant="secondary" onclick={() => { editingQuota = usageData?.quota || null; showSettingsModal = true; }}>
             <Settings size={14} />
             Adjust Policy
-          </button>
+          </Button>
         {/if}
-        <button class="btn-primary" onclick={loadQuotaData}>
+        <Button variant="primary" onclick={loadQuotaData}>
           <RefreshCcw size={14} />
           Sync Registry
-        </button>
+        </Button>
       </div>
     {/snippet}
   </PageHeaderWithAction>

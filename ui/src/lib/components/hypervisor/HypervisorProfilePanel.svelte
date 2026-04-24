@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import { Check, RotateCcw } from 'lucide-svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import ConfirmAction from '$lib/components/modals/ConfirmAction.svelte';
@@ -42,14 +43,14 @@
 			</select>
 		</div>
 
-		<button class="btn-primary w-full" disabled={saving || !selectedProfileId} onclick={() => confirmApplyOpen = true}>
+		<Button variant="primary" class="w-full" disabled={saving || !selectedProfileId} onclick={() => confirmApplyOpen = true}>
 			<Check size={14} />
 			APPLY_PRESET
-		</button>
-		<button class="btn-secondary w-full" disabled={saving} onclick={() => confirmResetOpen = true}>
+		</Button>
+		<Button variant="secondary" class="w-full" disabled={saving} onclick={() => confirmResetOpen = true}>
 			<RotateCcw size={14} />
 			RESET_DEFAULTS
-		</button>
+		</Button>
 	</div>
 </SectionCard>
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
@@ -94,24 +95,24 @@
 			{#snippet actions()}
 				<ActionStrip>
 					{#if detail.exposure === 'public'}
-						<button class="btn-secondary btn-sm" disabled title="Not available in this release">
+						<Button variant="secondary" size="sm" disabled title="Not available in this release">
 							<ShieldAlert size={14} />
 							Withdraw Exposure
-						</button>
+						</Button>
 					{:else}
-						<button class="btn-secondary btn-sm" disabled title="Not available in this release">
+						<Button variant="secondary" size="sm" disabled title="Not available in this release">
 							<Shield size={14} />
 							Expose Publicly
-						</button>
+						</Button>
 					{/if}
-					<button class="btn-secondary btn-sm" disabled title="Not available in this release">
+					<Button variant="secondary" size="sm" disabled title="Not available in this release">
 						<Activity size={14} />
 						Edit Policy
-					</button>
-					<button class="btn-secondary btn-sm" onclick={() => showEditModal = true}>
+					</Button>
+					<Button variant="secondary" size="sm" onclick={() => showEditModal = true}>
 						<Pencil size={14} />
 						Edit
-					</button>
+					</Button>
 			</ActionStrip>
 			{/snippet}
 		</ResourceDetailHeader>

@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/FilterBar.svelte';
@@ -104,10 +105,10 @@
 <div class="inventory-page">
 	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
-			<button class="btn-primary" onclick={() => createOpen = true}>
+			<Button variant="primary" onclick={() => createOpen = true}>
 				<Plus size={14} />
 				Define Fabric
-			</button>
+			</Button>
 		{/snippet}
 	</PageHeaderWithAction>
 

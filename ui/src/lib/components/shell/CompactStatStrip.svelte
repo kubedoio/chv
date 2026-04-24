@@ -11,58 +11,19 @@
 
 	let { stats }: Props = $props();
 
-	function getStatusClass(status?: string) {
-		switch (status) {
-			case 'healthy': return 'stat-value--healthy';
-			case 'warning': return 'stat-value--warning';
-			case 'critical': return 'stat-value--critical';
-			default: return 'stat-value--neutral';
-		}
-	}
+	const statusClasses: Record<string, string> = {
+		healthy: 'text-[var(--color-success)]',
+		warning: 'text-[var(--color-warning)]',
+		critical: 'text-[var(--color-danger)]',
+		neutral: 'text-[var(--shell-text)]'
+	};
 </script>
 
-<div class="compact-stat-strip">
+<div class="flex gap-6 px-4 py-2 bg-[var(--shell-surface)] border border-[var(--shell-line)] rounded-[0.5rem]">
 	{#each stats as stat}
-		<div class="stat-item">
-			<div class="stat-label">{stat.label}</div>
-			<div class="stat-value {getStatusClass(stat.status)}">{stat.value}</div>
+		<div class="flex flex-col gap-[0.125rem]">
+			<div class="text-[length:var(--text-xs)] font-semibold uppercase tracking-[0.05em] text-[var(--shell-text-muted)]">{stat.label}</div>
+			<div class="text-[length:var(--text-lg)] font-semibold tabular-nums {statusClasses[stat.status ?? 'neutral']}">{stat.value}</div>
 		</div>
 	{/each}
 </div>
-
-<style>
-	.compact-stat-strip {
-		display: flex;
-		gap: 1.5rem;
-		padding: 0.5rem 1rem;
-		background: var(--shell-surface);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.5rem;
-	}
-
-	.stat-item {
-		display: flex;
-		flex-direction: column;
-		gap: 0.125rem;
-	}
-
-	.stat-label {
-		font-size: var(--text-xs);
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
-	}
-
-	.stat-value {
-		font-size: var(--text-lg);
-		font-weight: 600;
-		font-variant-numeric: tabular-nums;
-		color: var(--shell-text);
-	}
-
-	.stat-value--healthy { color: var(--color-success); }
-	.stat-value--warning { color: var(--color-warning); }
-	.stat-value--critical { color: var(--color-danger); }
-	.stat-value--neutral { color: var(--shell-text); }
-</style>

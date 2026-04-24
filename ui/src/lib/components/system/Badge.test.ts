@@ -9,14 +9,14 @@ describe('Badge', () => {
 	});
 
 	it.each([
-		['healthy', 'badge--healthy'],
-		['warning', 'badge--warning'],
-		['degraded', 'badge--degraded'],
-		['failed', 'badge--failed'],
-		['unknown', 'badge--unknown']
+		['healthy', 'bg-[var(--status-healthy-bg)]'],
+		['warning', 'bg-[var(--status-warning-bg)]'],
+		['degraded', 'bg-[var(--status-degraded-bg)]'],
+		['failed', 'bg-[var(--status-failed-bg)]'],
+		['unknown', 'bg-[var(--status-unknown-bg)]']
 	] as const)('applies the correct CSS class for tone %s', (tone, expectedClass) => {
 		const { container } = render(Badge, { props: { label: 'Test', tone } });
-		const badge = container.querySelector('.badge');
+		const badge = container.querySelector('span');
 		expect(badge?.classList.contains(expectedClass)).toBe(true);
 	});
 });

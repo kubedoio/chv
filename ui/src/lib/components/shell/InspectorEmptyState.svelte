@@ -2,34 +2,9 @@
 	import { Database } from 'lucide-svelte';
 </script>
 
-<div class="empty-state">
-	<div class="empty-icon">
+<div class="flex-1 flex flex-col items-center justify-center p-8 text-center gap-6">
+	<div class="text-[var(--color-neutral-200)]">
 		<Database size={32} />
 	</div>
-	<p>Select a node or VM to inspect its live status and metadata.</p>
+	<p class="text-[length:var(--text-sm)] font-medium text-[var(--shell-text-muted)] max-w-[16rem] leading-relaxed">Select a node or VM to inspect its live status and metadata.</p>
 </div>
-
-<style>
-	.empty-state {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		padding: 2rem;
-		text-align: center;
-		gap: 1.5rem;
-	}
-
-	.empty-icon {
-		color: var(--color-neutral-200);
-	}
-
-	.empty-state p {
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--shell-text-muted);
-		max-width: 16rem;
-		line-height: 1.5;
-	}
-</style>

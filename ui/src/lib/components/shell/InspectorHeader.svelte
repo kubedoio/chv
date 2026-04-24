@@ -1,47 +1,15 @@
 <script lang="ts">
 	import { Info, X } from 'lucide-svelte';
 	import { selection } from '$lib/stores/selection.svelte';
+	import Button from '$lib/components/primitives/Button.svelte';
 </script>
 
-<header class="drawer-header">
-	<div class="header-title">
+<header class="px-3 py-2 border-b border-[var(--border-subtle)] flex justify-between items-center bg-[var(--bg-surface-muted)]">
+	<div class="flex items-center gap-2 text-[length:var(--text-xs)] font-bold text-[var(--shell-text-secondary)] tracking-[0.06em] uppercase">
 		<Info size={12} />
 		<span>Quick inspector</span>
 	</div>
-	<button class="btn-close" onclick={() => selection.clear()} aria-label="Close inspector">
+	<Button variant="ghost" ariaLabel="Close inspector" onclick={() => selection.clear()}>
 		<X size={12} />
-	</button>
+	</Button>
 </header>
-
-<style>
-	.drawer-header {
-		padding: 0.5rem 0.75rem;
-		border-bottom: 1px solid var(--border-subtle);
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		background: var(--bg-surface-muted);
-	}
-
-	.header-title {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		font-size: var(--text-xs);
-		font-weight: 700;
-		color: var(--shell-text-secondary);
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-	}
-
-	.btn-close {
-		background: transparent;
-		border: none;
-		color: var(--color-neutral-400);
-		cursor: pointer;
-		padding: 0.25rem;
-		display: flex;
-	}
-
-	.btn-close:hover { color: var(--color-neutral-900); }
-</style>

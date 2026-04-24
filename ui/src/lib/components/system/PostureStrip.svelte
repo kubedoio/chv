@@ -10,54 +10,21 @@
 	}
 
 	let { chips }: Props = $props();
+
+	const variantValueClasses: Record<string, string> = {
+		healthy: 'text-[var(--status-healthy-text)]',
+		warning: 'text-[var(--status-warning-text)]',
+		degraded: 'text-[var(--status-failed-text)]',
+		failed: 'text-[var(--status-failed-text)]',
+		default: 'text-[var(--shell-text)]'
+	};
 </script>
 
-<div class="posture-strip" role="list" aria-label="Fleet posture">
+<div class="flex flex-wrap gap-2" role="list" aria-label="Fleet posture">
 	{#each chips as chip}
-		<div class="posture-strip__chip posture-strip__chip--{chip.variant ?? 'default'}" role="listitem">
-			<span class="posture-strip__label">{chip.label}</span>
-			<span class="posture-strip__value">{chip.value}</span>
+		<div class="flex items-center gap-[0.4rem] border border-[var(--shell-line)] rounded-full bg-[var(--shell-surface)] px-[0.8rem] py-[0.35rem] text-[0.8rem]" role="listitem">
+			<span class="text-[var(--shell-text-muted)]">{chip.label}</span>
+			<span class="font-bold {variantValueClasses[chip.variant ?? 'default']}">{chip.value}</span>
 		</div>
 	{/each}
 </div>
-
-<style>
-	.posture-strip {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
-
-	.posture-strip__chip {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 999px;
-		background: var(--shell-surface);
-		padding: 0.35rem 0.8rem;
-		font-size: 0.8rem;
-	}
-
-	.posture-strip__label {
-		color: var(--shell-text-muted);
-	}
-
-	.posture-strip__value {
-		font-weight: 700;
-		color: var(--shell-text);
-	}
-
-	.posture-strip__chip--healthy .posture-strip__value {
-		color: var(--status-healthy-text);
-	}
-
-	.posture-strip__chip--warning .posture-strip__value {
-		color: var(--status-warning-text);
-	}
-
-	.posture-strip__chip--degraded .posture-strip__value,
-	.posture-strip__chip--failed .posture-strip__value {
-		color: var(--status-failed-text);
-	}
-</style>

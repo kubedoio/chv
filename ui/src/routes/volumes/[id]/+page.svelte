@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
@@ -195,22 +196,22 @@
 						{#if confirmingAction}
 							<div class="confirm-group">
 								<span class="confirm-text">Confirm <strong>{confirmingAction}</strong>?</span>
-								<button class="btn-danger btn-sm" onclick={() => executeAction(confirmingAction!)}>Confirm</button>
-								<button class="btn-secondary btn-sm" onclick={() => confirmingAction = null}>Cancel</button>
+								<Button variant="danger" size="sm" onclick={() => executeAction(confirmingAction!)}>Confirm</Button>
+								<Button variant="secondary" size="sm" onclick={() => confirmingAction = null}>Cancel</Button>
 							</div>
 						{:else}
-							<button class="btn-primary btn-sm" disabled={!!detail.summary.attached_vm_id || pendingAction !== null} onclick={() => handleActionClick('attach')}>
+							<Button variant="primary" size="sm" disabled={!!detail.summary.attached_vm_id || pendingAction !== null} onclick={() => handleActionClick('attach')}>
 								<Link2 size={14} />
 								{pendingAction === 'attach' ? 'Attaching...' : 'Attach'}
-							</button>
-							<button class="btn-secondary btn-sm" disabled={!detail.summary.attached_vm_id || pendingAction !== null} onclick={() => handleActionClick('detach', true)}>
+							</Button>
+							<Button variant="secondary" size="sm" disabled={!detail.summary.attached_vm_id || pendingAction !== null} onclick={() => handleActionClick('detach', true)}>
 								<Unlink size={14} />
 								{pendingAction === 'detach' ? 'Detaching...' : 'Detach'}
-							</button>
-							<button class="btn-secondary btn-sm" disabled={pendingAction !== null} onclick={() => handleActionClick('resize')}>
+							</Button>
+							<Button variant="secondary" size="sm" disabled={pendingAction !== null} onclick={() => handleActionClick('resize')}>
 								<Maximize2 size={14} />
 								{pendingAction === 'resize' ? 'Resizing...' : 'Resize'}
-							</button>
+							</Button>
 						{/if}
 					</ActionStrip>
 				</div>
@@ -297,8 +298,8 @@
 	{/snippet}
 	{#snippet footer()}
 		<div class="modal-footer">
-			<button class="btn-secondary btn-sm" onclick={() => attachModalOpen = false}>Cancel</button>
-			<button class="btn-primary btn-sm" disabled={!selectedVmId || loadingVms} onclick={executeAttach}>Attach</button>
+			<Button variant="secondary" size="sm" onclick={() => attachModalOpen = false}>Cancel</Button>
+			<Button variant="primary" size="sm" disabled={!selectedVmId || loadingVms} onclick={executeAttach}>Attach</Button>
 		</div>
 	{/snippet}
 </Modal>
@@ -315,8 +316,8 @@
 	{/snippet}
 	{#snippet footer()}
 		<div class="modal-footer">
-			<button class="btn-secondary btn-sm" onclick={() => resizeModalOpen = false}>Cancel</button>
-			<button class="btn-primary btn-sm" onclick={executeResize}>Resize</button>
+			<Button variant="secondary" size="sm" onclick={() => resizeModalOpen = false}>Cancel</Button>
+			<Button variant="primary" size="sm" onclick={executeResize}>Resize</Button>
 		</div>
 	{/snippet}
 </Modal>

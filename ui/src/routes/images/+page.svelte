@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
@@ -119,10 +120,10 @@
 <div class="inventory-page">
 	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
-			<button class="btn-primary" onclick={() => (modalOpen = true)}>
+			<Button variant="primary" onclick={() => (modalOpen = true)}>
 				<Plus size={14} />
 				Ingest Image
-			</button>
+			</Button>
 		{/snippet}
 	</PageHeaderWithAction>
 

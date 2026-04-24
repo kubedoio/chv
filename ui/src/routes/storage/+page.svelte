@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { HardDrive, Plus, Database, ShieldCheck } from 'lucide-svelte';
@@ -86,10 +87,10 @@
 <div class="inventory-page">
   <PageHeaderWithAction page={pageDef}>
     {#snippet actions()}
-      <button class="btn-primary" onclick={() => createModalOpen = true}>
+      <Button variant="primary" onclick={() => createModalOpen = true}>
         <Plus size={14} />
         Mount Storage
-      </button>
+      </Button>
     {/snippet}
   </PageHeaderWithAction>
 

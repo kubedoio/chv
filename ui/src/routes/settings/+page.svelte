@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
@@ -100,22 +101,22 @@
 			<aside class="support-area">
 				<SectionCard title="Administrative Ops" icon={Settings}>
 					<div class="ops-pipeline">
-						<button class="btn-secondary op-button">
+						<Button variant="secondary" class="op-button">
 							<History size={14} />
 							Audit Registry
-						</button>
-						<button class="btn-secondary op-button">
+						</Button>
+						<Button variant="secondary" class="op-button">
 							<Lock size={14} />
 							Seal Control Plane
-						</button>
+						</Button>
 						<a href="/settings/hypervisor" class="btn-secondary op-button">
 							<Cpu size={14} />
 							Fabric Parameters
 						</a>
-						<button class="btn-primary op-button">
+						<Button variant="primary" class="op-button">
 							<UsersIcon size={14} />
 							Authorize Principal
-						</button>
+						</Button>
 					</div>
 				</SectionCard>
 

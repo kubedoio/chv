@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import { 
     Server, Copy, Trash2, Plus, FileCode, Box, LayoutTemplate, 
@@ -121,15 +122,15 @@
     {#snippet actions()}
       <div class="header-actions">
         {#if activeTab === 'vm'}
-          <button class="btn-primary" onclick={() => createVMTemplateOpen = true}>
+          <Button variant="primary" onclick={() => createVMTemplateOpen = true}>
             <LayoutTemplate size={14} />
             Commit Blueprint
-          </button>
+          </Button>
         {:else}
-          <button class="btn-primary" onclick={() => cloudInitEditorOpen = true}>
+          <Button variant="primary" onclick={() => cloudInitEditorOpen = true}>
             <FileCode size={14} />
             Register Init Script
-          </button>
+          </Button>
         {/if}
       </div>
     {/snippet}

@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import type { VMSnapshot } from '$lib/api/types';
 	import { createAPIClient } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast';
@@ -154,10 +155,10 @@
 
 <SectionCard title="VM Snapshots" icon={Camera} badgeLabel={String(snapshots.length)}>
 	<div class="snapshot-header">
-		<button class="btn-primary btn-sm" onclick={() => { createOpen = true; }}>
+		<Button variant="primary" size="sm" onclick={() => { createOpen = true; }}>
 			<Camera size={14} />
 			Create Snapshot
-		</button>
+		</Button>
 	</div>
 
 	{#if loading && snapshots.length === 0}
@@ -242,10 +243,11 @@
 		</label>
 	</div>
 	{#snippet footer()}
-		<button type="button" class="btn-secondary btn-sm" onclick={() => { createOpen = false; }}>Cancel</button>
-		<button
+		<Button type="button" variant="secondary" size="sm" onclick={() => { createOpen = false; }}>Cancel</Button>
+		<Button
 			type="button"
-			class="btn-primary btn-sm"
+			variant="primary"
+			size="sm"
 			disabled={createSubmitting || !createName.trim()}
 			onclick={handleCreate}
 		>
@@ -253,7 +255,7 @@
 				<span class="animate-spin"><LoaderCircle size={14} /></span>
 			{/if}
 			Create Snapshot
-		</button>
+		</Button>
 	{/snippet}
 </Modal>
 

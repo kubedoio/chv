@@ -58,7 +58,7 @@ describe('FilterPanel', () => {
 
 	it('renders reset link with preserved non-filter params', () => {
 		const { container } = render(FilterPanel, { props: { filters, values: {} } });
-		const reset = container.querySelector('.filter-panel__actions a');
+		const reset = container.querySelector('form a[href]');
 		expect(reset?.getAttribute('href')).toBe('?sort=name');
 	});
 });

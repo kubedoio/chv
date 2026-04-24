@@ -76,44 +76,44 @@
 	}
 </script>
 
-<div class="inspect-drawer">
+<div class="flex flex-col h-full bg-[var(--bg-surface)]">
 	<InspectorHeader />
 
 	{#if active.id}
-		<div class="drawer-content" in:fade={{ duration: 100 }}>
+		<div class="flex-1 p-5 flex flex-col gap-6 overflow-y-auto" in:fade={{ duration: 100 }}>
 			<EntityIdentity type={active.type} label={active.label} id={active.id} />
 
 			{#if isLoading}
-				<div class="drawer-loading">
+				<div class="py-12 flex flex-col items-center gap-3 text-[10px] font-extrabold text-[var(--color-neutral-500)]">
 					<Loader2 size={16} class="animate-spin" />
 					<span>COLLECTING_TELEMETRY...</span>
 				</div>
 			{:else if details}
-				<div class="inspector-sections">
-					<div class="section">
-						<div class="label">Operational Posture</div>
+				<div class="flex flex-col gap-6">
+					<div class="flex flex-col gap-[0.625rem]">
+						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">Operational Posture</div>
 						<PostureCard status={details.status} actual_state={details.actual_state} />
 					</div>
 
-					<div class="section">
-						<div class="label">System Pulse</div>
+					<div class="flex flex-col gap-[0.625rem]">
+						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">System Pulse</div>
 						<MetricBars cpuUsage={0} memoryUsagePercent={0} />
 					</div>
 
-					<div class="section">
-						<div class="label">Property Mesh</div>
+					<div class="flex flex-col gap-[0.625rem]">
+						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">Property Mesh</div>
 						<PropertyMesh
 							architecture={details.architecture}
 							providerType={details.provider_type}
 						/>
 					</div>
 
-					<div class="section">
-						<div class="label">Mutation Controls</div>
+					<div class="flex flex-col gap-[0.625rem]">
+						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">Mutation Controls</div>
 						<MutationControls />
 					</div>
 
-					<a href="/{active.type}s/{active.id}" class="inspect-full-link">
+					<a href="/{active.type}s/{active.id}" class="flex items-center justify-between p-3 bg-[rgba(var(--color-primary-rgb),0.1)] text-[var(--color-primary)] no-underline text-[10px] font-extrabold rounded-[var(--radius-xs)] mt-2 hover:bg-[rgba(var(--color-primary-rgb),0.15)]">
 						<span>FULL_INSPECTION_DETAIL</span>
 						<ChevronRight size={14} />
 					</a>
@@ -124,79 +124,3 @@
 		<InspectorEmptyState />
 	{/if}
 </div>
-
-<style>
-	.inspect-drawer {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		background: var(--bg-surface);
-	}
-
-	.drawer-content {
-		flex: 1;
-		padding: 1.25rem;
-		display: flex;
-		flex-direction: column;
-		gap: 1.5rem;
-		overflow-y: auto;
-	}
-
-	.drawer-loading {
-		padding: 3rem 0;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.75rem;
-		font-size: 10px;
-		font-weight: 800;
-		color: var(--color-neutral-500);
-	}
-
-	.animate-spin {
-		animation: spin 1s linear infinite;
-	}
-
-	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
-	}
-
-	.inspector-sections {
-		display: flex;
-		flex-direction: column;
-		gap: 1.5rem;
-	}
-
-	.section {
-		display: flex;
-		flex-direction: column;
-		gap: 0.625rem;
-	}
-
-	.section .label {
-		font-size: 9px;
-		font-weight: 800;
-		color: var(--color-neutral-500);
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
-	}
-
-	.inspect-full-link {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.75rem;
-		background: rgba(var(--color-primary-rgb), 0.1);
-		color: var(--color-primary);
-		text-decoration: none;
-		font-size: 10px;
-		font-weight: 800;
-		border-radius: var(--radius-xs);
-		margin-top: 0.5rem;
-	}
-
-	.inspect-full-link:hover {
-		background: rgba(var(--color-primary-rgb), 0.15);
-	}
-</style>

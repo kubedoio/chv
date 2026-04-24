@@ -22,73 +22,26 @@
 </script>
 
 {#if totalItems > 0}
-	<nav class="url-pagination" aria-label="Pagination">
+	<nav class="flex items-center justify-between gap-4 px-4 py-[0.85rem] border border-[var(--shell-line)] rounded-[1.15rem] bg-[var(--shell-surface)]" aria-label="Pagination">
 		<a
 			href={buildHref(page - 1)}
-			class="url-pagination__link"
-			class:url-pagination__link--disabled={page <= 1}
+			class="inline-flex items-center px-[0.9rem] py-2 rounded-[0.75rem] text-[0.9rem] font-semibold no-underline {page <= 1 ? 'bg-[var(--shell-surface-muted)] text-[var(--shell-text-muted)] cursor-not-allowed pointer-events-none' : 'bg-[var(--shell-accent)] text-[#fff9f2] hover:opacity-[0.92]'}"
 			aria-disabled={page <= 1 ? 'true' : undefined}
 		>
 			Previous
 		</a>
-		<span class="url-pagination__info">
+		<span class="text-[0.9rem] text-[var(--shell-text-secondary)]">
 			Page {page} of {totalPages}
-			<span class="url-pagination__detail">
+			<span class="text-[var(--shell-text-muted)]">
 				({totalItems} items)
 			</span>
 		</span>
 		<a
 			href={buildHref(page + 1)}
-			class="url-pagination__link"
-			class:url-pagination__link--disabled={page >= totalPages}
+			class="inline-flex items-center px-[0.9rem] py-2 rounded-[0.75rem] text-[0.9rem] font-semibold no-underline {page >= totalPages ? 'bg-[var(--shell-surface-muted)] text-[var(--shell-text-muted)] cursor-not-allowed pointer-events-none' : 'bg-[var(--shell-accent)] text-[#fff9f2] hover:opacity-[0.92]'}"
 			aria-disabled={page >= totalPages ? 'true' : undefined}
 		>
 			Next
 		</a>
 	</nav>
 {/if}
-
-<style>
-	.url-pagination {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		padding: 0.85rem 1rem;
-		border: 1px solid var(--shell-line);
-		border-radius: 1.15rem;
-		background: var(--shell-surface);
-	}
-
-	.url-pagination__link {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.5rem 0.9rem;
-		border-radius: 0.75rem;
-		background: var(--shell-accent);
-		color: #fff9f2;
-		font-size: 0.9rem;
-		font-weight: 600;
-		text-decoration: none;
-	}
-
-	.url-pagination__link:hover:not(.url-pagination__link--disabled) {
-		opacity: 0.92;
-	}
-
-	.url-pagination__link--disabled {
-		background: var(--shell-surface-muted);
-		color: var(--shell-text-muted);
-		cursor: not-allowed;
-		pointer-events: none;
-	}
-
-	.url-pagination__info {
-		font-size: 0.9rem;
-		color: var(--shell-text-secondary);
-	}
-
-	.url-pagination__detail {
-		color: var(--shell-text-muted);
-	}
-</style>

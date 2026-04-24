@@ -22,50 +22,10 @@
 	});
 </script>
 
-<a href={config.href} class="resource-link" class:is-compact={compact}>
-	<config.icon size={12} class="res-icon" />
+<a href={config.href} class="inline-flex items-center gap-[0.35rem] no-underline text-[var(--shell-text)] font-medium transition-colors duration-150 ease-in-out hover:text-[var(--shell-accent)] {compact ? '' : ''}">
+	<config.icon size={12} class="text-[var(--shell-text-muted)]" />
 	{#if !compact}
-		<span class="res-kind">{config.label}</span>
+		<span class="text-[10px] uppercase font-bold text-[var(--shell-text-muted)] tracking-[0.05em]">{config.label}</span>
 	{/if}
-	<span class="res-name">{label}</span>
+	<span class="text-[length:var(--text-sm)] whitespace-nowrap overflow-hidden text-ellipsis max-w-[200px] {compact ? 'text-[length:var(--text-xs)]' : ''}">{label}</span>
 </a>
-
-<style>
-	.resource-link {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.35rem;
-		text-decoration: none;
-		color: var(--shell-text);
-		font-weight: 500;
-		transition: color 0.15s ease;
-	}
-
-	.resource-link:hover {
-		color: var(--shell-accent);
-	}
-
-	.res-icon {
-		color: var(--shell-text-muted);
-	}
-
-	.res-kind {
-		font-size: 10px;
-		text-transform: uppercase;
-		font-weight: 700;
-		color: var(--shell-text-muted);
-		letter-spacing: 0.05em;
-	}
-
-	.res-name {
-		font-size: var(--text-sm);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 200px;
-	}
-
-	.is-compact .res-name {
-		font-size: var(--text-xs);
-	}
-</style>

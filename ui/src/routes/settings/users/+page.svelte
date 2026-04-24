@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import { onMount } from 'svelte';
 	import { Users, Plus, Pencil, Trash2, ShieldCheck, UserCheck, Key, ShieldAlert } from 'lucide-svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
@@ -150,10 +151,10 @@
 	<PageHeaderWithAction page={pageDef}>
 		{#snippet actions()}
 			<div class="header-actions">
-        <button class="btn-primary" onclick={openCreate}>
+        <Button variant="primary" onclick={openCreate}>
           <Plus size={14} />
           ADD_IDENTITY
-        </button>
+        </Button>
       </div>
 		{/snippet}
 	</PageHeaderWithAction>
@@ -278,10 +279,10 @@
 		</div>
 	{/snippet}
 	{#snippet footer()}
-		<button onclick={() => createOpen = false} class="btn-secondary">ABORT</button>
-		<button onclick={handleCreate} disabled={createForm.submitting} class="btn-primary">
+		<Button onclick={() => createOpen = false} variant="secondary">ABORT</Button>
+		<Button onclick={handleCreate} disabled={createForm.submitting}  variant="primary">
 			{createForm.submitting ? 'EXECUTING...' : 'COMMIT_ENTRY'}
-		</button>
+		</Button>
 	{/snippet}
 </Modal>
 
@@ -323,10 +324,10 @@
 		{/if}
 	{/snippet}
 	{#snippet footer()}
-		<button onclick={() => editOpen = false} class="btn-secondary">ABORT</button>
-		<button onclick={handleEdit} disabled={editForm.submitting} class="btn-primary">
+		<Button onclick={() => editOpen = false} variant="secondary">ABORT</Button>
+		<Button onclick={handleEdit} disabled={editForm.submitting}  variant="primary">
 			{editForm.submitting ? 'EXECUTING...' : 'PATCH_ENTRY'}
-		</button>
+		</Button>
 	{/snippet}
 </Modal>
 
@@ -375,10 +376,10 @@
 		</form>
 	{/snippet}
 	{#snippet footer()}
-		<button type="button" onclick={() => createOpen = false} class="btn-secondary">Cancel</button>
-		<button type="button" onclick={handleCreate} disabled={createForm.submitting} class="btn-primary">
+		<Button type="button" onclick={() => createOpen = false} variant="secondary">Cancel</Button>
+		<Button type="button" onclick={handleCreate} disabled={createForm.submitting}  variant="primary">
 			{createForm.submitting ? 'Creating...' : 'Create User'}
-		</button>
+		</Button>
 	{/snippet}
 </Modal>
 
@@ -418,10 +419,10 @@
 		{/if}
 	{/snippet}
 	{#snippet footer()}
-		<button type="button" onclick={() => editOpen = false} class="btn-secondary">Cancel</button>
-		<button type="button" onclick={handleEdit} disabled={editForm.submitting} class="btn-primary">
+		<Button type="button" onclick={() => editOpen = false} variant="secondary">Cancel</Button>
+		<Button type="button" onclick={handleEdit} disabled={editForm.submitting}  variant="primary">
 			{editForm.submitting ? 'Saving...' : 'Save Changes'}
-		</button>
+		</Button>
 	{/snippet}
 </Modal>
 

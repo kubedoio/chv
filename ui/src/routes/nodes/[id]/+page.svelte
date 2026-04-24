@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import { getStoredToken } from '$lib/api/client';
 	import { mutateNode } from '$lib/bff/nodes';
@@ -92,21 +93,21 @@
 			{#snippet actions()}
 				<div class="header-actions">
            {#if detail.summary.maintenance}
-							<button class="btn-secondary" disabled={pendingAction !== null} onclick={() => executeAction('exit_maintenance')}>
+							<Button variant="secondary" disabled={pendingAction !== null} onclick={() => executeAction('exit_maintenance')}>
 								<Wrench size={14} />
 								{pendingAction === 'exit_maintenance' ? 'EXECUTING...' : 'EXIT_MAINTENANCE'}
-							</button>
+							</Button>
 						{:else}
-							<button class="btn-secondary" disabled={pendingAction !== null} onclick={() => executeAction('enter_maintenance')}>
+							<Button variant="secondary" disabled={pendingAction !== null} onclick={() => executeAction('enter_maintenance')}>
 								<Wrench size={14} />
 								{pendingAction === 'enter_maintenance' ? 'EXECUTING...' : 'ENTER_MAINTENANCE'}
-							</button>
+							</Button>
 						{/if}
 
-						<button class="btn-primary" disabled={pendingAction !== null} onclick={() => executeAction('drain')}>
+						<Button variant="primary" disabled={pendingAction !== null} onclick={() => executeAction('drain')}>
 							<ArrowUpFromLine size={14} />
 							{pendingAction === 'drain' ? 'EXECUTING...' : 'DRAIN_FABRIC'}
-						</button>
+						</Button>
 				</div>
 			{/snippet}
 		</ResourceDetailHeader>

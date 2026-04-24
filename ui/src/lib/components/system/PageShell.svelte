@@ -11,56 +11,19 @@
 	let { title, eyebrow, description, children }: Props = $props();
 </script>
 
-<div class="page-shell">
-	<header class="page-shell__header">
+<div class="grid gap-[1.2rem]">
+	<header class="grid gap-[0.35rem]">
 		{#if eyebrow}
-			<div class="page-shell__eyebrow">{eyebrow}</div>
+			<div class="text-[0.74rem] font-bold tracking-[0.12em] uppercase text-[var(--shell-text-muted)]">{eyebrow}</div>
 		{/if}
-		<h1 class="page-shell__title">{title}</h1>
+		<h1 class="text-2xl font-bold text-[var(--shell-text)]">{title}</h1>
 		{#if description}
-			<p class="page-shell__description">{description}</p>
+			<p class="text-[0.92rem] text-[var(--shell-text-secondary)] leading-relaxed">{description}</p>
 		{/if}
 	</header>
 	{#if children}
-		<div class="page-shell__content">
+		<div class="grid gap-[1.2rem]">
 			{@render children()}
 		</div>
 	{/if}
 </div>
-
-<style>
-	.page-shell {
-		display: grid;
-		gap: 1.2rem;
-	}
-
-	.page-shell__header {
-		display: grid;
-		gap: 0.35rem;
-	}
-
-	.page-shell__eyebrow {
-		font-size: 0.74rem;
-		font-weight: 700;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-		color: var(--shell-text-muted);
-	}
-
-	.page-shell__title {
-		font-size: 1.5rem;
-		font-weight: 700;
-		color: var(--shell-text);
-	}
-
-	.page-shell__description {
-		font-size: 0.92rem;
-		color: var(--shell-text-secondary);
-		line-height: 1.5;
-	}
-
-	.page-shell__content {
-		display: grid;
-		gap: 1.2rem;
-	}
-</style>

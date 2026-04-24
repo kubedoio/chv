@@ -8,52 +8,13 @@
 
 	let { label, tone }: Props = $props();
 
-	const toneClass = $derived(`status-badge--${tone}`);
+	const toneClasses: Record<string, string> = {
+		healthy: 'bg-[var(--status-healthy-bg)] border-[var(--status-healthy-border)] text-[var(--status-healthy-text)]',
+		warning: 'bg-[var(--status-warning-bg)] border-[var(--status-warning-border)] text-[var(--status-warning-text)]',
+		degraded: 'bg-[var(--status-degraded-bg)] border-[var(--status-degraded-border)] text-[var(--status-degraded-text)]',
+		failed: 'bg-[var(--status-failed-bg)] border-[var(--status-failed-border)] text-[var(--status-failed-text)]',
+		unknown: 'bg-[var(--status-unknown-bg)] border-[var(--status-unknown-border)] text-[var(--status-unknown-text)]'
+	};
 </script>
 
-<span class={`status-badge ${toneClass}`}>{label}</span>
-
-<style>
-	.status-badge {
-		display: inline-flex;
-		align-items: center;
-		border: 1px solid var(--shell-line-strong);
-		border-radius: 999px;
-		padding: 0.15rem 0.5rem;
-		font-size: var(--text-xs);
-		font-weight: 600;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		white-space: nowrap;
-	}
-
-	.status-badge--healthy {
-		background: var(--status-healthy-bg);
-		border-color: var(--status-healthy-border);
-		color: var(--status-healthy-text);
-	}
-
-	.status-badge--warning {
-		background: var(--status-warning-bg);
-		border-color: var(--status-warning-border);
-		color: var(--status-warning-text);
-	}
-
-	.status-badge--degraded {
-		background: var(--status-degraded-bg);
-		border-color: var(--status-degraded-border);
-		color: var(--status-degraded-text);
-	}
-
-	.status-badge--failed {
-		background: var(--status-failed-bg);
-		border-color: var(--status-failed-border);
-		color: var(--status-failed-text);
-	}
-
-	.status-badge--unknown {
-		background: var(--status-unknown-bg);
-		border-color: var(--status-unknown-border);
-		color: var(--status-unknown-text);
-	}
-</style>
+<span class="inline-flex items-center border rounded-full px-2 py-[0.15rem] text-[length:var(--text-xs)] font-semibold tracking-[0.08em] uppercase whitespace-nowrap {toneClasses[tone]}">{label}</span>

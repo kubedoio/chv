@@ -48,26 +48,26 @@ A comprehensive design system for the CHV (Cloud Hypervisor Virtualization) plat
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `--color-neutral-50` | #f7f3ec | Page backgrounds |
-| `--color-neutral-100` | #efe9df | Card backgrounds |
-| `--color-neutral-200` | #ddd5c8 | Borders, dividers |
-| `--color-neutral-300` | #c7bcac | Disabled states |
-| `--color-neutral-400` | #9d917f | Placeholder text |
-| `--color-neutral-500` | #75695b | Secondary text |
-| `--color-neutral-600` | #5e5449 | Body text |
-| `--color-neutral-700` | #423b33 | Headings |
-| `--color-neutral-800` | #29241f | Strong emphasis |
-| `--color-neutral-900` | #191612 | Primary text |
+| `--color-neutral-50` | #f4f1ea | Page backgrounds |
+| `--color-neutral-100` | #e0ddd5 | Card backgrounds |
+| `--color-neutral-200` | #c7c4bc | Borders, dividers |
+| `--color-neutral-300` | #aead9f | Disabled states |
+| `--color-neutral-400` | #8d8d81 | Placeholder text |
+| `--color-neutral-500` | #6f6f61 | Secondary text |
+| `--color-neutral-600` | #525252 | Body text |
+| `--color-neutral-700` | #393939 | Headings |
+| `--color-neutral-800` | #262626 | Strong emphasis |
+| `--color-neutral-900` | #161616 | Primary text |
 
 ### Dark Theme (Sidebar)
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `--color-sidebar-bg` | #f9f5ee | Sidebar background |
-| `--color-sidebar-dark` | #f1eadf | Header/footer sections |
-| `--color-sidebar-border` | #ddd5c8 | Borders in sidebar |
-| `--color-sidebar-text` | #75695b | Inactive menu items |
-| `--color-sidebar-text-active` | #191612 | Active menu items |
+| `--color-sidebar-bg` | #1e1c18 | Sidebar background |
+| `--color-sidebar-dark` | #161410 | Header/footer sections |
+| `--color-sidebar-border` | #2e2b24 | Borders in sidebar |
+| `--color-sidebar-text` | #9a8e7c | Inactive menu items |
+| `--color-sidebar-text-active` | #f5f2ec | Active menu items |
 
 ## Typography
 
@@ -82,13 +82,13 @@ A comprehensive design system for the CHV (Cloud Hypervisor Virtualization) plat
 
 | Token | Size | Line Height | Weight | Usage |
 |-------|------|-------------|--------|-------|
-| `--text-xs` | 0.75rem (12px) | 1rem | 400 | Captions, timestamps |
-| `--text-sm` | 0.875rem (14px) | 1.25rem | 400 | Body small, buttons |
-| `--text-base` | 1rem (16px) | 1.5rem | 400 | Body text |
-| `--text-lg` | 1.125rem (18px) | 1.75rem | 500 | Subheadings |
-| `--text-xl` | 1.25rem (20px) | 1.75rem | 600 | Section titles |
+| `--text-xs` | 0.6875rem (11px) | 1rem | 400 | Captions, timestamps |
+| `--text-sm` | 0.8125rem (13px) | 1.25rem | 400 | Body small, buttons |
+| `--text-base` | 0.875rem (14px) | 1.5rem | 400 | Body text |
+| `--text-lg` | 1rem (16px) | 1.75rem | 500 | Subheadings |
+| `--text-xl` | 1.125rem (18px) | 1.75rem | 600 | Section titles |
 | `--text-2xl` | 1.5rem (24px) | 2rem | 600 | Page titles |
-| `--text-3xl` | 1.875rem (30px) | 2.25rem | 700 | Major headings |
+| `--text-3xl` | 1.75rem (28px) | 2.25rem | 700 | Major headings |
 
 ### Typography Patterns
 
@@ -168,19 +168,19 @@ A comprehensive design system for the CHV (Cloud Hypervisor Virtualization) plat
 
 | Token | Value | Usage |
 |-------|-------|-------|
-| `--shadow-sm` | 0 1px 2px 0 rgba(0, 0, 0, 0.05) | Subtle depth, inputs |
-| `--shadow-md` | 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1) | Cards, dropdowns |
-| `--shadow-lg` | 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1) | Modals, popovers |
+| `--shadow-sm` | 0 1px 2px rgba(0, 0, 0, 0.04) | Subtle depth, inputs |
+| `--shadow-md` | 0 2px 4px rgba(0, 0, 0, 0.08) | Cards, dropdowns |
+| `--shadow-lg` | 0 8px 16px rgba(0, 0, 0, 0.1) | Modals, popovers |
 | `--shadow-xl` | 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1) | Full-screen overlays |
 | `--shadow-glow-primary` | 0 0 14px rgba(143, 90, 42, 0.1) | Primary focus states |
-| `--shadow-glow-success` | 0 0 8px rgba(63, 107, 69, 0.12) | Success focus states |
 
 ## Border Radius
 
 | Token | Value | Usage |
 |-------|-------|-------|
+| `--radius-xs` | 0.125rem (2px) | Tags, chips |
 | `--radius-sm` | 0.25rem (4px) | Buttons, inputs, badges |
-| `--radius-md` | 0.5rem (8px) | Cards, modals |
+| `--radius-md` | 0.375rem (6px) | Cards, modals |
 | `--radius-lg` | 0.75rem (12px) | Large cards, panels |
 | `--radius-xl` | 1rem (16px) | Feature cards |
 | `--radius-full` | 9999px | Pills, avatars |

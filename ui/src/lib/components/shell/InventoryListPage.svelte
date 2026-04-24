@@ -56,7 +56,7 @@
 	}: Props = $props();
 </script>
 
-<div class="inventory-page">
+<div class="flex flex-col gap-3">
 	<PageHeaderWithAction {page}>
 		{#snippet actions()}
 			{#if headerActions}
@@ -65,7 +65,7 @@
 		{/snippet}
 	</PageHeaderWithAction>
 
-	<div class="inventory-metrics">
+	<div class="grid gap-3" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
 		{#each metrics as m}
 			<CompactMetricCard
 				label={m.label}
@@ -76,7 +76,7 @@
 		{/each}
 	</div>
 
-	<div class="inventory-controls">
+	<div class="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-[var(--radius-xs)] overflow-hidden">
 		<FilterBar
 			{filters}
 			{activeFilters}
@@ -85,8 +85,8 @@
 		/>
 	</div>
 
-	<main class="inventory-main">
-		<section class="inventory-table-area">
+	<main class="grid gap-4 items-start grid-cols-[1fr_300px] max-[1100px]:!grid-cols-1">
+		<section>
 			{#if state === 'error'}
 				<ErrorState />
 			{:else if state === 'empty'}
@@ -100,127 +100,8 @@
 			{/if}
 		</section>
 
-		<aside class="support-area">
+		<aside class="flex flex-col gap-4">
 			{@render sidebar()}
 		</aside>
 	</main>
 </div>
-
-<style>
-	.inventory-page {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.inventory-metrics {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-		gap: 0.75rem;
-	}
-
-	.inventory-controls {
-		background: var(--bg-surface);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-xs);
-		overflow: hidden;
-	}
-
-	.inventory-main {
-		display: grid;
-		grid-template-columns: 1fr 300px;
-		gap: 1rem;
-		align-items: start;
-	}
-
-	.support-area {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.empty-hint {
-		font-size: 11px;
-		color: var(--color-neutral-400);
-		padding: 1rem;
-		text-align: center;
-	}
-
-	.attention-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-		list-style: none;
-		padding: 0;
-		margin: 0;
-	}
-
-	.attention-card {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.5rem 0.75rem;
-		background: var(--bg-surface-muted);
-		border-radius: var(--radius-xs);
-		text-decoration: none;
-		color: var(--color-neutral-800);
-		transition: background 0.1s ease;
-	}
-
-	.attention-card:hover {
-		background: var(--bg-surface-hover);
-	}
-
-	.attention-card__main {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.res-name {
-		font-size: 11px;
-		font-weight: 700;
-	}
-
-	.res-issue {
-		font-size: 9px;
-		color: var(--color-danger);
-		font-weight: 600;
-		text-transform: uppercase;
-	}
-
-	.task-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-		list-style: none;
-		padding: 0;
-		margin: 0;
-	}
-
-	.task-item {
-		display: flex;
-		justify-content: space-between;
-		font-size: 10px;
-		padding: 0.35rem 0.5rem;
-		background: var(--bg-surface-muted);
-		border-radius: var(--radius-xs);
-	}
-
-	.task-label {
-		font-weight: 600;
-		color: var(--color-neutral-700);
-	}
-
-	.task-time {
-		color: var(--color-success);
-		font-weight: 700;
-		text-transform: uppercase;
-		font-size: 9px;
-	}
-
-	@media (max-width: 1100px) {
-		.inventory-main {
-			grid-template-columns: 1fr;
-		}
-	}
-</style>

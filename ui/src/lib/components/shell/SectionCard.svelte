@@ -9,86 +9,32 @@
 	}
 
 	let { title, icon: Icon, children, actions, badgeLabel, badgeTone = 'neutral' }: Props = $props();
+
+	const badgeToneClasses: Record<string, string> = {
+		healthy: 'bg-[var(--color-success-light)] text-[var(--color-success-dark)]',
+		warning: 'bg-[var(--color-warning-light)] text-[var(--color-warning-dark)]',
+		degraded: 'bg-[var(--color-danger-light)] text-[var(--color-danger-dark)]',
+		failed: 'bg-[var(--color-danger-light)] text-[var(--color-danger-dark)]',
+		neutral: 'bg-[var(--shell-line)] text-[var(--shell-text-muted)]'
+	};
 </script>
 
-<section class="section-card">
-	<header class="section-card__header">
-		<div class="header-left">
-			{#if Icon}<Icon size={14} class="section-icon" />{/if}
-			<h3 class="section-title">{title}</h3>
+<section class="bg-[var(--shell-surface)] border border-[var(--shell-line)] rounded-[0.35rem] flex flex-col overflow-hidden">
+	<header class="flex justify-between items-center px-3 py-[0.65rem] border-b border-[var(--shell-line)] bg-[var(--shell-surface-muted)]">
+		<div class="flex items-center gap-2">
+			{#if Icon}<Icon size={14} class="text-[var(--shell-text-muted)]" />{/if}
+			<h3 class="text-[length:var(--text-xs)] font-bold uppercase tracking-[0.05em] text-[var(--shell-text-muted)] m-0">{title}</h3>
 			{#if badgeLabel}
-				<span class="section-badge tone-{badgeTone}">{badgeLabel}</span>
+				<span class="text-[10px] font-bold px-[0.4rem] py-[0.1rem] rounded-full {badgeToneClasses[badgeTone]}">{badgeLabel}</span>
 			{/if}
 		</div>
 		{#if actions}
-			<div class="header-right">
+			<div class="flex gap-2">
 				{@render actions()}
 			</div>
 		{/if}
 	</header>
-	<div class="section-card__content">
+	<div class="p-3 text-[length:var(--text-sm)]">
 		{@render children()}
 	</div>
 </section>
-
-<style>
-	.section-card {
-		background: var(--shell-surface);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-
-	.section-card__header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 0.65rem 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		background: var(--shell-surface-muted);
-	}
-
-	.header-left {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.section-icon {
-		color: var(--shell-text-muted);
-	}
-
-	.section-title {
-		font-size: var(--text-xs);
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
-		margin: 0;
-	}
-
-	.section-badge {
-		font-size: 10px;
-		font-weight: 700;
-		padding: 0.1rem 0.4rem;
-		border-radius: 9999px;
-		background: var(--shell-line);
-		color: var(--shell-text-muted);
-	}
-
-	.section-badge.tone-healthy { background: var(--color-success-light); color: var(--color-success-dark); }
-	.section-badge.tone-warning { background: var(--color-warning-light); color: var(--color-warning-dark); }
-	.section-badge.tone-failed { background: var(--color-danger-light); color: var(--color-danger-dark); }
-
-	.section-card__content {
-		padding: 0.75rem;
-		font-size: var(--text-sm);
-	}
-
-	.header-right {
-		display: flex;
-		gap: 0.5rem;
-	}
-</style>

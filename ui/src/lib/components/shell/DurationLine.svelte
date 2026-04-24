@@ -29,19 +29,6 @@
 	});
 </script>
 
-<span class="duration-line" class:is-running={!finishedMs}>
+<span class="font-mono text-[length:var(--text-xs)] {finishedMs ? 'text-[var(--shell-text-muted)]' : 'text-[var(--shell-accent)] font-medium'}">
 	{duration}
 </span>
-
-<style>
-	.duration-line {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-	}
-
-	.is-running {
-		color: var(--shell-accent);
-		font-weight: 500;
-	}
-</style>

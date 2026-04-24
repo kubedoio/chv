@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
@@ -37,10 +38,10 @@
 <div class="inventory-page">
 	<PageHeaderWithAction page={page}>
 		{#snippet actions()}
-			<button class="btn-primary">
+			<Button variant="primary">
 				<Wrench size={14} />
 				Schedule Sequence
-			</button>
+			</Button>
 		{/snippet}
 	</PageHeaderWithAction>
 
@@ -129,7 +130,7 @@
 									<strong>v2.5.0-LTS STAGED</strong>
 									<span>Includes critical NVMe driver stability patches.</span>
 								</div>
-								<button class="btn-primary">Initiate Upgrade</button>
+								<Button variant="primary">Initiate Upgrade</Button>
 							</div>
 						{:else}
 							<div class="posture-nominal">
@@ -151,7 +152,7 @@
 								<li>
 									<div class="action-item">
 										<span class="action-desc">{action.summary}</span>
-										<button class="btn-secondary">Acknowledge</button>
+										<Button variant="secondary">Acknowledge</Button>
 									</div>
 								</li>
 							{/each}

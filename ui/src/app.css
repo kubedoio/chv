@@ -263,61 +263,6 @@ select:focus {
 }
 
 /* ==========================================================================
-   Buttons
-   ========================================================================== */
-
-button, 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.75rem;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-default);
-  border: 1px solid transparent;
-}
-
-.btn-primary {
-  background-color: var(--shell-accent);
-  color: white;
-  border-color: var(--shell-accent);
-}
-
-.btn-primary:hover {
-  opacity: 0.9;
-}
-
-.btn-secondary {
-  background-color: var(--shell-surface);
-  color: var(--shell-text);
-  border-color: var(--shell-line);
-}
-
-.btn-secondary:hover {
-  background-color: var(--shell-surface-muted);
-  border-color: var(--shell-line-strong);
-}
-
-.btn-danger {
-  background-color: var(--color-danger);
-  color: white;
-  border-color: var(--color-danger);
-}
-
-.btn-danger:hover {
-  opacity: 0.9;
-}
-
-.btn-sm {
-  padding: 0.25rem 0.5rem;
-  font-size: var(--text-xs);
-}
-
-/* ==========================================================================
    Accessibility
    ========================================================================== */
 
@@ -334,7 +279,7 @@ button,
 
 /* Selection color */
 ::selection {
-  background: rgba(229, 112, 53, 0.2);
+  background: rgba(143, 90, 42, 0.2);
   color: var(--color-neutral-900);
 }
 

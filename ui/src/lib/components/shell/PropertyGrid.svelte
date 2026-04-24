@@ -13,87 +13,32 @@
 	}
 
 	let { title, properties, columns = 2 }: Props = $props();
+
+	const toneClasses: Record<string, string> = {
+		healthy: 'text-[var(--color-success)]',
+		warning: 'text-[var(--color-warning-dark)]',
+		degraded: 'text-[var(--color-danger)]',
+		failed: 'text-[var(--color-danger)]',
+		neutral: ''
+	};
 </script>
 
-<section class="property-grid-container">
-	{#if title}<h3 class="grid-title">{title}</h3>{/if}
+<section class="flex flex-col gap-3">
+	{#if title}<h3 class="text-[length:var(--text-xs)] font-bold uppercase tracking-[0.05em] text-[var(--shell-text-muted)] border-b border-[var(--shell-line)] pb-1 m-0">{title}</h3>{/if}
 	
-	<div class="property-grid" style="--cols: {columns}">
+	<div class="grid gap-4 max-[600px]:!grid-cols-1" style="grid-template-columns: repeat({columns}, 1fr);">
 		{#each properties as prop}
-			<div class="property-item">
-				<span class="label">{prop.label}</span>
-				<div class="value-container">
-					<span class="value" class:tone-healthy={prop.tone === 'healthy'} class:tone-warning={prop.tone === 'warning'} class:tone-failed={prop.tone === 'failed'}>
+			<div class="flex flex-col gap-[0.15rem]">
+				<span class="text-[length:var(--text-xs)] text-[var(--shell-text-muted)] font-medium">{prop.label}</span>
+				<div class="flex flex-col">
+					<span class="text-[length:var(--text-sm)] font-semibold text-[var(--shell-text)] {toneClasses[prop.tone ?? 'neutral']}">
 						{prop.value}
 					</span>
 					{#if prop.subtext}
-						<span class="subtext">{prop.subtext}</span>
+						<span class="text-[length:var(--text-xs)] text-[var(--shell-text-muted)]">{prop.subtext}</span>
 					{/if}
 				</div>
 			</div>
 		{/each}
 	</div>
 </section>
-
-<style>
-	.property-grid-container {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.grid-title {
-		font-size: var(--text-xs);
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
-		border-bottom: 1px solid var(--shell-line);
-		padding-bottom: 0.25rem;
-		margin: 0;
-	}
-
-	.property-grid {
-		display: grid;
-		grid-template-columns: repeat(var(--cols), 1fr);
-		gap: 1rem;
-	}
-
-	.property-item {
-		display: flex;
-		flex-direction: column;
-		gap: 0.15rem;
-	}
-
-	.label {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		font-weight: 500;
-	}
-
-	.value-container {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.value {
-		font-size: var(--text-sm);
-		font-weight: 600;
-		color: var(--shell-text);
-	}
-
-	.subtext {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-	}
-
-	.tone-healthy { color: var(--color-success); }
-	.tone-warning { color: var(--color-warning-dark); }
-	.tone-failed { color: var(--color-danger); }
-
-	@media (max-width: 600px) {
-		.property-grid {
-			grid-template-columns: 1fr;
-		}
-	}
-</style>

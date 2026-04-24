@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
@@ -47,10 +48,10 @@
 		>
 			{#snippet actions()}
 				<div class="header-actions">
-					<button class="btn-secondary">
+					<Button variant="secondary">
 						<ExternalLink size={14} />
 						FABRIC_CONSOLE
-					</button>
+					</Button>
 				</div>
 			{/snippet}
 		</ResourceDetailHeader>

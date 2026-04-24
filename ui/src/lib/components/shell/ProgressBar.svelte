@@ -14,21 +14,6 @@
 	}[tone]);
 </script>
 
-<div class="progress-container">
-	<div class="progress-bar" style="width: {progress}%; background: {color}"></div>
+<div class="w-full h-1 bg-[var(--shell-line)] rounded-full overflow-hidden">
+	<div class="h-full transition-[width] duration-300 ease-out" style="width: {progress}%; background: {color}"></div>
 </div>
-
-<style>
-	.progress-container {
-		width: 100%;
-		height: 4px;
-		background: var(--shell-line);
-		border-radius: 999px;
-		overflow: hidden;
-	}
-
-	.progress-bar {
-		height: 100%;
-		transition: width 0.3s ease;
-	}
-</style>

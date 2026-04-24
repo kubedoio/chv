@@ -15,35 +15,9 @@
 	}[severity]);
 </script>
 
-<div class="severity-shield severity-{severity}" style="--badge-bg: {config.bg}; --badge-color: {config.color}">
+<div class="inline-flex items-center gap-[0.35rem] px-[0.4rem] py-[0.15rem] rounded-full font-bold text-[10px] uppercase tracking-[0.05em] {severity === 'critical' ? 'border border-[var(--color-danger)] shadow-[0_0_4px_rgba(239,68,68,0.2)]' : severity === 'warning' ? 'border border-[var(--color-warning-dark)]' : 'border border-transparent'}" style="background: {config.bg}; color: {config.color};">
 	<config.icon size={14} />
 	{#if showLabel}
-		<span class="label">{config.label}</span>
+		<span>{config.label}</span>
 	{/if}
 </div>
-
-<style>
-	.severity-shield {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.35rem;
-		padding: 0.15rem 0.4rem;
-		border-radius: 9999px;
-		background: var(--badge-bg);
-		color: var(--badge-color);
-		font-weight: 700;
-		font-size: 10px;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		border: 1px solid transparent;
-	}
-
-	.severity-critical {
-		border-color: var(--color-danger);
-		box-shadow: 0 0 4px rgba(239, 68, 68, 0.2);
-	}
-
-	.severity-warning {
-		border-color: var(--color-warning-dark);
-	}
-</style>

@@ -29,38 +29,38 @@
 	}
 </script>
 
-<div class="inventory-table-container">
+<div class="w-full overflow-x-auto border border-[var(--shell-line)] rounded-[0.35rem] bg-[var(--shell-surface)]">
 	{#if rows.length === 0}
 		{#if emptySnippet}
 			{@render emptySnippet()}
 		{:else}
-			<div class="empty-placeholder" role="status">No inventory matched current filters.</div>
+			<div class="p-8 text-center text-[var(--shell-text-muted)] text-[length:var(--text-sm)]" role="status">No inventory matched current filters.</div>
 		{/if}
 	{:else}
-		<table class="inventory-table">
+		<table class="w-full border-collapse text-left">
 			<thead>
 				<tr>
 					{#each columns as col}
-						<th class="align-{col.align ?? 'left'}" scope="col">{col.label}</th>
+						<th class="bg-[var(--shell-surface-muted)] px-3 py-[0.45rem] text-[length:var(--text-xs)] font-semibold uppercase tracking-[0.05em] text-[var(--shell-text-muted)] border-b border-[var(--shell-line)] whitespace-nowrap {col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'}" scope="col">{col.label}</th>
 					{/each}
 				</tr>
 			</thead>
 			<tbody>
-				{#each rows as row}
-					<tr class:has-link={!!rowHref?.(row)}>
+				{#each rows as row, rowIndex}
+					<tr class="hover:bg-[rgba(143,90,42,0.02)] {rowIndex === rows.length - 1 ? "[&_td]:border-b-0" : ""}">
 						{#each columns as col, i}
 							{@const val = (row as Record<string, unknown>)[col.key]}
-							<td class="align-{col.align ?? 'left'}">
+							<td class="px-3 py-[0.4rem] border-b border-[var(--shell-line)] text-[length:var(--text-sm)] text-[var(--shell-text-secondary)] align-middle whitespace-nowrap {col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'}">
 								{#if cell}
 									{@render cell({ column: col, row })}
 								{:else if i === 0 && rowHref?.(row)}
-									<a href={rowHref(row)} class="row-link">
+									<a href={rowHref(row)} class="text-[var(--shell-text)] font-semibold no-underline hover:text-[var(--shell-accent)] hover:underline">
 										{val}
 									</a>
 								{:else if isBadge(val)}
 									<StatusBadge label={val.label} tone={val.tone} />
 								{:else}
-									<span class="cell-text">{val}</span>
+									<span class="tabular-nums">{val}</span>
 								{/if}
 							</td>
 						{/each}
@@ -70,73 +70,3 @@
 		</table>
 	{/if}
 </div>
-
-<style>
-	.inventory-table-container {
-		width: 100%;
-		overflow-x: auto;
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		background: var(--shell-surface);
-	}
-
-	.inventory-table {
-		width: 100%;
-		border-collapse: collapse;
-		text-align: left;
-	}
-
-	th {
-		background: var(--shell-surface-muted);
-		padding: 0.45rem 0.75rem;
-		font-size: var(--text-xs);
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
-		border-bottom: 1px solid var(--shell-line);
-		white-space: nowrap;
-	}
-
-	td {
-		padding: 0.4rem 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		font-size: var(--text-sm);
-		color: var(--shell-text-secondary);
-		vertical-align: middle;
-		white-space: nowrap;
-	}
-
-	tr:last-child td {
-		border-bottom: none;
-	}
-
-	tr:hover {
-		background: rgba(143, 90, 42, 0.02);
-	}
-
-	.row-link {
-		color: var(--shell-text);
-		font-weight: 600;
-		text-decoration: none;
-	}
-
-	.row-link:hover {
-		color: var(--shell-accent);
-		text-decoration: underline;
-	}
-
-	.cell-text {
-		font-variant-numeric: tabular-nums;
-	}
-
-	.align-right { text-align: right; }
-	.align-center { text-align: center; }
-
-	.empty-placeholder {
-		padding: 2rem;
-		text-align: center;
-		color: var(--shell-text-muted);
-		font-size: var(--text-sm);
-	}
-</style>

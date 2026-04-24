@@ -1,4 +1,5 @@
 <script lang="ts">
+import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import InventoryListPage from '$lib/components/shell/InventoryListPage.svelte';
@@ -100,10 +101,10 @@
 	rowHref={(row) => `/nodes/${row.node_id}`}
 >
 	{#snippet headerActions()}
-		<button class="btn-primary" onclick={() => (addNodeOpen = true)}>
+		<Button variant="primary" onclick={() => (addNodeOpen = true)}>
 			<Plus size={14} />
 			Enroll Node
-		</button>
+		</Button>
 	{/snippet}
 
 	{#snippet sidebar()}
