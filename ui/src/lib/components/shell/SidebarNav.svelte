@@ -2,14 +2,13 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { 
-		ChevronDown, 
-		House, 
-		LogOut, 
-		Moon, 
+	import {
+		ChevronDown,
+		House,
+		LogOut,
+		Moon,
 		Sun,
 		Database,
-		Blocks,
 		Server,
 		Box,
 		Activity,
@@ -17,13 +16,24 @@
 		Search,
 		Loader2,
 		ShieldCheck,
-		AlertCircle
+		AlertCircle,
+		Network,
+		HardDrive,
+		Image,
+		MoreVertical
 	} from 'lucide-svelte';
-	import { navigationGroups } from '$lib/shell/app-shell';
-	import { clearToken, createAPIClient, getStoredToken } from '$lib/api/client';
-	import { theme } from '$lib/stores/theme.svelte';
 	import { inventory } from '$lib/stores/inventory.svelte';
 	import { selection } from '$lib/stores/selection.svelte';
+	import { theme } from '$lib/stores/theme.svelte';
+	import { clearToken, getStoredToken } from '$lib/api/client';
+	import { mutateVm, deleteVm } from '$lib/bff/vms';
+	import { toast } from '$lib/stores/toast';
+	import { buildInstanceActions, normalizeInstanceStatus } from '$lib/shell/instance-actions';
+	import InstanceStatusBadge from './InstanceStatusBadge.svelte';
+	import InstanceContextMenu from './InstanceContextMenu.svelte';
+	import DeleteInstanceDialog from '$lib/components/modals/DeleteInstanceDialog.svelte';
+	import PowerOffInstanceDialog from '$lib/components/modals/PowerOffInstanceDialog.svelte';
+	import type { InstanceTreeItem, InstanceStatus } from '$lib/api/types';
 
 	function isActive(href: string, pathname: string): boolean {
 		if (href === '/') return pathname === '/';
@@ -31,12 +41,17 @@
 	}
 
 	let openGroups = $state<Record<string, boolean>>({
-		'dc-1': true,
-		'cl-1': true,
-		'nodes': true,
-		'instances': true
+		'cloud-1': true,
+		'hosts': true
 	});
 	let searchQuery = $state('');
+	let contextMenuInstance = $state<InstanceTreeItem | null>(null);
+	let contextMenuPos = $state({ x: 0, y: 0 });
+	let deleteDialogInstance = $state<InstanceTreeItem | null>(null);
+	let poweroffDialogInstance = $state<InstanceTreeItem | null>(null);
+	let pendingAction = $state<string | null>(null);
+
+	let contextMenuRef = $state<InstanceContextMenu | null>(null);
 
 	onMount(() => {
 		inventory.fetch();
@@ -53,21 +68,42 @@
 	const filteredNodes = $derived(
 		searchQuery.trim() === ''
 			? inventory.nodes
-			: inventory.nodes.filter(n =>
+			: inventory.nodes.filter((n) =>
 					n.name.toLowerCase().includes(searchQuery.toLowerCase())
 				)
 	);
 
-	const filteredAllVms = $derived(
+	const filteredVms = $derived(
 		searchQuery.trim() === ''
 			? inventory.vms
-			: inventory.vms.filter(v =>
+			: inventory.vms.filter((v) =>
 					v.name.toLowerCase().includes(searchQuery.toLowerCase())
 				)
 	);
 
+	const vmsByNode = $derived(
+		(() => {
+			const map = new Map<string, typeof inventory.vms>();
+			for (const vm of filteredVms) {
+				const list = map.get(vm.node_id) ?? [];
+				list.push(vm);
+				map.set(vm.node_id, list);
+			}
+			return map;
+		})()
+	);
+
+	function getNodeExpandedKey(nodeId: string): string {
+		return `host-${nodeId}`;
+	}
+
+	function getInstanceExpandedKey(nodeId: string): string {
+		return `host-${nodeId}-instances`;
+	}
+
 	async function handleLogout() {
 		try {
+			const { createAPIClient } = await import('$lib/api/client');
 			await createAPIClient().logout();
 		} catch {
 			// Best-effort
@@ -76,96 +112,324 @@
 			goto('/login');
 		}
 	}
+
+	function handleInstanceContextMenu(event: MouseEvent, instance: InstanceTreeItem) {
+		event.preventDefault();
+		contextMenuInstance = instance;
+		requestAnimationFrame(() => {
+			contextMenuRef?.openAt(event.clientX, event.clientY);
+		});
+	}
+
+	function handleKebabClick(event: MouseEvent, instance: InstanceTreeItem) {
+		event.preventDefault();
+		event.stopPropagation();
+		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+		contextMenuInstance = instance;
+		requestAnimationFrame(() => {
+			contextMenuRef?.openAt(rect.right - 8, rect.top + 8);
+		});
+	}
+
+	function handleInstanceAction(actionId: string) {
+		if (!contextMenuInstance) return;
+		const inst = contextMenuInstance;
+
+		switch (actionId) {
+			case 'open':
+				goto(`/vms/${inst.id}`);
+				break;
+			case 'console':
+				goto(`/vms/${inst.id}?tab=console`);
+				break;
+			case 'start':
+			case 'shutdown':
+			case 'restart':
+				executeLifecycleAction(inst, actionId);
+				break;
+			case 'poweroff':
+				poweroffDialogInstance = inst;
+				break;
+			case 'delete':
+				deleteDialogInstance = inst;
+				break;
+			case 'rename':
+				toast.info('Rename is not yet supported');
+				break;
+		}
+	}
+
+	async function executeLifecycleAction(inst: InstanceTreeItem, action: string) {
+		const token = getStoredToken() ?? undefined;
+		pendingAction = action;
+		try {
+			const apiAction = action === 'shutdown' ? 'stop' : action;
+			const isForce = false;
+			await mutateVm({ vm_id: inst.id, action: apiAction, force: isForce }, token);
+			toast.success(`${action} accepted for ${inst.name}`);
+			await inventory.fetch();
+		} catch (err: any) {
+			toast.error(err.message || `${action} failed`);
+		} finally {
+			pendingAction = null;
+		}
+	}
+
+	async function handleDeleteConfirm() {
+		if (!deleteDialogInstance) return;
+		const inst = deleteDialogInstance;
+		const token = getStoredToken() ?? undefined;
+		pendingAction = 'delete';
+		try {
+			await deleteVm({ vm_id: inst.id, requested_by: 'webui' }, token);
+			toast.success(`Instance ${inst.name} deleted`);
+			deleteDialogInstance = null;
+			await inventory.fetch();
+		} catch (err: any) {
+			toast.error(err.message || 'Delete failed');
+		} finally {
+			pendingAction = null;
+		}
+	}
+
+	async function handlePowerOffConfirm() {
+		if (!poweroffDialogInstance) return;
+		const inst = poweroffDialogInstance;
+		const token = getStoredToken() ?? undefined;
+		pendingAction = 'poweroff';
+		try {
+			await mutateVm({ vm_id: inst.id, action: 'stop', force: true }, token);
+			toast.success(`Power off accepted for ${inst.name}`);
+			poweroffDialogInstance = null;
+			await inventory.fetch();
+		} catch (err: any) {
+			toast.error(err.message || 'Power off failed');
+		} finally {
+			pendingAction = null;
+		}
+	}
+
+	function vmToTreeItem(vm: (typeof inventory.vms)[number]): InstanceTreeItem {
+		return {
+			id: vm.id,
+			name: vm.name,
+			nodeId: vm.node_id,
+			status: normalizeInstanceStatus(vm.actual_state)
+		};
+	}
 </script>
 
+{#if contextMenuInstance}
+	<InstanceContextMenu
+		bind:this={contextMenuRef}
+		actions={buildInstanceActions(contextMenuInstance.status)}
+		onAction={handleInstanceAction}
+		instanceName={contextMenuInstance.name}
+	/>
+{/if}
+
+{#if deleteDialogInstance}
+	<DeleteInstanceDialog
+		bind:open={() => deleteDialogInstance !== null, (v) => { if (!v) deleteDialogInstance = null; }}
+		instanceName={deleteDialogInstance.name}
+		instanceId={deleteDialogInstance.id}
+		onConfirm={handleDeleteConfirm}
+		onCancel={() => { deleteDialogInstance = null; }}
+	/>
+{/if}
+
+{#if poweroffDialogInstance}
+	<PowerOffInstanceDialog
+		bind:open={() => poweroffDialogInstance !== null, (v) => { if (!v) poweroffDialogInstance = null; }}
+		instanceName={poweroffDialogInstance.name}
+		onConfirm={handlePowerOffConfirm}
+		onCancel={() => { poweroffDialogInstance = null; }}
+	/>
+{/if}
+
 <nav class="flex flex-col h-full gap-4 select-none" aria-label="Primary">
+	<!-- Header -->
 	<div class="flex items-center gap-3 py-2 px-1">
 		<div class="grid place-items-center w-8 h-8 rounded-[var(--radius-sm)] bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]">
 			<Database size={16} />
 		</div>
 		<div class="flex flex-col">
-			<div class="text-[0.875rem] font-bold text-[var(--color-sidebar-text-active,#ffffff)]">Control Plane</div>
-			<div class="text-[0.625rem] text-[var(--color-neutral-400)] uppercase tracking-[0.05em]">Topology First</div>
+			<div class="text-[0.875rem] font-bold text-[var(--color-sidebar-text-active,#ffffff)]">CellHV</div>
+			<div class="text-[0.625rem] text-[var(--color-neutral-500)] uppercase tracking-[0.05em]">Control Plane</div>
 		</div>
 	</div>
 
+	<!-- Search -->
 	<div class="mx-1 flex min-h-8 items-center gap-2 rounded-[var(--radius-xs)] border border-[var(--color-neutral-700)] bg-[var(--color-neutral-800)] px-[0.625rem] text-[var(--color-neutral-400)] transition-colors duration-[120ms] ease-in-out focus-within:border-[var(--color-primary)] focus-within:text-[var(--color-sidebar-text-active,#ffffff)]">
 		<Search size={12} class="shrink-0" />
 		<input
 			type="search"
-			placeholder="Search fleet..."
+			placeholder="Search resources..."
 			class="min-w-0 flex-1 border-0 bg-transparent py-[0.35rem] px-0 text-[length:var(--text-xs)] text-[var(--color-sidebar-text-active,#ffffff)] placeholder:text-[var(--color-neutral-500)]"
 			bind:value={searchQuery}
-			aria-label="Search fleet nodes and VMs"
+			aria-label="Search fleet resources"
 		/>
 	</div>
 
+	<!-- Scrollable content -->
 	<div class="flex-1 flex flex-col gap-6 overflow-y-auto pr-2 app-nav__scrollbox">
+		<!-- Fleet Overview -->
 		<div class="flex flex-col gap-1">
-			<a href="/" class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}" aria-current={isActive('/', $page.url.pathname) ? 'page' : undefined}>
+			<a
+				href="/"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/', $page.url.pathname) ? 'page' : undefined}
+			>
 				<House size={14} />
 				<span>Fleet Overview</span>
 			</a>
 		</div>
 
+		<!-- Infrastructure -->
 		<div class="flex flex-col gap-1">
-			<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2">Infrastructure</div>
-			
+			<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2 tracking-wider">Infrastructure</div>
+
 			<div class="flex flex-col pl-2">
 				{#if inventory.isLoading}
 					<div class="py-2 px-4 text-[10px] text-[var(--color-neutral-500)] flex items-center gap-2">
 						<Loader2 size={12} class="animate-spin" />
 						<span>Syncing fleet...</span>
 					</div>
-				{:else if inventory.nodes.length === 0}
-					<div class="py-2 px-4 text-[10px] text-[var(--color-neutral-500)]">No nodes index.</div>
+				{:else if filteredNodes.length === 0}
+					<div class="py-2 px-4 text-[10px] text-[var(--color-neutral-500)]">No hosts enrolled.</div>
 				{:else}
+					<!-- Default Cloud -->
 					<div class="flex flex-col">
-						<button class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]" aria-expanded={openGroups['dc-1']} onclick={() => toggleGroup('dc-1')}>
-							<ChevronDown size={10} class={!openGroups['dc-1'] ? '-rotate-90' : ''} />
+						<button
+							class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+							aria-expanded={openGroups['cloud-1']}
+							onclick={() => toggleGroup('cloud-1')}
+						>
+							<ChevronDown size={10} class={!openGroups['cloud-1'] ? '-rotate-90' : ''} />
 							<Database size={12} />
-							<span>Default-DC</span>
+							<span>Default Cloud</span>
 						</button>
-						
-						{#if openGroups['dc-1']}
-							<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
-								{#each filteredNodes as node}
-									<div class="flex flex-col">
-										<a 
-											href="/nodes/{node.id}" 
-											class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {selection.active.id === node.id ? 'app-nav__tree-link--active' : ''}"
-											onclick={() => handleSelection('node', node.id, node.name)}
-										>
-											<div class="w-1 h-1 rounded-full {node.status === 'online' ? 'bg-[var(--color-success)]' : 'bg-[var(--color-neutral-600)]'}"></div>
-											<Server size={12} />
-											<span>{node.name}</span>
-										</a>
-									</div>
-								{/each}
 
+						{#if openGroups['cloud-1']}
+							<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
+								<!-- Hosts group -->
 								<div class="flex flex-col">
-									<button class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]" aria-expanded={openGroups['instances']} onclick={() => toggleGroup('instances')}>
-										<ChevronDown size={10} class={!openGroups['instances'] ? '-rotate-90' : ''} />
-										<Box size={12} />
-										<span>Instances</span>
+									<button
+										class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+										aria-expanded={openGroups['hosts']}
+										onclick={() => toggleGroup('hosts')}
+									>
+										<ChevronDown size={10} class={!openGroups['hosts'] ? '-rotate-90' : ''} />
+										<Server size={12} />
+										<span>Hosts</span>
 									</button>
 
-									{#if openGroups['instances']}
+									{#if openGroups['hosts']}
 										<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
-											{#if filteredAllVms.length === 0}
-												<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No VM instances.</div>
-											{:else}
-												{#each filteredAllVms as vm}
-													<a
-														href="/vms/{vm.id}"
-														class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {selection.active.id === vm.id ? 'app-nav__tree-link--active' : ''}"
-														onclick={() => handleSelection('vm', vm.id, vm.name)}
+											{#each filteredNodes as node}
+												{@const hostExpanded = openGroups[getNodeExpandedKey(node.id)] ?? true}
+												<div class="flex flex-col">
+													<button
+														class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+														aria-expanded={hostExpanded}
+														onclick={() => toggleGroup(getNodeExpandedKey(node.id))}
 													>
-														<div class="w-1 h-1 rounded-full {vm.actual_state === 'running' ? 'bg-[var(--color-success)]' : 'bg-[var(--color-warning)]'}"></div>
-														<Box size={10} />
-														<span>{vm.name}</span>
-													</a>
-												{/each}
+														<ChevronDown size={10} class={!hostExpanded ? '-rotate-90' : ''} />
+														<div
+															class="w-1.5 h-1.5 rounded-full {node.status === 'online' ? 'bg-[var(--color-success)]' : node.status === 'error' ? 'bg-[var(--color-danger)]' : 'bg-[var(--color-neutral-600)]'}"
+															aria-hidden="true"
+														></div>
+														<span class="truncate">{node.name}</span>
+													</button>
+
+													{#if hostExpanded}
+														<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
+															<!-- Instances under host -->
+															<div class="flex flex-col">
+																{@const instExpanded = openGroups[getInstanceExpandedKey(node.id)] ?? true}
+																<button
+																	class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+																	aria-expanded={instExpanded}
+																	onclick={() => toggleGroup(getInstanceExpandedKey(node.id))}
+																>
+																	<ChevronDown size={10} class={!instExpanded ? '-rotate-90' : ''} />
+																	<Box size={12} />
+																	<span class="flex-1">Instances</span>
+																	{@const hostVms = vmsByNode.get(node.id) ?? []}
+																	{#if hostVms.length > 0}
+																		<span class="text-[10px] text-[var(--color-neutral-500)]">{hostVms.length}</span>
+																	{/if}
+																</button>
+
+																{#if instExpanded}
+																	<div class="flex flex-col gap-[0.125rem]">
+																		{@const hostVms = vmsByNode.get(node.id) ?? []}
+																		{#if hostVms.length === 0}
+																			<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No instances.</div>
+																		{:else}
+																			{#each hostVms as vm}
+																				{@const inst = vmToTreeItem(vm)}
+																				{@const isVmActive = isActive(`/vms/${vm.id}`, $page.url.pathname)}
+																				<div
+																					class="group relative flex items-center gap-2 rounded-[var(--radius-xs)] text-[length:var(--text-xs)] py-[0.35rem] px-2 transition-colors
+																					{isVmActive ? 'app-nav__tree-link--active' : 'hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] text-[var(--color-neutral-400)]'}"
+																					role="button"
+																					tabindex="0"
+																					onclick={() => { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); }}
+																					onkeydown={(e) => { if (e.key === 'Enter') { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); } }}
+																					oncontextmenu={(e) => handleInstanceContextMenu(e, inst)}
+																				>
+																					<div
+																						class="w-[6px] h-[6px] rounded-full {inst.status === 'running' ? 'bg-[var(--color-success)]' : inst.status === 'error' ? 'bg-[var(--color-danger)]' : 'bg-[var(--color-neutral-500)]'}"
+																						aria-hidden="true"
+																					></div>
+																					<span class="truncate flex-1 min-w-0">{vm.name}</span>
+																					<InstanceStatusBadge status={inst.status} showText={true} />
+																					<button
+																						type="button"
+																						class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 p-0.5 rounded hover:bg-[var(--color-neutral-700)] text-[var(--color-neutral-400)] transition-opacity"
+																						aria-label="Actions for instance {vm.name}"
+																						onclick={(e) => handleKebabClick(e, inst)}
+																					>
+																						<MoreVertical size={12} />
+																					</button>
+																				</div>
+																			{/each}
+																		{/if}
+																	</div>
+																{/if}
+														</div>
+
+														<!-- Networks under host -->
+														<a
+															href="/networks?node_id={node.id}"
+															class="flex items-center gap-2 text-[length:var(--text-xs)] text-[var(--color-neutral-500)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+															onclick={() => handleSelection('node', node.id, node.name)}
+														>
+															<Network size={12} />
+															<span class="truncate">Networks</span>
+														</a>
+
+														<!-- Storage under host -->
+														<a
+															href="/storage?node_id={node.id}"
+															class="flex items-center gap-2 text-[length:var(--text-xs)] text-[var(--color-neutral-500)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+															onclick={() => handleSelection('node', node.id, node.name)}
+														>
+															<HardDrive size={12} />
+															<span class="truncate">Storage</span>
+														</a>
+
+														<!-- Images under host -->
+														<a
+															href="/images?node_id={node.id}"
+															class="flex items-center gap-2 text-[length:var(--text-xs)] text-[var(--color-neutral-500)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+															onclick={() => handleSelection('node', node.id, node.name)}
+														>
+															<Image size={12} />
+															<span class="truncate">Images</span>
+														</a>
+												</div>
 											{/if}
 										</div>
 									{/if}
@@ -177,45 +441,100 @@
 			</div>
 		</div>
 
+		<!-- Global -->
 		<div class="flex flex-col gap-1">
-			<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2">Resources</div>
-			<a href="/networks" class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/networks', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}" aria-current={isActive('/networks', $page.url.pathname) ? 'page' : undefined}>
-				<Activity size={14} />
-				<span>Network Fabric</span>
+			<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2 tracking-wider">Global</div>
+
+			<a
+				href="/images"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/images', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/images', $page.url.pathname) ? 'page' : undefined}
+			>
+				<Image size={14} />
+				<span>Images</span>
 			</a>
-			<a href="/storage" class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/storage', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}" aria-current={isActive('/storage', $page.url.pathname) ? 'page' : undefined}>
-				<Database size={14} />
+
+			<a
+				href="/networks"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/networks', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/networks', $page.url.pathname) ? 'page' : undefined}
+			>
+				<Network size={14} />
+				<span>Networks</span>
+			</a>
+
+			<a
+				href="/storage"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/storage', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/storage', $page.url.pathname) ? 'page' : undefined}
+			>
+				<HardDrive size={14} />
 				<span>Storage Pools</span>
 			</a>
-			<a href="/images" class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/images', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}" aria-current={isActive('/images', $page.url.pathname) ? 'page' : undefined}>
-				<Blocks size={14} />
-				<span>Image Library</span>
-			</a>
-		</div>
 
-		<div class="flex flex-col gap-1">
-			<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2">Operations</div>
-			<a href="/tasks" class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/tasks', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}" aria-current={isActive('/tasks', $page.url.pathname) ? 'page' : undefined}>
+			<a
+				href="/tasks"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/tasks', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/tasks', $page.url.pathname) ? 'page' : undefined}
+			>
 				<Activity size={14} />
-				<span>Operation Pipeline</span>
+				<span>Tasks</span>
 			</a>
-			<a href="/events" class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/events', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}" aria-current={isActive('/events', $page.url.pathname) ? 'page' : undefined}>
+
+			<a
+				href="/events"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/events', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/events', $page.url.pathname) ? 'page' : undefined}
+			>
 				<AlertCircle size={14} />
-				<span>Incident Log</span>
+				<span>Events</span>
 			</a>
-			<a href="/backups" class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/backups', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}" aria-current={isActive('/backups', $page.url.pathname) ? 'page' : undefined}>
+
+			<a
+				href="/backup-jobs"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/backup-jobs', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/backup-jobs', $page.url.pathname) ? 'page' : undefined}
+			>
 				<ShieldCheck size={14} />
-				<span>Data Protection</span>
+				<span>Backups</span>
+			</a>
+
+			<a
+				href="/settings"
+				class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/settings', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+				aria-current={isActive('/settings', $page.url.pathname) ? 'page' : undefined}
+			>
+				<Settings size={14} />
+				<span>Settings</span>
 			</a>
 		</div>
 	</div>
 
+	<!-- Footer controls -->
 	<div class="flex gap-2">
-		<button type="button" class="w-7 h-7 grid place-items-center bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-[var(--radius-xs)] text-[var(--color-neutral-400)] cursor-pointer transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-700)] hover:text-[var(--color-sidebar-text-active,#ffffff)]" onclick={() => theme.toggle()}>
+		<button
+			type="button"
+			class="w-7 h-7 grid place-items-center bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-[var(--radius-xs)] text-[var(--color-neutral-400)] cursor-pointer transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-700)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+			onclick={() => theme.toggle()}
+			aria-label="Toggle theme"
+		>
 			{#if theme.value === 'dark'}<Sun size={12} />{:else}<Moon size={12} />{/if}
 		</button>
-		<a href="/settings" class="w-7 h-7 grid place-items-center bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-[var(--radius-xs)] text-[var(--color-neutral-400)] cursor-pointer transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-700)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"><Settings size={12} /></a>
-		<button type="button" class="w-7 h-7 grid place-items-center bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-[var(--radius-xs)] text-[var(--color-neutral-400)] cursor-pointer transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-700)] hover:text-[var(--color-sidebar-text-active,#ffffff)]" onclick={handleLogout}><LogOut size={12} /></button>
+		<a
+			href="/settings"
+			class="w-7 h-7 grid place-items-center bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-[var(--radius-xs)] text-[var(--color-neutral-400)] cursor-pointer transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-700)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+			aria-label="Settings"
+		>
+			<Settings size={12} />
+		</a>
+		<button
+			type="button"
+			class="w-7 h-7 grid place-items-center bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-[var(--radius-xs)] text-[var(--color-neutral-400)] cursor-pointer transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-700)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+			onclick={handleLogout}
+			aria-label="Sign out"
+		>
+			<LogOut size={12} />
+		</button>
 	</div>
 </nav>
 
@@ -225,7 +544,7 @@
 	}
 
 	.app-nav__tree-link--active {
-		background: rgba(143, 90, 42, 0.15) !important;
+		background: rgba(var(--color-primary-rgb), 0.15) !important;
 		color: var(--color-primary) !important;
 		border-left: 2px solid var(--color-primary);
 		padding-left: calc(0.5rem - 2px);

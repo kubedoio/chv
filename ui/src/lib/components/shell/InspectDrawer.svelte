@@ -101,7 +101,7 @@
 					</div>
 
 					<div class="flex flex-col gap-[0.625rem]">
-						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">Property Mesh</div>
+						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">Properties</div>
 						<PropertyMesh
 							architecture={details.architecture}
 							providerType={details.provider_type}
@@ -109,7 +109,7 @@
 					</div>
 
 					<div class="flex flex-col gap-[0.625rem]">
-						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">Mutation Controls</div>
+						<div class="text-[9px] font-extrabold text-[var(--color-neutral-500)] uppercase tracking-[0.1em]">Actions</div>
 						<MutationControls />
 					</div>
 

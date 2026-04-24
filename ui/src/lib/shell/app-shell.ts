@@ -69,33 +69,33 @@ export const navigationGroups: NavGroup[] = [
 	{
 		label: 'Compute',
 		items: [
-			{ href: '/vms', label: 'Virtual Machines', shortLabel: 'VMs', icon: Box },
-			{ href: '/images', label: 'Images / Templates', shortLabel: 'Images', icon: Image }
+			{ href: '/vms', label: 'Instances', shortLabel: 'Instances', icon: Box },
+			{ href: '/images', label: 'Images', shortLabel: 'Images', icon: Image }
 		]
 	},
 	{
 		label: 'Infrastructure',
 		items: [
-			{ href: '/nodes', label: 'Nodes', shortLabel: 'Nodes', icon: Server },
+			{ href: '/nodes', label: 'Hosts', shortLabel: 'Hosts', icon: Server },
 			{
 				href: '/clusters',
-				label: 'Datacenters / Clusters',
-				shortLabel: 'Clusters',
+				label: 'Clouds',
+				shortLabel: 'Clouds',
 				icon: Blocks
 			},
 			{ href: '/networks', label: 'Networks', shortLabel: 'Networks', icon: Network },
-			{ href: '/volumes', label: 'Volumes', shortLabel: 'Volumes', icon: HardDrive }
+			{ href: '/volumes', label: 'Storage Pools', shortLabel: 'Storage', icon: HardDrive }
 		]
 	},
 	{
 		label: 'Operations',
 		items: [
 			{ href: '/tasks', label: 'Tasks', shortLabel: 'Tasks', icon: Activity },
-			{ href: '/events', label: 'Events / Alerts', shortLabel: 'Events', icon: Activity },
+			{ href: '/events', label: 'Events', shortLabel: 'Events', icon: Activity },
 			{
-				href: '/maintenance',
-				label: 'Maintenance / Upgrades',
-				shortLabel: 'Maintenance',
+				href: '/backup-jobs',
+				label: 'Backups',
+				shortLabel: 'Backups',
 				icon: Wrench
 			}
 		]
@@ -103,8 +103,8 @@ export const navigationGroups: NavGroup[] = [
 	{
 		label: 'Administration',
 		items: [
-			{ href: '/settings', label: 'Settings / Access', shortLabel: 'Settings', icon: Settings },
-			{ href: '/settings/users', label: 'User Management', shortLabel: 'Users', icon: Users }
+			{ href: '/settings', label: 'Settings', shortLabel: 'Settings', icon: Settings },
+			{ href: '/settings/users', label: 'Users', shortLabel: 'Users', icon: Users }
 		]
 	}
 ];
@@ -182,9 +182,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/clusters',
-		navLabel: 'Datacenters / Clusters',
-		shortLabel: 'Clusters',
-		title: 'Datacenters / Clusters',
+		navLabel: 'Clouds',
+		shortLabel: 'Clouds',
+		title: 'Clouds',
 		eyebrow: 'Fleet topology',
 		description:
 			'Cluster inventory, readiness posture, and active work across datacenters.',
@@ -197,7 +197,7 @@ const pageDefinitions: PageDefinition[] = [
 			{
 				label: 'Primary view',
 				value: 'Cluster roster',
-				note: 'Datacenter, capacity posture, maintenance windows, and node counts.',
+				note: 'Cloud capacity posture, maintenance windows, and node counts.',
 				tone: 'healthy'
 			},
 			{
@@ -208,13 +208,13 @@ const pageDefinitions: PageDefinition[] = [
 			},
 			{
 				label: 'Related context',
-				value: 'Nodes, tasks, events',
+				value: 'Hosts, tasks, events',
 				note: 'Cross-link cluster detail into work history and incident context.',
 				tone: 'unknown'
 			}
 		],
 		focusAreas: [
-			'Datacenter and cluster inventory',
+			'Cloud and cluster inventory',
 			'Readiness, maintenance, and version summaries',
 			'Capacity hotspots',
 			'Cluster-scoped tasks',
@@ -228,13 +228,13 @@ const pageDefinitions: PageDefinition[] = [
 				hint: 'Summary cards remain visible while the inventory refreshes.'
 			},
 			empty: {
-				title: 'No clusters registered yet',
+				title: 'No clouds registered yet',
 				description:
 					'Register a datacenter and cluster with the control plane to populate this view.',
 				hint: 'Cluster enrollment workflows will be available from the fleet setup page.'
 			},
 			error: {
-				title: 'Cluster inventory unavailable',
+				title: 'Cloud inventory unavailable',
 				description:
 					'The cluster rollups could not be loaded. Navigation remains available.',
 				hint: 'Retry the request or check the events page for related alerts.'
@@ -243,9 +243,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/nodes',
-		navLabel: 'Nodes',
-		shortLabel: 'Nodes',
-		title: 'Nodes',
+		navLabel: 'Hosts',
+		shortLabel: 'Hosts',
+		title: 'Hosts',
 		eyebrow: 'Compute inventory',
 		description:
 			'Monitor node readiness, maintenance state, version skew, and infrastructure pressure across the fleet.',
@@ -269,7 +269,7 @@ const pageDefinitions: PageDefinition[] = [
 			},
 			{
 				label: 'Cross-links',
-				value: 'VMs, volumes, networks',
+				value: 'Instances, storage pools, networks',
 				note: 'Node detail tabs should connect directly to related resources and recent tasks.',
 				tone: 'unknown'
 			}
@@ -283,9 +283,9 @@ const pageDefinitions: PageDefinition[] = [
 		],
 		states: {
 			loading: {
-				title: 'Loading node roster',
+				title: 'Loading host roster',
 				description:
-					'Node readiness, capacity, and maintenance signals are being assembled.',
+					'Host readiness, capacity, and maintenance signals are being assembled.',
 				hint: 'Table structure remains visible while data refreshes.'
 			},
 			empty: {
@@ -295,7 +295,7 @@ const pageDefinitions: PageDefinition[] = [
 				hint: 'Node enrollment workflows will be available from the fleet setup page.'
 			},
 			error: {
-				title: 'Node inventory unavailable',
+				title: 'Host inventory unavailable',
 				description:
 					'The node roster could not be loaded. Navigation remains available.',
 				hint: 'Retry the request or check the events page for related alerts.'
@@ -304,9 +304,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/vms',
-		navLabel: 'Virtual Machines',
-		shortLabel: 'VMs',
-		title: 'Virtual Machines',
+		navLabel: 'Instances',
+		shortLabel: 'Instances',
+		title: 'Instances',
 		eyebrow: 'Workload operations',
 		description:
 			'Give operators a fast path into power state, health, placement, and the last task touching each VM.',
@@ -344,13 +344,13 @@ const pageDefinitions: PageDefinition[] = [
 		],
 		states: {
 			loading: {
-				title: 'Loading virtual machine inventory',
+				title: 'Loading instance inventory',
 				description:
 					'VM state, health, and placement details are being assembled.',
 				hint: 'Lifecycle actions remain visible while data refreshes.'
 			},
 			empty: {
-				title: 'No virtual machines found',
+				title: 'No instances found',
 				description:
 					'Create or import a VM to populate this page.',
 				hint: 'VM creation workflows will be available from the provisioning page.'
@@ -365,9 +365,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/volumes',
-		navLabel: 'Volumes',
-		shortLabel: 'Volumes',
-		title: 'Volumes',
+		navLabel: 'Storage Pools',
+		shortLabel: 'Storage',
+		title: 'Storage Pools',
 		eyebrow: 'Storage inventory',
 		description:
 			'Track attached volumes, backend class, health, capacity, and the last task that changed storage state.',
@@ -443,7 +443,7 @@ const pageDefinitions: PageDefinition[] = [
 			{
 				label: 'Primary list',
 				value: 'Network roster',
-				note: 'Scope, health, attached VMs, and public exposure belong in the first scan.',
+				note: 'Scope, health, attached instances, and public exposure belong in the first scan.',
 				tone: 'healthy'
 			},
 			{
@@ -454,7 +454,7 @@ const pageDefinitions: PageDefinition[] = [
 			},
 			{
 				label: 'Follow-up context',
-				value: 'Related VMs and tasks',
+				value: 'Related instances and tasks',
 				note: 'Every network row should connect to affected workloads and recent operations.',
 				tone: 'unknown'
 			}
@@ -612,9 +612,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/events',
-		navLabel: 'Events / Alerts',
+		navLabel: 'Events',
 		shortLabel: 'Events',
-		title: 'Events / Alerts',
+		title: 'Events',
 		eyebrow: 'Incident context',
 		description:
 			'Surface recent events and active alerts with severity, resource scope, and acknowledgement state.',
@@ -673,9 +673,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/maintenance',
-		navLabel: 'Maintenance / Upgrades',
-		shortLabel: 'Maintenance',
-		title: 'Maintenance / Upgrades',
+		navLabel: 'Backups',
+		shortLabel: 'Backups',
+		title: 'Backups',
 		eyebrow: 'Change coordination',
 		description:
 			'Coordinate maintenance windows, draining, and upgrade visibility without hiding the related tasks and alerts.',

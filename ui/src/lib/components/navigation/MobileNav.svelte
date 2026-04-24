@@ -38,8 +38,8 @@
 	const navItems = [
 		{ id: 'overview', label: 'Overview', icon: LayoutGrid, href: '/' },
 		{ id: 'global-images', label: 'Images', icon: ImageIcon, href: '/images' },
-		{ id: 'global-storage', label: 'Storage', icon: HardDrive, href: '/storage' },
 		{ id: 'global-networks', label: 'Networks', icon: Network, href: '/networks' },
+		{ id: 'global-storage', label: 'Storage Pools', icon: HardDrive, href: '/storage' },
 		{ id: 'settings', label: 'Settings', icon: Settings, href: '/settings' },
 	];
 
@@ -188,7 +188,7 @@
 							>
 								<Server size={20} aria-hidden="true" />
 								<span>{node.name}</span>
-								<span class="status-indicator" class:online={node.status === 'online'}></span>
+								<span class="status-indicator" class:online={node.status === 'online'} aria-label={node.status === 'online' ? 'Online' : 'Offline'}></span>
 							</a>
 						</li>
 					{/each}

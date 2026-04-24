@@ -3,7 +3,7 @@ import { mutateVm, deleteVm } from '$lib/bff/vms';
 import { BFFError } from '$lib/bff/client';
 import type { MutateVmResponse } from '$lib/bff/types';
 
-const VALID_VM_ACTIONS = ['start', 'stop', 'restart', 'delete'] as const;
+const VALID_VM_ACTIONS = ['start', 'stop', 'restart', 'delete', 'shutdown', 'poweroff'] as const;
 type ValidVmAction = (typeof VALID_VM_ACTIONS)[number];
 
 export async function handleVmMutation(
@@ -30,11 +30,16 @@ export async function handleVmMutation(
 				accepted: true,
 				task_id: result.operation_id,
 				vm_id: result.vm_id,
-				summary: `Delete VM accepted`,
+				summary: `Delete instance accepted`,
 				action: validAction
 			};
 		}
-		const result = await mutateVm({ vm_id, action: validAction, force: false }, token);
+
+		// Map shutdown/poweroff to the underlying stop action with force flag
+		const apiAction = validAction === 'shutdown' || validAction === 'poweroff' ? 'stop' : validAction;
+		const isForce = validAction === 'poweroff';
+
+		const result = await mutateVm({ vm_id, action: apiAction, force: isForce }, token);
 		return { ...result, action: validAction };
 	} catch (err) {
 		const message = err instanceof BFFError

@@ -356,6 +356,64 @@ export type ResourceType =
   | 'logs' 
   | 'metrics';
 
+// --------------------------------------------------------------------------
+// Instance Resource Tree Contracts (left-panel redesign)
+// --------------------------------------------------------------------------
+
+export type InstanceStatus = 'running' | 'stopped' | 'error' | 'paused' | 'unknown';
+
+export type InstanceActionId =
+  | 'open'
+  | 'console'
+  | 'start'
+  | 'shutdown'
+  | 'poweroff'
+  | 'restart'
+  | 'rename'
+  | 'delete';
+
+export interface InstanceActionDefinition {
+  id: InstanceActionId;
+  label: string;
+  enabled: boolean;
+  dangerous: boolean;
+  requiresConfirmation: boolean;
+  disabledReason?: string;
+}
+
+export interface ResourceTreeNode {
+  id: string;
+  type: 'cloud' | 'host' | 'group' | 'instance' | 'network' | 'storage_pool' | 'image' | 'global_nav';
+  name: string;
+  status?: InstanceStatus | 'online' | 'offline' | 'error' | 'maintenance';
+  route?: string;
+  children?: ResourceTreeNode[];
+  actions?: InstanceActionDefinition[];
+  metadata?: Record<string, unknown>;
+  count?: number;
+}
+
+export interface HostTreeData {
+  hostId: string;
+  hostName: string;
+  hostStatus: 'online' | 'offline' | 'error' | 'maintenance';
+  instances: InstanceTreeItem[];
+}
+
+export interface InstanceTreeItem {
+  id: string;
+  name: string;
+  status: InstanceStatus;
+  nodeId: string;
+}
+
+export interface GlobalNavItem {
+  id: string;
+  label: string;
+  route: string;
+  icon: string;
+}
+
 // Backup types
 export interface BackupJob {
   id: string;
