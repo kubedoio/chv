@@ -34,6 +34,8 @@ pub const DEFAULT_LANDLOCK_ENABLE: bool = false;
 pub const DEFAULT_SERIAL_MODE: &str = "Pty";
 pub const DEFAULT_CONSOLE_MODE: &str = "Off";
 pub const DEFAULT_PVPANIC: bool = false;
+pub const DEFAULT_TPM_TYPE: Option<&str> = None;
+pub const DEFAULT_TPM_SOCKET_PATH: Option<&str> = None;
 
 pub const VALID_SERIAL_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
 pub const VALID_CONSOLE_MODES: &[&str] = &["Pty", "File", "Off", "Null"];

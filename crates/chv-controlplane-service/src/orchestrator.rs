@@ -1,5 +1,8 @@
 use crate::node_client::NodeClient;
-use chv_controlplane_store::{OperationRepository, OperationStatusUpdateInput, StorePool};
+use chv_controlplane_store::{
+    HypervisorSettingsRepository, HypervisorSettingsRow, OperationRepository,
+    OperationStatusUpdateInput, StorePool,
+};
 use chv_controlplane_types::domain::{OperationId, OperationStatus};
 use chv_errors::ChvError;
 use std::path::PathBuf;
@@ -450,31 +453,33 @@ impl Orchestrator {
             id: vm_id.to_string(),
         })?;
 
-        let global = sqlx::query_as::<_, HypervisorSettingsRow>(
-            "SELECT * FROM hypervisor_settings WHERE id = 1"
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(vm_id = %vm_id, error = %e, "failed to fetch hypervisor_settings, using defaults");
-            HypervisorSettingsRow {
-            cpu_nested: chv_common::hypervisor::DEFAULT_CPU_NESTED,
-            cpu_amx: chv_common::hypervisor::DEFAULT_CPU_AMX,
-            cpu_kvm_hyperv: chv_common::hypervisor::DEFAULT_CPU_KVM_HYPERV,
-            memory_mergeable: chv_common::hypervisor::DEFAULT_MEMORY_MERGEABLE,
-            memory_hugepages: chv_common::hypervisor::DEFAULT_MEMORY_HUGEPAGES,
-            memory_shared: chv_common::hypervisor::DEFAULT_MEMORY_SHARED,
-            memory_prefault: chv_common::hypervisor::DEFAULT_MEMORY_PREFAULT,
-            iommu: chv_common::hypervisor::DEFAULT_IOMMU,
-            rng_src: chv_common::hypervisor::DEFAULT_RNG_SRC.to_string(),
-            watchdog: chv_common::hypervisor::DEFAULT_WATCHDOG,
-            landlock_enable: chv_common::hypervisor::DEFAULT_LANDLOCK_ENABLE,
-            serial_mode: chv_common::hypervisor::DEFAULT_SERIAL_MODE.to_string(),
-            console_mode: chv_common::hypervisor::DEFAULT_CONSOLE_MODE.to_string(),
-            pvpanic: chv_common::hypervisor::DEFAULT_PVPANIC,
-            tpm_type: None,
-            tpm_socket_path: None,
-        }});
+        let global = HypervisorSettingsRepository::new(self.pool.clone())
+            .get_settings()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(vm_id = %vm_id, error = %e, "failed to fetch hypervisor_settings, using defaults");
+                HypervisorSettingsRow {
+                    id: 1,
+                    cpu_nested: chv_common::hypervisor::DEFAULT_CPU_NESTED,
+                    cpu_amx: chv_common::hypervisor::DEFAULT_CPU_AMX,
+                    cpu_kvm_hyperv: chv_common::hypervisor::DEFAULT_CPU_KVM_HYPERV,
+                    memory_mergeable: chv_common::hypervisor::DEFAULT_MEMORY_MERGEABLE,
+                    memory_hugepages: chv_common::hypervisor::DEFAULT_MEMORY_HUGEPAGES,
+                    memory_shared: chv_common::hypervisor::DEFAULT_MEMORY_SHARED,
+                    memory_prefault: chv_common::hypervisor::DEFAULT_MEMORY_PREFAULT,
+                    iommu: chv_common::hypervisor::DEFAULT_IOMMU,
+                    rng_src: chv_common::hypervisor::DEFAULT_RNG_SRC.to_string(),
+                    watchdog: chv_common::hypervisor::DEFAULT_WATCHDOG,
+                    landlock_enable: chv_common::hypervisor::DEFAULT_LANDLOCK_ENABLE,
+                    serial_mode: chv_common::hypervisor::DEFAULT_SERIAL_MODE.to_string(),
+                    console_mode: chv_common::hypervisor::DEFAULT_CONSOLE_MODE.to_string(),
+                    pvpanic: chv_common::hypervisor::DEFAULT_PVPANIC,
+                    tpm_type: chv_common::hypervisor::DEFAULT_TPM_TYPE.map(|s| s.to_string()),
+                    tpm_socket_path: chv_common::hypervisor::DEFAULT_TPM_SOCKET_PATH.map(|s| s.to_string()),
+                    profile_id: None,
+                    updated_at: String::new(),
+                }
+            });
 
         let volume_rows = sqlx::query_as::<_, VolumeDesiredStateRow>(
             r#"
@@ -591,8 +596,8 @@ impl Orchestrator {
             serial_mode: Some(vm_row.hv_serial_mode.unwrap_or_else(|| global.serial_mode.clone())),
             console_mode: Some(vm_row.hv_console_mode.unwrap_or_else(|| global.console_mode.clone())),
             pvpanic: Some(vm_row.hv_pvpanic.unwrap_or(global.pvpanic)),
-            tpm_type: vm_row.hv_tpm_type.clone().or_else(|| global.tpm_type.clone()),
-            tpm_socket_path: vm_row.hv_tpm_socket_path.clone().or_else(|| global.tpm_socket_path.clone()),
+            tpm_type: vm_row.hv_tpm_type.clone().or_else(|| global.tpm_type.clone()).or_else(|| chv_common::hypervisor::DEFAULT_TPM_TYPE.map(|s| s.to_string())),
+            tpm_socket_path: vm_row.hv_tpm_socket_path.clone().or_else(|| global.tpm_socket_path.clone()).or_else(|| chv_common::hypervisor::DEFAULT_TPM_SOCKET_PATH.map(|s| s.to_string())),
         };
 
         let spec = AgentVmSpec {
@@ -683,25 +688,6 @@ struct VmDesiredStateRow {
     hv_tpm_socket_path: Option<String>,
 }
 
-#[derive(sqlx::FromRow)]
-struct HypervisorSettingsRow {
-    cpu_nested: bool,
-    cpu_amx: bool,
-    cpu_kvm_hyperv: bool,
-    memory_mergeable: bool,
-    memory_hugepages: bool,
-    memory_shared: bool,
-    memory_prefault: bool,
-    iommu: bool,
-    rng_src: String,
-    watchdog: bool,
-    landlock_enable: bool,
-    serial_mode: String,
-    console_mode: String,
-    pvpanic: bool,
-    tpm_type: Option<String>,
-    tpm_socket_path: Option<String>,
-}
 
 #[derive(sqlx::FromRow)]
 struct VolumeDesiredStateRow {

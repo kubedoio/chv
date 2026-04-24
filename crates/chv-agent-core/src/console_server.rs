@@ -13,11 +13,14 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
+nix::ioctl_write_ptr_bad!(set_winsize, nix::libc::TIOCSWINSZ, nix::libc::winsize);
+
 #[derive(Clone)]
 pub struct ConsoleServer {
     vm_runtime: crate::vm_runtime::VmRuntime,
     jwt_secret: String,
     rate_limiter: Arc<Mutex<HashMap<String, Instant>>>,
+    consumed_tokens: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[derive(Clone)]
@@ -25,6 +28,7 @@ struct ConsoleState {
     vm_runtime: crate::vm_runtime::VmRuntime,
     jwt_secret: String,
     rate_limiter: Arc<Mutex<HashMap<String, Instant>>>,
+    consumed_tokens: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -52,6 +56,7 @@ impl ConsoleServer {
             vm_runtime,
             jwt_secret,
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+            consumed_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -60,7 +65,27 @@ impl ConsoleServer {
             vm_runtime: self.vm_runtime.clone(),
             jwt_secret: self.jwt_secret.clone(),
             rate_limiter: self.rate_limiter.clone(),
+            consumed_tokens: self.consumed_tokens.clone(),
         };
+
+        // Spawn periodic cleanup of rate limiter and consumed token cache
+        let rate_limiter = self.rate_limiter.clone();
+        let consumed_tokens = self.consumed_tokens.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let now = Instant::now();
+                let cutoff = Duration::from_secs(120);
+                if let Ok(mut limits) = rate_limiter.lock() {
+                    limits.retain(|_, last| now.duration_since(*last) < cutoff);
+                }
+                if let Ok(mut tokens) = consumed_tokens.lock() {
+                    tokens.retain(|_, last| now.duration_since(*last) < cutoff);
+                }
+            }
+        });
+
         let app = Router::new()
             .route("/vms/:vm_id/console", get(Self::ws_handler))
             .with_state(state);
@@ -104,6 +129,17 @@ impl ConsoleServer {
                 return StatusCode::UNAUTHORIZED.into_response();
             }
         }
+
+        // Replay prevention: reject tokens that have already been used
+        {
+            let mut tokens = state.consumed_tokens.lock().unwrap();
+            if tokens.contains_key(&params.token) {
+                tracing::warn!(vm_id = %vm_id, "console token replay detected");
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            tokens.insert(params.token.clone(), Instant::now());
+        }
+
         let vm_runtime = state.vm_runtime.clone();
         ws.on_upgrade(move |socket| Self::handle_socket(socket, vm_id, vm_runtime))
     }
@@ -234,15 +270,15 @@ impl ConsoleServer {
 }
 
 fn set_pty_size(fd: std::os::fd::RawFd, cols: u16, rows: u16) {
-    let ws = libc::winsize {
+    let ws = nix::libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
     unsafe {
-        if libc::ioctl(fd, libc::TIOCSWINSZ, &ws) < 0 {
-            tracing::warn!(error = %std::io::Error::last_os_error(), "failed to set pty size");
+        if let Err(e) = set_winsize(fd, &ws) {
+            tracing::warn!(error = %e, "failed to set pty size");
         }
     }
 }

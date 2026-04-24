@@ -817,6 +817,8 @@ ExecStartPre=/bin/chmod -R 775 /run/chv
 ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
+KillMode=mixed
+TimeoutStopSec=5
 RuntimeDirectory=chv
 LogsDirectory=chv
 
@@ -967,6 +969,7 @@ start_services() {
     if [ "${seeded_tokens}" -lt 1 ] 2>/dev/null; then
         fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
     fi
+    chown "${CHV_USER}:${CHV_USER}" "${CHV_DB_PATH}"
 
     # Ensure agent cache is cleared so reinstall triggers fresh enrollment
     rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"

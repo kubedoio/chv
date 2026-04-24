@@ -268,6 +268,7 @@ mod tests {
             memory_bytes: 8589934592,
             storage_classes: vec![],
             network_capabilities: vec![],
+            hypervisor_capabilities: vec![],
             labels: std::collections::HashMap::new(),
         };
         let versions = proto::ServiceVersions {

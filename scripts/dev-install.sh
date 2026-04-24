@@ -195,6 +195,8 @@ export INSTALL_CHV_NO_SEED="$NO_SEED"
 
 "$PROJECT_ROOT/scripts/install.sh"
 
+chown chv:chv /var/lib/chv/controlplane.db 2>/dev/null || true
+
 echo ""
 echo "Dev install complete! Version: $VERSION"
 if [ "$NO_SEED" = "0" ]; then

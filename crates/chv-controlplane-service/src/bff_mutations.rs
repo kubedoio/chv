@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use chv_controlplane_store::StorePool;
-use chv_controlplane_types::domain::Generation;
+use chv_controlplane_store::{OperationCreateInput, OperationRepository, StorePool};
+use chv_controlplane_types::domain::{Generation, OperationId, OperationStatus, ResourceId, ResourceKind};
 use chv_webui_bff::{BffError, MutationService};
 use chv_webui_bff_api::chv_webui_bff_v1::{
     MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse,
@@ -404,11 +404,105 @@ impl MutationService for ControlPlaneMutationService {
 
     async fn mutate_network(
         &self,
-        _network_id: String,
-        _action: String,
-        _force: bool,
-        _requested_by: String,
+        network_id: String,
+        action: String,
+        force: bool,
+        requested_by: String,
     ) -> Result<MutateNetworkResponse, BffError> {
-        Err(BffError::NotImplemented)
+        let node_id =
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT node_id FROM networks WHERE network_id = $1",
+            )
+            .bind(&network_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to look up network: {}", e)))?
+            .ok_or_else(|| BffError::NotFound(format!("network {} not found", network_id)))?;
+
+        let operation_repo = OperationRepository::new(self.pool.clone());
+
+        let (operation_type, desired_status, summary) = match action.as_str() {
+            "start" => ("StartNetwork", "Active", "start network accepted"),
+            "stop" => {
+                let op = if force { "ForceStopNetwork" } else { "StopNetwork" };
+                (op, "Inactive", "stop network accepted")
+            }
+            "restart" => ("RestartNetwork", "Restarting", "restart network accepted"),
+            _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
+        };
+
+        let generation = Self::fresh_generation();
+        let now = Self::now_ms();
+        let resource_id = ResourceId::new(network_id.clone())
+            .map_err(|e| BffError::Internal(format!("invalid network_id: {}", e)))?;
+
+        let idempotency_key = match (&node_id, force && action == "stop") {
+            (Some(nid), true) => format!(
+                "{}:{}:{}:{}:force=true",
+                operation_type, nid, network_id, generation
+            ),
+            (Some(nid), false) => {
+                format!("{}:{}:{}:{}", operation_type, nid, network_id, generation)
+            }
+            (None, true) => format!(
+                "{}:{}:{}:force=true",
+                operation_type, network_id, generation
+            ),
+            (None, false) => {
+                format!("{}:{}:{}", operation_type, network_id, generation)
+            }
+        };
+
+        let operation_id =
+            OperationId::new(format!("{}-{}", operation_type, chv_common::gen_short_id()))
+                .map_err(|e| BffError::Internal(format!("invalid operation_id: {}", e)))?;
+
+        let receipt = operation_repo
+            .create_or_get(&OperationCreateInput {
+                operation_id: operation_id.clone(),
+                idempotency_key,
+                resource_kind: ResourceKind::Network,
+                resource_id: Some(resource_id),
+                operation_type: operation_type.into(),
+                status: OperationStatus::Pending,
+                requested_by: Some(requested_by.clone()),
+                updated_by: None,
+                desired_generation: Some(generation),
+                observed_generation: None,
+                correlation_id: None,
+                requested_unix_ms: now,
+            })
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to create operation: {}", e)))?;
+
+        sqlx::query(
+            r#"
+            UPDATE network_desired_state
+            SET desired_status = $1,
+                desired_generation = $2,
+                requested_by = $3,
+                requested_at = strftime('%Y-%m-%dT%H:%M:%SZ', $4 / 1000.0, 'unixepoch'),
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $4 / 1000.0, 'unixepoch')
+            WHERE network_id = $5
+            "#,
+        )
+        .bind(desired_status)
+        .bind(
+            i64::try_from(generation.get())
+                .map_err(|e| BffError::Internal(format!("generation out of range: {}", e)))?,
+        )
+        .bind(&requested_by)
+        .bind(now)
+        .bind(&network_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to update network desired state: {}", e)))?;
+
+        Ok(MutateNetworkResponse {
+            accepted: true,
+            task_id: receipt.operation_id.to_string(),
+            network_id,
+            summary: summary.into(),
+        })
     }
 }

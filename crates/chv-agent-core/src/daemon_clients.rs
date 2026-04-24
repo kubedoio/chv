@@ -1,13 +1,16 @@
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{
     network_service_client::NetworkServiceClient, AttachVmNicRequest, DeleteNetworkTopologyRequest,
-    DetachVmNicRequest, EnsureNetworkTopologyRequest, ExposeServiceRequest,
+    DetachVmNicRequest, DhcpScope, DnsScope, EnsureDhcpScopeRequest, EnsureDnsScopeRequest,
+    EnsureNetworkTopologyRequest, ExposeServiceRequest, NetworkHealthRequest,
     ListNamespaceStateRequest, SetFirewallPolicyRequest, SetNatPolicyRequest,
     WithdrawServiceExposureRequest,
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
-    DetachVolumeFromVmRequest, ListVolumeSessionsRequest, OpenVolumeRequest, ResizeVolumeRequest,
+    DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest, VolumeHealthRequest,
+    OpenVolumeRequest, PrepareCloneRequest, PrepareSnapshotRequest, ResizeVolumeRequest,
+    SetDevicePolicyRequest,
 };
 use std::path::Path;
 use tokio::net::UnixStream;
@@ -218,6 +221,106 @@ impl StordClient {
         };
         self.inner
             .resize_volume(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn get_volume_health(
+        &mut self,
+        volume_id: &str,
+    ) -> Result<chv_stord_api::chv_stord_api::VolumeHealthResponse, ChvError> {
+        let req = VolumeHealthRequest {
+            volume_id: volume_id.to_string(),
+        };
+        let resp = self
+            .inner
+            .get_volume_health(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        Ok(resp)
+    }
+
+    pub async fn prepare_snapshot(
+        &mut self,
+        volume_id: &str,
+        snapshot_name: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = PrepareSnapshotRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        };
+        self.inner
+            .prepare_snapshot(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn prepare_clone(
+        &mut self,
+        volume_id: &str,
+        clone_name: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = PrepareCloneRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            clone_name: clone_name.to_string(),
+        };
+        self.inner
+            .prepare_clone(req)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn set_device_policy(
+        &mut self,
+        volume_id: &str,
+        policy: DevicePolicy,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = SetDevicePolicyRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            policy: Some(policy),
+        };
+        self.inner
+            .set_device_policy(req)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -540,6 +643,91 @@ impl NwdClient {
         };
         self.inner
             .detach_vm_nic(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn get_network_health(
+        &mut self,
+        network_id: &str,
+    ) -> Result<chv_nwd_api::chv_nwd_api::NetworkHealthResponse, ChvError> {
+        let req = NetworkHealthRequest {
+            network_id: network_id.to_string(),
+        };
+        let resp = self
+            .inner
+            .get_network_health(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        Ok(resp)
+    }
+
+    pub async fn ensure_dhcp_scope(
+        &mut self,
+        network_id: &str,
+        cidr: &str,
+        range_start: &str,
+        range_end: &str,
+        dns_servers: Vec<String>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = EnsureDhcpScopeRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            scope: Some(DhcpScope {
+                network_id: network_id.to_string(),
+                cidr: cidr.to_string(),
+                range_start: range_start.to_string(),
+                range_end: range_end.to_string(),
+                dns_servers,
+            }),
+        };
+        self.inner
+            .ensure_dhcp_scope(req)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn ensure_dns_scope(
+        &mut self,
+        network_id: &str,
+        forwarders: Vec<String>,
+        static_records: std::collections::HashMap<String, String>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = EnsureDnsScopeRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            scope: Some(DnsScope {
+                network_id: network_id.to_string(),
+                forwarders,
+                static_records,
+            }),
+        };
+        self.inner
+            .ensure_dns_scope(req)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
