@@ -33,7 +33,8 @@
 	let openGroups = $state<Record<string, boolean>>({
 		'dc-1': true,
 		'cl-1': true,
-		'nodes': true
+		'nodes': true,
+		'instances': true
 	});
 	let searchQuery = $state('');
 
@@ -57,13 +58,13 @@
 				)
 	);
 
-	function filteredVms(nodeId: string) {
-		const vms = inventory.vms.filter(v => v.node_id === nodeId);
-		if (searchQuery.trim() === '') return vms;
-		return vms.filter(v =>
-			v.name.toLowerCase().includes(searchQuery.toLowerCase())
-		);
-	}
+	const filteredAllVms = $derived(
+		searchQuery.trim() === ''
+			? inventory.vms
+			: inventory.vms.filter(v =>
+					v.name.toLowerCase().includes(searchQuery.toLowerCase())
+				)
+	);
 
 	async function handleLogout() {
 		try {
@@ -139,22 +140,36 @@
 											<Server size={12} />
 											<span>{node.name}</span>
 										</a>
-										
-										<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
-											{#each filteredVms(node.id) as vm}
-												<a 
-													href="/vms/{vm.id}" 
-													class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {selection.active.id === vm.id ? 'app-nav__tree-link--active' : ''}"
-													onclick={() => handleSelection('vm', vm.id, vm.name)}
-												>
-													<div class="w-1 h-1 rounded-full {vm.actual_state === 'running' ? 'bg-[var(--color-success)]' : 'bg-[var(--color-warning)]'}"></div>
-													<Box size={10} />
-													<span>{vm.name}</span>
-												</a>
-											{/each}
-										</div>
 									</div>
 								{/each}
+
+								<div class="flex flex-col">
+									<button class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]" aria-expanded={openGroups['instances']} onclick={() => toggleGroup('instances')}>
+										<ChevronDown size={10} class={!openGroups['instances'] ? '-rotate-90' : ''} />
+										<Box size={12} />
+										<span>Instances</span>
+									</button>
+
+									{#if openGroups['instances']}
+										<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
+											{#if filteredAllVms.length === 0}
+												<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No VM instances.</div>
+											{:else}
+												{#each filteredAllVms as vm}
+													<a
+														href="/vms/{vm.id}"
+														class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {selection.active.id === vm.id ? 'app-nav__tree-link--active' : ''}"
+														onclick={() => handleSelection('vm', vm.id, vm.name)}
+													>
+														<div class="w-1 h-1 rounded-full {vm.actual_state === 'running' ? 'bg-[var(--color-success)]' : 'bg-[var(--color-warning)]'}"></div>
+														<Box size={10} />
+														<span>{vm.name}</span>
+													</a>
+												{/each}
+											{/if}
+										</div>
+									{/if}
+								</div>
 							</div>
 						{/if}
 					</div>

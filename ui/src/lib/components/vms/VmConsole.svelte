@@ -17,12 +17,17 @@
 	let terminalEl: HTMLDivElement;
 	let terminal: Terminal;
 	let fitAddon: FitAddon;
-	let socket: WebSocket;
+	let socket: WebSocket | undefined;
+	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	let resizeObserver: ResizeObserver | undefined;
+	let activeSocketUrl = '';
 	let connected = $state(false);
 	let statusText = $state('Disconnected');
 	let copied = $state(false);
 	let copyTimer: ReturnType<typeof setTimeout>;
 	let wsError = $state('');
+	let terminalReady = $state(false);
+	let manualDisconnect = $state(false);
 
 	function validateWsUrl(url: string): boolean {
 		// Allow relative paths (starting with /) — they're always same-origin
@@ -45,7 +50,24 @@
 			: `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}${url}`;
 	}
 
+	function clearReconnectTimer() {
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
+		}
+	}
+
+	function scheduleReconnect() {
+		if (manualDisconnect || !running || !consoleUrl || !terminalReady) return;
+		clearReconnectTimer();
+		statusText = 'Reconnecting';
+		reconnectTimer = setTimeout(() => {
+			handleReconnect(false);
+		}, 1500);
+	}
+
 	function connectWith(url: string) {
+		if (!terminal) return;
 		if (!validateWsUrl(url)) {
 			wsError = `Refused to connect: WebSocket URL does not match the application origin.`;
 			statusText = 'Connection blocked';
@@ -53,12 +75,24 @@
 			return;
 		}
 		wsError = '';
+		clearReconnectTimer();
+		const wsUrl = buildWsUrl(url);
+		if (
+			socket &&
+			activeSocketUrl === wsUrl &&
+			(socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+		) {
+			return;
+		}
+
 		if (socket) {
+			socket.onclose = null;
 			socket.close();
 			// Clear terminal on reconnect so scrollback isn't duplicated
 			terminal.clear();
 		}
-		const wsUrl = buildWsUrl(url);
+		activeSocketUrl = wsUrl;
+		statusText = 'Connecting';
 		socket = new WebSocket(wsUrl);
 		socket.binaryType = 'arraybuffer';
 
@@ -72,6 +106,8 @@
 			if (event.data instanceof ArrayBuffer) {
 				const data = new Uint8Array(event.data);
 				terminal.write(data);
+			} else if (typeof event.data === 'string') {
+				terminal.write(event.data);
 			}
 		};
 
@@ -79,17 +115,20 @@
 			connected = false;
 			statusText = 'Disconnected';
 			terminal.writeln('\r\n\x1b[31m[Disconnected]\x1b[0m');
-			// No auto-reconnect: user controls reconnection explicitly
+			scheduleReconnect();
 		};
 
 		socket.onerror = () => {
 			connected = false;
-			statusText = 'Disconnected';
+			statusText = 'Connection error';
 			terminal.writeln('\r\n\x1b[31m[Connection error]\x1b[0m');
 		};
 	}
 
-	async function handleReconnect() {
+	async function handleReconnect(userInitiated = true) {
+		if (userInitiated) {
+			manualDisconnect = false;
+		}
 		let urlToUse = consoleUrl;
 
 		if (getConsoleUrl) {
@@ -106,6 +145,8 @@
 	}
 
 	function handleDisconnect() {
+		manualDisconnect = true;
+		clearReconnectTimer();
 		if (socket) {
 			socket.onclose = () => {
 				connected = false;
@@ -166,27 +207,36 @@
 	}
 
 	$effect(() => {
-		if (!terminal) return;
-		if (running && consoleUrl) {
+		if (!terminalReady) return;
+		if (running && consoleUrl && !manualDisconnect) {
 			connectWith(consoleUrl);
 		} else {
 			if (socket) {
+				socket.onclose = null;
 				socket.close();
-				socket = undefined as any;
+				socket = undefined;
 			}
+			clearReconnectTimer();
 			connected = false;
 			statusText = running ? 'Disconnected' : 'Instance not running';
-			showNotRunning();
+			if (!running) showNotRunning();
 		}
 	});
 
 	onMount(() => {
+		const rootStyle = getComputedStyle(document.documentElement);
 		terminal = new Terminal({
 			cursorBlink: true,
-			fontSize: 14,
-			fontFamily: 'monospace',
+			fontSize: 13,
+			fontFamily: rootStyle.getPropertyValue('--font-mono').trim() || 'monospace',
 			allowProposedApi: true,
-			scrollback: 10000
+			scrollback: 10000,
+			theme: {
+				background: rootStyle.getPropertyValue('--shell-surface-muted').trim() || '#f1ede4',
+				foreground: rootStyle.getPropertyValue('--shell-text').trim() || '#161616',
+				cursor: rootStyle.getPropertyValue('--shell-accent').trim() || '#8f5a2a',
+				selectionBackground: 'rgba(143, 90, 42, 0.22)'
+			}
 		});
 		fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
@@ -205,13 +255,21 @@
 			}
 		});
 
+		resizeObserver = new ResizeObserver(() => {
+			fitAddon?.fit();
+		});
+		resizeObserver.observe(terminalEl);
+
 		if (!running) {
 			showNotRunning();
 		}
+		terminalReady = true;
 	});
 
 	onDestroy(() => {
 		clearTimeout(copyTimer);
+		clearReconnectTimer();
+		resizeObserver?.disconnect();
 		socket?.close();
 		terminal?.dispose();
 	});
@@ -261,7 +319,7 @@
 					<button
 						class="toolbar-btn"
 						title="Reconnect"
-						onclick={handleReconnect}
+						onclick={() => handleReconnect()}
 					>
 						<PlugZap size={14} />
 					</button>
@@ -275,9 +333,9 @@
 <style>
 	.console-wrapper {
 		width: 100%;
-		background: var(--console-bg, #1a1a1a);
-		border-radius: 8px;
-		border: 1px solid var(--console-line, #333);
+		background: var(--shell-surface);
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--shell-line);
 		overflow: hidden;
 	}
 
@@ -285,71 +343,77 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.5rem 0.75rem;
-		background: var(--console-surface, #252525);
-		border-bottom: 1px solid var(--console-line, #333);
-		font-size: 0.8rem;
+		padding: 0.45rem 0.65rem;
+		background: var(--shell-surface-muted);
+		border-bottom: 1px solid var(--shell-line);
+		font-size: var(--text-xs);
 	}
 
 	.toolbar-left {
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
+		gap: 0.6rem;
 	}
 
 	.toolbar-right {
 		display: flex;
 		align-items: center;
-		gap: 0.25rem;
+		gap: 0.2rem;
 	}
 
 	.console-status {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		color: var(--console-text-secondary, #aaa);
+		color: var(--shell-text-secondary);
 	}
 
 	.status-dot {
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
-		background: var(--console-disconnected, #ef4444);
+		background: var(--color-danger);
 	}
 
 	.status-dot.connected {
-		background: var(--console-connected, #22c55e);
+		background: var(--color-success);
 	}
 
 	.console-meta {
-		color: var(--console-text-muted, #888);
-		font-family: monospace;
+		color: var(--shell-text-muted);
+		font-family: var(--font-mono);
 	}
 
 	.toolbar-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 28px;
-		height: 28px;
+		width: 1.75rem;
+		height: 1.75rem;
 		padding: 0;
 		background: transparent;
-		border: none;
-		border-radius: 4px;
-		color: var(--console-text-secondary, #aaa);
+		border: 1px solid transparent;
+		border-radius: var(--radius-xs);
+		color: var(--shell-text-secondary);
 		cursor: pointer;
-		transition: background 0.15s ease;
+		transition:
+			background 120ms ease,
+			border-color 120ms ease,
+			color 120ms ease;
 	}
 
 	.toolbar-btn:hover {
-		background: rgba(255, 255, 255, 0.08);
-		color: var(--console-text, #ddd);
+		background: var(--shell-accent-soft);
+		border-color: var(--shell-accent);
+		color: var(--shell-text);
 	}
 
 	.terminal-container {
 		width: 100%;
-		height: 500px;
-		padding: 8px;
+		height: min(54vh, 34rem);
+		min-height: 22rem;
+		padding: 0.5rem;
+		background: var(--shell-surface-muted);
 	}
 
 	:global(.xterm) {
@@ -360,11 +424,15 @@
 		background: transparent !important;
 	}
 
+	:global(.xterm-viewport) {
+		background: transparent !important;
+	}
+
 	.console-error {
 		padding: 0.5rem 0.75rem;
-		background: var(--console-error-bg, #3b1111);
-		border-bottom: 1px solid var(--console-error-border, #7f1d1d);
-		color: var(--console-error-text, #fca5a5);
-		font-size: 0.8rem;
+		background: var(--color-danger-light);
+		border-bottom: 1px solid var(--color-danger);
+		color: var(--color-danger-dark);
+		font-size: var(--text-xs);
 	}
 </style>

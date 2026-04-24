@@ -17,7 +17,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { 
     Play, Square, RotateCcw, Trash2, Database, Network, Activity, 
     Info, AlertTriangle, ChevronRight, Terminal, FileText, Power,
-    ShieldCheck, ArrowLeft
+    ShieldCheck, ArrowLeft, ChevronLeft
   } from 'lucide-svelte';
 	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
@@ -37,6 +37,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	let snapshots = $state<import('$lib/api/types').VMSnapshot[]>([]);
 	let snapshotsLoading = $state(false);
 	let snapshotsError = $state<string | null>(null);
+	let supportRailOpen = $state(false);
 
 	async function ensureVmConsole() {
 		if (!browser || VmConsoleComponent) return;
@@ -237,7 +238,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 			</aside>
 		</div>
 	{:else if detail.state === 'empty'}
-		<EmptyInfrastructureState title="Workload Identity Unknown" description="The requested virtual entity is not recognized." />
+		<EmptyInfrastructureState title="Workload Identity Unknown" description="The requested virtual entity is not recognized." hint="Return to the VM catalog and refresh the workload inventory." />
 	{:else}
 		<ResourceDetailHeader 
 			title={detail.summary.name} 
@@ -252,31 +253,26 @@ import Button from '$lib/components/primitives/Button.svelte';
            {#if confirmingAction}
 							<div class="confirm-group">
 								<span class="confirm-text">Confirm {confirmingAction}?</span>
-								<Button variant="primary" onclick={() => executeAction(confirmingAction!)}>Confirm</Button>
-								<Button variant="secondary" onclick={() => confirmingAction = null}>Cancel</Button>
+								<Button variant="primary" size="sm" onclick={() => executeAction(confirmingAction!)}>Confirm</Button>
+								<Button variant="secondary" size="sm" onclick={() => confirmingAction = null}>Cancel</Button>
 							</div>
 							{:else}
 								{@const ps = detail.summary.power_state.toLowerCase()}
-								<Button variant="primary" disabled={ps === 'running' || pendingAction !== null} onclick={() => executeAction('start')}>
-									<Play size={14} />
-									{pendingAction === 'start' ? 'EXECUTING...' : 'START'}
-								</Button>
-								<Button variant="secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'shutdown'}>
-									<Power size={14} />
-									{pendingAction === 'shutdown' ? 'EXECUTING...' : 'SHUTDOWN'}
-								</Button>
-								<Button variant="secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'poweroff'}>
-									<Square size={14} />
-									{pendingAction === 'poweroff' ? 'EXECUTING...' : 'POWEROFF'}
-								</Button>
-								<Button variant="secondary" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'}>
-									<RotateCcw size={14} />
-									{pendingAction === 'restart' ? 'EXECUTING...' : 'REBOOT'}
-								</Button>
-								<Button variant="secondary" disabled={pendingAction !== null} onclick={() => confirmingAction = 'delete'}>
-									<Trash2 size={14} />
-									{pendingAction === 'delete' ? 'EXECUTING...' : 'DELETE'}
-								</Button>
+								<button class="vm-action vm-action--primary" type="button" disabled={ps === 'running' || pendingAction !== null} onclick={() => executeAction('start')} title={pendingAction === 'start' ? 'Starting' : 'Start VM'} aria-label={pendingAction === 'start' ? 'Starting VM' : 'Start VM'}>
+									<Play size={13} />
+								</button>
+								<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'shutdown'} title={pendingAction === 'shutdown' ? 'Shutting down' : 'Shutdown VM'} aria-label={pendingAction === 'shutdown' ? 'Shutting down VM' : 'Shutdown VM'}>
+									<Power size={13} />
+								</button>
+								<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'poweroff'} title={pendingAction === 'poweroff' ? 'Powering off' : 'Poweroff VM'} aria-label={pendingAction === 'poweroff' ? 'Powering off VM' : 'Poweroff VM'}>
+									<Square size={13} />
+								</button>
+								<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'} title={pendingAction === 'restart' ? 'Rebooting' : 'Reboot VM'} aria-label={pendingAction === 'restart' ? 'Rebooting VM' : 'Reboot VM'}>
+									<RotateCcw size={13} />
+								</button>
+								<button class="vm-action vm-action--danger" type="button" disabled={pendingAction !== null} onclick={() => confirmingAction = 'delete'} title={pendingAction === 'delete' ? 'Deleting' : 'Delete VM'} aria-label={pendingAction === 'delete' ? 'Deleting VM' : 'Delete VM'}>
+									<Trash2 size={13} />
+								</button>
 						{/if}
 				</div>
 			{/snippet}
@@ -286,7 +282,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		  <DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
     </div>
 
-		<main class="inventory-main">
+		<main class="inventory-main" class:inventory-main--rail-open={supportRailOpen}>
 			<section class="detail-content">
 				{#if detail.currentTab === 'console'}
 					<SectionCard title="Direct Fabric Console" icon={Terminal}>
@@ -350,7 +346,8 @@ import Button from '$lib/components/primitives/Button.svelte';
                    {#if column.key === 'name'}
                      <span class="workload-name">{row.name}</span>
                    {:else if column.key === 'health'}
-                     <StatusBadge label={row.health.label} tone={row.health.tone} />
+										 {@const health = row.health as { label: string; tone: ShellTone }}
+                     <StatusBadge label={health.label} tone={health.tone} />
                    {:else}
                      <span class="cell-text">{row[column.key]}</span>
                    {/if}
@@ -373,7 +370,8 @@ import Button from '$lib/components/primitives/Button.svelte';
 							>
                 {#snippet cell({ column, row })}
                   {#if column.key === 'addressing_mode'}
-                     <StatusBadge label={row.addressing_mode.label} tone={row.addressing_mode.tone} />
+										 {@const addressingMode = row.addressing_mode as { label: string; tone: ShellTone }}
+                     <StatusBadge label={addressingMode.label} tone={addressingMode.tone} />
                   {:else}
                      <span class="cell-text">{row[column.key]}</span>
                   {/if}
@@ -388,28 +386,58 @@ import Button from '$lib/components/primitives/Button.svelte';
 				{/if}
 			</section>
 
-			<aside class="support-area">
-				<SectionCard title="Placement Audit" icon={ChevronRight}>
-					<PropertyGrid 
-						columns={1}
-						properties={[
-							{ label: 'Fabric Host', value: detail.summary.node_id },
-							{ label: 'Security Domain', value: 'BALANCED' },
-							{ label: 'Hypervisor Sub', value: 'CLOUD_HYPERVISOR_v3' }
-						]} 
-					/>
-				</SectionCard>
+			<aside class="support-area" class:support-area--collapsed={!supportRailOpen}>
+				<div class="support-rail-control">
+					<button
+						class="support-toggle"
+						type="button"
+						onclick={() => supportRailOpen = !supportRailOpen}
+						title={supportRailOpen ? 'Minimize details' : 'Expand details'}
+						aria-label={supportRailOpen ? 'Minimize details' : 'Expand details'}
+					>
+						{#if supportRailOpen}
+							<ChevronRight size={14} />
+						{:else}
+							<ChevronLeft size={14} />
+						{/if}
+					</button>
 
-				<SectionCard title="Workload Meta" icon={Info}>
-					<PropertyGrid properties={configProps} columns={1} />
-				</SectionCard>
+					{#if !supportRailOpen}
+						<button class="support-rail-tab" type="button" onclick={() => supportRailOpen = true} title="Placement audit" aria-label="Expand placement audit">
+							<ChevronRight size={13} />
+						</button>
+						<button class="support-rail-tab" type="button" onclick={() => supportRailOpen = true} title="Workload meta" aria-label="Expand workload meta">
+							<Info size={13} />
+						</button>
+						<button class="support-rail-tab" type="button" onclick={() => supportRailOpen = true} title="Safety integrity" aria-label="Expand safety integrity">
+							<ShieldCheck size={13} />
+						</button>
+					{/if}
+				</div>
 
-				<SectionCard title="Safety Integrity" icon={ShieldCheck}>
-					<div class="safety-sign">
-						<ShieldCheck size={16} />
-						<span>GUEST_LEVEL_NOMINAL</span>
-					</div>
-				</SectionCard>
+				{#if supportRailOpen}
+					<SectionCard title="Placement Audit" icon={ChevronRight}>
+						<PropertyGrid
+							columns={1}
+							properties={[
+								{ label: 'Fabric Host', value: detail.summary.node_id },
+								{ label: 'Security Domain', value: 'BALANCED' },
+								{ label: 'Hypervisor Sub', value: 'CLOUD_HYPERVISOR_v3' }
+							]}
+						/>
+					</SectionCard>
+
+					<SectionCard title="Workload Meta" icon={Info}>
+						<PropertyGrid properties={configProps} columns={1} />
+					</SectionCard>
+
+					<SectionCard title="Safety Integrity" icon={ShieldCheck}>
+						<div class="safety-sign">
+							<ShieldCheck size={16} />
+							<span>GUEST_LEVEL_NOMINAL</span>
+						</div>
+					</SectionCard>
+				{/if}
 			</aside>
 		</main>
 	{/if}
@@ -425,7 +453,54 @@ import Button from '$lib/components/primitives/Button.svelte';
 	.header-actions {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.5rem;
+		gap: 0.25rem;
+		align-items: center;
+		justify-content: flex-end;
+	}
+
+	.vm-action {
+		display: inline-grid;
+		place-items: center;
+		width: 1.85rem;
+		height: 1.85rem;
+		padding: 0;
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-xs);
+		background: var(--shell-surface);
+		color: var(--shell-text-secondary);
+		cursor: pointer;
+		transition:
+			background 120ms ease,
+			border-color 120ms ease,
+			color 120ms ease;
+	}
+
+	.vm-action:hover:not(:disabled) {
+		border-color: var(--shell-accent);
+		background: var(--shell-accent-soft);
+		color: var(--shell-text);
+	}
+
+	.vm-action:disabled {
+		cursor: not-allowed;
+		opacity: 0.42;
+	}
+
+	.vm-action--primary {
+		background: var(--shell-accent);
+		border-color: var(--shell-accent);
+		color: var(--color-sidebar-text-active, #ffffff);
+	}
+
+	.vm-action--primary:hover:not(:disabled) {
+		background: var(--color-primary-active);
+		color: var(--color-sidebar-text-active, #ffffff);
+	}
+
+	.vm-action--danger:hover:not(:disabled) {
+		border-color: var(--color-danger);
+		background: var(--color-danger-light);
+		color: var(--color-danger-dark);
 	}
 
 	.tabs-area {
@@ -434,9 +509,13 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 	.inventory-main {
 		display: grid;
-		grid-template-columns: minmax(0, 1.65fr) minmax(17rem, 0.9fr);
+		grid-template-columns: minmax(0, 1fr) 2.4rem;
 		gap: 1rem;
 		align-items: start;
+	}
+
+	.inventory-main--rail-open {
+		grid-template-columns: minmax(0, 1.65fr) minmax(17rem, 0.9fr);
 	}
 
 	.detail-content,
@@ -445,6 +524,42 @@ import Button from '$lib/components/primitives/Button.svelte';
 		flex-direction: column;
 		gap: 1rem;
 		min-width: 0;
+	}
+
+	.support-area {
+		position: sticky;
+		top: 0.75rem;
+	}
+
+	.support-area--collapsed {
+		align-items: stretch;
+		gap: 0.35rem;
+	}
+
+	.support-rail-control {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.support-toggle,
+	.support-rail-tab {
+		display: grid;
+		place-items: center;
+		width: 2.2rem;
+		height: 2.2rem;
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-xs);
+		background: var(--shell-surface);
+		color: var(--shell-text-muted);
+		cursor: pointer;
+	}
+
+	.support-toggle:hover,
+	.support-rail-tab:hover {
+		border-color: var(--shell-accent);
+		background: var(--shell-accent-soft);
+		color: var(--shell-text);
 	}
 
 	.summary-top,
@@ -632,6 +747,12 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 		.support-area {
 			order: -1;
+			position: static;
+			align-items: flex-start;
+		}
+
+		.support-rail-control {
+			flex-direction: row;
 		}
 	}
 
@@ -646,7 +767,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 		.header-actions :global(button),
 		.confirm-group :global(button) {
-			flex: 1 1 10rem;
+			flex: 0 0 auto;
 		}
 	}
 
