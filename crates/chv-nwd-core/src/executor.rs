@@ -340,13 +340,9 @@ impl LinuxExecutor {
             source: e,
         })?;
 
+        let dnsmasq_args = Self::dnsmasq_args(&conf_path, &pid_path);
         let out = Command::new("dnsmasq")
-            .args([
-                "--conf-file",
-                &conf_path.to_string_lossy(),
-                "--pid-file",
-                &pid_path.to_string_lossy(),
-            ])
+            .args(dnsmasq_args)
             .output()
             .await
             .map_err(|e| ChvError::Io {
@@ -363,6 +359,13 @@ impl LinuxExecutor {
         }
 
         Ok(())
+    }
+
+    fn dnsmasq_args(conf_path: &std::path::Path, pid_path: &std::path::Path) -> [String; 2] {
+        [
+            format!("--conf-file={}", conf_path.display()),
+            format!("--pid-file={}", pid_path.display()),
+        ]
     }
 
     async fn stop_dnsmasq(network_id: &str) {
@@ -809,5 +812,21 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.len() <= 15, "tap name exceeds Linux IFNAMSIZ: {}", a);
         assert!(a.starts_with("tap-"));
+    }
+
+    #[test]
+    fn dnsmasq_args_use_equals_form_required_by_dnsmasq() {
+        let args = LinuxExecutor::dnsmasq_args(
+            std::path::Path::new("/run/chv/nwd/dnsmasq-net.conf"),
+            std::path::Path::new("/run/chv/nwd/dnsmasq-net.pid"),
+        );
+
+        assert_eq!(
+            args,
+            [
+                "--conf-file=/run/chv/nwd/dnsmasq-net.conf".to_string(),
+                "--pid-file=/run/chv/nwd/dnsmasq-net.pid".to_string(),
+            ]
+        );
     }
 }

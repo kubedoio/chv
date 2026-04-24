@@ -219,6 +219,26 @@ fn read_stderr_tail(path: &std::path::Path) -> String {
     lines.join(" | ")
 }
 
+fn build_cpus_config(config: &VmConfig) -> serde_json::Value {
+    let hv = config.hypervisor_overrides.as_ref();
+    let mut cpus = serde_json::json!({
+        "boot_vcpus": config.cpus,
+        "max_vcpus": config.cpus,
+    });
+    if let Some(true) = hv.and_then(|h| h.cpu_amx) {
+        cpus["features"] = serde_json::json!({ "amx": true });
+    }
+    if let Some(true) = hv.and_then(|h| h.cpu_nested) {
+        cpus["topology"] = serde_json::json!({
+            "threads_per_core": 1,
+            "cores_per_die": config.cpus,
+            "dies_per_package": 1,
+            "packages": 1,
+        });
+    }
+    cpus
+}
+
 async fn build_cloud_init_seed(
     vm_dir: &Path,
     vm_id: &str,
@@ -510,16 +530,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let hv = config.hypervisor_overrides.as_ref();
 
-        let mut cpus = serde_json::json!({
-            "boot_vcpus": config.cpus,
-            "max_vcpus": config.cpus,
-        });
-        if let Some(true) = hv.and_then(|h| h.cpu_amx) {
-            cpus["features"] = serde_json::json!({ "amx": true });
-        }
-        if let Some(true) = hv.and_then(|h| h.cpu_nested) {
-            cpus["topology"] = serde_json::json!({ "threads_per_core": 1 });
-        }
+        let cpus = build_cpus_config(config);
 
         let mut memory = serde_json::json!({ "size": config.memory_bytes });
         if let Some(v) = hv.and_then(|h| h.memory_mergeable) {
@@ -1390,10 +1401,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
 #[cfg(test)]
 mod tests {
+    use super::build_cpus_config;
     use super::parse_http_status;
     use super::ProcessCloudHypervisorAdapter;
     use super::VmProcess;
     use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig};
+    use chv_common::hypervisor::HypervisorOverrides;
     use chv_errors::ChvError;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
@@ -1470,6 +1483,34 @@ mod tests {
             hypervisor_overrides: None,
         };
         adapter.validate_vm_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn nested_cpu_config_includes_complete_topology_for_cloud_hypervisor_v51() {
+        let cfg = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 2,
+            memory_bytes: 512 * 1024 * 1024,
+            kernel_path: PathBuf::from("/tmp/kernel"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: PathBuf::from("/tmp/chv/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: Some(HypervisorOverrides {
+                cpu_nested: Some(true),
+                ..Default::default()
+            }),
+        };
+
+        let cpus = build_cpus_config(&cfg);
+
+        assert_eq!(cpus["boot_vcpus"], 2);
+        assert_eq!(cpus["max_vcpus"], 2);
+        assert_eq!(cpus["topology"]["threads_per_core"], 1);
+        assert_eq!(cpus["topology"]["cores_per_die"], 2);
+        assert_eq!(cpus["topology"]["dies_per_package"], 1);
+        assert_eq!(cpus["topology"]["packages"], 1);
     }
 
     #[tokio::test]

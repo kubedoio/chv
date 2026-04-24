@@ -56,6 +56,84 @@ warn() { echo "[WARN] $*" >&2; }
 fatal() { echo "[ERROR] $*" >&2; exit 1; }
 cmd_exists() { command -v "$1" &>/dev/null; }
 
+list_chv_processes() {
+    ps -eo pid=,comm=,args= | awk '
+        $2 == "chv-agent" ||
+        $2 == "chv-stord" ||
+        $2 == "chv-nwd" ||
+        $2 == "chv-controlplane" ||
+        $2 == "chv-controlplan" {
+            print
+        }
+    '
+}
+
+list_chv_dnsmasq_processes() {
+    ps -eo pid=,comm=,args= | awk '
+        $2 == "dnsmasq" && $0 ~ /\/run\/chv\/nwd\/dnsmasq-/ {
+            print
+        }
+    '
+}
+
+list_chv_runtime_processes() {
+    list_chv_processes
+    list_chv_dnsmasq_processes
+}
+
+list_chv_socket_listeners() {
+    if cmd_exists ss; then
+        ss -xlpn | awk '/\/run\/chv\/(agent|stord|nwd)\/api\.sock/ { print }'
+    fi
+}
+
+wait_for_chv_process_exit() {
+    local attempt
+    for attempt in {1..10}; do
+        if [ -z "$(list_chv_runtime_processes)" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+remove_running_chv_processes() {
+    local pids
+    mapfile -t pids < <(list_chv_runtime_processes | awk '{print $1}' | sort -u)
+    if [ "${#pids[@]}" -eq 0 ]; then
+        info "No CHV runtime processes remain."
+        return 0
+    fi
+
+    warn "Terminating leftover CHV runtime processes: ${pids[*]}"
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    if ! wait_for_chv_process_exit; then
+        mapfile -t pids < <(list_chv_runtime_processes | awk '{print $1}' | sort -u)
+        if [ "${#pids[@]}" -gt 0 ]; then
+            warn "Forcing leftover CHV runtime processes to exit: ${pids[*]}"
+            kill -KILL "${pids[@]}" 2>/dev/null || true
+        fi
+    fi
+}
+
+validate_no_chv_processes() {
+    local remaining
+    remaining="$(list_chv_runtime_processes)"
+    if [ -n "$remaining" ]; then
+        fatal "CHV runtime processes are still running after cleanup:
+$remaining"
+    fi
+
+    remaining="$(list_chv_socket_listeners)"
+    if [ -n "$remaining" ]; then
+        fatal "CHV runtime socket listeners are still active after cleanup:
+$remaining"
+    fi
+
+    info "Validated no CHV processes or runtime socket listeners remain."
+}
+
 get_local_ip() {
     hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
 }
@@ -804,8 +882,8 @@ EOF
     cat > /etc/systemd/system/chv-agent.service <<'EOF'
 [Unit]
 Description=CHV Node Agent
-After=network.target chv-controlplane.service chv-stord.service chv-nwd.service
-Wants=chv-controlplane.service chv-stord.service chv-nwd.service
+After=network.target chv-controlplane.service
+Wants=chv-controlplane.service
 
 [Service]
 Type=simple
@@ -907,8 +985,6 @@ start_services() {
     info "Enabling and starting CHV services..."
 
     systemctl enable --now chv-controlplane
-    systemctl enable --now chv-stord
-    systemctl enable --now chv-nwd
 
     info "Waiting for control plane to apply database migrations (up to 30s)..."
     local attempt=1
@@ -1018,6 +1094,10 @@ clean_previous_install() {
         systemctl stop "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
     done
+    remove_running_chv_processes
+    validate_no_chv_processes
+    rm -f "${CHV_RUN_DIR}/agent/api.sock" "${CHV_RUN_DIR}/stord/api.sock" "${CHV_RUN_DIR}/nwd/api.sock"
+    rm -f "${CHV_RUN_DIR}"/nwd/dnsmasq-*.conf "${CHV_RUN_DIR}"/nwd/dnsmasq-*.hosts "${CHV_RUN_DIR}"/nwd/dnsmasq-*.pid
     # Remove old configs (will be regenerated)
     rm -f "${CHV_CONFIG_DIR}/agent.toml" "${CHV_CONFIG_DIR}/controlplane.toml" \
           "${CHV_CONFIG_DIR}/stord.toml" "${CHV_CONFIG_DIR}/nwd.toml" \
@@ -1074,8 +1154,6 @@ Upstream iface: ${INSTALL_CHV_BRIDGE_IFACE} (NAT enabled)
 Services:
   systemctl status chv-controlplane
   systemctl status chv-agent
-  systemctl status chv-stord
-  systemctl status chv-nwd
   systemctl status nginx
 
 Logs:

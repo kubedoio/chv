@@ -83,6 +83,86 @@ next_step() {
     echo "[${step_num}] $*"
 }
 
+list_chv_processes() {
+    ps -eo pid=,comm=,args= | awk '
+        $2 == "chv-agent" ||
+        $2 == "chv-stord" ||
+        $2 == "chv-nwd" ||
+        $2 == "chv-controlplane" ||
+        $2 == "chv-controlplan" {
+            print
+        }
+    '
+}
+
+list_chv_dnsmasq_processes() {
+    ps -eo pid=,comm=,args= | awk '
+        $2 == "dnsmasq" && $0 ~ /\/run\/chv\/nwd\/dnsmasq-/ {
+            print
+        }
+    '
+}
+
+list_chv_runtime_processes() {
+    list_chv_processes
+    list_chv_dnsmasq_processes
+}
+
+list_chv_socket_listeners() {
+    if command -v ss &>/dev/null; then
+        ss -xlpn | awk '/\/run\/chv\/(agent|stord|nwd)\/api\.sock/ { print }'
+    fi
+}
+
+wait_for_chv_process_exit() {
+    local attempt
+    for attempt in {1..10}; do
+        if [ -z "$(list_chv_runtime_processes)" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+remove_running_chv_processes() {
+    local pids
+    mapfile -t pids < <(list_chv_runtime_processes | awk '{print $1}' | sort -u)
+    if [ "${#pids[@]}" -eq 0 ]; then
+        echo "  No CHV runtime processes remain."
+        return 0
+    fi
+
+    echo "  Terminating leftover CHV runtime processes: ${pids[*]}"
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    if ! wait_for_chv_process_exit; then
+        mapfile -t pids < <(list_chv_runtime_processes | awk '{print $1}' | sort -u)
+        if [ "${#pids[@]}" -gt 0 ]; then
+            echo "  Forcing leftover CHV runtime processes to exit: ${pids[*]}"
+            kill -KILL "${pids[@]}" 2>/dev/null || true
+        fi
+    fi
+}
+
+validate_no_chv_processes() {
+    local remaining
+    remaining="$(list_chv_runtime_processes)"
+    if [ -n "$remaining" ]; then
+        echo "ERROR: CHV runtime processes are still running after cleanup:"
+        echo "$remaining"
+        exit 1
+    fi
+
+    remaining="$(list_chv_socket_listeners)"
+    if [ -n "$remaining" ]; then
+        echo "ERROR: CHV runtime socket listeners are still active after cleanup:"
+        echo "$remaining"
+        exit 1
+    fi
+
+    echo "  Validated: no CHV processes or runtime socket listeners remain."
+}
+
 # -----------------------------------------------------------------------------
 # Uninstall previous installation
 # -----------------------------------------------------------------------------
@@ -108,6 +188,9 @@ elif [ "$NO_UNINSTALL" = "0" ]; then
         fi
     done
 
+    remove_running_chv_processes
+    validate_no_chv_processes
+
     # Remove systemd unit files
     rm -f /etc/systemd/system/chv-controlplane.service
     rm -f /etc/systemd/system/chv-agent.service
@@ -127,6 +210,14 @@ elif [ "$NO_UNINSTALL" = "0" ]; then
     rm -f /etc/chv/stord.toml
     rm -f /etc/chv/nwd.toml
     rm -f /etc/chv/bootstrap.token
+
+    # Remove runtime sockets left behind by unclean daemon exits.
+    rm -f /run/chv/agent/api.sock
+    rm -f /run/chv/stord/api.sock
+    rm -f /run/chv/nwd/api.sock
+    rm -f /run/chv/nwd/dnsmasq-*.conf
+    rm -f /run/chv/nwd/dnsmasq-*.hosts
+    rm -f /run/chv/nwd/dnsmasq-*.pid
 
     # Remove database (clean state for new install)
     rm -f /var/lib/chv/controlplane.db
