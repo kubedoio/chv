@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build a CHV release tarball for linux-amd64
-# Usage: ./scripts/build-release.sh
+# Usage: ./scripts/build-release.sh [VERSION]
 # Output: dist/chv-<VERSION>-linux-amd64.tar.gz
 
 set -euo pipefail
@@ -9,7 +9,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-VERSION=$(cat VERSION | tr -d '[:space:]')
+# Read current version from root Cargo.toml
+VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)".*/\1/')
+
+# Optional version bump
+if [ $# -ge 1 ]; then
+    NEW_VERSION="$1"
+    echo "Bumping version: ${VERSION} -> ${NEW_VERSION}"
+    sed -i "s/^version = \"${VERSION}\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+    cargo check --workspace
+    git add Cargo.toml Cargo.lock
+    git commit -m "release: bump version to ${NEW_VERSION}"
+    VERSION="${NEW_VERSION}"
+fi
 ARCH="linux-amd64"
 RELEASE_NAME="chv-${VERSION}-${ARCH}"
 RELEASE_DIR="dist/${RELEASE_NAME}"

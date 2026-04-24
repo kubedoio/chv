@@ -13,7 +13,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("chv-nwd starting");
 
-    // TODO: replace with LinuxExecutor once ip/nft are available in test env
     let server = NetworkServer::new(
         chv_nwd_core::executor::LinuxExecutor::new(config.runtime_dir.clone()),
         chv_observability::Metrics::new(),

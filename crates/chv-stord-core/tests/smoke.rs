@@ -356,6 +356,8 @@ async fn set_device_policy_smoke() {
                 read_iops: 100,
                 write_iops: 100,
                 burst_allowed: false,
+                read_only: false,
+                no_exec: false,
             }),
         })
         .await
@@ -388,6 +390,8 @@ async fn set_device_policy_missing_session_returns_not_found() {
                 read_iops: 100,
                 write_iops: 100,
                 burst_allowed: false,
+                read_only: false,
+                no_exec: false,
             }),
         })
         .await

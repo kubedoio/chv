@@ -34,6 +34,8 @@ pub mod types {
         pub read_iops: u64,
         pub write_iops: u64,
         pub burst_allowed: bool,
+        pub read_only: bool,
+        pub no_exec: bool,
     }
 }
 

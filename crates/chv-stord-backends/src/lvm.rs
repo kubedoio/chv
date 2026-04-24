@@ -274,7 +274,7 @@ impl StorageBackend for LVMBackend {
         &self,
         volume_id: &str,
         handle: &str,
-        _policy: &DevicePolicy,
+        policy: &DevicePolicy,
     ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         if handle != self.expected_handle(volume_id) {
@@ -283,10 +283,41 @@ impl StorageBackend for LVMBackend {
                 reason: format!("handle {} does not match volume_id {}", handle, volume_id),
             });
         }
-        warn!(
-            volume_id,
-            "device policy ignored by LVMBackend (not yet implemented)"
-        );
+        let path = self.volume_path(volume_id)?;
+
+        if policy.read_only {
+            info!(volume_id, path = %path.display(), "applying read-only device policy");
+            let out = Command::new("blockdev")
+                .args(["--setro", &path.to_string_lossy()])
+                .output()
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: "blockdev".to_string(),
+                    source: e,
+                })?;
+            if !out.status.success() {
+                return Err(ChvError::BackendUnavailable {
+                    backend: "lvm".to_string(),
+                    reason: format!(
+                        "blockdev --setro failed: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                });
+            }
+        }
+
+        if policy.no_exec {
+            warn!(volume_id, "no_exec policy is not applicable at LVM block device level; skipping");
+        }
+
+        if policy.read_bps > 0
+            || policy.write_bps > 0
+            || policy.read_iops > 0
+            || policy.write_iops > 0
+        {
+            warn!(volume_id, "LVMBackend does not enforce throughput or iops limits");
+        }
+
         Ok(())
     }
 }

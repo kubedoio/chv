@@ -1,16 +1,17 @@
 <script lang="ts">
 	import type { PageDefinition } from '$lib/shell/app-shell';
 	import { Search } from 'lucide-svelte';
+	import CommandPalette from './CommandPalette.svelte';
 
 	interface Props {
 		page: PageDefinition;
 	}
 
 	let { page }: Props = $props();
+	let paletteOpen = $state(false);
 
 	function openCommandPalette() {
-		// TODO: implement command palette modal
-		console.log('Command palette not yet implemented');
+		paletteOpen = true;
 	}
 </script>
 
@@ -42,3 +43,5 @@
 		<div class="shrink-0 text-[length:var(--text-xs)] font-bold text-[var(--shell-text-muted)] bg-[var(--bg-surface)] min-w-[2.5rem] h-6 px-[0.45rem] grid place-items-center rounded-[var(--radius-xs)] border border-[var(--border-subtle)]">⌘K</div>
 	</button>
 </div>
+
+<CommandPalette bind:open={paletteOpen} />

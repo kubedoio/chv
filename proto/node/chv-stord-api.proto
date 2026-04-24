@@ -19,6 +19,8 @@ message DevicePolicy {
   uint64 read_iops = 3;
   uint64 write_iops = 4;
   bool burst_allowed = 5;
+  bool read_only = 6;
+  bool no_exec = 7;
 }
 
 message BackendLocator {

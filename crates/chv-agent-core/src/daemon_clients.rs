@@ -17,6 +17,16 @@ use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
+fn with_operation_id<T>(req: T, operation_id: Option<&str>) -> tonic::Request<T> {
+    let mut grpc_req = tonic::Request::new(req);
+    if let Some(op_id) = operation_id {
+        if let Ok(val) = tonic::metadata::MetadataValue::try_from(op_id) {
+            grpc_req.metadata_mut().insert("x-operation-id", val);
+        }
+    }
+    grpc_req
+}
+
 pub struct StordClient {
     inner: StorageServiceClient<Channel>,
 }
@@ -46,7 +56,6 @@ impl StordClient {
         })
     }
 
-    // TODO: propagate operation_id via gRPC metadata once chv-stord API supports it.
     pub async fn health_probe(&mut self) -> Result<bool, ChvError> {
         let _ = self
             .inner
@@ -105,7 +114,7 @@ impl StordClient {
         };
         let resp = self
             .inner
-            .open_volume(req)
+            .open_volume(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -136,7 +145,7 @@ impl StordClient {
         };
         let resp = self
             .inner
-            .attach_volume_to_vm(req)
+            .attach_volume_to_vm(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -166,7 +175,7 @@ impl StordClient {
             force,
         };
         self.inner
-            .detach_volume_from_vm(req)
+            .detach_volume_from_vm(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -193,7 +202,7 @@ impl StordClient {
             attachment_handle: attachment_handle.to_string(),
         };
         self.inner
-            .close_volume(req)
+            .close_volume(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -220,7 +229,7 @@ impl StordClient {
             new_size_bytes,
         };
         self.inner
-            .resize_volume(req)
+            .resize_volume(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -266,7 +275,7 @@ impl StordClient {
             snapshot_name: snapshot_name.to_string(),
         };
         self.inner
-            .prepare_snapshot(req)
+            .prepare_snapshot(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -293,7 +302,7 @@ impl StordClient {
             clone_name: clone_name.to_string(),
         };
         self.inner
-            .prepare_clone(req)
+            .prepare_clone(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -320,7 +329,7 @@ impl StordClient {
             policy: Some(policy),
         };
         self.inner
-            .set_device_policy(req)
+            .set_device_policy(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -359,7 +368,6 @@ impl NwdClient {
         })
     }
 
-    // TODO: propagate operation_id via gRPC metadata once chv-nwd API supports it.
     pub async fn health_probe(&mut self) -> Result<bool, ChvError> {
         let _ = self
             .inner
@@ -398,7 +406,7 @@ impl NwdClient {
                 options: std::collections::HashMap::new(),
             }),
         };
-        let resp = self.inner.ensure_network_topology(req).await.map_err(|e| {
+        let resp = self.inner.ensure_network_topology(with_operation_id(req, operation_id)).await.map_err(|e| {
             ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
@@ -441,7 +449,7 @@ impl NwdClient {
         };
         let resp = self
             .inner
-            .attach_vm_nic(req)
+            .attach_vm_nic(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -496,7 +504,7 @@ impl NwdClient {
             }),
         };
         self.inner
-            .expose_service(req)
+            .expose_service(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -523,7 +531,7 @@ impl NwdClient {
             network_id: network_id.to_string(),
         };
         self.inner
-            .withdraw_service_exposure(req)
+            .withdraw_service_exposure(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -562,7 +570,7 @@ impl NwdClient {
             }),
             network_id: network_id.to_string(),
         };
-        self.inner.delete_network_topology(req).await.map_err(|e| {
+        self.inner.delete_network_topology(with_operation_id(req, operation_id)).await.map_err(|e| {
             ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
@@ -588,7 +596,7 @@ impl NwdClient {
             policy: None,
         };
         self.inner
-            .set_firewall_policy(req)
+            .set_firewall_policy(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -614,7 +622,7 @@ impl NwdClient {
             policy: None,
         };
         self.inner
-            .set_nat_policy(req)
+            .set_nat_policy(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -642,7 +650,7 @@ impl NwdClient {
             vm_id: vm_id.to_string(),
         };
         self.inner
-            .detach_vm_nic(req)
+            .detach_vm_nic(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -696,7 +704,7 @@ impl NwdClient {
             }),
         };
         self.inner
-            .ensure_dhcp_scope(req)
+            .ensure_dhcp_scope(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -727,7 +735,7 @@ impl NwdClient {
             }),
         };
         self.inner
-            .ensure_dns_scope(req)
+            .ensure_dns_scope(with_operation_id(req, operation_id))
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),

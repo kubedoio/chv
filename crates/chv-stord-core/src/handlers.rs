@@ -76,6 +76,8 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             read_iops: p.read_iops,
             write_iops: p.write_iops,
             burst_allowed: p.burst_allowed,
+            read_only: p.read_only,
+            no_exec: p.no_exec,
         })
         .unwrap_or_default()
     }
