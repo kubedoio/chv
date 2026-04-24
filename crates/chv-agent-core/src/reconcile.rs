@@ -135,10 +135,26 @@ impl Reconciler {
                 self.reconcile_volumes().await?;
                 self.reconcile_vms().await?;
             }
+            NodeState::Failed => {
+                // Attempt recovery: if both daemons are healthy, restart bootstrap sequence
+                let stord_ok = match StordClient::connect(&self.stord_socket).await {
+                    Ok(mut c) => c.health_probe().await.unwrap_or(false),
+                    Err(_) => false,
+                };
+                let nwd_ok = match NwdClient::connect(&self.nwd_socket).await {
+                    Ok(mut c) => c.health_probe().await.unwrap_or(false),
+                    Err(_) => false,
+                };
+                if stord_ok && nwd_ok {
+                    info!("recovered from Failed, transitioning to HostReady");
+                    self.transition_state(NodeState::HostReady).await?;
+                } else {
+                    warn!(stord_ok, nwd_ok, "remaining in Failed, daemons not healthy");
+                }
+            }
             NodeState::Degraded
             | NodeState::Draining
-            | NodeState::Maintenance
-            | NodeState::Failed => {}
+            | NodeState::Maintenance => {}
         }
 
         Ok(())

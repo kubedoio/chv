@@ -65,10 +65,16 @@ impl HealthAggregator {
                     NodeState::Degraded
                 }
             }
-            NodeState::Draining
-            | NodeState::Maintenance
-            | NodeState::Failed
-            | NodeState::Discovered => current,
+            NodeState::Failed => {
+                if stord_ok && nwd_ok {
+                    NodeState::HostReady
+                } else if stord_ok || nwd_ok {
+                    NodeState::Degraded
+                } else {
+                    current
+                }
+            }
+            NodeState::Draining | NodeState::Maintenance | NodeState::Discovered => current,
         }
     }
 }
@@ -164,6 +170,39 @@ mod tests {
         assert_eq!(
             h.derive_node_state(NodeState::NetworkReady),
             NodeState::TenantReady
+        );
+    }
+
+    #[test]
+    fn health_failed_recover_to_host_ready_when_both_up() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        assert_eq!(
+            h.derive_node_state(NodeState::Failed),
+            NodeState::HostReady
+        );
+    }
+
+    #[test]
+    fn health_failed_recover_to_degraded_when_partial() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(false);
+        assert_eq!(
+            h.derive_node_state(NodeState::Failed),
+            NodeState::Degraded
+        );
+    }
+
+    #[test]
+    fn health_failed_stays_failed_when_both_down() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(false);
+        h.update_nwd(false);
+        assert_eq!(
+            h.derive_node_state(NodeState::Failed),
+            NodeState::Failed
         );
     }
 }
