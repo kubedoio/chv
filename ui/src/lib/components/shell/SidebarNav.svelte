@@ -20,7 +20,8 @@
 		Network,
 		HardDrive,
 		Image,
-		MoreVertical
+		MoreVertical,
+		Pin
 	} from 'lucide-svelte';
 	import { inventory } from '$lib/stores/inventory.svelte';
 	import { selection } from '$lib/stores/selection.svelte';
@@ -92,6 +93,12 @@
 			}
 			return map;
 		})()
+	);
+
+	const pinnedVms = $derived(
+		inventory.vms
+			.filter((vm) => normalizeInstanceStatus(vm.actual_state) === 'running')
+			.slice(0, 3)
 	);
 
 	function getNodeExpandedKey(nodeId: string): string {
@@ -290,6 +297,29 @@
 			</a>
 		</div>
 
+		{#if pinnedVms.length > 0}
+			<div class="flex flex-col gap-1">
+				<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2 tracking-wider">Pinned</div>
+				{#each pinnedVms as vm}
+					{@const inst = vmToTreeItem(vm)}
+					{@const isVmActive = isActive(`/vms/${vm.id}`, $page.url.pathname)}
+					<div
+						class="app-nav__pinned-row group {isVmActive ? 'app-nav__tree-link--active' : ''}"
+						role="button"
+						tabindex="0"
+						aria-label="Pinned instance {vm.name}"
+						onclick={() => { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); }}
+						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); } }}
+						oncontextmenu={(e) => handleInstanceContextMenu(e, inst)}
+					>
+						<Pin size={12} />
+						<span class="truncate">{vm.name}</span>
+						<InstanceStatusBadge status={inst.status} showText={false} />
+					</div>
+				{/each}
+			</div>
+		{/if}
+
 		<!-- Infrastructure -->
 		<div class="flex flex-col gap-1">
 			<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2 tracking-wider">Infrastructure</div>
@@ -380,7 +410,7 @@
 																					role="button"
 																					tabindex="0"
 																					onclick={() => { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); }}
-																					onkeydown={(e) => { if (e.key === 'Enter') { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); } }}
+																					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); } }}
 																					oncontextmenu={(e) => handleInstanceContextMenu(e, inst)}
 																				>
 																					<InstanceStatusBadge status={inst.status} showText={false} />
@@ -575,6 +605,27 @@
 	}
 
 	.app-nav__tree-row:hover {
+		background: var(--color-neutral-800);
+		color: var(--color-sidebar-text-active, #ffffff);
+	}
+
+	.app-nav__pinned-row {
+		display: grid;
+		grid-template-columns: 0.875rem minmax(0, 1fr) 0.875rem;
+		align-items: center;
+		gap: 0.45rem;
+		min-height: 1.75rem;
+		padding: 0.25rem 0.5rem;
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-300);
+		cursor: pointer;
+		font-size: var(--text-xs);
+		transition:
+			background-color 120ms ease-in-out,
+			color 120ms ease-in-out;
+	}
+
+	.app-nav__pinned-row:hover {
 		background: var(--color-neutral-800);
 		color: var(--color-sidebar-text-active, #ffffff);
 	}

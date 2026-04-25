@@ -46,6 +46,7 @@ export type OverviewResponse = {
 	capacity_hotspots?: number;
 	cpu_usage_percent?: number;
 	memory_usage_percent?: number;
+	storage_usage_percent?: number;
 	alerts?: { summary: string; scope: string; severity: string }[];
 	recent_tasks?: RecentTask[];
 };

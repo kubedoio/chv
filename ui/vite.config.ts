@@ -3,6 +3,11 @@ import { defineConfig } from 'vite';
 
 declare const process: { env?: Record<string, string> };
 
+const bffProxyTarget =
+	process.env?.CHV_WEBUI_BFF_PROXY_TARGET ??
+	process.env?.PUBLIC_CHV_API_PROXY_TARGET ??
+	'http://localhost:8888';
+
 export default defineConfig({
 	plugins: [sveltekit()],
 	resolve:
@@ -18,8 +23,17 @@ export default defineConfig({
 	server: {
 		proxy: {
 			'/api': {
-				target: 'http://localhost:8888',
+				target: bffProxyTarget,
 				changeOrigin: true
+			},
+			'/v1': {
+				target: bffProxyTarget,
+				changeOrigin: true
+			},
+			'/ws': {
+				target: bffProxyTarget,
+				changeOrigin: true,
+				ws: true
 			}
 		}
 	}

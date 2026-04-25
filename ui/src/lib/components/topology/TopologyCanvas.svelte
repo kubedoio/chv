@@ -15,7 +15,16 @@
 		run: () => void;
 	}
 
+	interface Props {
+		highlightedResourceIds?: string[];
+	}
+
+	let { highlightedResourceIds = [] }: Props = $props();
+
 	let zoom = $state(1);
+	let pan = $state({ x: 0, y: 0 });
+	let isPanning = $state(false);
+	let dragStart = $state<{ x: number; y: number; panX: number; panY: number } | null>(null);
 	let contextMenu = $state<{
 		x: number;
 		y: number;
@@ -25,6 +34,9 @@
 		actions: MenuAction[];
 	} | null>(null);
 	let menuElement = $state<HTMLDivElement | null>(null);
+	let canvasElement = $state<HTMLDivElement | null>(null);
+
+	const highlightedIds = $derived(new Set(highlightedResourceIds));
 
 	function getVmNodeId(vm: (typeof inventory.vms)[number]): string {
 		return vm.node_id ?? 'unassigned';
@@ -74,19 +86,86 @@
 		})()
 	);
 
-	const topologyBounds = $derived(
+	const topologyBox = $derived(
 		(() => {
 			const points = [...displayNodes, ...displayVms];
-			if (points.length === 0) return '0 0 800 600';
+			if (points.length === 0) return { x: 0, y: 0, width: 800, height: 600 };
 			const xs = points.map((p) => p.x);
 			const ys = points.map((p) => p.y);
-			const minX = Math.min(...xs) - 170;
-			const minY = Math.min(...ys) - 120;
-			const width = Math.max(800, Math.max(...xs) - minX + 170);
-			const height = Math.max(600, Math.max(...ys) - minY + 140);
-			return `${minX} ${minY} ${width} ${height}`;
+			const x = Math.min(...xs) - 170;
+			const y = Math.min(...ys) - 120;
+			const width = Math.max(800, Math.max(...xs) - x + 170);
+			const height = Math.max(600, Math.max(...ys) - y + 140);
+			return { x, y, width, height };
 		})()
 	);
+
+	const viewBox = $derived(
+		(() => {
+			const width = topologyBox.width / zoom;
+			const height = topologyBox.height / zoom;
+			const x = topologyBox.x + pan.x + (topologyBox.width - width) / 2;
+			const y = topologyBox.y + pan.y + (topologyBox.height - height) / 2;
+			return `${x} ${y} ${width} ${height}`;
+		})()
+	);
+
+	const selectedResource = $derived(
+		(() => {
+			if (!selection.active.id) {
+				return {
+					type: 'fleet',
+					name: 'Global Fleet',
+					status: 'Nominal',
+					tone: 'healthy',
+					meta: `${inventory.nodes.length} hosts · ${inventory.vms.length} workloads`,
+					actions: [
+						{ label: 'All instances', href: '/vms' },
+						{ label: 'Tasks', href: '/tasks' },
+						{ label: 'Events', href: '/events' }
+					]
+				};
+			}
+
+			if (selection.active.type === 'node') {
+				const node = displayNodes.find((item) => item.id === selection.active.id);
+				if (!node) return null;
+				return {
+					type: 'host',
+					name: node.name,
+					status: node.status,
+					tone: node.status,
+					meta: `${node.vmCount} workloads · ${node.status}`,
+					actions: [
+						{ label: 'Open host', href: `/nodes/${node.id}` },
+						{ label: 'Instances', href: `/vms?node_id=${node.id}` },
+						{ label: 'Storage', href: `/storage?node_id=${node.id}` }
+					]
+				};
+			}
+
+			if (selection.active.type === 'vm') {
+				const vm = displayVms.find((item) => item.id === selection.active.id);
+				if (!vm) return null;
+				return {
+					type: 'instance',
+					name: vm.name,
+					status: vm.stateLabel,
+					tone: vm.status,
+					meta: `${vm.nodeId} · ${vm.vcpu} vCPU · ${vm.memory_mb} MB`,
+					actions: [
+						{ label: 'Open instance', href: `/vms/${vm.id}` },
+						{ label: 'Console', href: `/vms/${vm.id}?tab=console` },
+						{ label: 'Events', href: `/events?resource_id=${vm.id}` }
+					]
+				};
+			}
+
+			return null;
+		})()
+	);
+
+	const showMinimap = $derived(inventory.nodes.length + inventory.vms.length > 12);
 
 	function getStatusColor(status: string) {
 		switch (status) {
@@ -98,7 +177,68 @@
 	}
 
 	function setZoom(next: number) {
-		zoom = Math.min(1.5, Math.max(0.7, next));
+		zoom = Math.min(1.8, Math.max(0.65, next));
+	}
+
+	function fitFleet() {
+		zoom = 1;
+		pan = { x: 0, y: 0 };
+	}
+
+	function fitSelection() {
+		const id = selection.active.id;
+		if (!id) {
+			fitFleet();
+			return;
+		}
+
+		const point = [...displayNodes, ...displayVms].find((item) => item.id === id);
+		if (!point) {
+			fitFleet();
+			return;
+		}
+
+		zoom = 1.25;
+		pan = {
+			x: point.x - topologyBox.x - topologyBox.width / 2,
+			y: point.y - topologyBox.y - topologyBox.height / 2
+		};
+	}
+
+	function handlePointerDown(event: PointerEvent) {
+		if (event.button !== 0 || contextMenu) return;
+		const target = event.target as Element;
+		if (
+			target.closest('.node-group') ||
+			target.closest('.vm-group') ||
+			target.closest('.topology-menu') ||
+			target.closest('.topology-minimap') ||
+			target.closest('.selection-panel')
+		) return;
+		isPanning = true;
+		dragStart = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
+		canvasElement?.setPointerCapture(event.pointerId);
+	}
+
+	function handlePointerMove(event: PointerEvent) {
+		if (!isPanning || !dragStart || !canvasElement) return;
+		const rect = canvasElement.getBoundingClientRect();
+		const viewWidth = topologyBox.width / zoom;
+		const viewHeight = topologyBox.height / zoom;
+		const dx = ((event.clientX - dragStart.x) / Math.max(rect.width, 1)) * viewWidth;
+		const dy = ((event.clientY - dragStart.y) / Math.max(rect.height, 1)) * viewHeight;
+		pan = {
+			x: dragStart.panX - dx,
+			y: dragStart.panY - dy
+		};
+	}
+
+	function handlePointerUp(event: PointerEvent) {
+		isPanning = false;
+		dragStart = null;
+		if (canvasElement?.hasPointerCapture(event.pointerId)) {
+			canvasElement.releasePointerCapture(event.pointerId);
+		}
 	}
 
 	function closeContextMenu() {
@@ -183,6 +323,17 @@
 		}
 	}
 
+	function selectFromMinimap(event: MouseEvent) {
+		if (!canvasElement) return;
+		const rect = (event.currentTarget as SVGSVGElement).getBoundingClientRect();
+		const x = topologyBox.x + ((event.clientX - rect.left) / Math.max(rect.width, 1)) * topologyBox.width;
+		const y = topologyBox.y + ((event.clientY - rect.top) / Math.max(rect.height, 1)) * topologyBox.height;
+		pan = {
+			x: x - topologyBox.x - topologyBox.width / 2,
+			y: y - topologyBox.y - topologyBox.height / 2
+		};
+	}
+
 	$effect(() => {
 		if (!contextMenu) return;
 
@@ -216,14 +367,22 @@
 				<button class="btn-zoom" type="button" onclick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
 				<button class="btn-zoom" type="button" aria-label="Zoom in" onclick={() => setZoom(zoom + 0.1)}>+</button>
 				<button class="btn-zoom" type="button" aria-label="Zoom out" onclick={() => setZoom(zoom - 0.1)}>-</button>
+				<button class="btn-zoom btn-zoom--text" type="button" onclick={fitFleet}>Fit</button>
+				<button class="btn-zoom btn-zoom--text" type="button" onclick={fitSelection}>Focus</button>
 			</div>
 		</div>
 	</div>
 
 	<div
+		bind:this={canvasElement}
 		class="svg-container"
+		class:svg-container--panning={isPanning}
 		role="application"
 		aria-label="Interactive live fleet topology"
+		onpointerdown={handlePointerDown}
+		onpointermove={handlePointerMove}
+		onpointerup={handlePointerUp}
+		onpointercancel={handlePointerUp}
 		oncontextmenu={(e) => openContextMenu(e, 'fleet')}
 	>
 		{#if inventory.isLoading}
@@ -232,7 +391,7 @@
 				<span>Fetching technical topology...</span>
 			</div>
 		{:else}
-			<svg viewBox={topologyBounds} class="canvas-svg" style:transform={`scale(${zoom})`}>
+			<svg viewBox={viewBox} class="canvas-svg">
 				<!-- Connections -->
 				{#each displayVms as vm}
 					{@const parent = displayNodes.find(n => n.id === vm.nodeId)}
@@ -240,6 +399,7 @@
 						<path 
 							d="M {vm.x} {vm.y + 22} C {vm.x} {vm.y + 70}, {parent.x} {parent.y - 70}, {parent.x} {parent.y - 32}"
 							class="connection-line"
+							class:connection-line--active={highlightedIds.has(vm.id) || highlightedIds.has(parent.id)}
 							style:--status-color={getStatusColor(vm.status)}
 							in:draw={{duration: 1000}}
 						/>
@@ -251,6 +411,7 @@
 					<g 
 						class="node-group" 
 						class:node-group--active={selection.active.id === node.id}
+						class:node-group--highlighted={highlightedIds.has(node.id)}
 						role="button"
 						tabindex="0"
 						aria-label="Host {node.name}, {node.vmCount} workloads"
@@ -282,6 +443,7 @@
 					<g 
 						class="vm-group"
 						class:vm-group--active={selection.active.id === vm.id}
+						class:vm-group--highlighted={highlightedIds.has(vm.id)}
 						role="button"
 						tabindex="0"
 						aria-label="Instance {vm.name}, {vm.stateLabel}"
@@ -307,6 +469,45 @@
 					</g>
 				{/each}
 			</svg>
+
+			{#if showMinimap}
+				<button type="button" class="topology-minimap" aria-label="Use topology minimap" onclick={selectFromMinimap}>
+					<svg viewBox={`${topologyBox.x} ${topologyBox.y} ${topologyBox.width} ${topologyBox.height}`}>
+						{#each displayNodes as node}
+							<rect x={node.x - 10} y={node.y - 8} width="20" height="16" rx="2" class="minimap-node" />
+						{/each}
+						{#each displayVms as vm}
+							<circle cx={vm.x} cy={vm.y} r="3" class="minimap-vm" />
+						{/each}
+						<rect
+							x={topologyBox.x + pan.x + (topologyBox.width - topologyBox.width / zoom) / 2}
+							y={topologyBox.y + pan.y + (topologyBox.height - topologyBox.height / zoom) / 2}
+							width={topologyBox.width / zoom}
+							height={topologyBox.height / zoom}
+							class="minimap-view"
+						/>
+					</svg>
+				</button>
+			{/if}
+
+			{#if selectedResource}
+				<aside class="selection-panel" aria-label="Selected topology component" transition:fade={{ duration: 120 }}>
+					<div>
+						<p class="selection-panel__eyebrow">{selectedResource.type}</p>
+						<h3>{selectedResource.name}</h3>
+						<p>{selectedResource.meta}</p>
+					</div>
+					<div class="selection-panel__status">
+						<span style:background={getStatusColor(selectedResource.tone)}></span>
+						<strong>{selectedResource.status}</strong>
+					</div>
+					<div class="selection-panel__actions">
+						{#each selectedResource.actions as action}
+							<a href={action.href}>{action.label}</a>
+						{/each}
+					</div>
+				</aside>
+			{/if}
 		{/if}
 
 		{#if contextMenu}
@@ -406,6 +607,10 @@
 		border-radius: 2px;
 	}
 
+	.btn-zoom--text {
+		min-width: 2.4rem;
+	}
+
 	.btn-zoom:hover {
 		background: var(--color-neutral-50);
 	}
@@ -420,6 +625,12 @@
 		background-size: 20px 20px;
 		overflow: hidden;
 		position: relative;
+		cursor: grab;
+		touch-action: none;
+	}
+
+	.svg-container--panning {
+		cursor: grabbing;
 	}
 
 	.canvas-loading {
@@ -446,8 +657,7 @@
 	.canvas-svg {
 		width: 100%;
 		height: 100%;
-		transform-origin: center;
-		transition: transform 180ms var(--ease-default);
+		transition: opacity 180ms var(--ease-default);
 	}
 
 	.connection-line {
@@ -457,6 +667,14 @@
 		opacity: 0.48;
 		stroke-dasharray: 6 7;
 		animation: dash 20s linear infinite;
+	}
+
+	.connection-line--active {
+		stroke: var(--color-primary);
+		stroke-width: 2.5;
+		opacity: 0.9;
+		stroke-dasharray: 10 5;
+		animation-duration: 6s;
 	}
 
 	@keyframes dash {
@@ -481,6 +699,13 @@
 	.node-group:hover .node-box {
 		stroke: var(--color-primary);
 		stroke-width: 2;
+	}
+
+	.node-group--highlighted .node-box,
+	.vm-group--highlighted .vm-box {
+		stroke: var(--color-primary);
+		stroke-width: 2;
+		filter: drop-shadow(0 0 10px rgba(143, 90, 42, 0.22));
 	}
 
 	.node-group--active .node-box {
@@ -604,6 +829,119 @@
 		letter-spacing: 0.05em;
 	}
 
+	.topology-minimap {
+		position: absolute;
+		right: 0.75rem;
+		bottom: 0.75rem;
+		width: 8.75rem;
+		height: 6.25rem;
+		padding: 0;
+		border: 1px solid var(--shell-line-strong);
+		border-radius: var(--radius-xs);
+		background: color-mix(in srgb, var(--shell-surface) 92%, transparent);
+		box-shadow: var(--shadow-sm);
+		cursor: crosshair;
+		overflow: hidden;
+	}
+
+	.topology-minimap svg {
+		width: 100%;
+		height: 100%;
+	}
+
+	.minimap-node {
+		fill: var(--color-primary-light);
+		stroke: var(--color-primary);
+		stroke-width: 2;
+	}
+
+	.minimap-vm {
+		fill: var(--color-success);
+		opacity: 0.85;
+	}
+
+	.minimap-view {
+		fill: rgba(143, 90, 42, 0.08);
+		stroke: var(--color-primary);
+		stroke-width: 3;
+	}
+
+	.selection-panel {
+		position: absolute;
+		left: 0.75rem;
+		bottom: 0.75rem;
+		display: grid;
+		gap: 0.55rem;
+		width: min(18rem, calc(100% - 1.5rem));
+		padding: 0.75rem;
+		border: 1px solid var(--shell-line-strong);
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--shell-surface) 94%, transparent);
+		box-shadow: var(--shadow-sm);
+	}
+
+	.selection-panel__eyebrow,
+	.selection-panel p,
+	.selection-panel h3 {
+		margin: 0;
+	}
+
+	.selection-panel__eyebrow {
+		font-size: 9px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--shell-text-muted);
+	}
+
+	.selection-panel h3 {
+		margin-top: 0.15rem;
+		font-size: var(--text-sm);
+		color: var(--shell-text);
+	}
+
+	.selection-panel p {
+		margin-top: 0.2rem;
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+	}
+
+	.selection-panel__status {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-size: var(--text-xs);
+		color: var(--shell-text);
+	}
+
+	.selection-panel__status span {
+		width: 0.45rem;
+		height: 0.45rem;
+		border-radius: 999px;
+		background: var(--color-success);
+	}
+
+	.selection-panel__actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+	}
+
+	.selection-panel__actions a {
+		padding: 0.25rem 0.45rem;
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-xs);
+		color: var(--shell-text);
+		font-size: var(--text-xs);
+		text-decoration: none;
+		background: var(--shell-surface-muted);
+	}
+
+	.selection-panel__actions a:hover {
+		border-color: var(--shell-line-strong);
+		color: var(--shell-accent);
+	}
+
 	@media (prefers-reduced-motion: reduce) {
 		.connection-line {
 			animation: none;
@@ -611,7 +949,8 @@
 
 		.canvas-svg,
 		.node-box,
-		.vm-box {
+		.vm-box,
+		.selection-panel {
 			transition: none;
 		}
 	}

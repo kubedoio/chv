@@ -29,10 +29,19 @@
 			operation: t.operation,
 			summary: t.summary,
 			status: t.status,
+			resource_kind: t.resource_kind,
+			resource_id: t.resource_id,
 			started_at: new Date(t.started_unix_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
 			tone: meta.tone as any
 		};
 	}));
+
+	const activeTopologyResourceIds = $derived(
+		recentTasks
+			.filter((task) => ['queued', 'running', 'pending', 'accepted', 'in_progress'].includes(task.status.toLowerCase()))
+			.map((task) => task.resource_id)
+			.filter(Boolean)
+	);
 
 	const fleetBriefing = $derived([
 		{
@@ -65,19 +74,29 @@
 		{
 			label: 'CPU envelope',
 			value: `${Math.round(overview.cpu_usage_percent || 0)}%`,
-			width: overview.cpu_usage_percent || 0
+			width: overview.cpu_usage_percent || 0,
+			state: getPressureState(overview.cpu_usage_percent || 0)
 		},
 		{
 			label: 'Memory envelope',
 			value: `${Math.round(overview.memory_usage_percent || 0)}%`,
-			width: overview.memory_usage_percent || 0
+			width: overview.memory_usage_percent || 0,
+			state: getPressureState(overview.memory_usage_percent || 0)
 		},
 		{
 			label: 'Storage pressure',
 			value: `${Math.round(overview.storage_usage_percent || 0)}%`,
-			width: overview.storage_usage_percent || 0
+			width: overview.storage_usage_percent || 0,
+			state: getPressureState(overview.storage_usage_percent || 0)
 		}
 	]);
+
+	function getPressureState(value: number): string {
+		if (value >= 90) return 'Critical';
+		if (value >= 75) return 'Pressure';
+		if (value >= 45) return 'Warm';
+		return 'Idle';
+	}
 </script>
 
 <div class="cockpit-dashboard">
@@ -122,7 +141,7 @@
 					unit="%"
 					trend={+1}
 					points={[65, 68, 70, 72, 71, 72]}
-					color={overview.memory_usage_percent > 85 ? 'warning' : 'primary'}
+					color={overview.memory_usage_percent > 85 ? 'danger' : 'primary'}
 				/>
 			</div>
 
@@ -170,7 +189,7 @@
 
 			<div class="cockpit-workspace">
 				<section class="cockpit-topology">
-					<TopologyCanvas />
+					<TopologyCanvas highlightedResourceIds={activeTopologyResourceIds} />
 				</section>
 
 				<aside class="cockpit-rail">
@@ -182,8 +201,13 @@
 						<div class="capacity-preview">
 							{#each pressureCards as item}
 								<div class="cap-item">
-									<div class="cap-header"><span>{item.label}</span><span>{item.value}</span></div>
-									<div class="cap-bar"><div class="cap-fill" style={`width: ${item.width}%`}></div></div>
+									<div class="cap-header">
+										<span>{item.label}</span>
+										<span>{item.value} · {item.state}</span>
+									</div>
+									<div class="cap-bar" aria-label="{item.label}: {item.value}, {item.state}">
+										<div class="cap-fill" class:cap-fill--warm={item.state === 'Warm'} class:cap-fill--pressure={item.state === 'Pressure'} class:cap-fill--critical={item.state === 'Critical'} style={`width: ${item.width}%`}></div>
+									</div>
 								</div>
 							{/each}
 							<div class="capacity-footnote">
@@ -373,6 +397,18 @@
 	.cap-fill {
 		height: 100%;
 		background: var(--color-primary);
+	}
+
+	.cap-fill--warm {
+		background: var(--color-info);
+	}
+
+	.cap-fill--pressure {
+		background: var(--color-warning);
+	}
+
+	.cap-fill--critical {
+		background: var(--color-danger);
 	}
 
 	@media (max-width: 1100px) {
