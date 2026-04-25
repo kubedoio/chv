@@ -232,8 +232,8 @@
 			allowProposedApi: true,
 			scrollback: 10000,
 			theme: {
-				background: rootStyle.getPropertyValue('--shell-surface-muted').trim() || '#f1ede4',
-				foreground: rootStyle.getPropertyValue('--shell-text').trim() || '#161616',
+				background: '#000000',
+				foreground: '#e0e0e0',
 				cursor: rootStyle.getPropertyValue('--shell-accent').trim() || '#8f5a2a',
 				selectionBackground: 'rgba(143, 90, 42, 0.22)'
 			}
@@ -413,7 +413,7 @@
 		height: min(54vh, 34rem);
 		min-height: 22rem;
 		padding: 0.5rem;
-		background: var(--shell-surface-muted);
+		background: #000000;
 	}
 
 	:global(.xterm) {
