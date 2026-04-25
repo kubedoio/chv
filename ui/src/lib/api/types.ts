@@ -100,6 +100,7 @@ export interface ImportProgress {
 export interface VM {
   id: string;
   name: string;
+  node_id?: string;
   image_id: string;
   storage_pool_id: string;
   network_id: string;

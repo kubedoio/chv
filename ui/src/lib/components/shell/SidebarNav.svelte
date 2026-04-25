@@ -85,9 +85,10 @@
 		(() => {
 			const map = new Map<string, typeof inventory.vms>();
 			for (const vm of filteredVms) {
-				const list = map.get(vm.node_id) ?? [];
+				const nodeId = getVmNodeId(vm);
+				const list = map.get(nodeId) ?? [];
 				list.push(vm);
-				map.set(vm.node_id, list);
+				map.set(nodeId, list);
 			}
 			return map;
 		})()
@@ -99,6 +100,10 @@
 
 	function getInstanceExpandedKey(nodeId: string): string {
 		return `host-${nodeId}-instances`;
+	}
+
+	function getVmNodeId(vm: (typeof inventory.vms)[number]): string {
+		return vm.node_id ?? 'unassigned';
 	}
 
 	async function handleLogout() {
@@ -213,7 +218,7 @@
 		return {
 			id: vm.id,
 			name: vm.name,
-			nodeId: vm.node_id,
+			nodeId: getVmNodeId(vm),
 			status: normalizeInstanceStatus(vm.actual_state)
 		};
 	}
@@ -332,7 +337,7 @@
 												{@const hostVms = vmsByNode.get(node.id) ?? []}
 												<div class="flex flex-col">
 													<button
-														class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+														class="app-nav__tree-row app-nav__tree-row--host"
 														aria-expanded={hostExpanded}
 														onclick={() => toggleGroup(getNodeExpandedKey(node.id))}
 													>
@@ -349,7 +354,7 @@
 															<!-- Instances under host -->
 															<div class="flex flex-col">
 																<button
-																	class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+																	class="app-nav__tree-row app-nav__tree-row--resource"
 																	aria-expanded={instExpanded}
 																	onclick={() => toggleGroup(getInstanceExpandedKey(node.id))}
 																>
@@ -362,7 +367,7 @@
 																</button>
 
 																{#if instExpanded}
-																	<div class="flex flex-col gap-[0.125rem]">
+																	<div class="app-nav__instance-list">
 																		{#if hostVms.length === 0}
 																			<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No instances.</div>
 																		{:else}
@@ -370,7 +375,7 @@
 																				{@const inst = vmToTreeItem(vm)}
 																				{@const isVmActive = isActive(`/vms/${vm.id}`, $page.url.pathname)}
 																				<div
-																					class="group relative flex items-center gap-2 rounded-[var(--radius-xs)] text-[length:var(--text-xs)] py-[0.35rem] px-2 transition-colors
+																					class="app-nav__instance-row group
 																					{isVmActive ? 'app-nav__tree-link--active' : 'hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] text-[var(--color-neutral-400)]'}"
 																					role="button"
 																					tabindex="0"
@@ -378,15 +383,11 @@
 																					onkeydown={(e) => { if (e.key === 'Enter') { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); } }}
 																					oncontextmenu={(e) => handleInstanceContextMenu(e, inst)}
 																				>
-																					<div
-																						class="w-[6px] h-[6px] rounded-full {inst.status === 'running' ? 'bg-[var(--color-success)]' : inst.status === 'error' ? 'bg-[var(--color-danger)]' : 'bg-[var(--color-neutral-500)]'}"
-																						aria-hidden="true"
-																					></div>
+																					<InstanceStatusBadge status={inst.status} showText={false} />
 																					<span class="truncate flex-1 min-w-0">{vm.name}</span>
-																					<InstanceStatusBadge status={inst.status} showText={true} />
 																					<button
 																						type="button"
-																						class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 p-0.5 rounded hover:bg-[var(--color-neutral-700)] text-[var(--color-neutral-400)] transition-opacity"
+																						class="app-nav__instance-action"
 																						aria-label="Actions for instance {vm.name}"
 																						onclick={(e) => handleKebabClick(e, inst)}
 																					>
@@ -402,7 +403,7 @@
 														<!-- Networks under host -->
 														<a
 															href="/networks?node_id={node.id}"
-															class="flex items-center gap-2 text-[length:var(--text-xs)] text-[var(--color-neutral-500)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+															class="app-nav__tree-row app-nav__tree-row--resource app-nav__tree-row--link"
 															onclick={() => handleSelection('node', node.id, node.name)}
 														>
 															<Network size={12} />
@@ -412,7 +413,7 @@
 														<!-- Storage under host -->
 														<a
 															href="/storage?node_id={node.id}"
-															class="flex items-center gap-2 text-[length:var(--text-xs)] text-[var(--color-neutral-500)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+															class="app-nav__tree-row app-nav__tree-row--resource app-nav__tree-row--link"
 															onclick={() => handleSelection('node', node.id, node.name)}
 														>
 															<HardDrive size={12} />
@@ -422,7 +423,7 @@
 														<!-- Images under host -->
 														<a
 															href="/images?node_id={node.id}"
-															class="flex items-center gap-2 text-[length:var(--text-xs)] text-[var(--color-neutral-500)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 px-2 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+															class="app-nav__tree-row app-nav__tree-row--resource app-nav__tree-row--link"
 															onclick={() => handleSelection('node', node.id, node.name)}
 														>
 															<Image size={12} />
@@ -542,6 +543,92 @@
 <style>
 	.app-nav__scrollbox::-webkit-scrollbar {
 		width: 4px;
+	}
+
+	.app-nav__tree-row {
+		display: grid;
+		grid-template-columns: 0.75rem 0.875rem minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 0.35rem;
+		min-height: 1.625rem;
+		padding: 0.25rem 0.45rem;
+		border: 0;
+		border-radius: var(--radius-xs);
+		background: transparent;
+		color: var(--color-neutral-400);
+		cursor: pointer;
+		font-size: var(--text-xs);
+		text-align: left;
+		text-decoration: none;
+		transition:
+			background-color 120ms ease-in-out,
+			color 120ms ease-in-out;
+	}
+
+	.app-nav__tree-row--host {
+		font-size: var(--text-sm);
+	}
+
+	.app-nav__tree-row--resource,
+	.app-nav__tree-row--link {
+		color: var(--color-neutral-500);
+	}
+
+	.app-nav__tree-row:hover {
+		background: var(--color-neutral-800);
+		color: var(--color-sidebar-text-active, #ffffff);
+	}
+
+	.app-nav__instance-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+		margin-left: 1.225rem;
+		padding-left: 0.45rem;
+		border-left: 1px solid var(--color-neutral-700);
+	}
+
+	.app-nav__instance-row {
+		position: relative;
+		display: grid;
+		grid-template-columns: 0.875rem minmax(0, 1fr) 1.25rem;
+		align-items: center;
+		gap: 0.35rem;
+		min-height: 1.625rem;
+		padding: 0.25rem 0.35rem;
+		border-radius: var(--radius-xs);
+		font-size: var(--text-xs);
+		transition:
+			background-color 120ms ease-in-out,
+			color 120ms ease-in-out;
+	}
+
+	.app-nav__instance-action {
+		display: grid;
+		place-items: center;
+		width: 1.25rem;
+		height: 1.25rem;
+		padding: 0;
+		border: 0;
+		border-radius: var(--radius-xs);
+		background: transparent;
+		color: var(--color-neutral-400);
+		cursor: pointer;
+		opacity: 0;
+		transition:
+			opacity 120ms ease-in-out,
+			background-color 120ms ease-in-out,
+			color 120ms ease-in-out;
+	}
+
+	.group:hover .app-nav__instance-action,
+	.group:focus-within .app-nav__instance-action {
+		opacity: 1;
+	}
+
+	.app-nav__instance-action:hover {
+		background: var(--color-neutral-700);
+		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
 	.app-nav__tree-link--active {
