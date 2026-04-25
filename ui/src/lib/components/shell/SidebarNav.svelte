@@ -105,10 +105,6 @@
 		return `host-${nodeId}`;
 	}
 
-	function getInstanceExpandedKey(nodeId: string): string {
-		return `host-${nodeId}-instances`;
-	}
-
 	function getVmNodeId(vm: (typeof inventory.vms)[number]): string {
 		return vm.node_id ?? 'unassigned';
 	}
@@ -333,7 +329,6 @@
 				{:else if filteredNodes.length === 0}
 					<div class="py-2 px-4 text-[10px] text-[var(--color-neutral-500)]">No hosts enrolled.</div>
 				{:else}
-					<!-- Default Cloud -->
 					<div class="flex flex-col">
 						<button
 							class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
@@ -347,7 +342,6 @@
 
 						{#if openGroups['cloud-1']}
 							<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
-								<!-- Hosts group -->
 								<div class="flex flex-col">
 									<button
 										class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
@@ -363,7 +357,6 @@
 										<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
 											{#each filteredNodes as node}
 												{@const hostExpanded = openGroups[getNodeExpandedKey(node.id)] ?? true}
-												{@const instExpanded = openGroups[getInstanceExpandedKey(node.id)] ?? true}
 												{@const hostVms = vmsByNode.get(node.id) ?? []}
 												<div class="flex flex-col">
 													<button
@@ -381,94 +374,59 @@
 
 													{#if hostExpanded}
 														<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
-															<!-- Instances under host -->
-															<div class="flex flex-col">
-																<button
-																	class="app-nav__tree-row app-nav__tree-row--resource"
-																	aria-expanded={instExpanded}
-																	onclick={() => toggleGroup(getInstanceExpandedKey(node.id))}
-																>
-																	<ChevronDown size={10} class={!instExpanded ? '-rotate-90' : ''} />
-																	<Box size={12} />
-																	<span class="flex-1">Instances</span>
-																	{#if hostVms.length > 0}
-																		<span class="text-[10px] text-[var(--color-neutral-500)]">{hostVms.length}</span>
-																	{/if}
-																</button>
-
-																{#if instExpanded}
-																	<div class="app-nav__instance-list">
-																		{#if hostVms.length === 0}
-																			<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No instances.</div>
-																		{:else}
-																			{#each hostVms as vm}
-																				{@const inst = vmToTreeItem(vm)}
-																				{@const isVmActive = isActive(`/vms/${vm.id}`, $page.url.pathname)}
-																				<div
-																					class="app-nav__instance-row group
-																					{isVmActive ? 'app-nav__tree-link--active' : 'hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] text-[var(--color-neutral-400)]'}"
-																					role="button"
-																					tabindex="0"
-																					onclick={() => { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); }}
-																					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); } }}
-																					oncontextmenu={(e) => handleInstanceContextMenu(e, inst)}
-																				>
-																					<InstanceStatusBadge status={inst.status} showText={false} />
-																					<span class="truncate flex-1 min-w-0">{vm.name}</span>
-																					<button
-																						type="button"
-																						class="app-nav__instance-action"
-																						aria-label="Actions for instance {vm.name}"
-																						onclick={(e) => handleKebabClick(e, inst)}
-																					>
-																						<MoreVertical size={12} />
-																					</button>
-																				</div>
-																			{/each}
-																		{/if}
-																	</div>
+															<div class="app-nav__instance-list app-nav__instance-list--direct">
+																{#if hostVms.length === 0}
+																	<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No instances.</div>
+																{:else}
+																	{#each hostVms as vm}
+																		{@const inst = vmToTreeItem(vm)}
+																		{@const isVmActive = isActive(`/vms/${vm.id}`, $page.url.pathname)}
+																		<div
+																			class="app-nav__instance-row group
+																			{isVmActive ? 'app-nav__tree-link--active' : 'hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] text-[var(--color-neutral-400)]'}"
+																			role="button"
+																			tabindex="0"
+																			onclick={() => { handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); }}
+																			onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelection('vm', vm.id, vm.name); goto(`/vms/${vm.id}`); } }}
+																			oncontextmenu={(e) => handleInstanceContextMenu(e, inst)}
+																		>
+																			<InstanceStatusBadge status={inst.status} showText={false} />
+																			<span class="truncate flex-1 min-w-0">{vm.name}</span>
+																			<button
+																				type="button"
+																				class="app-nav__instance-action"
+																				aria-label="Actions for instance {vm.name}"
+																				onclick={(e) => handleKebabClick(e, inst)}
+																			>
+																				<MoreVertical size={12} />
+																			</button>
+																		</div>
+																	{/each}
 																{/if}
+															</div>
 														</div>
-
-														<!-- Networks under host -->
-														<a
-															href="/networks?node_id={node.id}"
-															class="app-nav__tree-row app-nav__tree-row--resource app-nav__tree-row--link"
-															onclick={() => handleSelection('node', node.id, node.name)}
-														>
-															<Network size={12} />
-															<span class="truncate">Networks</span>
-														</a>
-
-														<!-- Storage under host -->
-														<a
-															href="/storage?node_id={node.id}"
-															class="app-nav__tree-row app-nav__tree-row--resource app-nav__tree-row--link"
-															onclick={() => handleSelection('node', node.id, node.name)}
-														>
-															<HardDrive size={12} />
-															<span class="truncate">Storage</span>
-														</a>
-
-														<!-- Images under host -->
-														<a
-															href="/images?node_id={node.id}"
-															class="app-nav__tree-row app-nav__tree-row--resource app-nav__tree-row--link"
-															onclick={() => handleSelection('node', node.id, node.name)}
-														>
-															<Image size={12} />
-															<span class="truncate">Images</span>
-														</a>
+													{/if}
 												</div>
-											{/if}
-										</div>
-									{/each}
+											{/each}
 										</div>
 									{/if}
 								</div>
 							</div>
 						{/if}
 					</div>
+
+					<a
+						href="/vms"
+						class="app-nav__infrastructure-link {isActive('/vms', $page.url.pathname) ? 'app-nav__tree-link--active' : ''}"
+						aria-current={isActive('/vms', $page.url.pathname) ? 'page' : undefined}
+					>
+						<span class="app-nav__tree-spacer" aria-hidden="true"></span>
+						<Box size={12} />
+						<span class="truncate">Instances</span>
+						{#if filteredVms.length > 0}
+							<span class="app-nav__tree-count">{filteredVms.length}</span>
+						{/if}
+					</a>
 				{/if}
 			</div>
 		</div>
@@ -609,6 +567,36 @@
 		color: var(--color-sidebar-text-active, #ffffff);
 	}
 
+	.app-nav__infrastructure-link {
+		display: grid;
+		grid-template-columns: 0.75rem 0.875rem minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 0.35rem;
+		min-height: 1.625rem;
+		padding: 0.25rem 0.45rem;
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-400);
+		font-size: var(--text-sm);
+		text-decoration: none;
+		transition:
+			background-color 120ms ease-in-out,
+			color 120ms ease-in-out;
+	}
+
+	.app-nav__infrastructure-link:hover {
+		background: var(--color-neutral-800);
+		color: var(--color-sidebar-text-active, #ffffff);
+	}
+
+	.app-nav__tree-spacer {
+		width: 0.75rem;
+	}
+
+	.app-nav__tree-count {
+		font-size: 10px;
+		color: var(--color-neutral-500);
+	}
+
 	.app-nav__pinned-row {
 		display: grid;
 		grid-template-columns: 0.875rem minmax(0, 1fr) 0.875rem;
@@ -637,6 +625,10 @@
 		margin-left: 1.225rem;
 		padding-left: 0.45rem;
 		border-left: 1px solid var(--color-neutral-700);
+	}
+
+	.app-nav__instance-list--direct {
+		margin-left: 0;
 	}
 
 	.app-nav__instance-row {

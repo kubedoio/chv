@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import type { PageData } from './$types';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
@@ -11,14 +13,42 @@
 	import { 
 		Activity, 
 		AlertCircle, 
+		Minus,
+		Plus,
 		Server,
 		ShieldCheck,
+		X,
 		Zap
 	} from 'lucide-svelte';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
 	import { inventory } from '$lib/stores/inventory.svelte';
 
 	let { data }: { data: PageData } = $props();
+
+	type PanelId = 'briefing' | 'attention' | 'pipeline' | 'capacity';
+
+	const dashboardPanelStorageKey = 'chv.fleet-overview.panels.v1';
+	const defaultPanelState: Record<PanelId, boolean> = {
+		briefing: true,
+		attention: true,
+		pipeline: true,
+		capacity: true
+	};
+	const dashboardPanels: { id: PanelId; label: string }[] = [
+		{ id: 'briefing', label: 'Fleet Briefing' },
+		{ id: 'attention', label: 'Immediate Attention' },
+		{ id: 'pipeline', label: 'Operation Pipeline' },
+		{ id: 'capacity', label: 'Capacity Pressure' }
+	];
+
+	let panelVisible = $state<Record<PanelId, boolean>>({ ...defaultPanelState });
+	let panelCollapsed = $state<Record<PanelId, boolean>>({
+		briefing: false,
+		attention: false,
+		pipeline: false,
+		capacity: false
+	});
+	let panelPrefsLoaded = $state(false);
 
 	const overview = $derived(data.overview);
 
@@ -91,11 +121,59 @@
 		}
 	]);
 
+	const hasBriefingRow = $derived(panelVisible.briefing || panelVisible.attention);
+	const hasRailPanels = $derived(panelVisible.pipeline || panelVisible.capacity);
+	const compactRail = $derived(
+		hasRailPanels &&
+			(!panelVisible.pipeline || panelCollapsed.pipeline) &&
+			(!panelVisible.capacity || panelCollapsed.capacity)
+	);
+
+	onMount(() => {
+		try {
+			const stored = localStorage.getItem(dashboardPanelStorageKey);
+			if (stored) {
+				const parsed = JSON.parse(stored) as {
+					visible?: Partial<Record<PanelId, boolean>>;
+					collapsed?: Partial<Record<PanelId, boolean>>;
+				};
+				panelVisible = { ...panelVisible, ...parsed.visible };
+				panelCollapsed = { ...panelCollapsed, ...parsed.collapsed };
+			}
+		} catch {
+			// Ignore malformed local dashboard preferences.
+		} finally {
+			panelPrefsLoaded = true;
+		}
+	});
+
+	$effect(() => {
+		const prefs = {
+			visible: { ...panelVisible },
+			collapsed: { ...panelCollapsed }
+		};
+		if (!browser || !panelPrefsLoaded) return;
+		localStorage.setItem(dashboardPanelStorageKey, JSON.stringify(prefs));
+	});
+
 	function getPressureState(value: number): string {
 		if (value >= 90) return 'Critical';
 		if (value >= 75) return 'Pressure';
 		if (value >= 45) return 'Warm';
 		return 'Idle';
+	}
+
+	function togglePanelVisibility(id: PanelId) {
+		panelVisible[id] = !panelVisible[id];
+		if (panelVisible[id]) panelCollapsed[id] = false;
+	}
+
+	function togglePanelCollapsed(id: PanelId) {
+		panelCollapsed[id] = !panelCollapsed[id];
+	}
+
+	function hidePanel(id: PanelId) {
+		panelVisible[id] = false;
 	}
 </script>
 
@@ -143,81 +221,139 @@
 					points={[65, 68, 70, 72, 71, 72]}
 					color={overview.memory_usage_percent > 85 ? 'danger' : 'primary'}
 				/>
-			</div>
+				</div>
 
-			<div class="cockpit-briefing-grid">
-				<SectionCard title="Fleet Briefing" icon={ShieldCheck} badgeLabel="Shift View">
-					<div class="briefing-grid">
-						{#each fleetBriefing as item}
-							<article class="briefing-card">
-								<p class="briefing-label">{item.label}</p>
-								<p class="briefing-value">{item.value}</p>
-								<p class="briefing-note">{item.note}</p>
-							</article>
-						{/each}
-					</div>
-				</SectionCard>
+				<div class="dashboard-panel-bar" aria-label="Dashboard panel visibility">
+					<span>Dashboard panels</span>
+					{#each dashboardPanels as panel}
+						<button
+							type="button"
+							class:dashboard-panel-toggle--active={panelVisible[panel.id]}
+							onclick={() => togglePanelVisibility(panel.id)}
+						>
+							{panel.label}
+						</button>
+					{/each}
+				</div>
 
-				<SectionCard
-					title="Immediate Attention"
-					icon={AlertCircle}
-					badgeLabel={overview.unresolved_alerts > 0 ? String(overview.unresolved_alerts) : 'Clear'}
-					badgeTone={overview.unresolved_alerts > 0 ? 'warning' : 'healthy'}
-				>
-					<ul class="attention-list">
-						{#each overview.alerts.slice(0, 4) as alert}
-							<li class="attention-item">
-								<div class="attention-item__header">
-									<SeverityShield severity={alert.severity} />
-									<span class="attention-scope">{alert.scope}</span>
+				{#if hasBriefingRow}
+					<div class="cockpit-briefing-grid" class:cockpit-briefing-grid--single={!(panelVisible.briefing && panelVisible.attention)}>
+						{#if panelVisible.briefing}
+							<SectionCard title="Fleet Briefing" icon={ShieldCheck} badgeLabel="Shift View" collapsed={panelCollapsed.briefing}>
+								{#snippet actions()}
+									<button class="panel-icon-button" type="button" aria-label={panelCollapsed.briefing ? 'Expand Fleet Briefing' : 'Minimize Fleet Briefing'} onclick={() => togglePanelCollapsed('briefing')}>
+										{#if panelCollapsed.briefing}<Plus size={12} />{:else}<Minus size={12} />{/if}
+									</button>
+									<button class="panel-icon-button" type="button" aria-label="Remove Fleet Briefing from dashboard" onclick={() => hidePanel('briefing')}>
+										<X size={12} />
+									</button>
+								{/snippet}
+								<div class="briefing-grid">
+									{#each fleetBriefing as item}
+										<article class="briefing-card">
+											<p class="briefing-label">{item.label}</p>
+											<p class="briefing-value">{item.value}</p>
+											<p class="briefing-note">{item.note}</p>
+										</article>
+									{/each}
 								</div>
-								<p>{alert.summary}</p>
-							</li>
-						{/each}
-						{#if overview.alerts.length === 0}
-							<li class="attention-item attention-item--quiet">
-								<Server size={15} />
-								<div>
-									<p>Signals nominal across the indexed fleet.</p>
-									<span>No active incidents are crowding the queue.</span>
-								</div>
-							</li>
+							</SectionCard>
 						{/if}
-					</ul>
-				</SectionCard>
-			</div>
 
-			<div class="cockpit-workspace">
-				<section class="cockpit-topology">
-					<TopologyCanvas highlightedResourceIds={activeTopologyResourceIds} />
-				</section>
+						{#if panelVisible.attention}
+							<SectionCard
+								title="Immediate Attention"
+								icon={AlertCircle}
+								badgeLabel={overview.unresolved_alerts > 0 ? String(overview.unresolved_alerts) : 'Clear'}
+								badgeTone={overview.unresolved_alerts > 0 ? 'warning' : 'healthy'}
+								collapsed={panelCollapsed.attention}
+							>
+								{#snippet actions()}
+									<button class="panel-icon-button" type="button" aria-label={panelCollapsed.attention ? 'Expand Immediate Attention' : 'Minimize Immediate Attention'} onclick={() => togglePanelCollapsed('attention')}>
+										{#if panelCollapsed.attention}<Plus size={12} />{:else}<Minus size={12} />{/if}
+									</button>
+									<button class="panel-icon-button" type="button" aria-label="Remove Immediate Attention from dashboard" onclick={() => hidePanel('attention')}>
+										<X size={12} />
+									</button>
+								{/snippet}
+								<ul class="attention-list">
+									{#each overview.alerts.slice(0, 4) as alert}
+										<li class="attention-item">
+											<div class="attention-item__header">
+												<SeverityShield severity={alert.severity} />
+												<span class="attention-scope">{alert.scope}</span>
+											</div>
+											<p>{alert.summary}</p>
+										</li>
+									{/each}
+									{#if overview.alerts.length === 0}
+										<li class="attention-item attention-item--quiet">
+											<Server size={15} />
+											<div>
+												<p>Signals nominal across the indexed fleet.</p>
+												<span>No active incidents are crowding the queue.</span>
+											</div>
+										</li>
+									{/if}
+								</ul>
+							</SectionCard>
+						{/if}
+					</div>
+				{/if}
 
-				<aside class="cockpit-rail">
-					<SectionCard title="Operation Pipeline" icon={Activity} badgeLabel="Live">
-						<TaskTimeline tasks={recentTasks.slice(0, 4)} />
-					</SectionCard>
+				<div class="cockpit-workspace" class:cockpit-workspace--wide={!hasRailPanels} class:cockpit-workspace--compact-rail={compactRail}>
+					<section class="cockpit-topology">
+						<TopologyCanvas highlightedResourceIds={activeTopologyResourceIds} />
+					</section>
 
-					<SectionCard title="Capacity Pressure" icon={Zap}>
-						<div class="capacity-preview">
-							{#each pressureCards as item}
-								<div class="cap-item">
-									<div class="cap-header">
-										<span>{item.label}</span>
-										<span>{item.value} · {item.state}</span>
+					{#if hasRailPanels}
+						<aside class="cockpit-rail">
+							{#if panelVisible.pipeline}
+								<SectionCard title="Operation Pipeline" icon={Activity} badgeLabel="Live" collapsed={panelCollapsed.pipeline}>
+									{#snippet actions()}
+										<button class="panel-icon-button" type="button" aria-label={panelCollapsed.pipeline ? 'Expand Operation Pipeline' : 'Minimize Operation Pipeline'} onclick={() => togglePanelCollapsed('pipeline')}>
+											{#if panelCollapsed.pipeline}<Plus size={12} />{:else}<Minus size={12} />{/if}
+										</button>
+										<button class="panel-icon-button" type="button" aria-label="Remove Operation Pipeline from dashboard" onclick={() => hidePanel('pipeline')}>
+											<X size={12} />
+										</button>
+									{/snippet}
+									<TaskTimeline tasks={recentTasks.slice(0, 4)} />
+								</SectionCard>
+							{/if}
+
+							{#if panelVisible.capacity}
+								<SectionCard title="Capacity Pressure" icon={Zap} collapsed={panelCollapsed.capacity}>
+									{#snippet actions()}
+										<button class="panel-icon-button" type="button" aria-label={panelCollapsed.capacity ? 'Expand Capacity Pressure' : 'Minimize Capacity Pressure'} onclick={() => togglePanelCollapsed('capacity')}>
+											{#if panelCollapsed.capacity}<Plus size={12} />{:else}<Minus size={12} />{/if}
+										</button>
+										<button class="panel-icon-button" type="button" aria-label="Remove Capacity Pressure from dashboard" onclick={() => hidePanel('capacity')}>
+											<X size={12} />
+										</button>
+									{/snippet}
+									<div class="capacity-preview">
+										{#each pressureCards as item}
+											<div class="cap-item">
+												<div class="cap-header">
+													<span>{item.label}</span>
+													<span>{item.value} · {item.state}</span>
+												</div>
+												<div class="cap-bar" aria-label="{item.label}: {item.value}, {item.state}">
+													<div class="cap-fill" class:cap-fill--warm={item.state === 'Warm'} class:cap-fill--pressure={item.state === 'Pressure'} class:cap-fill--critical={item.state === 'Critical'} style={`width: ${item.width}%`}></div>
+												</div>
+											</div>
+										{/each}
+										<div class="capacity-footnote">
+											<span>Network throughput index</span>
+											<strong>Nominal</strong>
+										</div>
 									</div>
-									<div class="cap-bar" aria-label="{item.label}: {item.value}, {item.state}">
-										<div class="cap-fill" class:cap-fill--warm={item.state === 'Warm'} class:cap-fill--pressure={item.state === 'Pressure'} class:cap-fill--critical={item.state === 'Critical'} style={`width: ${item.width}%`}></div>
-									</div>
-								</div>
-							{/each}
-							<div class="capacity-footnote">
-								<span>Network throughput index</span>
-								<strong>Nominal</strong>
-							</div>
-						</div>
-					</SectionCard>
-				</aside>
-			</div>
+								</SectionCard>
+							{/if}
+						</aside>
+					{/if}
+				</div>
 		</div>
 	{/if}
 </div>
@@ -242,10 +378,73 @@
 		gap: 0.75rem;
 	}
 
+	.dashboard-panel-bar {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		padding: 0.35rem 0.45rem;
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-xs);
+		background: var(--shell-surface);
+	}
+
+	.dashboard-panel-bar span {
+		margin-right: 0.25rem;
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--shell-text-muted);
+	}
+
+	.dashboard-panel-bar button,
+	.panel-icon-button {
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-xs);
+		background: var(--shell-surface-muted);
+		color: var(--shell-text-muted);
+		cursor: pointer;
+		transition:
+			background-color 120ms ease-in-out,
+			border-color 120ms ease-in-out,
+			color 120ms ease-in-out;
+	}
+
+	.dashboard-panel-bar button {
+		padding: 0.25rem 0.45rem;
+		font-size: 10px;
+		font-weight: 600;
+	}
+
+	.dashboard-panel-bar button:hover,
+	.panel-icon-button:hover {
+		border-color: var(--shell-line-strong);
+		color: var(--shell-text);
+	}
+
+	.dashboard-panel-toggle--active {
+		border-color: color-mix(in srgb, var(--color-primary) 40%, var(--shell-line)) !important;
+		background: color-mix(in srgb, var(--color-primary-light) 70%, var(--shell-surface)) !important;
+		color: var(--color-primary) !important;
+	}
+
+	.panel-icon-button {
+		display: grid;
+		place-items: center;
+		width: 1.55rem;
+		height: 1.55rem;
+		padding: 0;
+	}
+
 	.cockpit-briefing-grid {
 		display: grid;
 		grid-template-columns: minmax(0, 1.3fr) minmax(18rem, 0.9fr);
 		gap: 0.75rem;
+	}
+
+	.cockpit-briefing-grid--single {
+		grid-template-columns: 1fr;
 	}
 
 	.briefing-grid {
@@ -291,6 +490,14 @@
 		align-items: start;
 		flex: 1;
 		min-height: 0;
+	}
+
+	.cockpit-workspace--compact-rail {
+		grid-template-columns: minmax(0, 1fr) minmax(13rem, 0.28fr);
+	}
+
+	.cockpit-workspace--wide {
+		grid-template-columns: minmax(0, 1fr);
 	}
 
 	.cockpit-topology {

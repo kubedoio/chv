@@ -6,9 +6,10 @@
 		actions?: import('svelte').Snippet;
 		badgeLabel?: string;
 		badgeTone?: 'healthy' | 'warning' | 'degraded' | 'failed' | 'neutral';
+		collapsed?: boolean;
 	}
 
-	let { title, icon: Icon, children, actions, badgeLabel, badgeTone = 'neutral' }: Props = $props();
+	let { title, icon: Icon, children, actions, badgeLabel, badgeTone = 'neutral', collapsed = false }: Props = $props();
 
 	const badgeToneClasses: Record<string, string> = {
 		healthy: 'bg-[var(--color-success-light)] text-[var(--color-success-dark)]',
@@ -34,7 +35,9 @@
 			</div>
 		{/if}
 	</header>
-	<div class="p-3 text-[length:var(--text-sm)]">
-		{@render children()}
-	</div>
+	{#if !collapsed}
+		<div class="p-3 text-[length:var(--text-sm)]">
+			{@render children()}
+		</div>
+	{/if}
 </section>
