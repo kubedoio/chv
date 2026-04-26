@@ -144,9 +144,9 @@ import Button from '$lib/components/primitives/Button.svelte';
                  {#if column.key === 'name'}
                    <span class="workload-name">{row.name}</span>
                  {:else if column.key === 'power_state' || column.key === 'health'}
-                   <StatusBadge label={row[column.key].label} tone={row[column.key].tone} />
+                   <StatusBadge label={(row as any)[column.key].label} tone={(row as any)[column.key].tone} />
                  {:else}
-                    <span class="cell-text">{row[column.key]}</span>
+                    <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
                  {/if}
                {/snippet}
             </InventoryTable>

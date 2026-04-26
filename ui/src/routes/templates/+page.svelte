@@ -18,7 +18,11 @@ import Button from '$lib/components/primitives/Button.svelte';
   import CloudInitViewer from '$lib/components/shell/CloudInitViewer.svelte';
   import CloudInitEditor from '$lib/components/shell/CloudInitEditor.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
+  import type { ShellTone } from '$lib/shell/app-shell';
   import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
+  import ConfirmDialog from '$lib/components/shared/ConfirmDialog.svelte';
+
+  const InventoryTableAny = InventoryTable as any;
 
   const client = createAPIClient();
   const pageDef = getPageDefinition('/images'); // Reusing Images definition as it covers library
@@ -177,45 +181,45 @@ import Button from '$lib/components/primitives/Button.svelte';
       {:else if error}
         <ErrorState />
       {:else if activeTab === 'vm'}
-        <InventoryTable columns={vmColumns} rows={vmTemplates.map(t => ({
+        <InventoryTableAny columns={vmColumns} rows={vmTemplates.map(t => ({
           ...t,
           resources: `${t.vcpu} vCPU / ${t.memory_mb}MB`,
           image_name: images.find(i => i.id === t.image_id)?.name || t.image_id,
           status: { label: 'VERIFIED', tone: 'healthy' }
         }))}>
-          {#snippet cell({ column, row })}
+          {#snippet cell({ column, row }: { column: any; row: any })}
              {#if column.key === 'name'}
                <span class="blueprint-name">{row.name}</span>
              {:else if column.key === 'status'}
-               <StatusBadge label={row.status.label} tone={row.status.tone} />
+               <StatusBadge label={row.status.label} tone={row.status.tone as ShellTone} />
              {:else}
-               <span class="cell-text">{row[column.key]}</span>
+               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
              {/if}
           {/snippet}
-          {#snippet actions({ row })}
+          {#snippet actions({ row }: { row: any })}
             <div class="row-ops">
                <button class="op-btn" onclick={() => cloneTemplate(row)} title="Orchestrate Workload"><Copy size={12} /></button>
             </div>
           {/snippet}
-        </InventoryTable>
+        </InventoryTableAny>
       {:else}
-        <InventoryTable columns={ciColumns} rows={cloudInitTemplates.map(t => ({
+        <InventoryTableAny columns={ciColumns} rows={cloudInitTemplates.map(t => ({
           ...t,
           variables: t.variables?.join(', ') || 'NONE'
         }))}>
-           {#snippet cell({ column, row })}
+           {#snippet cell({ column, row }: { column: any; row: any })}
              {#if column.key === 'name'}
                <span class="blueprint-name">{row.name}</span>
              {:else}
-               <span class="cell-text">{row[column.key]}</span>
+               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
              {/if}
           {/snippet}
-          {#snippet actions({ row })}
+          {#snippet actions({ row }: { row: any })}
             <div class="row-ops">
                <button class="op-btn" title="View Registry"><FileCode size={12} /></button>
             </div>
           {/snippet}
-        </InventoryTable>
+        </InventoryTableAny>
       {/if}
     </section>
 

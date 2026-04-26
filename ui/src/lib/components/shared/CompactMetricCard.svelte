@@ -7,7 +7,7 @@
 		unit?: string;
 		trend?: number; // percentage
 		points?: number[]; // for a small sparkline
-		color?: 'primary' | 'accent' | 'success' | 'danger';
+		color?: 'primary' | 'accent' | 'success' | 'danger' | 'neutral' | 'warning';
 	}
 
 	let { label, value, unit = '', trend = 0, points = [], color = 'primary' }: Props = $props();

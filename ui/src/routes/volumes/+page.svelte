@@ -142,7 +142,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 					rowHref={(row) => `/volumes/${row.volume_id}`} 
 				>
 					{#snippet cell({ column, row })}
-						{@const val = row[column.key]}
+						{@const val = (row as any)[column.key]}
 						{#if column.key === 'name'}
 							<span class="volume-name">{row.name}</span>
 						{:else if typeof val === 'object' && val?.tone}

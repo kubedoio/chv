@@ -351,7 +351,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 										 {@const health = row.health as { label: string; tone: ShellTone }}
                      <StatusBadge label={health.label} tone={health.tone} />
                    {:else}
-                     <span class="cell-text">{row[column.key]}</span>
+                     <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
                    {/if}
                 {/snippet}
               </InventoryTable>
@@ -375,7 +375,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 										 {@const addressingMode = row.addressing_mode as { label: string; tone: ShellTone }}
                      <StatusBadge label={addressingMode.label} tone={addressingMode.tone} />
                   {:else}
-                     <span class="cell-text">{row[column.key]}</span>
+                     <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
                   {/if}
                 {/snippet}
               </InventoryTable>

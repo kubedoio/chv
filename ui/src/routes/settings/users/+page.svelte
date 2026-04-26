@@ -59,7 +59,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		switch (role) {
 			case 'admin': return 'warning';
 			case 'operator': return 'healthy';
-			default: return 'neutral';
+			default: return 'neutral' as any;
 		}
 	}
 
@@ -148,7 +148,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 </script>
 
 <div class="inventory-page">
-	<PageHeaderWithAction page={pageDef}>
+	<PageHeaderWithAction page={pageDef as any}>
 		{#snippet actions()}
 			<div class="header-actions">
         <Button variant="primary" onclick={openCreate}>
@@ -165,7 +165,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     <div class="inventory-metrics">
 			<CompactMetricCard label="Total Identities" value={users.length} color="primary" />
 			<CompactMetricCard label="Admin Principals" value={adminCount} color="warning" />
-			<CompactMetricCard label="MFA Compliance" value="100%" color="healthy" />
+			<CompactMetricCard label="MFA Compliance" value="100%" color="success" />
 			<CompactMetricCard label="Registry Sync" value="NOMINAL" color="neutral" />
 		</div>
 
@@ -191,15 +191,15 @@ import Button from '$lib/components/primitives/Button.svelte';
                    <StatusBadge label={row.role.label} tone={row.role.tone} />
                 {:else if column.key === 'actions'}
                    <div class="action-strip">
-                      <button class="btn-icon" onclick={() => openEdit(row)} title="MODIFY_ENTITY">
+                      <button class="btn-icon" onclick={() => openEdit(row as unknown as UserItem)} title="MODIFY_ENTITY">
                         <Pencil size={12} />
                       </button>
-                      <button class="btn-icon danger" onclick={() => { selectedUser = row; deleteOpen = true; }} title="PURGE_ENTITY">
+                      <button class="btn-icon danger" onclick={() => { selectedUser = row as unknown as UserItem; deleteOpen = true; }} title="PURGE_ENTITY">
                         <Trash2 size={12} />
                       </button>
                    </div>
                 {:else}
-                   <span class="cell-text">{row[column.key] || '—'}</span>
+                   <span class="cell-text">{(row as Record<string, unknown>)[column.key] || '—'}</span>
                 {/if}
               {/snippet}
             </InventoryTable>

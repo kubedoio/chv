@@ -138,7 +138,7 @@
 						{:else if column.key === 'summary'}
 							<span class="summary-text">{row.summary}</span>
 						{:else}
-							<span class="cell-text">{row[column.key]}</span>
+							<span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
 						{/if}
 					{/snippet}
 				</InventoryTable>

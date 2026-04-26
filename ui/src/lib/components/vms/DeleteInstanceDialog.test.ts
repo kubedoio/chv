@@ -38,7 +38,7 @@ describe('DeleteInstanceDialog', () => {
 	it('disables delete button when confirmation text is empty', () => {
 		renderDialog({});
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
-		expect(deleteButton).toBeDisabled();
+		expect((deleteButton as HTMLButtonElement).disabled).toBe(true);
 	});
 
 	it('disables delete button when confirmation text does not match instance name', () => {
@@ -46,7 +46,7 @@ describe('DeleteInstanceDialog', () => {
 		const input = screen.getByLabelText(/Type instance name to confirm deletion/i);
 		fireEvent.input(input, { target: { value: 'wrong-name' } });
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
-		expect(deleteButton).toBeDisabled();
+		expect((deleteButton as HTMLButtonElement).disabled).toBe(true);
 	});
 
 	it('enables delete button when confirmation text exactly matches instance name', () => {
@@ -54,7 +54,7 @@ describe('DeleteInstanceDialog', () => {
 		const input = screen.getByLabelText(/Type instance name to confirm deletion/i);
 		fireEvent.input(input, { target: { value: 'web-server-01' } });
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
-		expect(deleteButton).not.toBeDisabled();
+		expect((deleteButton as HTMLButtonElement).disabled).toBe(false);
 	});
 
 	it('trims accidental spaces before comparing confirmation text', () => {
@@ -62,7 +62,7 @@ describe('DeleteInstanceDialog', () => {
 		const input = screen.getByLabelText(/Type instance name to confirm deletion/i);
 		fireEvent.input(input, { target: { value: '  web-server-01  ' } });
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
-		expect(deleteButton).not.toBeDisabled();
+		expect((deleteButton as HTMLButtonElement).disabled).toBe(false);
 	});
 
 	it('calls onConfirm when delete is clicked with matching text', () => {

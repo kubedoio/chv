@@ -128,11 +128,11 @@ import Button from '$lib/components/primitives/Button.svelte';
 					rowHref={(row) => `/clusters/${row.cluster_id}`}
 				>
 					{#snippet cell({ column, row })}
-						{@const val = row[column.key]}
+						{@const val = (row as any)[column.key]}
 						{#if column.key === 'name'}
 							<div class="fabric-identity">
 								<span class="fabric-name">{row.name}</span>
-								{#if row.is_local}
+								{#if (row as any).is_local}
 									<span class="fabric-tag">EDGE</span>
 								{/if}
 							</div>

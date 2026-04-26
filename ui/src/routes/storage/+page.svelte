@@ -116,7 +116,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     <FilterBar
       filters={filterOptions}
       activeFilters={{ query }}
-      onFilterChange={(k, v) => query = v}
+      onFilterChange={(k, v) => query = v as string}
       onClearAll={() => query = ''}
     />
   </div>
@@ -135,10 +135,9 @@ import Button from '$lib/components/primitives/Button.svelte';
         <InventoryTable
           {columns}
           rows={tableRows}
-          {loading}
         >
           {#snippet cell({ column, row })}
-            {@const val = row[column.key]}
+            {@const val = (row as any)[column.key]}
             {#if column.key === 'name'}
               <div class="pool-identity">
                 <span class="pool-name">{row.name}</span>

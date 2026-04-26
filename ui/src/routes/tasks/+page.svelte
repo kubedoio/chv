@@ -147,10 +147,10 @@
 							</div>
 						{:else if column.key === 'duration'}
 							<DurationLine startedMs={row.started_unix_ms} finishedMs={row.finished_unix_ms} />
-						{:else if typeof row[column.key] === 'object' && row[column.key]?.tone}
-							<StatusBadge label={row[column.key].label} tone={row[column.key].tone} />
+						{:else if typeof (row as any)[column.key] === 'object' && (row as any)[column.key]?.tone}
+							<StatusBadge label={(row as any)[column.key].label} tone={(row as any)[column.key].tone} />
 						{:else}
-							<span class="cell-text">{row[column.key]}</span>
+							<span class="cell-text">{(row as any)[column.key]}</span>
 						{/if}
 					{/snippet}
 				</InventoryTable>

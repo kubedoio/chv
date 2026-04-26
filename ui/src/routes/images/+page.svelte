@@ -191,14 +191,14 @@ import Button from '$lib/components/primitives/Button.svelte';
 						{:else if column.key === 'name'}
 							<div class="artifact-identity">
 								<span class="artifact-name">{row.name}</span>
-								{#if row.is_template}
+								{#if (row as any).is_template}
 									<span class="artifact-tag">SYS</span>
 								{/if}
 							</div>
-						{:else if row[column.key] && typeof row[column.key] === 'object' && 'label' in row[column.key]}
-							<StatusBadge label={row[column.key].label} tone={row[column.key].tone} />
+						{:else if (row as any)[column.key] && typeof (row as any)[column.key] === 'object' && 'label' in (row as any)[column.key]}
+							<StatusBadge label={(row as any)[column.key].label} tone={(row as any)[column.key].tone} />
 						{:else}
-							<span class="cell-text">{row[column.key] ?? ''}</span>
+							<span class="cell-text">{(row as any)[column.key] ?? ''}</span>
 						{/if}
 					{/snippet}
 				</InventoryTable>

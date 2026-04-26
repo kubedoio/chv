@@ -2,9 +2,10 @@
 	interface Props {
 		progress: number;
 		tone?: 'healthy' | 'warning' | 'failed' | 'neutral';
+		size?: 'sm' | 'md' | 'lg';
 	}
 
-	let { progress, tone = 'healthy' }: Props = $props();
+	let { progress, tone = 'healthy', size = 'md' }: Props = $props();
 
 	const color = $derived({
 		healthy: 'var(--color-success)',

@@ -53,6 +53,8 @@ import Button from '$lib/components/primitives/Button.svelte';
     return usageData.usage[key as keyof typeof usageData.usage] as number;
   }
 
+  function handleModalSuccess() {}
+
   function getQuotaValue(key: ResourceKey): number {
     if (!usageData) return 0;
     switch (key) {
@@ -122,7 +124,7 @@ import Button from '$lib/components/primitives/Button.svelte';
                <div class="val-pair">
                   <span class="used">{used}</span>
                   <span class="sep">/</span>
-                  <span class="limit">{max}{resource.unit || ''}</span>
+                  <span class="limit">{max}{(resource as any).unit || ''}</span>
                </div>
                <div class="progress-track">
                   <div class="progress-fill" style="width: {p}%"></div>

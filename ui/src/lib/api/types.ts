@@ -439,6 +439,7 @@ export interface BackupHistory {
   started_at?: string;
   completed_at?: string;
   error?: string;
+  vm_name?: string;
 }
 
 export interface CreateBackupJobInput {

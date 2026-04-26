@@ -11,7 +11,7 @@
         <h2 class="text-lg font-semibold">{template?.name ?? 'Cloud-init Config'}</h2>
         <button onclick={() => open = false} class="text-muted hover:text-ink">✕</button>
       </div>
-      <pre class="bg-neutral-50 p-4 rounded text-sm overflow-auto max-h-[60vh]">{template?.cloud_init_config ?? 'No config available'}</pre>
+      <pre class="bg-neutral-50 p-4 rounded text-sm overflow-auto max-h-[60vh]">{template?.content ?? 'No config available'}</pre>
     </div>
   </div>
 {/if}

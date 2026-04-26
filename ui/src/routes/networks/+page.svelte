@@ -157,7 +157,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 					rowHref={(row) => `/networks/${row.network_id}`}
 				>
 					{#snippet cell({ column, row })}
-						{@const val = row[column.key]}
+						{@const val = (row as Record<string, unknown>)[column.key]}
 						{#if column.key === 'name'}
 							<div class="fabric-identity">
 								<span class="fabric-name">{row.name}</span>

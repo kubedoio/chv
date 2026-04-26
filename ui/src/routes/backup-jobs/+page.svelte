@@ -197,7 +197,7 @@ import Button from '$lib/components/primitives/Button.svelte';
           columns={jobColumns} 
           rows={backupJobs.map(j => ({
             ...j,
-            next_run: j.next_run_formatted || '—'
+            next_run: (j as any).next_run_formatted || '—'
           }))}
         >
           {#snippet cell({ column, row })}
@@ -218,7 +218,7 @@ import Button from '$lib/components/primitives/Button.svelte';
                    </button>
                 </div>
              {:else}
-               <span class="cell-text">{row[column.key]}</span>
+               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
              {/if}
           {/snippet}
         </InventoryTable>
@@ -226,18 +226,18 @@ import Button from '$lib/components/primitives/Button.svelte';
         <InventoryTable columns={historyColumns} rows={backupHistory.map(h => ({
           ...h,
           size: formatBytes(h.size_bytes),
-          started_at: new Date(h.started_at).toLocaleString()
+          started_at: new Date(String(h.started_at)).toLocaleString()
         }))}>
           {#snippet cell({ column, row })}
              {#if column.key === 'status'}
-               <StatusBadge label={h.status.toUpperCase()} tone={h.status === 'completed' ? 'healthy' : h.status === 'running' ? 'warning' : 'failed'} />
+               <StatusBadge label={row.status.toUpperCase()} tone={row.status === 'completed' ? 'healthy' : row.status === 'running' ? 'warning' : 'failed'} />
              {:else if column.key === 'completed_at'}
                <div class="trace-end">
-                 <span class="timestamp">{new Date(row.completed_at).toLocaleTimeString()}</span>
+                 <span class="timestamp">{new Date(String(row.completed_at)).toLocaleTimeString()}</span>
                  <button class="trace-dl" title="DOWNLOAD_ARTIFACT"><Download size={12} /></button>
                </div>
              {:else}
-               <span class="cell-text">{row[column.key]}</span>
+               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
              {/if}
           {/snippet}
         </InventoryTable>

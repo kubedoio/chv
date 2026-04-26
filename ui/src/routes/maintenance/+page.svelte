@@ -30,7 +30,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	const upgradePostureProps = $derived([
 		{ label: 'Current Release', value: maintenance.current_version || 'Unavailable' },
 		{ label: 'Platform Readiness', value: maintenance.upgrade_available ? 'Upgrade Available' : 'Current', tone: (maintenance.upgrade_available ? 'warning' : 'healthy') as any },
-		{ label: 'Node Reboot Requirement', value: maintenance.reboot_required_nodes?.length > 0 ? `${maintenance.reboot_required_nodes.length} Pending` : 'Nominal', tone: (maintenance.reboot_required_nodes?.length ? 'warning' : 'healthy') as any },
+		{ label: 'Node Reboot Requirement', value: (maintenance.reboot_required_nodes?.length ?? 0) > 0 ? `${maintenance.reboot_required_nodes!.length} Pending` : 'Nominal', tone: (maintenance.reboot_required_nodes?.length ? 'warning' : 'healthy') as any },
 		{ label: 'Orchestrator State', value: maintenance.orchestrator_health || 'Nominal', tone: (maintenance.orchestrator_health === 'Nominal' ? 'healthy' : 'warning') as any }
 	]);
 </script>

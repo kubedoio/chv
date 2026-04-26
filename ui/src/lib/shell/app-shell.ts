@@ -25,7 +25,7 @@ export interface NavItem {
 export interface StateDefinition {
 	title: string;
 	description: string;
-	hint: string;
+	hint?: string;
 }
 
 export interface SummaryDefinition {
