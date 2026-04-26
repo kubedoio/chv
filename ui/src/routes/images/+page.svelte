@@ -3,12 +3,12 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import FilterBar from '$lib/components/FilterBar.svelte';
+	import FilterBar from '$lib/components/shared/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import ImportImageModal from '$lib/components/modals/ImportImageModal.svelte';
+	import ImportImageModal from '$lib/components/storage/ImportImageModal.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
@@ -191,14 +191,14 @@ import Button from '$lib/components/primitives/Button.svelte';
 						{:else if column.key === 'name'}
 							<div class="artifact-identity">
 								<span class="artifact-name">{row.name}</span>
-								{#if row.is_template}
+								{#if (row as any).is_template}
 									<span class="artifact-tag">SYS</span>
 								{/if}
 							</div>
-						{:else if row[column.key] && typeof row[column.key] === 'object' && 'label' in row[column.key]}
-							<StatusBadge label={row[column.key].label} tone={row[column.key].tone} />
+						{:else if (row as any)[column.key] && typeof (row as any)[column.key] === 'object' && 'label' in (row as any)[column.key]}
+							<StatusBadge label={(row as any)[column.key].label} tone={(row as any)[column.key].tone} />
 						{:else}
-							<span class="cell-text">{row[column.key] ?? ''}</span>
+							<span class="cell-text">{(row as any)[column.key] ?? ''}</span>
 						{/if}
 					{/snippet}
 				</InventoryTable>

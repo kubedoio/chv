@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const OPERATION_ID_METADATA_KEY: &str = "x-operation-id";
+
 pub mod hypervisor;
 
 pub mod types {
@@ -36,6 +38,8 @@ pub mod types {
         pub burst_allowed: bool,
         pub read_only: bool,
         pub no_exec: bool,
+        pub io_scheduler: String,
+        pub cache_mode: String,
     }
 }
 
@@ -106,9 +110,9 @@ mod tests {
     #[test]
     fn validate_id_rejects_invalid() {
         assert!(!validate_id(""));
-        assert!(!validate_id("ABCDEF"));          // uppercase
-        assert!(!validate_id("../etc/passwd"));   // path traversal
-        assert!(!validate_id("abc xyz"));         // space
-        assert!(!validate_id("g1h2i3j4"));        // non-hex letters
+        assert!(!validate_id("ABCDEF")); // uppercase
+        assert!(!validate_id("../etc/passwd")); // path traversal
+        assert!(!validate_id("abc xyz")); // space
+        assert!(!validate_id("g1h2i3j4")); // non-hex letters
     }
 }

@@ -32,8 +32,8 @@
 	import { buildInstanceActions, normalizeInstanceStatus } from '$lib/shell/instance-actions';
 	import InstanceStatusBadge from './InstanceStatusBadge.svelte';
 	import InstanceContextMenu from './InstanceContextMenu.svelte';
-	import DeleteInstanceDialog from '$lib/components/modals/DeleteInstanceDialog.svelte';
-	import PowerOffInstanceDialog from '$lib/components/modals/PowerOffInstanceDialog.svelte';
+	import DeleteInstanceDialog from '$lib/components/vms/DeleteInstanceDialog.svelte';
+	import PowerOffInstanceDialog from '$lib/components/vms/PowerOffInstanceDialog.svelte';
 	import type { InstanceTreeItem, InstanceStatus } from '$lib/api/types';
 
 	function isActive(href: string, pathname: string): boolean {

@@ -36,23 +36,20 @@ pub async fn export_vm(
     }
 
     // Verify VM exists
-    let vm = sqlx::query_as::<_, VmRow>(
-        "SELECT display_name FROM vms WHERE vm_id = ?",
-    )
-    .bind(&vm_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
-    .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+    let vm = sqlx::query_as::<_, VmRow>("SELECT display_name FROM vms WHERE vm_id = ?")
+        .bind(&vm_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
 
     // Find ALL attached volumes
-    let volumes: Vec<VolumeRow> = sqlx::query_as(
-        "SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ?",
-    )
-    .bind(&vm_id)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to find volumes: {}", e)))?;
+    let volumes: Vec<VolumeRow> =
+        sqlx::query_as("SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ?")
+            .bind(&vm_id)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to find volumes: {}", e)))?;
 
     if volumes.is_empty() {
         return Err(BffError::BadRequest("vm has no attached volumes".into()));
@@ -73,14 +70,12 @@ pub async fn export_vm(
                 vol.volume_id
             )));
         }
-        let canonical = tokio::fs::canonicalize(&disk_path)
-            .await
-            .map_err(|e| {
-                BffError::Internal(format!(
-                    "failed to resolve disk path for {}: {}",
-                    vol.volume_id, e
-                ))
-            })?;
+        let canonical = tokio::fs::canonicalize(&disk_path).await.map_err(|e| {
+            BffError::Internal(format!(
+                "failed to resolve disk path for {}: {}",
+                vol.volume_id, e
+            ))
+        })?;
         if !canonical.starts_with(&expected_base) {
             return Err(BffError::BadRequest(
                 "disk path is outside expected directory".into(),

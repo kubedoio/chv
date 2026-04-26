@@ -65,6 +65,20 @@ pub trait StorageBackend: Send + Sync + 'static {
         clone_name: &str,
     ) -> Result<(), ChvError>;
 
+    async fn restore_snapshot(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        snapshot_name: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn delete_snapshot(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        snapshot_name: &str,
+    ) -> Result<(), ChvError>;
+
     async fn set_device_policy(
         &self,
         volume_id: &str,

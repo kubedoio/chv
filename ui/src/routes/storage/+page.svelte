@@ -6,10 +6,10 @@ import Button from '$lib/components/primitives/Button.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-  import FilterBar from '$lib/components/FilterBar.svelte';
-  import CreateStoragePoolModal from '$lib/components/modals/CreateStoragePoolModal.svelte';
+  import FilterBar from '$lib/components/shared/FilterBar.svelte';
+  import CreateStoragePoolModal from '$lib/components/storage/CreateStoragePoolModal.svelte';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import { formatBytes } from '$lib/utils/table.svelte';
   import type { StoragePool } from '$lib/api/types';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';
@@ -116,7 +116,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     <FilterBar
       filters={filterOptions}
       activeFilters={{ query }}
-      onFilterChange={(k, v) => query = v}
+      onFilterChange={(k, v) => query = v as string}
       onClearAll={() => query = ''}
     />
   </div>
@@ -135,10 +135,9 @@ import Button from '$lib/components/primitives/Button.svelte';
         <InventoryTable
           {columns}
           rows={tableRows}
-          {loading}
         >
           {#snippet cell({ column, row })}
-            {@const val = row[column.key]}
+            {@const val = (row as any)[column.key]}
             {#if column.key === 'name'}
               <div class="pool-identity">
                 <span class="pool-name">{row.name}</span>

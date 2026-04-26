@@ -1,33 +1,47 @@
 import { test, expect } from '@playwright/test';
+import { mockApiResponse } from './helpers';
 
 test.describe('Authentication', () => {
-	// Let's test the login page elements
 	test('has expected login form', async ({ page }) => {
 		await page.goto('/login');
 
-		// Check the title
-		await expect(page).toHaveTitle(/Login/);
-
-		// Verify form elements exist
-		const usernameInput = page.getByLabel(/username*/i);
-		await expect(usernameInput).toBeVisible();
-
-		const passwordInput = page.getByLabel(/password*/i);
-		await expect(passwordInput).toBeVisible();
-
-		const loginButton = page.getByRole('button', { name: /sign in/i });
-		await expect(loginButton).toBeVisible();
+		await expect(page.getByLabel(/operator identity/i)).toBeVisible();
+		await expect(page.getByLabel(/access credential/i)).toBeVisible();
+		await expect(page.getByRole('button', { name: /authenticate session/i })).toBeVisible();
 	});
 
 	test('shows error on invalid credentials', async ({ page }) => {
 		await page.goto('/login');
+		await mockApiResponse(page, '/v1/auth/login', { error: { message: 'Invalid credentials' } }, 401);
 
-		await page.getByLabel(/username*/i).fill('admin');
-		await page.getByLabel(/password*/i).fill('wrong-password');
-		await page.getByRole('button', { name: /sign in/i }).click();
+		await page.getByLabel(/operator identity/i).fill('admin');
+		await page.getByLabel(/access credential/i).fill('wrong-password');
+		await page.getByRole('button', { name: /authenticate session/i }).click();
 
-		// Check for error boundary or toast
-		// The app shows errors in a toast or form error block.
-		await expect(page.getByText('Invalid credentials')).toBeVisible();
+		await expect(page.locator('.login-error')).toContainText('Invalid credentials');
+	});
+
+	test('successful login stores token and redirects to dashboard', async ({ page }) => {
+		await page.goto('/login');
+		await mockApiResponse(page, '/v1/auth/login', {
+			token: 'mock-jwt-token-123',
+			user: { username: 'admin', role: 'admin' }
+		});
+
+		await page.getByLabel(/operator identity/i).fill('admin');
+		await page.getByLabel(/access credential/i).fill('correct-password');
+		await page.getByRole('button', { name: /authenticate session/i }).click();
+
+		await expect(page).toHaveURL('/');
+		const token = await page.evaluate(() => localStorage.getItem('chv-api-token'));
+		expect(token).toBe('mock-jwt-token-123');
+	});
+
+	test('token persistence allows direct access to dashboard', async ({ page }) => {
+		await page.addInitScript(() => {
+			localStorage.setItem('chv-api-token', 'existing-token');
+		});
+		await page.goto('/');
+		await expect(page.getByText('Fleet Overview')).toBeVisible();
 	});
 });

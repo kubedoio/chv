@@ -222,11 +222,141 @@ pub async fn mutate_volume(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let resize_bytes = payload.get("resize_bytes").and_then(|v| v.as_u64());
-    let vm_id = payload.get("vm_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let vm_id = payload
+        .get("vm_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let response = state
         .mutations
-        .mutate_volume(volume_id, action, force, resize_bytes, vm_id, claims.username)
+        .mutate_volume(
+            volume_id,
+            action,
+            force,
+            resize_bytes,
+            vm_id,
+            claims.username,
+        )
+        .await?;
+
+    Ok(Json(json!({
+        "accepted": response.accepted,
+        "task_id": response.task_id,
+        "volume_id": response.volume_id,
+        "summary": response.summary,
+    })))
+}
+
+pub async fn snapshot_volume(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
+    let volume_id = payload
+        .get("volume_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
+        .to_string();
+    let snapshot_name = payload
+        .get("snapshot_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing snapshot_name".into()))?
+        .to_string();
+
+    let response = state
+        .mutations
+        .snapshot_volume(volume_id, snapshot_name, claims.username)
+        .await?;
+
+    Ok(Json(json!({
+        "accepted": response.accepted,
+        "task_id": response.task_id,
+        "volume_id": response.volume_id,
+        "summary": response.summary,
+    })))
+}
+
+pub async fn restore_volume_snapshot(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
+    let volume_id = payload
+        .get("volume_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
+        .to_string();
+    let snapshot_name = payload
+        .get("snapshot_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing snapshot_name".into()))?
+        .to_string();
+
+    let response = state
+        .mutations
+        .restore_volume_snapshot(volume_id, snapshot_name, claims.username)
+        .await?;
+
+    Ok(Json(json!({
+        "accepted": response.accepted,
+        "task_id": response.task_id,
+        "volume_id": response.volume_id,
+        "summary": response.summary,
+    })))
+}
+
+pub async fn delete_volume_snapshot(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
+    let volume_id = payload
+        .get("volume_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
+        .to_string();
+    let snapshot_name = payload
+        .get("snapshot_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing snapshot_name".into()))?
+        .to_string();
+
+    let response = state
+        .mutations
+        .delete_volume_snapshot(volume_id, snapshot_name, claims.username)
+        .await?;
+
+    Ok(Json(json!({
+        "accepted": response.accepted,
+        "task_id": response.task_id,
+        "volume_id": response.volume_id,
+        "summary": response.summary,
+    })))
+}
+
+pub async fn clone_volume(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
+    let source_volume_id = payload
+        .get("source_volume_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing source_volume_id".into()))?
+        .to_string();
+    let target_volume_id = payload
+        .get("target_volume_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing target_volume_id".into()))?
+        .to_string();
+
+    let response = state
+        .mutations
+        .clone_volume(source_volume_id, target_volume_id, claims.username)
         .await?;
 
     Ok(Json(json!({

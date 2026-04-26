@@ -9,8 +9,8 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import LoadingState from '$lib/components/shell/LoadingState.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import Modal from '$lib/components/modals/Modal.svelte';
-	import ConfirmAction from '$lib/components/modals/ConfirmAction.svelte';
+	import Modal from '$lib/components/primitives/Modal.svelte';
+	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
 	import { Camera, RotateCcw, Trash2, MemoryStick, LoaderCircle } from 'lucide-svelte';
 	import { formatDateTimeLabel } from '$lib/webui/formatters';
 
@@ -182,7 +182,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 							class="btn-icon btn-icon-sm"
 							aria-label="Restore snapshot"
 							title="Restore snapshot"
-							onclick={() => { restoreTarget = row; restoreOpen = true; }}
+							onclick={() => { restoreTarget = row as unknown as VMSnapshot; restoreOpen = true; }}
 						>
 							<RotateCcw size={14} />
 						</button>
@@ -190,7 +190,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 							class="btn-icon btn-icon-danger btn-icon-sm"
 							aria-label="Delete snapshot"
 							title="Delete snapshot"
-							onclick={() => { deleteTarget = row; deleteOpen = true; }}
+							onclick={() => { deleteTarget = row as unknown as VMSnapshot; deleteOpen = true; }}
 						>
 							<Trash2 size={14} />
 						</button>
@@ -200,7 +200,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 				{:else if column.key === 'status'}
 					<StatusBadge label={row.status.label} tone={row.status.tone} />
 				{:else}
-					<span class="cell-text">{row[column.key]}</span>
+					<span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
 				{/if}
 			{/snippet}
 		</InventoryTable>

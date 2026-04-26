@@ -429,6 +429,18 @@ impl ReconcileService for ReconcileServiceImplementation {
 
         let now = Self::now_ms();
 
+        let clone_source_volume_id = spec
+            .clone_source_volume_id
+            .as_ref()
+            .map(|id| ResourceId::new(id.clone()))
+            .transpose()
+            .map_err(|e| {
+                ControlPlaneServiceError::InvalidArgument(format!(
+                    "invalid clone_source_volume_id: {}",
+                    e
+                ))
+            })?;
+
         if let Err(e) = self
             .desired_state_repo
             .upsert_volume(&VolumeDesiredStateInput {
@@ -451,6 +463,9 @@ impl ReconcileService for ReconcileServiceImplementation {
                 device_name: spec.device_name,
                 read_only: spec.read_only,
                 resize_to_bytes: None,
+                snapshot_op: spec.snapshot_op,
+                snapshot_name: spec.snapshot_name,
+                clone_source_volume_id,
                 requested_unix_ms: now,
             })
             .await
@@ -551,6 +566,23 @@ impl ReconcileService for ReconcileServiceImplementation {
             })
             .collect();
 
+        let firewall_rules_json = spec
+            .firewall_rules
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let nat_rules_json = spec
+            .nat_rules
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let dhcp_scope_json = spec
+            .dhcp_scope
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let dns_scope_json = spec
+            .dns_scope
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+
         if let Err(e) = self
             .desired_state_repo
             .upsert_network_with_exposures(
@@ -567,6 +599,11 @@ impl ReconcileService for ReconcileServiceImplementation {
                     } else {
                         Some(fragment.updated_by)
                     },
+                    firewall_rules_json,
+                    nat_rules_json,
+                    dhcp_scope_json,
+                    dns_enabled: spec.dns_enabled,
+                    dns_scope_json,
                     requested_unix_ms: now,
                 },
                 &exposures,

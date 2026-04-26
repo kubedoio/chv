@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-13
+
 ## Context
 A network VM was considered. For MVP-1, the service-VM approach is deferred in favor of a host-daemon model because simplicity is the first priority.
 
@@ -56,3 +59,7 @@ Cons:
 - weaker isolation than a network VM
 - stronger dependence on correct Linux networking behavior
 - “no noticeable interruption” must be interpreted realistically for active flows
+
+## Related ADRs
+- **ADR-001** explicitly forbids a network service VM and eBPF datapath in MVP-1, consistent with this decision.
+- **ADR-003** and **ADR-007** define node-level `Draining` and service-level drain-and-replace. Upgrading `chv-nwd` via drain-and-replace does not require the node to enter `Draining` unless the upgrade cannot preserve tenant network continuity.

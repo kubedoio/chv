@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use chv_controlplane_store::{OperationCreateInput, OperationRepository, StorePool};
-use chv_controlplane_types::domain::{Generation, OperationId, OperationStatus, ResourceId, ResourceKind};
+use chv_controlplane_store::StorePool;
+use chv_controlplane_types::domain::Generation;
 use chv_webui_bff::{BffError, MutationService};
 use chv_webui_bff_api::chv_webui_bff_v1::{
     MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse,
@@ -402,6 +402,194 @@ impl MutationService for ControlPlaneMutationService {
         })
     }
 
+    async fn snapshot_volume(
+        &self,
+        volume_id: String,
+        snapshot_name: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError> {
+        let row = sqlx::query_as::<_, VolumeLookupRow>(
+            r#"
+            SELECT
+                v.node_id as node_id,
+                vds.attached_vm_id as vm_id,
+                v.capacity_bytes as size_bytes
+            FROM volumes v
+            JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
+            WHERE v.volume_id = $1
+            "#,
+        )
+        .bind(&volume_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up volume: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("volume {} not found", volume_id)))?;
+
+        let meta = self.build_meta(row.node_id.clone(), requested_by);
+        let ack = self
+            .lifecycle_service
+            .snapshot_volume(proto::SnapshotVolumeRequest {
+                meta,
+                node_id: row.node_id.clone(),
+                volume_id: volume_id.clone(),
+                snapshot_name,
+            })
+            .await;
+
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+
+        Ok(MutateVolumeResponse {
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
+            volume_id,
+            summary: result.human_summary,
+        })
+    }
+
+    async fn restore_volume_snapshot(
+        &self,
+        volume_id: String,
+        snapshot_name: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError> {
+        let row = sqlx::query_as::<_, VolumeLookupRow>(
+            r#"
+            SELECT
+                v.node_id as node_id,
+                vds.attached_vm_id as vm_id,
+                v.capacity_bytes as size_bytes
+            FROM volumes v
+            JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
+            WHERE v.volume_id = $1
+            "#,
+        )
+        .bind(&volume_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up volume: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("volume {} not found", volume_id)))?;
+
+        let meta = self.build_meta(row.node_id.clone(), requested_by);
+        let ack = self
+            .lifecycle_service
+            .restore_volume(proto::RestoreVolumeRequest {
+                meta,
+                node_id: row.node_id.clone(),
+                volume_id: volume_id.clone(),
+                snapshot_name,
+            })
+            .await;
+
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+
+        Ok(MutateVolumeResponse {
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
+            volume_id,
+            summary: result.human_summary,
+        })
+    }
+
+    async fn delete_volume_snapshot(
+        &self,
+        volume_id: String,
+        snapshot_name: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError> {
+        let row = sqlx::query_as::<_, VolumeLookupRow>(
+            r#"
+            SELECT
+                v.node_id as node_id,
+                vds.attached_vm_id as vm_id,
+                v.capacity_bytes as size_bytes
+            FROM volumes v
+            JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
+            WHERE v.volume_id = $1
+            "#,
+        )
+        .bind(&volume_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up volume: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("volume {} not found", volume_id)))?;
+
+        let meta = self.build_meta(row.node_id.clone(), requested_by);
+        let ack = self
+            .lifecycle_service
+            .delete_volume_snapshot(proto::DeleteVolumeSnapshotRequest {
+                meta,
+                node_id: row.node_id.clone(),
+                volume_id: volume_id.clone(),
+                snapshot_name,
+            })
+            .await;
+
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+
+        Ok(MutateVolumeResponse {
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
+            volume_id,
+            summary: result.human_summary,
+        })
+    }
+
+    async fn clone_volume(
+        &self,
+        source_volume_id: String,
+        target_volume_id: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError> {
+        let row = sqlx::query_as::<_, VolumeLookupRow>(
+            r#"
+            SELECT
+                v.node_id as node_id,
+                vds.attached_vm_id as vm_id,
+                v.capacity_bytes as size_bytes
+            FROM volumes v
+            JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
+            WHERE v.volume_id = $1
+            "#,
+        )
+        .bind(&source_volume_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up volume: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("volume {} not found", source_volume_id)))?;
+
+        let meta = self.build_meta(row.node_id.clone(), requested_by);
+        let ack = self
+            .lifecycle_service
+            .clone_volume(proto::CloneVolumeRequest {
+                meta,
+                node_id: row.node_id.clone(),
+                source_volume_id: source_volume_id.clone(),
+                target_volume_id: target_volume_id.clone(),
+            })
+            .await;
+
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+
+        Ok(MutateVolumeResponse {
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
+            volume_id: target_volume_id,
+            summary: result.human_summary,
+        })
+    }
+
     async fn mutate_network(
         &self,
         network_id: String,
@@ -409,100 +597,59 @@ impl MutationService for ControlPlaneMutationService {
         force: bool,
         requested_by: String,
     ) -> Result<MutateNetworkResponse, BffError> {
-        let node_id =
-            sqlx::query_scalar::<_, Option<String>>(
-                "SELECT node_id FROM networks WHERE network_id = $1",
-            )
-            .bind(&network_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to look up network: {}", e)))?
-            .ok_or_else(|| BffError::NotFound(format!("network {} not found", network_id)))?;
+        let node_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT node_id FROM networks WHERE network_id = $1",
+        )
+        .bind(&network_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up network: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("network {} not found", network_id)))?;
 
-        let operation_repo = OperationRepository::new(self.pool.clone());
+        let meta = self.build_meta(node_id.clone(), requested_by);
 
-        let (operation_type, desired_status, summary) = match action.as_str() {
-            "start" => ("StartNetwork", "Active", "start network accepted"),
-            "stop" => {
-                let op = if force { "ForceStopNetwork" } else { "StopNetwork" };
-                (op, "Inactive", "stop network accepted")
+        let ack = match action.as_str() {
+            "start" => {
+                self.lifecycle_service
+                    .start_network(proto::StartNetworkRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        network_id: network_id.clone(),
+                    })
+                    .await
             }
-            "restart" => ("RestartNetwork", "Restarting", "restart network accepted"),
+            "stop" => {
+                self.lifecycle_service
+                    .stop_network(proto::StopNetworkRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        network_id: network_id.clone(),
+                        force,
+                    })
+                    .await
+            }
+            "restart" => {
+                self.lifecycle_service
+                    .restart_network(proto::RestartNetworkRequest {
+                        meta,
+                        node_id: node_id.clone(),
+                        network_id: network_id.clone(),
+                    })
+                    .await
+            }
             _ => return Err(BffError::BadRequest(format!("invalid action: {}", action))),
         };
 
-        let generation = Self::fresh_generation();
-        let now = Self::now_ms();
-        let resource_id = ResourceId::new(network_id.clone())
-            .map_err(|e| BffError::Internal(format!("invalid network_id: {}", e)))?;
-
-        let idempotency_key = match (&node_id, force && action == "stop") {
-            (Some(nid), true) => format!(
-                "{}:{}:{}:{}:force=true",
-                operation_type, nid, network_id, generation
-            ),
-            (Some(nid), false) => {
-                format!("{}:{}:{}:{}", operation_type, nid, network_id, generation)
-            }
-            (None, true) => format!(
-                "{}:{}:{}:force=true",
-                operation_type, network_id, generation
-            ),
-            (None, false) => {
-                format!("{}:{}:{}", operation_type, network_id, generation)
-            }
-        };
-
-        let operation_id =
-            OperationId::new(format!("{}-{}", operation_type, chv_common::gen_short_id()))
-                .map_err(|e| BffError::Internal(format!("invalid operation_id: {}", e)))?;
-
-        let receipt = operation_repo
-            .create_or_get(&OperationCreateInput {
-                operation_id: operation_id.clone(),
-                idempotency_key,
-                resource_kind: ResourceKind::Network,
-                resource_id: Some(resource_id),
-                operation_type: operation_type.into(),
-                status: OperationStatus::Pending,
-                requested_by: Some(requested_by.clone()),
-                updated_by: None,
-                desired_generation: Some(generation),
-                observed_generation: None,
-                correlation_id: None,
-                requested_unix_ms: now,
-            })
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to create operation: {}", e)))?;
-
-        sqlx::query(
-            r#"
-            UPDATE network_desired_state
-            SET desired_status = $1,
-                desired_generation = $2,
-                requested_by = $3,
-                requested_at = strftime('%Y-%m-%dT%H:%M:%SZ', $4 / 1000.0, 'unixepoch'),
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $4 / 1000.0, 'unixepoch')
-            WHERE network_id = $5
-            "#,
-        )
-        .bind(desired_status)
-        .bind(
-            i64::try_from(generation.get())
-                .map_err(|e| BffError::Internal(format!("generation out of range: {}", e)))?,
-        )
-        .bind(&requested_by)
-        .bind(now)
-        .bind(&network_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to update network desired state: {}", e)))?;
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
 
         Ok(MutateNetworkResponse {
-            accepted: true,
-            task_id: receipt.operation_id.to_string(),
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
             network_id,
-            summary: summary.into(),
+            summary: result.human_summary,
         })
     }
 }

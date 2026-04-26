@@ -127,6 +127,25 @@ message ApplyNetworkDesiredStateRequest {
   DesiredStateFragment fragment = 4;
 }
 
+message StartNetworkRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+}
+
+message StopNetworkRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+  bool force = 4;
+}
+
+message RestartNetworkRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+}
+
 message AcknowledgeDesiredStateVersionRequest {
   RequestMeta meta = 1;
   string node_id = 2;
@@ -291,6 +310,34 @@ message ResizeVolumeRequest {
   uint64 new_size_bytes = 4;
 }
 
+message SnapshotVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string volume_id = 3;
+  string snapshot_name = 4;
+}
+
+message RestoreVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string volume_id = 3;
+  string snapshot_name = 4;
+}
+
+message DeleteVolumeSnapshotRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string volume_id = 3;
+  string snapshot_name = 4;
+}
+
+message CloneVolumeRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string source_volume_id = 3;
+  string target_volume_id = 4;
+}
+
 message PauseNodeSchedulingRequest {
   RequestMeta meta = 1;
   string node_id = 2;
@@ -416,6 +463,10 @@ service LifecycleService {
   rpc AttachVolume(AttachVolumeRequest) returns (AckResponse);
   rpc DetachVolume(DetachVolumeRequest) returns (AckResponse);
   rpc ResizeVolume(ResizeVolumeRequest) returns (AckResponse);
+  rpc SnapshotVolume(SnapshotVolumeRequest) returns (AckResponse);
+  rpc RestoreVolume(RestoreVolumeRequest) returns (AckResponse);
+  rpc DeleteVolumeSnapshot(DeleteVolumeSnapshotRequest) returns (AckResponse);
+  rpc CloneVolume(CloneVolumeRequest) returns (AckResponse);
   rpc AddDisk(AddDiskRequest) returns (AckResponse);
   rpc RemoveDevice(RemoveDeviceRequest) returns (AckResponse);
   rpc AddNet(AddNetRequest) returns (AckResponse);
@@ -429,6 +480,9 @@ service LifecycleService {
   rpc DrainNode(DrainNodeRequest) returns (AckResponse);
   rpc EnterMaintenance(EnterMaintenanceRequest) returns (AckResponse);
   rpc ExitMaintenance(ExitMaintenanceRequest) returns (AckResponse);
+  rpc StartNetwork(StartNetworkRequest) returns (AckResponse);
+  rpc StopNetwork(StopNetworkRequest) returns (AckResponse);
+  rpc RestartNetwork(RestartNetworkRequest) returns (AckResponse);
 }
 
 service TelemetryService {

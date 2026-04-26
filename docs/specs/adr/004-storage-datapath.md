@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-13
+
 ## Context
 A storage VM plus NBD was considered and rejected for MVP-1 because it would add extra indirection, operational complexity, and performance risk. The selected model uses a host-side daemon.
 

@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-13
+
 ## Context
 Multiple moving parts exist on each node: control plane, `chv-agent`, `chv-stord`, `chv-nwd`, Cloud Hypervisor, and host helper tooling. Version skew must be controlled.
 
@@ -41,3 +44,7 @@ Cons:
 ## Rules
 - rollback targets must exist in the compatibility matrix
 - component upgrades outside the matrix are unsupported
+
+## Related ADRs
+- **ADR-002** defines desired-state generation strings. During rollback, the control plane must ensure that generation strings remain monotonic and that stale generations are rejected, even across version skew.
+- **ADR-001** defines `chv-agent` supervision of `chv-stord` and `chv-nwd`. Independent component upgrades (permitted inside the compatibility matrix) must coordinate with `chv-agent` supervision so that the agent does not incorrectly restart or fail a subordinate that is undergoing a controlled upgrade.

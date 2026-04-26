@@ -1,6 +1,7 @@
 import type { PageLoad } from './$types';
 import { getStoredToken } from '$lib/api/client';
 import { getVm, getVmConsoleUrl } from '$lib/bff/vms';
+import { cachedFetch, DETAIL_TTL } from '$lib/stores/api-cache.svelte';
 import type { VmSummary, RelatedTask, AttachedVolume, AttachedNic } from '$lib/bff/types';
 
 export type VmDetailModel = {
@@ -99,7 +100,11 @@ export const load: PageLoad = async ({ params, url }) => {
 	const token = getStoredToken() ?? undefined;
 	const currentTab = url.searchParams.get('tab') ?? 'summary';
 	try {
-		const res = await getVm({ vm_id: params.id }, token);
+		const res = await cachedFetch(
+			`vms:detail:${params.id}`,
+			() => getVm({ vm_id: params.id }, token),
+			DETAIL_TTL
+		);
 		let consoleUrl: string | undefined;
 		if (currentTab === 'console') {
 			try {

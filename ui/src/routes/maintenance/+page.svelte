@@ -5,7 +5,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ProgressBar from '$lib/components/shell/ProgressBar.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 	import { Wrench, ArrowUpFromLine, RefreshCcw, Activity, ShieldCheck, AlertCircle, Clock } from 'lucide-svelte';
@@ -30,7 +30,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	const upgradePostureProps = $derived([
 		{ label: 'Current Release', value: maintenance.current_version || 'Unavailable' },
 		{ label: 'Platform Readiness', value: maintenance.upgrade_available ? 'Upgrade Available' : 'Current', tone: (maintenance.upgrade_available ? 'warning' : 'healthy') as any },
-		{ label: 'Node Reboot Requirement', value: maintenance.reboot_required_nodes?.length > 0 ? `${maintenance.reboot_required_nodes.length} Pending` : 'Nominal', tone: (maintenance.reboot_required_nodes?.length ? 'warning' : 'healthy') as any },
+		{ label: 'Node Reboot Requirement', value: (maintenance.reboot_required_nodes?.length ?? 0) > 0 ? `${maintenance.reboot_required_nodes!.length} Pending` : 'Nominal', tone: (maintenance.reboot_required_nodes?.length ? 'warning' : 'healthy') as any },
 		{ label: 'Orchestrator State', value: maintenance.orchestrator_health || 'Nominal', tone: (maintenance.orchestrator_health === 'Nominal' ? 'healthy' : 'warning') as any }
 	]);
 </script>

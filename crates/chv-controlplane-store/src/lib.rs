@@ -1,5 +1,5 @@
 mod alerts;
-mod backup_jobs;
+mod backups;
 mod bootstrap_tokens;
 mod db;
 mod desired_state;
@@ -11,18 +11,26 @@ mod observed_state;
 mod operations;
 
 pub use alerts::{AlertCreateInput, AlertRepository};
-pub use backup_jobs::{BackupJobCreateInput, BackupJobRepository, BackupJobRow, BackupJobUpdateInput, BackupHistoryRow};
+pub use backups::{
+    BackupJobCreateInput, BackupJobRow, BackupJobStatusUpdateInput, BackupRepository,
+    BackupRestoreCreateInput, BackupRestoreRow, BackupRestoreStatusUpdateInput,
+    BackupScheduleCreateInput, BackupScheduleRow, BackupScheduleUpdateInput,
+};
 pub use bootstrap_tokens::{BootstrapTokenRepository, BootstrapTokenValidation};
 pub use db::{
     connect_pool, migrations_path, migrator, run_migrations, ControlPlaneStoreConfig, StoreError,
     StorePool,
 };
 pub use desired_state::{
-    DesiredStateRepository, NetworkDesiredStateInput, VmDesiredStateInput, VmPowerStatePatchInput,
-    VolumeAttachmentPatchInput, VolumeDesiredStateInput, VolumeResizePatchInput,
+    DesiredStateRepository, NetworkDesiredStateInput, NetworkStatusPatchInput, VmDesiredStateInput,
+    VmPowerStatePatchInput, VolumeAttachmentPatchInput, VolumeClonePatchInput,
+    VolumeDesiredStateInput, VolumeResizePatchInput, VolumeSnapshotPatchInput,
 };
 pub use events::{EventAppendInput, EventRepository};
-pub use hypervisor_settings::{HypervisorSettingsPatchInput, HypervisorSettingsRepository, HypervisorProfileRow, HypervisorSettingsRow};
+pub use hypervisor_settings::{
+    HypervisorProfileRow, HypervisorSettingsPatchInput, HypervisorSettingsRepository,
+    HypervisorSettingsRow,
+};
 pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
 pub use nodes::{
     NodeBootstrapResultInput, NodeDrainIntentInput, NodeInventoryInput, NodeRepository,
@@ -30,8 +38,8 @@ pub use nodes::{
     NodeVersionInput,
 };
 pub use observed_state::{
-    NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository,
-    VmMetricsInput, VmObservedStateInput, VolumeObservedStateInput,
+    NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository, VmMetricsInput,
+    VmObservedStateInput, VolumeObservedStateInput,
 };
 pub use operations::{OperationCreateInput, OperationRepository, OperationStatusUpdateInput};
 

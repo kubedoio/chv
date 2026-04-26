@@ -15,9 +15,9 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-	import Modal from '$lib/components/modals/Modal.svelte';
-	import FormField from '$lib/components/forms/FormField.svelte';
-	import Input from '$lib/components/Input.svelte';
+	import Modal from '$lib/components/primitives/Modal.svelte';
+	import FormField from '$lib/components/shared/FormField.svelte';
+	import Input from '$lib/components/primitives/TextInput.svelte';
 	import { Link2, Unlink, Maximize2, Database, Box, Activity, Info, AlertTriangle } from 'lucide-svelte';
 
 	let { data }: { data: PageData } = $props();

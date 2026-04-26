@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-15
+
 ## Context
 CHV needs a WebUI that competes with established virtualization platforms while matching CHV's architecture:
 - remote control plane

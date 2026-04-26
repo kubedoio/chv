@@ -172,7 +172,10 @@ pub async fn list_storage_pools_stub(
         }
         Err(e) => {
             tracing::error!(error = %e, "list_storage_pools db query failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!([])))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!([])),
+            )
         }
     }
 }
@@ -184,17 +187,31 @@ pub async fn create_storage_pool_stub(
 ) -> impl axum::response::IntoResponse {
     let name = match payload.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
-        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {"code": "BAD_REQUEST", "message": "missing name", "retryable": false}}))),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": {"code": "BAD_REQUEST", "message": "missing name", "retryable": false}}),
+                ),
+            )
+        }
     };
 
-    let node_id = payload.get("node_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let node_id = payload
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let backend_class = payload
         .get("pool_type")
         .or_else(|| payload.get("backend_class"))
         .and_then(|v| v.as_str())
         .unwrap_or("localdisk")
         .to_string();
-    let path = payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let path = payload
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let total_bytes = payload
         .get("capacity_bytes")
         .or_else(|| payload.get("total_bytes"))
@@ -236,7 +253,12 @@ pub async fn create_storage_pool_stub(
         ),
         Err(e) => {
             tracing::error!(error = %e, "create_storage_pool db insert failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": {"code": "INTERNAL", "message": "failed to create storage pool", "retryable": false}})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": {"code": "INTERNAL", "message": "failed to create storage pool", "retryable": false}}),
+                ),
+            )
         }
     }
 }
@@ -260,14 +282,6 @@ pub async fn list_vm_templates_stub() -> impl axum::response::IntoResponse {
 }
 
 pub async fn list_cloud_init_templates_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!([])))
-}
-
-pub async fn list_backup_jobs_stub() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!([])))
-}
-
-pub async fn list_backup_history_stub() -> impl axum::response::IntoResponse {
     (StatusCode::OK, Json(serde_json::json!([])))
 }
 

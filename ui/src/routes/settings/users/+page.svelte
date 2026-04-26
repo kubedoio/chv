@@ -4,12 +4,12 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { Users, Plus, Pencil, Trash2, ShieldCheck, UserCheck, Key, ShieldAlert } from 'lucide-svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
   import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import Modal from '$lib/components/modals/Modal.svelte';
-	import ConfirmAction from '$lib/components/modals/ConfirmAction.svelte';
+	import Modal from '$lib/components/primitives/Modal.svelte';
+	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
 	import { toast } from '$lib/stores/toast';
 	import { getStoredToken } from '$lib/api/client';
 	import { listUsers, createUser, updateUser, deleteUser, type UserItem } from '$lib/bff/users';
@@ -59,7 +59,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		switch (role) {
 			case 'admin': return 'warning';
 			case 'operator': return 'healthy';
-			default: return 'neutral';
+			default: return 'neutral' as any;
 		}
 	}
 
@@ -148,7 +148,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 </script>
 
 <div class="inventory-page">
-	<PageHeaderWithAction page={pageDef}>
+	<PageHeaderWithAction page={pageDef as any}>
 		{#snippet actions()}
 			<div class="header-actions">
         <Button variant="primary" onclick={openCreate}>
@@ -165,7 +165,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     <div class="inventory-metrics">
 			<CompactMetricCard label="Total Identities" value={users.length} color="primary" />
 			<CompactMetricCard label="Admin Principals" value={adminCount} color="warning" />
-			<CompactMetricCard label="MFA Compliance" value="100%" color="healthy" />
+			<CompactMetricCard label="MFA Compliance" value="100%" color="success" />
 			<CompactMetricCard label="Registry Sync" value="NOMINAL" color="neutral" />
 		</div>
 
@@ -191,15 +191,15 @@ import Button from '$lib/components/primitives/Button.svelte';
                    <StatusBadge label={row.role.label} tone={row.role.tone} />
                 {:else if column.key === 'actions'}
                    <div class="action-strip">
-                      <button class="btn-icon" onclick={() => openEdit(row)} title="MODIFY_ENTITY">
+                      <button class="btn-icon" onclick={() => openEdit(row as unknown as UserItem)} title="MODIFY_ENTITY">
                         <Pencil size={12} />
                       </button>
-                      <button class="btn-icon danger" onclick={() => { selectedUser = row; deleteOpen = true; }} title="PURGE_ENTITY">
+                      <button class="btn-icon danger" onclick={() => { selectedUser = row as unknown as UserItem; deleteOpen = true; }} title="PURGE_ENTITY">
                         <Trash2 size={12} />
                       </button>
                    </div>
                 {:else}
-                   <span class="cell-text">{row[column.key] || '—'}</span>
+                   <span class="cell-text">{(row as Record<string, unknown>)[column.key] || '—'}</span>
                 {/if}
               {/snippet}
             </InventoryTable>

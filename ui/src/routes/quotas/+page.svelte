@@ -5,12 +5,12 @@ import Button from '$lib/components/primitives/Button.svelte';
   import { createAPIClient, getStoredRole } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
   import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';
   import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-  import QuotaSettingsModal from '$lib/components/modals/QuotaSettingsModal.svelte';
+  import QuotaSettingsModal from '$lib/components/settings/QuotaSettingsModal.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
   import type { UsageWithQuota, Quota, UserInfo } from '$lib/api/types';
 
@@ -52,6 +52,8 @@ import Button from '$lib/components/primitives/Button.svelte';
     if (!usageData) return 0;
     return usageData.usage[key as keyof typeof usageData.usage] as number;
   }
+
+  function handleModalSuccess() {}
 
   function getQuotaValue(key: ResourceKey): number {
     if (!usageData) return 0;
@@ -122,7 +124,7 @@ import Button from '$lib/components/primitives/Button.svelte';
                <div class="val-pair">
                   <span class="used">{used}</span>
                   <span class="sep">/</span>
-                  <span class="limit">{max}{resource.unit || ''}</span>
+                  <span class="limit">{max}{(resource as any).unit || ''}</span>
                </div>
                <div class="progress-track">
                   <div class="progress-fill" style="width: {p}%"></div>

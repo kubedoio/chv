@@ -106,10 +106,7 @@ impl AgentServer {
         })?;
         // Ensure the socket is group-writable so the control plane (running as a
         // different user in the same group) can connect.
-        let _ = std::fs::set_permissions(
-            socket_path,
-            std::fs::Permissions::from_mode(0o775),
-        );
+        let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o775));
         let uds_stream = UnixListenerStream::new(uds);
         tonic::transport::Server::builder()
             .add_service(proto::reconcile_service_server::ReconcileServiceServer::new(self.clone()))
@@ -298,18 +295,21 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                 .get("cidr")
                 .and_then(|v| v.as_str())
                 .unwrap_or("10.0.0.0/24");
-            let gateway = spec
-                .get("gateway")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let gateway = spec.get("gateway").and_then(|v| v.as_str()).unwrap_or("");
 
             let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
                 .await
                 .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
 
-            nwd.ensure_network_topology(&inner.network_id, bridge, cidr, gateway, Some(&meta.operation_id))
-                .await
-                .map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
+            nwd.ensure_network_topology(
+                &inner.network_id,
+                bridge,
+                cidr,
+                gateway,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
 
             if let Some(exposures) = spec.get("exposures").and_then(|v| v.as_array()) {
                 for exp in exposures {
@@ -342,6 +342,106 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                             )
                             .await;
                     }
+                }
+            }
+
+            // Firewall policy
+            if let Some(rules) = spec.get("firewall_rules") {
+                let fw_op_id = format!("{}-firewall", meta.operation_id);
+                let policy_json = serde_json::to_vec(rules).unwrap_or_default();
+                let _ = nwd
+                    .set_firewall_policy(&inner.network_id, "v1", policy_json, Some(&fw_op_id))
+                    .await;
+            }
+
+            // NAT policy
+            if spec
+                .get("nat_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let nat_op_id = format!("{}-nat", meta.operation_id);
+                let policy_json = spec
+                    .get("nat_rules")
+                    .map(|v| serde_json::to_vec(v).unwrap_or_default())
+                    .unwrap_or_default();
+                let _ = nwd
+                    .set_nat_policy(&inner.network_id, "v1", policy_json, Some(&nat_op_id))
+                    .await;
+            }
+
+            // DHCP scope
+            if spec
+                .get("dhcp_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                if let Some(scope) = spec.get("dhcp_scope") {
+                    let dhcp_op_id = format!("{}-dhcp", meta.operation_id);
+                    let range_start = scope
+                        .get("range_start")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let range_end = scope
+                        .get("range_end")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let dns_servers: Vec<String> = scope
+                        .get("dns_servers")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = nwd
+                        .ensure_dhcp_scope(
+                            &inner.network_id,
+                            cidr,
+                            range_start,
+                            range_end,
+                            dns_servers,
+                            Some(&dhcp_op_id),
+                        )
+                        .await;
+                }
+            }
+
+            // DNS scope
+            if spec
+                .get("dns_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                if let Some(scope) = spec.get("dns_scope") {
+                    let dns_op_id = format!("{}-dns", meta.operation_id);
+                    let forwarders: Vec<String> = scope
+                        .get("forwarders")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let static_records: std::collections::HashMap<String, String> = scope
+                        .get("static_records")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = nwd
+                        .ensure_dns_scope(
+                            &inner.network_id,
+                            forwarders,
+                            static_records,
+                            Some(&dns_op_id),
+                        )
+                        .await;
                 }
             }
         }
@@ -834,7 +934,11 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
 
         stord
-            .resize_volume(&inner.volume_id, inner.new_size_bytes, Some(&meta.operation_id))
+            .resize_volume(
+                &inner.volume_id,
+                inner.new_size_bytes,
+                Some(&meta.operation_id),
+            )
             .await
             .map_err(|e| Status::internal(format!("resize_volume failed: {}", e)))?;
 
@@ -851,7 +955,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         if let Some(vm_id) = attached_vm {
             if let Err(e) = self
                 .vm_runtime
-                .resize_disk(&vm_id, &inner.volume_id, inner.new_size_bytes, Some(&meta.operation_id))
+                .resize_disk(
+                    &vm_id,
+                    &inner.volume_id,
+                    inner.new_size_bytes,
+                    Some(&meta.operation_id),
+                )
                 .await
             {
                 tracing::warn!(
@@ -871,6 +980,162 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "volume resized".to_string(),
+            }),
+        }))
+    }
+
+    async fn snapshot_volume(
+        &self,
+        req: Request<proto::SnapshotVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        stord
+            .prepare_snapshot(
+                &inner.volume_id,
+                &inner.snapshot_name,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("prepare_snapshot failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "volume snapshot created".to_string(),
+            }),
+        }))
+    }
+
+    async fn restore_volume(
+        &self,
+        req: Request<proto::RestoreVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        stord
+            .restore_snapshot(
+                &inner.volume_id,
+                &inner.snapshot_name,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("restore_snapshot failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "volume snapshot restored".to_string(),
+            }),
+        }))
+    }
+
+    async fn delete_volume_snapshot(
+        &self,
+        req: Request<proto::DeleteVolumeSnapshotRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        stord
+            .delete_snapshot(
+                &inner.volume_id,
+                &inner.snapshot_name,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("delete_snapshot failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "volume snapshot deleted".to_string(),
+            }),
+        }))
+    }
+
+    async fn clone_volume(
+        &self,
+        req: Request<proto::CloneVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.source_volume_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+
+        let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("stord unavailable: {}", e)))?;
+
+        stord
+            .prepare_clone(
+                &inner.source_volume_id,
+                &inner.target_volume_id,
+                Some(&meta.operation_id),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("prepare_clone failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "volume cloned".to_string(),
             }),
         }))
     }
@@ -1103,7 +1368,11 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         let params = chv_agent_runtime_ch::adapter::AddDiskParams {
             path: std::path::PathBuf::from(&inner.disk_path),
             read_only: inner.read_only,
-            id: if inner.disk_id.is_empty() { None } else { Some(inner.disk_id.clone()) },
+            id: if inner.disk_id.is_empty() {
+                None
+            } else {
+                Some(inner.disk_id.clone())
+            },
         };
         self.vm_runtime
             .add_disk(&inner.vm_id, &params, Some(&meta.operation_id))
@@ -1166,7 +1435,11 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         let params = chv_agent_runtime_ch::adapter::AddNetParams {
             tap_name: inner.tap_name.clone(),
             mac_address: inner.mac_address.clone(),
-            id: if inner.net_id.is_empty() { None } else { Some(inner.net_id.clone()) },
+            id: if inner.net_id.is_empty() {
+                None
+            } else {
+                Some(inner.net_id.clone())
+            },
         };
         self.vm_runtime
             .add_net(&inner.vm_id, &params, Some(&meta.operation_id))
@@ -1198,7 +1471,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         drop(cache);
         self.vm_runtime
-            .resize_disk(&inner.vm_id, &inner.disk_id, inner.new_size_bytes, Some(&meta.operation_id))
+            .resize_disk(
+                &inner.vm_id,
+                &inner.disk_id,
+                inner.new_size_bytes,
+                Some(&meta.operation_id),
+            )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         let observed_generation = self.cache.lock().await.observed_generation.clone();
@@ -1300,12 +1578,158 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }))
     }
 
+    async fn start_network(
+        &self,
+        req: Request<proto::StartNetworkRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let spec_json = cache
+            .get_fragment("network", &inner.network_id)
+            .map(|f| f.spec_json.clone())
+            .unwrap_or_default();
+        let spec = serde_json::from_slice::<serde_json::Value>(&spec_json).unwrap_or_default();
+        let bridge = spec
+            .get("bridge_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("br0");
+        let cidr = spec
+            .get("cidr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("10.0.0.0/24");
+        let gateway = spec.get("gateway").and_then(|v| v.as_str()).unwrap_or("");
+        drop(cache);
+
+        let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+        nwd.ensure_network_topology(
+            &inner.network_id,
+            bridge,
+            cidr,
+            gateway,
+            Some(&meta.operation_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "network started".to_string(),
+            }),
+        }))
+    }
+
+    async fn stop_network(
+        &self,
+        req: Request<proto::StopNetworkRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        drop(cache);
+
+        let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+        nwd.delete_network_topology(&inner.network_id, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(format!("delete_network_topology failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "network stopped".to_string(),
+            }),
+        }))
+    }
+
+    async fn restart_network(
+        &self,
+        req: Request<proto::RestartNetworkRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let cache = self.cache.lock().await;
+        ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let spec_json = cache
+            .get_fragment("network", &inner.network_id)
+            .map(|f| f.spec_json.clone())
+            .unwrap_or_default();
+        let spec = serde_json::from_slice::<serde_json::Value>(&spec_json).unwrap_or_default();
+        let bridge = spec
+            .get("bridge_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("br0");
+        let cidr = spec
+            .get("cidr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("10.0.0.0/24");
+        let gateway = spec.get("gateway").and_then(|v| v.as_str()).unwrap_or("");
+        drop(cache);
+
+        let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+        nwd.delete_network_topology(&inner.network_id, Some(&meta.operation_id))
+            .await
+            .map_err(|e| Status::internal(format!("delete_network_topology failed: {}", e)))?;
+        nwd.ensure_network_topology(
+            &inner.network_id,
+            bridge,
+            cidr,
+            gateway,
+            Some(&meta.operation_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("ensure_network_topology failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: meta.operation_id.clone(),
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "network restarted".to_string(),
+            }),
+        }))
+    }
+
     async fn ping_vmm(
         &self,
         req: Request<proto::PingVmmRequest>,
     ) -> Result<Response<proto::PingVmmResponse>, Status> {
         let inner = req.into_inner();
-        let result = self.vm_runtime
+        let result = self
+            .vm_runtime
             .ping(&inner.vm_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -1623,6 +2047,20 @@ mod tests {
             Err(Status::unimplemented(""))
         }
 
+        async fn restore_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::RestoreSnapshotRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn delete_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DeleteSnapshotRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
         async fn set_device_policy(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
@@ -1725,6 +2163,20 @@ mod tests {
         async fn prepare_clone(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::PrepareCloneRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn restore_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::RestoreSnapshotRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn delete_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DeleteSnapshotRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }

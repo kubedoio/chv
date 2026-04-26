@@ -285,16 +285,17 @@ export function getShortcutsByContext(): ShortcutGroup[] {
 // Built-in global shortcuts
 export function createGlobalShortcuts(
   onSearchOpen: () => void,
-  onQuickActionsOpen: () => void
+  onQuickActionsOpen: () => void,
+  onCommandPaletteOpen: () => void
 ): Shortcut[] {
   return [
     {
-      id: 'global-search',
+      id: 'command-palette',
       key: 'k',
       modifiers: [isMac ? 'meta' : 'ctrl'],
       context: 'global',
-      description: 'Open global search',
-      handler: onSearchOpen,
+      description: 'Open command palette',
+      handler: onCommandPaletteOpen,
       preventDefault: true
     },
     {

@@ -1,5 +1,9 @@
 name: CI
 
+# Version bumps are handled manually via:
+#   make bump-version BUMP_TYPE=build
+# See scripts/bump-version.sh for details.
+
 on:
   push:
     branches: [main]
@@ -18,6 +22,9 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: cargo check
         run: cargo check --workspace

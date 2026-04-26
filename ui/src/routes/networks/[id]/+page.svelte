@@ -11,8 +11,8 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Shield, ShieldAlert, Network, Box, Activity, Info, AlertTriangle, Pencil } from 'lucide-svelte';
-	import CreateNetworkModal from '$lib/components/modals/CreateNetworkModal.svelte';
-	import FirewallRuleEditor from '$lib/components/shared/FirewallRuleEditor.svelte';
+	import CreateNetworkModal from '$lib/components/networks/CreateNetworkModal.svelte';
+	import FirewallRuleEditor from '$lib/components/networks/FirewallRuleEditor.svelte';
 
 	let { data }: { data: PageData } = $props();
 

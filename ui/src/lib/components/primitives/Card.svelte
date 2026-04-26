@@ -22,7 +22,7 @@
 </script>
 
 <div
-	class="bg-white border border-[var(--color-neutral-200)] rounded-md shadow-sm overflow-hidden transition-all duration-300 ease-in-out {interactive ? 'cursor-pointer hover:shadow-lg hover:border-[var(--color-primary)]/30 hover:-translate-y-0.5' : ''}"
+	class="bg-[var(--bg-surface)] border border-[var(--color-neutral-200)] rounded-md shadow-sm overflow-hidden transition-all duration-300 ease-in-out {interactive ? 'cursor-pointer hover:shadow-lg hover:border-[var(--color-primary)]/30 hover:-translate-y-0.5' : ''}"
 	role="article"
 >
 	{#if header}

@@ -26,27 +26,32 @@
   --color-accent-soft: #f0dfcb;
   
   /* Semantic Colors (IBM Carbon Tones) */
-  --color-success: #198038;
-  --color-success-light: #defbe6;
-  --color-success-dark: #0e4a21;
-  
-  --color-warning: #f1c21b;
-  --color-warning-light: #fcf4d6;
-  --color-warning-dark: #8a6a00;
-  
-  --color-danger: #da1e28;
-  --color-danger-light: #fff1f1;
-  --color-danger-dark: #750e13;
-  
-  --color-info: #0043ce;
-  --color-info-light: #edf5ff;
-  --color-info-dark: #001d6c;
+  --color-success: #3f6b45;
+  --color-success-light: #edf4ee;
+  --color-success-dark: #27462d;
+  --color-success-glow: rgba(63, 107, 69, 0.12);
+
+  --color-warning: #9a6a1f;
+  --color-warning-light: #f8efd9;
+  --color-warning-dark: #744d0f;
+  --color-warning-glow: rgba(154, 106, 31, 0.12);
+
+  --color-danger: #9b4338;
+  --color-danger-light: #faece8;
+  --color-danger-dark: #6e2d25;
+  --color-danger-glow: rgba(155, 67, 56, 0.12);
+
+  --color-info: #49627d;
+  --color-info-light: #edf1f6;
+  --color-info-dark: #304255;
+  --color-info-glow: rgba(73, 98, 125, 0.12);
+
   --color-primary-rgb: 143, 90, 42;
   --color-accent-rgb: 154, 106, 31;
-  --color-success-rgb: 25, 128, 56;
-  --color-warning-rgb: 241, 194, 27;
-  --color-danger-rgb: 218, 30, 40;
-  --color-info-rgb: 0, 67, 206;
+  --color-success-rgb: 63, 107, 69;
+  --color-warning-rgb: 154, 106, 31;
+  --color-danger-rgb: 155, 67, 56;
+  --color-info-rgb: 73, 98, 125;
   
   /* Neutral Scale (Technical Grays) */
   --color-neutral-50: #f4f1ea;
@@ -145,6 +150,24 @@
   --color-info-rgb: 106, 140, 173;
   --color-info-glow: rgba(106, 140, 173, 0.15);
 
+  --bg-base: #1a1816;
+  --bg-sidebar: #1e1c18;
+  --bg-surface: #24221e;
+  --bg-surface-muted: #1e1c18;
+
+  --color-accent: #c4922e;
+  --color-accent-soft: #2d2410;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.5);
+  --shadow-glow-primary: 0 0 14px rgba(196, 133, 78, 0.15);
+
+  --border-subtle: rgba(180, 160, 130, 0.12);
+  --border-strong: rgba(180, 160, 130, 0.22);
+
+  --dot-grid: rgba(255, 255, 255, 0.04);
+
   --color-neutral-50: #1a1816;
   --color-neutral-100: #222019;
   --color-neutral-200: #2e2b24;
@@ -194,10 +217,6 @@
    Base Styles
    ========================================================================== */
 
-* {
-  box-sizing: border-box;
-}
-
 html {
   scroll-behavior: smooth;
 }
@@ -216,27 +235,6 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   line-height: 1.5;
-}
-
-/* ==========================================================================
-   Typography
-   ========================================================================== */
-
-h1, h2, h3, h4, h5, h6 {
-  font-family: var(--font-sans);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--color-neutral-900);
-  margin: 0;
-}
-
-h1 { font-size: var(--text-3xl); line-height: 1.2; }
-h2 { font-size: var(--text-2xl); line-height: 1.25; }
-h3 { font-size: var(--text-xl); line-height: 1.3; }
-h4 { font-size: var(--text-lg); line-height: 1.4; }
-
-p {
-  margin: 0;
 }
 
 /* Monospace for technical data */
@@ -283,40 +281,6 @@ select:focus {
   color: var(--color-neutral-900);
 }
 
-/* Screen reader only content */
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
-/* Skip link */
-.skip-link {
-  position: absolute;
-  top: -40px;
-  left: 0;
-  z-index: 100;
-  padding: 8px 16px;
-  background: var(--color-primary);
-  color: white;
-  font-weight: 500;
-  text-decoration: none;
-  border-radius: 0 0 4px 0;
-  transition: top 0.2s ease;
-}
-
-.skip-link:focus {
-  top: 0;
-  outline: 2px solid white;
-  outline-offset: -2px;
-}
-
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -357,26 +321,4 @@ select:focus {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-neutral-500);
-}
-
-/* ==========================================================================
-   Utilities
-   ========================================================================== */
-
-.dot-grid {
-  background-image: radial-gradient(var(--dot-grid) 1px, transparent 0);
-  background-size: 24px 24px;
-}
-
-.technical-surface {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-sm);
-}
-
-.glass-panel {
-  background: rgba(252, 249, 244, 0.72);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--shell-line);
 }

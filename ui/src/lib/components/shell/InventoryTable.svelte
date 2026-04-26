@@ -1,4 +1,4 @@
-<script lang="ts">
+<script lang="ts" generics="T extends Record<string, unknown>">
 	import type { Snippet } from 'svelte';
 	import StatusBadge from './StatusBadge.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
@@ -14,7 +14,7 @@
 		tone: ShellTone;
 	}
 
-	interface Props<T = Record<string, unknown>> {
+	interface Props {
 		columns: Column[];
 		rows: T[];
 		rowHref?: (row: T) => string | null;

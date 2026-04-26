@@ -1,13 +1,13 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import FilterBar from '$lib/components/FilterBar.svelte';
+	import FilterBar from '$lib/components/shared/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import ResourceLink from '$lib/components/shell/ResourceLink.svelte';
 	import DurationLine from '$lib/components/shell/DurationLine.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import { getTaskStatusMeta } from '$lib/webui/tasks';
@@ -147,10 +147,10 @@
 							</div>
 						{:else if column.key === 'duration'}
 							<DurationLine startedMs={row.started_unix_ms} finishedMs={row.finished_unix_ms} />
-						{:else if typeof row[column.key] === 'object' && row[column.key]?.tone}
-							<StatusBadge label={row[column.key].label} tone={row[column.key].tone} />
+						{:else if typeof (row as any)[column.key] === 'object' && (row as any)[column.key]?.tone}
+							<StatusBadge label={(row as any)[column.key].label} tone={(row as any)[column.key].tone} />
 						{:else}
-							<span class="cell-text">{row[column.key]}</span>
+							<span class="cell-text">{(row as any)[column.key]}</span>
 						{/if}
 					{/snippet}
 				</InventoryTable>

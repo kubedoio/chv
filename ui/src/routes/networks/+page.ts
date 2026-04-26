@@ -1,6 +1,7 @@
 import type { PageLoad } from './$types';
 import { getStoredToken } from '$lib/api/client';
 import { listNetworks } from '$lib/bff/networks';
+import { cachedFetch, LIST_TTL } from '$lib/stores/api-cache.svelte';
 
 export type NetworkListItem = {
 	network_id: string;
@@ -56,7 +57,11 @@ export const load: PageLoad = async ({ url }) => {
 	if (exposure) current.exposure = exposure;
 
 	try {
-		const res = await listNetworks(token);
+		const res = await cachedFetch(
+			'networks:list',
+			() => listNetworks(token),
+			LIST_TTL
+		);
 		const fetchedItems = (res.items ?? []) as NetworkListItem[];
 
 		const filtered = filterNetworks(fetchedItems, current);

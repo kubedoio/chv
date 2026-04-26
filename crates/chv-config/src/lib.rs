@@ -353,7 +353,10 @@ mod tests {
     fn load_agent_config_auto_generates_secret_when_default() {
         let cfg = load_agent_config(None).expect("should succeed with auto-generated secret");
         assert_ne!(cfg.jwt_secret, "chv-dev-secret-change-in-production");
-        assert!(cfg.jwt_secret.len() >= 32, "auto-generated secret should be at least 32 chars");
+        assert!(
+            cfg.jwt_secret.len() >= 32,
+            "auto-generated secret should be at least 32 chars"
+        );
     }
 
     #[test]
@@ -379,14 +382,16 @@ jwt_secret = "tooshort"
         )
         .expect("write config");
 
-        let cfg = load_agent_config(Some(&config_path)).expect("should succeed with auto-generated secret");
+        let cfg = load_agent_config(Some(&config_path))
+            .expect("should succeed with auto-generated secret");
         assert_ne!(cfg.jwt_secret, "tooshort");
         assert!(cfg.jwt_secret.len() >= 32);
     }
 
     #[test]
     fn load_controlplane_config_auto_generates_secret_when_default() {
-        let cfg = load_controlplane_config(None).expect("should succeed with auto-generated secret");
+        let cfg =
+            load_controlplane_config(None).expect("should succeed with auto-generated secret");
         assert_ne!(cfg.jwt_secret, "chv-dev-secret-change-in-production");
         assert!(cfg.jwt_secret.len() >= 32);
     }

@@ -1,4 +1,5 @@
 import { listVms } from '$lib/bff/vms';
+import { cachedFetch, LIST_TTL } from '$lib/stores/api-cache.svelte';
 import type { ListVmsRequest, VmListItem } from '$lib/bff/types';
 
 export type VmsListModel = {
@@ -58,7 +59,11 @@ export async function buildVmsLoad({ searchParams, token }: VmsLoadDeps): Promis
 	};
 
 	try {
-		const res = await listVms(req, token);
+		const res = await cachedFetch(
+			`vms:list:${JSON.stringify(req)}`,
+			() => listVms(req, token),
+			LIST_TTL
+		);
 		const fetchedItems = res.items;
 
 		return {

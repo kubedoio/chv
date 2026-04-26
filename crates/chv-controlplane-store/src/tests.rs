@@ -274,6 +274,11 @@ async fn test_network_exposure_upsert_and_fk() {
             desired_status: Some("active".into()),
             requested_by: None,
             updated_by: None,
+            firewall_rules_json: None,
+            nat_rules_json: None,
+            dhcp_scope_json: None,
+            dns_enabled: None,
+            dns_scope_json: None,
             requested_unix_ms: 1000,
         })
         .await

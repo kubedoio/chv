@@ -2,37 +2,68 @@
 
 ## Project Overview
 
-CHV is a Rust-first virtualization management repository with a Svelte frontend and proto/spec-driven backend direction.
+CHV is a Rust-first virtualization management repository with a SvelteKit frontend and proto/spec-driven backend direction. It provides API-driven VM lifecycle management built on Cloud Hypervisor for sovereign private cloud and edge environments.
 
 ## Repository Direction
 
-- Active backend/control-plane language: Rust
+- Active backend/control-plane language: **Rust**
 - Active backend workspace: `/Cargo.toml`, `/cmd`, `/crates`, `/gen/rust`
 - Authoritative contracts: `/proto`
-- Authoritative design and behavior docs: `/docs/specs`, `/docs/chv-llm-handoff-pack`
+- Authoritative design and behavior docs: `/docs/specs`, `/docs/plans`
+- Current phase: Early-to-MVP transitioning to stability (see [`docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md`](docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md))
 
 ## Build Commands
 
 ```bash
-# Active backend workspace
+# Rust workspace
 cargo build --workspace
 cargo test --workspace
+cargo clippy --workspace -- -D warnings
+cargo fmt --all
 
 # Frontend
-cd ui && npm run build
+cd ui && npm install && npm run build
+
+# Release packaging
+make release
+
+# Local dev install with systemd units
+make dev-install
 ```
+
+## Proto Generation
+
+If you change `.proto` files:
+
+```bash
+cargo build --workspace
+```
+
+The workspace `build.rs` files use `tonic-build` to regenerate code in `/gen/rust`. Do not hand-edit generated files.
 
 ## Backend Implementation Rules
 
-- New backend/control-plane work belongs in the Rust workspace, not the archived Go tree.
+- New backend/control-plane work belongs in the Rust workspace, not any archived Go tree.
 - Proto contracts in `/proto` are the source of truth for inter-service APIs.
 - ADRs and component specs in `/docs/specs` define the intended system boundaries.
+- Use `chv-errors` for structured errors; avoid panics in service code.
+- Use `tracing` for logging; never `println!` in library crates.
+- Keep Svelte components under ~300 lines; extract helpers when growing larger.
 
-## Skill routing
+## Key Files for Context
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
+| File | Why it matters |
+|------|---------------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | High-level architecture, data flow, current phase |
+| [`docs/specs/adr/`](docs/specs/adr/) | Boundaries and invariants (agent/stord/nwd split, control-plane boundary, state machines) |
+| [`docs/specs/component/`](docs/specs/component/) | Component responsibilities and failure behavior |
+| [`docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md`](docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md) | Current sprint roadmap and known gaps |
+| [`DESIGN.md`](DESIGN.md) | Design system tokens (colors, typography, spacing) |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, code style, PR workflow |
+
+## Skill Routing
+
+When the user's request matches an available skill, ALWAYS invoke it using the Skill tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
 
 Key routing rules:
 - Product ideas, "is this worth building", brainstorming → invoke office-hours
@@ -45,5 +76,5 @@ Key routing rules:
 - Design system, brand → invoke design-consultation
 - Visual audit, design polish → invoke design-review
 - Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
+- Save progress, checkpoint, resume → invoke context-save / context-restore
 - Code quality, health check → invoke health

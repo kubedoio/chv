@@ -1,6 +1,7 @@
 import type { PageLoad } from './$types';
 import { getStoredToken } from '$lib/api/client';
 import { listNodes } from '$lib/bff/nodes';
+import { cachedFetch, LIST_TTL } from '$lib/stores/api-cache.svelte';
 import type { ListNodesRequest, NodeListItem } from '$lib/bff/types';
 
 export type { NodeListItem };
@@ -52,7 +53,11 @@ export const load: PageLoad = async ({ url }) => {
 	};
 
 	try {
-		const res = await listNodes(req, token);
+		const res = await cachedFetch(
+			`nodes:list:${JSON.stringify(req)}`,
+			() => listNodes(req, token),
+			LIST_TTL
+		);
 		const fetchedItems = res.items;
 
 		const filtered = filterNodes(fetchedItems, current);

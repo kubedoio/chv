@@ -319,10 +319,10 @@ All handlers require `require_operator_or_admin`.
 
 Add routes:
 ```rust
-.route("/v1/settings/hypervisor", post(crate::handlers::hypervisor_settings::get_settings))
+.route("/v1/settings/hypervisor", get(crate::handlers::hypervisor_settings::get_settings))
 .route("/v1/settings/hypervisor/update", post(crate::handlers::hypervisor_settings::update_settings))
 .route("/v1/settings/hypervisor/apply-profile", post(crate::handlers::hypervisor_settings::apply_profile))
-.route("/v1/settings/hypervisor/profiles", post(crate::handlers::hypervisor_settings::list_profiles))
+.route("/v1/settings/hypervisor/profiles", get(crate::handlers::hypervisor_settings::list_profiles))
 ```
 
 ---

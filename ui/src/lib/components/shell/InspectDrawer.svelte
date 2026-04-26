@@ -81,7 +81,7 @@
 
 	{#if active.id}
 		<div class="flex-1 p-5 flex flex-col gap-6 overflow-y-auto" in:fade={{ duration: 100 }}>
-			<EntityIdentity type={active.type} label={active.label} id={active.id} />
+			<EntityIdentity type={active.type} label={active.label ?? ''} id={active.id ?? ''} />
 
 			{#if isLoading}
 				<div class="py-12 flex flex-col items-center gap-3 text-[10px] font-extrabold text-[var(--color-neutral-500)]">

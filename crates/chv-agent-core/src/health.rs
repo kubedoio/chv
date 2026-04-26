@@ -178,10 +178,7 @@ mod tests {
         let mut h = HealthAggregator::new();
         h.update_stord(true);
         h.update_nwd(true);
-        assert_eq!(
-            h.derive_node_state(NodeState::Failed),
-            NodeState::HostReady
-        );
+        assert_eq!(h.derive_node_state(NodeState::Failed), NodeState::HostReady);
     }
 
     #[test]
@@ -189,10 +186,7 @@ mod tests {
         let mut h = HealthAggregator::new();
         h.update_stord(true);
         h.update_nwd(false);
-        assert_eq!(
-            h.derive_node_state(NodeState::Failed),
-            NodeState::Degraded
-        );
+        assert_eq!(h.derive_node_state(NodeState::Failed), NodeState::Degraded);
     }
 
     #[test]
@@ -200,9 +194,6 @@ mod tests {
         let mut h = HealthAggregator::new();
         h.update_stord(false);
         h.update_nwd(false);
-        assert_eq!(
-            h.derive_node_state(NodeState::Failed),
-            NodeState::Failed
-        );
+        assert_eq!(h.derive_node_state(NodeState::Failed), NodeState::Failed);
     }
 }

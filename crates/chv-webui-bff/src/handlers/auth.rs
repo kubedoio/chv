@@ -50,15 +50,18 @@ pub async fn login(
         None => (None, DUMMY_HASH.to_string()),
     };
 
-    let valid = bcrypt::verify(password, &hash_to_check)
-        .map_err(|e| {
-            tracing::error!(error = %e, "bcrypt verification failed");
-            BffError::Internal("authentication service unavailable".into())
-        })?;
+    let valid = bcrypt::verify(password, &hash_to_check).map_err(|e| {
+        tracing::error!(error = %e, "bcrypt verification failed");
+        BffError::Internal("authentication service unavailable".into())
+    })?;
 
     let user = match user_row {
         Some(u) if valid => u,
-        _ => return Err(BffError::Unauthorized("Invalid username or password".into())),
+        _ => {
+            return Err(BffError::Unauthorized(
+                "Invalid username or password".into(),
+            ))
+        }
     };
 
     let exp = SystemTime::now()
@@ -99,14 +102,20 @@ mod tests {
     fn bcrypt_verify_known_admin_hash() {
         let hash = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m";
         let result = bcrypt::verify("admin", hash).expect("bcrypt::verify should not error");
-        assert!(result, "bcrypt::verify should return true for admin/known-hash");
+        assert!(
+            result,
+            "bcrypt::verify should return true for admin/known-hash"
+        );
     }
 
     #[test]
     fn bcrypt_verify_wrong_password_fails() {
         let hash = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m";
         let result = bcrypt::verify("wrong", hash).expect("bcrypt::verify should not error");
-        assert!(!result, "bcrypt::verify should return false for wrong password");
+        assert!(
+            !result,
+            "bcrypt::verify should return false for wrong password"
+        );
     }
 
     /// Verify that the timing-attack mitigation path works: when a user is not found we

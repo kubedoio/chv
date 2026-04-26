@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-15
+
 ## Context
 Virtualization UIs become hard to trust when actions disappear into background processes or when state is ambiguous.
 

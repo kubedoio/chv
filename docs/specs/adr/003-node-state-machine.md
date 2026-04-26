@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-13
+
 ## Context
 The control plane must not infer readiness from loose health checks. A node needs explicit states for scheduling, failure handling, and recovery.
 
@@ -55,3 +58,7 @@ Pros:
 Cons:
 - requires disciplined state reporting
 - requires explicit sub-state handling in implementation
+
+## Related ADRs
+- **ADR-006** defines partition and autonomy behavior during control-plane outages. A partitioned node that remains locally healthy does not automatically enter `Degraded`; the transition depends on whether critical service readiness is lost. If the node preserves runtime state and local services remain healthy, it may stay `TenantReady` (but still deny new placements per ADR-006).
+- **ADR-005** and **ADR-007** define `chv-nwd` drain-and-replace upgrades. Service-level draining (upgrading `chv-nwd` on a host) is distinct from node-level `Draining` (evacuating all VMs). Service-level drain may be performed without moving the node to `Draining` if tenant continuity can be preserved.

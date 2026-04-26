@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-13
+
 ## Context
 The node must continue safely during control-plane outages without drifting into unbounded local authority.
 
@@ -31,3 +34,6 @@ Cons:
 - no new long-lived desired state may be invented on the node
 - all deferred reports must be flushed after reconnect
 - stale generations must not be applied
+
+## Related ADRs
+- **ADR-003** defines the node state machine. Partition behavior is not a separate state; instead, it modifies allowed operations within existing states (typically `TenantReady` or `Degraded`).

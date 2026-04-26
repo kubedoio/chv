@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-13
+
 ## Context
 CHV MVP-1 needs a clear split between orchestration, storage, networking, and the VMM. Earlier designs considered storage and network service VMs. For MVP-1, the priorities are simplicity first, then isolation, then performance, then operator control. The host should remain thin, but small sandboxed daemons are allowed where necessary.
 
@@ -87,3 +90,7 @@ Cons:
 
 ## Notes
 This ADR does not permit collapsing `chv-stord` or `chv-nwd` into `chv-agent`.
+
+## Related ADRs
+- **ADR-005** defers the eBPF datapath and network-VM approach for MVP-1, consistent with the host-daemon model chosen here.
+- **ADR-007** defines upgrade policy for these daemons. Independent `chv-stord` upgrades are permitted inside the compatibility matrix; `chv-nwd` uses drain-and-replace. See ADR-007 for how supervision interacts with component upgrades.

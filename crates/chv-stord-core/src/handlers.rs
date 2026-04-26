@@ -78,6 +78,8 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             burst_allowed: p.burst_allowed,
             read_only: p.read_only,
             no_exec: p.no_exec,
+            io_scheduler: p.io_scheduler,
+            cache_mode: p.cache_mode,
         })
         .unwrap_or_default()
     }
@@ -543,6 +545,78 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         if let Err(e) = self
             .backend
             .prepare_clone(&s.volume_id, &s.attachment_handle, &req.clone_name)
+            .await
+        {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
+    }
+
+    async fn restore_snapshot(
+        &self,
+        request: Request<proto::RestoreSnapshotRequest>,
+    ) -> Result<Response<proto::Result>, Status> {
+        self.metrics
+            .increment_counter("stord_restore_snapshot_total");
+        let req = request.into_inner();
+        let span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = span.enter();
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
+
+        let Some(s) = session else {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: req.volume_id.clone(),
+            };
+            return Ok(Response::new(e.to_proto_result()));
+        };
+
+        if let Err(e) = self
+            .backend
+            .restore_snapshot(&s.volume_id, &s.attachment_handle, &req.snapshot_name)
+            .await
+        {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
+    }
+
+    async fn delete_snapshot(
+        &self,
+        request: Request<proto::DeleteSnapshotRequest>,
+    ) -> Result<Response<proto::Result>, Status> {
+        self.metrics
+            .increment_counter("stord_delete_snapshot_total");
+        let req = request.into_inner();
+        let span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+        let _enter = span.enter();
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
+
+        let Some(s) = session else {
+            let e = ChvError::NotFound {
+                resource: "session".to_string(),
+                id: req.volume_id.clone(),
+            };
+            return Ok(Response::new(e.to_proto_result()));
+        };
+
+        if let Err(e) = self
+            .backend
+            .delete_snapshot(&s.volume_id, &s.attachment_handle, &req.snapshot_name)
             .await
         {
             return Ok(Response::new(e.to_proto_result()));

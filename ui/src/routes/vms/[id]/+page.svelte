@@ -7,6 +7,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
+	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
@@ -19,7 +20,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     Info, AlertTriangle, ChevronRight, Terminal, FileText, Power,
     ShieldCheck, ArrowLeft, ChevronLeft
   } from 'lucide-svelte';
-	import DetailTabs from '$lib/components/webui/DetailTabs.svelte';
+	import DetailTabs from '$lib/components/shared/DetailTabs.svelte';
 	import VMMetricsWidget from '$lib/components/vms/VMMetricsWidget.svelte';
 	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
@@ -113,6 +114,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 				await mutateVm({ vm_id, action: apiAction, force: isForce }, token);
 				toast.success(`Workload ${action} accepted`);
 			}
+			invalidatePattern('vms:');
 			await invalidateAll();
 		} catch (err: any) {
 			toast.error(err.message || 'Mutation failed');
@@ -349,7 +351,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 										 {@const health = row.health as { label: string; tone: ShellTone }}
                      <StatusBadge label={health.label} tone={health.tone} />
                    {:else}
-                     <span class="cell-text">{row[column.key]}</span>
+                     <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
                    {/if}
                 {/snippet}
               </InventoryTable>
@@ -373,7 +375,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 										 {@const addressingMode = row.addressing_mode as { label: string; tone: ShellTone }}
                      <StatusBadge label={addressingMode.label} tone={addressingMode.tone} />
                   {:else}
-                     <span class="cell-text">{row[column.key]}</span>
+                     <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
                   {/if}
                 {/snippet}
               </InventoryTable>

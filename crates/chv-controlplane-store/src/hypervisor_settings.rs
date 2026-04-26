@@ -156,7 +156,10 @@ impl HypervisorSettingsRepository {
 
         sets.push("updated_at = datetime('now')");
 
-        let sql = format!("UPDATE hypervisor_settings SET {} WHERE id = 1", sets.join(", "));
+        let sql = format!(
+            "UPDATE hypervisor_settings SET {} WHERE id = 1",
+            sets.join(", ")
+        );
         let mut query = sqlx::query(&sql);
 
         if let Some(v) = input.cpu_nested {
@@ -224,10 +227,7 @@ impl HypervisorSettingsRepository {
         Ok(rows)
     }
 
-    pub async fn get_profile(
-        &self,
-        id: &str,
-    ) -> Result<Option<HypervisorProfileRow>, StoreError> {
+    pub async fn get_profile(&self, id: &str) -> Result<Option<HypervisorProfileRow>, StoreError> {
         let row = sqlx::query_as::<_, HypervisorProfileRow>(
             "SELECT * FROM hypervisor_profiles WHERE id = $1",
         )
@@ -295,7 +295,10 @@ impl HypervisorSettingsRepository {
             sets.push("tpm_socket_path = ?");
         }
 
-        let sql = format!("UPDATE hypervisor_settings SET {} WHERE id = 1", sets.join(", "));
+        let sql = format!(
+            "UPDATE hypervisor_settings SET {} WHERE id = 1",
+            sets.join(", ")
+        );
         let mut query = sqlx::query(&sql);
 
         query = query.bind(profile_id);

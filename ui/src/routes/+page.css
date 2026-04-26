@@ -1,0 +1,273 @@
+.cockpit-dashboard {
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+}
+
+.cockpit-layout {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	height: 100%;
+}
+
+.cockpit-metrics {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 0.75rem;
+}
+
+.dashboard-panel-bar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.35rem;
+	padding: 0.35rem 0.45rem;
+	border: 1px solid var(--shell-line);
+	border-radius: var(--radius-xs);
+	background: var(--shell-surface);
+}
+
+.dashboard-panel-bar span {
+	margin-right: 0.25rem;
+	font-size: 10px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--shell-text-muted);
+}
+
+.dashboard-panel-bar button,
+.panel-icon-button {
+	border: 1px solid var(--shell-line);
+	border-radius: var(--radius-xs);
+	background: var(--shell-surface-muted);
+	color: var(--shell-text-muted);
+	cursor: pointer;
+	transition:
+		background-color 120ms ease-in-out,
+		border-color 120ms ease-in-out,
+		color 120ms ease-in-out;
+}
+
+.dashboard-panel-bar button {
+	padding: 0.25rem 0.45rem;
+	font-size: 10px;
+	font-weight: 600;
+}
+
+.dashboard-panel-bar button:hover,
+.panel-icon-button:hover {
+	border-color: var(--shell-line-strong);
+	color: var(--shell-text);
+}
+
+.dashboard-panel-toggle--active {
+	border-color: color-mix(in srgb, var(--color-primary) 40%, var(--shell-line)) !important;
+	background: color-mix(in srgb, var(--color-primary-light) 70%, var(--shell-surface)) !important;
+	color: var(--color-primary) !important;
+}
+
+.panel-icon-button {
+	display: grid;
+	place-items: center;
+	width: 1.55rem;
+	height: 1.55rem;
+	padding: 0;
+}
+
+.cockpit-briefing-grid {
+	display: grid;
+	grid-template-columns: minmax(0, 1.3fr) minmax(18rem, 0.9fr);
+	gap: 0.75rem;
+}
+
+.cockpit-briefing-grid--single {
+	grid-template-columns: 1fr;
+}
+
+.briefing-grid {
+	display: grid;
+	gap: 0.75rem;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.briefing-card {
+	padding: 0.85rem 0.9rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--shell-line);
+	background: var(--shell-surface-muted);
+}
+
+.briefing-label {
+	margin: 0;
+	font-size: 10px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--shell-text-muted);
+}
+
+.briefing-value {
+	margin: 0.45rem 0 0;
+	font-size: var(--text-lg);
+	font-weight: 700;
+	color: var(--shell-text);
+}
+
+.briefing-note {
+	margin: 0.3rem 0 0;
+	font-size: var(--text-xs);
+	line-height: 1.5;
+	color: var(--shell-text-secondary);
+}
+
+.cockpit-workspace {
+	display: grid;
+	grid-template-columns: minmax(0, 1.65fr) minmax(19rem, 0.85fr);
+	gap: 0.75rem;
+	align-items: start;
+	flex: 1;
+	min-height: 0;
+}
+
+.cockpit-workspace--compact-rail {
+	grid-template-columns: minmax(0, 1fr) minmax(13rem, 0.28fr);
+}
+
+.cockpit-workspace--wide {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.cockpit-topology {
+	min-width: 0;
+}
+
+.cockpit-topology .topology-canvas {
+	min-height: 34rem;
+}
+
+.cockpit-topology .svg-container {
+	min-height: 28rem;
+}
+
+.cockpit-rail {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	min-width: 0;
+}
+
+.attention-list {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.attention-item {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4rem;
+	padding: 0.7rem 0.75rem;
+	background: var(--bg-surface-muted);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-sm);
+}
+
+.attention-item__header {
+	display: flex;
+	align-items: center;
+	gap: 0.45rem;
+}
+
+.attention-item p {
+	margin: 0;
+	font-size: var(--text-sm);
+	line-height: 1.45;
+	color: var(--shell-text);
+}
+
+.attention-scope,
+.attention-item span {
+	font-size: var(--text-xs);
+	color: var(--shell-text-muted);
+}
+
+.attention-item--quiet {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	align-items: start;
+	color: var(--color-success);
+}
+
+.capacity-preview {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+.cap-item {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+}
+
+.cap-header {
+	display: flex;
+	justify-content: space-between;
+	font-size: 9px;
+	font-weight: 600;
+	color: var(--color-neutral-500);
+	text-transform: uppercase;
+}
+
+.capacity-footnote {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding-top: 0.25rem;
+	font-size: var(--text-xs);
+	color: var(--shell-text-muted);
+}
+
+.cap-bar {
+	height: 4px;
+	background: var(--color-neutral-100);
+	border-radius: 999px;
+	overflow: hidden;
+}
+
+.cap-fill {
+	height: 100%;
+	background: var(--color-primary);
+}
+
+.cap-fill--warm {
+	background: var(--color-info);
+}
+
+.cap-fill--pressure {
+	background: var(--color-warning);
+}
+
+.cap-fill--critical {
+	background: var(--color-danger);
+}
+
+@media (max-width: 1100px) {
+	.cockpit-briefing-grid,
+	.cockpit-workspace {
+		grid-template-columns: 1fr;
+	}
+
+	.briefing-grid {
+		grid-template-columns: 1fr;
+	}
+
+	.cockpit-topology .topology-canvas {
+		min-height: 28rem;
+	}
+}

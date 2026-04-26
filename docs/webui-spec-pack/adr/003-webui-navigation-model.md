@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-15
+
 ## Decision
 The primary navigation model is:
 

@@ -2,8 +2,8 @@ use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
     AlertCreateInput, AlertRepository, EventAppendInput, EventRepository,
-    NetworkObservedStateInput, NodeObservedStateInput, NodeRepository,
-    ObservedStateRepository, VmMetricsInput, VmObservedStateInput, VolumeObservedStateInput,
+    NetworkObservedStateInput, NodeObservedStateInput, NodeRepository, ObservedStateRepository,
+    VmMetricsInput, VmObservedStateInput, VolumeObservedStateInput,
 };
 use chv_controlplane_types::domain::{
     EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, ResourceId,

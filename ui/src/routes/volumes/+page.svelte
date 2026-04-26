@@ -2,11 +2,11 @@
 import Button from '$lib/components/primitives/Button.svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import FilterBar from '$lib/components/FilterBar.svelte';
+	import FilterBar from '$lib/components/shared/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
@@ -142,7 +142,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 					rowHref={(row) => `/volumes/${row.volume_id}`} 
 				>
 					{#snippet cell({ column, row })}
-						{@const val = row[column.key]}
+						{@const val = (row as any)[column.key]}
 						{#if column.key === 'name'}
 							<span class="volume-name">{row.name}</span>
 						{:else if typeof val === 'object' && val?.tone}

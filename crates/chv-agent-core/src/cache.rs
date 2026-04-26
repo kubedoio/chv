@@ -407,9 +407,7 @@ impl NodeCache {
 
     pub fn update_vm_desired_state(&mut self, vm_id: &str, desired_state: &str) {
         if let Some(frag) = self.vm_fragments.get_mut(vm_id) {
-            if let Ok(mut spec) =
-                serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
-            {
+            if let Ok(mut spec) = serde_json::from_slice::<serde_json::Value>(&frag.spec_json) {
                 spec["desired_state"] = serde_json::Value::String(desired_state.to_string());
                 if let Ok(bytes) = serde_json::to_vec(&spec) {
                     frag.spec_json = bytes;

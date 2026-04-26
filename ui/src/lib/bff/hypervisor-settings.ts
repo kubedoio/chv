@@ -24,7 +24,7 @@ export type HypervisorSettings = {
 export type HypervisorProfile = {
 	id: string;
 	name: string;
-	description: string;
+	description: string | null;
 	cpu_nested: boolean | null;
 	cpu_amx: boolean | null;
 	cpu_kvm_hyperv: boolean | null;
@@ -53,8 +53,7 @@ export type HypervisorSettingsPatch = Partial<HypervisorSettings>;
 
 export async function getHypervisorSettings(token?: string): Promise<HypervisorSettingsResponse> {
 	return bffFetch(BFFEndpoints.getHypervisorSettings, {
-		method: 'POST',
-		body: JSON.stringify({}),
+		method: 'GET',
 		token
 	});
 }
@@ -64,7 +63,7 @@ export async function updateHypervisorSettings(
 	token?: string
 ): Promise<HypervisorSettingsResponse> {
 	return bffFetch(BFFEndpoints.updateHypervisorSettings, {
-		method: 'POST',
+		method: 'PATCH',
 		body: JSON.stringify(payload),
 		token
 	});
@@ -74,17 +73,15 @@ export async function applyHypervisorProfile(
 	profileId: string,
 	token?: string
 ): Promise<HypervisorSettingsResponse> {
-	return bffFetch(BFFEndpoints.applyHypervisorProfile, {
+	return bffFetch(`${BFFEndpoints.applyHypervisorProfile}/${profileId}`, {
 		method: 'POST',
-		body: JSON.stringify({ profile_id: profileId }),
 		token
 	});
 }
 
 export async function listHypervisorProfiles(token?: string): Promise<{ profiles: HypervisorProfile[] }> {
 	return bffFetch(BFFEndpoints.listHypervisorProfiles, {
-		method: 'POST',
-		body: JSON.stringify({}),
+		method: 'GET',
 		token
 	});
 }

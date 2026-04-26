@@ -1,6 +1,7 @@
 import type { PageLoad } from './$types';
 import { getStoredToken } from '$lib/api/client';
 import { getNode } from '$lib/bff/nodes';
+import { cachedFetch, DETAIL_TTL } from '$lib/stores/api-cache.svelte';
 import type { GetNodeResponse } from '$lib/bff/types';
 
 export type NodeDetailModel = {
@@ -110,7 +111,11 @@ export const load: PageLoad = async ({ params, url }) => {
 	const token = getStoredToken() ?? undefined;
 	const currentTab = url.searchParams.get('tab') ?? 'summary';
 	try {
-		const res = await getNode({ node_id: params.id }, token);
+		const res = await cachedFetch(
+			`nodes:detail:${params.id}`,
+			() => getNode({ node_id: params.id }, token),
+			DETAIL_TTL
+		);
 		const detail = mapDetail(res, currentTab, params.id);
 		return { detail, requestedNodeId: params.id };
 	} catch {

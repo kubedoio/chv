@@ -1,13 +1,13 @@
 <script lang="ts">
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import FilterBar from '$lib/components/FilterBar.svelte';
+	import FilterBar from '$lib/components/shared/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import ResourceLink from '$lib/components/shell/ResourceLink.svelte';
 	import SeverityShield from '$lib/components/shell/SeverityShield.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
@@ -138,7 +138,7 @@
 						{:else if column.key === 'summary'}
 							<span class="summary-text">{row.summary}</span>
 						{:else}
-							<span class="cell-text">{row[column.key]}</span>
+							<span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
 						{/if}
 					{/snippet}
 				</InventoryTable>
