@@ -437,7 +437,9 @@ impl StorageBackend for LocalFileBackend {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(ChvError::BackendUnavailable {
                         backend: "local".to_string(),
-                        reason: "qemu-img is not installed; install qemu-utils to resize qcow2 volumes".to_string(),
+                        reason:
+                            "qemu-img is not installed; install qemu-utils to resize qcow2 volumes"
+                                .to_string(),
                     });
                 }
                 Err(e) => {
@@ -502,6 +504,89 @@ impl StorageBackend for LocalFileBackend {
             "qcow2 clone not supported",
         )
         .await
+    }
+
+    async fn restore_snapshot(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        snapshot_name: &str,
+    ) -> Result<(), ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        let locator_str = handle.strip_prefix(&prefix).unwrap_or(handle);
+        let path = std::path::Path::new(locator_str);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.runtime_dir.join(path)
+        };
+
+        let snap = self
+            .runtime_dir
+            .join(format!("{}-{}.img", volume_id, snapshot_name));
+        if !snap.exists() {
+            return Err(ChvError::NotFound {
+                resource: "snapshot".to_string(),
+                id: snap.to_string_lossy().to_string(),
+            });
+        }
+
+        tokio::fs::copy(&snap, &path)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("failed to restore snapshot: {}", e),
+            })?;
+
+        info!(
+            volume_id,
+            snapshot_name,
+            path = %path.display(),
+            "restored local snapshot"
+        );
+        Ok(())
+    }
+
+    async fn delete_snapshot(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        snapshot_name: &str,
+    ) -> Result<(), ChvError> {
+        let prefix = format!("local-{}-", volume_id);
+        if !handle.starts_with(&prefix) {
+            return Err(ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("handle {} does not belong to this backend", handle),
+            });
+        }
+
+        let snap = self
+            .runtime_dir
+            .join(format!("{}-{}.img", volume_id, snapshot_name));
+        if snap.exists() {
+            tokio::fs::remove_file(&snap)
+                .await
+                .map_err(|e| ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to delete snapshot: {}", e),
+                })?;
+        }
+
+        info!(
+            volume_id,
+            snapshot_name,
+            path = %snap.display(),
+            "deleted local snapshot"
+        );
+        Ok(())
     }
 
     async fn set_device_policy(
@@ -888,7 +973,11 @@ mod tests {
             let err = result.unwrap_err();
             match err {
                 ChvError::BackendUnavailable { reason, .. } => {
-                    assert!(reason.contains("qemu-img"), "error should mention qemu-img: {}", reason);
+                    assert!(
+                        reason.contains("qemu-img"),
+                        "error should mention qemu-img: {}",
+                        reason
+                    );
                 }
                 other => panic!("expected BackendUnavailable, got {:?}", other),
             }

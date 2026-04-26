@@ -138,7 +138,9 @@ In `crates/chv-agent-core/Cargo.toml`:
 [dependencies]
 axum = { workspace = true }
 nix = { workspace = true, features = ["pty", "ioctl"] }
-tokio-tungstenite = "0.24"
+# Note: tokio-tungstenite is not required. axum 0.7+ provides native WebSocket support
+# via `axum::extract::ws`. Only add tokio-tungstenite if you need a standalone client.
+# tokio-tungstenite = "0.24"
 ```
 
 **Step 2: Implement console WebSocket handler**

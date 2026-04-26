@@ -120,7 +120,7 @@ Payload: { "sub": "console", "vm_id": "test-1", "exp": 1713432000, "iat": 171343
 | File | Change |
 |------|--------|
 | `crates/chv-agent-runtime-ch/src/process.rs` | PTY creation, `--serial tty=...`, store master FD |
-| `crates/chv-agent-core/src/console.rs` | WebSocket server, PTY relay task, token validation |
+| `crates/chv-agent-core/src/console_server.rs` | WebSocket server, PTY relay task, token validation |
 | `crates/chv-agent-core/src/agent_server.rs` | Wire console server into agent startup |
 | `crates/chv-config/src/lib.rs` | Add `console_bind` to agent config |
 | `crates/chv-webui-bff/src/handlers/vms.rs` | `GET /v1/vms/{vm_id}/console-url` handler |

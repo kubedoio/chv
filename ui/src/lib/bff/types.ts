@@ -237,7 +237,7 @@ export type HypervisorSettings = {
 export type HypervisorProfile = {
 	id: string;
 	name: string;
-	description: string;
+	description: string | null;
 	cpu_nested: boolean | null;
 	cpu_amx: boolean | null;
 	cpu_kvm_hyperv: boolean | null;

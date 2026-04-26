@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-13
+
 ## Context
 The control plane must remain authoritative for long-lived desired state, while the node must preserve runtime state during outages and reboots. Cloud Hypervisor should not be remotely reachable.
 
@@ -41,3 +44,6 @@ Cons:
 - stale desired-state generations must be rejected cleanly
 - non-numeric generation values must be rejected as invalid contract input
 - retries should be safe and idempotent where possible
+
+## Related ADRs
+- **ADR-007** references the compatibility matrix and rollback policy during upgrades. Desired-state generation strings (defined in this ADR) remain authoritative during version skew; rollback targets must validate generation compatibility.

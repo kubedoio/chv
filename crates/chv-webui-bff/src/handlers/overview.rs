@@ -59,7 +59,7 @@ pub async fn get_overview(
         .unwrap_or(0);
 
     let networks_healthy = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM network_observed_state WHERE health_status = 'healthy'"
+        "SELECT COUNT(*) FROM network_observed_state WHERE health_status = 'healthy'",
     )
     .fetch_one(&state.pool)
     .await

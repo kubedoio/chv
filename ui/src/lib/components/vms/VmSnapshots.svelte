@@ -9,8 +9,8 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import LoadingState from '$lib/components/shell/LoadingState.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import Modal from '$lib/components/modals/Modal.svelte';
-	import ConfirmAction from '$lib/components/modals/ConfirmAction.svelte';
+	import Modal from '$lib/components/primitives/Modal.svelte';
+	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
 	import { Camera, RotateCcw, Trash2, MemoryStick, LoaderCircle } from 'lucide-svelte';
 	import { formatDateTimeLabel } from '$lib/webui/formatters';
 

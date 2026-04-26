@@ -2,9 +2,9 @@
 import Button from '$lib/components/primitives/Button.svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import FilterBar from '$lib/components/FilterBar.svelte';
+	import FilterBar from '$lib/components/shared/FilterBar.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';

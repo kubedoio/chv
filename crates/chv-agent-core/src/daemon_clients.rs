@@ -2,26 +2,29 @@ use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{
     network_service_client::NetworkServiceClient, AttachVmNicRequest, DeleteNetworkTopologyRequest,
     DetachVmNicRequest, DhcpScope, DnsScope, EnsureDhcpScopeRequest, EnsureDnsScopeRequest,
-    EnsureNetworkTopologyRequest, ExposeServiceRequest, NetworkHealthRequest,
-    ListNamespaceStateRequest, SetFirewallPolicyRequest, SetNatPolicyRequest,
+    EnsureNetworkTopologyRequest, ExposeServiceRequest, ListNamespaceStateRequest,
+    NetworkHealthRequest, SetFirewallPolicyRequest, SetNatPolicyRequest,
     WithdrawServiceExposureRequest,
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
-    DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest, VolumeHealthRequest,
+    DeleteSnapshotRequest, DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest,
     OpenVolumeRequest, PrepareCloneRequest, PrepareSnapshotRequest, ResizeVolumeRequest,
-    SetDevicePolicyRequest,
+    RestoreSnapshotRequest, SetDevicePolicyRequest, VolumeHealthRequest,
 };
 use std::path::Path;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
+use tracing::Instrument;
 
 fn with_operation_id<T>(req: T, operation_id: Option<&str>) -> tonic::Request<T> {
     let mut grpc_req = tonic::Request::new(req);
     if let Some(op_id) = operation_id {
         if let Ok(val) = tonic::metadata::MetadataValue::try_from(op_id) {
-            grpc_req.metadata_mut().insert("x-operation-id", val);
+            grpc_req
+                .metadata_mut()
+                .insert(chv_common::OPERATION_ID_METADATA_KEY, val);
         }
     }
     grpc_req
@@ -57,9 +60,11 @@ impl StordClient {
     }
 
     pub async fn health_probe(&mut self) -> Result<bool, ChvError> {
+        let span = tracing::info_span!("stord_health_probe");
         let _ = self
             .inner
             .list_volume_sessions(ListVolumeSessionsRequest {})
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -112,9 +117,11 @@ impl StordClient {
             }),
             policy: None,
         };
+        let span = tracing::info_span!("open_volume", operation_id = operation_id.unwrap_or(""));
         let resp = self
             .inner
             .open_volume(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -143,9 +150,14 @@ impl StordClient {
             vm_id: vm_id.to_string(),
             attachment_handle: attachment_handle.to_string(),
         };
+        let span = tracing::info_span!(
+            "attach_volume_to_vm",
+            operation_id = operation_id.unwrap_or("")
+        );
         let resp = self
             .inner
             .attach_volume_to_vm(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -174,8 +186,13 @@ impl StordClient {
             vm_id: vm_id.to_string(),
             force,
         };
+        let span = tracing::info_span!(
+            "detach_volume_from_vm",
+            operation_id = operation_id.unwrap_or("")
+        );
         self.inner
             .detach_volume_from_vm(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -201,8 +218,10 @@ impl StordClient {
             volume_id: volume_id.to_string(),
             attachment_handle: attachment_handle.to_string(),
         };
+        let span = tracing::info_span!("close_volume", operation_id = operation_id.unwrap_or(""));
         self.inner
             .close_volume(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -228,8 +247,10 @@ impl StordClient {
             volume_id: volume_id.to_string(),
             new_size_bytes,
         };
+        let span = tracing::info_span!("resize_volume", operation_id = operation_id.unwrap_or(""));
         self.inner
             .resize_volume(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -245,9 +266,11 @@ impl StordClient {
         let req = VolumeHealthRequest {
             volume_id: volume_id.to_string(),
         };
+        let span = tracing::info_span!("get_volume_health");
         let resp = self
             .inner
             .get_volume_health(req)
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -274,8 +297,13 @@ impl StordClient {
             volume_id: volume_id.to_string(),
             snapshot_name: snapshot_name.to_string(),
         };
+        let span = tracing::info_span!(
+            "prepare_snapshot",
+            operation_id = operation_id.unwrap_or("")
+        );
         self.inner
             .prepare_snapshot(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -301,8 +329,72 @@ impl StordClient {
             volume_id: volume_id.to_string(),
             clone_name: clone_name.to_string(),
         };
+        let span = tracing::info_span!("prepare_clone", operation_id = operation_id.unwrap_or(""));
         self.inner
             .prepare_clone(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn restore_snapshot(
+        &mut self,
+        volume_id: &str,
+        snapshot_name: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = RestoreSnapshotRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        };
+        let span = tracing::info_span!(
+            "restore_snapshot",
+            operation_id = operation_id.unwrap_or("")
+        );
+        self.inner
+            .restore_snapshot(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn delete_snapshot(
+        &mut self,
+        volume_id: &str,
+        snapshot_name: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = DeleteSnapshotRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        };
+        let span =
+            tracing::info_span!("delete_snapshot", operation_id = operation_id.unwrap_or(""));
+        self.inner
+            .delete_snapshot(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -328,8 +420,13 @@ impl StordClient {
             volume_id: volume_id.to_string(),
             policy: Some(policy),
         };
+        let span = tracing::info_span!(
+            "set_device_policy",
+            operation_id = operation_id.unwrap_or("")
+        );
         self.inner
             .set_device_policy(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
@@ -369,9 +466,11 @@ impl NwdClient {
     }
 
     pub async fn health_probe(&mut self) -> Result<bool, ChvError> {
+        let span = tracing::info_span!("nwd_health_probe");
         let _ = self
             .inner
             .list_namespace_state(ListNamespaceStateRequest {})
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -406,16 +505,27 @@ impl NwdClient {
                 options: std::collections::HashMap::new(),
             }),
         };
-        let resp = self.inner.ensure_network_topology(with_operation_id(req, operation_id)).await.map_err(|e| {
-            ChvError::NetworkUnavailable {
+        let span = tracing::info_span!(
+            "ensure_network_topology",
+            operation_id = operation_id.unwrap_or("")
+        );
+        let resp = self
+            .inner
+            .ensure_network_topology(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
-            }
-        })?.into_inner();
+            })?
+            .into_inner();
         if !resp.status.eq_ignore_ascii_case("ok") {
             return Err(ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
-                reason: format!("ensure_network_topology failed: {} ({})", resp.human_summary, resp.error_code),
+                reason: format!(
+                    "ensure_network_topology failed: {} ({})",
+                    resp.human_summary, resp.error_code
+                ),
             });
         }
         Ok(())
@@ -447,9 +557,11 @@ impl NwdClient {
                 ip_address: ip_address.to_string(),
             }),
         };
+        let span = tracing::info_span!("attach_vm_nic", operation_id = operation_id.unwrap_or(""));
         let resp = self
             .inner
             .attach_vm_nic(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -460,7 +572,10 @@ impl NwdClient {
             if !result.status.eq_ignore_ascii_case("ok") {
                 return Err(ChvError::NetworkUnavailable {
                     resource: "nwd".to_string(),
-                    reason: format!("attach_vm_nic failed: {} ({})", result.human_summary, result.error_code),
+                    reason: format!(
+                        "attach_vm_nic failed: {} ({})",
+                        result.human_summary, result.error_code
+                    ),
                 });
             }
         }
@@ -503,8 +618,10 @@ impl NwdClient {
                 mode: mode.to_string(),
             }),
         };
+        let span = tracing::info_span!("expose_service", operation_id = operation_id.unwrap_or(""));
         self.inner
             .expose_service(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -530,8 +647,13 @@ impl NwdClient {
             exposure_id: exposure_id.to_string(),
             network_id: network_id.to_string(),
         };
+        let span = tracing::info_span!(
+            "withdraw_service_exposure",
+            operation_id = operation_id.unwrap_or("")
+        );
         self.inner
             .withdraw_service_exposure(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -543,9 +665,11 @@ impl NwdClient {
     pub async fn list_namespace_state(
         &mut self,
     ) -> Result<chv_nwd_api::chv_nwd_api::ListNamespaceStateResponse, ChvError> {
+        let span = tracing::info_span!("list_namespace_state");
         let resp = self
             .inner
             .list_namespace_state(ListNamespaceStateRequest {})
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -570,18 +694,26 @@ impl NwdClient {
             }),
             network_id: network_id.to_string(),
         };
-        self.inner.delete_network_topology(with_operation_id(req, operation_id)).await.map_err(|e| {
-            ChvError::NetworkUnavailable {
+        let span = tracing::info_span!(
+            "delete_network_topology",
+            operation_id = operation_id.unwrap_or("")
+        );
+        self.inner
+            .delete_network_topology(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         Ok(())
     }
 
     pub async fn set_firewall_policy(
         &mut self,
         network_id: &str,
+        policy_version: &str,
+        policy_json: Vec<u8>,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         let req = SetFirewallPolicyRequest {
@@ -593,10 +725,18 @@ impl NwdClient {
                     .as_millis() as i64,
             }),
             network_id: network_id.to_string(),
-            policy: None,
+            policy: Some(chv_nwd_api::chv_nwd_api::FirewallPolicy {
+                policy_version: policy_version.to_string(),
+                policy_json,
+            }),
         };
+        let span = tracing::info_span!(
+            "set_firewall_policy",
+            operation_id = operation_id.unwrap_or("")
+        );
         self.inner
             .set_firewall_policy(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -608,6 +748,8 @@ impl NwdClient {
     pub async fn set_nat_policy(
         &mut self,
         network_id: &str,
+        policy_version: &str,
+        policy_json: Vec<u8>,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         let req = SetNatPolicyRequest {
@@ -619,10 +761,15 @@ impl NwdClient {
                     .as_millis() as i64,
             }),
             network_id: network_id.to_string(),
-            policy: None,
+            policy: Some(chv_nwd_api::chv_nwd_api::NatPolicy {
+                policy_version: policy_version.to_string(),
+                policy_json,
+            }),
         };
+        let span = tracing::info_span!("set_nat_policy", operation_id = operation_id.unwrap_or(""));
         self.inner
             .set_nat_policy(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -649,8 +796,10 @@ impl NwdClient {
             nic_id: nic_id.to_string(),
             vm_id: vm_id.to_string(),
         };
+        let span = tracing::info_span!("detach_vm_nic", operation_id = operation_id.unwrap_or(""));
         self.inner
             .detach_vm_nic(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -666,9 +815,11 @@ impl NwdClient {
         let req = NetworkHealthRequest {
             network_id: network_id.to_string(),
         };
+        let span = tracing::info_span!("get_network_health");
         let resp = self
             .inner
             .get_network_health(req)
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -703,8 +854,13 @@ impl NwdClient {
                 dns_servers,
             }),
         };
+        let span = tracing::info_span!(
+            "ensure_dhcp_scope",
+            operation_id = operation_id.unwrap_or("")
+        );
         self.inner
             .ensure_dhcp_scope(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -734,8 +890,13 @@ impl NwdClient {
                 static_records,
             }),
         };
+        let span = tracing::info_span!(
+            "ensure_dns_scope",
+            operation_id = operation_id.unwrap_or("")
+        );
         self.inner
             .ensure_dns_scope(with_operation_id(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::NetworkUnavailable {
                 resource: "nwd".to_string(),
@@ -812,6 +973,18 @@ mod tests {
         async fn prepare_clone(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::PrepareCloneRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn restore_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::RestoreSnapshotRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn delete_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DeleteSnapshotRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }

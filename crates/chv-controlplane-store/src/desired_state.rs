@@ -112,6 +112,9 @@ INSERT INTO volume_desired_state (
     device_name,
     read_only,
     resize_to_bytes,
+    snapshot_op,
+    snapshot_name,
+    clone_source_volume_id,
     requested_at,
     updated_at
 )
@@ -126,8 +129,11 @@ VALUES (
     $8,
     $9,
     $10,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $11 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $11 / 1000.0, 'unixepoch')
+    $11,
+    $12,
+    $13,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $14 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $14 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (volume_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
@@ -139,6 +145,9 @@ ON CONFLICT (volume_id) DO UPDATE SET
     device_name = EXCLUDED.device_name,
     read_only = EXCLUDED.read_only,
     resize_to_bytes = EXCLUDED.resize_to_bytes,
+    snapshot_op = EXCLUDED.snapshot_op,
+    snapshot_name = EXCLUDED.snapshot_name,
+    clone_source_volume_id = EXCLUDED.clone_source_volume_id,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -172,6 +181,11 @@ INSERT INTO network_desired_state (
     desired_status,
     requested_by,
     updated_by,
+    firewall_rules_json,
+    nat_rules_json,
+    dhcp_scope_json,
+    dns_enabled,
+    dns_scope_json,
     requested_at,
     updated_at
 )
@@ -181,14 +195,24 @@ VALUES (
     $3,
     $4,
     $5,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch')
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $11 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $11 / 1000.0, 'unixepoch')
 )
 ON CONFLICT (network_id) DO UPDATE SET
     desired_generation = EXCLUDED.desired_generation,
     desired_status = EXCLUDED.desired_status,
     requested_by = EXCLUDED.requested_by,
     updated_by = EXCLUDED.updated_by,
+    firewall_rules_json = EXCLUDED.firewall_rules_json,
+    nat_rules_json = EXCLUDED.nat_rules_json,
+    dhcp_scope_json = EXCLUDED.dhcp_scope_json,
+    dns_enabled = EXCLUDED.dns_enabled,
+    dns_scope_json = EXCLUDED.dns_scope_json,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -258,6 +282,34 @@ ON CONFLICT (volume_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 "#;
 
+const PATCH_NETWORK_STATUS_SQL: &str = r#"
+INSERT INTO network_desired_state (
+    network_id,
+    desired_generation,
+    desired_status,
+    requested_by,
+    updated_by,
+    requested_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $6 / 1000.0, 'unixepoch')
+)
+ON CONFLICT (network_id) DO UPDATE SET
+    desired_generation = EXCLUDED.desired_generation,
+    desired_status = EXCLUDED.desired_status,
+    requested_by = EXCLUDED.requested_by,
+    updated_by = EXCLUDED.updated_by,
+    requested_at = EXCLUDED.requested_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
 const PATCH_VOLUME_RESIZE_SQL: &str = r#"
 INSERT INTO volume_desired_state (
     volume_id,
@@ -285,6 +337,71 @@ ON CONFLICT (volume_id) DO UPDATE SET
     requested_by = EXCLUDED.requested_by,
     updated_by = EXCLUDED.updated_by,
     resize_to_bytes = EXCLUDED.resize_to_bytes,
+    requested_at = EXCLUDED.requested_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
+const PATCH_VOLUME_SNAPSHOT_SQL: &str = r#"
+INSERT INTO volume_desired_state (
+    volume_id,
+    desired_generation,
+    desired_status,
+    requested_by,
+    updated_by,
+    snapshot_op,
+    snapshot_name,
+    requested_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch')
+)
+ON CONFLICT (volume_id) DO UPDATE SET
+    desired_generation = EXCLUDED.desired_generation,
+    desired_status = EXCLUDED.desired_status,
+    requested_by = EXCLUDED.requested_by,
+    updated_by = EXCLUDED.updated_by,
+    snapshot_op = EXCLUDED.snapshot_op,
+    snapshot_name = EXCLUDED.snapshot_name,
+    requested_at = EXCLUDED.requested_at,
+    updated_at = EXCLUDED.updated_at
+"#;
+
+const PATCH_VOLUME_CLONE_SQL: &str = r#"
+INSERT INTO volume_desired_state (
+    volume_id,
+    desired_generation,
+    desired_status,
+    requested_by,
+    updated_by,
+    clone_source_volume_id,
+    requested_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
+)
+ON CONFLICT (volume_id) DO UPDATE SET
+    desired_generation = EXCLUDED.desired_generation,
+    desired_status = EXCLUDED.desired_status,
+    requested_by = EXCLUDED.requested_by,
+    updated_by = EXCLUDED.updated_by,
+    clone_source_volume_id = EXCLUDED.clone_source_volume_id,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
 "#;
@@ -388,6 +505,14 @@ impl DesiredStateRepository {
             .bind(&input.device_name)
             .bind(input.read_only)
             .bind(input.resize_to_bytes)
+            .bind(&input.snapshot_op)
+            .bind(&input.snapshot_name)
+            .bind(
+                input
+                    .clone_source_volume_id
+                    .as_ref()
+                    .map(ResourceId::as_str),
+            )
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
@@ -459,6 +584,61 @@ impl DesiredStateRepository {
         Ok(())
     }
 
+    pub async fn set_volume_snapshot(
+        &self,
+        input: &VolumeSnapshotPatchInput,
+    ) -> Result<(), StoreError> {
+        sqlx::query(PATCH_VOLUME_SNAPSHOT_SQL)
+            .bind(input.volume_id.as_str())
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(&input.desired_status)
+            .bind(&input.requested_by)
+            .bind(&input.updated_by)
+            .bind(&input.snapshot_op)
+            .bind(&input.snapshot_name)
+            .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "volume",
+                        id: input.volume_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
+        Ok(())
+    }
+
+    pub async fn set_volume_clone(&self, input: &VolumeClonePatchInput) -> Result<(), StoreError> {
+        sqlx::query(PATCH_VOLUME_CLONE_SQL)
+            .bind(input.volume_id.as_str())
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(&input.desired_status)
+            .bind(&input.requested_by)
+            .bind(&input.updated_by)
+            .bind(
+                input
+                    .clone_source_volume_id
+                    .as_ref()
+                    .map(ResourceId::as_str),
+            )
+            .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "volume",
+                        id: input.volume_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
+        Ok(())
+    }
+
     pub async fn upsert_network(&self, input: &NetworkDesiredStateInput) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
 
@@ -477,6 +657,16 @@ impl DesiredStateRepository {
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
+            .bind(&input.firewall_rules_json)
+            .bind(&input.nat_rules_json)
+            .bind(&input.dhcp_scope_json)
+            .bind(
+                input
+                    .dns_enabled
+                    .map(|v| if v { 1 } else { 0 })
+                    .unwrap_or(0),
+            )
+            .bind(&input.dns_scope_json)
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
@@ -507,6 +697,16 @@ impl DesiredStateRepository {
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
+            .bind(&input.firewall_rules_json)
+            .bind(&input.nat_rules_json)
+            .bind(&input.dhcp_scope_json)
+            .bind(
+                input
+                    .dns_enabled
+                    .map(|v| if v { 1 } else { 0 })
+                    .unwrap_or(0),
+            )
+            .bind(&input.dns_scope_json)
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
@@ -536,6 +736,31 @@ impl DesiredStateRepository {
         }
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn set_network_status(
+        &self,
+        input: &NetworkStatusPatchInput,
+    ) -> Result<(), StoreError> {
+        sqlx::query(PATCH_NETWORK_STATUS_SQL)
+            .bind(input.network_id.as_str())
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(&input.desired_status)
+            .bind(&input.requested_by)
+            .bind(&input.updated_by)
+            .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "network",
+                        id: input.network_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
         Ok(())
     }
 }
@@ -589,6 +814,9 @@ pub struct VolumeDesiredStateInput {
     pub device_name: Option<String>,
     pub read_only: bool,
     pub resize_to_bytes: Option<i64>,
+    pub snapshot_op: Option<String>,
+    pub snapshot_name: Option<String>,
+    pub clone_source_volume_id: Option<ResourceId>,
     pub requested_unix_ms: i64,
 }
 
@@ -615,11 +843,49 @@ pub struct VolumeResizePatchInput {
 }
 
 #[derive(Clone)]
+pub struct VolumeSnapshotPatchInput {
+    pub volume_id: ResourceId,
+    pub desired_generation: Generation,
+    pub desired_status: Option<String>,
+    pub requested_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub snapshot_op: Option<String>,
+    pub snapshot_name: Option<String>,
+    pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct VolumeClonePatchInput {
+    pub volume_id: ResourceId,
+    pub desired_generation: Generation,
+    pub desired_status: Option<String>,
+    pub requested_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub clone_source_volume_id: Option<ResourceId>,
+    pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
 pub struct NetworkDesiredStateInput {
     pub network_id: ResourceId,
     pub node_id: Option<NodeId>,
     pub display_name: String,
     pub network_class: Option<String>,
+    pub desired_generation: Generation,
+    pub desired_status: Option<String>,
+    pub requested_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub firewall_rules_json: Option<String>,
+    pub nat_rules_json: Option<String>,
+    pub dhcp_scope_json: Option<String>,
+    pub dns_enabled: Option<bool>,
+    pub dns_scope_json: Option<String>,
+    pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct NetworkStatusPatchInput {
+    pub network_id: ResourceId,
     pub desired_generation: Generation,
     pub desired_status: Option<String>,
     pub requested_by: Option<String>,

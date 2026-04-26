@@ -59,6 +59,26 @@ impl LVMBackend {
     fn expected_handle(&self, volume_id: &str) -> String {
         format!("lvm-{}-{}", self.vg_name, volume_id)
     }
+
+    async fn resolve_dm_name(&self, path: &std::path::Path) -> Result<String, ChvError> {
+        let canonical = tokio::fs::canonicalize(path)
+            .await
+            .map_err(|e| ChvError::Io {
+                path: path.to_string_lossy().to_string(),
+                source: e,
+            })?;
+        let dm_name = canonical
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!(
+                    "could not determine dm device name from canonical path: {}",
+                    canonical.display()
+                ),
+            })?;
+        Ok(dm_name.to_string())
+    }
 }
 
 #[async_trait]
@@ -270,6 +290,51 @@ impl StorageBackend for LVMBackend {
         Ok(())
     }
 
+    async fn restore_snapshot(
+        &self,
+        _volume_id: &str,
+        _handle: &str,
+        _snapshot_name: &str,
+    ) -> Result<(), ChvError> {
+        Err(ChvError::InvalidArgument {
+            field: "operation".to_string(),
+            reason: "LVM restore snapshot not yet implemented".to_string(),
+        })
+    }
+
+    async fn delete_snapshot(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        snapshot_name: &str,
+    ) -> Result<(), ChvError> {
+        self.validate_handle(handle)?;
+        if handle != self.expected_handle(volume_id) {
+            return Err(ChvError::InvalidArgument {
+                field: "handle".to_string(),
+                reason: format!("handle {} does not match volume_id {}", handle, volume_id),
+            });
+        }
+        Self::sanitize_id(snapshot_name)?;
+        let snap = format!("{}-snap-{}", volume_id, snapshot_name);
+        let out = Command::new("lvremove")
+            .args(["-y", &format!("{}/{}", self.vg_name, snap)])
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "lvremove".to_string(),
+                source: e,
+            })?;
+        if !out.status.success() {
+            return Err(ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!("lvremove failed: {}", String::from_utf8_lossy(&out.stderr)),
+            });
+        }
+        info!(volume_id, snapshot_name, "deleted LVM snapshot");
+        Ok(())
+    }
+
     async fn set_device_policy(
         &self,
         volume_id: &str,
@@ -306,8 +371,36 @@ impl StorageBackend for LVMBackend {
             }
         }
 
+        if !policy.io_scheduler.is_empty() {
+            let dm_name = self.resolve_dm_name(&path).await?;
+            let scheduler_path = format!("/sys/block/{}/queue/scheduler", dm_name);
+            info!(
+                volume_id,
+                dm_name,
+                scheduler = %policy.io_scheduler,
+                "applying io_scheduler device policy"
+            );
+            tokio::fs::write(&scheduler_path, &policy.io_scheduler)
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: scheduler_path,
+                    source: e,
+                })?;
+        }
+
+        if !policy.cache_mode.is_empty() {
+            warn!(
+                volume_id,
+                cache_mode = %policy.cache_mode,
+                "cache_mode policy is not supported by LVMBackend at attach time; configure cache at LV creation"
+            );
+        }
+
         if policy.no_exec {
-            warn!(volume_id, "no_exec policy is not applicable at LVM block device level; skipping");
+            warn!(
+                volume_id,
+                "no_exec policy is not applicable at LVM block device level; skipping"
+            );
         }
 
         if policy.read_bps > 0
@@ -315,7 +408,10 @@ impl StorageBackend for LVMBackend {
             || policy.read_iops > 0
             || policy.write_iops > 0
         {
-            warn!(volume_id, "LVMBackend does not enforce throughput or iops limits");
+            warn!(
+                volume_id,
+                "LVMBackend does not enforce throughput or iops limits"
+            );
         }
 
         Ok(())

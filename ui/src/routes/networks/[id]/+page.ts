@@ -2,6 +2,7 @@ import type { PageLoad } from './$types';
 import { getStoredToken } from '$lib/api/client';
 import { error } from '@sveltejs/kit';
 import { getNetwork } from '$lib/bff/networks';
+import { cachedFetch, DETAIL_TTL } from '$lib/stores/api-cache.svelte';
 
 export type NetworkDetailModel = {
 	network_id: string;
@@ -34,7 +35,11 @@ export const load: PageLoad = async ({ params }) => {
 	const token = getStoredToken() ?? undefined;
 
 	try {
-		const res = await getNetwork(params.id, token);
+		const res = await cachedFetch(
+			`networks:detail:${params.id}`,
+			() => getNetwork(params.id, token),
+			DETAIL_TTL
+		);
 		const detail = res.detail as NetworkDetailModel | null;
 		if (!detail) {
 			error(404, 'Network not found');

@@ -358,6 +358,8 @@ async fn set_device_policy_smoke() {
                 burst_allowed: false,
                 read_only: false,
                 no_exec: false,
+                io_scheduler: String::new(),
+                cache_mode: String::new(),
             }),
         })
         .await
@@ -392,6 +394,8 @@ async fn set_device_policy_missing_session_returns_not_found() {
                 burst_allowed: false,
                 read_only: false,
                 no_exec: false,
+                io_scheduler: String::new(),
+                cache_mode: String::new(),
             }),
         })
         .await

@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-15
+
 ## Context
 The UI needs stable contracts and must not inherit internal backend complexity directly.
 

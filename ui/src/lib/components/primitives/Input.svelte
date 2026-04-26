@@ -30,7 +30,7 @@
 	let describedBy = $derived([errorId, hintId].filter(Boolean).join(' ') || undefined);
 
 	const baseClasses =
-		'w-full py-2.5 px-3.5 text-sm rounded-sm bg-white text-[var(--color-neutral-900)] transition-all duration-150 ease-in-out focus:outline-none disabled:bg-[var(--color-neutral-100)] disabled:text-[var(--color-neutral-400)] disabled:cursor-not-allowed placeholder:text-[var(--color-neutral-400)]';
+		'w-full py-2.5 px-3.5 text-sm rounded-sm bg-[var(--bg-surface)] text-[var(--color-neutral-900)] transition-all duration-150 ease-in-out focus:outline-none disabled:bg-[var(--color-neutral-100)] disabled:text-[var(--color-neutral-400)] disabled:cursor-not-allowed placeholder:text-[var(--color-neutral-400)]';
 
 	const errorClasses =
 		'border-[var(--color-danger)] shadow-[0_0_0_3px_var(--color-danger-glow)] hover:border-[var(--color-danger)] focus:border-[var(--color-danger)] focus:shadow-[0_0_0_3px_var(--color-danger-glow)]';

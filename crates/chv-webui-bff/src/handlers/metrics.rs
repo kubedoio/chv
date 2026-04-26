@@ -29,12 +29,11 @@ pub async fn get_metrics(
     .await
     .unwrap_or(0);
 
-    let vm_error: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM vm_observed_state WHERE health_status = 'error'",
-    )
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or(0);
+    let vm_error: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM vm_observed_state WHERE health_status = 'error'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or(0);
 
     let node_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
         .fetch_one(&state.pool)

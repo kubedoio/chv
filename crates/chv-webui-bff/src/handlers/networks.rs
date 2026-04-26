@@ -247,6 +247,19 @@ pub async fn create_network(
         .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
         .unwrap_or(false);
 
+    let firewall_rules_json = payload.get("firewall_rules").map(|v| v.to_string());
+
+    let nat_rules_json = payload.get("nat_rules").map(|v| v.to_string());
+
+    let dhcp_scope_json = payload.get("dhcp_scope").map(|v| v.to_string());
+
+    let dns_enabled = payload
+        .get("dns_enabled")
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
+        .unwrap_or(false);
+
+    let dns_scope_json = payload.get("dns_scope").map(|v| v.to_string());
+
     let network_id = chv_common::gen_short_id();
 
     let mut tx = state
@@ -271,9 +284,10 @@ pub async fn create_network(
         r#"
         INSERT INTO network_desired_state (
             network_id, desired_generation, desired_status, cidr, gateway,
-            dhcp_enabled, ipam_mode, is_default, requested_at, updated_at
+            dhcp_enabled, ipam_mode, is_default, firewall_rules_json, nat_rules_json,
+            dhcp_scope_json, dns_enabled, dns_scope_json, requested_at, updated_at
         )
-        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        VALUES (?, 1, 'Pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&network_id)
@@ -282,6 +296,11 @@ pub async fn create_network(
     .bind(if dhcp_enabled { 1 } else { 0 })
     .bind(&ipam_mode)
     .bind(if is_default { 1 } else { 0 })
+    .bind(&firewall_rules_json)
+    .bind(&nat_rules_json)
+    .bind(&dhcp_scope_json)
+    .bind(if dns_enabled { 1 } else { 0 })
+    .bind(&dns_scope_json)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
@@ -298,6 +317,7 @@ pub async fn create_network(
         "dhcp_enabled": dhcp_enabled,
         "ipam_mode": ipam_mode,
         "is_default": is_default,
+        "dns_enabled": dns_enabled,
     })))
 }
 
@@ -313,13 +333,12 @@ pub async fn delete_network(
         .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
         .to_string();
 
-    let attached_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = ?"
-    )
-    .bind(&network_id)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to count attached vms: {}", e)))?;
+    let attached_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = ?")
+            .bind(&network_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to count attached vms: {}", e)))?;
 
     if attached_count > 0 {
         return Err(BffError::Conflict(format!(
@@ -328,14 +347,18 @@ pub async fn delete_network(
         )));
     }
 
-    let exists = sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
-        .bind(&network_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
+    let exists =
+        sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
+            .bind(&network_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
 
     if exists.is_none() {
-        return Err(BffError::NotFound(format!("network {} not found", network_id)));
+        return Err(BffError::NotFound(format!(
+            "network {} not found",
+            network_id
+        )));
     }
 
     sqlx::query("DELETE FROM networks WHERE network_id = ?")
@@ -362,22 +385,51 @@ pub async fn update_network(
         .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
         .to_string();
 
-    let exists = sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
-        .bind(&network_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
+    let exists =
+        sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
+            .bind(&network_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check network existence: {}", e)))?;
 
     if exists.is_none() {
-        return Err(BffError::NotFound(format!("network {} not found", network_id)));
+        return Err(BffError::NotFound(format!(
+            "network {} not found",
+            network_id
+        )));
     }
 
     let name = payload.get("name").and_then(|v| v.as_str());
     let cidr = payload.get("cidr").and_then(|v| v.as_str());
     let gateway = payload.get("gateway").and_then(|v| v.as_str());
-    let dhcp_enabled = payload.get("dhcp_enabled").and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))).map(|d| if d { 1 } else { 0 });
+    let dhcp_enabled = payload
+        .get("dhcp_enabled")
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
+        .map(|d| if d { 1 } else { 0 });
     let ipam_mode = payload.get("ipam_mode").and_then(|v| v.as_str());
-    let is_default = payload.get("is_default").and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0))).map(|d| if d { 1 } else { 0 });
+    let is_default = payload
+        .get("is_default")
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
+        .map(|d| if d { 1 } else { 0 });
+    let firewall_rules_json = payload.get("firewall_rules").map(|v| v.to_string());
+    let nat_rules_json = payload.get("nat_rules").map(|v| v.to_string());
+    let dhcp_scope_json = payload.get("dhcp_scope").map(|v| v.to_string());
+    let dns_enabled = payload
+        .get("dns_enabled")
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
+        .map(|d| if d { 1 } else { 0 });
+    let dns_scope_json = payload.get("dns_scope").map(|v| v.to_string());
+
+    let has_network_update = cidr.is_some()
+        || gateway.is_some()
+        || dhcp_enabled.is_some()
+        || ipam_mode.is_some()
+        || is_default.is_some()
+        || firewall_rules_json.is_some()
+        || nat_rules_json.is_some()
+        || dhcp_scope_json.is_some()
+        || dns_enabled.is_some()
+        || dns_scope_json.is_some();
 
     let mut tx = state
         .pool
@@ -394,7 +446,7 @@ pub async fn update_network(
             .map_err(|e| BffError::Internal(format!("failed to update network name: {}", e)))?;
     }
 
-    if cidr.is_some() || gateway.is_some() || dhcp_enabled.is_some() || ipam_mode.is_some() || is_default.is_some() {
+    if has_network_update {
         sqlx::query(
             r#"
             UPDATE network_desired_state
@@ -404,6 +456,11 @@ pub async fn update_network(
                 dhcp_enabled = COALESCE(?, dhcp_enabled),
                 ipam_mode = COALESCE(?, ipam_mode),
                 is_default = COALESCE(?, is_default),
+                firewall_rules_json = COALESCE(?, firewall_rules_json),
+                nat_rules_json = COALESCE(?, nat_rules_json),
+                dhcp_scope_json = COALESCE(?, dhcp_scope_json),
+                dns_enabled = COALESCE(?, dns_enabled),
+                dns_scope_json = COALESCE(?, dns_scope_json),
                 desired_generation = desired_generation + 1,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
             WHERE network_id = ?
@@ -414,17 +471,29 @@ pub async fn update_network(
         .bind(dhcp_enabled)
         .bind(ipam_mode)
         .bind(is_default)
+        .bind(&firewall_rules_json)
+        .bind(&nat_rules_json)
+        .bind(&dhcp_scope_json)
+        .bind(dns_enabled)
+        .bind(&dns_scope_json)
         .bind(&network_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| BffError::Internal(format!("failed to update network desired state: {}", e)))?;
+        .map_err(|e| {
+            BffError::Internal(format!("failed to update network desired state: {}", e))
+        })?;
     }
 
     tx.commit()
         .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
-    get_network(BearerToken(claims), State(state), axum::Json(json!({ "network_id": network_id }))).await
+    get_network(
+        BearerToken(claims),
+        State(state),
+        axum::Json(json!({ "network_id": network_id })),
+    )
+    .await
 }
 
 #[derive(sqlx::FromRow)]

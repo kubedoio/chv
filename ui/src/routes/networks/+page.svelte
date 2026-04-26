@@ -2,18 +2,19 @@
 import Button from '$lib/components/primitives/Button.svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-	import FilterBar from '$lib/components/FilterBar.svelte';
+	import FilterBar from '$lib/components/shared/FilterBar.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import CreateNetworkModal from '$lib/components/modals/CreateNetworkModal.svelte';
+	import CreateNetworkModal from '$lib/components/networks/CreateNetworkModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 	import { Plus, Shield, Globe, Lock } from 'lucide-svelte';
 	import { goto, invalidateAll } from '$app/navigation';
+	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
 	import { page as appPage } from '$app/stores';
 
 	let { data }: { data: PageData } = $props();
@@ -211,7 +212,13 @@ import Button from '$lib/components/primitives/Button.svelte';
 	</main>
 </div>
 
-<CreateNetworkModal bind:open={createOpen} onSuccess={() => invalidateAll()} />
+<CreateNetworkModal
+		bind:open={createOpen}
+		onSuccess={async () => {
+			invalidatePattern('networks:');
+			await invalidateAll();
+		}}
+	/>
 
 <style>
 	.inventory-page {

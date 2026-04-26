@@ -186,9 +186,7 @@ pub async fn update_user(
     .ok_or_else(|| BffError::NotFound(format!("user {} not found", user_id)))?;
 
     let resolved_role = new_role.unwrap_or(&row.role).to_string();
-    let resolved_display_name = new_display_name
-        .map(|s| s.to_string())
-        .or(row.display_name);
+    let resolved_display_name = new_display_name.map(|s| s.to_string()).or(row.display_name);
     let resolved_email = new_email.map(|s| s.to_string()).or(row.email);
 
     let resolved_password_hash = if let Some(pw) = new_password {
@@ -217,19 +215,17 @@ pub async fn update_user(
             BffError::Internal("failed to update user".into())
         })?;
     } else {
-        sqlx::query(
-            "UPDATE users SET role = ?, display_name = ?, email = ? WHERE user_id = ?",
-        )
-        .bind(&resolved_role)
-        .bind(&resolved_display_name)
-        .bind(&resolved_email)
-        .bind(&user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "update_user db update failed");
-            BffError::Internal("failed to update user".into())
-        })?;
+        sqlx::query("UPDATE users SET role = ?, display_name = ?, email = ? WHERE user_id = ?")
+            .bind(&resolved_role)
+            .bind(&resolved_display_name)
+            .bind(&resolved_email)
+            .bind(&user_id)
+            .execute(&state.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "update_user db update failed");
+                BffError::Internal("failed to update user".into())
+            })?;
     }
 
     Ok(Json(json!({
@@ -256,7 +252,9 @@ pub async fn delete_user(
 
     // Cannot delete yourself
     if claims.sub == user_id {
-        return Err(BffError::BadRequest("cannot delete your own account".into()));
+        return Err(BffError::BadRequest(
+            "cannot delete your own account".into(),
+        ));
     }
 
     // Check user exists

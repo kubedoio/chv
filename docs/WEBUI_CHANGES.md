@@ -1,123 +1,50 @@
-# WebUI Changes Summary
+# WebUI Changes
 
-## New Components Created
+> **Note:** This file is retained for historical reference. For the current state of the UI and recent changes, see [`CHANGELOG.md`](../CHANGELOG.md) and the [Gap Analysis & Implementation Plan](./plans/2026-04-24-gap-analysis-and-implementation-plan.md).
 
-### 1. ProgressBar.svelte
-- **Location**: `ui/src/lib/components/ProgressBar.svelte`
-- **Purpose**: Visual progress indicator for downloads and long-running operations
-- **Features**:
-  - Configurable size (sm, md, lg)
-  - Color variants (blue, green, yellow, red)
-  - Optional label and percentage display
-  - Smooth animations
+## Historical Sprint Summary (Pre-2026-04-14)
 
-### 2. StatusIndicator.svelte
-- **Location**: `ui/src/lib/components/StatusIndicator.svelte`
-- **Purpose**: Animated status indicator for real-time state changes
-- **Features**:
-  - Animated spinner for transient states (starting, stopping, importing, etc.)
-  - Color-coded icons for different states
-  - Pulse animation for active operations
-  - Configurable sizes
+### Components Added
 
-## Enhanced Pages
+- **ProgressBar.svelte** — Visual progress indicator for downloads and long-running operations
+- **StatusIndicator.svelte** — Animated status indicator for real-time state changes with pulse animation
 
-### 1. Dashboard (+page.svelte)
-**New Features**:
-- **Stats Cards**: Show VM, Image, Storage Pool, and Network counts
-- **Real-time Data**: Auto-polls every 10 seconds for live updates
-- **Recent Events Widget**: Shows last 5 events with quick link to full events page
-- **System Status**: Install state indicator with visual icons
-- **Quick Navigation**: Stats cards are clickable links
+### Pages Enhanced
 
-**Data Displayed**:
-- Total VMs with running/stopped breakdown
-- Total images with ready/importing breakdown
-- Storage pool status
-- Network status
-- Recent operational events
+- **Dashboard** — Stats cards (VMs, Images, Pools, Networks), 10-second auto-poll, recent events widget
+- **VM Detail** — State-aware polling (3s transient / 10s stable), status spinner, PID display, manual refresh
+- **Events** — 10-second auto-refresh, new-event badge with auto-clear
+- **Images** — Import-aware polling (3s during import / 30s idle), status indicators
 
-### 2. VM Detail Page (vms/[id]/+page.svelte)
-**New Features**:
-- **Auto-refresh Polling**: 
-  - 3-second intervals for transient states (starting, stopping, provisioning)
-  - 10-second intervals for stable states
-  - Automatic polling start/stop based on state
-- **Status Indicator**: Shows animated spinner during state transitions
-- **Last Updated Timestamp**: Shows when data was last refreshed
-- **Manual Refresh Button**: Allows manual refresh with loading state
-- **PID Display**: Shows Cloud Hypervisor process ID when running
+### Technical Improvements
 
-### 3. Events Page (events/+page.svelte)
-**New Features**:
-- **Faster Auto-refresh**: Changed from 30s to 10s intervals
-- **New Event Badge**: Shows count of new events since last view
-- **Auto-clear Badge**: Clicking refresh clears the new event counter
-
-### 4. Images Page (images/+page.svelte)
-**New Features**:
-- **Auto-refresh Polling**:
-  - 3-second intervals when images are importing
-  - 30-second intervals otherwise
-- **Status Indicator**: Shows animated spinner for importing images
-- **Refresh Button**: Manual refresh with spinning icon during imports
-
-### 5. StatsCard Component
-**Enhancements**:
-- **Subtitle Support**: Shows additional context below the value
-- **Clickable Links**: Cards can link to detail pages
-- **Chevron Indicator**: Shows when card is clickable
-
-## Technical Improvements
-
-### Reactivity
-- All polling respects component lifecycle (onDestroy cleanup)
-- Polling intervals adjust dynamically based on state
-- Effect hooks restart polling when conditions change
-
-### Type Safety
-- Full TypeScript support for all new components
-- Proper interface definitions for props
-
-### Performance
-- Polling only occurs when necessary (transient states)
-- Cleanup prevents memory leaks
+- Lifecycle-respecting polling with `onDestroy` cleanup
+- Dynamic interval adjustment based on resource state
 - Shared API client instance
+- Full TypeScript support for all new components
 
-## UI/UX Improvements
+## Current UI State (as of 2026-04-26)
 
-### Visual Feedback
-- Animated spinners during operations
-- Real-time status updates without page refresh
-- Clear visual hierarchy on dashboard
-- Consistent card styling
+The WebUI has grown substantially since the above sprint. Current capabilities include:
 
-### User Experience
-- No manual refresh needed for status updates
-- Quick overview of system health on dashboard
-- Easy navigation between related resources
-- Clear indication of ongoing operations
+- **VM Management** — List, detail, create (with basic and advanced tabs), start/stop/reboot/delete, serial console
+- **Storage** — Volumes, storage pools, snapshots, image import/export
+- **Networking** — Networks list, firewall rule viewer
+- **Infrastructure** — Nodes list, enrollment status, hypervisor settings (partial)
+- **Tasks & Events** — Task list, event stream with filtering
+- **Settings** — User management, API tokens, hypervisor settings page (partial)
+- **Metrics** — VM metrics widgets using Chart.js
 
-## Files Modified
+### Known UI Gaps
 
-```
-ui/src/lib/components/
-  - StatsCard.svelte (enhanced)
-  - ProgressBar.svelte (new)
-  - StatusIndicator.svelte (new)
+| Gap | Status | Priority |
+|-----|--------|----------|
+| UI Production Readiness refactor (Tailwind-first, component split) | Not started | P1 |
+| Command palette | TODO | P2 |
+| E2E tests (Playwright) | Missing | P3 |
+| Client-side caching layer | Missing | P3 |
+| Dark mode | Not started | P3 |
+| DataTable component splitting (688 lines) | Not started | P2 |
+| Overview page logic extraction (526 lines) | Not started | P2 |
 
-ui/src/routes/
-  - +page.svelte (dashboard enhanced)
-  - events/+page.svelte (auto-refresh improved)
-  - images/+page.svelte (polling added)
-  - vms/[id]/+page.svelte (polling & status added)
-```
-
-## Build Verification
-
-```bash
-cd ui && npm run build
-# ✓ built in 28.13s
-```
-
-All components compile successfully with TypeScript.
+See the [Gap Analysis](./plans/2026-04-24-gap-analysis-and-implementation-plan.md) for the full UI backlog and sprint schedule.

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { page } from '$app/stores';
-	import MobileNav from '$lib/components/navigation/MobileNav.svelte';
+	import MobileNav from '$lib/components/shell/MobileNav.svelte';
 	import SidebarNav from '$lib/components/shell/SidebarNav.svelte';
 	import TopCommandBar from '$lib/components/shell/TopCommandBar.svelte';
 	import InspectDrawer from '$lib/components/shell/InspectDrawer.svelte';

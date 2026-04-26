@@ -5,7 +5,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ProgressBar from '$lib/components/shell/ProgressBar.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
 	import { Wrench, ArrowUpFromLine, RefreshCcw, Activity, ShieldCheck, AlertCircle, Clock } from 'lucide-svelte';

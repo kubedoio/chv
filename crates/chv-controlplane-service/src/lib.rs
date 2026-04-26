@@ -3,7 +3,6 @@ mod bff_mutations;
 mod container;
 mod enrollment;
 mod error;
-mod hypervisor_settings_validator;
 mod inventory;
 mod lifecycle;
 mod node_client;

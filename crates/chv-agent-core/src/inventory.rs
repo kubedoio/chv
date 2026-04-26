@@ -129,7 +129,10 @@ mod tests {
     fn cpu_threads_is_nonzero() {
         let reporter = InventoryReporter::new("node-x", "host-x");
         let inventory = reporter.build_inventory();
-        assert!(inventory.cpu_threads > 0, "cpu_threads should be > 0 on any real machine");
+        assert!(
+            inventory.cpu_threads > 0,
+            "cpu_threads should be > 0 on any real machine"
+        );
     }
 
     #[test]

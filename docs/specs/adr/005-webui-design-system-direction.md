@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Date
+2026-04-15
+
 ## Decision
 The CHV WebUI should not copy Proxmox or Xen Orchestra visually. It should exceed them in legibility and workflow quality.
 

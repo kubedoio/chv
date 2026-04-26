@@ -1,5 +1,9 @@
 name: CI
 
+# Version bumps are handled manually via:
+#   make bump-version BUMP_TYPE=build
+# See scripts/bump-version.sh for details.
+
 on:
   push:
     branches: [main]

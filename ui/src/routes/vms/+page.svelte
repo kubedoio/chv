@@ -3,12 +3,13 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import InventoryListPage from '$lib/components/shell/InventoryListPage.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CreateVMModal from '$lib/components/modals/CreateVMModal.svelte';
+	import CreateVMModal from '$lib/components/vms/CreateVMModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import { Plus, Activity, AlertCircle, ShieldCheck } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
 	import { invalidateAll } from '$app/navigation';
+	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -171,7 +172,13 @@ import Button from '$lib/components/primitives/Button.svelte';
 	{/snippet}
 </InventoryListPage>
 
-<CreateVMModal bind:open={modalOpen} onSuccess={() => invalidateAll()} />
+<CreateVMModal
+		bind:open={modalOpen}
+		onSuccess={async () => {
+			invalidatePattern('vms:');
+			await invalidateAll();
+		}}
+	/>
 
 <style>
 	.dispatch-cue {

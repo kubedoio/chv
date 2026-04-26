@@ -46,6 +46,34 @@ pub trait MutationService: Send + Sync {
         requested_by: String,
     ) -> Result<MutateVolumeResponse, BffError>;
 
+    async fn snapshot_volume(
+        &self,
+        volume_id: String,
+        snapshot_name: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError>;
+
+    async fn restore_volume_snapshot(
+        &self,
+        volume_id: String,
+        snapshot_name: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError>;
+
+    async fn delete_volume_snapshot(
+        &self,
+        volume_id: String,
+        snapshot_name: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError>;
+
+    async fn clone_volume(
+        &self,
+        source_volume_id: String,
+        target_volume_id: String,
+        requested_by: String,
+    ) -> Result<MutateVolumeResponse, BffError>;
+
     async fn mutate_network(
         &self,
         network_id: String,

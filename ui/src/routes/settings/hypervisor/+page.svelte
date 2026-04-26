@@ -1,16 +1,16 @@
 <script lang="ts">
 	import {
 		Cpu, MemoryStick, Plug, Shield, Monitor,
-		Settings, Activity, ShieldCheck
+		Settings, Activity
 	} from 'lucide-svelte';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import HypervisorToggle from '$lib/components/hypervisor/HypervisorToggle.svelte';
-	import HypervisorSelectField from '$lib/components/hypervisor/HypervisorSelectField.svelte';
-	import HypervisorTextField from '$lib/components/hypervisor/HypervisorTextField.svelte';
-	import HypervisorProfilePanel from '$lib/components/hypervisor/HypervisorProfilePanel.svelte';
+	import HypervisorToggle from '$lib/components/settings/HypervisorToggle.svelte';
+	import HypervisorSelectField from '$lib/components/settings/HypervisorSelectField.svelte';
+	import HypervisorTextField from '$lib/components/settings/HypervisorTextField.svelte';
+	import HypervisorProfilePanel from '$lib/components/settings/HypervisorProfilePanel.svelte';
 	import { toast } from '$lib/stores/toast';
 	import { getStoredToken } from '$lib/api/client';
 	import {

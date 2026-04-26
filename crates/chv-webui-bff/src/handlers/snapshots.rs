@@ -108,7 +108,12 @@ pub async fn create_snapshot(
     }
 
     let snapshot_id = chv_common::gen_short_id();
-    let snapshot_path = state.agent_runtime_dir.join("vms").join(&vm_id).join("snapshots").join(&snapshot_id);
+    let snapshot_path = state
+        .agent_runtime_dir
+        .join("vms")
+        .join(&vm_id)
+        .join("snapshots")
+        .join(&snapshot_id);
     let snapshot_path = snapshot_path.to_string_lossy().to_string();
 
     sqlx::query(
@@ -131,7 +136,11 @@ pub async fn create_snapshot(
     // Dispatch snapshot operation through control plane
     let response = state
         .mutations
-        .snapshot_vm(vm_id.clone(), snapshot_path.clone(), claims.username.clone())
+        .snapshot_vm(
+            vm_id.clone(),
+            snapshot_path.clone(),
+            claims.username.clone(),
+        )
         .await
         .map_err(|e| BffError::Internal(format!("failed to dispatch snapshot: {:?}", e)))?;
 
@@ -229,19 +238,17 @@ pub async fn restore_snapshot(
     .await
     .map_err(|e| BffError::Internal(format!("failed to look up snapshot: {}", e)))?;
 
-    let snapshot = row.ok_or_else(|| {
-        BffError::NotFound(format!("snapshot {} not found", snapshot_id))
-    })?;
+    let snapshot =
+        row.ok_or_else(|| BffError::NotFound(format!("snapshot {} not found", snapshot_id)))?;
 
     // Check VM power state — must be stopped before restoring a snapshot
-    let runtime_status: Option<String> = sqlx::query_scalar(
-        "SELECT runtime_status FROM vm_observed_state WHERE vm_id = ?",
-    )
-    .bind(&snapshot.vm_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
-    .flatten();
+    let runtime_status: Option<String> =
+        sqlx::query_scalar("SELECT runtime_status FROM vm_observed_state WHERE vm_id = ?")
+            .bind(&snapshot.vm_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
+            .flatten();
 
     let is_running = runtime_status
         .as_deref()

@@ -23,9 +23,11 @@ pub async fn import_vm(
     let mut header_buf = Vec::new();
     let mut total_size: u64 = 0;
 
-    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
-        BffError::BadRequest(format!("multipart error: {}", e))
-    })? {
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| BffError::BadRequest(format!("multipart error: {}", e)))?
+    {
         let field_name = field.name().unwrap_or("").to_string();
 
         if field_name == "name" {
@@ -42,9 +44,11 @@ pub async fn import_vm(
             continue;
         }
 
-        while let Some(chunk) = field.chunk().await.map_err(|e| {
-            BffError::BadRequest(format!("chunk error: {}", e))
-        })? {
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| BffError::BadRequest(format!("chunk error: {}", e)))?
+        {
             total_size += chunk.len() as u64;
             if total_size > MAX_FILE_SIZE {
                 if let Some(ref p) = tmp_path {
@@ -66,11 +70,9 @@ pub async fn import_vm(
                     let tmp_file = state
                         .agent_runtime_dir
                         .join(format!(".import-tmp-{}", chv_common::gen_short_id()));
-                    let mut f = tokio::fs::File::create(&tmp_file)
-                        .await
-                        .map_err(|e| {
-                            BffError::Internal(format!("failed to create temp file: {}", e))
-                        })?;
+                    let mut f = tokio::fs::File::create(&tmp_file).await.map_err(|e| {
+                        BffError::Internal(format!("failed to create temp file: {}", e))
+                    })?;
                     tmp_path = Some(tmp_file);
 
                     f.write_all(&header_buf).await.map_err(|e| {
@@ -83,12 +85,10 @@ pub async fn import_vm(
                     .append(true)
                     .open(p)
                     .await
-                    .map_err(|e| {
-                        BffError::Internal(format!("failed to open temp file: {}", e))
-                    })?;
-                f.write_all(&chunk).await.map_err(|e| {
-                    BffError::Internal(format!("failed to write temp file: {}", e))
-                })?;
+                    .map_err(|e| BffError::Internal(format!("failed to open temp file: {}", e)))?;
+                f.write_all(&chunk)
+                    .await
+                    .map_err(|e| BffError::Internal(format!("failed to write temp file: {}", e)))?;
             }
         }
     }
@@ -119,12 +119,18 @@ pub async fn import_vm(
     // Move temp file to final location
     if let Err(e) = tokio::fs::create_dir_all(&vm_dir).await {
         let _ = tokio::fs::remove_file(&tmp_file).await;
-        return Err(BffError::Internal(format!("failed to create vm dir: {}", e)));
+        return Err(BffError::Internal(format!(
+            "failed to create vm dir: {}",
+            e
+        )));
     }
     if let Err(e) = tokio::fs::rename(&tmp_file, &disk_path).await {
         let _ = tokio::fs::remove_dir_all(&vm_dir).await;
         let _ = tokio::fs::remove_file(&tmp_file).await;
-        return Err(BffError::Internal(format!("failed to move disk file: {}", e)));
+        return Err(BffError::Internal(format!(
+            "failed to move disk file: {}",
+            e
+        )));
     }
 
     let file_size = tokio::fs::metadata(&disk_path)
@@ -214,7 +220,10 @@ pub async fn import_vm(
 
     if let Err(e) = insert_vol {
         let _ = tokio::fs::remove_dir_all(&vm_dir).await;
-        return Err(BffError::Internal(format!("failed to insert volume: {}", e)));
+        return Err(BffError::Internal(format!(
+            "failed to insert volume: {}",
+            e
+        )));
     }
 
     // Insert volume desired state
@@ -262,7 +271,10 @@ pub async fn import_vm(
 
     if let Err(e) = insert_op {
         let _ = tokio::fs::remove_dir_all(&vm_dir).await;
-        return Err(BffError::Internal(format!("failed to insert operation: {}", e)));
+        return Err(BffError::Internal(format!(
+            "failed to insert operation: {}",
+            e
+        )));
     }
 
     tx.commit()

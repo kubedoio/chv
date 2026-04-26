@@ -1,5 +1,15 @@
 # WebUI Review Prompt
 
+> **⚠️ This is a curated review snapshot, not the canonical source of truth.**
+>
+> The authoritative versions of these ADRs, specs, and proto files live in [`docs/specs/`](../specs/).
+> This pack exists only for LLM-driven review workflows. Do not edit these files directly;
+> make changes in `docs/specs/` and regenerate the pack instead.
+>
+> Files unique to this pack (not in `docs/specs/`):
+> - `README.md` (this file)
+> - `guides/webui-implementation-guide.md`
+
 Review the supplied WebUI implementation against the CHV WebUI ADRs, specs, and contracts.
 
 Be strict.

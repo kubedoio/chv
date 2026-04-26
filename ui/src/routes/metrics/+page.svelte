@@ -3,8 +3,8 @@
   import { Activity, Server, Cpu, Clock, BarChart3, LineChart, PieChart, ShieldAlert } from 'lucide-svelte';
   import { createAPIClient } from '$lib/api/client';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
-  import ChartJS from '$lib/components/charts/ChartJS.svelte';
+  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
+  import ChartJS from '$lib/components/shared/charts/ChartJS.svelte';
   import type { ChartData } from 'chart.js';
   import type { VM, Node } from '$lib/api/types';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';

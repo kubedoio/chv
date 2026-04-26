@@ -322,6 +322,54 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         Ok(Response::new(resp))
     }
 
+    async fn snapshot_volume(
+        &self,
+        request: Request<proto::SnapshotVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .snapshot_volume(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn restore_volume(
+        &self,
+        request: Request<proto::RestoreVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .restore_volume(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn delete_volume_snapshot(
+        &self,
+        request: Request<proto::DeleteVolumeSnapshotRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .delete_volume_snapshot(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn clone_volume(
+        &self,
+        request: Request<proto::CloneVolumeRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .clone_volume(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
     async fn pause_node_scheduling(
         &self,
         request: Request<proto::PauseNodeSchedulingRequest>,
@@ -502,11 +550,49 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         Ok(Response::new(resp))
     }
 
+    async fn start_network(
+        &self,
+        request: Request<proto::StartNetworkRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .start_network(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn stop_network(
+        &self,
+        request: Request<proto::StopNetworkRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .stop_network(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn restart_network(
+        &self,
+        request: Request<proto::RestartNetworkRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let resp = self
+            .service
+            .restart_network(request.into_inner())
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
     async fn ping_vmm(
         &self,
         _request: Request<proto::PingVmmRequest>,
     ) -> Result<Response<proto::PingVmmResponse>, Status> {
-        Err(tonic::Status::unimplemented("ping_vmm not supported on control plane"))
+        Err(tonic::Status::unimplemented(
+            "ping_vmm not supported on control plane",
+        ))
     }
 }
 

@@ -418,29 +418,27 @@ export interface GlobalNavItem {
 // Backup types
 export interface BackupJob {
   id: string;
+  job_id: string;
   vm_id: string;
   name: string;
   schedule: string;
   retention: number;
-  destination: string;
+  destination?: string;
   enabled: boolean;
-  last_run?: string;
-  next_run?: string;
   created_at: string;
-  vm_name?: string;
+  updated_at?: string;
 }
 
 export interface BackupHistory {
   id: string;
-  job_id?: string;
+  job_id: string;
   vm_id: string;
   snapshot_id: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'pending';
   size_bytes: number;
-  started_at: string;
+  started_at?: string;
   completed_at?: string;
   error?: string;
-  vm_name?: string;
 }
 
 export interface CreateBackupJobInput {
@@ -451,10 +449,7 @@ export interface CreateBackupJobInput {
   destination?: string;
 }
 
-export interface BackupJobResponse extends BackupJob {
-  next_run_formatted?: string;
-  last_run_formatted?: string;
-}
+export interface BackupJobResponse extends BackupJob {}
 
 // VLAN Types
 export interface VLANNetwork {

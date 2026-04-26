@@ -301,6 +301,105 @@ impl Orchestrator {
                     )
                     .await
             }
+            "SnapshotVolume" => {
+                let snapshot_name = row.correlation_id.as_deref().unwrap_or("");
+                client
+                    .snapshot_volume(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        snapshot_name,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "RestoreVolume" => {
+                let snapshot_name = row.correlation_id.as_deref().unwrap_or("");
+                client
+                    .restore_volume(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        snapshot_name,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "DeleteVolumeSnapshot" => {
+                let snapshot_name = row.correlation_id.as_deref().unwrap_or("");
+                client
+                    .delete_volume_snapshot(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        snapshot_name,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "CloneVolume" => {
+                let source = row.correlation_id.as_deref().unwrap_or("");
+                let source_volume_id = source.strip_prefix("source=").unwrap_or(source);
+                client
+                    .clone_volume(
+                        node_id,
+                        source_volume_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "StartNetwork" => {
+                client
+                    .start_network(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "StopNetwork" => {
+                client
+                    .stop_network(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        false,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "ForceStopNetwork" => {
+                client
+                    .stop_network(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        true,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "RestartNetwork" => {
+                client
+                    .restart_network(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
             other => {
                 return Err(ChvError::Internal {
                     reason: format!("unsupported operation_type for dispatch: {other}"),
@@ -355,7 +454,7 @@ impl Orchestrator {
                     {
                         let volume_id = &row.resource_id;
                         let _ = sqlx::query(
-                            "UPDATE volumes SET capacity_bytes = ? WHERE volume_id = ?"
+                            "UPDATE volumes SET capacity_bytes = ? WHERE volume_id = ?",
                         )
                         .bind(new_size)
                         .bind(volume_id)
@@ -411,7 +510,7 @@ impl Orchestrator {
     }
 
     /// Build the agent-compatible VmSpec JSON from control-plane DB records.
-    async fn build_agent_vm_spec(&self, vm_id: &str) -> Result<String, ChvError> {
+    pub(crate) async fn build_agent_vm_spec(&self, vm_id: &str) -> Result<String, ChvError> {
         let vm_row = sqlx::query_as::<_, VmDesiredStateRow>(
             r#"
             SELECT
@@ -555,8 +654,14 @@ impl Orchestrator {
             .map_err(|e| ChvError::Internal {
                 reason: format!("failed to query network desired state: {e}"),
             })?;
-            let cidr = row.as_ref().and_then(|r| r.cidr.clone()).unwrap_or_default();
-            let gateway = row.as_ref().and_then(|r| r.gateway.clone()).unwrap_or_default();
+            let cidr = row
+                .as_ref()
+                .and_then(|r| r.cidr.clone())
+                .unwrap_or_default();
+            let gateway = row
+                .as_ref()
+                .and_then(|r| r.gateway.clone())
+                .unwrap_or_default();
             network_configs.insert(nic.network_id.clone(), (cidr, gateway));
         }
 
@@ -585,20 +690,51 @@ impl Orchestrator {
             cpu_nested: Some(vm_row.hv_cpu_nested.unwrap_or(global.cpu_nested)),
             cpu_amx: Some(vm_row.hv_cpu_amx.unwrap_or(global.cpu_amx)),
             cpu_kvm_hyperv: Some(vm_row.hv_cpu_kvm_hyperv.unwrap_or(global.cpu_kvm_hyperv)),
-            memory_mergeable: Some(vm_row.hv_memory_mergeable.unwrap_or(global.memory_mergeable)),
-            memory_hugepages: Some(vm_row.hv_memory_hugepages.unwrap_or(global.memory_hugepages)),
+            memory_mergeable: Some(
+                vm_row
+                    .hv_memory_mergeable
+                    .unwrap_or(global.memory_mergeable),
+            ),
+            memory_hugepages: Some(
+                vm_row
+                    .hv_memory_hugepages
+                    .unwrap_or(global.memory_hugepages),
+            ),
             memory_shared: Some(vm_row.hv_memory_shared.unwrap_or(global.memory_shared)),
             memory_prefault: Some(vm_row.hv_memory_prefault.unwrap_or(global.memory_prefault)),
             iommu: Some(vm_row.hv_iommu.unwrap_or(global.iommu)),
             rng_src: Some(vm_row.hv_rng_src.unwrap_or_else(|| global.rng_src.clone())),
             watchdog: Some(vm_row.hv_watchdog.unwrap_or(global.watchdog)),
             landlock_enable: Some(vm_row.hv_landlock_enable.unwrap_or(global.landlock_enable)),
-            serial_mode: Some(vm_row.hv_serial_mode.unwrap_or_else(|| global.serial_mode.clone())),
-            console_mode: Some(vm_row.hv_console_mode.unwrap_or_else(|| global.console_mode.clone())),
+            serial_mode: Some(
+                vm_row
+                    .hv_serial_mode
+                    .unwrap_or_else(|| global.serial_mode.clone()),
+            ),
+            console_mode: Some(
+                vm_row
+                    .hv_console_mode
+                    .unwrap_or_else(|| global.console_mode.clone()),
+            ),
             pvpanic: Some(vm_row.hv_pvpanic.unwrap_or(global.pvpanic)),
-            tpm_type: vm_row.hv_tpm_type.clone().or_else(|| global.tpm_type.clone()).or_else(|| chv_common::hypervisor::DEFAULT_TPM_TYPE.map(|s| s.to_string())),
-            tpm_socket_path: vm_row.hv_tpm_socket_path.clone().or_else(|| global.tpm_socket_path.clone()).or_else(|| chv_common::hypervisor::DEFAULT_TPM_SOCKET_PATH.map(|s| s.to_string())),
+            tpm_type: vm_row
+                .hv_tpm_type
+                .clone()
+                .or_else(|| global.tpm_type.clone())
+                .or_else(|| chv_common::hypervisor::DEFAULT_TPM_TYPE.map(|s| s.to_string())),
+            tpm_socket_path: vm_row
+                .hv_tpm_socket_path
+                .clone()
+                .or_else(|| global.tpm_socket_path.clone())
+                .or_else(|| chv_common::hypervisor::DEFAULT_TPM_SOCKET_PATH.map(|s| s.to_string())),
         };
+
+        if let Err(e) = validate_merged_overrides(&overrides) {
+            return Err(ChvError::InvalidArgument {
+                field: "hypervisor_overrides".to_string(),
+                reason: e,
+            });
+        }
 
         let spec = AgentVmSpec {
             name: vm_row.display_name.unwrap_or_else(|| vm_id.to_string()),
@@ -650,6 +786,13 @@ impl Orchestrator {
     }
 }
 
+fn validate_merged_overrides(overrides: &HypervisorOverrides) -> Result<(), String> {
+    if overrides.iommu == Some(true) && overrides.memory_shared != Some(true) {
+        return Err("iommu=true requires memory_shared=true".to_string());
+    }
+    Ok(())
+}
+
 #[derive(sqlx::FromRow)]
 struct AcceptedOperationRow {
     operation_id: String,
@@ -687,7 +830,6 @@ struct VmDesiredStateRow {
     hv_tpm_type: Option<String>,
     hv_tpm_socket_path: Option<String>,
 }
-
 
 #[derive(sqlx::FromRow)]
 struct VolumeDesiredStateRow {

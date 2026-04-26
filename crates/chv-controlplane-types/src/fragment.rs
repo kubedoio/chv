@@ -1,4 +1,38 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallRuleSpec {
+    pub direction: String,
+    pub protocol: String,
+    pub source_cidr: Option<String>,
+    pub dest_port: Option<String>,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NatRuleSpec {
+    pub source_cidr: String,
+    pub dest_cidr: Option<String>,
+    pub masquerade: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DhcpScopeSpec {
+    pub range_start: String,
+    pub range_end: String,
+    pub dns_servers: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsScopeSpec {
+    pub forwarders: Option<Vec<String>>,
+    pub static_records: Option<BTreeMap<String, String>>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,9 +55,12 @@ pub struct VolumeSpec {
     pub device_name: Option<String>,
     #[serde(default)]
     pub read_only: bool,
+    pub snapshot_op: Option<String>,
+    pub snapshot_name: Option<String>,
+    pub clone_source_volume_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkSpec {
     pub network_class: Option<String>,
@@ -38,9 +75,19 @@ pub struct NetworkSpec {
     pub dhcp_enabled: Option<bool>,
     #[serde(default)]
     pub ipam_mode: Option<String>,
+    #[serde(default)]
+    pub firewall_rules: Option<Vec<FirewallRuleSpec>>,
+    #[serde(default)]
+    pub nat_rules: Option<Vec<NatRuleSpec>>,
+    #[serde(default)]
+    pub dhcp_scope: Option<DhcpScopeSpec>,
+    #[serde(default)]
+    pub dns_enabled: Option<bool>,
+    #[serde(default)]
+    pub dns_scope: Option<DnsScopeSpec>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkExposureSpec {
     pub service_name: String,

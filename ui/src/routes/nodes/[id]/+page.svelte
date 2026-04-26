@@ -5,17 +5,18 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { mutateNode } from '$lib/bff/nodes';
 	import { toast } from '$lib/stores/toast';
 	import { invalidateAll } from '$app/navigation';
+	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import TaskTimeline from '$lib/components/shell/TaskTimeline.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import { Pause, Play, Wrench, ArrowUpFromLine, Activity, Box, Info, AlertTriangle, ShieldCheck } from 'lucide-svelte';
-	import NodeHealthDashboard from '$lib/components/NodeHealthDashboard.svelte';
+	import NodeHealthDashboard from '$lib/components/nodes/NodeHealthDashboard.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
 
 	let { data }: { data: PageData } = $props();
@@ -38,6 +39,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		try {
 			await mutateNode({ node_id, action }, token);
 			toast.success(`Node ${action.replace('_', ' ')} accepted`);
+			invalidatePattern('nodes:');
 			await invalidateAll();
 		} catch (err: any) {
 			toast.error(err.message || 'Action failed');

@@ -31,7 +31,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
     let alert_repo = AlertRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
     let observed_state_repo = ObservedStateRepository::new(pool.clone());
-    let backup_job_repo = BackupJobRepository::new(pool.clone());
+    let backup_repo = BackupRepository::new(pool.clone());
     let lifecycle_service = Arc::new(crate::lifecycle::LifecycleServiceImplementation::new(
         node_repo.clone(),
         operation_repo.clone(),
@@ -46,7 +46,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         alert_repo,
         desired_state_repo,
         observed_state_repo,
-        backup_job_repo,
+        backup_repo,
         mutations: Arc::new(crate::ControlPlaneMutationService::new(
             pool_for_mutations,
             lifecycle_service,
@@ -154,12 +154,8 @@ async fn test_publish_alert_persistence() {
     let alert_repo = AlertRepository::new(pool.clone());
     let node_repo = NodeRepository::new(pool.clone());
 
-    let service = TelemetryServiceImplementation::new(
-        node_repo,
-        observed_state_repo,
-        event_repo,
-        alert_repo,
-    );
+    let service =
+        TelemetryServiceImplementation::new(node_repo, observed_state_repo, event_repo, alert_repo);
 
     let op_id = "op-123-custom-string";
     let request_ok = proto::PublishAlertRequest {
@@ -248,7 +244,10 @@ async fn test_report_node_state_auto_creates_missing_node_row() {
         reported_unix_ms: 1_710_000_000_000,
     };
 
-    let result = service.report_node_state(request).await.expect("report should succeed");
+    let result = service
+        .report_node_state(request)
+        .await
+        .expect("report should succeed");
     assert_eq!(result.result.unwrap().status, "ok");
 
     let node = sqlx::query("SELECT hostname, display_name FROM nodes WHERE node_id = ?")
@@ -2676,4 +2675,230 @@ async fn test_failed_operation_can_be_retried_idempotently() {
         .unwrap();
     let status: String = sqlx::Row::get(&row, "status");
     assert_eq!(status, "Accepted");
+}
+
+// ============================================================
+// Orchestrator merge logic tests
+// ============================================================
+
+#[tokio::test]
+async fn test_vm_override_takes_precedence_over_global() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    // Seed node, vm, vm_desired_state
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-merge-1', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vms (vm_id, node_id, display_name, hv_cpu_nested, hv_memory_shared) VALUES ('vm-merge-1', 'node-merge-1', 'vm', 1, 1)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vm_desired_state (vm_id, desired_generation, cpu_count, memory_bytes) VALUES ('vm-merge-1', 1, 2, 1073741824)")
+        .execute(&pool).await.unwrap();
+
+    // Set global settings opposite to VM overrides
+    sqlx::query("UPDATE hypervisor_settings SET cpu_nested = 0, memory_shared = 0 WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let orchestrator = crate::Orchestrator::new(
+        pool.clone(),
+        chv_controlplane_store::OperationRepository::new(pool.clone()),
+        "/tmp/chv-{node_id}.sock".to_string(),
+        "/var/lib/chv/vmlinux".to_string(),
+        "/var/lib/chv/CLOUDHV.fd".to_string(),
+    );
+
+    let spec_json = orchestrator
+        .build_agent_vm_spec("vm-merge-1")
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_str(&spec_json).unwrap();
+    let hv = spec["hypervisor_overrides"].as_object().unwrap();
+
+    assert_eq!(
+        hv["cpu_nested"], true,
+        "VM override should take precedence over global"
+    );
+    assert_eq!(
+        hv["memory_shared"], true,
+        "VM override should take precedence over global"
+    );
+}
+
+#[tokio::test]
+async fn test_global_setting_takes_precedence_over_default() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-merge-2', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+    // VM has NULL overrides
+    sqlx::query("INSERT INTO vms (vm_id, node_id, display_name) VALUES ('vm-merge-2', 'node-merge-2', 'vm')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vm_desired_state (vm_id, desired_generation, cpu_count, memory_bytes) VALUES ('vm-merge-2', 1, 2, 1073741824)")
+        .execute(&pool).await.unwrap();
+
+    // Set global to non-default values (default cpu_nested=true, memory_shared=false)
+    sqlx::query("UPDATE hypervisor_settings SET cpu_nested = 0, memory_shared = 1 WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let orchestrator = crate::Orchestrator::new(
+        pool.clone(),
+        chv_controlplane_store::OperationRepository::new(pool.clone()),
+        "/tmp/chv-{node_id}.sock".to_string(),
+        "/var/lib/chv/vmlinux".to_string(),
+        "/var/lib/chv/CLOUDHV.fd".to_string(),
+    );
+
+    let spec_json = orchestrator
+        .build_agent_vm_spec("vm-merge-2")
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_str(&spec_json).unwrap();
+    let hv = spec["hypervisor_overrides"].as_object().unwrap();
+
+    assert_eq!(
+        hv["cpu_nested"], false,
+        "Global setting should override default"
+    );
+    assert_eq!(
+        hv["memory_shared"], true,
+        "Global setting should override default"
+    );
+}
+
+#[tokio::test]
+async fn test_null_vm_overrides_use_global_settings() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-merge-3', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vms (vm_id, node_id, display_name) VALUES ('vm-merge-3', 'node-merge-3', 'vm')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vm_desired_state (vm_id, desired_generation, cpu_count, memory_bytes) VALUES ('vm-merge-3', 1, 2, 1073741824)")
+        .execute(&pool).await.unwrap();
+
+    // Explicit global values
+    sqlx::query("UPDATE hypervisor_settings SET cpu_amx = 1, rng_src = '/dev/random', serial_mode = 'File' WHERE id = 1")
+        .execute(&pool).await.unwrap();
+
+    let orchestrator = crate::Orchestrator::new(
+        pool.clone(),
+        chv_controlplane_store::OperationRepository::new(pool.clone()),
+        "/tmp/chv-{node_id}.sock".to_string(),
+        "/var/lib/chv/vmlinux".to_string(),
+        "/var/lib/chv/CLOUDHV.fd".to_string(),
+    );
+
+    let spec_json = orchestrator
+        .build_agent_vm_spec("vm-merge-3")
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_str(&spec_json).unwrap();
+    let hv = spec["hypervisor_overrides"].as_object().unwrap();
+
+    assert_eq!(
+        hv["cpu_amx"], true,
+        "NULL VM override should fall back to global"
+    );
+    assert_eq!(
+        hv["rng_src"], "/dev/random",
+        "NULL VM override should fall back to global"
+    );
+    assert_eq!(
+        hv["serial_mode"], "File",
+        "NULL VM override should fall back to global"
+    );
+}
+
+#[tokio::test]
+async fn test_defaults_used_when_settings_query_fails() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-merge-4', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vms (vm_id, node_id, display_name) VALUES ('vm-merge-4', 'node-merge-4', 'vm')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vm_desired_state (vm_id, desired_generation, cpu_count, memory_bytes) VALUES ('vm-merge-4', 1, 2, 1073741824)")
+        .execute(&pool).await.unwrap();
+
+    // Remove the singleton row so get_settings() fails
+    sqlx::query("DELETE FROM hypervisor_settings WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let orchestrator = crate::Orchestrator::new(
+        pool.clone(),
+        chv_controlplane_store::OperationRepository::new(pool.clone()),
+        "/tmp/chv-{node_id}.sock".to_string(),
+        "/var/lib/chv/vmlinux".to_string(),
+        "/var/lib/chv/CLOUDHV.fd".to_string(),
+    );
+
+    let spec_json = orchestrator
+        .build_agent_vm_spec("vm-merge-4")
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_str(&spec_json).unwrap();
+    let hv = spec["hypervisor_overrides"].as_object().unwrap();
+
+    // Verify hardcoded defaults from chv_common::hypervisor
+    assert_eq!(hv["cpu_nested"], true);
+    assert_eq!(hv["cpu_amx"], false);
+    assert_eq!(hv["cpu_kvm_hyperv"], false);
+    assert_eq!(hv["memory_mergeable"], false);
+    assert_eq!(hv["memory_hugepages"], false);
+    assert_eq!(hv["memory_shared"], false);
+    assert_eq!(hv["memory_prefault"], false);
+    assert_eq!(hv["iommu"], false);
+    assert_eq!(hv["rng_src"], "/dev/urandom");
+    assert_eq!(hv["watchdog"], false);
+    assert_eq!(hv["landlock_enable"], false);
+    assert_eq!(hv["serial_mode"], "Pty");
+    assert_eq!(hv["console_mode"], "Off");
+    assert_eq!(hv["pvpanic"], false);
+    assert!(hv.get("tpm_type").is_none() || hv["tpm_type"].is_null());
+    assert!(hv.get("tpm_socket_path").is_none() || hv["tpm_socket_path"].is_null());
+}
+
+#[tokio::test]
+async fn test_post_merge_validation_rejects_iommu_without_memory_shared() {
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-merge-5', 'host', 'host')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vms (vm_id, node_id, display_name, hv_iommu, hv_memory_shared) VALUES ('vm-merge-5', 'node-merge-5', 'vm', 1, 0)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO vm_desired_state (vm_id, desired_generation, cpu_count, memory_bytes) VALUES ('vm-merge-5', 1, 2, 1073741824)")
+        .execute(&pool).await.unwrap();
+
+    let orchestrator = crate::Orchestrator::new(
+        pool.clone(),
+        chv_controlplane_store::OperationRepository::new(pool.clone()),
+        "/tmp/chv-{node_id}.sock".to_string(),
+        "/var/lib/chv/vmlinux".to_string(),
+        "/var/lib/chv/CLOUDHV.fd".to_string(),
+    );
+
+    let result = orchestrator.build_agent_vm_spec("vm-merge-5").await;
+    match result {
+        Err(chv_errors::ChvError::InvalidArgument { field, reason }) => {
+            assert_eq!(field, "hypervisor_overrides");
+            assert!(
+                reason.contains("iommu=true requires memory_shared=true"),
+                "reason: {}",
+                reason
+            );
+        }
+        other => panic!(
+            "Expected InvalidArgument for iommu without memory_shared, got {:?}",
+            other
+        ),
+    }
 }

@@ -96,13 +96,12 @@ pub async fn create_token(
         BffError::Internal("failed to create token".into())
     })?;
 
-    let created_at = sqlx::query_scalar::<_, String>(
-        "SELECT created_at FROM api_tokens WHERE token_id = ?",
-    )
-    .bind(&token_id)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or_else(|_| "unknown".to_string());
+    let created_at =
+        sqlx::query_scalar::<_, String>("SELECT created_at FROM api_tokens WHERE token_id = ?")
+            .bind(&token_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
 
     Ok(Json(json!({
         "token_id": token_id,

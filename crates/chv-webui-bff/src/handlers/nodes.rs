@@ -346,10 +346,11 @@ pub async fn enroll_node(
     }
 
     // Also ensure a bootstrap token exists in the DB for the agent to consume
-    let token_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bootstrap_tokens WHERE used_at IS NULL")
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to check bootstrap tokens: {}", e)))?;
+    let token_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM bootstrap_tokens WHERE used_at IS NULL")
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check bootstrap tokens: {}", e)))?;
 
     let token_ready = token_count > 0;
 

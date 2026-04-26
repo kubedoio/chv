@@ -1,10 +1,10 @@
 use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
-    DesiredStateRepository, EventAppendInput, EventRepository, NodeDrainIntentInput,
-    NodeRepository, NodeSchedulingPatchInput, NodeStatePatchInput, OperationCreateInput,
-    OperationRepository, OperationStatusUpdateInput, VmDesiredStateInput, VmPowerStatePatchInput,
-    VolumeAttachmentPatchInput, VolumeResizePatchInput,
+    DesiredStateRepository, EventAppendInput, EventRepository, NetworkStatusPatchInput,
+    NodeDrainIntentInput, NodeRepository, NodeSchedulingPatchInput, NodeStatePatchInput,
+    OperationCreateInput, OperationRepository, OperationStatusUpdateInput, VmDesiredStateInput,
+    VmPowerStatePatchInput, VolumeAttachmentPatchInput, VolumeResizePatchInput,
 };
 use chv_controlplane_types::domain::{
     EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, OperationStatus,
@@ -60,6 +60,26 @@ pub trait LifecycleService: Send + Sync {
     async fn resize_volume(
         &self,
         request: proto::ResizeVolumeRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn snapshot_volume(
+        &self,
+        request: proto::SnapshotVolumeRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn restore_volume(
+        &self,
+        request: proto::RestoreVolumeRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn delete_volume_snapshot(
+        &self,
+        request: proto::DeleteVolumeSnapshotRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn clone_volume(
+        &self,
+        request: proto::CloneVolumeRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 
     async fn pause_node_scheduling(
@@ -135,6 +155,21 @@ pub trait LifecycleService: Send + Sync {
     async fn coredump_vm(
         &self,
         request: proto::CoredumpVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn start_network(
+        &self,
+        request: proto::StartNetworkRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn stop_network(
+        &self,
+        request: proto::StopNetworkRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn restart_network(
+        &self,
+        request: proto::RestartNetworkRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
@@ -225,6 +260,12 @@ impl LifecycleServiceImplementation {
         })
     }
 
+    fn parse_network_id(s: String) -> Result<ResourceId, ControlPlaneServiceError> {
+        ResourceId::new(s).map_err(|e| {
+            ControlPlaneServiceError::InvalidArgument(format!("invalid network_id: {}", e))
+        })
+    }
+
     fn resource_id_from_node_id(node_id: &NodeId) -> Result<ResourceId, ControlPlaneServiceError> {
         ResourceId::new(node_id.as_str())
             .map_err(|e| ControlPlaneServiceError::Internal(format!("invalid resource_id: {}", e)))
@@ -280,10 +321,11 @@ impl LifecycleServiceImplementation {
             format!("request:{}", meta.operation_id.trim())
         };
 
-        let operation_id = OperationId::new(format!("{}-{}", operation_type, chv_common::gen_short_id()))
-            .map_err(|e| {
-                ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e))
-            })?;
+        let operation_id =
+            OperationId::new(format!("{}-{}", operation_type, chv_common::gen_short_id()))
+                .map_err(|e| {
+                    ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e))
+                })?;
 
         let receipt = self
             .operation_repo
@@ -525,7 +567,11 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_type = if request.force { "ForceStopVm" } else { "StopVm" };
+        let operation_type = if request.force {
+            "ForceStopVm"
+        } else {
+            "StopVm"
+        };
         let operation_id = self
             .create_operation_and_emit(
                 operation_type,
@@ -786,6 +832,169 @@ impl LifecycleService for LifecycleServiceImplementation {
         .await?;
 
         Ok(Self::ok_ack(&operation_id, "resize volume accepted"))
+    }
+
+    async fn snapshot_volume(
+        &self,
+        request: proto::SnapshotVolumeRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let volume_id = Self::parse_volume_id(request.volume_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "SnapshotVolume",
+                node_id.clone(),
+                ResourceKind::Volume,
+                Some(volume_id.clone()),
+                &meta,
+                Some(format!("snapshot_name={}", request.snapshot_name)),
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_volume_snapshot(&chv_controlplane_store::VolumeSnapshotPatchInput {
+                    volume_id: volume_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    snapshot_op: Some("create".to_string()),
+                    snapshot_name: Some(request.snapshot_name),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "snapshot volume accepted"))
+    }
+
+    async fn restore_volume(
+        &self,
+        request: proto::RestoreVolumeRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let volume_id = Self::parse_volume_id(request.volume_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "RestoreVolume",
+                node_id.clone(),
+                ResourceKind::Volume,
+                Some(volume_id.clone()),
+                &meta,
+                Some(format!("snapshot_name={}", request.snapshot_name)),
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_volume_snapshot(&chv_controlplane_store::VolumeSnapshotPatchInput {
+                    volume_id: volume_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    snapshot_op: Some("restore".to_string()),
+                    snapshot_name: Some(request.snapshot_name),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "restore volume accepted"))
+    }
+
+    async fn delete_volume_snapshot(
+        &self,
+        request: proto::DeleteVolumeSnapshotRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let volume_id = Self::parse_volume_id(request.volume_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "DeleteVolumeSnapshot",
+                node_id.clone(),
+                ResourceKind::Volume,
+                Some(volume_id.clone()),
+                &meta,
+                Some(format!("snapshot_name={}", request.snapshot_name)),
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_volume_snapshot(&chv_controlplane_store::VolumeSnapshotPatchInput {
+                    volume_id: volume_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    snapshot_op: Some("delete".to_string()),
+                    snapshot_name: Some(request.snapshot_name),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(
+            &operation_id,
+            "delete volume snapshot accepted",
+        ))
+    }
+
+    async fn clone_volume(
+        &self,
+        request: proto::CloneVolumeRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let source_volume_id = Self::parse_volume_id(request.source_volume_id)?;
+        let target_volume_id = Self::parse_volume_id(request.target_volume_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "CloneVolume",
+                node_id.clone(),
+                ResourceKind::Volume,
+                Some(target_volume_id.clone()),
+                &meta,
+                Some(format!("source={}", source_volume_id)),
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_volume_clone(&chv_controlplane_store::VolumeClonePatchInput {
+                    volume_id: target_volume_id.clone(),
+                    desired_generation,
+                    desired_status: None,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    clone_source_volume_id: Some(source_volume_id.clone()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "clone volume accepted"))
     }
 
     async fn pause_node_scheduling(
@@ -1196,7 +1405,10 @@ impl LifecycleService for LifecycleServiceImplementation {
                 ResourceKind::Vm,
                 Some(vm_id.clone()),
                 &meta,
-                Some(format!("disk_id={}:size={}", request.disk_id, request.new_size_bytes)),
+                Some(format!(
+                    "disk_id={}:size={}",
+                    request.disk_id, request.new_size_bytes
+                )),
             )
             .await?;
 
@@ -1291,5 +1503,124 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.accept_operation(&operation_id).await?;
 
         Ok(Self::ok_ack(&operation_id, "coredump vm accepted"))
+    }
+
+    async fn start_network(
+        &self,
+        request: proto::StartNetworkRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let network_id = Self::parse_network_id(request.network_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "StartNetwork",
+                node_id.clone(),
+                ResourceKind::Network,
+                Some(network_id.clone()),
+                &meta,
+                None,
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_network_status(&NetworkStatusPatchInput {
+                    network_id: network_id.clone(),
+                    desired_generation,
+                    desired_status: Some("Active".into()),
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "start network accepted"))
+    }
+
+    async fn stop_network(
+        &self,
+        request: proto::StopNetworkRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let network_id = Self::parse_network_id(request.network_id)?;
+
+        let operation_type = if request.force {
+            "ForceStopNetwork"
+        } else {
+            "StopNetwork"
+        };
+        let operation_id = self
+            .create_operation_and_emit(
+                operation_type,
+                node_id.clone(),
+                ResourceKind::Network,
+                Some(network_id.clone()),
+                &meta,
+                Some(format!("force={}", request.force)),
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_network_status(&NetworkStatusPatchInput {
+                    network_id: network_id.clone(),
+                    desired_generation,
+                    desired_status: Some("Inactive".into()),
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "stop network accepted"))
+    }
+
+    async fn restart_network(
+        &self,
+        request: proto::RestartNetworkRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let network_id = Self::parse_network_id(request.network_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "RestartNetwork",
+                node_id.clone(),
+                ResourceKind::Network,
+                Some(network_id.clone()),
+                &meta,
+                None,
+            )
+            .await?;
+
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_network_status(&NetworkStatusPatchInput {
+                    network_id: network_id.clone(),
+                    desired_generation,
+                    desired_status: Some("Restarting".into()),
+                    requested_by: Self::normalize_requested_by(&meta),
+                    updated_by: None,
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
+        Ok(Self::ok_ack(&operation_id, "restart network accepted"))
     }
 }

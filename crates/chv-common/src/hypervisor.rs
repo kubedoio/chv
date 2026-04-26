@@ -55,7 +55,10 @@ pub fn validate_serial_mode(mode: &str) -> Result<(), String> {
     if VALID_SERIAL_MODES.contains(&mode) {
         Ok(())
     } else {
-        Err(format!("serial_mode must be one of {:?}", VALID_SERIAL_MODES))
+        Err(format!(
+            "serial_mode must be one of {:?}",
+            VALID_SERIAL_MODES
+        ))
     }
 }
 
@@ -63,7 +66,10 @@ pub fn validate_console_mode(mode: &str) -> Result<(), String> {
     if VALID_CONSOLE_MODES.contains(&mode) {
         Ok(())
     } else {
-        Err(format!("console_mode must be one of {:?}", VALID_CONSOLE_MODES))
+        Err(format!(
+            "console_mode must be one of {:?}",
+            VALID_CONSOLE_MODES
+        ))
     }
 }
 

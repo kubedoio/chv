@@ -2,7 +2,7 @@ use crate::api::{health, nodes, operations, stub};
 use axum::{
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use chv_webui_bff::AppState;
@@ -22,7 +22,7 @@ async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 pub fn admin_router(bff_state: AppState) -> Router {
-    let bff_router = chv_webui_bff::bff_router();
+    let bff_router = chv_webui_bff::bff_router(bff_state.clone());
 
     Router::new()
         .merge(bff_router)
@@ -42,7 +42,10 @@ pub fn admin_router(bff_state: AppState) -> Router {
         .route("/api/v1/nodes", get(stub::list_nodes_stub))
         .route("/api/v1/vms", get(stub::list_vms_stub))
         .route("/api/v1/networks", get(stub::list_networks_stub))
-        .route("/api/v1/storage-pools", get(stub::list_storage_pools_stub).post(stub::create_storage_pool_stub))
+        .route(
+            "/api/v1/storage-pools",
+            get(stub::list_storage_pools_stub).post(stub::create_storage_pool_stub),
+        )
         .route("/api/v1/operations", get(stub::list_operations_stub))
         .route("/api/v1/events", get(stub::list_events_stub))
         .route("/api/v1/images", get(stub::list_images_stub))
@@ -51,10 +54,30 @@ pub fn admin_router(bff_state: AppState) -> Router {
             "/api/v1/cloud-init-templates",
             get(stub::list_cloud_init_templates_stub),
         )
-        .route("/api/v1/backup-jobs", get(stub::list_backup_jobs_stub))
+        .route(
+            "/api/v1/backup-jobs",
+            get(chv_webui_bff::handlers::backups::list_backup_jobs_api)
+                .post(chv_webui_bff::handlers::backups::create_backup_job_api),
+        )
+        .route(
+            "/api/v1/backup-jobs/:job_id",
+            delete(chv_webui_bff::handlers::backups::delete_backup_job_api),
+        )
+        .route(
+            "/api/v1/backup-jobs/:job_id/run",
+            post(chv_webui_bff::handlers::backups::run_backup_job_api),
+        )
+        .route(
+            "/api/v1/backup-jobs/:job_id/toggle",
+            post(chv_webui_bff::handlers::backups::toggle_backup_job_api),
+        )
         .route(
             "/api/v1/backup-history",
-            get(stub::list_backup_history_stub),
+            get(chv_webui_bff::handlers::backups::list_backup_history_api),
+        )
+        .route(
+            "/api/v1/vms/:vm_id/backups",
+            get(chv_webui_bff::handlers::backups::list_vm_backups_api),
         )
         .route("/api/v1/quotas", get(stub::list_quotas_stub))
         .route("/api/v1/usage", get(stub::get_usage_stub))

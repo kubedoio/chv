@@ -6,7 +6,7 @@ use chv_controlplane_service::{
     TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
-    connect_pool, run_migrations, AlertRepository, BackupJobRepository, BootstrapTokenRepository,
+    connect_pool, run_migrations, AlertRepository, BackupRepository, BootstrapTokenRepository,
     ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NodeRepository,
     ObservedStateRepository, OperationRepository,
 };
@@ -40,7 +40,7 @@ pub async fn build_service(
     let alert_repo = AlertRepository::new(pool.clone());
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
     let operation_repo = OperationRepository::new(pool.clone());
-    let backup_job_repo = BackupJobRepository::new(pool.clone());
+    let backup_repo = BackupRepository::new(pool.clone());
 
     let lifecycle_service = Arc::new(LifecycleServiceImplementation::new(
         node_repo.clone(),
@@ -57,7 +57,7 @@ pub async fn build_service(
         alert_repo: alert_repo.clone(),
         desired_state_repo: desired_state_repo.clone(),
         observed_state_repo: observed_state_repo.clone(),
-        backup_job_repo: backup_job_repo.clone(),
+        backup_repo: backup_repo.clone(),
         mutations: Arc::new(ControlPlaneMutationService::new(
             pool.clone(),
             lifecycle_service.clone(),

@@ -19,10 +19,11 @@ pub async fn list_images(
         .unwrap_or(50)
         .clamp(1, 200);
     let offset = (page - 1) * page_size;
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE status != 'deleted'")
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to count images: {}", e)))?;
+    let total_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE status != 'deleted'")
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to count images: {}", e)))?;
     let total_pages = (total_count as u64).div_ceil(page_size);
 
     let rows = sqlx::query_as::<_, ImageRow>(
@@ -103,29 +104,22 @@ pub async fn import_image(
         .and_then(|v| v.as_str())
         .unwrap_or("qcow2");
 
-    let os = payload
-        .get("os")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let os = payload.get("os").and_then(|v| v.as_str()).unwrap_or("");
 
     let architecture = payload
         .get("architecture")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let checksum = payload
-        .get("checksum")
-        .and_then(|v| v.as_str());
+    let checksum = payload.get("checksum").and_then(|v| v.as_str());
 
     // Check for duplicate by source_url
     if !source_url.is_empty() {
-        let existing: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM images WHERE source_url = ?"
-        )
-        .bind(source_url)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to check existing image: {}", e)))?;
+        let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE source_url = ?")
+            .bind(source_url)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check existing image: {}", e)))?;
 
         if existing > 0 {
             return Err(BffError::Conflict(
@@ -167,15 +161,19 @@ pub async fn delete_image(
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     crate::auth::require_operator_or_admin(&claims)?;
-    let image_id = payload.get("image_id").and_then(|v| v.as_str())
+    let image_id = payload
+        .get("image_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing image_id".into()))?;
 
     // Check if image exists
-    let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM images WHERE image_id = ? AND status != 'deleted'")
-        .bind(image_id)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| BffError::Internal(format!("db error: {}", e)))?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM images WHERE image_id = ? AND status != 'deleted'",
+    )
+    .bind(image_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("db error: {}", e)))?;
 
     if !exists {
         return Err(BffError::NotFound(format!("image {} not found", image_id)));

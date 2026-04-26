@@ -21,6 +21,8 @@ message DevicePolicy {
   bool burst_allowed = 5;
   bool read_only = 6;
   bool no_exec = 7;
+  string io_scheduler = 8;
+  string cache_mode = 9;
 }
 
 message BackendLocator {
@@ -90,6 +92,18 @@ message PrepareCloneRequest {
   string clone_name = 3;
 }
 
+message RestoreSnapshotRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string snapshot_name = 3;
+}
+
+message DeleteSnapshotRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string snapshot_name = 3;
+}
+
 message SetDevicePolicyRequest {
   Meta meta = 1;
   string volume_id = 2;
@@ -131,6 +145,8 @@ service StorageService {
   rpc ResizeVolume(ResizeVolumeRequest) returns (Result);
   rpc PrepareSnapshot(PrepareSnapshotRequest) returns (Result);
   rpc PrepareClone(PrepareCloneRequest) returns (Result);
+  rpc RestoreSnapshot(RestoreSnapshotRequest) returns (Result);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (Result);
   rpc SetDevicePolicy(SetDevicePolicyRequest) returns (Result);
   rpc GetVolumeHealth(VolumeHealthRequest) returns (VolumeHealthResponse);
   rpc ListVolumeSessions(ListVolumeSessionsRequest) returns (ListVolumeSessionsResponse);

@@ -8,13 +8,13 @@ import Button from '$lib/components/primitives/Button.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
-  import CompactMetricCard from '$lib/components/CompactMetricCard.svelte';
+  import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
   import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
   import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';
   import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-  import Modal from '$lib/components/modals/Modal.svelte';
+  import Modal from '$lib/components/primitives/Modal.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
   import type { BackupJobResponse, BackupHistory, VM } from '$lib/api/types';
 

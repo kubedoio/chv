@@ -40,15 +40,13 @@ fn validate_settings_patch(input: &HypervisorSettingsPatchInput) -> Result<(), S
             .map_err(|e| format!("console_mode: {}", e))?;
     }
     if let Some(ref t) = input.tpm_type {
-        chv_common::hypervisor::validate_tpm_type(t)
-            .map_err(|e| format!("tpm_type: {}", e))?;
+        chv_common::hypervisor::validate_tpm_type(t).map_err(|e| format!("tpm_type: {}", e))?;
     }
     if input.tpm_type.is_none() && input.tpm_socket_path.is_some() {
         return Err("tpm_socket_path requires tpm_type to be set".into());
     }
     if let Some(ref src) = input.rng_src {
-        chv_common::hypervisor::validate_rng_src(src)
-            .map_err(|e| format!("rng_src: {}", e))?;
+        chv_common::hypervisor::validate_rng_src(src).map_err(|e| format!("rng_src: {}", e))?;
     }
     if let Some(ref path) = input.tpm_socket_path {
         if !path.starts_with('/') {
@@ -61,7 +59,9 @@ fn validate_settings_patch(input: &HypervisorSettingsPatchInput) -> Result<(), S
     Ok(())
 }
 
-pub fn validate_vm_overrides(overrides: &chv_common::hypervisor::HypervisorOverrides) -> Result<(), String> {
+pub fn validate_vm_overrides(
+    overrides: &chv_common::hypervisor::HypervisorOverrides,
+) -> Result<(), String> {
     if let Some(ref mode) = overrides.serial_mode {
         chv_common::hypervisor::validate_serial_mode(mode)
             .map_err(|e| format!("serial_mode: {}", e))?;
@@ -71,15 +71,13 @@ pub fn validate_vm_overrides(overrides: &chv_common::hypervisor::HypervisorOverr
             .map_err(|e| format!("console_mode: {}", e))?;
     }
     if let Some(ref t) = overrides.tpm_type {
-        chv_common::hypervisor::validate_tpm_type(t)
-            .map_err(|e| format!("tpm_type: {}", e))?;
+        chv_common::hypervisor::validate_tpm_type(t).map_err(|e| format!("tpm_type: {}", e))?;
     }
     if overrides.tpm_type.is_none() && overrides.tpm_socket_path.is_some() {
         return Err("tpm_socket_path requires tpm_type to be set".into());
     }
     if let Some(ref src) = overrides.rng_src {
-        chv_common::hypervisor::validate_rng_src(src)
-            .map_err(|e| format!("rng_src: {}", e))?;
+        chv_common::hypervisor::validate_rng_src(src).map_err(|e| format!("rng_src: {}", e))?;
     }
     if let Some(ref path) = overrides.tpm_socket_path {
         if !path.starts_with('/') {
@@ -192,15 +190,14 @@ fn profile_to_json(row: ProfileRow) -> Value {
     })
 }
 
-async fn fetch_settings_and_profiles(
-    pool: &sqlx::SqlitePool,
-) -> Result<Value, BffError> {
-    let settings = sqlx::query_as::<_, SettingsRow>(
-        "SELECT * FROM hypervisor_settings WHERE id = 1",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to fetch hypervisor settings: {}", e)))?;
+async fn fetch_settings_and_profiles(pool: &sqlx::SqlitePool) -> Result<Value, BffError> {
+    let settings =
+        sqlx::query_as::<_, SettingsRow>("SELECT * FROM hypervisor_settings WHERE id = 1")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                BffError::Internal(format!("failed to fetch hypervisor settings: {}", e))
+            })?;
 
     let profiles = sqlx::query_as::<_, ProfileRow>("SELECT * FROM hypervisor_profiles")
         .fetch_all(pool)
@@ -220,7 +217,6 @@ async fn fetch_settings_and_profiles(
 pub async fn get_settings(
     BearerToken(_claims): BearerToken,
     State(state): State<AppState>,
-    _payload: axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     let result = fetch_settings_and_profiles(&state.pool).await?;
     Ok(Json(result))
@@ -242,15 +238,33 @@ pub async fn update_settings(
         memory_shared: payload.get("memory_shared").and_then(|v| v.as_bool()),
         memory_prefault: payload.get("memory_prefault").and_then(|v| v.as_bool()),
         iommu: payload.get("iommu").and_then(|v| v.as_bool()),
-        rng_src: payload.get("rng_src").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        rng_src: payload
+            .get("rng_src")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         watchdog: payload.get("watchdog").and_then(|v| v.as_bool()),
         landlock_enable: payload.get("landlock_enable").and_then(|v| v.as_bool()),
-        serial_mode: payload.get("serial_mode").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        console_mode: payload.get("console_mode").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        serial_mode: payload
+            .get("serial_mode")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        console_mode: payload
+            .get("console_mode")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         pvpanic: payload.get("pvpanic").and_then(|v| v.as_bool()),
-        tpm_type: payload.get("tpm_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        tpm_socket_path: payload.get("tpm_socket_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        profile_id: payload.get("profile_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        tpm_type: payload
+            .get("tpm_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        tpm_socket_path: payload
+            .get("tpm_socket_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        profile_id: payload
+            .get("profile_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
     };
 
     if let Err(msg) = validate_settings_patch(&input) {
@@ -306,38 +320,34 @@ pub async fn update_settings(
         for p in params {
             query = query.bind(p);
         }
-        query
-            .execute(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to update hypervisor settings: {}", e)))?;
+        query.execute(&state.pool).await.map_err(|e| {
+            BffError::Internal(format!("failed to update hypervisor settings: {}", e))
+        })?;
     }
 
     let result = fetch_settings_and_profiles(&state.pool).await?;
     Ok(Json(result))
 }
 
-pub async fn apply_profile(
-    BearerToken(claims): BearerToken,
-    State(state): State<AppState>,
-    axum::Json(payload): axum::Json<Value>,
+async fn apply_profile_inner(
+    claims: &crate::auth::Claims,
+    pool: &sqlx::SqlitePool,
+    profile_id: &str,
 ) -> Result<Json<Value>, BffError> {
-    crate::auth::require_operator_or_admin(&claims)?;
+    crate::auth::require_operator_or_admin(claims)?;
 
-    let profile_id = payload
-        .get("profile_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BffError::BadRequest("missing profile_id".into()))?;
-
-    let exists: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM hypervisor_profiles WHERE id = ?"
-    )
-    .bind(profile_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to check profile: {}", e)))?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM hypervisor_profiles WHERE id = ?")
+            .bind(profile_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check profile: {}", e)))?;
 
     if exists.is_none() {
-        return Err(BffError::NotFound(format!("profile {} not found", profile_id)));
+        return Err(BffError::NotFound(format!(
+            "profile {} not found",
+            profile_id
+        )));
     }
 
     sqlx::query(
@@ -382,18 +392,37 @@ pub async fn apply_profile(
     .bind(profile_id)
     .bind(profile_id)
     .bind(profile_id)
-    .execute(&state.pool)
+    .execute(pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to apply profile: {}", e)))?;
 
-    let result = fetch_settings_and_profiles(&state.pool).await?;
+    let result = fetch_settings_and_profiles(pool).await?;
     Ok(Json(result))
+}
+
+pub async fn apply_profile(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let profile_id = payload
+        .get("profile_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing profile_id".into()))?;
+    apply_profile_inner(&claims, &state.pool, profile_id).await
+}
+
+pub async fn apply_profile_by_path(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    axum::extract::Path(profile_id): axum::extract::Path<String>,
+) -> Result<Json<Value>, BffError> {
+    apply_profile_inner(&claims, &state.pool, &profile_id).await
 }
 
 pub async fn list_profiles(
     BearerToken(_claims): BearerToken,
     State(state): State<AppState>,
-    _payload: axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     let profiles = sqlx::query_as::<_, ProfileRow>("SELECT * FROM hypervisor_profiles")
         .fetch_all(&state.pool)

@@ -1,7 +1,9 @@
 # CHV Makefile
 # Quick commands for building, packaging, and local installation.
 
-.PHONY: all build build-ui release dev-install clean test fmt
+.PHONY: all build build-ui release dev-install clean test fmt bump-version
+
+BUMP_TYPE ?= build
 
 all: build build-ui
 
@@ -22,6 +24,9 @@ test:
 
 fmt:
 	cargo fmt --all
+
+bump-version:
+	./scripts/bump-version.sh $(BUMP_TYPE)
 
 clean:
 	cargo clean

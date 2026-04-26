@@ -4,7 +4,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import InventoryListPage from '$lib/components/shell/InventoryListPage.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
-	import AddNodeModal from '$lib/components/modals/AddNodeModal.svelte';
+	import AddNodeModal from '$lib/components/nodes/AddNodeModal.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import { Plus, AlertCircle, ShieldCheck } from 'lucide-svelte';
 	import { goto } from '$app/navigation';

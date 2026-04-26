@@ -59,8 +59,13 @@ impl VmRuntime {
     ) -> Result<(), ChvError> {
         let id = vm_id.into();
         self.adapter.create_vm(config, operation_id).await?;
-        let prior_failures = self.failure_counts.lock().unwrap()
-            .get(&id).map(|(c, _)| *c).unwrap_or(0);
+        let prior_failures = self
+            .failure_counts
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|(c, _)| *c)
+            .unwrap_or(0);
         let mut map = self.vms.lock().unwrap();
         map.insert(
             id.clone(),
@@ -146,7 +151,9 @@ impl VmRuntime {
         destination: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        self.adapter.snapshot_vm(vm_id, destination, operation_id).await
+        self.adapter
+            .snapshot_vm(vm_id, destination, operation_id)
+            .await
     }
 
     pub async fn restore_snapshot(
@@ -155,7 +162,9 @@ impl VmRuntime {
         source: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        self.adapter.restore_snapshot(vm_id, source, operation_id).await
+        self.adapter
+            .restore_snapshot(vm_id, source, operation_id)
+            .await
     }
 
     pub async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
@@ -176,7 +185,11 @@ impl VmRuntime {
         Ok(())
     }
 
-    pub async fn power_button(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+    pub async fn power_button(
+        &self,
+        vm_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
         self.adapter.power_button(vm_id, operation_id).await
     }
 
@@ -195,7 +208,9 @@ impl VmRuntime {
         device_id: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        self.adapter.remove_device(vm_id, device_id, operation_id).await
+        self.adapter
+            .remove_device(vm_id, device_id, operation_id)
+            .await
     }
 
     pub async fn add_net(
@@ -214,7 +229,9 @@ impl VmRuntime {
         new_size_bytes: u64,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        self.adapter.resize_disk(vm_id, disk_id, new_size_bytes, operation_id).await
+        self.adapter
+            .resize_disk(vm_id, disk_id, new_size_bytes, operation_id)
+            .await
     }
 
     pub async fn ping(&self, vm_id: &str) -> Result<bool, ChvError> {
@@ -227,7 +244,9 @@ impl VmRuntime {
         destination: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        self.adapter.coredump(vm_id, destination, operation_id).await
+        self.adapter
+            .coredump(vm_id, destination, operation_id)
+            .await
     }
 
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
@@ -258,7 +277,10 @@ impl VmRuntime {
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             let count = entry.consecutive_failures;
             drop(map);
-            self.failure_counts.lock().unwrap().insert(vm_id, (count, generation));
+            self.failure_counts
+                .lock()
+                .unwrap()
+                .insert(vm_id, (count, generation));
         } else {
             drop(map);
             let mut fc = self.failure_counts.lock().unwrap();
@@ -269,12 +291,18 @@ impl VmRuntime {
     }
 
     pub fn consecutive_failures(&self, vm_id: &str) -> u32 {
-        self.failure_counts.lock().unwrap()
-            .get(vm_id).map(|(c, _)| *c).unwrap_or(0)
+        self.failure_counts
+            .lock()
+            .unwrap()
+            .get(vm_id)
+            .map(|(c, _)| *c)
+            .unwrap_or(0)
     }
 
     pub fn consecutive_failures_for_generation(&self, vm_id: &str, generation: &str) -> u32 {
-        self.failure_counts.lock().unwrap()
+        self.failure_counts
+            .lock()
+            .unwrap()
             .get(vm_id)
             .filter(|(_, gen)| gen == generation)
             .map(|(c, _)| *c)
