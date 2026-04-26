@@ -952,6 +952,12 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
 
+        if !qemu_img_ok {
+            // Write qcow2 magic so detect_kind sees it as qcow2; qemu-img
+            // is missing so convert_qcow2_to_raw will return BackendUnavailable.
+            std::fs::write(&seed, b"QFI\xfb").unwrap();
+        }
+
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let mut options = std::collections::HashMap::new();
         options.insert("seed_from".to_string(), seed.to_string_lossy().to_string());
