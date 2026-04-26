@@ -1,4 +1,7 @@
-use axum::{extract::{Path, State}, response::Json};
+use axum::{
+    extract::{Path, State},
+    response::Json,
+};
 use serde_json::{json, Value};
 
 use crate::router::AppState;
@@ -21,9 +24,7 @@ struct VMTemplateRow {
     created_at: String,
 }
 
-pub async fn list_vm_templates(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, BffError> {
+pub async fn list_vm_templates(State(state): State<AppState>) -> Result<Json<Value>, BffError> {
     let rows = sqlx::query_as::<_, VMTemplateRow>(
         r#"
         SELECT
@@ -85,10 +86,7 @@ pub async fn create_vm_template(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let vcpu = payload
-        .get("vcpu")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(2);
+    let vcpu = payload.get("vcpu").and_then(|v| v.as_i64()).unwrap_or(2);
 
     let memory_mb = payload
         .get("memory_mb")
@@ -97,17 +95,11 @@ pub async fn create_vm_template(
 
     let memory_bytes = memory_mb * 1024 * 1024;
 
-    let image_id = payload
-        .get("image_id")
-        .and_then(|v| v.as_str());
+    let image_id = payload.get("image_id").and_then(|v| v.as_str());
 
-    let network_id = payload
-        .get("network_id")
-        .and_then(|v| v.as_str());
+    let network_id = payload.get("network_id").and_then(|v| v.as_str());
 
-    let cloud_init_config = payload
-        .get("cloud_init_config")
-        .and_then(|v| v.as_str());
+    let cloud_init_config = payload.get("cloud_init_config").and_then(|v| v.as_str());
 
     let template_id = chv_common::gen_short_id();
 
@@ -171,7 +163,7 @@ pub async fn delete_vm_template(
     let vm_count: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM vm_desired_state vds
            JOIN vm_templates t ON t.image_id IS NOT NULL AND vds.image_ref = t.image_id
-           WHERE t.template_id = ?"#
+           WHERE t.template_id = ?"#,
     )
     .bind(&template_id)
     .fetch_one(&state.pool)
@@ -227,7 +219,8 @@ pub async fn preview_vm_template(
     .await
     .map_err(|e| BffError::Internal(format!("failed to fetch vm_template: {}", e)))?;
 
-    let row = row.ok_or_else(|| BffError::NotFound(format!("vm template {} not found", template_id)))?;
+    let row =
+        row.ok_or_else(|| BffError::NotFound(format!("vm template {} not found", template_id)))?;
 
     Ok(Json(json!({
         "id": row.template_id,
@@ -292,7 +285,7 @@ pub async fn clone_vm_template(
     let mut image_ref = template.image_id.clone().unwrap_or_default();
     if !image_ref.is_empty() && image_ref != "default" {
         if let Some(source_url) = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT source_url FROM images WHERE image_id = ?"
+            "SELECT source_url FROM images WHERE image_id = ?",
         )
         .bind(&image_ref)
         .fetch_optional(&state.pool)
@@ -310,23 +303,27 @@ pub async fn clone_vm_template(
     }
 
     // Cloud-init: custom_user_data > rendered template variables > template default
-    let cloud_init_userdata = if let Some(custom) = payload.get("custom_user_data").and_then(|v| v.as_str()) {
-        Some(custom.to_string())
-    } else {
-        let vars = payload.get("variables").and_then(|v| v.as_object());
-        if let (Some(base), Some(vars)) = (template.cloud_init_userdata.as_ref(), vars) {
-            let mut rendered = base.clone();
-            for (key, value) in vars {
-                let placeholder = format!("{{{{{}}}}}", key);
-                rendered = rendered.replace(&placeholder, value.as_str().unwrap_or(""));
-            }
-            Some(rendered)
+    let cloud_init_userdata =
+        if let Some(custom) = payload.get("custom_user_data").and_then(|v| v.as_str()) {
+            Some(custom.to_string())
         } else {
-            template.cloud_init_userdata.clone()
-        }
-    };
+            let vars = payload.get("variables").and_then(|v| v.as_object());
+            if let (Some(base), Some(vars)) = (template.cloud_init_userdata.as_ref(), vars) {
+                let mut rendered = base.clone();
+                for (key, value) in vars {
+                    let placeholder = format!("{{{{{}}}}}", key);
+                    rendered = rendered.replace(&placeholder, value.as_str().unwrap_or(""));
+                }
+                Some(rendered)
+            } else {
+                template.cloud_init_userdata.clone()
+            }
+        };
 
-    let network_id = template.network_id.clone().unwrap_or_else(|| "default".to_string());
+    let network_id = template
+        .network_id
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let volume_size_bytes = payload
         .get("volume_size_gb")
         .and_then(|v| v.as_i64())
@@ -335,9 +332,15 @@ pub async fn clone_vm_template(
         * 1024
         * 1024;
 
-    // Enforce quota before creating anything
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    // Enforce quota inside the transaction to avoid races
     crate::handlers::vms::enforce_user_quota(
-        &state.pool,
+        &mut tx,
         &claims.username,
         template.cpu_count,
         template.memory_bytes,
@@ -348,11 +351,6 @@ pub async fn clone_vm_template(
     let vm_id = chv_common::gen_short_id();
     let volume_id = chv_common::gen_short_id();
     let operation_id = chv_common::gen_short_id();
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
     // Insert VM
     sqlx::query(
@@ -456,7 +454,7 @@ pub async fn clone_vm_template(
 
     // Fetch network CIDR for IP generation
     let network_cidr: String = sqlx::query_scalar(
-        "SELECT COALESCE(cidr, '') FROM network_desired_state WHERE network_id = ?"
+        "SELECT COALESCE(cidr, '') FROM network_desired_state WHERE network_id = ?",
     )
     .bind(&network_id)
     .fetch_one(&mut *tx)

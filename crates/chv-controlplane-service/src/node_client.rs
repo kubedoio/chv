@@ -4,6 +4,7 @@ use std::path::Path;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
+use tracing::Instrument;
 
 pub struct NodeClient {
     reconcile: proto::reconcile_service_client::ReconcileServiceClient<Channel>,
@@ -67,8 +68,10 @@ impl NodeClient {
                 updated_by: requested_by.unwrap_or("control-plane").to_string(),
             }),
         };
+        let span = tracing::info_span!("apply_vm_desired_state", operation_id);
         self.reconcile
-            .apply_vm_desired_state(req)
+            .apply_vm_desired_state(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -106,8 +109,10 @@ impl NodeClient {
                 updated_by: requested_by.unwrap_or("control-plane").to_string(),
             }),
         };
+        let span = tracing::info_span!("apply_volume_desired_state", operation_id);
         self.reconcile
-            .apply_volume_desired_state(req)
+            .apply_volume_desired_state(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -145,8 +150,10 @@ impl NodeClient {
                 updated_by: requested_by.unwrap_or("control-plane").to_string(),
             }),
         };
+        let span = tracing::info_span!("apply_network_desired_state", operation_id);
         self.reconcile
-            .apply_network_desired_state(req)
+            .apply_network_desired_state(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -178,8 +185,10 @@ impl NodeClient {
                 vm_spec_json,
             }),
         };
+        let span = tracing::info_span!("create_vm", operation_id);
         self.lifecycle
-            .create_vm(req)
+            .create_vm(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -207,8 +216,10 @@ impl NodeClient {
             node_id: node_id.to_string(),
             vm_id: vm_id.to_string(),
         };
+        let span = tracing::info_span!("start_vm", operation_id);
         self.lifecycle
-            .start_vm(req)
+            .start_vm(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -238,8 +249,10 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             force,
         };
+        let span = tracing::info_span!("stop_vm", operation_id);
         self.lifecycle
-            .stop_vm(req)
+            .stop_vm(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -269,8 +282,10 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             force,
         };
+        let span = tracing::info_span!("reboot_vm", operation_id);
         self.lifecycle
-            .reboot_vm(req)
+            .reboot_vm(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -300,8 +315,10 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             force,
         };
+        let span = tracing::info_span!("delete_vm", operation_id);
         self.lifecycle
-            .delete_vm(req)
+            .delete_vm(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -331,8 +348,10 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             destination: destination.to_string(),
         };
+        let span = tracing::info_span!("snapshot_vm", operation_id);
         self.lifecycle
-            .snapshot_vm(req)
+            .snapshot_vm(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -362,8 +381,10 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             source: source.to_string(),
         };
+        let span = tracing::info_span!("restore_snapshot", operation_id);
         self.lifecycle
-            .restore_snapshot(req)
+            .restore_snapshot(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -396,8 +417,10 @@ impl NodeClient {
                 volume_spec_json: vec![],
             }),
         };
+        let span = tracing::info_span!("attach_volume", operation_id);
         self.lifecycle
-            .attach_volume(req)
+            .attach_volume(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -406,6 +429,7 @@ impl NodeClient {
             .map(|r| r.into_inner())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn detach_volume(
         &mut self,
         node_id: &str,
@@ -429,8 +453,10 @@ impl NodeClient {
             volume_id: volume_id.to_string(),
             force,
         };
+        let span = tracing::info_span!("detach_volume", operation_id);
         self.lifecycle
-            .detach_volume(req)
+            .detach_volume(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -460,8 +486,10 @@ impl NodeClient {
             volume_id: volume_id.to_string(),
             new_size_bytes,
         };
+        let span = tracing::info_span!("resize_volume", operation_id);
         self.lifecycle
-            .resize_volume(req)
+            .resize_volume(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "agent".to_string(),
@@ -469,6 +497,243 @@ impl NodeClient {
             })
             .map(|r| r.into_inner())
     }
+
+    pub async fn snapshot_volume(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        generation: &str,
+        snapshot_name: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::SnapshotVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            volume_id: volume_id.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        };
+        let span = tracing::info_span!("snapshot_volume", operation_id);
+        self.lifecycle
+            .snapshot_volume(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("snapshot_volume failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn restore_volume(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        generation: &str,
+        snapshot_name: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::RestoreVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            volume_id: volume_id.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        };
+        let span = tracing::info_span!("restore_volume", operation_id);
+        self.lifecycle
+            .restore_volume(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("restore_volume failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn delete_volume_snapshot(
+        &mut self,
+        node_id: &str,
+        volume_id: &str,
+        generation: &str,
+        snapshot_name: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::DeleteVolumeSnapshotRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            volume_id: volume_id.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        };
+        let span = tracing::info_span!("delete_volume_snapshot", operation_id);
+        self.lifecycle
+            .delete_volume_snapshot(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("delete_volume_snapshot failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn clone_volume(
+        &mut self,
+        node_id: &str,
+        source_volume_id: &str,
+        target_volume_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::CloneVolumeRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            source_volume_id: source_volume_id.to_string(),
+            target_volume_id: target_volume_id.to_string(),
+        };
+        let span = tracing::info_span!("clone_volume", operation_id);
+        self.lifecycle
+            .clone_volume(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("clone_volume failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn start_network(
+        &mut self,
+        node_id: &str,
+        network_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::StartNetworkRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            network_id: network_id.to_string(),
+        };
+        let span = tracing::info_span!("start_network", operation_id);
+        self.lifecycle
+            .start_network(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("start_network failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn stop_network(
+        &mut self,
+        node_id: &str,
+        network_id: &str,
+        generation: &str,
+        force: bool,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::StopNetworkRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            network_id: network_id.to_string(),
+            force,
+        };
+        let span = tracing::info_span!("stop_network", operation_id);
+        self.lifecycle
+            .stop_network(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("stop_network failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+
+    pub async fn restart_network(
+        &mut self,
+        node_id: &str,
+        network_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::RestartNetworkRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            network_id: network_id.to_string(),
+        };
+        let span = tracing::info_span!("restart_network", operation_id);
+        self.lifecycle
+            .restart_network(with_operation_id_metadata(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "agent".to_string(),
+                reason: format!("restart_network failed: {e}"),
+            })
+            .map(|r| r.into_inner())
+    }
+}
+
+fn with_operation_id_metadata<T>(req: T, operation_id: &str) -> tonic::Request<T> {
+    let mut grpc_req = tonic::Request::new(req);
+    if let Ok(val) = tonic::metadata::MetadataValue::try_from(operation_id) {
+        grpc_req
+            .metadata_mut()
+            .insert(chv_common::OPERATION_ID_METADATA_KEY, val);
+    }
+    grpc_req
 }
 
 fn now_unix_ms() -> i64 {

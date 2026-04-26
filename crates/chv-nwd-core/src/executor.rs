@@ -226,6 +226,11 @@ impl LinuxExecutor {
         Ok(format!("chv-{}", sanitized))
     }
 
+    async fn run_nft_quiet(args: &[&str]) -> Result<(), ()> {
+        let _ = Command::new("nft").args(args).output().await;
+        Ok(())
+    }
+
     async fn run_nft_idempotent(args: &[&str]) -> Result<(), ChvError> {
         match Self::run_nft(args).await {
             Ok(()) => Ok(()),
@@ -244,15 +249,13 @@ impl LinuxExecutor {
     }
 
     fn derive_dhcp_range(cidr: &str) -> Result<(String, String, String), ChvError> {
-        let parts: Vec<&str> = cidr.split('/').collect();
-        if parts.len() != 2 {
-            return Err(ChvError::InvalidArgument {
+        let (ip, prefix_str) = cidr
+            .split_once('/')
+            .ok_or_else(|| ChvError::InvalidArgument {
                 field: "cidr".to_string(),
                 reason: format!("invalid CIDR: {}", cidr),
-            });
-        }
-        let ip = parts[0];
-        let prefix: u8 = parts[1].parse().map_err(|_| ChvError::InvalidArgument {
+            })?;
+        let prefix: u8 = prefix_str.parse().map_err(|_| ChvError::InvalidArgument {
             field: "cidr".to_string(),
             reason: format!("invalid prefix in CIDR: {}", cidr),
         })?;
@@ -265,32 +268,41 @@ impl LinuxExecutor {
             });
         }
 
-        match prefix {
-            24 => {
-                let base = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
-                Ok((
-                    format!("{}.50", base),
-                    format!("{}.250", base),
-                    "255.255.255.0".to_string(),
-                ))
-            }
-            16 => {
-                let base = format!("{}.{}", octets[0], octets[1]);
-                Ok((
-                    format!("{}.0.50", base),
-                    format!("{}.255.250", base),
-                    "255.255.0.0".to_string(),
-                ))
-            }
-            _ => {
-                let base = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
-                Ok((
-                    format!("{}.50", base),
-                    format!("{}.250", base),
-                    "255.255.255.0".to_string(),
-                ))
-            }
-        }
+        let (base, netmask) = match prefix {
+            16 => (format!("{}.{}", octets[0], octets[1]), "255.255.0.0"),
+            _ => (
+                format!("{}.{}.{}", octets[0], octets[1], octets[2]),
+                "255.255.255.0",
+            ),
+        };
+
+        let range_start = if prefix == 16 {
+            format!("{}.0.50", base)
+        } else {
+            format!("{}.50", base)
+        };
+        let range_end = if prefix == 16 {
+            format!("{}.255.250", base)
+        } else {
+            format!("{}.250", base)
+        };
+
+        Ok((range_start, range_end, netmask.to_string()))
+    }
+
+    async fn is_dnsmasq_running(pid_path: &std::path::Path) -> bool {
+        let Ok(pid_str) = tokio::fs::read_to_string(pid_path).await else {
+            return false;
+        };
+        let Ok(pid) = pid_str.trim().parse::<i32>() else {
+            return false;
+        };
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     async fn start_dnsmasq(
@@ -306,19 +318,8 @@ impl LinuxExecutor {
         let hosts_path = runtime_dir.join(format!("dnsmasq-{}.hosts", network_id));
         let pid_path = runtime_dir.join(format!("dnsmasq-{}.pid", network_id));
 
-        // Check if already running
-        if let Ok(pid_str) = tokio::fs::read_to_string(&pid_path).await {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                if Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .output()
-                    .await
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-                {
-                    return Ok(());
-                }
-            }
+        if Self::is_dnsmasq_running(&pid_path).await {
+            return Ok(());
         }
 
         // Create empty hostsfile if not exists
@@ -335,10 +336,12 @@ impl LinuxExecutor {
             gateway_ip,
             hosts_path.display()
         );
-        tokio::fs::write(&conf_path, config).await.map_err(|e| ChvError::Io {
-            path: conf_path.to_string_lossy().to_string(),
-            source: e,
-        })?;
+        tokio::fs::write(&conf_path, config)
+            .await
+            .map_err(|e| ChvError::Io {
+                path: conf_path.to_string_lossy().to_string(),
+                source: e,
+            })?;
 
         let dnsmasq_args = Self::dnsmasq_args(&conf_path, &pid_path);
         let out = Command::new("dnsmasq")
@@ -368,18 +371,23 @@ impl LinuxExecutor {
         ]
     }
 
+    async fn signal_by_pid_file(pid_path: &std::path::Path, signal: &str) {
+        let Ok(pid_str) = tokio::fs::read_to_string(pid_path).await else {
+            return;
+        };
+        let _ = Command::new("kill")
+            .args([signal, pid_str.trim()])
+            .output()
+            .await;
+    }
+
     async fn stop_dnsmasq(network_id: &str) {
         let runtime_dir = PathBuf::from("/run/chv/nwd");
         let pid_path = runtime_dir.join(format!("dnsmasq-{}.pid", network_id));
         let conf_path = runtime_dir.join(format!("dnsmasq-{}.conf", network_id));
         let hosts_path = runtime_dir.join(format!("dnsmasq-{}.hosts", network_id));
 
-        if let Ok(pid_str) = tokio::fs::read_to_string(&pid_path).await {
-            let _ = Command::new("kill")
-                .args([pid_str.trim()])
-                .output()
-                .await;
-        }
+        Self::signal_by_pid_file(&pid_path, "").await;
 
         let _ = tokio::fs::remove_file(&pid_path).await;
         let _ = tokio::fs::remove_file(&conf_path).await;
@@ -388,9 +396,11 @@ impl LinuxExecutor {
 
     async fn add_dhcp_host(network_id: &str, mac_address: &str, ip_address: &str) {
         let hosts_path = format!("/run/chv/nwd/dnsmasq-{}.hosts", network_id);
-        let pid_path = format!("/run/chv/nwd/dnsmasq-{}.pid", network_id);
+        let pid_path = std::path::PathBuf::from(format!("/run/chv/nwd/dnsmasq-{}.pid", network_id));
 
-        let content = tokio::fs::read_to_string(&hosts_path).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&hosts_path)
+            .await
+            .unwrap_or_default();
         let entry = format!("{},{}\n", mac_address, ip_address);
 
         if !content.contains(mac_address) {
@@ -403,12 +413,7 @@ impl LinuxExecutor {
             }
         }
 
-        if let Ok(pid_str) = tokio::fs::read_to_string(&pid_path).await {
-            let _ = Command::new("kill")
-                .args(["-HUP", pid_str.trim()])
-                .output()
-                .await;
-        }
+        Self::signal_by_pid_file(&pid_path, "-HUP").await;
     }
 }
 
@@ -431,12 +436,26 @@ impl NetworkExecutor for LinuxExecutor {
         // Assign gateway IP to bridge
         if !spec.gateway_ip.is_empty() && !spec.subnet_cidr.is_empty() {
             let prefix = spec.subnet_cidr.split('/').nth(1).unwrap_or("24");
-            let _ = Self::run_ip(&["addr", "add", &format!("{}/{}", spec.gateway_ip, prefix), "dev", &spec.bridge_name]).await;
+            let _ = Self::run_ip(&[
+                "addr",
+                "add",
+                &format!("{}/{}", spec.gateway_ip, prefix),
+                "dev",
+                &spec.bridge_name,
+            ])
+            .await;
         }
 
         // Start dnsmasq for DHCP
         if !spec.subnet_cidr.is_empty() && !spec.gateway_ip.is_empty() {
-            if let Err(e) = Self::start_dnsmasq(&spec.network_id, &spec.bridge_name, &spec.subnet_cidr, &spec.gateway_ip).await {
+            if let Err(e) = Self::start_dnsmasq(
+                &spec.network_id,
+                &spec.bridge_name,
+                &spec.subnet_cidr,
+                &spec.gateway_ip,
+            )
+            .await
+            {
                 warn!(error = %e, "failed to start dnsmasq");
             }
         }
@@ -446,10 +465,7 @@ impl NetworkExecutor for LinuxExecutor {
             Self::run_ip(&["netns", "add", &spec.namespace_name]).await?;
         }
 
-        // Minimal nftables table to satisfy baseline hook
-        let _ = Command::new("nft")
-            .args(["add", "table", "inet", &format!("chv-{}", spec.network_id)])
-            .output()
+        let _ = Self::run_nft_quiet(&["add", "table", "inet", &format!("chv-{}", spec.network_id)])
             .await;
 
         Ok(TopologyApplyResult {
@@ -485,10 +501,7 @@ impl NetworkExecutor for LinuxExecutor {
         }
 
         if let Ok(table) = Self::sanitized_nft_table(network_id) {
-            let _ = Command::new("nft")
-                .args(["delete", "table", "inet", &table])
-                .output()
-                .await;
+            let _ = Self::run_nft_quiet(&["delete", "table", "inet", &table]).await;
         }
 
         Ok(())
@@ -503,17 +516,17 @@ impl NetworkExecutor for LinuxExecutor {
         let ns_ok = Self::namespace_exists(&state.namespace_name).await;
 
         if bridge_ok && ns_ok {
-            Ok("healthy".to_string())
-        } else {
-            let missing: Vec<&str> = [
-                if bridge_ok { None } else { Some("bridge") },
-                if ns_ok { None } else { Some("namespace") },
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            Ok(format!("degraded: missing {}", missing.join(", ")))
+            return Ok("healthy".to_string());
         }
+
+        let mut missing = Vec::new();
+        if !bridge_ok {
+            missing.push("bridge");
+        }
+        if !ns_ok {
+            missing.push("namespace");
+        }
+        Ok(format!("degraded: missing {}", missing.join(", ")))
     }
 
     async fn attach_vm_nic(

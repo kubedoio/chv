@@ -60,7 +60,8 @@ pub async fn get_quota(
     .await
     .map_err(|e| BffError::Internal(format!("failed to get quota: {}", e)))?;
 
-    let row = row.ok_or_else(|| BffError::NotFound(format!("quota for user {} not found", user_id)))?;
+    let row =
+        row.ok_or_else(|| BffError::NotFound(format!("quota for user {} not found", user_id)))?;
 
     Ok(Json(json!({
         "user_id": row.user_id,
@@ -173,7 +174,10 @@ pub async fn update_quota(
         .map_err(|e| BffError::Internal(format!("db error: {}", e)))?;
 
     if !exists {
-        return Err(BffError::NotFound(format!("quota for user {} not found", user_id)));
+        return Err(BffError::NotFound(format!(
+            "quota for user {} not found",
+            user_id
+        )));
     }
 
     let max_vms = payload.get("max_vms").and_then(|v| v.as_i64());
@@ -245,7 +249,7 @@ pub async fn get_usage(
     let vm_count: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM vms v
            JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
-           WHERE vds.requested_by = ?"#
+           WHERE vds.requested_by = ?"#,
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -261,7 +265,7 @@ pub async fn get_usage(
            FROM vm_desired_state vds
            LEFT JOIN volume_desired_state vd ON vd.attached_vm_id = vds.vm_id
            LEFT JOIN volumes vol ON vol.volume_id = vd.volume_id
-           WHERE vds.requested_by = ?"#
+           WHERE vds.requested_by = ?"#,
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -281,12 +285,14 @@ pub async fn get_usage(
     .await
     .map_err(|e| BffError::Internal(format!("failed to get quota: {}", e)))?;
 
-    let quota = quota_row.map(|r| json!({
-        "max_vms": r.max_vms,
-        "max_cpu": r.max_cpu,
-        "max_memory_gb": r.max_memory_bytes.map(|b| b / (1024 * 1024 * 1024)),
-        "max_storage_gb": r.max_storage_bytes.map(|b| b / (1024 * 1024 * 1024)),
-    }));
+    let quota = quota_row.map(|r| {
+        json!({
+            "max_vms": r.max_vms,
+            "max_cpu": r.max_cpu,
+            "max_memory_gb": r.max_memory_bytes.map(|b| b / (1024 * 1024 * 1024)),
+            "max_storage_gb": r.max_storage_bytes.map(|b| b / (1024 * 1024 * 1024)),
+        })
+    });
 
     Ok(Json(json!({
         "usage": {
@@ -306,8 +312,14 @@ pub async fn check_quota(
 ) -> Result<Json<Value>, BffError> {
     let user_id = &claims.sub;
 
-    let requested_vms = payload.get("requested_vms").and_then(|v| v.as_i64()).unwrap_or(1);
-    let requested_cpu = payload.get("requested_cpu").and_then(|v| v.as_i64()).unwrap_or(0);
+    let requested_vms = payload
+        .get("requested_vms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let requested_cpu = payload
+        .get("requested_cpu")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let requested_memory_bytes = payload
         .get("requested_memory_gb")
         .and_then(|v| v.as_i64())
@@ -345,7 +357,7 @@ pub async fn check_quota(
     let vm_count: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM vms v
            JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
-           WHERE vds.requested_by = ?"#
+           WHERE vds.requested_by = ?"#,
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -360,7 +372,7 @@ pub async fn check_quota(
            FROM vm_desired_state vds
            LEFT JOIN volume_desired_state vd ON vd.attached_vm_id = vds.vm_id
            LEFT JOIN volumes vol ON vol.volume_id = vd.volume_id
-           WHERE vds.requested_by = ?"#
+           WHERE vds.requested_by = ?"#,
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -375,22 +387,28 @@ pub async fn check_quota(
 
     if let Some(max) = quota.max_vms {
         if vm_count + requested_vms > max {
-            violations.push(format!("VM quota exceeded: {} + {} > {}", vm_count, requested_vms, max));
+            violations.push(format!(
+                "VM quota exceeded: {} + {} > {}",
+                vm_count, requested_vms, max
+            ));
         }
     }
     if let Some(max) = quota.max_cpu {
         if current_cpu + requested_cpu > max {
-            violations.push(format!("CPU quota exceeded: {} + {} > {}", current_cpu, requested_cpu, max));
+            violations.push(format!(
+                "CPU quota exceeded: {} + {} > {}",
+                current_cpu, requested_cpu, max
+            ));
         }
     }
     if let Some(max) = quota.max_memory_bytes {
         if current_memory + requested_memory_bytes > max {
-            violations.push(format!("Memory quota exceeded"));
+            violations.push("Memory quota exceeded".to_string());
         }
     }
     if let Some(max) = quota.max_storage_bytes {
         if current_storage + requested_storage_bytes > max {
-            violations.push(format!("Storage quota exceeded"));
+            violations.push("Storage quota exceeded".to_string());
         }
     }
 

@@ -181,12 +181,14 @@ impl EnrollmentService for EnrollmentServiceImplementation {
                 hypervisor_capabilities: if inventory.hypervisor_capabilities.is_empty() {
                     None
                 } else {
-                    Some(serde_json::to_value(&inventory.hypervisor_capabilities).map_err(|e| {
-                        ControlPlaneServiceError::Internal(format!(
-                            "failed to serialize hypervisor_capabilities: {}",
-                            e
-                        ))
-                    })?)
+                    Some(
+                        serde_json::to_value(&inventory.hypervisor_capabilities).map_err(|e| {
+                            ControlPlaneServiceError::Internal(format!(
+                                "failed to serialize hypervisor_capabilities: {}",
+                                e
+                            ))
+                        })?,
+                    )
                 },
                 reported_unix_ms: now,
             })
@@ -369,7 +371,7 @@ impl CertificateIssuer for CaBackedCertificateIssuer {
                 .serial_number
                 .as_ref()
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| chv_common::gen_short_id()),
+                .unwrap_or_else(chv_common::gen_short_id),
         })
     }
 }

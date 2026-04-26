@@ -6,7 +6,9 @@ use axum::{
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
+use lru::LruCache;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,15 +22,7 @@ pub struct ConsoleServer {
     vm_runtime: crate::vm_runtime::VmRuntime,
     jwt_secret: String,
     rate_limiter: Arc<Mutex<HashMap<String, Instant>>>,
-    consumed_tokens: Arc<Mutex<HashMap<String, Instant>>>,
-}
-
-#[derive(Clone)]
-struct ConsoleState {
-    vm_runtime: crate::vm_runtime::VmRuntime,
-    jwt_secret: String,
-    rate_limiter: Arc<Mutex<HashMap<String, Instant>>>,
-    consumed_tokens: Arc<Mutex<HashMap<String, Instant>>>,
+    consumed_tokens: Arc<Mutex<LruCache<String, Instant>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -42,7 +36,7 @@ struct ResizeMsg {
     rows: u16,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[allow(dead_code)]
 struct Claims {
     sub: String,
@@ -56,25 +50,20 @@ impl ConsoleServer {
             vm_runtime,
             jwt_secret,
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
-            consumed_tokens: Arc::new(Mutex::new(HashMap::new())),
+            consumed_tokens: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap()))),
         }
     }
 
     pub async fn try_bind(bind: &str) -> Result<TcpListener, chv_errors::ChvError> {
-        TcpListener::bind(bind).await.map_err(|e| chv_errors::ChvError::Io {
-            path: bind.to_string(),
-            source: e,
-        })
+        TcpListener::bind(bind)
+            .await
+            .map_err(|e| chv_errors::ChvError::Io {
+                path: bind.to_string(),
+                source: e,
+            })
     }
 
     fn router(self) -> Router {
-        let state = ConsoleState {
-            vm_runtime: self.vm_runtime.clone(),
-            jwt_secret: self.jwt_secret.clone(),
-            rate_limiter: self.rate_limiter.clone(),
-            consumed_tokens: self.consumed_tokens.clone(),
-        };
-
         // Spawn periodic cleanup of rate limiter and consumed token cache
         let rate_limiter = self.rate_limiter.clone();
         let consumed_tokens = self.consumed_tokens.clone();
@@ -88,21 +77,30 @@ impl ConsoleServer {
                     limits.retain(|_, last| now.duration_since(*last) < cutoff);
                 }
                 if let Ok(mut tokens) = consumed_tokens.lock() {
-                    tokens.retain(|_, last| now.duration_since(*last) < cutoff);
+                    let expired: Vec<String> = tokens
+                        .iter()
+                        .filter(|(_, last)| now.duration_since(**last) >= cutoff)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for k in expired {
+                        tokens.pop(&k);
+                    }
                 }
             }
         });
 
         Router::new()
             .route("/vms/:vm_id/console", get(Self::ws_handler))
-            .with_state(state)
+            .with_state(self)
     }
 
     pub async fn run(self, listener: TcpListener) -> Result<(), chv_errors::ChvError> {
         let app = self.router();
-        axum::serve(listener, app).await.map_err(|e| chv_errors::ChvError::Internal {
-            reason: format!("console server error: {}", e),
-        })?;
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| chv_errors::ChvError::Internal {
+                reason: format!("console server error: {}", e),
+            })?;
         Ok(())
     }
 
@@ -125,18 +123,18 @@ impl ConsoleServer {
 
     fn check_replay(
         token: &str,
-        consumed_tokens: &Arc<Mutex<HashMap<String, Instant>>>,
+        consumed_tokens: &Arc<Mutex<LruCache<String, Instant>>>,
     ) -> Option<Response> {
         let mut tokens = consumed_tokens.lock().unwrap();
-        if tokens.contains_key(token) {
+        if tokens.contains(token) {
             return Some(StatusCode::UNAUTHORIZED.into_response());
         }
-        tokens.insert(token.to_string(), Instant::now());
+        tokens.put(token.to_string(), Instant::now());
         None
     }
 
     async fn ws_handler(
-        State(state): State<ConsoleState>,
+        State(state): State<ConsoleServer>,
         Path(vm_id): Path<String>,
         Query(params): Query<ConsoleParams>,
         ws: WebSocketUpgrade,
@@ -164,42 +162,21 @@ impl ConsoleServer {
         vm_id: String,
         vm_runtime: crate::vm_runtime::VmRuntime,
     ) {
-        let pty_fd = {
-            let mut attempts = 0;
-            loop {
-                match vm_runtime.pty_master(&vm_id) {
-                    Some(fd) => break fd,
-                    None => {
-                        attempts += 1;
-                        if attempts >= 10 {
-                            tracing::warn!(vm_id = %vm_id, "no pty master for vm after 10 retries");
-                            return;
-                        }
-                        tracing::debug!(vm_id = %vm_id, attempt = attempts, "pty not ready, retrying");
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
-                }
-            }
+        let Some(pty_fd) =
+            Self::retry_fetch(|| vm_runtime.pty_master(&vm_id), &vm_id, "pty master").await
+        else {
+            return;
         };
-
         let raw_fd = pty_fd.as_raw_fd();
 
-        // Obtain broadcast channel for PTY output
-        let mut pty_rx = {
-            let mut attempts = 0;
-            loop {
-                match vm_runtime.pty_output_rx(&vm_id) {
-                    Some(rx) => break rx,
-                    None => {
-                        attempts += 1;
-                        if attempts >= 10 {
-                            tracing::warn!(vm_id = %vm_id, "no pty broadcast channel for vm after 10 retries");
-                            return;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
-                }
-            }
+        let Some(mut pty_rx) = Self::retry_fetch(
+            || vm_runtime.pty_output_rx(&vm_id),
+            &vm_id,
+            "pty broadcast channel",
+        )
+        .await
+        else {
+            return;
         };
 
         let (mut ws_tx, mut ws_rx) = socket.split();
@@ -248,24 +225,24 @@ impl ConsoleServer {
             let mut pty_writer = tokio_file;
 
             while let Some(result) = ws_rx.next().await {
-                match result {
-                    Ok(axum::extract::ws::Message::Text(text)) => {
+                let Ok(msg) = result else {
+                    break;
+                };
+                #[allow(clippy::collapsible_match)]
+                match msg {
+                    axum::extract::ws::Message::Text(text) => {
                         if let Ok(resize) = serde_json::from_str::<ResizeMsg>(&text) {
                             set_pty_size(raw_fd, resize.cols, resize.rows);
                         } else if pty_writer.write_all(text.as_bytes()).await.is_err() {
                             break;
                         }
                     }
-                    Ok(axum::extract::ws::Message::Binary(data)) => {
+                    axum::extract::ws::Message::Binary(data) => {
                         if pty_writer.write_all(&data).await.is_err() {
                             break;
                         }
                     }
-                    Ok(axum::extract::ws::Message::Close(_)) => break,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "websocket receive error");
-                        break;
-                    }
+                    axum::extract::ws::Message::Close(_) => break,
                     _ => {}
                 }
             }
@@ -281,6 +258,25 @@ impl ConsoleServer {
         }
 
         drop(pty_fd);
+    }
+
+    /// Retry an operation up to 10 times with 500 ms delays.
+    async fn retry_fetch<T, F>(mut fetch: F, vm_id: &str, resource_name: &str) -> Option<T>
+    where
+        F: FnMut() -> Option<T>,
+    {
+        for attempt in 1..=10 {
+            if let Some(val) = fetch() {
+                return Some(val);
+            }
+            if attempt == 10 {
+                tracing::warn!(vm_id = %vm_id, "no {} for vm after 10 retries", resource_name);
+                return None;
+            }
+            tracing::debug!(vm_id = %vm_id, attempt = attempt, "{} not ready, retrying", resource_name);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        None
     }
 }
 
@@ -300,7 +296,10 @@ fn set_pty_size(fd: std::os::fd::RawFd, cols: u16, rows: u16) {
 
 /// Validate a JWT token against the given secret using HS256.
 /// Returns Ok(Claims) if the token is valid and not expired, Err otherwise.
-fn validate_console_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+fn validate_console_token(
+    token: &str,
+    secret: &str,
+) -> Result<Claims, jsonwebtoken::errors::Error> {
     let decoding_key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
@@ -317,13 +316,11 @@ mod tests {
     }
 
     fn encode_claims(sub: &str, username: &str, exp: u64, secret: &str) -> String {
-        #[derive(serde::Serialize)]
-        struct TestClaims<'a> {
-            sub: &'a str,
-            username: &'a str,
-            exp: u64,
-        }
-        let claims = TestClaims { sub, username, exp };
+        let claims = Claims {
+            sub: sub.to_string(),
+            username: username.to_string(),
+            exp,
+        };
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
         jsonwebtoken::encode(
             &header,
@@ -345,7 +342,11 @@ mod tests {
     fn valid_jwt_is_accepted() {
         let token = encode_claims("user-1", "admin", future_exp(), &test_secret());
         let result = validate_console_token(&token, &test_secret());
-        assert!(result.is_ok(), "valid JWT should be accepted, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "valid JWT should be accepted, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -372,7 +373,10 @@ mod tests {
     fn wrong_secret_is_rejected() {
         let token = encode_claims("user-1", "admin", future_exp(), "wrong-secret");
         let result = validate_console_token(&token, &test_secret());
-        assert!(result.is_err(), "token signed with wrong secret should be rejected");
+        assert!(
+            result.is_err(),
+            "token signed with wrong secret should be rejected"
+        );
     }
 
     #[tokio::test]
@@ -462,13 +466,16 @@ mod tests {
         assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
         assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_some());
         // Manually expire the entry
-        rate_limiter.lock().unwrap().insert("vm-1".to_string(), Instant::now() - Duration::from_secs(10));
+        rate_limiter
+            .lock()
+            .unwrap()
+            .insert("vm-1".to_string(), Instant::now() - Duration::from_secs(10));
         assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
     }
 
     #[test]
     fn replay_prevention_blocks_reused_token() {
-        let consumed = Arc::new(Mutex::new(HashMap::new()));
+        let consumed = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap())));
         let token = "token-abc";
         // First use should pass
         assert!(ConsoleServer::check_replay(token, &consumed).is_none());

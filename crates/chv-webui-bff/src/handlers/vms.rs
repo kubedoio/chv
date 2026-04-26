@@ -2,9 +2,9 @@ use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
 
 use crate::handlers::hypervisor_settings::validate_vm_overrides;
-use chv_common::hypervisor::HypervisorOverrides;
 use crate::router::AppState;
 use crate::BffError;
+use chv_common::hypervisor::HypervisorOverrides;
 
 pub async fn list_vms(
     crate::auth::BearerToken(_claims): crate::auth::BearerToken,
@@ -332,7 +332,7 @@ pub async fn create_vm(
     if image_ref != "default" && !image_ref.is_empty() {
         tracing::info!(%image_ref, "create_vm: looking up image in DB");
         if let Some(source_url) = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT source_url FROM images WHERE image_id = ?"
+            "SELECT source_url FROM images WHERE image_id = ?",
         )
         .bind(&image_ref)
         .fetch_optional(&state.pool)
@@ -381,9 +381,15 @@ pub async fn create_vm(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
-    // Enforce quota before creating anything
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    // Enforce quota inside the transaction to avoid races
     enforce_user_quota(
-        &state.pool,
+        &mut tx,
         &claims.username,
         cpu_count,
         memory_bytes,
@@ -394,12 +400,7 @@ pub async fn create_vm(
     let vm_id = chv_common::gen_short_id();
     let volume_id = chv_common::gen_short_id();
     let operation_id = chv_common::gen_short_id();
-    tracing::info!(%vm_id, %volume_id, %operation_id, "create_vm: generated IDs, beginning transaction");
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+    tracing::info!(%vm_id, %volume_id, %operation_id, "create_vm: generated IDs, continuing transaction");
 
     // Insert VM
     sqlx::query(
@@ -482,7 +483,9 @@ pub async fn create_vm(
         .bind(&vm_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| BffError::Internal(format!("failed to persist hypervisor overrides: {}", e)))?;
+        .map_err(|e| {
+            BffError::Internal(format!("failed to persist hypervisor overrides: {}", e))
+        })?;
     }
 
     // Insert volume
@@ -566,7 +569,7 @@ pub async fn create_vm(
 
     // Fetch network CIDR for IP generation
     let network_cidr: String = sqlx::query_scalar(
-        "SELECT COALESCE(cidr, '') FROM network_desired_state WHERE network_id = ?"
+        "SELECT COALESCE(cidr, '') FROM network_desired_state WHERE network_id = ?",
     )
     .bind(&network_id)
     .fetch_one(&mut *tx)
@@ -751,7 +754,11 @@ pub async fn get_vm_console(
         return Err(BffError::BadRequest("invalid vm_id format".into()));
     }
 
-    let log_path = state.agent_runtime_dir.join("vms").join(vm_id).join("console.log");
+    let log_path = state
+        .agent_runtime_dir
+        .join("vms")
+        .join(vm_id)
+        .join("console.log");
     let log_content = tokio::fs::read_to_string(&log_path)
         .await
         .unwrap_or_default();
@@ -759,7 +766,11 @@ pub async fn get_vm_console(
     // Return last 500 lines
     let line_count = log_content.lines().count();
     let tail = if line_count > 500 {
-        log_content.lines().skip(line_count - 500).collect::<Vec<_>>().join("\n")
+        log_content
+            .lines()
+            .skip(line_count - 500)
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         log_content
     };
@@ -811,12 +822,11 @@ pub async fn get_vm_console_url(
         return Err(BffError::BadRequest("invalid vm_id format".into()));
     }
 
-    let node_id: Option<String> =
-        sqlx::query_scalar("SELECT node_id FROM vms WHERE vm_id = ?")
-            .bind(&vm_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?;
+    let node_id: Option<String> = sqlx::query_scalar("SELECT node_id FROM vms WHERE vm_id = ?")
+        .bind(&vm_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?;
 
     let _node_id = node_id.ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
 
@@ -894,7 +904,7 @@ struct VmNicRow {
 /// Check if creating a VM would exceed the user's quota.
 /// Returns Ok(()) if allowed, Err(BffError) if quota would be exceeded.
 pub(crate) async fn enforce_user_quota(
-    pool: &sqlx::SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     user_id: &str,
     requested_cpu: i64,
     requested_memory_bytes: i64,
@@ -904,7 +914,7 @@ pub(crate) async fn enforce_user_quota(
         "SELECT max_vms, max_cpu, max_memory_bytes, max_storage_bytes FROM quotas WHERE user_id = ?"
     )
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| BffError::Internal(format!("failed to check quota: {}", e)))?;
 
@@ -913,63 +923,74 @@ pub(crate) async fn enforce_user_quota(
         None => return Ok(()),
     };
 
-    let vm_count: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM vms v
-           JOIN vm_desired_state vds ON v.vm_id = vds.vm_id
-           WHERE vds.requested_by = ?"#
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to count vms: {}", e)))?;
+    let vm_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM vm_desired_state WHERE requested_by = ?")
+            .bind(user_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to count vms: {}", e)))?;
 
-    let usage_row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>)>(
-        r#"SELECT
-             COALESCE(SUM(vds.cpu_count), 0),
-             COALESCE(SUM(vds.memory_bytes), 0),
-             COALESCE(SUM(vol.capacity_bytes), 0)
-           FROM vm_desired_state vds
-           LEFT JOIN volume_desired_state vd ON vd.attached_vm_id = vds.vm_id
-           LEFT JOIN volumes vol ON vol.volume_id = vd.volume_id
-           WHERE vds.requested_by = ?"#
+    let usage_row = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+        "SELECT COALESCE(SUM(cpu_count), 0), COALESCE(SUM(memory_bytes), 0) FROM vm_desired_state WHERE requested_by = ?"
     )
     .bind(user_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .map_err(|e| BffError::Internal(format!("failed to compute usage: {}", e)))?;
 
     let current_cpu = usage_row.0.unwrap_or(0);
     let current_memory = usage_row.1.unwrap_or(0);
-    let current_storage = usage_row.2.unwrap_or(0);
+
+    let current_storage: i64 = sqlx::query_scalar(
+        r#"SELECT COALESCE(SUM(v.capacity_bytes), 0)
+           FROM volumes v
+           JOIN volume_desired_state vd ON v.volume_id = vd.volume_id
+           JOIN vm_desired_state vds ON vd.attached_vm_id = vds.vm_id
+           WHERE vds.requested_by = ?"#,
+    )
+    .bind(user_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to compute storage usage: {}", e)))?;
 
     if let Some(max) = quota.0 {
         if vm_count + 1 > max {
-            return Err(BffError::BadRequest(format!(
-                "VM quota exceeded: {} of {} VMs used",
-                vm_count, max
-            )));
+            return Err(BffError::QuotaExceeded {
+                resource: "vms".to_string(),
+                limit: max,
+                used: vm_count,
+                requested: 1,
+            });
         }
     }
     if let Some(max) = quota.1 {
         if current_cpu + requested_cpu > max {
-            return Err(BffError::BadRequest(format!(
-                "CPU quota exceeded: {} + {} = {} cores, limit is {}",
-                current_cpu, requested_cpu, current_cpu + requested_cpu, max
-            )));
+            return Err(BffError::QuotaExceeded {
+                resource: "vcpus".to_string(),
+                limit: max,
+                used: current_cpu,
+                requested: requested_cpu,
+            });
         }
     }
     if let Some(max) = quota.2 {
         if current_memory + requested_memory_bytes > max {
-            return Err(BffError::BadRequest(
-                "Memory quota exceeded".into()
-            ));
+            return Err(BffError::QuotaExceeded {
+                resource: "memory".to_string(),
+                limit: max,
+                used: current_memory,
+                requested: requested_memory_bytes,
+            });
         }
     }
     if let Some(max) = quota.3 {
         if current_storage + requested_storage_bytes > max {
-            return Err(BffError::BadRequest(
-                "Storage quota exceeded".into()
-            ));
+            return Err(BffError::QuotaExceeded {
+                resource: "disk".to_string(),
+                limit: max,
+                used: current_storage,
+                requested: requested_storage_bytes,
+            });
         }
     }
 
@@ -1019,7 +1040,11 @@ pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
     let (base_str, prefix_str) = cidr.split_once('/').unwrap_or((cidr, "24"));
     let prefix: u32 = prefix_str.parse().unwrap_or(24);
     let host_bits = 32u32.saturating_sub(prefix);
-    let total_hosts = if host_bits >= 32 { 1u32 } else { 1u32 << host_bits };
+    let total_hosts = if host_bits >= 32 {
+        1u32
+    } else {
+        1u32 << host_bits
+    };
     let usable_hosts = total_hosts.saturating_sub(3).max(1); // exclude network, gateway, broadcast
 
     // Parse base IP into u32
@@ -1029,7 +1054,11 @@ pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
         .fold(0u32, |acc, octet| (acc << 8) | octet as u32);
 
     // Network address (masked)
-    let mask = if prefix >= 32 { 0xFFFFFFFF } else { 0xFFFFFFFFu32 << (32 - prefix) };
+    let mask = if prefix >= 32 {
+        0xFFFFFFFF
+    } else {
+        0xFFFFFFFFu32 << (32 - prefix)
+    };
     let network_u32 = base_u32 & mask;
 
     // Deterministic offset from hash of vm_id + network_id

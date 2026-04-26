@@ -14,7 +14,9 @@ use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
 
-use crate::adapter::{AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo};
+use crate::adapter::{
+    AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo,
+};
 
 const CONSOLE_SCROLLBACK_BYTES: usize = 256 * 1024;
 
@@ -63,6 +65,24 @@ impl ProcessCloudHypervisorAdapter {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    fn get_vm_socket(&self, vm_id: &str) -> Result<std::path::PathBuf, ChvError> {
+        let vms = self.vms.lock().unwrap();
+        let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
+            resource: "vm".to_string(),
+            id: vm_id.to_string(),
+        })?;
+        Ok(proc.api_socket.clone())
+    }
+
+    fn expect_status(status: u16, endpoint: &str) -> Result<(), ChvError> {
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!("{} returned unexpected status {}", endpoint, status),
+            });
+        }
+        Ok(())
     }
 
     async fn ch_api_request(
@@ -125,7 +145,7 @@ impl ProcessCloudHypervisorAdapter {
                     let content_length = headers
                         .lines()
                         .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
-                        .and_then(|l| l.splitn(2, ':').nth(1))
+                        .and_then(|l| l.split_once(':').map(|x| x.1))
                         .and_then(|v| v.trim().parse::<usize>().ok())
                         .unwrap_or(0);
                     let body_start = header_end + 4;
@@ -169,7 +189,10 @@ impl ProcessCloudHypervisorAdapter {
         if config.api_socket_path.parent().is_none() {
             return Err(ChvError::InvalidArgument {
                 field: "api_socket_path".to_string(),
-                reason: format!("api_socket_path has no parent directory: {}", config.api_socket_path.display()),
+                reason: format!(
+                    "api_socket_path has no parent directory: {}",
+                    config.api_socket_path.display()
+                ),
             });
         }
         if let Some(ref fw) = config.firmware_path {
@@ -246,23 +269,29 @@ async fn build_cloud_init_seed(
     nics: &[crate::adapter::VmNicConfig],
 ) -> Result<std::path::PathBuf, ChvError> {
     let seed_dir = vm_dir.join("seed");
-    tokio::fs::create_dir_all(&seed_dir).await.map_err(|e| ChvError::Io {
-        path: seed_dir.to_string_lossy().to_string(),
-        source: e,
-    })?;
+    tokio::fs::create_dir_all(&seed_dir)
+        .await
+        .map_err(|e| ChvError::Io {
+            path: seed_dir.to_string_lossy().to_string(),
+            source: e,
+        })?;
 
     let meta_data = format!("instance-id: {}\nlocal-hostname: {}\n", vm_id, vm_id);
-    tokio::fs::write(seed_dir.join("meta-data"), meta_data.as_bytes()).await.map_err(|e| ChvError::Io {
-        path: seed_dir.join("meta-data").to_string_lossy().to_string(),
-        source: e,
-    })?;
+    tokio::fs::write(seed_dir.join("meta-data"), meta_data.as_bytes())
+        .await
+        .map_err(|e| ChvError::Io {
+            path: seed_dir.join("meta-data").to_string_lossy().to_string(),
+            source: e,
+        })?;
 
     let default_userdata = "#cloud-config\nusers:\n  - name: ubuntu\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    plain_text_passwd: ubuntu\n    lock_passwd: false\nchpasswd:\n  expire: false\nssh_pwauth: true\n";
     let user_data = userdata.unwrap_or(default_userdata);
-    tokio::fs::write(seed_dir.join("user-data"), user_data.as_bytes()).await.map_err(|e| ChvError::Io {
-        path: seed_dir.join("user-data").to_string_lossy().to_string(),
-        source: e,
-    })?;
+    tokio::fs::write(seed_dir.join("user-data"), user_data.as_bytes())
+        .await
+        .map_err(|e| ChvError::Io {
+            path: seed_dir.join("user-data").to_string_lossy().to_string(),
+            source: e,
+        })?;
 
     // Generate network-config v2 with MAC-matched static IPs from the control plane IPAM.
     let mut network_config = String::from("version: 2\nethernets:\n");
@@ -300,16 +329,24 @@ async fn build_cloud_init_seed(
         network_config.push_str("  id0:\n    match:\n      driver: virtio*\n    dhcp4: true\n");
     }
 
-    tokio::fs::write(seed_dir.join("network-config"), network_config.as_bytes()).await.map_err(|e| ChvError::Io {
-        path: seed_dir.join("network-config").to_string_lossy().to_string(),
-        source: e,
-    })?;
+    tokio::fs::write(seed_dir.join("network-config"), network_config.as_bytes())
+        .await
+        .map_err(|e| ChvError::Io {
+            path: seed_dir
+                .join("network-config")
+                .to_string_lossy()
+                .to_string(),
+            source: e,
+        })?;
 
     let seed_iso = vm_dir.join("seed.iso");
     let output = tokio::process::Command::new("genisoimage")
-        .arg("-output").arg(&seed_iso)
-        .arg("-volid").arg("cidata")
-        .arg("-joliet").arg("-rock")
+        .arg("-output")
+        .arg(&seed_iso)
+        .arg("-volid")
+        .arg("cidata")
+        .arg("-joliet")
+        .arg("-rock")
         .arg(seed_dir.join("user-data"))
         .arg(seed_dir.join("meta-data"))
         .arg(seed_dir.join("network-config"))
@@ -321,7 +358,10 @@ async fn build_cloud_init_seed(
 
     if !output.status.success() {
         return Err(ChvError::Internal {
-            reason: format!("genisoimage failed: {}", String::from_utf8_lossy(&output.stderr)),
+            reason: format!(
+                "genisoimage failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
         });
     }
 
@@ -399,7 +439,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let mut cmd = tokio::process::Command::new(&self.chv_binary);
         cmd.arg("--api-socket").arg(&config.api_socket_path);
 
-        let vm_runtime_dir = config.api_socket_path
+        let vm_runtime_dir = config
+            .api_socket_path
             .parent()
             .expect("api_socket_path must have a parent directory");
 
@@ -413,10 +454,15 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // The ISO carries the control-plane-assigned static IP configuration so
         // cloud-init images (e.g. Ubuntu cloud images) come up on the correct network.
         let has_nics = !config.nics.is_empty();
-        let has_userdata = config.cloud_init_userdata.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let has_userdata = config
+            .cloud_init_userdata
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
         let seed_iso_path = if has_nics || has_userdata {
             let userdata = config.cloud_init_userdata.as_deref();
-            match build_cloud_init_seed(vm_runtime_dir, &config.vm_id, userdata, &config.nics).await {
+            match build_cloud_init_seed(vm_runtime_dir, &config.vm_id, userdata, &config.nics).await
+            {
                 Ok(path) => Some(path),
                 Err(e) => {
                     warn!(vm_id = %config.vm_id, error = %e, "failed to build cloud-init seed ISO, continuing without it");
@@ -435,7 +481,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             .append(true)
             .open(&stderr_log_path);
         match stderr_file {
-            Ok(f) => { cmd.stderr(Stdio::from(f)); }
+            Ok(f) => {
+                cmd.stderr(Stdio::from(f));
+            }
             Err(e) => {
                 warn!(error = %e, path = %stderr_log_path.display(), "failed to open stderr log, falling back to null");
                 cmd.stderr(Stdio::null());
@@ -488,25 +536,31 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Build VM config JSON and create VM via REST API (supports multiple disks)
         let mut disks_json = Vec::new();
         for disk in &config.disks {
-            let mut d = serde_json::Map::new();
-            d.insert("path".into(), serde_json::Value::from(disk.path.to_string_lossy().to_string()));
+            let mut disk_obj = serde_json::Map::new();
+            disk_obj.insert(
+                "path".into(),
+                serde_json::Value::from(disk.path.to_string_lossy().to_string()),
+            );
             if disk.read_only {
-                d.insert("readonly".into(), serde_json::Value::from(true));
+                disk_obj.insert("readonly".into(), serde_json::Value::from(true));
             }
             let image_type = if disk.path.extension().map(|e| e == "qcow2").unwrap_or(false) {
                 "Qcow2"
             } else {
                 "Raw"
             };
-            d.insert("image_type".into(), serde_json::Value::from(image_type));
-            disks_json.push(serde_json::Value::Object(d));
+            disk_obj.insert("image_type".into(), serde_json::Value::from(image_type));
+            disks_json.push(serde_json::Value::Object(disk_obj));
         }
         if let Some(ref seed_path) = seed_iso_path {
-            let mut d = serde_json::Map::new();
-            d.insert("path".into(), serde_json::Value::from(seed_path.to_string_lossy().to_string()));
-            d.insert("readonly".into(), serde_json::Value::from(true));
-            d.insert("image_type".into(), serde_json::Value::from("Raw"));
-            disks_json.push(serde_json::Value::Object(d));
+            let mut disk_obj = serde_json::Map::new();
+            disk_obj.insert(
+                "path".into(),
+                serde_json::Value::from(seed_path.to_string_lossy().to_string()),
+            );
+            disk_obj.insert("readonly".into(), serde_json::Value::from(true));
+            disk_obj.insert("image_type".into(), serde_json::Value::from("Raw"));
+            disks_json.push(serde_json::Value::Object(disk_obj));
         }
 
         let mut net_json = Vec::new();
@@ -515,17 +569,26 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 warn!(mac = %nic.mac_address, "skipping NIC with empty tap_name");
                 continue;
             }
-            let mut n = serde_json::Map::new();
-            n.insert("mac".into(), serde_json::Value::from(nic.mac_address.clone()));
-            n.insert("tap".into(), serde_json::Value::from(nic.tap_name.clone()));
-            net_json.push(serde_json::Value::Object(n));
+            let mut net_obj = serde_json::Map::new();
+            net_obj.insert(
+                "mac".into(),
+                serde_json::Value::from(nic.mac_address.clone()),
+            );
+            net_obj.insert("tap".into(), serde_json::Value::from(nic.tap_name.clone()));
+            net_json.push(serde_json::Value::Object(net_obj));
         }
 
         let mut payload = serde_json::Map::new();
         if let Some(ref fw) = config.firmware_path {
-            payload.insert("firmware".into(), serde_json::Value::from(fw.to_string_lossy().to_string()));
+            payload.insert(
+                "firmware".into(),
+                serde_json::Value::from(fw.to_string_lossy().to_string()),
+            );
         } else {
-            payload.insert("kernel".into(), serde_json::Value::from(config.kernel_path.to_string_lossy().to_string()));
+            payload.insert(
+                "kernel".into(),
+                serde_json::Value::from(config.kernel_path.to_string_lossy().to_string()),
+            );
         }
 
         let hv = config.hypervisor_overrides.as_ref();
@@ -546,12 +609,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             memory["prefault"] = serde_json::json!(v);
         }
 
-        let serial_mode = hv
-            .and_then(|h| h.serial_mode.as_deref())
-            .unwrap_or("Pty");
-        let console_mode = hv
-            .and_then(|h| h.console_mode.as_deref())
-            .unwrap_or("Off");
+        let serial_mode = hv.and_then(|h| h.serial_mode.as_deref()).unwrap_or("Pty");
+        let console_mode = hv.and_then(|h| h.console_mode.as_deref()).unwrap_or("Off");
 
         let mut vm_config_json = serde_json::json!({
             "cpus": cpus,
@@ -563,7 +622,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             "console": { "mode": console_mode },
         });
 
-        if let Some(true) = hv.and_then(|h| h.cpu_kvm_hyperv).or_else(|| hv.and_then(|h| h.cpu_nested)) {
+        if let Some(true) = hv.and_then(|h| h.cpu_kvm_hyperv) {
             vm_config_json["platform"] = serde_json::json!({ "kvm_hyperv": true });
         }
         if let Some(v) = hv.and_then(|h| h.iommu) {
@@ -599,22 +658,29 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let body = vm_config_json.to_string();
         let (create_status, create_body) = Self::ch_api_request_with_body(
-            &config.api_socket_path, "PUT", "/api/v1/vm.create", Some(&body),
-        ).await?;
+            &config.api_socket_path,
+            "PUT",
+            "/api/v1/vm.create",
+            Some(&body),
+        )
+        .await?;
 
         if create_status != 200 && create_status != 204 {
             let _ = child.start_kill();
             let _ = child.wait().await;
             let _ = tokio::fs::remove_file(&config.api_socket_path).await;
             return Err(ChvError::Internal {
-                reason: format!("vm.create returned status {} for vm {}: {}", create_status, config.vm_id, create_body),
+                reason: format!(
+                    "vm.create returned status {} for vm {}: {}",
+                    create_status, config.vm_id, create_body
+                ),
             });
         }
 
         // Query CHV for the PTY slave path it created for the serial device.
-        let (info_status, info_body) = Self::ch_api_request_with_body(
-            &config.api_socket_path, "GET", "/api/v1/vm.info", None,
-        ).await?;
+        let (info_status, info_body) =
+            Self::ch_api_request_with_body(&config.api_socket_path, "GET", "/api/v1/vm.info", None)
+                .await?;
         let slave_path = if info_status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
                 v.pointer("/config/serial/file")
@@ -625,10 +691,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         } else {
             None
-        }.ok_or_else(|| {
+        }
+        .ok_or_else(|| {
             let _ = child.start_kill();
             ChvError::Internal {
-                reason: format!("vm.info did not return serial PTY path for vm {}", config.vm_id),
+                reason: format!(
+                    "vm.info did not return serial PTY path for vm {}",
+                    config.vm_id
+                ),
             }
         })?;
 
@@ -648,10 +718,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // keystrokes — we want every byte forwarded to the guest immediately.
         if let Ok(mut term) = nix::sys::termios::tcgetattr(&pty_slave) {
             nix::sys::termios::cfmakeraw(&mut term);
-            let _ = nix::sys::termios::tcsetattr(&pty_slave, nix::sys::termios::SetArg::TCSANOW, &term);
+            let _ =
+                nix::sys::termios::tcsetattr(&pty_slave, nix::sys::termios::SetArg::TCSANOW, &term);
         }
         let pty_fd_raw = pty_slave.into_raw_fd();
-        let _ = nix::fcntl::fcntl(pty_fd_raw, nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC));
+        let _ = nix::fcntl::fcntl(
+            pty_fd_raw,
+            nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        );
 
         info!(
             vm_id = %config.vm_id,
@@ -728,8 +802,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let (api_socket, pty_master_fd, pty_tx, pty_scrollback, broadcaster_alive) = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
+            let vms = self.vms.lock().unwrap();
+            let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
                 id: vm_id.to_string(),
             })?;
@@ -756,8 +830,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         }
 
-        let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
+        let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
         if status != 200 && status != 204 {
             warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
         }
@@ -787,14 +860,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         force: bool,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, force = force, op = operation_id.unwrap_or("-"), "stopping vm");
 
@@ -833,7 +899,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             while start.elapsed() < std::time::Duration::from_secs(10) {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if let Ok((200, body)) =
-                    Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await
+                    Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None)
+                        .await
                 {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                         let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
@@ -851,8 +918,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // in the map so a later vm.boot can restart it; we truncate the
             // on-disk log so the existing writer task can continue appending.
             let (pty_scrollback, log_path) = {
-                let map = self.vms.lock().unwrap();
-                let proc = map.get(vm_id);
+                let vms = self.vms.lock().unwrap();
+                let proc = vms.get(vm_id);
                 (
                     proc.map(|p| p.pty_scrollback.clone()),
                     proc.and_then(|p| p.api_socket.parent().map(|d| d.join("console.log"))),
@@ -871,8 +938,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     .open(&path)
                     .await
                 {
-                    Ok(_) => info!(vm_id = %vm_id, path = %path.display(), "truncated console.log on graceful stop"),
-                    Err(e) => warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to truncate console.log"),
+                    Ok(_) => {
+                        info!(vm_id = %vm_id, path = %path.display(), "truncated console.log on graceful stop")
+                    }
+                    Err(e) => {
+                        warn!(vm_id = %vm_id, path = %path.display(), error = %e, "failed to truncate console.log")
+                    }
                 }
             }
         }
@@ -897,19 +968,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
 
-        let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
+        let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.reboot", None).await?;
         if status != 200 && status != 204 {
             warn!(status = status, "unexpected status from vm.reboot");
         }
@@ -923,14 +986,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         memory_bytes: Option<u64>,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, ?cpus, ?memory_bytes, op = operation_id.unwrap_or("-"), "resizing vm via ch api");
 
@@ -945,23 +1001,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resize", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.resize returned unexpected status {}", status),
-            });
-        }
+        Self::expect_status(status, "vm.resize")?;
         Ok(())
     }
 
     async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         let (status, body) =
             Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
@@ -971,20 +1016,21 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
-        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| ChvError::Internal {
-            reason: format!("failed to parse vm.info response: {}", e),
-        })?;
+        let response_json: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| ChvError::Internal {
+                reason: format!("failed to parse vm.info response: {}", e),
+            })?;
 
-        let state = v
+        let state = response_json
             .get("state")
             .and_then(|s| s.as_str())
             .unwrap_or("Unknown")
             .to_string();
-        let cpus = v
+        let cpus = response_json
             .pointer("/config/cpus/boot_vcpus")
             .and_then(|c| c.as_u64())
             .unwrap_or(0) as u32;
-        let memory_bytes = v
+        let memory_bytes = response_json
             .pointer("/config/memory/size")
             .and_then(|m| m.as_u64())
             .unwrap_or(0);
@@ -997,14 +1043,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn vm_counters(&self, vm_id: &str) -> Result<VmCounters, ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         let (status, body) =
             Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.counters", None).await?;
@@ -1014,12 +1053,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             });
         }
 
-        let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| ChvError::Internal {
-            reason: format!("failed to parse vm.counters response: {}", e),
-        })?;
+        let response_json: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| ChvError::Internal {
+                reason: format!("failed to parse vm.counters response: {}", e),
+            })?;
 
         // CPU usage is reported in seconds; compute percentage from delta across ticks.
-        let cpu_seconds = v
+        let cpu_seconds = response_json
             .pointer("/cpus/usage/cpu_seconds")
             .and_then(|c| c.as_f64())
             .unwrap_or(0.0);
@@ -1047,7 +1087,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let mut net_rx = 0u64;
         let mut net_tx = 0u64;
-        if let Some(net) = v.get("net").and_then(|n| n.as_object()) {
+        if let Some(net) = response_json.get("net").and_then(|n| n.as_object()) {
             for (_iface, counters) in net {
                 if let Some(obj) = counters.as_object() {
                     net_rx += obj.get("rx_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -1058,7 +1098,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let mut disk_read = 0u64;
         let mut disk_written = 0u64;
-        if let Some(block) = v.get("block").and_then(|b| b.as_object()) {
+        if let Some(block) = response_json.get("block").and_then(|b| b.as_object()) {
             for (_dev, counters) in block {
                 if let Some(obj) = counters.as_object() {
                     disk_read += obj.get("read_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -1069,7 +1109,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         // Memory counters are not exposed by vm.counters; use vm.info config as total
         // and report 0 for used (CH does not expose guest memory usage).
-        let memory_total = v
+        let memory_total = response_json
             .pointer("/memory/available")
             .and_then(|m| m.as_u64())
             .unwrap_or(0);
@@ -1091,25 +1131,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         destination: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "snapshotting vm via ch api");
 
         let body = format!(r#"{{"destination_url":"file://{}"}}"#, destination);
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.snapshot", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.snapshot returned unexpected status {}", status),
-            });
-        }
+        Self::expect_status(status, "vm.snapshot")?;
         Ok(())
     }
 
@@ -1119,91 +1148,45 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         source: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, source = %source, op = operation_id.unwrap_or("-"), "restoring snapshot via ch api");
 
         let body = format!(r#"{{"source_url":"file://{}"}}"#, source);
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.restore", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.restore returned unexpected status {}", status),
-            });
-        }
+        Self::expect_status(status, "vm.restore")?;
         Ok(())
     }
 
     async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "pausing vm via ch api");
 
-        let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.pause", None).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.pause returned unexpected status {}", status),
-            });
-        }
+        let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.pause", None).await?;
+        Self::expect_status(status, "vm.pause")?;
         Ok(())
     }
 
     async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "resuming vm via ch api");
 
-        let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resume", None).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.resume returned unexpected status {}", status),
-            });
-        }
+        let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resume", None).await?;
+        Self::expect_status(status, "vm.resume")?;
         Ok(())
     }
 
     async fn power_button(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "sending ACPI power button via ch api");
 
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.power-button", None).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.power-button returned unexpected status {}", status),
-            });
-        }
+        Self::expect_status(status, "vm.power-button")?;
         Ok(())
     }
 
@@ -1213,32 +1196,28 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         params: &AddDiskParams,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, path = %params.path.display(), op = operation_id.unwrap_or("-"), "hot-adding disk via ch api");
 
         let mut obj = serde_json::Map::new();
-        obj.insert("path".to_string(), serde_json::Value::from(params.path.to_string_lossy().to_string()));
-        obj.insert("readonly".to_string(), serde_json::Value::from(params.read_only));
+        obj.insert(
+            "path".to_string(),
+            serde_json::Value::from(params.path.to_string_lossy().to_string()),
+        );
+        obj.insert(
+            "readonly".to_string(),
+            serde_json::Value::from(params.read_only),
+        );
         if let Some(ref id) = params.id {
             obj.insert("id".to_string(), serde_json::Value::from(id.clone()));
         }
         let body = serde_json::Value::Object(obj).to_string();
 
         let (status, response_body) =
-            Self::ch_api_request_with_body(&api_socket, "PUT", "/api/v1/vm.add-disk", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.add-disk returned unexpected status {}", status),
-            });
-        }
+            Self::ch_api_request_with_body(&api_socket, "PUT", "/api/v1/vm.add-disk", Some(&body))
+                .await?;
+        Self::expect_status(status, "vm.add-disk")?;
         Ok(response_body)
     }
 
@@ -1248,25 +1227,15 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         device_id: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, device_id = %device_id, op = operation_id.unwrap_or("-"), "hot-removing device via ch api");
 
         let body = format!(r#"{{"id":"{}"}}"#, device_id);
         let status =
-            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.remove-device", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.remove-device returned unexpected status {}", status),
-            });
-        }
+            Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.remove-device", Some(&body))
+                .await?;
+        Self::expect_status(status, "vm.remove-device")?;
         Ok(())
     }
 
@@ -1276,32 +1245,28 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         params: &AddNetParams,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, tap = %params.tap_name, mac = %params.mac_address, op = operation_id.unwrap_or("-"), "hot-adding net via ch api");
 
         let mut obj = serde_json::Map::new();
-        obj.insert("tap".to_string(), serde_json::Value::from(params.tap_name.clone()));
-        obj.insert("mac".to_string(), serde_json::Value::from(params.mac_address.clone()));
+        obj.insert(
+            "tap".to_string(),
+            serde_json::Value::from(params.tap_name.clone()),
+        );
+        obj.insert(
+            "mac".to_string(),
+            serde_json::Value::from(params.mac_address.clone()),
+        );
         if let Some(ref id) = params.id {
             obj.insert("id".to_string(), serde_json::Value::from(id.clone()));
         }
         let body = serde_json::Value::Object(obj).to_string();
 
         let (status, response_body) =
-            Self::ch_api_request_with_body(&api_socket, "PUT", "/api/v1/vm.add-net", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.add-net returned unexpected status {}", status),
-            });
-        }
+            Self::ch_api_request_with_body(&api_socket, "PUT", "/api/v1/vm.add-net", Some(&body))
+                .await?;
+        Self::expect_status(status, "vm.add-net")?;
         Ok(response_body)
     }
 
@@ -1312,37 +1277,19 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         new_size_bytes: u64,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, disk_id = %disk_id, new_size = new_size_bytes, op = operation_id.unwrap_or("-"), "resizing disk via ch api");
 
         let body = format!(r#"{{"id":"{}","new_size":{}}}"#, disk_id, new_size_bytes);
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resize-zone", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.resize-zone returned unexpected status {}", status),
-            });
-        }
+        Self::expect_status(status, "vm.resize-zone")?;
         Ok(())
     }
 
     async fn ping(&self, vm_id: &str) -> Result<bool, ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         match Self::ch_api_request(&api_socket, "GET", "/api/v1/vmm.ping", None).await {
             Ok(status) => Ok(status == 200),
@@ -1356,25 +1303,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         destination: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = {
-            let map = self.vms.lock().unwrap();
-            let proc = map.get(vm_id).ok_or_else(|| ChvError::NotFound {
-                resource: "vm".to_string(),
-                id: vm_id.to_string(),
-            })?;
-            proc.api_socket.clone()
-        };
+        let api_socket = self.get_vm_socket(vm_id)?;
 
         info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "generating coredump via ch api");
 
         let body = format!(r#"{{"destination_url":"file://{}"}}"#, destination);
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.coredump", Some(&body)).await?;
-        if status != 200 && status != 204 {
-            return Err(ChvError::Internal {
-                reason: format!("vm.coredump returned unexpected status {}", status),
-            });
-        }
+        Self::expect_status(status, "vm.coredump")?;
         Ok(())
     }
 
@@ -1560,11 +1496,17 @@ mod tests {
         assert!(console_log.exists());
 
         // Force stop should clear scrollback and remove console.log.
-        adapter.stop_vm("vm-test", true, Some("op-test")).await.unwrap();
+        adapter
+            .stop_vm("vm-test", true, Some("op-test"))
+            .await
+            .unwrap();
 
         // Post-stop assertions.
         assert!(adapter.pty_scrollback("vm-test").is_none());
-        assert!(!console_log.exists(), "console.log should be removed on force stop");
+        assert!(
+            !console_log.exists(),
+            "console.log should be removed on force stop"
+        );
     }
 
     #[tokio::test]
@@ -1589,9 +1531,7 @@ mod tests {
 
         // Spawn a child that exits immediately so the graceful shutdown loop
         // breaks early (CH process disappeared).
-        let mut child = tokio::process::Command::new("true")
-            .spawn()
-            .unwrap();
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
         let _ = child.wait().await;
 
         {
@@ -1622,12 +1562,21 @@ mod tests {
 
         // Graceful stop: the CH API calls will fail (no real socket), so the
         // loop breaks with "CH process disappeared" and then clears caches.
-        adapter.stop_vm("vm-test", false, Some("op-test")).await.unwrap();
+        adapter
+            .stop_vm("vm-test", false, Some("op-test"))
+            .await
+            .unwrap();
 
         // Post-stop assertions: scrollback cleared, log truncated.
         assert_eq!(adapter.pty_scrollback("vm-test").unwrap(), b"");
-        assert!(console_log.exists(), "console.log should still exist after graceful stop");
+        assert!(
+            console_log.exists(),
+            "console.log should still exist after graceful stop"
+        );
         let post_size = std::fs::metadata(&console_log).unwrap().len();
-        assert_eq!(post_size, 0, "console.log should be truncated on graceful stop");
+        assert_eq!(
+            post_size, 0,
+            "console.log should be truncated on graceful stop"
+        );
     }
 }

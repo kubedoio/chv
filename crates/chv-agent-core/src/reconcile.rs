@@ -57,9 +57,9 @@ impl Reconciler {
             return false;
         }
         if failures >= 10 {
-            self.reconcile_tick % 60 != 0
+            !self.reconcile_tick.is_multiple_of(60)
         } else if failures >= 3 {
-            self.reconcile_tick % 6 != 0
+            !self.reconcile_tick.is_multiple_of(6)
         } else {
             false
         }
@@ -152,9 +152,7 @@ impl Reconciler {
                     warn!(stord_ok, nwd_ok, "remaining in Failed, daemons not healthy");
                 }
             }
-            NodeState::Degraded
-            | NodeState::Draining
-            | NodeState::Maintenance => {}
+            NodeState::Degraded | NodeState::Draining | NodeState::Maintenance => {}
         }
 
         Ok(())
@@ -165,7 +163,19 @@ impl Reconciler {
         // Falls back to the hardcoded default if the fragment has no cidr.
         const DEFAULT_CIDR: &str = "10.0.0.0/24";
 
-        let (desired_networks, network_cidrs, network_gateways, network_bridges) = {
+        let (
+            desired_networks,
+            network_cidrs,
+            network_gateways,
+            network_bridges,
+            network_firewall_rules,
+            network_nat_enabled,
+            network_nat_rules,
+            network_dhcp_enabled,
+            network_dhcp_scopes,
+            network_dns_enabled,
+            network_dns_scopes,
+        ) = {
             let cache = self.cache.lock().await;
             let mut desired_networks: BTreeSet<String> =
                 cache.vm_network_ids().into_iter().collect();
@@ -177,6 +187,20 @@ impl Reconciler {
             let mut network_gateways: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
             let mut network_bridges: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut network_firewall_rules: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
+            let mut network_nat_enabled: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            let mut network_nat_rules: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
+            let mut network_dhcp_enabled: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            let mut network_dhcp_scopes: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
+            let mut network_dns_enabled: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            let mut network_dns_scopes: std::collections::HashMap<String, serde_json::Value> =
                 std::collections::HashMap::new();
             for (net_id, frag) in &cache.network_fragments {
                 let spec = serde_json::from_slice::<serde_json::Value>(&frag.spec_json).ok();
@@ -212,27 +236,69 @@ impl Reconciler {
                             format!("br-{}", net_id)
                         }
                     });
+                if let Some(rules) = spec.as_ref().and_then(|v| v.get("firewall_rules").cloned()) {
+                    network_firewall_rules.insert(net_id.clone(), rules);
+                }
+                if let Some(enabled) = spec
+                    .as_ref()
+                    .and_then(|v| v.get("nat_enabled"))
+                    .and_then(|v| v.as_bool())
+                {
+                    network_nat_enabled.insert(net_id.clone(), enabled);
+                }
+                if let Some(rules) = spec.as_ref().and_then(|v| v.get("nat_rules").cloned()) {
+                    network_nat_rules.insert(net_id.clone(), rules);
+                }
+                if let Some(enabled) = spec
+                    .as_ref()
+                    .and_then(|v| v.get("dhcp_enabled"))
+                    .and_then(|v| v.as_bool())
+                {
+                    network_dhcp_enabled.insert(net_id.clone(), enabled);
+                }
+                if let Some(scope) = spec.as_ref().and_then(|v| v.get("dhcp_scope").cloned()) {
+                    network_dhcp_scopes.insert(net_id.clone(), scope);
+                }
+                if let Some(enabled) = spec
+                    .as_ref()
+                    .and_then(|v| v.get("dns_enabled"))
+                    .and_then(|v| v.as_bool())
+                {
+                    network_dns_enabled.insert(net_id.clone(), enabled);
+                }
+                if let Some(scope) = spec.as_ref().and_then(|v| v.get("dns_scope").cloned()) {
+                    network_dns_scopes.insert(net_id.clone(), scope);
+                }
                 network_cidrs.insert(net_id.clone(), cidr);
                 network_gateways.insert(net_id.clone(), gateway);
                 network_bridges.insert(net_id.clone(), bridge);
             }
 
-            (desired_networks, network_cidrs, network_gateways, network_bridges)
+            (
+                desired_networks,
+                network_cidrs,
+                network_gateways,
+                network_bridges,
+                network_firewall_rules,
+                network_nat_enabled,
+                network_nat_rules,
+                network_dhcp_enabled,
+                network_dhcp_scopes,
+                network_dns_enabled,
+                network_dns_scopes,
+            )
         };
         // Cache lock is dropped here — all subsequent operations are lock-free async I/O.
 
         let mut nwd = NwdClient::connect(&self.nwd_socket).await?;
         for net_id in &desired_networks {
-            let bridge = network_bridges
-                .get(net_id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    if net_id == "default" {
-                        "chvbr0".to_string()
-                    } else {
-                        format!("br-{}", net_id)
-                    }
-                });
+            let bridge = network_bridges.get(net_id).cloned().unwrap_or_else(|| {
+                if net_id == "default" {
+                    "chvbr0".to_string()
+                } else {
+                    format!("br-{}", net_id)
+                }
+            });
             let cidr = network_cidrs
                 .get(net_id)
                 .map(|s| s.as_str())
@@ -250,12 +316,117 @@ impl Reconciler {
                 warn!(network_id = %net_id, error = %e, "failed to ensure network topology");
             } else {
                 info!(network_id = %net_id, bridge = %bridge, "reconcile_networks: ensure_network_topology succeeded");
+                // Network health check (Sprint 11 A1)
+                match nwd.get_network_health(net_id).await {
+                    Ok(health) => {
+                        if health.health_status != "healthy" && health.health_status != "ok" {
+                            warn!(network_id = %net_id, health_status = %health.health_status, last_error = %health.last_error, "network health degraded");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(network_id = %net_id, error = %e, "failed to get network health");
+                    }
+                }
+                // Firewall policy
+                if let Some(rules) = network_firewall_rules.get(net_id) {
+                    let fw_op_id = format!("{}-firewall", op_id);
+                    let policy_json = serde_json::to_vec(rules).unwrap_or_default();
+                    if let Err(e) = nwd
+                        .set_firewall_policy(net_id, "v1", policy_json, Some(&fw_op_id))
+                        .await
+                    {
+                        warn!(network_id = %net_id, error = %e, "failed to set firewall policy");
+                    }
+                }
+                // NAT policy
+                if network_nat_enabled.get(net_id).copied().unwrap_or(false) {
+                    let nat_op_id = format!("{}-nat", op_id);
+                    let policy_json = network_nat_rules
+                        .get(net_id)
+                        .map(|v| serde_json::to_vec(v).unwrap_or_default())
+                        .unwrap_or_default();
+                    if let Err(e) = nwd
+                        .set_nat_policy(net_id, "v1", policy_json, Some(&nat_op_id))
+                        .await
+                    {
+                        warn!(network_id = %net_id, error = %e, "failed to set nat policy");
+                    }
+                }
+                // DHCP scope
+                if network_dhcp_enabled.get(net_id).copied().unwrap_or(false) {
+                    if let Some(scope) = network_dhcp_scopes.get(net_id) {
+                        let dhcp_op_id = format!("{}-dhcp", op_id);
+                        let range_start = scope
+                            .get("range_start")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let range_end = scope
+                            .get("range_end")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let dns_servers: Vec<String> = scope
+                            .get("dns_servers")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Err(e) = nwd
+                            .ensure_dhcp_scope(
+                                net_id,
+                                cidr,
+                                range_start,
+                                range_end,
+                                dns_servers,
+                                Some(&dhcp_op_id),
+                            )
+                            .await
+                        {
+                            warn!(network_id = %net_id, error = %e, "failed to ensure dhcp scope");
+                        }
+                    }
+                }
+                // DNS scope
+                if network_dns_enabled.get(net_id).copied().unwrap_or(false) {
+                    if let Some(scope) = network_dns_scopes.get(net_id) {
+                        let dns_op_id = format!("{}-dns", op_id);
+                        let forwarders: Vec<String> = scope
+                            .get("forwarders")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let static_records: std::collections::HashMap<String, String> = scope
+                            .get("static_records")
+                            .and_then(|v| v.as_object())
+                            .map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.clone(), s.to_string()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Err(e) = nwd
+                            .ensure_dns_scope(net_id, forwarders, static_records, Some(&dns_op_id))
+                            .await
+                        {
+                            warn!(network_id = %net_id, error = %e, "failed to ensure dns scope");
+                        }
+                    }
+                }
             }
         }
 
         let actual = nwd.list_namespace_state().await?;
         for state in actual.items {
             if !desired_networks.contains(&state.network_id) {
+                // TODO(Sprint 11): Wire withdraw_service_exposure for exposures removed from desired state before deleting topology.
                 let op_id = format!("reconcile-network-delete-{}", state.network_id);
                 if let Err(e) = nwd
                     .delete_network_topology(&state.network_id, Some(&op_id))
@@ -269,16 +440,24 @@ impl Reconciler {
     }
 
     async fn reconcile_volumes(&mut self) -> Result<(), ChvError> {
-        let (pairs, cached_handles) = {
+        let (pairs, cached_handles, volume_fragments) = {
             let cache = self.cache.lock().await;
             let pairs: HashSet<(String, String)> = cache.vm_volume_handles().into_iter().collect();
             let cached_handles = cache.volume_handles.clone();
-            (pairs, cached_handles)
+            let volume_fragments = cache.volume_fragments.clone();
+            (pairs, cached_handles, volume_fragments)
         };
-        if pairs.is_empty() {
+        let needs_stord = !pairs.is_empty() || !volume_fragments.is_empty();
+        if !needs_stord {
             return Ok(());
         }
-        let mut stord = StordClient::connect(&self.stord_socket).await?;
+        let mut stord = match StordClient::connect(&self.stord_socket).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "failed to connect to stord, skipping volume reconcile");
+                return Ok(());
+            }
+        };
         for (vm_id, volume_id) in pairs {
             // Only re-attach volumes that were previously opened (cached).
             // Fresh volumes will be opened (with seed_from + size_bytes) by prepare_vm in reconcile_vms.
@@ -299,6 +478,19 @@ impl Reconciler {
                         .await
                     {
                         warn!(volume_id = %volume_id, vm_id = %vm_id, error = %e, "failed to attach volume");
+                    } else {
+                        // Volume health check (Sprint 11 A1)
+                        match stord.get_volume_health(&volume_id).await {
+                            Ok(health) => {
+                                if health.health_status != "healthy" && health.health_status != "ok"
+                                {
+                                    warn!(volume_id = %volume_id, health_status = %health.health_status, last_error = %health.last_error, "volume health degraded");
+                                }
+                            }
+                            Err(e) => {
+                                warn!(volume_id = %volume_id, error = %e, "failed to get volume health");
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -306,6 +498,105 @@ impl Reconciler {
                 }
             }
         }
+
+        // Snapshot and clone operations from volume desired state fragments.
+        for (volume_id, fragment) in &volume_fragments {
+            let spec = match std::str::from_utf8(&fragment.spec_json) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(volume_id = %volume_id, error = %e, "failed to decode volume_fragment spec_json as utf-8");
+                    continue;
+                }
+            };
+            let spec = match serde_json::from_str::<serde_json::Value>(spec) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(volume_id = %volume_id, error = %e, "failed to parse volume_fragment spec_json");
+                    continue;
+                }
+            };
+
+            // Snapshot operations
+            if let Some(snapshot_op) = spec.get("snapshot_op").and_then(|v| v.as_str()) {
+                let snapshot_name = spec
+                    .get("snapshot_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(volume_id);
+                let op_id = format!("reconcile-volume-snapshot-{}-{}", volume_id, snapshot_op);
+                let result = match snapshot_op {
+                    "create" => {
+                        stord
+                            .prepare_snapshot(volume_id, snapshot_name, Some(&op_id))
+                            .await
+                    }
+                    "restore" => {
+                        stord
+                            .restore_snapshot(volume_id, snapshot_name, Some(&op_id))
+                            .await
+                    }
+                    "delete" => {
+                        stord
+                            .delete_snapshot(volume_id, snapshot_name, Some(&op_id))
+                            .await
+                    }
+                    _ => {
+                        warn!(volume_id = %volume_id, snapshot_op = %snapshot_op, "unknown snapshot_op");
+                        continue;
+                    }
+                };
+                if let Err(e) = result {
+                    warn!(volume_id = %volume_id, snapshot_op = %snapshot_op, error = %e, "snapshot operation failed");
+                } else {
+                    info!(volume_id = %volume_id, snapshot_op = %snapshot_op, "snapshot operation succeeded");
+                    let mut cache = self.cache.lock().await;
+                    if let Some(frag) = cache.volume_fragments.get_mut(volume_id) {
+                        if let Ok(mut spec) =
+                            serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
+                        {
+                            if let Some(obj) = spec.as_object_mut() {
+                                obj.remove("snapshot_op");
+                                obj.remove("snapshot_name");
+                            }
+                            if let Ok(bytes) = serde_json::to_vec(&spec) {
+                                frag.spec_json = bytes;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clone operations
+            if let Some(source_volume_id) =
+                spec.get("clone_source_volume_id").and_then(|v| v.as_str())
+            {
+                let op_id = format!(
+                    "reconcile-volume-clone-{}-from-{}",
+                    volume_id, source_volume_id
+                );
+                if let Err(e) = stord
+                    .prepare_clone(source_volume_id, volume_id, Some(&op_id))
+                    .await
+                {
+                    warn!(volume_id = %volume_id, source_volume_id = %source_volume_id, error = %e, "clone operation failed");
+                } else {
+                    info!(volume_id = %volume_id, source_volume_id = %source_volume_id, "clone operation succeeded");
+                    let mut cache = self.cache.lock().await;
+                    if let Some(frag) = cache.volume_fragments.get_mut(volume_id) {
+                        if let Ok(mut spec) =
+                            serde_json::from_slice::<serde_json::Value>(&frag.spec_json)
+                        {
+                            if let Some(obj) = spec.as_object_mut() {
+                                obj.remove("clone_source_volume_id");
+                            }
+                            if let Ok(bytes) = serde_json::to_vec(&spec) {
+                                frag.spec_json = bytes;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -332,7 +623,9 @@ impl Reconciler {
         let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
         tokio::fs::create_dir_all(&vm_dir)
             .await
-            .map_err(|e| ChvError::Internal { reason: format!("failed to create vm dir: {}", e) })?;
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to create vm dir: {}", e),
+            })?;
 
         let mut disks = Vec::new();
         let mut volume_ids = Vec::new();
@@ -375,6 +668,7 @@ impl Reconciler {
             stord
                 .attach_volume_to_vm(&disk.volume_id, vm_id, &handle, Some(&open_op_id))
                 .await?;
+            // TODO(Sprint 11): Wire set_device_policy when DiskSpec includes device policy configuration.
             disks.push(VmDiskConfig {
                 path: PathBuf::from(export_path),
                 read_only: disk.read_only,
@@ -495,7 +789,9 @@ impl Reconciler {
                 warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
                 continue;
             };
-            let failures = self.vm_runtime.consecutive_failures_for_generation(vm_id, &generation);
+            let failures = self
+                .vm_runtime
+                .consecutive_failures_for_generation(vm_id, &generation);
             if self.should_skip_vm(failures) {
                 self.log_backoff_skip(vm_id, failures);
                 continue;
@@ -604,7 +900,9 @@ impl Reconciler {
                 };
                 (fragment.generation.clone(), fragment.spec_json.clone())
             };
-            let failures = self.vm_runtime.consecutive_failures_for_generation(vm_id, &generation);
+            let failures = self
+                .vm_runtime
+                .consecutive_failures_for_generation(vm_id, &generation);
             if self.should_skip_vm(failures) {
                 self.log_backoff_skip(vm_id, failures);
                 continue;
@@ -658,23 +956,43 @@ impl Reconciler {
                             Ok(c) => c,
                             Err(e) => {
                                 warn!(vm_id = %vm_id, error = %e, "failed to prepare vm for re-creation");
-                                self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                                self.vm_runtime.record_failure(
+                                    vm_id.to_string(),
+                                    generation.clone(),
+                                    e.to_string(),
+                                );
                                 continue;
                             }
                         };
-                        if let Err(e) = self.vm_runtime.create_vm(vm_id, &generation, &config, Some(&recreate_op_id)).await {
+                        if let Err(e) = self
+                            .vm_runtime
+                            .create_vm(vm_id, &generation, &config, Some(&recreate_op_id))
+                            .await
+                        {
                             warn!(vm_id = %vm_id, error = %e, "failed to re-create vm");
-                            self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                            self.vm_runtime.record_failure(
+                                vm_id.to_string(),
+                                generation.clone(),
+                                e.to_string(),
+                            );
                             continue;
                         }
                         let start_op_id = format!("{}-start", recreate_op_id);
                         if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
                             warn!(vm_id = %vm_id, error = %e, "failed to start re-created vm");
-                            self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                            self.vm_runtime.record_failure(
+                                vm_id.to_string(),
+                                generation.clone(),
+                                e.to_string(),
+                            );
                         }
                     } else {
                         warn!(vm_id = %vm_id, error = %e, "failed to start vm");
-                        self.vm_runtime.record_failure(vm_id.to_string(), generation.clone(), e.to_string());
+                        self.vm_runtime.record_failure(
+                            vm_id.to_string(),
+                            generation.clone(),
+                            e.to_string(),
+                        );
                     }
                     continue;
                 }
@@ -1010,6 +1328,18 @@ mod tests {
         async fn prepare_clone(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::PrepareCloneRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn restore_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::RestoreSnapshotRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn delete_snapshot(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DeleteSnapshotRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }

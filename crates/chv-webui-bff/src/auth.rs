@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use axum::{
-    extract::FromRequestParts,
+    extract::{FromRequestParts, Request},
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +16,79 @@ pub struct Claims {
     pub username: String,
     pub role: String,
     pub exp: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Role {
+    Viewer,
+    Operator,
+    Admin,
+}
+
+impl Role {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "admin" => Some(Role::Admin),
+            "operator" => Some(Role::Operator),
+            "viewer" => Some(Role::Viewer),
+            _ => None,
+        }
+    }
+
+    pub fn rank(&self) -> u8 {
+        match self {
+            Role::Viewer => 0,
+            Role::Operator => 1,
+            Role::Admin => 2,
+        }
+    }
+
+    pub fn meets(&self, required: Role) -> bool {
+        self.rank() >= required.rank()
+    }
+}
+
+fn forbidden_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "message": "insufficient permissions",
+            "code": "FORBIDDEN"
+        })),
+    )
+        .into_response()
+}
+
+async fn role_check(claims: &Claims, required: Role, req: Request, next: Next) -> Response {
+    let user_role = Role::parse(&claims.role).unwrap_or(Role::Viewer);
+    if !user_role.meets(required) {
+        return forbidden_response();
+    }
+    next.run(req).await
+}
+
+pub async fn viewer_middleware(
+    BearerToken(claims): BearerToken,
+    req: Request,
+    next: Next,
+) -> Response {
+    role_check(&claims, Role::Viewer, req, next).await
+}
+
+pub async fn operator_middleware(
+    BearerToken(claims): BearerToken,
+    req: Request,
+    next: Next,
+) -> Response {
+    role_check(&claims, Role::Operator, req, next).await
+}
+
+pub async fn admin_middleware(
+    BearerToken(claims): BearerToken,
+    req: Request,
+    next: Next,
+) -> Response {
+    role_check(&claims, Role::Admin, req, next).await
 }
 
 pub fn require_operator_or_admin(claims: &Claims) -> Result<(), BffError> {
@@ -226,5 +301,3 @@ mod tests {
         assert_eq!(hash.len(), 64);
     }
 }
-
-
