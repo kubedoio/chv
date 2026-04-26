@@ -205,16 +205,28 @@ log_level = "info"
 #[cfg(target_os = "linux")]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    async fn fake_daemon_script(path: &std::path::Path, behaviour: &str) {
+        let script = format!("#!/bin/sh\n{}\n", behaviour);
+        tokio::fs::write(path, script).await.unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
 
     #[tokio::test]
     async fn supervisor_start_and_shutdown() {
-        // Use sleep as a fake daemon binary
+        let stord_bin = PathBuf::from("/tmp/chv-test-stord");
+        let nwd_bin = PathBuf::from("/tmp/chv-test-nwd");
+        fake_daemon_script(&stord_bin, "sleep 10").await;
+        fake_daemon_script(&nwd_bin, "sleep 10").await;
         let mut supervisor = DaemonSupervisor::new(
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("10"),
-            PathBuf::from("10"),
-            PathBuf::from("/tmp"),
+            stord_bin,
+            nwd_bin,
+            PathBuf::from("dummy"),
+            PathBuf::from("dummy"),
+            PathBuf::from("/tmp/chv-supervisor-test-start"),
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -226,16 +238,20 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_health_check_detects_dead_process() {
+        let stord_bin = PathBuf::from("/tmp/chv-test-stord-dead");
+        let nwd_bin = PathBuf::from("/tmp/chv-test-nwd-dead");
+        fake_daemon_script(&stord_bin, "exit 0").await;
+        fake_daemon_script(&nwd_bin, "exit 0").await;
         let mut supervisor = DaemonSupervisor::new(
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("0"),
-            PathBuf::from("0"),
-            PathBuf::from("/tmp"),
+            stord_bin,
+            nwd_bin,
+            PathBuf::from("dummy"),
+            PathBuf::from("dummy"),
+            PathBuf::from("/tmp/chv-supervisor-test-dead"),
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
-        // Give processes time to exit (sleep 0 exits immediately)
+        // Give processes time to exit
         tokio::time::sleep(Duration::from_millis(100)).await;
         let (s, n) = supervisor.health_check().await;
         assert!(!s);
@@ -245,12 +261,16 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_restart_if_needed_restarts_dead_process() {
+        let stord_bin = PathBuf::from("/tmp/chv-test-stord-restart");
+        let nwd_bin = PathBuf::from("/tmp/chv-test-nwd-restart");
+        fake_daemon_script(&stord_bin, "exit 0").await;
+        fake_daemon_script(&nwd_bin, "exit 0").await;
         let mut supervisor = DaemonSupervisor::new(
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("0"),
-            PathBuf::from("0"),
-            PathBuf::from("/tmp"),
+            stord_bin.clone(),
+            nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            PathBuf::from("dummy"),
+            PathBuf::from("/tmp/chv-supervisor-test-restart"),
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -261,9 +281,9 @@ mod tests {
         // Reset last restart timestamps so throttle allows restart
         supervisor.stord_last_restart = None;
         supervisor.nwd_last_restart = None;
-        // Change args so restarted processes stay alive
-        supervisor.stord_socket = PathBuf::from("10");
-        supervisor.nwd_socket = PathBuf::from("10");
+        // Rewrite scripts so restarted processes stay alive
+        fake_daemon_script(&stord_bin, "sleep 10").await;
+        fake_daemon_script(&nwd_bin, "sleep 10").await;
         supervisor.restart_if_needed().await.unwrap();
         let (s2, n2) = supervisor.health_check().await;
         assert!(s2);
@@ -273,12 +293,16 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_restart_throttle_prevents_spam() {
+        let stord_bin = PathBuf::from("/tmp/chv-test-stord-throttle");
+        let nwd_bin = PathBuf::from("/tmp/chv-test-nwd-throttle");
+        fake_daemon_script(&stord_bin, "exit 0").await;
+        fake_daemon_script(&nwd_bin, "exit 0").await;
         let mut supervisor = DaemonSupervisor::new(
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("/bin/sleep"),
-            PathBuf::from("0"),
-            PathBuf::from("0"),
-            PathBuf::from("/tmp"),
+            stord_bin.clone(),
+            nwd_bin.clone(),
+            PathBuf::from("dummy"),
+            PathBuf::from("dummy"),
+            PathBuf::from("/tmp/chv-supervisor-test-throttle"),
         );
         supervisor.start_stord().await.unwrap();
         supervisor.start_nwd().await.unwrap();
@@ -286,9 +310,9 @@ mod tests {
         // Reset last restart timestamps so first restart is allowed
         supervisor.stord_last_restart = None;
         supervisor.nwd_last_restart = None;
-        // Change args so restarted processes stay alive for the health check
-        supervisor.stord_socket = PathBuf::from("10");
-        supervisor.nwd_socket = PathBuf::from("10");
+        // Rewrite scripts so restarted processes stay alive for the health check
+        fake_daemon_script(&stord_bin, "sleep 10").await;
+        fake_daemon_script(&nwd_bin, "sleep 10").await;
         // First restart should succeed
         supervisor.restart_if_needed().await.unwrap();
         assert!(supervisor.stord_last_restart.is_some());
