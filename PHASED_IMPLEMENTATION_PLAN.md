@@ -11,30 +11,10 @@ Based on the comprehensive repository review and existing roadmap (`docs/plans/2
 *   **Clean Up Unused CSS**: Remove unused CSS selectors across Svelte components (e.g., `.user-icon`, `.username-cell` in `settings/users/+page.svelte`, `.action-btn` in `templates/+page.svelte`, etc.) to clear `svelte-check` warnings.
 *   **Fix A11y Warnings**: Add `tabindex` and keyboard event handlers to the `dialog` roles in `CloudInitViewer.svelte` and `CloudInitEditor.svelte`. Fix associated labels in `settings/users/+page.svelte`.
 
-### 1.2 Agent Daemon Integration (Removing Stubs)
-*   **`chv-stord` Integration (`A1`, `A3`)**: Implement missing `stord` gRPC calls in `crates/chv-agent-core/src/reconcile.rs`. Replace `unimplemented!()` in the mock with real daemon clients for:
-    *   `get_volume_health`
-    *   `resize_volume`
-    *   `prepare_snapshot`
-    *   `prepare_clone`
-    *   `restore_snapshot`
-    *   `delete_snapshot`
-    *   `set_device_policy` (`A7`)
-*   **`chv-nwd` Integration (`A2`, `A3`)**: Implement missing `nwd` gRPC calls in `crates/chv-agent-core/src/reconcile.rs`.
-    *   `get_network_health`
-    *   `set_firewall_policy`
-    *   `set_nat_policy`
-    *   `ensure_dhcp_scope`
-    *   `ensure_dns_scope`
-    *   `expose_service`
-    *   `withdraw_service_exposure` (Needs wiring for exposures removed from desired state).
-*   **Console Server Hardening (`A4`, `A5`)**:
-    *   Implement one-time-use LRU cache and replay prevention for Console tokens.
-    *   Wire `ioctl(TIOCSWINSZ)` to allow PTY resizing.
-
-### 1.3 Control Plane Infrastructure (`I1`, `I2`)
-*   Fix `dev-install.sh` / `install.sh` to ensure the SQLite database has proper `chown chv:chv` ownership to prevent read-only DB errors on deploy.
-*   Fix agent console port collision (PID holding 8444 after restart) by configuring `KillMode=mixed` and `TimeoutStopSec=5` in the agent systemd unit.
+### 1.2 Agent Daemon Integration (Testing Mocks & Coverage)
+*   **`chv-stord` and `chv-nwd` Mock Completion (`A1`, `A2`)**: Update tests in `crates/chv-agent-core/src/reconcile.rs` to ensure tests properly check the implementations instead of returning `unimplemented!()`. (Note: The real `StordClient` and `NwdClient` daemons *already implement* the RPCs `get_volume_health`, `resize_volume`, `set_firewall_policy`, etc. The issue resides in test coverage and mock stubs).
+    *   Implement missing mock logic for `get_volume_health`, `resize_volume`, `prepare_snapshot`, `prepare_clone`, `restore_snapshot`, `delete_snapshot`, `set_device_policy` (`A7`)
+    *   Implement missing mock logic for `get_network_health`, `set_firewall_policy`, `set_nat_policy`, `ensure_dhcp_scope`, `ensure_dns_scope`, `expose_service`, `withdraw_service_exposure`.
 
 ---
 
@@ -43,14 +23,13 @@ Based on the comprehensive repository review and existing roadmap (`docs/plans/2
 **Goal**: Fulfill the remaining core features outlined in the gap analysis.
 
 ### 2.1 Backend / BFF Completion
-*   **Network Mutations (`B1`)**: Implement `mutate_network` in `crates/chv-webui-bff/src/handlers/mutations.rs` (or `networks.rs`) which currently returns `NotImplemented`.
 *   **Hypervisor Orchestrator Merge (`B5`)**: Ensure the `vm.create` payload injected into the agent includes all hypervisor fields, falling back to defaults cleanly.
 *   **Quota Enforcement (`B3`)**: Implement quota checking at the orchestrator layer (`create_vm` path) to prevent exceeding limits.
 *   **Agent API Token Auth (`B10`)**: Enforce gRPC auth for the agent using the existing `tokens` table instead of relying solely on mTLS or local network trust.
 *   **Metadata Propagation (`A6`)**: Propagate `operation_id` via gRPC metadata in `daemon_clients.rs`.
 
 ### 2.2 Storage & Network Daemons
-*   **`chv-nwd` Linux Executor (`A8`)**: Implement the `LinuxExecutor` logic (`ip`, `nft`) in `cmd/chv-nwd/main.rs`.
+*   **`chv-nwd` Linux Executor (`A8`)**: Finish implementing `LinuxExecutor` enforcement (`DHCP` and `DNS` scopes currently log they are accepted but not enforced).
 *   **Storage Pool Provisioning (`B7`)**: Extend `chv-stord` backend to handle actual directory/LVM provisioning and validation, rather than just DB inserts.
 *   **Image Import Validation (`B8`)**: Ensure `qcow2` headers are validated correctly before copying.
 
