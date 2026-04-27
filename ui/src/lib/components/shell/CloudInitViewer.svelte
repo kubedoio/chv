@@ -9,7 +9,7 @@
     <div class="bg-white rounded-lg shadow-lg w-full max-w-2xl mx-4 p-6">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold">{template?.name ?? 'Cloud-init Config'}</h2>
-        <button onclick={() => open = false} class="text-muted hover:text-ink">✕</button>
+        <button onclick={() => open = false} class="text-muted hover:text-ink" aria-label="Close modal">✕</button>
       </div>
       <pre class="bg-neutral-50 p-4 rounded text-sm overflow-auto max-h-[60vh]">{template?.content ?? 'No config available'}</pre>
     </div>
