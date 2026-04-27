@@ -333,6 +333,7 @@
 						<button
 							class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
 							aria-expanded={openGroups['cloud-1']}
+							aria-controls="group-cloud-1"
 							onclick={() => toggleGroup('cloud-1')}
 						>
 							<ChevronDown size={10} class={!openGroups['cloud-1'] ? '-rotate-90' : ''} />
@@ -341,11 +342,12 @@
 						</button>
 
 						{#if openGroups['cloud-1']}
-							<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
+							<div id="group-cloud-1" class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
 								<div class="flex flex-col">
 									<button
 										class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
 										aria-expanded={openGroups['hosts']}
+										aria-controls="group-hosts"
 										onclick={() => toggleGroup('hosts')}
 									>
 										<ChevronDown size={10} class={!openGroups['hosts'] ? '-rotate-90' : ''} />
@@ -354,7 +356,7 @@
 									</button>
 
 									{#if openGroups['hosts']}
-										<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
+										<div id="group-hosts" class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
 											{#each filteredNodes as node}
 												{@const hostExpanded = openGroups[getNodeExpandedKey(node.id)] ?? true}
 												{@const hostVms = vmsByNode.get(node.id) ?? []}
@@ -362,6 +364,7 @@
 													<button
 														class="app-nav__tree-row app-nav__tree-row--host"
 														aria-expanded={hostExpanded}
+														aria-controls="group-{node.id}"
 														onclick={() => toggleGroup(getNodeExpandedKey(node.id))}
 													>
 														<ChevronDown size={10} class={!hostExpanded ? '-rotate-90' : ''} />
@@ -373,7 +376,7 @@
 													</button>
 
 													{#if hostExpanded}
-														<div class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
+														<div id="group-{node.id}" class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
 															<div class="app-nav__instance-list app-nav__instance-list--direct">
 																{#if hostVms.length === 0}
 																	<div class="py-1 px-2 text-[10px] text-[var(--color-neutral-500)]">No instances.</div>
