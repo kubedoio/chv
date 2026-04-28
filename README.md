@@ -7,7 +7,7 @@ CHV is a Linux-first, cloud-image-first virtualization platform for sovereign pr
 **Version:** `0.0.0.2`  
 **Phase:** Early-to-MVP transitioning to stability  
 
-The project has a solid Phase 1 foundation (Rust control plane, SQLite store, certificate enrollment, gRPC services) and a functional SvelteKit Web UI. Active work is tracked in the [Gap Analysis & Implementation Plan](./docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md) covering Sprints 11–15: stability hardening, hypervisor settings E2E, UI production readiness, quotas/backups, and daemon parity.
+The project has a solid Phase 1 foundation (Rust control plane, SQLite store, certificate enrollment, gRPC services) and a functional SvelteKit Web UI. Active work is tracked in the [Phased Implementation Plan](./PHASED_IMPLEMENTATION_PLAN.md) covering stability hardening, feature completion, and production readiness.
 
 ## Architecture
 
@@ -124,9 +124,10 @@ cargo build --workspace
 |----------|---------|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | System architecture, data flow, and boundaries |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) | Deploy CHV on a combined control-plane + hypervisor host |
-| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (001–007) |
+| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (001–010) |
 | [`docs/specs/component/`](./docs/specs/component) | Component specs (agent, stord, nwd) |
-| [`docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md`](./docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md) | Current sprint roadmap (Sprints 11–15) |
+| [`PHASED_IMPLEMENTATION_PLAN.md`](./PHASED_IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
+| [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) | Day-2 operations, monitoring, and troubleshooting |
 | [`DESIGN.md`](./DESIGN.md) | Design system (typography, color, spacing, dark mode) |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release history |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development workflow, code style, and PR process |

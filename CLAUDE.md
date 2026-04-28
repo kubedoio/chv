@@ -10,7 +10,7 @@ CHV is a Rust-first virtualization management repository with a SvelteKit fronte
 - Active backend workspace: `/Cargo.toml`, `/cmd`, `/crates`, `/gen/rust`
 - Authoritative contracts: `/proto`
 - Authoritative design and behavior docs: `/docs/specs`, `/docs/plans`
-- Current phase: Early-to-MVP transitioning to stability (see [`docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md`](docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md))
+- Current phase: Early-to-MVP transitioning to stability (see [`PHASED_IMPLEMENTATION_PLAN.md`](PHASED_IMPLEMENTATION_PLAN.md))
 
 ## Build Commands
 
@@ -55,9 +55,10 @@ The workspace `build.rs` files use `tonic-build` to regenerate code in `/gen/rus
 | File | Why it matters |
 |------|---------------|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | High-level architecture, data flow, current phase |
-| [`docs/specs/adr/`](docs/specs/adr/) | Boundaries and invariants (agent/stord/nwd split, control-plane boundary, state machines) |
+| [`docs/specs/adr/`](docs/specs/adr/) | Boundaries and invariants (agent/stord/nwd split, control-plane boundary, state machines, error handling, logging, async safety) |
 | [`docs/specs/component/`](docs/specs/component/) | Component responsibilities and failure behavior |
-| [`docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md`](docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md) | Current sprint roadmap and known gaps |
+| [`PHASED_IMPLEMENTATION_PLAN.md`](PHASED_IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Day-2 operations, monitoring, and troubleshooting |
 | [`DESIGN.md`](DESIGN.md) | Design system tokens (colors, typography, spacing) |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, code style, PR workflow |
 

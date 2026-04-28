@@ -13,6 +13,9 @@ This directory indexes all Architecture Decision Records for CHV. The canonical 
 | [ADR-005](../specs/adr/005-network-service-model.md) | Network Service Model | **Accepted** | Defers network-VM approach; `chv-nwd` is a host-side Linux bridge/netns/veth/nftables daemon. Defers eBPF and distributed overlay. |
 | [ADR-006](../specs/adr/006-partition-policy.md) | Partition and Autonomy Policy | **Accepted** | Defines node behavior during control-plane outages: preserve runtime, allow limited local ops, deny destructive mutations, converge on reconnection. |
 | [ADR-007](../specs/adr/007-upgrade-rollback.md) | Upgrade and Rollback Policy | **Accepted** | Mandates bundle-tested node upgrades with one-step rollback. Tracks versions for control plane, all node daemons, Cloud Hypervisor, and host helpers. |
+| [ADR-008](../specs/adr/008-error-handling-patterns.md) | Error Handling Patterns | **Accepted** | Structured errors via `chv-errors`; no panics in service code; graceful mutex poison recovery; explicit gRPC/HTTP mapping. |
+| [ADR-009](../specs/adr/009-logging-and-observability.md) | Logging and Observability | **Accepted** | `tracing` for structured logging; no `println!` in library crates; secret redaction; Prometheus metrics endpoint. |
+| [ADR-010](../specs/adr/010-async-runtime-safety.md) | Async Runtime Safety | **Accepted** | `tokio::sync::Mutex` in async contexts; `std::sync::Mutex` only in sync helpers with graceful poison handling; minimize lock scope. |
 
 ## Web UI ADRs
 

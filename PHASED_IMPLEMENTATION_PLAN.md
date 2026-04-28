@@ -1,6 +1,6 @@
 # CHV Phased Implementation Plan
 
-Based on the comprehensive repository review and existing roadmap (`docs/plans/2026-04-24-gap-analysis-and-implementation-plan.md`), the following is a detailed, phased implementation plan to bring the CHV platform to production readiness.
+Based on the comprehensive repository review and existing roadmap, the following is a detailed, phased implementation plan to bring the CHV platform to production readiness.
 
 ## Phase 1: Stability, Bug Fixes & Agent Parity
 

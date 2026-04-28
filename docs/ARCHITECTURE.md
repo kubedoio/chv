@@ -135,7 +135,7 @@ See ADR-007: [Upgrade and Rollback Policy](./specs/adr/007-upgrade-rollback.md)
 ## Current Implementation Phase
 
 **Phase:** Early-to-MVP transitioning to stability  
-**Gap Analysis:** [`plans/2026-04-24-gap-analysis-and-implementation-plan.md`](./plans/2026-04-24-gap-analysis-and-implementation-plan.md)
+**Gap Analysis:** [`../PHASED_IMPLEMENTATION_PLAN.md`](../PHASED_IMPLEMENTATION_PLAN.md)
 
 ### What Works
 
@@ -180,6 +180,7 @@ See ADR-007: [Upgrade and Rollback Policy](./specs/adr/007-upgrade-rollback.md)
 
 - [Architecture Decision Records](./specs/adr/)
 - [Component Specifications](./specs/component/)
-- [Gap Analysis & Implementation Plan](./plans/2026-04-24-gap-analysis-and-implementation-plan.md)
+- [Phased Implementation Plan](../PHASED_IMPLEMENTATION_PLAN.md)
 - [Deployment Guide](./DEPLOYMENT.md)
+- [Operations Guide](./OPERATIONS.md)
 - [Design System](../DESIGN.md)

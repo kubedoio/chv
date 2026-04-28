@@ -1,6 +1,6 @@
 # WebUI Changes
 
-> **Note:** This file is retained for historical reference. For the current state of the UI and recent changes, see [`CHANGELOG.md`](../CHANGELOG.md) and the [Gap Analysis & Implementation Plan](./plans/2026-04-24-gap-analysis-and-implementation-plan.md).
+> **Note:** This file is retained for historical reference. For the current state of the UI and recent changes, see [`CHANGELOG.md`](../CHANGELOG.md) and the [`PHASED_IMPLEMENTATION_PLAN.md`](../PHASED_IMPLEMENTATION_PLAN.md).
 
 ## Historical Sprint Summary (Pre-2026-04-14)
 
@@ -47,4 +47,4 @@ The WebUI has grown substantially since the above sprint. Current capabilities i
 | DataTable component splitting (688 lines) | Not started | P2 |
 | Overview page logic extraction (526 lines) | Not started | P2 |
 
-See the [Gap Analysis](./plans/2026-04-24-gap-analysis-and-implementation-plan.md) for the full UI backlog and sprint schedule.
+See the [`PHASED_IMPLEMENTATION_PLAN.md`](../PHASED_IMPLEMENTATION_PLAN.md) for the full UI backlog and sprint schedule.
