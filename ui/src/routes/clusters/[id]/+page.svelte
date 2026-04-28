@@ -330,62 +330,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		}
 	}
 
-	.detail-page {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.detail-grid {
-		display: grid;
-		grid-template-columns: 1fr 300px;
-		gap: 1rem;
-		align-items: start;
-	}
-
-	.detail-main-span {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.detail-side-span {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.capacity-segments {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-		padding: 0.5rem 0;
-	}
-
-	.cap-segment {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-	}
-
-	.cap-info {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-	}
-
-	.cap-label {
-		font-size: var(--text-xs);
-		font-weight: 500;
-		color: var(--shell-text-muted);
-	}
-
-	.cap-val {
-		font-family: var(--font-mono);
-		font-size: var(--text-sm);
-		font-weight: 700;
-	}
-
 	.workload-summary {
 		display: grid;
 		grid-template-columns: 1fr 1fr;
@@ -403,14 +347,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 	.w-stat .val { font-size: var(--text-lg); font-weight: 700; }
 	.w-stat .lbl { font-size: 10px; color: var(--shell-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-
-	.w-hint {
-		grid-column: 1 / -1;
-		font-size: 11px;
-		color: var(--shell-text-muted);
-		text-align: center;
-		margin-top: 0.5rem;
-	}
 
 	.mini-activity {
 		display: flex;
@@ -439,9 +375,4 @@ import Button from '$lib/components/primitives/Button.svelte';
 		padding: 1rem 0;
 	}
 
-	@media (max-width: 1200px) {
-		.detail-grid {
-			grid-template-columns: 1fr;
-		}
-	}
 </style>

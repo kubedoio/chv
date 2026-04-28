@@ -294,54 +294,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		gap: 0.35rem;
 	}
 
-	.btn-primary {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.35rem;
-		background: var(--shell-accent);
-		color: white;
-		border: none;
-		border-radius: 0.35rem;
-		padding: 0.45rem 0.9rem;
-		font-size: var(--text-sm);
-		font-weight: 600;
-		cursor: pointer;
-		transition: opacity 0.15s;
-	}
-
-	.btn-primary:hover {
-		opacity: 0.9;
-	}
-
-	.btn-primary:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.btn-secondary {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.35rem;
-		background: white;
-		color: var(--shell-text);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		padding: 0.45rem 0.9rem;
-		font-size: var(--text-sm);
-		font-weight: 600;
-		cursor: pointer;
-		transition: background 0.15s;
-	}
-
-	.btn-secondary:hover {
-		background: var(--shell-surface-muted);
-	}
-
-	.btn-sm {
-		padding: 0.35rem 0.65rem;
-		font-size: var(--text-xs);
-	}
-
 	.btn-icon {
 		display: inline-flex;
 		align-items: center;

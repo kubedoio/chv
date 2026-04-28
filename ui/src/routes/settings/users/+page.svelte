@@ -247,28 +247,28 @@ import Button from '$lib/components/primitives/Button.svelte';
 	{#snippet children()}
 		<div class="params-column">
 			<div class="field-control">
-				<label class="label">IDENTITY_ID</label>
-				<input type="text" bind:value={createForm.username} placeholder="operator_id" />
+				<label class="label" for="create-tech-username">IDENTITY_ID</label>
+				<input id="create-tech-username" type="text" bind:value={createForm.username} placeholder="operator_id" />
 			</div>
 			<div class="field-control">
-				<label class="label">ACCESS_PWD</label>
-				<input type="password" bind:value={createForm.password} placeholder="min_8_chars" />
+				<label class="label" for="create-tech-password">ACCESS_PWD</label>
+				<input id="create-tech-password" type="password" bind:value={createForm.password} placeholder="min_8_chars" />
 			</div>
 			<div class="field-control">
-				<label class="label">RBAC_ROLE</label>
-				<select bind:value={createForm.role}>
+				<label class="label" for="create-tech-role">RBAC_ROLE</label>
+				<select id="create-tech-role" bind:value={createForm.role}>
 					<option value="viewer">VIEWER</option>
 					<option value="operator">OPERATOR</option>
 					<option value="admin">ADMIN</option>
 				</select>
 			</div>
 			<div class="field-control">
-				<label class="label">ALIAS</label>
-				<input type="text" bind:value={createForm.display_name} placeholder="optional_name" />
+				<label class="label" for="create-tech-display-name">ALIAS</label>
+				<input id="create-tech-display-name" type="text" bind:value={createForm.display_name} placeholder="optional_name" />
 			</div>
 			<div class="field-control">
-				<label class="label">EMAIL_LINK</label>
-				<input type="email" bind:value={createForm.email} placeholder="optional_mail" />
+				<label class="label" for="create-tech-email">EMAIL_LINK</label>
+				<input id="create-tech-email" type="email" bind:value={createForm.email} placeholder="optional_mail" />
 			</div>
 			{#if createForm.error}
 				<div class="form-error-row">
@@ -291,28 +291,28 @@ import Button from '$lib/components/primitives/Button.svelte';
 		{#if selectedUser}
 			<div class="params-column">
 				<div class="field-control">
-					<label class="label">IDENTITY_ID</label>
-					<input type="text" value={selectedUser.username} disabled class="locked" />
+					<label class="label" for="edit-tech-username">IDENTITY_ID</label>
+					<input id="edit-tech-username" type="text" value={selectedUser.username} disabled class="locked" />
 				</div>
 				<div class="field-control">
-					<label class="label">RBAC_ROLE</label>
-					<select bind:value={editForm.role}>
+					<label class="label" for="edit-tech-role">RBAC_ROLE</label>
+					<select id="edit-tech-role" bind:value={editForm.role}>
 						<option value="viewer">VIEWER</option>
 						<option value="operator">OPERATOR</option>
 						<option value="admin">ADMIN</option>
 					</select>
 				</div>
 				<div class="field-control">
-					<label class="label">ALIAS</label>
-					<input type="text" bind:value={editForm.display_name} />
+					<label class="label" for="edit-tech-display-name">ALIAS</label>
+					<input id="edit-tech-display-name" type="text" bind:value={editForm.display_name} />
 				</div>
 				<div class="field-control">
-					<label class="label">EMAIL_LINK</label>
-					<input type="email" bind:value={editForm.email} />
+					<label class="label" for="edit-tech-email">EMAIL_LINK</label>
+					<input id="edit-tech-email" type="email" bind:value={editForm.email} />
 				</div>
 				<div class="field-control">
-					<label class="label">RESET_PWD</label>
-					<input type="password" bind:value={editForm.password} placeholder="leave_blank_to_keep" />
+					<label class="label" for="edit-tech-password">RESET_PWD</label>
+					<input id="edit-tech-password" type="password" bind:value={editForm.password} placeholder="leave_blank_to_keep" />
 				</div>
 				{#if editForm.error}
 					<div class="form-error-row">
@@ -619,82 +619,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		text-align: center;
 	}
 
-  .w-full { width: 100%; justify-content: center; }
-
-	@media (max-width: 1100px) {
-		.inventory-main {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.users-page {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.loading-state,
-	.empty-state {
-		padding: 2rem;
-		text-align: center;
-		color: var(--shell-text-muted);
-		font-size: var(--text-sm);
-	}
-
-	.users-table-wrap {
-		overflow-x: auto;
-	}
-
-	.users-table {
-		width: 100%;
-		border-collapse: collapse;
-		font-size: var(--text-sm);
-	}
-
-	.users-table th {
-		text-align: left;
-		padding: 0.5rem 0.75rem;
-		font-size: 10px;
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--shell-text-muted);
-		border-bottom: 1px solid var(--shell-line);
-		white-space: nowrap;
-	}
-
-	.users-table td {
-		padding: 0.625rem 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		color: var(--shell-text);
-		vertical-align: middle;
-	}
-
-	.users-table tbody tr:last-child td {
-		border-bottom: none;
-	}
-
-	.users-table tbody tr:hover {
-		background: var(--shell-surface-muted);
-	}
-
-	.username-cell {
-		font-weight: 500;
-		font-family: var(--font-mono, monospace);
-	}
-
-	.email-cell {
-		color: var(--shell-text-secondary);
-		font-size: 11px;
-	}
-
-	.action-buttons {
-		display: flex;
-		align-items: center;
-		gap: 0.25rem;
-	}
-
-	.btn-icon {
+  .btn-icon {
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -711,55 +636,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 	.btn-icon:hover {
 		background: var(--shell-surface-muted);
 		color: var(--shell-text);
-	}
-
-	.btn-icon--danger:hover {
-		background: var(--status-failed-bg);
-		border-color: var(--status-failed-border);
-		color: var(--status-failed-text);
-	}
-
-	.btn-primary {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		padding: 0.4rem 0.875rem;
-		border-radius: 0.25rem;
-		background: var(--shell-accent);
-		color: white;
-		font-size: var(--text-sm);
-		font-weight: 500;
-		border: none;
-		cursor: pointer;
-		transition: opacity 0.1s;
-	}
-
-	.btn-primary:hover {
-		opacity: 0.88;
-	}
-
-	.btn-primary:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.btn-secondary {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		padding: 0.4rem 0.875rem;
-		border-radius: 0.25rem;
-		background: transparent;
-		color: var(--shell-text);
-		font-size: var(--text-sm);
-		font-weight: 500;
-		border: 1px solid var(--shell-line);
-		cursor: pointer;
-		transition: background 0.1s;
-	}
-
-	.btn-secondary:hover {
-		background: var(--shell-surface-muted);
 	}
 
 	.form-fields {

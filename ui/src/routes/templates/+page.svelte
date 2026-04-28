@@ -533,32 +533,4 @@ import Button from '$lib/components/primitives/Button.svelte';
     }
   }
 
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-sm);
-    color: var(--color-neutral-500);
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    transition: all var(--duration-fast);
-  }
-
-  .action-btn:hover {
-    background: var(--color-neutral-100);
-    color: var(--color-neutral-700);
-  }
-
-  .action-btn.start:hover {
-    color: var(--color-success);
-    background: var(--color-success-light);
-  }
-
-  .action-btn.danger:hover {
-    color: var(--color-danger);
-    background: var(--color-danger-light);
-  }
 </style>

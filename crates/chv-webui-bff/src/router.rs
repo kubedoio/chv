@@ -319,7 +319,12 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         )
         .route(
             "/v1/backups/jobs/:job_id",
-            delete(crate::handlers::backups::delete_backup_job),
+            patch(crate::handlers::backups::update_backup_job)
+                .delete(crate::handlers::backups::delete_backup_job),
+        )
+        .route(
+            "/v1/backups/jobs/:job_id/execute",
+            post(crate::handlers::backups::execute_backup_job),
         )
         .route(
             "/v1/backups/schedules",

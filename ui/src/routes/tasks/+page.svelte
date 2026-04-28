@@ -211,25 +211,11 @@
 		overflow: hidden;
 	}
 
-	.single-col {
-		grid-template-columns: 1fr !important;
-	}
-
-	.mono-id {
-		font-family: var(--font-mono);
-		font-size: 11px;
-		color: var(--shell-text-muted);
-	}
-
 	.actor-cell {
 		display: flex;
 		align-items: center;
 		gap: 0.35rem;
 		font-size: var(--text-xs);
 		color: var(--shell-text-muted);
-	}
-
-	.actor-icon {
-		opacity: 0.5;
 	}
 </style>

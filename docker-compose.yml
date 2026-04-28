@@ -1,17 +1,211 @@
+version: "3.8"
+
+# CHV local development stack
+# Note: chv-webui-bff is embedded in the chv-controlplane binary (port 8080).
+#
+# Services:
+#   chv-controlplane — gRPC control plane + HTTP BFF API
+#   chv-stord        — storage daemon (Unix socket)
+#   chv-nwd          — network daemon (Unix socket)
+#   chv-agent        — node agent (supervises VM runtime; stord/nwd run in separate containers above)
+#   chv-webui        — nginx serving the SvelteKit static app + proxying API/BFF/WebSocket
+#
+# Bootstrap token must be created manually after the controlplane starts, e.g.:
+#   docker compose exec chv-controlplane chv-controlplane --generate-bootstrap-token > token.txt
+
 services:
-  chv:
-    build: .
+  chv-controlplane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      sh -c "mkdir -p /run/chv/controlplane /var/lib/chv /usr/local/share/chv/migrations &&
+             cat > /etc/chv/controlplane.toml <<'EOF'
+      grpc_bind = \"0.0.0.0:8443\"
+      http_bind = \"0.0.0.0:8080\"
+      log_level = \"info\"
+      runtime_dir = \"/run/chv/controlplane\"
+      agent_runtime_dir = \"/var/lib/chv/agent\"
+      jwt_secret = \"chv-local-dev-secret-do-not-use-in-production-ever\"
+
+      [database]
+      url = \"sqlite:///var/lib/chv/controlplane.db\"
+      migrations_dir = \"/usr/local/share/chv/migrations\"
+      max_connections = 4
+      min_connections = 1
+      acquire_timeout_secs = 5
+      EOF
+      chv-controlplane /etc/chv/controlplane.toml"
     ports:
-      - "80:80"       # Web UI
+      - "8080:8080"   # HTTP BFF / Admin API
       - "8443:8443"   # gRPC (agent enrollment)
     volumes:
       - chv-data:/var/lib/chv
-      - chv-config:/etc/chv
+      - chv-run:/run/chv
+      - chv-certs:/etc/chv/certs
+    networks:
+      - chv
     restart: unless-stopped
-    privileged: true   # Required for KVM/Cloud Hypervisor
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  chv-stord:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      sh -c "mkdir -p /var/lib/chv/storage/localdisk /run/chv/stord &&
+             cat > /etc/chv/stord.toml <<'EOF'
+      socket_path = \"/run/chv/stord/api.sock\"
+      runtime_dir = \"/var/lib/chv/storage/localdisk\"
+      log_level = \"info\"
+      EOF
+      chv-stord /etc/chv/stord.toml"
+    volumes:
+      - chv-data:/var/lib/chv
+      - chv-run:/run/chv
+    networks:
+      - chv
+    restart: unless-stopped
+    depends_on:
+      - chv-controlplane
+
+  chv-nwd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      sh -c "mkdir -p /run/chv/nwd &&
+             cat > /etc/chv/nwd.toml <<'EOF'
+      socket_path = \"/run/chv/nwd/api.sock\"
+      runtime_dir = \"/run/chv/nwd\"
+      log_level = \"info\"
+      EOF
+      chv-nwd /etc/chv/nwd.toml"
+    volumes:
+      - chv-run:/run/chv
+    networks:
+      - chv
+    restart: unless-stopped
+    depends_on:
+      chv-controlplane:
+        condition: service_healthy
+
+  chv-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    privileged: true
     devices:
       - /dev/kvm:/dev/kvm
+    command: >
+      sh -c "mkdir -p /var/lib/chv/agent /run/chv/agent /var/lib/chv/cache /etc/chv/certs &&
+             cat > /etc/chv/agent.toml <<'EOF'
+      socket_path = \"/run/chv/agent/api.sock\"
+      runtime_dir = \"/var/lib/chv/agent\"
+      log_level = \"info\"
+      control_plane_addr = \"http://chv-controlplane:8443\"
+      stord_socket = \"/run/chv/stord/api.sock\"
+      nwd_socket = \"/run/chv/nwd/api.sock\"
+      chv_binary_path = \"/usr/bin/cloud-hypervisor\"
+      stord_binary_path = \"/dev/null\"
+      nwd_binary_path = \"/dev/null\"
+      cache_path = \"/var/lib/chv/cache/agent-cache.json\"
+      node_id = \"\"
+      metrics_bind = \"0.0.0.0:9901\"
+      storage_base_dir = \"/var/lib/chv/storage\"
+      bootstrap_token_path = \"/etc/chv/bootstrap.token\"
+      tls_cert_path = \"/run/chv/agent/agent.crt\"
+      tls_key_path = \"/run/chv/agent/agent.key\"
+      ca_cert_path = \"/etc/chv/certs/ca.crt\"
+      console_bind = \"0.0.0.0:8444\"
+      jwt_secret = \"chv-local-dev-secret-do-not-use-in-production-ever\"
+      EOF
+      chv-agent /etc/chv/agent.toml"
+    ports:
+      - "8444:8444"   # Serial console WebSocket
+      - "9901:9901"   # Agent metrics
+    volumes:
+      - chv-data:/var/lib/chv
+      - chv-run:/run/chv
+      - chv-certs:/etc/chv/certs
+    networks:
+      - chv
+    restart: unless-stopped
+    depends_on:
+      - chv-controlplane
+      - chv-stord
+      - chv-nwd
+
+  chv-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      sh -c "cat > /etc/nginx/sites-enabled/default <<'EOF'
+      server {
+        listen 80;
+        server_name _;
+        root /opt/chv/ui;
+        index index.html;
+        location / {
+          try_files \$$uri \$$uri/ /index.html;
+        }
+        location = /index.html {
+          add_header Cache-Control \"no-cache, no-store, must-revalidate\";
+        }
+        location /_app/immutable/ {
+          add_header Cache-Control \"public, max-age=31536000, immutable\";
+        }
+        location /api/ {
+          proxy_pass http://chv-controlplane:8080;
+          proxy_http_version 1.1;
+          proxy_set_header Host \$$host;
+          proxy_set_header X-Real-IP \$$remote_addr;
+          proxy_set_header X-Forwarded-For \$$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto \$$scheme;
+          proxy_intercept_errors off;
+        }
+        location /v1/ {
+          proxy_pass http://chv-controlplane:8080;
+          proxy_http_version 1.1;
+          proxy_set_header Host \$$host;
+          proxy_set_header X-Real-IP \$$remote_addr;
+          proxy_set_header X-Forwarded-For \$$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto \$$scheme;
+          proxy_intercept_errors off;
+        }
+        location /ws/vms/ {
+          proxy_pass http://chv-agent:8444/vms/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade \$$http_upgrade;
+          proxy_set_header Connection \"upgrade\";
+          proxy_set_header Host \$$host;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        }
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml+rss text/javascript;
+      }
+      EOF
+      nginx -g 'daemon off;'"
+    ports:
+      - "80:80"       # Web UI
+    depends_on:
+      - chv-controlplane
+      - chv-agent
+    networks:
+      - chv
+    restart: unless-stopped
 
 volumes:
   chv-data:
-  chv-config:
+  chv-run:
+  chv-certs:
+
+networks:
+  chv:
+    driver: bridge

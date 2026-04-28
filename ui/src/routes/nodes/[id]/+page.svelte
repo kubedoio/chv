@@ -204,41 +204,10 @@ import Button from '$lib/components/primitives/Button.svelte';
 		gap: 0.5rem;
 	}
 
-	.detail-grid {
-		display: grid;
-		grid-template-columns: 1fr 300px;
-		gap: 1rem;
-		align-items: start;
-	}
-
-	.detail-main-span {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.detail-sections {
-		display: grid;
-		grid-template-columns: 1fr;
-		gap: 1rem;
-	}
-
-	.detail-side-span {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
 	.empty-hint {
 		font-size: var(--text-xs);
 		color: var(--shell-text-muted);
 		text-align: center;
 		padding: 1rem 0;
-	}
-
-	@media (max-width: 1200px) {
-		.detail-grid {
-			grid-template-columns: 1fr;
-		}
 	}
 </style>

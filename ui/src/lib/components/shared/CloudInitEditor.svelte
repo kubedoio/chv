@@ -25,9 +25,9 @@
   const client = createAPIClient({ token: getStoredToken() ?? undefined });
 
   // Form state
-  let name = $state(initialName);
-  let description = $state(initialDescription);
-  let content = $state(initialContent || '#cloud-config\n');
+  let name = $state('');
+  let description = $state('');
+  let content = $state('#cloud-config\n');
   let variables = $state<string[]>([]);
   
   // Preview state

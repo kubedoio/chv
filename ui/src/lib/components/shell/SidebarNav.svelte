@@ -562,11 +562,6 @@
 		font-size: var(--text-sm);
 	}
 
-	.app-nav__tree-row--resource,
-	.app-nav__tree-row--link {
-		color: var(--color-neutral-500);
-	}
-
 	.app-nav__tree-row:hover {
 		background: var(--color-neutral-800);
 		color: var(--color-sidebar-text-active, #ffffff);

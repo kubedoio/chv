@@ -413,10 +413,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		gap: 0.75rem;
 	}
 
-	.posture-strip-wrapper {
-		margin-top: -0.25rem;
-	}
-
 	.inventory-controls {
 		border: 1px solid var(--shell-line);
 		border-radius: 0.35rem;
@@ -434,30 +430,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		display: flex;
 		flex-direction: column;
 		gap: 0.75rem;
-	}
-
-	.support-panel {
-		background: var(--shell-surface);
-		border: 1px solid var(--shell-line);
-		border-radius: 0.35rem;
-		padding: 0.75rem;
-	}
-
-	.support-panel__header {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		margin-bottom: 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		padding-bottom: 0.5rem;
-	}
-
-	.support-panel__header h3 {
-		font-size: var(--text-xs);
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--shell-text-muted);
 	}
 
 	.empty-hint {
@@ -496,72 +468,9 @@ import Button from '$lib/components/primitives/Button.svelte';
 		color: var(--color-warning-dark);
 	}
 
-	.delete-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		background: none;
-		border: 1px solid transparent;
-		border-radius: 0.25rem;
-		padding: 0.2rem 0.35rem;
-		cursor: pointer;
-		color: var(--shell-text-muted);
-		transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-	}
-
-	.delete-btn:hover:not(:disabled) {
-		color: var(--color-danger, #c0392b);
-		border-color: var(--color-danger, #c0392b);
-		background: rgba(192, 57, 43, 0.06);
-	}
-
-	.delete-btn:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-
-	.delete-error-banner {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		background: rgba(192, 57, 43, 0.08);
-		border: 1px solid var(--color-danger, #c0392b);
-		border-radius: 0.35rem;
-		padding: 0.5rem 0.75rem;
-		font-size: var(--text-sm);
-		color: var(--color-danger, #c0392b);
-	}
-
-	.dismiss-btn {
-		background: none;
-		border: none;
-		cursor: pointer;
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		padding: 0.1rem 0.25rem;
-	}
-
-	.dismiss-btn:hover {
-		color: var(--shell-text);
-	}
-
 	.cell-text {
 		font-variant-numeric: tabular-nums;
 	}
-
-	.cell-badge {
-		display: inline-block;
-		padding: 0.1rem 0.4rem;
-		border-radius: 0.2rem;
-		font-size: var(--text-xs);
-		font-weight: 600;
-		text-transform: capitalize;
-	}
-
-	.cell-badge[data-tone="healthy"] { background: rgba(39, 174, 96, 0.12); color: var(--color-ok-dark, #1e8449); }
-	.cell-badge[data-tone="warning"] { background: rgba(243, 156, 18, 0.12); color: var(--color-warning-dark, #d68910); }
-	.cell-badge[data-tone="failed"]  { background: rgba(192, 57, 43, 0.12); color: var(--color-danger, #c0392b); }
-	.cell-badge[data-tone="unknown"] { background: var(--shell-surface-muted); color: var(--shell-text-muted); }
 
 	@media (max-width: 1100px) {
 		.inventory-main {

@@ -126,8 +126,5 @@ import Button from '$lib/components/primitives/Button.svelte';
 		border-radius: var(--radius-xs);
 	}
 
-	.w-full {
-		width: 100%;
-		justify-content: center;
-	}
+
 </style>

@@ -103,10 +103,10 @@ import Button from '$lib/components/primitives/Button.svelte';
      <EmptyInfrastructureState title="Policy records missing" description="Unable to locate resource pressure audit logs." />
   {:else}
     <div class="inventory-metrics">
-      <CompactMetricCard label="Compute Load" value="{getPercentage('cpus')}%" color={getPercentage('cpus') > 80 ? 'warning' : 'primary'} />
+      <CompactMetricCard label="Compute Load" value={getPercentage('cpus') + '%'} color={getPercentage('cpus') > 80 ? 'warning' : 'primary'} />
       <CompactMetricCard label="Memory Load" value="{getPercentage('memory_gb')}%" color={getPercentage('memory_gb') > 80 ? 'warning' : 'primary'} />
       <CompactMetricCard label="Storage Load" value="{getPercentage('storage_gb')}%" color={getPercentage('storage_gb') > 80 ? 'warning' : 'primary'} />
-      <CompactMetricCard label="Network Assets" value="{getUsageValue('networks')}" color="neutral" />
+      <CompactMetricCard label="Network Assets" value={String(getUsageValue('networks'))} color="neutral" />
     </div>
 
     <main class="inventory-main">

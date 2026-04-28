@@ -12,8 +12,8 @@ mod operations;
 
 pub use alerts::{AlertCreateInput, AlertRepository};
 pub use backups::{
-    BackupJobCreateInput, BackupJobRow, BackupJobStatusUpdateInput, BackupRepository,
-    BackupRestoreCreateInput, BackupRestoreRow, BackupRestoreStatusUpdateInput,
+    BackupJobCreateInput, BackupJobRow, BackupJobStatusUpdateInput, BackupJobUpdateInput,
+    BackupRepository, BackupRestoreCreateInput, BackupRestoreRow, BackupRestoreStatusUpdateInput,
     BackupScheduleCreateInput, BackupScheduleRow, BackupScheduleUpdateInput,
 };
 pub use bootstrap_tokens::{BootstrapTokenRepository, BootstrapTokenValidation};

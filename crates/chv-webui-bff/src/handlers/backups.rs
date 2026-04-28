@@ -8,8 +8,8 @@ use crate::router::AppState;
 use crate::BffError;
 use chrono::Utc;
 use chv_controlplane_store::{
-    BackupJobCreateInput, BackupRestoreCreateInput, BackupScheduleCreateInput,
-    BackupScheduleUpdateInput,
+    BackupJobCreateInput, BackupJobUpdateInput, BackupRestoreCreateInput,
+    BackupScheduleCreateInput, BackupScheduleUpdateInput,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -280,6 +280,124 @@ pub async fn delete_backup_job(
         .map_err(|e| BffError::Internal(format!("failed to delete backup job: {}", e)))?;
 
     Ok(Json(json!({ "deleted": true })))
+}
+
+pub async fn update_backup_job(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    let row = state
+        .backup_repo
+        .get_job(&job_id)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to get backup job: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("backup job {} not found", job_id)))?;
+
+    let volume_id = payload
+        .get("volume_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(row.volume_id);
+    let status = payload
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&row.status)
+        .to_string();
+    let backup_type = payload
+        .get("backup_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&row.backup_type)
+        .to_string();
+    let target_path = payload
+        .get("target_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(row.target_path);
+    let storage_backend = payload
+        .get("storage_backend")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(row.storage_backend);
+    let started_at = payload
+        .get("started_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(row.started_at);
+    let completed_at = payload
+        .get("completed_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(row.completed_at);
+    let error_message = payload
+        .get("error_message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(row.error_message);
+    let size_bytes = payload
+        .get("size_bytes")
+        .and_then(|v| v.as_i64())
+        .or(row.size_bytes);
+
+    let input = BackupJobUpdateInput {
+        job_id,
+        volume_id,
+        status,
+        backup_type,
+        target_path,
+        storage_backend,
+        started_at,
+        completed_at,
+        error_message,
+        size_bytes,
+    };
+
+    state
+        .backup_repo
+        .update_job(&input)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to update backup job: {}", e)))?;
+
+    Ok(Json(json!({ "updated": true })))
+}
+
+pub async fn execute_backup_job(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, BffError> {
+    let row = state
+        .backup_repo
+        .get_job(&job_id)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to get backup job: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("backup job {} not found", job_id)))?;
+
+    let input = BackupJobCreateInput {
+        vm_id: row.vm_id,
+        volume_id: row.volume_id,
+        status: "Running".into(),
+        backup_type: row.backup_type,
+        target_path: row.target_path,
+        storage_backend: row.storage_backend,
+        started_at: Some(Utc::now().to_rfc3339()),
+        completed_at: None,
+        error_message: None,
+        size_bytes: None,
+    };
+
+    let execution_id = state
+        .backup_repo
+        .create_job(&input)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to execute backup job: {}", e)))?;
+
+    Ok(Json(json!({
+        "execution_id": execution_id,
+        "status": "Running",
+        "started_at": input.started_at,
+    })))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

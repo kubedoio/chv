@@ -73,6 +73,20 @@ UPDATE backup_jobs SET
 WHERE job_id = ?
 "#;
 
+const UPDATE_JOB_SQL: &str = r#"
+UPDATE backup_jobs SET
+    volume_id = ?,
+    status = ?,
+    backup_type = ?,
+    target_path = ?,
+    storage_backend = ?,
+    started_at = ?,
+    completed_at = ?,
+    error_message = ?,
+    size_bytes = ?
+WHERE job_id = ?
+"#;
+
 const DELETE_JOB_SQL: &str = "DELETE FROM backup_jobs WHERE job_id = ?";
 
 const LIST_JOBS_FOR_VM_SQL: &str = r#"
@@ -301,6 +315,23 @@ impl BackupRepository {
     ) -> Result<(), StoreError> {
         sqlx::query(UPDATE_JOB_STATUS_SQL)
             .bind(&input.status)
+            .bind(&input.started_at)
+            .bind(&input.completed_at)
+            .bind(&input.error_message)
+            .bind(input.size_bytes)
+            .bind(&input.job_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_job(&self, input: &BackupJobUpdateInput) -> Result<(), StoreError> {
+        sqlx::query(UPDATE_JOB_SQL)
+            .bind(&input.volume_id)
+            .bind(&input.status)
+            .bind(&input.backup_type)
+            .bind(&input.target_path)
+            .bind(&input.storage_backend)
             .bind(&input.started_at)
             .bind(&input.completed_at)
             .bind(&input.error_message)
@@ -547,6 +578,20 @@ pub struct BackupJobCreateInput {
 pub struct BackupJobStatusUpdateInput {
     pub job_id: String,
     pub status: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub error_message: Option<String>,
+    pub size_bytes: Option<i64>,
+}
+
+#[derive(Clone)]
+pub struct BackupJobUpdateInput {
+    pub job_id: String,
+    pub volume_id: Option<String>,
+    pub status: String,
+    pub backup_type: String,
+    pub target_path: Option<String>,
+    pub storage_backend: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub error_message: Option<String>,

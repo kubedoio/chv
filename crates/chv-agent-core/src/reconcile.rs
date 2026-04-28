@@ -1279,7 +1279,19 @@ mod tests {
             &self,
             _req: Request<chv_stord_api::chv_stord_api::VolumeHealthRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::VolumeHealthResponse>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(
+                chv_stord_api::chv_stord_api::VolumeHealthResponse {
+                    result: Some(chv_stord_api::chv_stord_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                    volume_id: "".to_string(),
+                    health_status: "healthy".to_string(),
+                    backend_state: "".to_string(),
+                    last_error: "".to_string(),
+                },
+            ))
         }
         async fn attach_volume_to_vm(
             &self,
@@ -1317,37 +1329,61 @@ mod tests {
             &self,
             _req: Request<chv_stord_api::chv_stord_api::ResizeVolumeRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn prepare_snapshot(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::PrepareSnapshotRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn prepare_clone(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::PrepareCloneRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn restore_snapshot(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::RestoreSnapshotRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn delete_snapshot(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::DeleteSnapshotRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn set_device_policy(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
     }
 
@@ -1389,7 +1425,18 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::NetworkHealthRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::NetworkHealthResponse>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::NetworkHealthResponse {
+                    result: Some(chv_nwd_api::chv_nwd_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                    network_id: "".to_string(),
+                    health_status: "healthy".to_string(),
+                    last_error: "".to_string(),
+                },
+            ))
         }
         async fn attach_vm_nic(
             &self,
@@ -1425,37 +1472,61 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::SetFirewallPolicyRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn set_nat_policy(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::SetNatPolicyRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn ensure_dhcp_scope(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::EnsureDhcpScopeRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn ensure_dns_scope(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::EnsureDnsScopeRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn expose_service(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::ExposeServiceRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
         async fn withdraw_service_exposure(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::WithdrawServiceExposureRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
-            Err(Status::unimplemented(""))
+            Ok(Response::new(chv_nwd_api::chv_nwd_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
     }
 

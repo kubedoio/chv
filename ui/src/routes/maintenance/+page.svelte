@@ -125,7 +125,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 					<div class="upgrade-dispatch">
 						{#if maintenance.upgrade_available}
 							<div class="upgrade-alert">
-								<RefreshCcw size={14} class="spin-slow" />
+								<span class="spin-slow"><RefreshCcw size={14} /></span>
 								<div class="upgrade-text">
 									<strong>v2.5.0-LTS STAGED</strong>
 									<span>Includes critical NVMe driver stability patches.</span>
