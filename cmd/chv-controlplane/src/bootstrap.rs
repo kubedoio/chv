@@ -160,6 +160,13 @@ pub async fn build_service(
     );
     tokio::spawn(orchestrator.run());
 
+    let backup_worker = chv_controlplane_service::BackupWorker::new(
+        pool.clone(),
+        backup_repo.clone(),
+        config.agent_socket_pattern.clone(),
+    );
+    tokio::spawn(backup_worker.run());
+
     Ok(ControlPlaneService::new(
         runtime,
         ControlPlaneComponents::new(

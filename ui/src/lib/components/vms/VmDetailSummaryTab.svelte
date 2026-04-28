@@ -13,9 +13,9 @@
 		health: string;
 		cpu: string;
 		memory: string;
-		volumes: Record<string, unknown>[];
-		nics: Record<string, unknown>[];
-		tasks: { task_id: string; summary: string; status: string; operation: string; started_at?: string; tone: ShellTone }[];
+		volumes?: any[];
+		nics?: any[];
+		recentTasks?: any[];
 	}
 
 	let {
@@ -23,10 +23,18 @@
 		health,
 		cpu,
 		memory,
-		volumes,
-		nics,
-		tasks
+		volumes = [],
+		nics = [],
+		recentTasks = []
 	}: Props = $props();
+
+	function normalizeTone(status: string): ShellTone {
+		const s = status.toLowerCase();
+		if (['running', 'healthy', 'ready', 'active', 'online'].includes(s)) return 'healthy';
+		if (['warning', 'maintenance', 'starting', 'stopping', 'paused', 'rebooting'].includes(s)) return 'warning';
+		if (['failed', 'error', 'critical', 'crashed', 'deleting'].includes(s)) return 'failed';
+		return 'unknown';
+	}
 
 	const volumeColumns = [
 		{ key: 'name', label: 'Volume Identity' },
@@ -41,6 +49,31 @@
 		{ key: 'mac_address', label: 'L2 Identity' },
 		{ key: 'addressing_mode', label: 'DHCP/STA', align: 'center' as const }
 	];
+
+	const volumeRows = $derived(
+		volumes.map(v => ({
+			...v,
+			health: { label: v.health, tone: normalizeTone(v.health) }
+		}))
+	);
+
+	const nicRows = $derived(
+		nics.map(n => ({
+			...n,
+			ip_address: n.ip_address || 'UNASSIGNED',
+			addressing_mode: {
+				label: n.addressing_mode === 'internal' ? 'DHCP' : 'STATIC',
+				tone: n.addressing_mode === 'internal' ? 'healthy' : 'warning'
+			}
+		}))
+	);
+
+	const timelineTasks = $derived(
+		recentTasks.map(t => ({
+			...t,
+			tone: normalizeTone(t.status)
+		}))
+	);
 </script>
 
 <div class="summary-top">
@@ -72,7 +105,7 @@
 	{:else}
 		<InventoryTable
 			columns={volumeColumns}
-			rows={volumes}
+			rows={volumeRows}
 			rowHref={(row) => `/volumes/${row.volume_id}`}
 		>
 			{#snippet cell({ column, row }: { column: any; row: Record<string, unknown> })}
@@ -94,7 +127,7 @@
 	{:else}
 		<InventoryTable
 			columns={nicColumns}
-			rows={nics}
+			rows={nicRows}
 		>
 			{#snippet cell({ column, row }: { column: any; row: Record<string, unknown> })}
 				{#if column.key === 'addressing_mode'}
@@ -108,7 +141,7 @@
 </SectionCard>
 
 <SectionCard title="Operational History" icon={Activity}>
-	<TaskTimeline tasks={tasks} />
+	<TaskTimeline tasks={timelineTasks} />
 </SectionCard>
 
 <style>

@@ -345,6 +345,7 @@ pub async fn clone_vm_template(
         template.cpu_count,
         template.memory_bytes,
         volume_size_bytes,
+        1, // vm_count_delta: creating 1 new VM from template
     )
     .await?;
 

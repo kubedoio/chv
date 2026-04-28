@@ -4,20 +4,19 @@
 	import { selection } from '$lib/stores/selection.svelte';
 	import { Loader2 } from 'lucide-svelte';
 	import {
-		displayNodes,
-		displayVms,
-		topologyBox,
-		showMinimap,
+		getDisplayNodes,
+		getDisplayVms,
+		getTopologyBox,
+		getShowMinimap,
 		getStatusColor
 	} from './topology-layout.svelte';
-	import { selectedResource } from './topology-selection.svelte';
+	import { getSelectedResource } from './topology-selection.svelte';
 	import TopologyHeader from './TopologyHeader.svelte';
 	import TopologyGraph from './TopologyGraph.svelte';
 	import TopologyMinimap from './TopologyMinimap.svelte';
 	import TopologySelectionPanel from './TopologySelectionPanel.svelte';
 	import TopologyContextMenu from './TopologyContextMenu.svelte';
 	import TopologyFooter from './TopologyFooter.svelte';
-
 	type TopologyTarget = 'fleet' | 'node' | 'vm';
 
 	interface MenuAction {
@@ -49,6 +48,11 @@
 	let canvasElement = $state<HTMLDivElement | null>(null);
 
 	const highlightedIds = $derived(new Set(highlightedResourceIds));
+	const displayNodes = $derived(getDisplayNodes());
+	const displayVms = $derived(getDisplayVms());
+	const topologyBox = $derived(getTopologyBox());
+	const showMinimap = $derived(getShowMinimap());
+	const selectedResource = $derived(getSelectedResource());
 
 	const viewBox = $derived(
 		(() => {
@@ -287,7 +291,6 @@
 		from { transform: rotate(0deg); }
 		to { transform: rotate(360deg); }
 	}
-
 	@media (prefers-reduced-motion: reduce) {
 		:global(.animate-spin) {
 			animation: none;

@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { goto } from '$app/navigation';
 	import type { PageData } from './$types';
 	import { getStoredToken, createAPIClient } from '$lib/api/client';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
@@ -15,18 +14,14 @@
 	import VmDetailErrorState from '$lib/components/vms/VmDetailErrorState.svelte';
 	import VmDetailSummaryTab from '$lib/components/vms/VmDetailSummaryTab.svelte';
 	import VmDetailSupportRail from '$lib/components/vms/VmDetailSupportRail.svelte';
-	import Button from '$lib/components/primitives/Button.svelte';
+	import VmDetailActions from '$lib/components/vms/VmDetailActions.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
-	import {
-		Play, Square, RotateCcw, Trash2, Power,
-		Terminal, FileText
-	} from 'lucide-svelte';
+	import { Terminal, FileText } from 'lucide-svelte';
 
 	let { data }: { data: PageData } = $props();
 
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
-	let confirmingAction = $state<string | null>(null);
 	let liveConsoleUrl = $state<string | undefined>(undefined);
 	let VmConsoleComponent = $state<typeof import('$lib/components/vms/VmConsole.svelte').default | null>(null);
 	let consoleLoading = $state(false);
@@ -96,7 +91,6 @@
 	}
 
 	async function executeAction(action: string) {
-		confirmingAction = null;
 		pendingAction = action;
 		const token = getStoredToken() ?? undefined;
 		const vm_id = detail.summary.vm_id;
@@ -121,11 +115,6 @@
 	}
 
 	const configProps = $derived(detail.configuration.map(c => ({ label: c.label, value: c.value })));
-
-	const timelineTasks = $derived(detail.recent_tasks.map(t => ({
-		...t,
-		tone: normalizeTone(t.status)
-	})));
 </script>
 
 <div class="inventory-page">
@@ -149,32 +138,7 @@
 			parentHref="/vms"
 		>
 			{#snippet actions()}
-				<div class="header-actions">
-					{#if confirmingAction}
-						<div class="confirm-group">
-							<span class="confirm-text">Confirm {confirmingAction}?</span>
-							<Button variant="primary" size="sm" onclick={() => executeAction(confirmingAction!)}>Confirm</Button>
-							<Button variant="secondary" size="sm" onclick={() => confirmingAction = null}>Cancel</Button>
-						</div>
-					{:else}
-						{@const ps = detail.summary.power_state.toLowerCase()}
-						<button class="vm-action vm-action--primary" type="button" disabled={ps === 'running' || pendingAction !== null} onclick={() => executeAction('start')} title={pendingAction === 'start' ? 'Starting' : 'Start VM'} aria-label={pendingAction === 'start' ? 'Starting VM' : 'Start VM'}>
-							<Play size={13} />
-						</button>
-						<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'shutdown'} title={pendingAction === 'shutdown' ? 'Shutting down' : 'Shutdown VM'} aria-label={pendingAction === 'shutdown' ? 'Shutting down VM' : 'Shutdown VM'}>
-							<Power size={13} />
-						</button>
-						<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'poweroff'} title={pendingAction === 'poweroff' ? 'Powering off' : 'Poweroff VM'} aria-label={pendingAction === 'poweroff' ? 'Powering off VM' : 'Poweroff VM'}>
-							<Square size={13} />
-						</button>
-						<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'} title={pendingAction === 'restart' ? 'Rebooting' : 'Reboot VM'} aria-label={pendingAction === 'restart' ? 'Rebooting VM' : 'Reboot VM'}>
-							<RotateCcw size={13} />
-						</button>
-						<button class="vm-action vm-action--danger" type="button" disabled={pendingAction !== null} onclick={() => confirmingAction = 'delete'} title={pendingAction === 'delete' ? 'Deleting' : 'Delete VM'} aria-label={pendingAction === 'delete' ? 'Deleting VM' : 'Delete VM'}>
-							<Trash2 size={13} />
-						</button>
-					{/if}
-				</div>
+				<VmDetailActions {pendingAction} powerState={detail.summary.power_state} onExecute={executeAction} />
 			{/snippet}
 		</ResourceDetailHeader>
 
@@ -220,16 +184,9 @@
 						health={detail.summary.health}
 						cpu={detail.summary.cpu}
 						memory={detail.summary.memory}
-						volumes={detail.summary.attached_volumes?.map(v => ({
-							...v,
-							health: { label: v.health, tone: normalizeTone(v.health) }
-						})) ?? []}
-						nics={detail.summary.attached_nics?.map(n => ({
-							...n,
-							ip_address: n.ip_address || 'UNASSIGNED',
-							addressing_mode: { label: n.addressing_mode === 'internal' ? 'DHCP' : 'STATIC', tone: n.addressing_mode === 'internal' ? 'healthy' : 'warning' }
-						})) ?? []}
-						tasks={timelineTasks}
+						volumes={detail.summary.attached_volumes ?? []}
+						nics={detail.summary.attached_nics ?? []}
+						recentTasks={detail.recent_tasks}
 					/>
 				{/if}
 			</section>
@@ -249,59 +206,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 1rem;
-	}
-
-	.header-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.25rem;
-		align-items: center;
-		justify-content: flex-end;
-	}
-
-	.vm-action {
-		display: inline-grid;
-		place-items: center;
-		width: 1.85rem;
-		height: 1.85rem;
-		padding: 0;
-		border: 1px solid var(--shell-line);
-		border-radius: var(--radius-xs);
-		background: var(--shell-surface);
-		color: var(--shell-text-secondary);
-		cursor: pointer;
-		transition:
-			background 120ms ease,
-			border-color 120ms ease,
-			color 120ms ease;
-	}
-
-	.vm-action:hover:not(:disabled) {
-		border-color: var(--shell-accent);
-		background: var(--shell-accent-soft);
-		color: var(--shell-text);
-	}
-
-	.vm-action:disabled {
-		cursor: not-allowed;
-		opacity: 0.42;
-	}
-
-	.vm-action--primary {
-		background: var(--shell-accent);
-		border-color: var(--shell-accent);
-		color: var(--color-sidebar-text-active, #ffffff);
-	}
-
-	.vm-action--primary:hover:not(:disabled) {
-		background: var(--color-primary-active);
-		color: var(--color-sidebar-text-active, #ffffff);
-	}
-
-	.vm-action--danger:hover:not(:disabled) {
-		border-color: var(--color-danger);
-		background: var(--color-danger-light);
-		color: var(--color-danger-dark);
 	}
 
 	.tabs-area {
@@ -333,23 +237,6 @@
 		padding: 1rem 0;
 	}
 
-	.confirm-group {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-		background: var(--color-danger-light);
-		padding: 0.45rem 0.65rem;
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--color-danger);
-	}
-
-	.confirm-text {
-		font-size: var(--text-sm);
-		color: var(--color-danger-dark);
-		font-weight: 600;
-	}
-
 	.boot-log {
 		font-family: var(--font-mono);
 		font-size: var(--text-xs);
@@ -377,13 +264,5 @@
 			margin-top: 0;
 		}
 
-		.confirm-group {
-			align-items: stretch;
-		}
-
-		.header-actions :global(button),
-		.confirm-group :global(button) {
-			flex: 0 0 auto;
-		}
 	}
 </style>

@@ -211,6 +211,13 @@ pub async fn mutate_volume(
         .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
         .to_string();
 
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
+
     let action = payload
         .get("action")
         .and_then(|v| v.as_str())
@@ -258,6 +265,13 @@ pub async fn snapshot_volume(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
         .to_string();
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -288,6 +302,13 @@ pub async fn restore_volume_snapshot(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
         .to_string();
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -318,6 +339,13 @@ pub async fn delete_volume_snapshot(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing volume_id".into()))?
         .to_string();
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -348,6 +376,13 @@ pub async fn clone_volume(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing source_volume_id".into()))?
         .to_string();
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_volume_owner(&mut conn, &source_volume_id, &claims.username, claims.role == "admin").await?;
     let target_volume_id = payload
         .get("target_volume_id")
         .and_then(|v| v.as_str())
@@ -365,6 +400,29 @@ pub async fn clone_volume(
         "volume_id": response.volume_id,
         "summary": response.summary,
     })))
+}
+
+/// Check if the user is the owner of a volume or an admin.
+/// Returns Ok(()) if allowed, Err(BffError::Forbidden) if not.
+pub(crate) async fn require_volume_owner(
+    conn: &mut sqlx::SqliteConnection,
+    volume_id: &str,
+    user_id: &str,
+    is_admin: bool,
+) -> Result<(), BffError> {
+    if is_admin {
+        return Ok(());
+    }
+    let owner: Option<String> = sqlx::query_scalar("SELECT owner_id FROM volumes WHERE volume_id = ?")
+        .bind(volume_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check volume owner: {}", e)))?;
+    match owner {
+        Some(o) if o == user_id => Ok(()),
+        None => Ok(()), // backward compatibility: unowned resources are open
+        Some(_) => Err(BffError::Forbidden("you do not own this volume".into())),
+    }
 }
 
 #[derive(sqlx::FromRow)]

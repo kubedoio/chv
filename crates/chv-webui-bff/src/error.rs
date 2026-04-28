@@ -11,6 +11,7 @@ pub enum BffError {
     NotFound(String),
     BadRequest(String),
     Unauthorized(String),
+    Forbidden(String),
     Conflict(String),
     QuotaExceeded {
         resource: String,
@@ -39,6 +40,7 @@ impl IntoResponse for BffError {
             BffError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone(), "NOT_FOUND"),
             BffError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone(), "BAD_REQUEST"),
             BffError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone(), "UNAUTHORIZED"),
+            BffError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone(), "FORBIDDEN"),
             BffError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), "CONFLICT"),
             BffError::QuotaExceeded {
                 resource,

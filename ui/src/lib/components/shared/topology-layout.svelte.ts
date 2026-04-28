@@ -4,7 +4,7 @@ function getVmNodeId(vm: { node_id?: string }): string {
 	return vm.node_id ?? 'unassigned';
 }
 
-export const displayNodes = $derived(
+const _displayNodes = $derived(
 	inventory.nodes.map((n, i) => {
 		const columns = Math.max(1, Math.ceil(Math.sqrt(Math.max(inventory.nodes.length, 1))));
 		const hostVms = inventory.vms.filter((vm) => getVmNodeId(vm) === n.id);
@@ -18,7 +18,7 @@ export const displayNodes = $derived(
 	})
 );
 
-export const displayVms = $derived(
+const _displayVms = $derived(
 	(() => {
 		const siblingIndex = new Map<string, number>();
 		const siblingCount = new Map<string, number>();
@@ -29,7 +29,7 @@ export const displayVms = $derived(
 
 		return inventory.vms.map((v) => {
 			const nodeId = getVmNodeId(v);
-			const parent = displayNodes.find((n) => n.id === nodeId);
+			const parent = _displayNodes.find((n) => n.id === nodeId);
 			const index = siblingIndex.get(nodeId) ?? 0;
 			siblingIndex.set(nodeId, index + 1);
 			const total = siblingCount.get(nodeId) ?? 1;
@@ -48,9 +48,9 @@ export const displayVms = $derived(
 	})()
 );
 
-export const topologyBox = $derived(
+const _topologyBox = $derived(
 	(() => {
-		const points = [...displayNodes, ...displayVms];
+		const points = [..._displayNodes, ..._displayVms];
 		if (points.length === 0) return { x: 0, y: 0, width: 800, height: 600 };
 		const xs = points.map((p: any) => p.x);
 		const ys = points.map((p: any) => p.y);
@@ -62,7 +62,12 @@ export const topologyBox = $derived(
 	})()
 );
 
-export const showMinimap = $derived(inventory.nodes.length + inventory.vms.length > 12);
+const _showMinimap = $derived(inventory.nodes.length + inventory.vms.length > 12);
+
+export function getDisplayNodes() { return _displayNodes; }
+export function getDisplayVms() { return _displayVms; }
+export function getTopologyBox() { return _topologyBox; }
+export function getShowMinimap() { return _showMinimap; }
 
 export function getStatusColor(status: string) {
 	switch (status) {

@@ -1,10 +1,10 @@
 import { selection } from '$lib/stores/selection.svelte';
 import { inventory } from '$lib/stores/inventory.svelte';
-import { displayNodes, displayVms, getStatusColor } from './topology-layout.svelte';
+import { getDisplayNodes, getDisplayVms, getStatusColor } from './topology-layout.svelte';
 
 export { getStatusColor };
 
-export const selectedResource = $derived(
+const _selectedResource = $derived(
 	(() => {
 		if (!selection.active.id) {
 			return {
@@ -22,7 +22,7 @@ export const selectedResource = $derived(
 		}
 
 		if (selection.active.type === 'node') {
-			const node = displayNodes.find((item) => item.id === selection.active.id);
+			const node = getDisplayNodes().find((item) => item.id === selection.active.id);
 			if (!node) return null;
 			return {
 				type: 'host',
@@ -39,7 +39,7 @@ export const selectedResource = $derived(
 		}
 
 		if (selection.active.type === 'vm') {
-			const vm = displayVms.find((item) => item.id === selection.active.id);
+			const vm = getDisplayVms().find((item) => item.id === selection.active.id);
 			if (!vm) return null;
 			return {
 				type: 'instance',
@@ -58,3 +58,5 @@ export const selectedResource = $derived(
 		return null;
 	})()
 );
+
+export function getSelectedResource() { return _selectedResource; }

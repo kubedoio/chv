@@ -270,12 +270,13 @@ pub async fn create_network(
 
     sqlx::query(
         r#"
-        INSERT INTO networks (network_id, display_name, network_class, created_at, updated_at)
-        VALUES (?, ?, 'bridge', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO networks (network_id, display_name, network_class, owner_id, created_at, updated_at)
+        VALUES (?, ?, 'bridge', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&network_id)
     .bind(&name)
+    .bind(&claims.username)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert network: {}", e)))?;
@@ -333,6 +334,13 @@ pub async fn delete_network(
         .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
         .to_string();
 
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_network_owner(&mut conn, &network_id, &claims.username, claims.role == "admin").await?;
+
     let attached_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = ?")
             .bind(&network_id)
@@ -384,6 +392,13 @@ pub async fn update_network(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
         .to_string();
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_network_owner(&mut conn, &network_id, &claims.username, claims.role == "admin").await?;
 
     let exists =
         sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
@@ -496,6 +511,29 @@ pub async fn update_network(
     .await
 }
 
+/// Check if the user is the owner of a network or an admin.
+/// Returns Ok(()) if allowed, Err(BffError::Forbidden) if not.
+pub(crate) async fn require_network_owner(
+    conn: &mut sqlx::SqliteConnection,
+    network_id: &str,
+    user_id: &str,
+    is_admin: bool,
+) -> Result<(), BffError> {
+    if is_admin {
+        return Ok(());
+    }
+    let owner: Option<String> = sqlx::query_scalar("SELECT owner_id FROM networks WHERE network_id = ?")
+        .bind(network_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check network owner: {}", e)))?;
+    match owner {
+        Some(o) if o == user_id => Ok(()),
+        None => Ok(()), // backward compatibility: unowned resources are open
+        Some(_) => Err(BffError::Forbidden("you do not own this network".into())),
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct NetworkRow {
     network_id: String,
@@ -546,6 +584,13 @@ pub async fn mutate_network(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing network_id".into()))?
         .to_string();
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_network_owner(&mut conn, &network_id, &claims.username, claims.role == "admin").await?;
 
     let action = payload
         .get("action")

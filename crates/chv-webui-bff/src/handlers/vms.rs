@@ -355,11 +355,7 @@ pub async fn create_vm(
         }
     }
 
-    let requested_by = payload
-        .get("requested_by")
-        .and_then(|v| v.as_str())
-        .unwrap_or("webui")
-        .to_string();
+    let requested_by = claims.sub.clone();
 
     let network_id = payload
         .get("network_id")
@@ -394,6 +390,7 @@ pub async fn create_vm(
         cpu_count,
         memory_bytes,
         volume_size_bytes,
+        1, // vm_count_delta: creating 1 new VM
     )
     .await?;
 
@@ -405,13 +402,14 @@ pub async fn create_vm(
     // Insert VM
     sqlx::query(
         r#"
-        INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
-        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO vms (vm_id, node_id, display_name, owner_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&vm_id)
     .bind(&node_id)
     .bind(&display_name)
+    .bind(&claims.username)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
@@ -491,13 +489,14 @@ pub async fn create_vm(
     // Insert volume
     sqlx::query(
         r#"
-        INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes, updated_at)
-        VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO volumes (volume_id, node_id, display_name, owner_id, capacity_bytes, updated_at)
+        VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&volume_id)
     .bind(&node_id)
     .bind(format!("{}-disk", display_name))
+    .bind(&claims.username)
     .bind(volume_size_bytes)
     .execute(&mut *tx)
     .await
@@ -656,6 +655,8 @@ pub async fn delete_vm(
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
+    require_vm_owner(&mut tx, &vm_id, &claims.username, claims.role == "admin").await?;
+
     sqlx::query(
         r#"
         UPDATE vm_desired_state
@@ -747,6 +748,17 @@ pub async fn resize_vm(
         return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
     }
 
+    // Fetch current resource usage for delta-based quota check
+    let current: (Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT cpu_count, memory_bytes FROM vm_desired_state WHERE vm_id = ?"
+    )
+    .bind(&vm_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to read current vm resources: {}", e)))?;
+    let old_cpu = current.0.unwrap_or(0);
+    let old_memory = current.1.unwrap_or(0);
+
     let requested_by = claims.sub.clone();
     let operation_id = chv_common::gen_short_id();
     let idempotency_key = format!("resize-vm-{}", vm_id);
@@ -756,6 +768,19 @@ pub async fn resize_vm(
         .begin()
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    require_vm_owner(&mut tx, &vm_id, &claims.username, claims.role == "admin").await?;
+
+    // Enforce quota using delta so we don't double-count this VM
+    enforce_user_quota(
+        &mut tx,
+        &claims.username,
+        cpu_count - old_cpu,
+        memory_bytes - old_memory,
+        0, // storage unchanged on resize
+        0, // vm_count_delta: no new VM
+    )
+    .await?;
 
     sqlx::query(
         r#"
@@ -827,6 +852,13 @@ pub async fn mutate_vm(
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
+    require_vm_owner(&mut conn, &vm_id, &claims.username, claims.role == "admin").await?;
 
     let response = state
         .mutations
@@ -929,17 +961,30 @@ pub async fn get_vm_console_url(
         .await
         .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?;
 
-    let _node_id = node_id.ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+    let node_id = node_id.ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+
+    let agent_ws_address: Option<String> = sqlx::query_scalar(
+        "SELECT agent_ws_address FROM nodes WHERE node_id = ?"
+    )
+    .bind(&node_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to look up node: {}", e)))?;
 
     let token = generate_console_token(&vm_id, &claims.username, &state.jwt_secret)
         .map_err(|e| BffError::Internal(format!("failed to generate console token: {}", e)))?;
 
-    // Return a relative path so the browser connects through the nginx WebSocket proxy
-    let console_url = format!("/ws/vms/{}/console?token={}", vm_id, token);
+    // Return a full WS URL when the node has an agent_ws_address configured;
+    // otherwise fall back to the relative path for single-node / proxy setups.
+    let console_url = match agent_ws_address {
+        Some(addr) => format!("ws://{}/vms/{}/console?token={}", addr, vm_id, token),
+        None => format!("/ws/vms/{}/console?token={}", vm_id, token),
+    };
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
 
     Ok(Json(json!({
         "vm_id": vm_id,
+        "node_id": node_id,
         "url": console_url,
         "expires_at": expires_at.to_rfc3339(),
     })))
@@ -1004,12 +1049,36 @@ struct VmNicRow {
 
 /// Check if creating a VM would exceed the user's quota.
 /// Returns Ok(()) if allowed, Err(BffError) if quota would be exceeded.
+/// Check if the user is the owner of a resource or an admin.
+/// Returns Ok(()) if allowed, Err(BffError::Forbidden) if not.
+pub(crate) async fn require_vm_owner(
+    conn: &mut sqlx::SqliteConnection,
+    vm_id: &str,
+    user_id: &str,
+    is_admin: bool,
+) -> Result<(), BffError> {
+    if is_admin {
+        return Ok(());
+    }
+    let owner: Option<String> = sqlx::query_scalar("SELECT owner_id FROM vms WHERE vm_id = ?")
+        .bind(vm_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check vm owner: {}", e)))?;
+    match owner {
+        Some(o) if o == user_id => Ok(()),
+        None => Ok(()), // backward compatibility: unowned resources are open
+        Some(_) => Err(BffError::Forbidden("you do not own this VM".into())),
+    }
+}
+
 pub(crate) async fn enforce_user_quota(
     conn: &mut sqlx::SqliteConnection,
     user_id: &str,
     requested_cpu: i64,
     requested_memory_bytes: i64,
     requested_storage_bytes: i64,
+    vm_count_delta: i64,
 ) -> Result<(), BffError> {
     let quota_row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, Option<i64>)>(
         "SELECT max_vms, max_cpu, max_memory_bytes, max_storage_bytes FROM quotas WHERE user_id = ?"
@@ -1055,12 +1124,12 @@ pub(crate) async fn enforce_user_quota(
     .map_err(|e| BffError::Internal(format!("failed to compute storage usage: {}", e)))?;
 
     if let Some(max) = quota.0 {
-        if vm_count + 1 > max {
+        if vm_count + vm_count_delta > max {
             return Err(BffError::QuotaExceeded {
                 resource: "vms".to_string(),
                 limit: max,
                 used: vm_count,
-                requested: 1,
+                requested: vm_count_delta,
             });
         }
     }

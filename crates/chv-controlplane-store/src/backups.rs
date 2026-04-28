@@ -124,7 +124,8 @@ SELECT
     destination,
     enabled,
     created_at,
-    updated_at
+    updated_at,
+    last_run_at
 FROM backup_schedules
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?
@@ -143,7 +144,8 @@ SELECT
     destination,
     enabled,
     created_at,
-    updated_at
+    updated_at,
+    last_run_at
 FROM backup_schedules
 WHERE schedule_id = ?
 "#;
@@ -447,6 +449,37 @@ impl BackupRepository {
         Ok(())
     }
 
+    pub async fn list_enabled_schedules(
+        &self,
+    ) -> Result<Vec<BackupScheduleRow>, StoreError> {
+        sqlx::query_as::<_, BackupScheduleRow>(
+            "SELECT * FROM backup_schedules WHERE enabled = true",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    pub async fn update_schedule_last_run(
+        &self,
+        schedule_id: &str,
+        last_run_at: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE backup_schedules SET last_run_at = ? WHERE schedule_id = ?")
+            .bind(last_run_at)
+            .bind(schedule_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_pending_jobs(&self) -> Result<Vec<BackupJobRow>, StoreError> {
+        sqlx::query_as::<_, BackupJobRow>("SELECT * FROM backup_jobs WHERE status = 'Pending'")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::from)
+    }
+
     // ── Restores ─────────────────────────────────────────────────────────────
 
     pub async fn list_restores(
@@ -543,6 +576,7 @@ pub struct BackupScheduleRow {
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
+    pub last_run_at: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

@@ -28,6 +28,8 @@ hyper-util = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt.workspace = true
+chrono = "0.4"
+cron = "0.16"
 
 [dev-dependencies]
 x509-parser = "0.16"
