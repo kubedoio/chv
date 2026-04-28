@@ -289,6 +289,7 @@
 		</div>
 		<div class="toolbar-right">
 			<button
+				type="button"
 				class="toolbar-btn"
 				title="Copy terminal contents"
 				onclick={handleCopy}
@@ -300,6 +301,7 @@
 				{/if}
 			</button>
 			<button
+				type="button"
 				class="toolbar-btn"
 				title="Download terminal contents"
 				onclick={handleDownload}
@@ -308,7 +310,7 @@
 			</button>
 			{#if statusText !== 'Refreshing token...'}
 				{#if connected}
-					<button
+					<button type="button"
 						class="toolbar-btn"
 						title="Disconnect"
 						onclick={handleDisconnect}
@@ -316,7 +318,7 @@
 						<Unplug size={14} />
 					</button>
 				{:else}
-					<button
+					<button type="button"
 						class="toolbar-btn"
 						title="Reconnect"
 						onclick={() => handleReconnect()}

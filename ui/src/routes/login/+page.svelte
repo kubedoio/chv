@@ -154,6 +154,7 @@
       {/if}
 
       <button
+        type="button"
         class="btn-login"
         onclick={(e) => { e.preventDefault(); handleLogin(); }}
         disabled={loading}

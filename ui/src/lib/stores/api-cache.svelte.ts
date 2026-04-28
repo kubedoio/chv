@@ -32,6 +32,7 @@ export async function cachedFetch<T>(
 		return data;
 	} catch (err) {
 		if (entry) {
+			// TODO: integrate structured logger instead of console
 			// eslint-disable-next-line no-console
 			console.warn(`[api-cache] fetch error for key "${key}", returning stale data`, err);
 			return entry.data;

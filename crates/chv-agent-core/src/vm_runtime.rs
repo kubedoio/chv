@@ -62,11 +62,15 @@ impl VmRuntime {
         let prior_failures = self
             .failure_counts
             .lock()
-            .unwrap()
+            .map_err(|_| ChvError::Internal {
+                reason: "failure_counts mutex poisoned".to_string(),
+            })?
             .get(&id)
             .map(|(c, _)| *c)
             .unwrap_or(0);
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
+            reason: "vms mutex poisoned".to_string(),
+        })?;
         map.insert(
             id.clone(),
             VmRecord {
@@ -82,7 +86,9 @@ impl VmRuntime {
 
     pub async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.start_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
+            reason: "vms mutex poisoned".to_string(),
+        })?;
         let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
             resource: "vm".to_string(),
             id: vm_id.to_string(),
@@ -90,7 +96,9 @@ impl VmRuntime {
         rec.runtime_status = "Running".to_string();
         rec.consecutive_failures = 0;
         drop(map);
-        self.failure_counts.lock().unwrap().remove(vm_id);
+        self.failure_counts.lock().map_err(|_| ChvError::Internal {
+            reason: "failure_counts mutex poisoned".to_string(),
+        })?.remove(vm_id);
         Ok(())
     }
 
@@ -101,7 +109,9 @@ impl VmRuntime {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         self.adapter.stop_vm(vm_id, force, operation_id).await?;
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
+            reason: "vms mutex poisoned".to_string(),
+        })?;
         if let Some(rec) = map.get_mut(vm_id) {
             rec.runtime_status = "Stopped".to_string();
         }
@@ -110,13 +120,17 @@ impl VmRuntime {
 
     pub async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.delete_vm(vm_id, operation_id).await?;
-        self.vms.lock().unwrap().remove(vm_id);
+        self.vms.lock().map_err(|_| ChvError::Internal {
+            reason: "vms mutex poisoned".to_string(),
+        })?.remove(vm_id);
         Ok(())
     }
 
     pub async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.reboot_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
+            reason: "vms mutex poisoned".to_string(),
+        })?;
         let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
             resource: "vm".to_string(),
             id: vm_id.to_string(),
@@ -169,7 +183,9 @@ impl VmRuntime {
 
     pub async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.pause_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
+            reason: "vms mutex poisoned".to_string(),
+        })?;
         if let Some(rec) = map.get_mut(vm_id) {
             rec.runtime_status = "Paused".to_string();
         }
@@ -178,7 +194,9 @@ impl VmRuntime {
 
     pub async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.resume_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
+            reason: "vms mutex poisoned".to_string(),
+        })?;
         if let Some(rec) = map.get_mut(vm_id) {
             rec.runtime_status = "Running".to_string();
         }
@@ -250,11 +268,20 @@ impl VmRuntime {
     }
 
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
-        self.vms.lock().unwrap().get(vm_id).cloned()
+        self.vms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(vm_id)
+            .cloned()
     }
 
     pub fn list(&self) -> Vec<VmRecord> {
-        self.vms.lock().unwrap().values().cloned().collect()
+        self.vms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn record_failure(
@@ -266,7 +293,7 @@ impl VmRuntime {
         let vm_id = vm_id.into();
         let generation = generation.into();
         let error = error.into();
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
         // Only update existing records; do not create phantom records for VMs
         // that were never successfully created. A phantom record causes the
         // reconciler to skip creation and try start/stop on a non-existent VM.
@@ -279,11 +306,14 @@ impl VmRuntime {
             drop(map);
             self.failure_counts
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(vm_id, (count, generation));
         } else {
             drop(map);
-            let mut fc = self.failure_counts.lock().unwrap();
+            let mut fc = self
+                .failure_counts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let entry = fc.entry(vm_id).or_insert((0, generation.clone()));
             entry.0 = entry.0.saturating_add(1);
             entry.1 = generation;
@@ -293,7 +323,7 @@ impl VmRuntime {
     pub fn consecutive_failures(&self, vm_id: &str) -> u32 {
         self.failure_counts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(vm_id)
             .map(|(c, _)| *c)
             .unwrap_or(0)
@@ -302,7 +332,7 @@ impl VmRuntime {
     pub fn consecutive_failures_for_generation(&self, vm_id: &str, generation: &str) -> u32 {
         self.failure_counts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(vm_id)
             .filter(|(_, gen)| gen == generation)
             .map(|(c, _)| *c)
@@ -310,7 +340,10 @@ impl VmRuntime {
     }
 
     pub fn clear_failure_count(&self, vm_id: &str) {
-        self.failure_counts.lock().unwrap().remove(vm_id);
+        self.failure_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(vm_id);
     }
 }
 

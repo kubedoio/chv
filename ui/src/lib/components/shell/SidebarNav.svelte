@@ -331,6 +331,7 @@
 				{:else}
 					<div class="flex flex-col">
 						<button
+							type="button"
 							class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
 							aria-expanded={openGroups['cloud-1']}
 							aria-controls="group-cloud-1"
@@ -344,7 +345,7 @@
 						{#if openGroups['cloud-1']}
 							<div id="group-cloud-1" class="ml-2 pl-2 border-l border-[var(--color-neutral-700)] flex flex-col gap-[0.125rem]">
 								<div class="flex flex-col">
-									<button
+									<button type="button"
 										class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
 										aria-expanded={openGroups['hosts']}
 										aria-controls="group-hosts"
@@ -361,11 +362,12 @@
 												{@const hostExpanded = openGroups[getNodeExpandedKey(node.id)] ?? true}
 												{@const hostVms = vmsByNode.get(node.id) ?? []}
 												<div class="flex flex-col">
-													<button
-														class="app-nav__tree-row app-nav__tree-row--host"
-														aria-expanded={hostExpanded}
-														aria-controls="group-{node.id}"
-														onclick={() => toggleGroup(getNodeExpandedKey(node.id))}
+														<button
+																type="button"
+																class="app-nav__tree-row app-nav__tree-row--host"
+																aria-expanded={hostExpanded}
+																aria-controls="group-{node.id}"
+																onclick={() => toggleGroup(getNodeExpandedKey(node.id))}
 													>
 														<ChevronDown size={10} class={!hostExpanded ? '-rotate-90' : ''} />
 														<div

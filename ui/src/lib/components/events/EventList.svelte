@@ -156,6 +156,7 @@
         <!-- Actions -->
         {#if onMarkAllRead}
           <button
+            type="button"
             onclick={onMarkAllRead}
             class="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
             title="Mark all as read"
@@ -167,6 +168,7 @@
         
         {#if onClear && events.length > 0}
           <button
+            type="button"
             onclick={onClear}
             class="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
             title="Clear all"
@@ -184,6 +186,7 @@
         <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-orange-50 text-orange-700 text-xs font-medium rounded-full border border-orange-200">
           {resourceFilters.find(f => f.id === currentFilter)?.label || currentFilter}
           <button
+            type="button"
             onclick={() => setFilter(null)}
             class="hover:text-orange-900"
             aria-label="Clear filter"
@@ -215,6 +218,7 @@
         {@const isExpanded = expandedEvents.has(event.id)}
         <div class="event-item">
           <button
+            type="button"
             class="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors text-left"
             onclick={() => toggleExpand(event.id)}
             aria-expanded={isExpanded}
@@ -285,6 +289,7 @@
   {#if getTotalPages() > 1}
     <div class="px-5 py-3 border-t border-slate-100 flex items-center justify-between">
       <button
+        type="button"
         onclick={() => goToPage(currentPage - 1)}
         disabled={currentPage === 1}
         class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -295,6 +300,7 @@
         Page {currentPage} of {getTotalPages()}
       </span>
       <button
+        type="button"
         onclick={() => goToPage(currentPage + 1)}
         disabled={currentPage === getTotalPages()}
         class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"

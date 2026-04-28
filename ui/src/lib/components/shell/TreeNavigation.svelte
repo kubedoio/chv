@@ -20,8 +20,17 @@
   import VisuallyHidden from '../shared/VisuallyHidden.svelte';
   
   // Props
+  interface NodeTreeItem {
+    id: string;
+    name: string;
+    status?: string;
+    resources?: {
+      storagePools?: number;
+    };
+  }
+
   interface Props {
-    nodes?: any[];
+    nodes?: NodeTreeItem[];
   }
   
   let { nodes = [] }: Props = $props();
@@ -47,6 +56,8 @@
       const client = createAPIClient({ token });
       vms = (await client.listVMs()) ?? [];
     } catch (err) {
+      // TODO: integrate structured logger instead of console
+      // eslint-disable-next-line no-console
       console.error('Failed to fetch VMs:', err);
       vms = [];
     }

@@ -122,6 +122,7 @@
 
       <div class="flex flex-wrap gap-3">
         <button 
+          type="button"
           class="button-primary px-4 py-2 text-sm font-medium" 
           on:click={handleBootstrap}
           disabled={actionLoading}
@@ -129,6 +130,7 @@
           {actionLoading ? 'Running…' : 'Bootstrap'}
         </button>
         <button 
+          type="button"
           class="button-secondary px-4 py-2 text-sm font-medium" 
           on:click={handleRefresh}
           disabled={actionLoading}
@@ -136,6 +138,7 @@
           Re-run Checks
         </button>
         <button 
+          type="button"
           class="button-secondary px-4 py-2 text-sm font-medium" 
           on:click={handleRepairBridge}
           disabled={actionLoading}
@@ -143,6 +146,7 @@
           Repair Bridge
         </button>
         <button 
+          type="button"
           class="button-secondary px-4 py-2 text-sm font-medium" 
           on:click={handleRepairDirectories}
           disabled={actionLoading}
@@ -150,6 +154,7 @@
           Repair Directories
         </button>
         <button 
+          type="button"
           class="button-secondary px-4 py-2 text-sm font-medium" 
           on:click={handleRepairLocaldisk}
           disabled={actionLoading}

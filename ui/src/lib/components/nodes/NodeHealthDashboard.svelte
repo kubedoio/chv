@@ -61,6 +61,8 @@
 
       nodes = nodesWithMetrics;
     } catch (e) {
+      // TODO: integrate structured logger instead of console
+      // eslint-disable-next-line no-console
       console.error('Failed to load nodes:', e);
     } finally {
       loading = false;

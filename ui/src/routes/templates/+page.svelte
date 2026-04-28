@@ -15,14 +15,12 @@ import Button from '$lib/components/primitives/Button.svelte';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';
   import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
   import CreateFromTemplate from '$lib/components/vms/CreateFromTemplate.svelte';
-  import CloudInitViewer from '$lib/components/shell/CloudInitViewer.svelte';
-  import CloudInitEditor from '$lib/components/shell/CloudInitEditor.svelte';
+  import CloudInitModalViewer from '$lib/components/shell/CloudInitModalViewer.svelte';
+  import CloudInitModalEditor from '$lib/components/shell/CloudInitModalEditor.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
   import type { ShellTone } from '$lib/shell/app-shell';
   import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
   import ConfirmDialog from '$lib/components/shared/ConfirmDialog.svelte';
-
-  const InventoryTableAny = InventoryTable as any;
 
   const client = createAPIClient();
   const pageDef = getPageDefinition('/images'); // Reusing Images definition as it covers library
@@ -80,13 +78,15 @@ import Button from '$lib/components/primitives/Button.svelte';
     { key: 'resources', label: 'Resource Profile' },
     { key: 'image_name', label: 'Base Image' },
     { key: 'tags', label: 'Directives' },
-    { key: 'status', label: 'Availability', align: 'center' as const }
+    { key: 'status', label: 'Availability', align: 'center' as const },
+    { key: '_actions', label: '', align: 'center' as const }
   ];
 
   const ciColumns = [
     { key: 'name', label: 'Identity' },
     { key: 'variables', label: 'Defined Var Registry' },
-    { key: 'last_used', label: 'Last Seq', align: 'right' as const }
+    { key: 'last_used', label: 'Last Seq', align: 'right' as const },
+    { key: '_actions', label: '', align: 'center' as const }
   ];
 
   async function loadData() {
@@ -164,11 +164,11 @@ import Button from '$lib/components/primitives/Button.svelte';
   </div>
 
   <div class="tabs-nav">
-    <button class="tab-item" class:active={activeTab === 'vm'} onclick={() => activeTab = 'vm'}>
+    <button type="button" class="tab-item" class:active={activeTab === 'vm'} onclick={() => activeTab = 'vm'}>
       <Box size={14} />
       <span>Workload Blueprints</span>
     </button>
-    <button class="tab-item" class:active={activeTab === 'cloudinit'} onclick={() => activeTab = 'cloudinit'}>
+    <button type="button" class="tab-item" class:active={activeTab === 'cloudinit'} onclick={() => activeTab = 'cloudinit'}>
       <FileCode size={14} />
       <span>Init Registries</span>
     </button>
@@ -181,45 +181,43 @@ import Button from '$lib/components/primitives/Button.svelte';
       {:else if error}
         <ErrorState />
       {:else if activeTab === 'vm'}
-        <InventoryTableAny columns={vmColumns} rows={vmTemplates.map(t => ({
+        <InventoryTable columns={vmColumns} rows={vmTemplates.map(t => ({
           ...t,
           resources: `${t.vcpu} vCPU / ${t.memory_mb}MB`,
           image_name: images.find(i => i.id === t.image_id)?.name || t.image_id,
           status: { label: 'VERIFIED', tone: 'healthy' }
         }))}>
-          {#snippet cell({ column, row }: { column: any; row: any })}
+          {#snippet cell({ column, row })}
              {#if column.key === 'name'}
                <span class="blueprint-name">{row.name}</span>
              {:else if column.key === 'status'}
                <StatusBadge label={row.status.label} tone={row.status.tone as ShellTone} />
+             {:else if column.key === '_actions'}
+               <div class="row-ops">
+                  <button type="button" class="op-btn" onclick={() => cloneTemplate(row)} title="Orchestrate Workload"><Copy size={12} /></button>
+               </div>
              {:else}
                <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
              {/if}
           {/snippet}
-          {#snippet actions({ row }: { row: any })}
-            <div class="row-ops">
-               <button class="op-btn" onclick={() => cloneTemplate(row)} title="Orchestrate Workload"><Copy size={12} /></button>
-            </div>
-          {/snippet}
-        </InventoryTableAny>
+        </InventoryTable>
       {:else}
-        <InventoryTableAny columns={ciColumns} rows={cloudInitTemplates.map(t => ({
+        <InventoryTable columns={ciColumns} rows={cloudInitTemplates.map(t => ({
           ...t,
           variables: t.variables?.join(', ') || 'NONE'
         }))}>
-           {#snippet cell({ column, row }: { column: any; row: any })}
+           {#snippet cell({ column, row })}
              {#if column.key === 'name'}
                <span class="blueprint-name">{row.name}</span>
+             {:else if column.key === '_actions'}
+               <div class="row-ops">
+                  <button type="button" class="op-btn" title="View Registry"><FileCode size={12} /></button>
+               </div>
              {:else}
                <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
              {/if}
           {/snippet}
-          {#snippet actions({ row }: { row: any })}
-            <div class="row-ops">
-               <button class="op-btn" title="View Registry"><FileCode size={12} /></button>
-            </div>
-          {/snippet}
-        </InventoryTableAny>
+        </InventoryTable>
       {/if}
     </section>
 
@@ -268,13 +266,13 @@ import Button from '$lib/components/primitives/Button.svelte';
 />
 
 <!-- Cloud-init Viewer Modal -->
-<CloudInitViewer
+<CloudInitModalViewer
   bind:open={cloudInitViewerOpen}
   template={selectedCloudInitTemplate}
 />
 
 <!-- Cloud-init Editor Modal -->
-<CloudInitEditor
+<CloudInitModalEditor
   bind:open={cloudInitEditorOpen}
   onSuccess={loadData}
 />

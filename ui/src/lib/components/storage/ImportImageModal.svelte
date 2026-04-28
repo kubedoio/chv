@@ -104,12 +104,14 @@
 <Modal bind:open title="Import Image">
 	<div class="tabs flex border-b border-line mb-4">
 		<button 
+			type="button"
 			class="px-4 py-2 text-sm font-medium {activeTab === 'remote' ? 'border-b-2 border-accent text-accent' : 'text-muted'}"
 			onclick={() => activeTab = 'remote'}
 		>
 			Remote URL
 		</button>
 		<button 
+			type="button"
 			class="px-4 py-2 text-sm font-medium {activeTab === 'local' ? 'border-b-2 border-accent text-accent' : 'text-muted'}"
 			onclick={() => activeTab = 'local'}
 		>

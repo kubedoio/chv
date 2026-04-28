@@ -391,6 +391,7 @@
         />
         {#if query}
           <button
+            type="button"
             onclick={() => { query = ''; inputRef?.focus(); }}
             class="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600"
             aria-label="Clear search"
@@ -425,6 +426,7 @@
                 {@const globalIndex = getGlobalIndex(sectionIndex, actionIndex)}
                 {@const Icon = action.icon}
                 <button
+                  type="button"
                   data-index={globalIndex}
                   role="option"
                   aria-selected={selectedIndex === globalIndex}

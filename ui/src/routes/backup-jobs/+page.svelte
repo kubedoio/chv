@@ -175,11 +175,11 @@ import Button from '$lib/components/primitives/Button.svelte';
 
   <div class="inventory-controls-strip">
     <div class="tab-registry">
-      <button class="tab-btn" class:is-active={activeTab === 'jobs'} onclick={() => activeTab = 'jobs'}>
+      <button type="button" class="tab-btn" class:is-active={activeTab === 'jobs'} onclick={() => activeTab = 'jobs'}>
         <Calendar size={12} />
         <span>SCHEDULED_SEQUENCES</span>
       </button>
-      <button class="tab-btn" class:is-active={activeTab === 'history'} onclick={() => activeTab = 'history'}>
+      <button type="button" class="tab-btn" class:is-active={activeTab === 'history'} onclick={() => activeTab = 'history'}>
         <Activity size={12} />
         <span>EXECUTION_TRACE_LOG</span>
       </button>
@@ -212,8 +212,8 @@ import Button from '$lib/components/primitives/Button.svelte';
                <span class="cell-mono">{row.schedule} ({row.retention} ROT)</span>
              {:else if column.key === '_actions'}
                 <div class="op-cluster">
-                   <button class="op-ctrl" onclick={() => runJobNow(row)} title="FORCE_EXECUTE"><Play size={12} /></button>
-                   <button class="op-ctrl" onclick={() => toggleJob(row)} title="TOGGLE_STATUS">
+                   <button type="button" class="op-ctrl" onclick={() => runJobNow(row)} title="FORCE_EXECUTE"><Play size={12} /></button>
+                   <button type="button" class="op-ctrl" onclick={() => toggleJob(row)} title="TOGGLE_STATUS">
                       {#if row.enabled}<Pause size={12} />{:else}<Play size={12} />{/if}
                    </button>
                 </div>
@@ -234,7 +234,7 @@ import Button from '$lib/components/primitives/Button.svelte';
              {:else if column.key === 'completed_at'}
                <div class="trace-end">
                  <span class="timestamp">{new Date(String(row.completed_at)).toLocaleTimeString()}</span>
-                 <button class="trace-dl" title="DOWNLOAD_ARTIFACT"><Download size={12} /></button>
+                 <button type="button" class="trace-dl" title="DOWNLOAD_ARTIFACT"><Download size={12} /></button>
                </div>
              {:else}
                <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>

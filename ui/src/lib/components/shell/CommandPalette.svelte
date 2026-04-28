@@ -93,7 +93,7 @@
 						{#each cmds as cmd, i}
 							{@const globalIndex = getGlobalIndex(category, i)}
 							{@const Icon = cmd.icon}
-							<button id="cmd-item-{globalIndex}" data-index={globalIndex} role="option" aria-selected={selectedIndex===globalIndex} class="w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors duration-100" class:bg-[var(--shell-accent-soft)]={selectedIndex===globalIndex} onclick={()=>execute(cmd)}>
+							<button type="button" id="cmd-item-{globalIndex}" data-index={globalIndex} role="option" aria-selected={selectedIndex===globalIndex} class="w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors duration-100" class:bg-[var(--shell-accent-soft)]={selectedIndex===globalIndex} onclick={()=>execute(cmd)}>
 								<Icon size={16} class="shrink-0 text-[var(--shell-text-muted)]" />
 								<span class="flex-1 text-[length:var(--text-sm)] font-medium text-[var(--shell-text)]">{cmd.title}</span>
 							</button>

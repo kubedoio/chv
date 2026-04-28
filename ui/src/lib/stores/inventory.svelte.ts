@@ -79,6 +79,8 @@ class InventoryStore {
 			this.nodes = (nodesRes.items || []).map(mapNode);
 			this.vms = (vmsRes.items || []).map(mapVm);
 		} catch (err) {
+			// TODO: integrate structured logger instead of console
+			// eslint-disable-next-line no-console
 			console.error('Failed to load local inventory:', err);
 			this.nodes = [];
 			this.vms = [];

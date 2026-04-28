@@ -250,6 +250,7 @@
         />
         {#if query}
           <button
+            type="button"
             onclick={() => { setSearchQuery(''); results = []; inputRef?.focus(); }}
             class="p-1 rounded hover:bg-[var(--bg-surface-muted)] text-[var(--shell-text-muted)] hover:text-[var(--shell-text-secondary)]"
             aria-label="Clear search"
@@ -287,6 +288,7 @@
                   {@const globalIndex = getGlobalIndex(type, i)}
                   {@const Icon = getIconComponent(type)}
                   <button
+                    type="button"
                     id="search-item-{globalIndex}"
                     data-index={globalIndex}
                     role="option"
@@ -320,6 +322,7 @@
             <div class="px-4 py-1.5 flex items-center justify-between">
               <span class="text-xs font-semibold text-[var(--shell-text-secondary)] uppercase tracking-wider">Recent</span>
               <button
+                type="button"
                 onclick={clearRecentSearches}
                 class="text-xs text-[var(--shell-text-muted)] hover:text-[var(--shell-text-secondary)]"
               >
@@ -329,6 +332,7 @@
             {#each recent as item, i}
               {@const Icon = getIconComponent(item.type)}
               <button
+                type="button"
                 id="search-item-{i}"
                 data-index={i}
                 role="option"

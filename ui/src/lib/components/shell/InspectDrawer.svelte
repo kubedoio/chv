@@ -68,6 +68,8 @@
 				};
 			}
 		} catch (err) {
+			// TODO: integrate structured logger instead of console
+			// eslint-disable-next-line no-console
 			console.error('Failed to fetch inspector details:', err);
 			details = null;
 		} finally {

@@ -141,6 +141,7 @@
           <h2 class="text-lg font-semibold text-gray-900">Keyboard Shortcuts</h2>
         </div>
         <button
+          type="button"
           onclick={handleClose}
           class="p-2 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
           aria-label="Close"

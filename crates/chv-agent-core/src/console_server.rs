@@ -10,7 +10,7 @@ use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -21,8 +21,8 @@ nix::ioctl_write_ptr_bad!(set_winsize, nix::libc::TIOCSWINSZ, nix::libc::winsize
 pub struct ConsoleServer {
     vm_runtime: crate::vm_runtime::VmRuntime,
     jwt_secret: String,
-    rate_limiter: Arc<Mutex<HashMap<String, Instant>>>,
-    consumed_tokens: Arc<Mutex<LruCache<String, Instant>>>,
+    rate_limiter: Arc<tokio::sync::Mutex<HashMap<String, Instant>>>,
+    consumed_tokens: Arc<tokio::sync::Mutex<LruCache<String, Instant>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -49,8 +49,8 @@ impl ConsoleServer {
         Self {
             vm_runtime,
             jwt_secret,
-            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
-            consumed_tokens: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap()))),
+            rate_limiter: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            consumed_tokens: Arc::new(tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap()))),
         }
     }
 
@@ -73,18 +73,17 @@ impl ConsoleServer {
                 interval.tick().await;
                 let now = Instant::now();
                 let cutoff = Duration::from_secs(120);
-                if let Ok(mut limits) = rate_limiter.lock() {
-                    limits.retain(|_, last| now.duration_since(*last) < cutoff);
-                }
-                if let Ok(mut tokens) = consumed_tokens.lock() {
-                    let expired: Vec<String> = tokens
-                        .iter()
-                        .filter(|(_, last)| now.duration_since(**last) >= cutoff)
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in expired {
-                        tokens.pop(&k);
-                    }
+                let mut limits = rate_limiter.lock().await;
+                limits.retain(|_, last| now.duration_since(*last) < cutoff);
+                drop(limits);
+                let mut tokens = consumed_tokens.lock().await;
+                let expired: Vec<String> = tokens
+                    .iter()
+                    .filter(|(_, last)| now.duration_since(**last) >= cutoff)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in expired {
+                    tokens.pop(&k);
                 }
             }
         });
@@ -104,12 +103,12 @@ impl ConsoleServer {
         Ok(())
     }
 
-    fn check_rate_limit(
+    async fn check_rate_limit(
         vm_id: &str,
-        rate_limiter: &Arc<Mutex<HashMap<String, Instant>>>,
+        rate_limiter: &Arc<tokio::sync::Mutex<HashMap<String, Instant>>>,
     ) -> Option<Response> {
         const RATE_LIMIT_SECS: u64 = 2;
-        let mut limits = rate_limiter.lock().unwrap();
+        let mut limits = rate_limiter.lock().await;
         let now = Instant::now();
         if let Some(last) = limits.get(vm_id) {
             if now.duration_since(*last) < Duration::from_secs(RATE_LIMIT_SECS) {
@@ -121,11 +120,11 @@ impl ConsoleServer {
         None
     }
 
-    fn check_replay(
+    async fn check_replay(
         token: &str,
-        consumed_tokens: &Arc<Mutex<LruCache<String, Instant>>>,
+        consumed_tokens: &Arc<tokio::sync::Mutex<LruCache<String, Instant>>>,
     ) -> Option<Response> {
-        let mut tokens = consumed_tokens.lock().unwrap();
+        let mut tokens = consumed_tokens.lock().await;
         if tokens.contains(token) {
             return Some(StatusCode::UNAUTHORIZED.into_response());
         }
@@ -139,7 +138,7 @@ impl ConsoleServer {
         Query(params): Query<ConsoleParams>,
         ws: WebSocketUpgrade,
     ) -> Response {
-        if let Some(response) = Self::check_rate_limit(&vm_id, &state.rate_limiter) {
+        if let Some(response) = Self::check_rate_limit(&vm_id, &state.rate_limiter).await {
             return response;
         }
 
@@ -148,7 +147,7 @@ impl ConsoleServer {
             return StatusCode::UNAUTHORIZED.into_response();
         }
 
-        if let Some(response) = Self::check_replay(&params.token, &state.consumed_tokens) {
+        if let Some(response) = Self::check_replay(&params.token, &state.consumed_tokens).await {
             tracing::warn!(vm_id = %vm_id, "console token replay detected");
             return response;
         }
@@ -446,45 +445,45 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
-    #[test]
-    fn rate_limit_blocks_rapid_requests() {
-        let rate_limiter = Arc::new(Mutex::new(HashMap::new()));
+    #[tokio::test]
+    async fn rate_limit_blocks_rapid_requests() {
+        let rate_limiter = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         // First request should pass
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_none());
         // Immediate second request should be blocked
         assert!(
-            ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_some(),
+            ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_some(),
             "rapid request should be rate limited"
         );
         // Different VM should pass
-        assert!(ConsoleServer::check_rate_limit("vm-2", &rate_limiter).is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-2", &rate_limiter).await.is_none());
     }
 
-    #[test]
-    fn rate_limit_allows_after_cooldown() {
-        let rate_limiter = Arc::new(Mutex::new(HashMap::new()));
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_some());
+    #[tokio::test]
+    async fn rate_limit_allows_after_cooldown() {
+        let rate_limiter = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_some());
         // Manually expire the entry
         rate_limiter
             .lock()
-            .unwrap()
+            .await
             .insert("vm-1".to_string(), Instant::now() - Duration::from_secs(10));
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_none());
     }
 
-    #[test]
-    fn replay_prevention_blocks_reused_token() {
-        let consumed = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap())));
+    #[tokio::test]
+    async fn replay_prevention_blocks_reused_token() {
+        let consumed = Arc::new(tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap())));
         let token = "token-abc";
         // First use should pass
-        assert!(ConsoleServer::check_replay(token, &consumed).is_none());
+        assert!(ConsoleServer::check_replay(token, &consumed).await.is_none());
         // Reuse should be blocked
         assert!(
-            ConsoleServer::check_replay(token, &consumed).is_some(),
+            ConsoleServer::check_replay(token, &consumed).await.is_some(),
             "reused token should be blocked"
         );
         // Different token should pass
-        assert!(ConsoleServer::check_replay("token-def", &consumed).is_none());
+        assert!(ConsoleServer::check_replay("token-def", &consumed).await.is_none());
     }
 }

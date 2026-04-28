@@ -151,7 +151,7 @@
     </div>
     <div class="flex items-center gap-2">
       <span class="text-xs text-gray-400">Ctrl+Shift+C: Copy | Ctrl+Shift+V: Paste</span>
-      <button onclick={onClose} class="text-xs text-gray-400 hover:text-white ml-2">Close</button>
+      <button type="button" onclick={onClose} class="text-xs text-gray-400 hover:text-white ml-2">Close</button>
     </div>
   </div>
 

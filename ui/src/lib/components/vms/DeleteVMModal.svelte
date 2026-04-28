@@ -73,14 +73,14 @@
   {/snippet}
   
   {#snippet footer()}
-    <button onclick={() => open = false} class="button-secondary">Cancel</button>
+    <button type="button" onclick={() => open = false} class="button-secondary">Cancel</button>
     {#if !confirming}
-      <button onclick={() => confirming = true} class="button-danger">
+      <button type="button" onclick={() => confirming = true} class="button-danger">
         Delete VM
       </button>
     {:else}
-      <button onclick={() => confirming = false} class="button-secondary">Back</button>
-      <button onclick={handleDelete} disabled={deleting || confirmText !== vm?.name} class="button-danger">
+      <button type="button" onclick={() => confirming = false} class="button-secondary">Back</button>
+      <button type="button" onclick={handleDelete} disabled={deleting || confirmText !== vm?.name} class="button-danger">
         {deleting ? 'Deleting...' : 'Confirm Delete'}
       </button>
     {/if}

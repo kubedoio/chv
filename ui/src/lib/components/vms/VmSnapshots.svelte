@@ -179,6 +179,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 				{#if column.key === 'actions'}
 					<div class="action-cell">
 						<button
+							type="button"
 							class="btn-icon btn-icon-sm"
 							aria-label="Restore snapshot"
 							title="Restore snapshot"
@@ -187,6 +188,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 							<RotateCcw size={14} />
 						</button>
 						<button
+							type="button"
 							class="btn-icon btn-icon-danger btn-icon-sm"
 							aria-label="Delete snapshot"
 							title="Delete snapshot"

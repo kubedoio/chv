@@ -19,18 +19,21 @@
   
   <div class="tabs flex gap-1 mb-3 border-b border-line">
     <button 
+      type="button"
       onclick={() => activeTab = 'user-data'}
       class="px-3 py-2 text-sm {activeTab === 'user-data' ? 'border-b-2 border-primary font-medium' : 'text-muted'}"
     >
       user-data
     </button>
     <button 
+      type="button"
       onclick={() => activeTab = 'meta-data'}
       class="px-3 py-2 text-sm {activeTab === 'meta-data' ? 'border-b-2 border-primary font-medium' : 'text-muted'}"
     >
       meta-data
     </button>
     <button 
+      type="button"
       onclick={() => activeTab = 'network-config'}
       class="px-3 py-2 text-sm {activeTab === 'network-config' ? 'border-b-2 border-primary font-medium' : 'text-muted'}"
     >

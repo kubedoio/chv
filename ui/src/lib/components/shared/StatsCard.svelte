@@ -1,11 +1,11 @@
 <script lang="ts">
+	import type { Component } from 'svelte';
 	import { TrendingUp, TrendingDown, Minus, ChevronRight } from 'lucide-svelte';
 
 	interface Props {
 		title: string;
 		value: string | number;
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		icon?: any;
+		icon?: Component;
 		trend?: 'up' | 'down' | 'neutral';
 		subtitle?: string;
 		href?: string;

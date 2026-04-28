@@ -56,6 +56,8 @@
 
       vms = vmsWithMetrics;
     } catch (e) {
+      // TODO: integrate structured logger instead of console
+      // eslint-disable-next-line no-console
       console.error('Failed to load VMs:', e);
     } finally {
       loading = false;

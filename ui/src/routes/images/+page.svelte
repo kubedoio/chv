@@ -132,7 +132,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	{#if deleteError}
 		<div class="operation-alert operation-alert--danger">
 			<span>{deleteError}</span>
-			<button onclick={() => (deleteError = null)}>Dismiss</button>
+			<button type="button" onclick={() => (deleteError = null)}>Dismiss</button>
 		</div>
 	{/if}
 
@@ -181,6 +181,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 					{#snippet cell({ column, row })}
 						{#if column.key === '_actions'}
 							<button
+								type="button"
 								class="btn-icon-destructive"
 								disabled={deletingId === row.image_id}
 								onclick={(e) => { e.preventDefault(); e.stopPropagation(); handleDelete(row.image_id, row.name, row.usage_count); }}

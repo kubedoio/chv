@@ -119,6 +119,7 @@
       <span class="text-sm text-muted">({rules.length})</span>
     </div>
     <button 
+      type="button"
       onclick={() => showForm = true}
       class="button-primary flex items-center gap-2"
     >
@@ -206,8 +207,8 @@
         </div>
       </div>
       <div class="flex gap-2 mt-4">
-        <button onclick={createRule} class="button-primary">Create Rule</button>
-        <button onclick={() => showForm = false} class="button-secondary">Cancel</button>
+        <button type="button" onclick={createRule} class="button-primary">Create Rule</button>
+        <button type="button" onclick={() => showForm = false} class="button-secondary">Cancel</button>
       </div>
     </div>
   {/if}
@@ -265,6 +266,7 @@
               <td class="px-4 py-3 text-muted">{rule.description || '-'}</td>
               <td class="px-4 py-3 text-right">
                 <button 
+                  type="button"
                   onclick={() => deleteRule(rule.id)} 
                   class="p-2 hover:bg-rose-50 rounded text-rose-600 border border-transparent hover:border-rose-200 transition-all"
                   title="Delete Rule"

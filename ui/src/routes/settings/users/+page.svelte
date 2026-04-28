@@ -191,10 +191,10 @@ import Button from '$lib/components/primitives/Button.svelte';
                    <StatusBadge label={row.role.label} tone={row.role.tone} />
                 {:else if column.key === 'actions'}
                    <div class="action-strip">
-                      <button class="btn-icon" onclick={() => openEdit(row as unknown as UserItem)} title="MODIFY_ENTITY">
+                      <button type="button" class="btn-icon" onclick={() => openEdit(row as unknown as UserItem)} title="MODIFY_ENTITY">
                         <Pencil size={12} />
                       </button>
-                      <button class="btn-icon danger" onclick={() => { selectedUser = row as unknown as UserItem; deleteOpen = true; }} title="PURGE_ENTITY">
+                      <button type="button" class="btn-icon danger" onclick={() => { selectedUser = row as unknown as UserItem; deleteOpen = true; }} title="PURGE_ENTITY">
                         <Trash2 size={12} />
                       </button>
                    </div>

@@ -16,7 +16,7 @@ pub struct ControlPlaneRuntime {
     runtime_dir: PathBuf,
     tls_config: Option<tonic::transport::ServerTlsConfig>,
     http_shutdown_tx: tokio::sync::watch::Sender<()>,
-    http_join_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>>,
+    http_join_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>>,
 }
 
 impl ControlPlaneRuntime {
@@ -32,7 +32,7 @@ impl ControlPlaneRuntime {
             runtime_dir,
             tls_config,
             http_shutdown_tx,
-            http_join_handle: std::sync::Mutex::new(Some(http_join_handle)),
+            http_join_handle: tokio::sync::Mutex::new(Some(http_join_handle)),
         }
     }
 
@@ -193,7 +193,7 @@ impl ControlPlaneService {
 
         let _ = self.runtime.http_shutdown_tx.send(());
 
-        let handle = self.runtime.http_join_handle.lock().unwrap().take();
+        let handle = self.runtime.http_join_handle.lock().await.take();
         if let Some(handle) = handle {
             if let Err(e) = handle.await {
                 error!("HTTP admin server join error: {}", e);

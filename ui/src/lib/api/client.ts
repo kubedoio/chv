@@ -219,7 +219,8 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       // Network error (server unreachable, CORS, etc.)
       const message = getUserFriendlyMessage(fetchError);
       
-      // Log for debugging
+      // TODO: integrate structured logger instead of console
+      // eslint-disable-next-line no-console
       console.error('API Network Error:', {
         path,
         error: fetchError,
@@ -268,7 +269,8 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         );
       }
 
-      // Log error for debugging
+      // TODO: integrate structured logger instead of console
+      // eslint-disable-next-line no-console
       console.error('API Error:', {
         path,
         status: response.status,

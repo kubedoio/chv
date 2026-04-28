@@ -17,7 +17,7 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
     if let Ok(secret) = std::fs::read_to_string(SHARED_SECRET_PATH) {
         let secret = secret.trim().to_string();
         if secret.len() >= 32 {
-            eprintln!("INFO: loaded jwt_secret from {}", SHARED_SECRET_PATH);
+            tracing::info!("loaded jwt_secret from {}", SHARED_SECRET_PATH);
             return secret;
         }
     }
@@ -31,14 +31,13 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
                 std::fs::Permissions::from_mode(0o600),
             );
         }
-        eprintln!(
-            "INFO: generated jwt_secret and saved to {} (shared by all CHV services)",
+        tracing::info!(
+            "generated jwt_secret and saved to {} (shared by all CHV services)",
             SHARED_SECRET_PATH
         );
     } else {
-        eprintln!(
-            "WARNING: generated jwt_secret but could not write to {}. \
-             Set jwt_secret in {} config manually.",
+        tracing::warn!(
+            "generated jwt_secret but could not write to {}. Set jwt_secret in {} config manually.",
             SHARED_SECRET_PATH, service_name
         );
     }

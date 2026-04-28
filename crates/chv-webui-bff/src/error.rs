@@ -22,24 +22,6 @@ pub enum BffError {
 
 impl IntoResponse for BffError {
     fn into_response(self) -> axum::response::Response {
-        if let BffError::QuotaExceeded {
-            resource,
-            limit,
-            used,
-            requested,
-        } = &self
-        {
-            let body = Json(json!({
-                "message": format!("{} quota exceeded", resource),
-                "code": "QUOTA_EXCEEDED",
-                "resource": resource,
-                "limit": limit,
-                "used": used,
-                "requested": requested,
-            }));
-            return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
-        }
-
         let (status, message, code) = match &self {
             BffError::NotImplemented => (
                 StatusCode::NOT_IMPLEMENTED,
@@ -58,7 +40,22 @@ impl IntoResponse for BffError {
             BffError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone(), "BAD_REQUEST"),
             BffError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone(), "UNAUTHORIZED"),
             BffError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), "CONFLICT"),
-            BffError::QuotaExceeded { .. } => unreachable!(),
+            BffError::QuotaExceeded {
+                resource,
+                limit,
+                used,
+                requested,
+            } => {
+                let body = Json(json!({
+                    "message": format!("{} quota exceeded", resource),
+                    "code": "QUOTA_EXCEEDED",
+                    "resource": resource,
+                    "limit": limit,
+                    "used": used,
+                    "requested": requested,
+                }));
+                return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+            }
         };
 
         let body = Json(json!({

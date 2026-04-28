@@ -7,7 +7,7 @@
     <div class="bg-white rounded-lg shadow-lg w-full max-w-2xl mx-4 p-6">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold">Register Cloud-init Script</h2>
-        <button onclick={() => open = false} class="text-muted hover:text-ink" aria-label="Close modal">✕</button>
+        <button type="button" onclick={() => open = false} class="text-muted hover:text-ink" aria-label="Close modal">✕</button>
       </div>
       <p class="text-muted text-sm">Cloud-init editor placeholder.</p>
     </div>

@@ -96,6 +96,8 @@
 				networkId = defaultNet ? defaultNet.network_id : networks[0].network_id;
 			}
 		} catch (e) {
+			// TODO: integrate structured logger instead of console
+			// eslint-disable-next-line no-console
 			console.error('Failed to load images/networks', e);
 		} finally {
 			loadingData = false;
