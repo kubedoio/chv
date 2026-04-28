@@ -206,6 +206,7 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         )
         .route("/v1/vms/create", post(crate::handlers::vms::create_vm))
         .route("/v1/vms/delete", post(crate::handlers::vms::delete_vm))
+        .route("/v1/vms/resize", post(crate::handlers::vms::resize_vm))
         .route("/v1/vms/mutate", post(crate::handlers::vms::mutate_vm))
         .route(
             "/v1/vms/:vm_id/export",

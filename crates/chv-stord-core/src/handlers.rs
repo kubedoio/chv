@@ -121,6 +121,19 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             .unwrap_or_else(|| operation_span(""));
         let _enter = _span.enter();
 
+        if req.volume_id.is_empty() {
+            return Ok(Response::new(proto::OpenVolumeResponse {
+                result: Some(ChvError::InvalidArgument {
+                    field: "volume_id".to_string(),
+                    reason: "volume_id must not be empty".to_string(),
+                }.to_proto_result()),
+                volume_id: req.volume_id,
+                attachment_handle: String::new(),
+                export_kind: String::new(),
+                export_path: String::new(),
+            }));
+        }
+
         let locator = match Self::map_backend_locator(req.backend) {
             Ok(l) => l,
             Err(e) => {
@@ -459,6 +472,13 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
         let _enter = span.enter();
+
+        if req.new_size_bytes == 0 {
+            return Ok(Response::new(ChvError::InvalidArgument {
+                field: "new_size_bytes".to_string(),
+                reason: "new_size_bytes must be > 0".to_string(),
+            }.to_proto_result()));
+        }
 
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);

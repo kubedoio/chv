@@ -11,6 +11,8 @@ pub struct VmRecord {
     pub runtime_status: String,
     pub last_error: Option<String>,
     pub consecutive_failures: u32,
+    pub cpus: u32,
+    pub memory_bytes: u64,
 }
 
 pub struct VmRuntime {
@@ -79,6 +81,8 @@ impl VmRuntime {
                 runtime_status: "Created".to_string(),
                 last_error: None,
                 consecutive_failures: prior_failures,
+                cpus: config.cpus,
+                memory_bytes: config.memory_bytes,
             },
         );
         Ok(())
@@ -344,6 +348,17 @@ impl VmRuntime {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(vm_id);
+    }
+
+    pub fn update_vm_config(&self, vm_id: &str, cpus: u32, memory_bytes: u64) -> bool {
+        let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rec) = map.get_mut(vm_id) {
+            rec.cpus = cpus;
+            rec.memory_bytes = memory_bytes;
+            true
+        } else {
+            false
+        }
     }
 }
 

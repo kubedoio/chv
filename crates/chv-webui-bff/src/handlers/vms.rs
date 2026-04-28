@@ -704,6 +704,107 @@ pub async fn delete_vm(
     })))
 }
 
+pub async fn resize_vm(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<Value>,
+) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
+    let vm_id = payload
+        .get("vm_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?
+        .to_string();
+
+    let cpu_count = payload
+        .get("cpu_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let memory_bytes = if let Some(bytes) = payload.get("memory_bytes").and_then(|v| v.as_i64()) {
+        bytes
+    } else if let Some(mb) = payload.get("memory_mb").and_then(|v| v.as_i64()) {
+        mb * 1024 * 1024
+    } else {
+        0
+    };
+
+    if cpu_count <= 0 {
+        return Err(BffError::BadRequest("cpu_count must be > 0".into()));
+    }
+    if memory_bytes <= 0 {
+        return Err(BffError::BadRequest("memory must be > 0".into()));
+    }
+
+    let exists =
+        sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
+            .bind(&vm_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check vm existence: {}", e)))?;
+
+    if exists.is_none() {
+        return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
+    }
+
+    let requested_by = claims.sub.clone();
+    let operation_id = chv_common::gen_short_id();
+    let idempotency_key = format!("resize-vm-{}", vm_id);
+
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
+
+    sqlx::query(
+        r#"
+        UPDATE vm_desired_state
+        SET cpu_count = ?, memory_bytes = ?, desired_generation = desired_generation + 1, updated_by = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        WHERE vm_id = ?
+        "#,
+    )
+    .bind(cpu_count)
+    .bind(memory_bytes)
+    .bind(&requested_by)
+    .bind(&vm_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to update vm_desired_state: {}", e)))?;
+
+    let new_generation: i64 =
+        sqlx::query_scalar("SELECT desired_generation FROM vm_desired_state WHERE vm_id = ?")
+            .bind(&vm_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO operations (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, requested_by, desired_generation, requested_at, created_at, updated_at)
+        VALUES (?, ?, 'vm', ?, 'ResizeVm', 'Accepted', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        "#,
+    )
+    .bind(&operation_id)
+    .bind(&idempotency_key)
+    .bind(&vm_id)
+    .bind(&requested_by)
+    .bind(new_generation)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
+
+    Ok(Json(json!({
+        "vm_id": vm_id,
+        "operation_id": operation_id,
+        "status": "Accepted",
+    })))
+}
+
 pub async fn mutate_vm(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,

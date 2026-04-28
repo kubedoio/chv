@@ -1008,6 +1008,26 @@ impl Reconciler {
                     continue;
                 }
             }
+
+            // Resize if cpus or memory changed
+            if record.cpus != spec.cpus || record.memory_bytes != spec.memory_bytes {
+                let op_id = format!("reconcile-vm-resize-{}", vm_id);
+                if let Err(e) = self
+                    .vm_runtime
+                    .resize_vm(vm_id, Some(spec.cpus), Some(spec.memory_bytes), Some(&op_id))
+                    .await
+                {
+                    warn!(vm_id = %vm_id, error = %e, "failed to resize vm");
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
+                    continue;
+                }
+                // Update stored config so we don't resize every tick
+                self.vm_runtime.update_vm_config(vm_id, spec.cpus, spec.memory_bytes);
+            }
         }
 
         Ok(())
