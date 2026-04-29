@@ -403,7 +403,7 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             crate::auth::admin_middleware,
         ));
 
-    login.merge(viewer).merge(operator).merge(admin).layer(
-        axum::middleware::from_fn(crate::metrics_middleware::track_metrics),
-    )
+    login.merge(viewer).merge(operator).merge(admin)
+        .layer(axum::middleware::from_fn(crate::metrics_middleware::track_metrics))
+        .layer(axum::middleware::from_fn(crate::correlation_middleware::extract_correlation_id))
 }

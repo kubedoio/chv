@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, State},
+    extract::{Extension, Multipart, State},
     response::Json,
 };
 use serde_json::{json, Value};
@@ -14,6 +14,7 @@ const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024; // 100 GiB
 pub async fn import_vm(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
+    Extension(correlation_id): Extension<Option<String>>,
     mut multipart: Multipart,
 ) -> Result<Json<Value>, BffError> {
     crate::auth::require_operator_or_admin(&claims)?;
@@ -148,7 +149,7 @@ pub async fn import_vm(
     .ok_or_else(|| BffError::BadRequest("no healthy nodes available".into()))?;
 
     let volume_id = chv_common::gen_short_id();
-    let operation_id = chv_common::gen_short_id();
+    let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
 
     let mut tx = state
         .pool

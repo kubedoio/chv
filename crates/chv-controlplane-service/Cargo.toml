@@ -35,4 +35,5 @@ metrics = { workspace = true }
 
 [dev-dependencies]
 x509-parser = "0.16"
+tempfile = "3"
 chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }

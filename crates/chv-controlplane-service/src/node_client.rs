@@ -1,14 +1,149 @@
 use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
+use tokio::time::timeout;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 use tracing::Instrument;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+struct MethodCircuit {
+    state: CircuitState,
+    failures: Vec<Instant>,
+    opened_at: Option<Instant>,
+}
+
+pub struct CircuitBreaker {
+    inner: Mutex<HashMap<String, MethodCircuit>>,
+    failure_threshold: usize,
+    failure_window: Duration,
+    open_duration: Duration,
+}
+
+impl CircuitBreaker {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            failure_threshold: 5,
+            failure_window: Duration::from_secs(30),
+            open_duration: Duration::from_secs(30),
+        }
+    }
+
+    pub fn check(&self, method: &str) -> Result<(), ChvError> {
+        let mut inner = self.inner.lock().unwrap();
+        let now = Instant::now();
+        let entry = inner.entry(method.to_string()).or_insert_with(|| MethodCircuit {
+            state: CircuitState::Closed,
+            failures: Vec::new(),
+            opened_at: None,
+        });
+
+        match entry.state {
+            CircuitState::Closed => Ok(()),
+            CircuitState::Open => {
+                if let Some(opened_at) = entry.opened_at {
+                    if now.duration_since(opened_at) >= self.open_duration {
+                        entry.state = CircuitState::HalfOpen;
+                        entry.opened_at = None;
+                        Ok(())
+                    } else {
+                        Err(ChvError::BackendUnavailable {
+                            backend: "agent".to_string(),
+                            reason: format!("circuit breaker open for {method}"),
+                        })
+                    }
+                } else {
+                    entry.state = CircuitState::HalfOpen;
+                    Ok(())
+                }
+            }
+            CircuitState::HalfOpen => Ok(()),
+        }
+    }
+
+    pub fn record_success(&self, method: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(entry) = inner.get_mut(method) {
+            entry.state = CircuitState::Closed;
+            entry.failures.clear();
+            entry.opened_at = None;
+        }
+    }
+
+    pub fn record_failure(&self, method: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let now = Instant::now();
+        let entry = inner.entry(method.to_string()).or_insert_with(|| MethodCircuit {
+            state: CircuitState::Closed,
+            failures: Vec::new(),
+            opened_at: None,
+        });
+
+        match entry.state {
+            CircuitState::HalfOpen => {
+                entry.state = CircuitState::Open;
+                entry.opened_at = Some(now);
+                metrics::counter!(
+                    "chv_node_client_circuit_breaker_trips_total",
+                    "method" => method.to_string(),
+                )
+                .increment(1);
+            }
+            CircuitState::Closed => {
+                entry.failures.retain(|&t| now.duration_since(t) < self.failure_window);
+                entry.failures.push(now);
+                if entry.failures.len() >= self.failure_threshold {
+                    entry.state = CircuitState::Open;
+                    entry.opened_at = Some(now);
+                    entry.failures.clear();
+                    metrics::counter!(
+                        "chv_node_client_circuit_breaker_trips_total",
+                        "method" => method.to_string(),
+                    )
+                    .increment(1);
+                }
+            }
+            CircuitState::Open => {}
+        }
+    }
+}
+
+async fn with_timeout<F, T>(
+    future: F,
+    backend: &str,
+    method: &str,
+) -> Result<T, ChvError>
+where
+    F: std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+{
+    timeout(Duration::from_secs(30), future)
+        .await
+        .map_err(|_| ChvError::BackendUnavailable {
+            backend: backend.to_string(),
+            reason: format!("{method} timed out after 30s"),
+        })?
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: backend.to_string(),
+            reason: format!("{method} failed: {e}"),
+        })
+        .map(|r| r.into_inner())
+}
+
 pub struct NodeClient {
     reconcile: proto::reconcile_service_client::ReconcileServiceClient<Channel>,
     lifecycle: proto::lifecycle_service_client::LifecycleServiceClient<Channel>,
+    circuit_breaker: CircuitBreaker,
 }
 
 impl NodeClient {
@@ -36,6 +171,7 @@ impl NodeClient {
                 channel.clone(),
             ),
             lifecycle: proto::lifecycle_service_client::LifecycleServiceClient::new(channel),
+            circuit_breaker: CircuitBreaker::new(),
         })
     }
 
@@ -68,16 +204,22 @@ impl NodeClient {
                 updated_by: requested_by.unwrap_or("control-plane").to_string(),
             }),
         };
+        let method = "apply_vm_desired_state";
         let span = tracing::info_span!("apply_vm_desired_state", operation_id);
-        self.reconcile
-            .apply_vm_desired_state(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("apply_vm_desired_state failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.reconcile
+                .apply_vm_desired_state(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn apply_volume_desired_state(
@@ -109,16 +251,22 @@ impl NodeClient {
                 updated_by: requested_by.unwrap_or("control-plane").to_string(),
             }),
         };
+        let method = "apply_volume_desired_state";
         let span = tracing::info_span!("apply_volume_desired_state", operation_id);
-        self.reconcile
-            .apply_volume_desired_state(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("apply_volume_desired_state failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.reconcile
+                .apply_volume_desired_state(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn apply_network_desired_state(
@@ -150,16 +298,22 @@ impl NodeClient {
                 updated_by: requested_by.unwrap_or("control-plane").to_string(),
             }),
         };
+        let method = "apply_network_desired_state";
         let span = tracing::info_span!("apply_network_desired_state", operation_id);
-        self.reconcile
-            .apply_network_desired_state(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("apply_network_desired_state failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.reconcile
+                .apply_network_desired_state(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn create_vm(
@@ -185,16 +339,22 @@ impl NodeClient {
                 vm_spec_json,
             }),
         };
+        let method = "create_vm";
         let span = tracing::info_span!("create_vm", operation_id);
-        self.lifecycle
-            .create_vm(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("create_vm failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .create_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn start_vm(
@@ -216,16 +376,22 @@ impl NodeClient {
             node_id: node_id.to_string(),
             vm_id: vm_id.to_string(),
         };
+        let method = "start_vm";
         let span = tracing::info_span!("start_vm", operation_id);
-        self.lifecycle
-            .start_vm(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("start_vm failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .start_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn stop_vm(
@@ -249,16 +415,22 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             force,
         };
+        let method = "stop_vm";
         let span = tracing::info_span!("stop_vm", operation_id);
-        self.lifecycle
-            .stop_vm(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("stop_vm failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .stop_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn reboot_vm(
@@ -282,16 +454,22 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             force,
         };
+        let method = "reboot_vm";
         let span = tracing::info_span!("reboot_vm", operation_id);
-        self.lifecycle
-            .reboot_vm(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("reboot_vm failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .reboot_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn delete_vm(
@@ -315,16 +493,22 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             force,
         };
+        let method = "delete_vm";
         let span = tracing::info_span!("delete_vm", operation_id);
-        self.lifecycle
-            .delete_vm(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("delete_vm failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .delete_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn snapshot_vm(
@@ -348,16 +532,22 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             destination: destination.to_string(),
         };
+        let method = "snapshot_vm";
         let span = tracing::info_span!("snapshot_vm", operation_id);
-        self.lifecycle
-            .snapshot_vm(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("snapshot_vm failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .snapshot_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn restore_snapshot(
@@ -381,16 +571,22 @@ impl NodeClient {
             vm_id: vm_id.to_string(),
             source: source.to_string(),
         };
+        let method = "restore_snapshot";
         let span = tracing::info_span!("restore_snapshot", operation_id);
-        self.lifecycle
-            .restore_snapshot(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("restore_snapshot failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .restore_snapshot(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn attach_volume(
@@ -417,16 +613,22 @@ impl NodeClient {
                 volume_spec_json: vec![],
             }),
         };
+        let method = "attach_volume";
         let span = tracing::info_span!("attach_volume", operation_id);
-        self.lifecycle
-            .attach_volume(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("attach_volume failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .attach_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -453,16 +655,22 @@ impl NodeClient {
             volume_id: volume_id.to_string(),
             force,
         };
+        let method = "detach_volume";
         let span = tracing::info_span!("detach_volume", operation_id);
-        self.lifecycle
-            .detach_volume(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("detach_volume failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .detach_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn resize_volume(
@@ -486,16 +694,22 @@ impl NodeClient {
             volume_id: volume_id.to_string(),
             new_size_bytes,
         };
+        let method = "resize_volume";
         let span = tracing::info_span!("resize_volume", operation_id);
-        self.lifecycle
-            .resize_volume(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("resize_volume failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .resize_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn snapshot_volume(
@@ -519,16 +733,22 @@ impl NodeClient {
             volume_id: volume_id.to_string(),
             snapshot_name: snapshot_name.to_string(),
         };
+        let method = "snapshot_volume";
         let span = tracing::info_span!("snapshot_volume", operation_id);
-        self.lifecycle
-            .snapshot_volume(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("snapshot_volume failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .snapshot_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn restore_volume(
@@ -552,16 +772,22 @@ impl NodeClient {
             volume_id: volume_id.to_string(),
             snapshot_name: snapshot_name.to_string(),
         };
+        let method = "restore_volume";
         let span = tracing::info_span!("restore_volume", operation_id);
-        self.lifecycle
-            .restore_volume(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("restore_volume failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .restore_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn delete_volume_snapshot(
@@ -585,16 +811,22 @@ impl NodeClient {
             volume_id: volume_id.to_string(),
             snapshot_name: snapshot_name.to_string(),
         };
+        let method = "delete_volume_snapshot";
         let span = tracing::info_span!("delete_volume_snapshot", operation_id);
-        self.lifecycle
-            .delete_volume_snapshot(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("delete_volume_snapshot failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .delete_volume_snapshot(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn clone_volume(
@@ -618,16 +850,22 @@ impl NodeClient {
             source_volume_id: source_volume_id.to_string(),
             target_volume_id: target_volume_id.to_string(),
         };
+        let method = "clone_volume";
         let span = tracing::info_span!("clone_volume", operation_id);
-        self.lifecycle
-            .clone_volume(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("clone_volume failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .clone_volume(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn start_network(
@@ -649,16 +887,22 @@ impl NodeClient {
             node_id: node_id.to_string(),
             network_id: network_id.to_string(),
         };
+        let method = "start_network";
         let span = tracing::info_span!("start_network", operation_id);
-        self.lifecycle
-            .start_network(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("start_network failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .start_network(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn stop_network(
@@ -682,16 +926,22 @@ impl NodeClient {
             network_id: network_id.to_string(),
             force,
         };
+        let method = "stop_network";
         let span = tracing::info_span!("stop_network", operation_id);
-        self.lifecycle
-            .stop_network(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("stop_network failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .stop_network(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 
     pub async fn restart_network(
@@ -713,16 +963,22 @@ impl NodeClient {
             node_id: node_id.to_string(),
             network_id: network_id.to_string(),
         };
+        let method = "restart_network";
         let span = tracing::info_span!("restart_network", operation_id);
-        self.lifecycle
-            .restart_network(with_operation_id_metadata(req, operation_id))
-            .instrument(span)
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "agent".to_string(),
-                reason: format!("restart_network failed: {e}"),
-            })
-            .map(|r| r.into_inner())
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .restart_network(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(_) => self.circuit_breaker.record_failure(method),
+        };
+        result
     }
 }
 

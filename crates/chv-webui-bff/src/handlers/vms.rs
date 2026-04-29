@@ -1,4 +1,4 @@
-use axum::{extract::State, response::Json};
+use axum::{extract::{Extension, State}, response::Json};
 use serde_json::{json, Value};
 
 use crate::handlers::hypervisor_settings::validate_vm_overrides;
@@ -276,6 +276,7 @@ pub async fn get_vm(
 pub async fn create_vm(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
+    Extension(correlation_id): Extension<Option<String>>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     crate::auth::require_operator_or_admin(&claims)?;
@@ -396,7 +397,7 @@ pub async fn create_vm(
 
     let vm_id = chv_common::gen_short_id();
     let volume_id = chv_common::gen_short_id();
-    let operation_id = chv_common::gen_short_id();
+    let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
     tracing::info!(%vm_id, %volume_id, %operation_id, "create_vm: generated IDs, continuing transaction");
 
     // Insert VM
@@ -627,6 +628,7 @@ pub async fn create_vm(
 pub async fn delete_vm(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
+    Extension(correlation_id): Extension<Option<String>>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     crate::auth::require_operator_or_admin(&claims)?;
@@ -677,7 +679,7 @@ pub async fn delete_vm(
             .await
             .map_err(|e| BffError::Internal(format!("failed to read generation: {}", e)))?;
 
-    let operation_id = chv_common::gen_short_id();
+    let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
     let idempotency_key = format!("delete-vm-{}", vm_id);
     sqlx::query(
         r#"
@@ -708,6 +710,7 @@ pub async fn delete_vm(
 pub async fn resize_vm(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
+    Extension(correlation_id): Extension<Option<String>>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     crate::auth::require_operator_or_admin(&claims)?;
@@ -760,7 +763,7 @@ pub async fn resize_vm(
     let old_memory = current.1.unwrap_or(0);
 
     let requested_by = claims.sub.clone();
-    let operation_id = chv_common::gen_short_id();
+    let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
     let idempotency_key = format!("resize-vm-{}", vm_id);
 
     let mut tx = state

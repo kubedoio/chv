@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod correlation_middleware;
 pub mod error;
 pub mod handlers;
 pub mod metrics_middleware;

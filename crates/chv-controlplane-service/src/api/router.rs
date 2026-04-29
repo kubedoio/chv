@@ -28,6 +28,7 @@ pub fn admin_router(bff_state: AppState) -> Router {
         .merge(bff_router)
         // Health & admin
         .route("/health", get(health::health_handler))
+        .route("/health/deep", get(health::deep_health_handler))
         .route("/ready", get(health::ready_handler))
         .route("/metrics", get(health::metrics_handler))
         .route("/admin/nodes", get(nodes::list_nodes))

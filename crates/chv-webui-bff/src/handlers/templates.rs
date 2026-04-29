@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     response::Json,
 };
 use serde_json::{json, Value};
@@ -238,6 +238,7 @@ pub async fn preview_vm_template(
 pub async fn clone_vm_template(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
+    Extension(correlation_id): Extension<Option<String>>,
     Path(template_id): Path<String>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -351,7 +352,7 @@ pub async fn clone_vm_template(
 
     let vm_id = chv_common::gen_short_id();
     let volume_id = chv_common::gen_short_id();
-    let operation_id = chv_common::gen_short_id();
+    let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
 
     // Insert VM
     sqlx::query(

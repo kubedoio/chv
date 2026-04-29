@@ -95,6 +95,72 @@ async fn test_ready_endpoint() {
 }
 
 #[tokio::test]
+async fn test_deep_health_endpoint() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+
+    // Scenario 1: directory exists but has no sockets -> healthy (skipped connectivity)
+    let mut app_state = test_app_state(test_db.pool.clone());
+    let temp_dir = tempfile::tempdir().unwrap();
+    app_state.agent_runtime_dir = temp_dir.path().to_path_buf();
+    let app = crate::api::router::admin_router(app_state);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::get("/health/deep")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["status"], "healthy");
+    let checks = json["checks"].as_object().unwrap();
+    assert_eq!(checks["database"]["status"], "pass");
+    assert_eq!(checks["agent_socket_dir"]["status"], "pass");
+    assert_eq!(checks["agent_connectivity"]["status"], "skipped");
+    assert_eq!(checks["agent_connectivity"]["detail"], "no agent sockets found");
+
+    // Scenario 2: directory does not exist -> degraded
+    let mut app_state2 = test_app_state(test_db.pool.clone());
+    app_state2.agent_runtime_dir = std::path::PathBuf::from("/nonexistent/chv/agent/dir");
+    let app2 = crate::api::router::admin_router(app_state2);
+
+    let response2 = app2
+        .oneshot(
+            axum::http::Request::get("/health/deep")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response2.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+
+    assert_eq!(json2["status"], "degraded");
+    let checks2 = json2["checks"].as_object().unwrap();
+    assert_eq!(checks2["database"]["status"], "pass");
+    assert_eq!(checks2["agent_socket_dir"]["status"], "fail");
+    assert_eq!(checks2["agent_connectivity"]["status"], "skipped");
+    assert_eq!(
+        checks2["agent_connectivity"]["detail"],
+        "agent socket directory not available"
+    );
+}
+
+#[tokio::test]
 async fn test_admin_nodes_endpoint() {
     use axum::http::StatusCode;
     use tower::ServiceExt;
