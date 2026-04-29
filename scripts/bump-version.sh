@@ -92,8 +92,11 @@ fi
 # ---------------------------------------------------------------------------
 # 4. UI sidebar version label
 # ---------------------------------------------------------------------------
-SIDEBAR_OLD_VERSION=$(grep -o 'chv-v[0-9][0-9.]*-alpha' ui/src/lib/components/Sidebar.svelte | sed 's/chv-v//;s/-alpha//' || echo "$OLD_VERSION")
-sed -i "s/chv-v${SIDEBAR_OLD_VERSION}-alpha/chv-v${NEW_VERSION}-alpha/" ui/src/lib/components/Sidebar.svelte
+SIDEBAR_FILE="ui/src/lib/components/shell/Sidebar.svelte"
+if [ -f "$SIDEBAR_FILE" ]; then
+  SIDEBAR_OLD_VERSION=$(grep -o 'chv-v[0-9][0-9.]*-alpha' "$SIDEBAR_FILE" | sed 's/chv-v//;s/-alpha//' || echo "$OLD_VERSION")
+  sed -i "s/chv-v${SIDEBAR_OLD_VERSION}-alpha/chv-v${NEW_VERSION}-alpha/" "$SIDEBAR_FILE"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Documentation & install scripts
