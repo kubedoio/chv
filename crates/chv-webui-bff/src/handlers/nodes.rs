@@ -11,6 +11,11 @@ pub async fn list_nodes(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, BffError> {
+    let cache_key = "nodes:list";
+    if let Some(cached) = state.cache.get(cache_key).await {
+        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+    }
+
     let page = payload
         .get("page")
         .and_then(|v| v.as_u64())
@@ -102,7 +107,7 @@ pub async fn list_nodes(
         })
         .collect();
 
-    Ok(Json(json!({
+    let response = Json(json!({
         "items": items,
         "page": {
             "page": page,
@@ -113,7 +118,11 @@ pub async fn list_nodes(
         "filters": {
             "applied": {}
         },
-    })))
+    }));
+    if let Ok(json) = serde_json::to_string(&response.0) {
+        state.cache.set(cache_key, json).await;
+    }
+    Ok(response)
 }
 
 pub async fn get_node(
@@ -315,6 +324,8 @@ pub async fn mutate_node(
         .mutate_node(node_id, action, claims.username)
         .await?;
 
+    state.cache.invalidate("nodes:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,
@@ -354,6 +365,8 @@ pub async fn enroll_node(
 
     let token_ready = token_count > 0;
 
+    state.cache.invalidate("nodes:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "success": true,
         "cache_cleared": cache_existed,

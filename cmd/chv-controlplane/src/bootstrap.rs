@@ -2,7 +2,7 @@ use chv_config::ControlPlaneConfig;
 use chv_controlplane_service::{
     ControlPlaneComponents, ControlPlaneMutationService, ControlPlaneRuntime, ControlPlaneService,
     ControlPlaneServiceError, EnrollmentServiceImplementation, InventoryServiceImplementation,
-    LifecycleServiceImplementation, Orchestrator, ReconcileServiceImplementation,
+    LifecycleServiceImplementation, NodeClientPool, Orchestrator, ReconcileServiceImplementation,
     TelemetryServiceImplementation,
 };
 use chv_controlplane_store::{
@@ -64,6 +64,7 @@ pub async fn build_service(
         )),
         jwt_secret: config.jwt_secret.clone(),
         agent_runtime_dir: config.agent_runtime_dir.clone(),
+        cache: chv_webui_bff::BffCache::new(5),
     };
 
     let router = chv_controlplane_service::api::router::admin_router(bff_state);
@@ -154,12 +155,15 @@ pub async fn build_service(
         shutdown_rx,
     );
 
+    let node_client_pool = NodeClientPool::new();
+
     let orchestrator = Orchestrator::new(
         pool.clone(),
         operation_repo.clone(),
         config.agent_socket_pattern.clone(),
         config.kernel_path.clone(),
         config.firmware_path.clone(),
+        node_client_pool.clone(),
     );
     let orchestrator_handle = tokio::spawn(orchestrator.run());
 
@@ -167,6 +171,7 @@ pub async fn build_service(
         pool.clone(),
         backup_repo.clone(),
         config.agent_socket_pattern.clone(),
+        node_client_pool.clone(),
     );
     let backup_worker_handle = tokio::spawn(backup_worker.run());
 

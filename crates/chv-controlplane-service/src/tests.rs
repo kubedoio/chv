@@ -53,6 +53,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         )),
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
+        cache: chv_webui_bff::BffCache::new(5),
     }
 }
 
@@ -2772,6 +2773,7 @@ async fn test_vm_override_takes_precedence_over_global() {
         "/tmp/chv-{node_id}.sock".to_string(),
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
+        crate::NodeClientPool::new(),
     );
 
     let spec_json = orchestrator
@@ -2816,6 +2818,7 @@ async fn test_global_setting_takes_precedence_over_default() {
         "/tmp/chv-{node_id}.sock".to_string(),
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
+        crate::NodeClientPool::new(),
     );
 
     let spec_json = orchestrator
@@ -2857,6 +2860,7 @@ async fn test_null_vm_overrides_use_global_settings() {
         "/tmp/chv-{node_id}.sock".to_string(),
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
+        crate::NodeClientPool::new(),
     );
 
     let spec_json = orchestrator
@@ -2904,6 +2908,7 @@ async fn test_defaults_used_when_settings_query_fails() {
         "/tmp/chv-{node_id}.sock".to_string(),
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
+        crate::NodeClientPool::new(),
     );
 
     let spec_json = orchestrator
@@ -2950,6 +2955,7 @@ async fn test_post_merge_validation_rejects_iommu_without_memory_shared() {
         "/tmp/chv-{node_id}.sock".to_string(),
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
+        crate::NodeClientPool::new(),
     );
 
     let result = orchestrator.build_agent_vm_spec("vm-merge-5").await;

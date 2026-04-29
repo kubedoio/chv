@@ -446,6 +446,7 @@ dependencies = [
  "chv-webui-bff-api",
  "control-plane-node-api",
  "cron",
+ "dashmap",
  "hyper-util",
  "jsonwebtoken",
  "metrics",

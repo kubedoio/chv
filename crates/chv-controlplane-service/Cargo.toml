@@ -31,6 +31,7 @@ jsonwebtoken = { workspace = true }
 bcrypt.workspace = true
 chrono = "0.4"
 cron = "0.16"
+dashmap = { workspace = true }
 metrics = { workspace = true }
 
 [dev-dependencies]

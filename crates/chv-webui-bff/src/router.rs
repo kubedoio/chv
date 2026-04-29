@@ -11,6 +11,7 @@ use chv_controlplane_store::{
     ObservedStateRepository, OperationRepository, StorePool,
 };
 
+use crate::cache::BffCache;
 use crate::mutations::MutationService;
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ pub struct AppState {
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
+    pub cache: BffCache,
 }
 
 pub fn bff_router(state: AppState) -> Router<AppState> {

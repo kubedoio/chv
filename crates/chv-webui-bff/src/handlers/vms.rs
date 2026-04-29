@@ -11,6 +11,11 @@ pub async fn list_vms(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    let cache_key = "vms:list";
+    if let Some(cached) = state.cache.get(cache_key).await {
+        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+    }
+
     let page = payload
         .get("page")
         .and_then(|v| v.as_u64())
@@ -92,7 +97,7 @@ pub async fn list_vms(
         })
         .collect();
 
-    Ok(Json(json!({
+    let response = Json(json!({
         "items": items,
         "page": {
             "page": page,
@@ -103,7 +108,11 @@ pub async fn list_vms(
         "filters": {
             "applied": {}
         },
-    })))
+    }));
+    if let Ok(json) = serde_json::to_string(&response.0) {
+        state.cache.set(cache_key, json).await;
+    }
+    Ok(response)
 }
 
 pub async fn get_vm(
@@ -618,6 +627,8 @@ pub async fn create_vm(
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
     tracing::info!(%vm_id, "create_vm: transaction committed successfully");
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "vm_id": vm_id,
         "operation_id": operation_id,
@@ -700,6 +711,8 @@ pub async fn delete_vm(
         .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "vm_id": vm_id,
         "operation_id": operation_id,
@@ -826,6 +839,8 @@ pub async fn resize_vm(
         .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "vm_id": vm_id,
         "operation_id": operation_id,
@@ -868,6 +883,8 @@ pub async fn mutate_vm(
         .mutate_vm(vm_id, action, force, claims.username)
         .await?;
 
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,

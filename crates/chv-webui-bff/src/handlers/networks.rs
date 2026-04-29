@@ -10,6 +10,11 @@ pub async fn list_networks(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    let cache_key = "networks:list";
+    if let Some(cached) = state.cache.get(cache_key).await {
+        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+    }
+
     let page = payload
         .get("page")
         .and_then(|v| v.as_u64())
@@ -84,7 +89,7 @@ pub async fn list_networks(
         })
         .collect();
 
-    Ok(Json(json!({
+    let response = Json(json!({
         "items": items,
         "page": {
             "page": page,
@@ -95,7 +100,11 @@ pub async fn list_networks(
         "filters": {
             "applied": {}
         },
-    })))
+    }));
+    if let Ok(json) = serde_json::to_string(&response.0) {
+        state.cache.set(cache_key, json).await;
+    }
+    Ok(response)
 }
 
 pub async fn get_network(
@@ -310,6 +319,8 @@ pub async fn create_network(
         .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
+    state.cache.invalidate("networks:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "network_id": network_id,
         "name": name,
@@ -375,6 +386,8 @@ pub async fn delete_network(
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete network: {}", e)))?;
 
+    state.cache.invalidate("networks:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "deleted": true,
         "network_id": network_id,
@@ -503,6 +516,8 @@ pub async fn update_network(
         .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
 
+    state.cache.invalidate("networks:").await;
+    state.cache.invalidate("overview").await;
     get_network(
         BearerToken(claims),
         State(state),
@@ -608,6 +623,8 @@ pub async fn mutate_network(
         .mutate_network(network_id, action, force, claims.username)
         .await?;
 
+    state.cache.invalidate("networks:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,

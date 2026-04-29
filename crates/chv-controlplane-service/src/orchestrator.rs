@@ -1,4 +1,4 @@
-use crate::node_client::NodeClient;
+use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::{
     HypervisorSettingsRepository, HypervisorSettingsRow, OperationRepository,
     OperationStatusUpdateInput, StorePool,
@@ -19,6 +19,7 @@ pub struct Orchestrator {
     kernel_path: String,
     firmware_path: String,
     tick_interval: Duration,
+    node_client_pool: NodeClientPool,
 }
 
 impl Orchestrator {
@@ -28,6 +29,7 @@ impl Orchestrator {
         agent_socket_pattern: String,
         kernel_path: String,
         firmware_path: String,
+        node_client_pool: NodeClientPool,
     ) -> Self {
         Self {
             pool,
@@ -36,6 +38,7 @@ impl Orchestrator {
             kernel_path,
             firmware_path,
             tick_interval: Duration::from_secs(2),
+            node_client_pool,
         }
     }
 
@@ -142,7 +145,7 @@ impl Orchestrator {
             })?;
 
         let socket_path = self.resolve_agent_socket(node_id);
-        let mut client = NodeClient::connect(&socket_path).await?;
+        let mut client = self.node_client_pool.get_or_connect(node_id, &socket_path).await?;
 
         let generation = row
             .desired_generation
@@ -497,6 +500,9 @@ impl Orchestrator {
                 Ok(())
             }
             Err(e) => {
+                if matches!(e, ChvError::BackendUnavailable { .. }) {
+                    self.node_client_pool.evict(node_id);
+                }
                 self.operation_repo
                     .update_status(&OperationStatusUpdateInput {
                         operation_id: OperationId::new(row.operation_id.clone()).map_err(|e| {

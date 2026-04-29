@@ -1,4 +1,4 @@
-use crate::node_client::NodeClient;
+use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::{
     BackupJobCreateInput, BackupJobStatusUpdateInput, BackupRepository, StorePool,
 };
@@ -16,15 +16,17 @@ pub struct BackupWorker {
     backup_repo: BackupRepository,
     agent_socket_pattern: String,
     tick_interval: Duration,
+    node_client_pool: NodeClientPool,
 }
 
 impl BackupWorker {
-    pub fn new(pool: StorePool, backup_repo: BackupRepository, agent_socket_pattern: String) -> Self {
+    pub fn new(pool: StorePool, backup_repo: BackupRepository, agent_socket_pattern: String, node_client_pool: NodeClientPool) -> Self {
         Self {
             pool,
             backup_repo,
             agent_socket_pattern,
             tick_interval: Duration::from_secs(30),
+            node_client_pool,
         }
     }
 
@@ -212,7 +214,7 @@ impl BackupWorker {
         })?;
 
         let socket_path = self.resolve_agent_socket(&node_id);
-        let mut client = NodeClient::connect(&socket_path).await?;
+        let mut client = self.node_client_pool.get_or_connect(&node_id, &socket_path).await?;
 
         let generation = "1";
         let snapshot_name = format!("backup-{}", job.job_id);
@@ -281,6 +283,9 @@ impl BackupWorker {
                 Ok(())
             }
             Err(e) => {
+                if matches!(e, ChvError::BackendUnavailable { .. }) {
+                    self.node_client_pool.evict(&node_id);
+                }
                 let now = chrono::Utc::now().to_rfc3339();
                 self.backup_repo
                     .update_job_status(&BackupJobStatusUpdateInput {

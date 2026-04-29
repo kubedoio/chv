@@ -3,6 +3,7 @@ use control_plane_node_api::control_plane_node_api as proto;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
@@ -140,10 +141,11 @@ where
         .map(|r| r.into_inner())
 }
 
+#[derive(Clone)]
 pub struct NodeClient {
     reconcile: proto::reconcile_service_client::ReconcileServiceClient<Channel>,
     lifecycle: proto::lifecycle_service_client::LifecycleServiceClient<Channel>,
-    circuit_breaker: CircuitBreaker,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl NodeClient {
@@ -171,7 +173,7 @@ impl NodeClient {
                 channel.clone(),
             ),
             lifecycle: proto::lifecycle_service_client::LifecycleServiceClient::new(channel),
-            circuit_breaker: CircuitBreaker::new(),
+            circuit_breaker: Arc::new(CircuitBreaker::new()),
         })
     }
 

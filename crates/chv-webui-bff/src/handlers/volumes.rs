@@ -8,6 +8,11 @@ pub async fn list_volumes(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    let cache_key = "volumes:list";
+    if let Some(cached) = state.cache.get(cache_key).await {
+        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+    }
+
     let page = payload
         .get("page")
         .and_then(|v| v.as_u64())
@@ -77,7 +82,7 @@ pub async fn list_volumes(
         })
         .collect();
 
-    Ok(Json(json!({
+    let response = Json(json!({
         "items": items,
         "page": {
             "page": page,
@@ -88,7 +93,11 @@ pub async fn list_volumes(
         "filters": {
             "applied": {}
         },
-    })))
+    }));
+    if let Ok(json) = serde_json::to_string(&response.0) {
+        state.cache.set(cache_key, json).await;
+    }
+    Ok(response)
 }
 
 pub async fn get_volume(
@@ -246,6 +255,8 @@ pub async fn mutate_volume(
         )
         .await?;
 
+    state.cache.invalidate("volumes:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,
@@ -283,6 +294,8 @@ pub async fn snapshot_volume(
         .snapshot_volume(volume_id, snapshot_name, claims.username)
         .await?;
 
+    state.cache.invalidate("volumes:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,
@@ -320,6 +333,8 @@ pub async fn restore_volume_snapshot(
         .restore_volume_snapshot(volume_id, snapshot_name, claims.username)
         .await?;
 
+    state.cache.invalidate("volumes:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,
@@ -357,6 +372,8 @@ pub async fn delete_volume_snapshot(
         .delete_volume_snapshot(volume_id, snapshot_name, claims.username)
         .await?;
 
+    state.cache.invalidate("volumes:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,
@@ -394,6 +411,8 @@ pub async fn clone_volume(
         .clone_volume(source_volume_id, target_volume_id, claims.username)
         .await?;
 
+    state.cache.invalidate("volumes:").await;
+    state.cache.invalidate("overview").await;
     Ok(Json(json!({
         "accepted": response.accepted,
         "task_id": response.task_id,

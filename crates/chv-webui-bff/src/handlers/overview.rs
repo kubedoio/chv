@@ -9,6 +9,11 @@ pub async fn get_overview(
     State(state): State<AppState>,
     _payload: axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    let cache_key = "overview";
+    if let Some(cached) = state.cache.get(cache_key).await {
+        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+    }
+
     let nodes_total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM nodes")
         .fetch_one(&state.pool)
         .await
@@ -126,7 +131,7 @@ pub async fn get_overview(
         })
         .collect();
 
-    Ok(Json(json!({
+    let response = Json(json!({
         "clusters_total": 0,
         "clusters_healthy": 0,
         "clusters_degraded": 0,
@@ -143,7 +148,11 @@ pub async fn get_overview(
         "alerts": alerts,
         "recent_tasks": recent_tasks,
         "state": "ready",
-    })))
+    }));
+    if let Ok(json) = serde_json::to_string(&response.0) {
+        state.cache.set_with_ttl(cache_key, json, Some(std::time::Duration::from_secs(10))).await;
+    }
+    Ok(response)
 }
 
 #[derive(sqlx::FromRow)]
