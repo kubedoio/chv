@@ -102,6 +102,8 @@ pub async fn create_token(
             .fetch_one(&state.pool)
             .await
             .unwrap_or_else(|_| "unknown".to_string());
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "token_id": token_id,
@@ -150,6 +152,8 @@ pub async fn revoke_token(
             tracing::error!(error = %e, "revoke_token db delete failed");
             BffError::Internal("failed to revoke token".into())
         })?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "revoked": true,

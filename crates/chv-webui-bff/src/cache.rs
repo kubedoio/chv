@@ -42,6 +42,15 @@ impl BffCache {
 
     pub async fn set_with_ttl(&self, key: &str, data: String, ttl: Option<Duration>) {
         let mut guard = self.inner.write().await;
+        // Cleanup expired entries if map is getting large
+        if guard.len() > 1000 {
+            let now = Instant::now();
+            let default_ttl = self.ttl;
+            guard.retain(|_, entry| {
+                let ttl = entry.ttl.unwrap_or(default_ttl);
+                now.duration_since(entry.cached_at) < ttl
+            });
+        }
         guard.insert(
             key.to_string(),
             CacheEntry {

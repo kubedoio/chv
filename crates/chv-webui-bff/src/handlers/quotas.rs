@@ -149,6 +149,8 @@ pub async fn create_quota(
     .execute(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to create quota: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "user_id": user_id,
@@ -210,6 +212,8 @@ pub async fn update_quota(
     .execute(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to update quota: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "user_id": user_id,
@@ -232,6 +236,8 @@ pub async fn delete_quota(
         .execute(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete quota: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "deleted": true,

@@ -163,6 +163,9 @@ pub async fn create_firewall_rule(
     .execute(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to create firewall_rule: {}", e)))?;
+    state.cache.invalidate("networks:").await;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "id": rule_id,
@@ -208,6 +211,9 @@ pub async fn delete_firewall_rule(
         .execute(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete firewall_rule: {}", e)))?;
+    state.cache.invalidate("networks:").await;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "deleted": true,

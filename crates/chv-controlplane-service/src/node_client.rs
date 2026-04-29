@@ -134,8 +134,7 @@ where
             backend: backend.to_string(),
             reason: format!("{method} timed out after 30s"),
         })?
-        .map_err(|e| ChvError::BackendUnavailable {
-            backend: backend.to_string(),
+        .map_err(|e| ChvError::Internal {
             reason: format!("{method} failed: {e}"),
         })
         .map(|r| r.into_inner())
@@ -219,7 +218,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -266,7 +266,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -313,7 +314,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -354,7 +356,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -391,7 +394,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -430,7 +434,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -469,7 +474,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -508,7 +514,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -547,7 +554,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -586,7 +594,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -628,7 +637,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -670,7 +680,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -709,7 +720,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -748,7 +760,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -787,7 +800,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -826,7 +840,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -865,7 +880,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -902,7 +918,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -941,7 +958,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }
@@ -978,7 +996,8 @@ impl NodeClient {
         .await;
         match &result {
             Ok(_) => self.circuit_breaker.record_success(method),
-            Err(_) => self.circuit_breaker.record_failure(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
         };
         result
     }

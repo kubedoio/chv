@@ -281,6 +281,10 @@ pub async fn import_vm(
     tx.commit()
         .await
         .map_err(|e| BffError::Internal(format!("failed to commit transaction: {}", e)))?;
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("volumes:").await;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "id": vm_id,

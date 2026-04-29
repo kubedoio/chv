@@ -30,12 +30,18 @@ impl BackupWorker {
         }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self, mut shutdown_rx: tokio::sync::watch::Receiver<()>) {
         info!("backup worker starting");
         let mut interval = tokio::time::interval(self.tick_interval);
         let mut tick_count: u64 = 0;
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown_rx.changed() => {
+                    info!("backup worker shutting down");
+                    break;
+                }
+            }
             tick_count += 1;
             if let Err(e) = self.tick(tick_count).await {
                 warn!(error = %e, "backup worker tick failed");

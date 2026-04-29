@@ -152,7 +152,7 @@ pub async fn build_service(
         tls_config,
         http_shutdown_tx,
         http_join_handle,
-        shutdown_rx,
+        shutdown_rx.clone(),
     );
 
     let node_client_pool = NodeClientPool::new();
@@ -165,7 +165,7 @@ pub async fn build_service(
         config.firmware_path.clone(),
         node_client_pool.clone(),
     );
-    let orchestrator_handle = tokio::spawn(orchestrator.run());
+    let orchestrator_handle = tokio::spawn(orchestrator.run(shutdown_rx.clone()));
 
     let backup_worker = chv_controlplane_service::BackupWorker::new(
         pool.clone(),
@@ -173,7 +173,7 @@ pub async fn build_service(
         config.agent_socket_pattern.clone(),
         node_client_pool.clone(),
     );
-    let backup_worker_handle = tokio::spawn(backup_worker.run());
+    let backup_worker_handle = tokio::spawn(backup_worker.run(shutdown_rx));
 
     Ok(ControlPlaneService::new(
         runtime,

@@ -1,11 +1,13 @@
 use dashmap::DashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use crate::node_client::NodeClient;
 use chv_errors::ChvError;
 
 #[derive(Clone)]
 pub struct NodeClientPool {
-    clients: DashMap<String, NodeClient>,
+    clients: DashMap<String, (NodeClient, Instant)>,
+    ttl: Duration,
 }
 
 impl Default for NodeClientPool {
@@ -18,6 +20,7 @@ impl NodeClientPool {
     pub fn new() -> Self {
         Self {
             clients: DashMap::new(),
+            ttl: Duration::from_secs(300),
         }
     }
 
@@ -26,14 +29,14 @@ impl NodeClientPool {
         node_id: &str,
         socket_path: &Path,
     ) -> Result<NodeClient, ChvError> {
-        // Fast path: check cache
         if let Some(entry) = self.clients.get(node_id) {
-            return Ok(entry.clone());
+            if entry.1.elapsed() < self.ttl {
+                return Ok(entry.0.clone());
+            }
+            // expired, fall through to reconnect
         }
-
-        // Slow path: connect and cache
         let client = NodeClient::connect(socket_path).await?;
-        self.clients.insert(node_id.to_string(), client.clone());
+        self.clients.insert(node_id.to_string(), (client.clone(), Instant::now()));
         Ok(client)
     }
 

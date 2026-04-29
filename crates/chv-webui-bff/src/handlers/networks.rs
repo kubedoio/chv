@@ -10,11 +10,6 @@ pub async fn list_networks(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    let cache_key = "networks:list";
-    if let Some(cached) = state.cache.get(cache_key).await {
-        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
-    }
-
     let page = payload
         .get("page")
         .and_then(|v| v.as_u64())
@@ -25,6 +20,11 @@ pub async fn list_networks(
         .and_then(|v| v.as_u64())
         .unwrap_or(50)
         .clamp(1, 200);
+    let cache_key = format!("networks:list:{}:{}", page, page_size);
+    if let Some(cached) = state.cache.get(&cache_key).await {
+        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+    }
+
     let offset = (page - 1) * page_size;
     let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM networks")
         .fetch_one(&state.pool)
@@ -102,7 +102,7 @@ pub async fn list_networks(
         },
     }));
     if let Ok(json) = serde_json::to_string(&response.0) {
-        state.cache.set(cache_key, json).await;
+        state.cache.set(&cache_key, json).await;
     }
     Ok(response)
 }

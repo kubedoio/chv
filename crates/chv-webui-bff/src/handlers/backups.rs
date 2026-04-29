@@ -192,6 +192,8 @@ pub async fn create_backup_job(
         .create_job(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to create backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "job_id": job_id,
@@ -278,6 +280,8 @@ pub async fn delete_backup_job(
         .delete_job(&job_id)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "deleted": true })))
 }
@@ -358,6 +362,8 @@ pub async fn update_backup_job(
         .update_job(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to update backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "updated": true })))
 }
@@ -392,6 +398,8 @@ pub async fn execute_backup_job(
         .create_job(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to execute backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "execution_id": execution_id,
@@ -457,6 +465,8 @@ pub async fn create_backup_schedule(
         .create_schedule(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to create backup schedule: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "schedule_id": schedule_id })))
 }
@@ -580,6 +590,8 @@ pub async fn update_backup_schedule(
         .update_schedule(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to update backup schedule: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "updated": true })))
 }
@@ -594,6 +606,8 @@ pub async fn delete_backup_schedule(
         .delete_schedule(&schedule_id)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete backup schedule: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "deleted": true })))
 }
@@ -637,6 +651,8 @@ pub async fn create_backup_restore(
         .create_restore(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to create backup restore: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "restore_id": restore_id })))
 }
@@ -785,6 +801,8 @@ pub async fn create_backup_job_api(
         .create_schedule(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to create backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "id": schedule_id,
@@ -809,6 +827,8 @@ pub async fn delete_backup_job_api(
         .delete_schedule(&job_id)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "success": true })))
 }
@@ -879,6 +899,8 @@ pub async fn run_backup_job_api(
         .create_job(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to run backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "id": execution_id,
@@ -917,6 +939,8 @@ pub async fn toggle_backup_job_api(
         .update_schedule(&input)
         .await
         .map_err(|e| BffError::Internal(format!("failed to toggle backup job: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({ "success": true, "enabled": new_enabled })))
 }

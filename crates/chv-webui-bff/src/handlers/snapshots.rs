@@ -150,6 +150,9 @@ pub async fn create_snapshot(
         task_id = %response.task_id,
         "snapshot dispatched"
     );
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,
@@ -206,6 +209,9 @@ pub async fn delete_snapshot(
         .execute(&state.pool)
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete snapshot: {}", e)))?;
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,
@@ -278,6 +284,9 @@ pub async fn restore_snapshot(
         task_id = %response.task_id,
         "restore dispatched"
     );
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,

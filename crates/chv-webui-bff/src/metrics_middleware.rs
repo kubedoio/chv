@@ -31,11 +31,11 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
 }
 
 /// Sanitize dynamic path segments so histogram cardinality stays bounded.
-/// Replaces UUID-like and hex ID segments with `{id}`.
+/// Replaces UUID-like segments with `{id}`.
 fn sanitize_path(path: &str) -> String {
     path.split('/')
         .map(|segment| {
-            if segment.len() >= 8 && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            if is_uuid_like(segment) {
                 "{id}"
             } else {
                 segment
@@ -43,4 +43,10 @@ fn sanitize_path(path: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn is_uuid_like(segment: &str) -> bool {
+    segment.len() == 36
+        && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && segment.matches('-').count() == 4
 }

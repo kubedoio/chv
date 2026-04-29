@@ -42,11 +42,17 @@ impl Orchestrator {
         }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self, mut shutdown_rx: tokio::sync::watch::Receiver<()>) {
         info!("orchestrator starting");
         let mut interval = tokio::time::interval(self.tick_interval);
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown_rx.changed() => {
+                    info!("orchestrator shutting down");
+                    break;
+                }
+            }
             if let Err(e) = self.tick().await {
                 warn!(error = %e, "orchestrator tick failed");
             }

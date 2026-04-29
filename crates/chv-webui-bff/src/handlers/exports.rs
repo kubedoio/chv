@@ -139,6 +139,9 @@ pub async fn export_vm(
         .map_err(|e| BffError::Internal(format!("failed to update export status: {}", e)))?;
 
     let download_url = format!("/api/v1/exports/{}/download", export_id);
+    state.cache.invalidate("vms:").await;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "export_id": export_id,

@@ -109,6 +109,8 @@ pub async fn create_storage_pool(
     .execute(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to create storage pool: {}", e)))?;
+    state.cache.invalidate("overview").await;
+
 
     Ok(Json(json!({
         "id": pool_id,
