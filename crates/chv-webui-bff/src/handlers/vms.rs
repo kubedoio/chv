@@ -997,8 +997,8 @@ pub async fn get_vm_console_url(
     // Return a full WS URL when the node has an agent_ws_address configured;
     // otherwise fall back to the relative path for single-node / proxy setups.
     let console_url = match agent_ws_address {
-        Some(addr) => format!("ws://{}/vms/{}/console?token={}", addr, vm_id, token),
-        None => format!("/ws/vms/{}/console?token={}", vm_id, token),
+        Some(addr) if !addr.is_empty() => format!("ws://{}/vms/{}/console?token={}", addr, vm_id, token),
+        _ => format!("/ws/vms/{}/console?token={}", vm_id, token),
     };
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
 
