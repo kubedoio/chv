@@ -23,4 +23,5 @@ async-trait = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt = { workspace = true }
 chrono = "0.4"
+metrics = { workspace = true }
 tokio-util = { version = "0.7.18", features = ["io"] }

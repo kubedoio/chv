@@ -1,5 +1,13 @@
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use std::sync::OnceLock;
 use tracing::Span;
+
+static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+
+/// Returns the globally installed Prometheus metrics handle, if one exists.
+pub fn prometheus_handle() -> Option<&'static PrometheusHandle> {
+    PROMETHEUS_HANDLE.get()
+}
 
 pub fn init_logger(filter: &str) -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = tracing_subscriber::fmt()
@@ -8,9 +16,12 @@ pub fn init_logger(filter: &str) -> Result<(), Box<dyn std::error::Error>> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    PrometheusBuilder::new()
-        .install_recorder()
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::set_global_recorder(recorder)
         .map_err(|e| format!("failed to install metrics recorder: {e}"))?;
+
+    let _ = PROMETHEUS_HANDLE.set(handle);
 
     Ok(())
 }

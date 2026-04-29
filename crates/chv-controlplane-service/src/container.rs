@@ -17,6 +17,7 @@ pub struct ControlPlaneRuntime {
     tls_config: Option<tonic::transport::ServerTlsConfig>,
     http_shutdown_tx: tokio::sync::watch::Sender<()>,
     http_join_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>>,
+    shutdown_rx: tokio::sync::watch::Receiver<()>,
 }
 
 impl ControlPlaneRuntime {
@@ -26,6 +27,7 @@ impl ControlPlaneRuntime {
         tls_config: Option<tonic::transport::ServerTlsConfig>,
         http_shutdown_tx: tokio::sync::watch::Sender<()>,
         http_join_handle: tokio::task::JoinHandle<Result<(), std::io::Error>>,
+        shutdown_rx: tokio::sync::watch::Receiver<()>,
     ) -> Self {
         Self {
             bind_addr,
@@ -33,6 +35,7 @@ impl ControlPlaneRuntime {
             tls_config,
             http_shutdown_tx,
             http_join_handle: tokio::sync::Mutex::new(Some(http_join_handle)),
+            shutdown_rx,
         }
     }
 
@@ -106,14 +109,34 @@ impl ControlPlaneComponents {
 pub struct ControlPlaneService {
     runtime: ControlPlaneRuntime,
     components: ControlPlaneComponents,
+    shutdown_tx: tokio::sync::watch::Sender<()>,
+    worker_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl ControlPlaneService {
-    pub fn new(runtime: ControlPlaneRuntime, components: ControlPlaneComponents) -> Self {
+    pub fn new(
+        runtime: ControlPlaneRuntime,
+        components: ControlPlaneComponents,
+        shutdown_tx: tokio::sync::watch::Sender<()>,
+        worker_handles: Vec<tokio::task::JoinHandle<()>>,
+    ) -> Self {
         Self {
             runtime,
             components,
+            shutdown_tx,
+            worker_handles,
         }
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(());
+        for handle in &self.worker_handles {
+            handle.abort();
+        }
+    }
+
+    pub fn shutdown_tx(&self) -> tokio::sync::watch::Sender<()> {
+        self.shutdown_tx.clone()
     }
 
     pub fn runtime(&self) -> &ControlPlaneRuntime {
@@ -182,13 +205,16 @@ impl ControlPlaneService {
             };
         }
 
+        let mut shutdown_rx = self.runtime.shutdown_rx.clone();
         let grpc_result = server
             .add_service(enrollment_server)
             .add_service(inventory_server)
             .add_service(telemetry_server)
             .add_service(reconcile_server)
             .add_service(lifecycle_server)
-            .serve(addr)
+            .serve_with_shutdown(addr, async move {
+                let _ = shutdown_rx.changed().await;
+            })
             .await;
 
         let _ = self.runtime.http_shutdown_tx.send(());

@@ -76,8 +76,27 @@ impl Orchestrator {
             reason: format!("failed to query accepted operations: {e}"),
         })?;
 
+        metrics::gauge!("orchestrator_operations_accepted").set(rows.len() as f64);
+
         for row in rows {
-            if let Err(e) = self.dispatch_operation(&row).await {
+            let start = std::time::Instant::now();
+            let dispatch_result = self.dispatch_operation(&row).await;
+            let duration = start.elapsed().as_secs_f64();
+
+            let status_label = if dispatch_result.is_ok() { "success" } else { "failure" };
+            metrics::counter!(
+                "orchestrator_operations_dispatched_total",
+                "type" => row.operation_type.clone(),
+                "status" => status_label,
+            )
+            .increment(1);
+            metrics::histogram!(
+                "orchestrator_dispatch_duration_seconds",
+                "type" => row.operation_type.clone(),
+            )
+            .record(duration);
+
+            if let Err(e) = dispatch_result {
                 warn!(
                     operation_id = %row.operation_id,
                     operation_type = %row.operation_type,

@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod error;
 pub mod handlers;
+pub mod metrics_middleware;
 pub mod mutations;
 pub mod router;
 

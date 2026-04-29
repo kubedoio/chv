@@ -143,12 +143,15 @@ pub async fn build_service(
         tls_config = Some(server_tls);
     }
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+
     let runtime = ControlPlaneRuntime::new(
         config.grpc_bind,
         config.runtime_dir.clone(),
         tls_config,
         http_shutdown_tx,
         http_join_handle,
+        shutdown_rx,
     );
 
     let orchestrator = Orchestrator::new(
@@ -158,14 +161,14 @@ pub async fn build_service(
         config.kernel_path.clone(),
         config.firmware_path.clone(),
     );
-    tokio::spawn(orchestrator.run());
+    let orchestrator_handle = tokio::spawn(orchestrator.run());
 
     let backup_worker = chv_controlplane_service::BackupWorker::new(
         pool.clone(),
         backup_repo.clone(),
         config.agent_socket_pattern.clone(),
     );
-    tokio::spawn(backup_worker.run());
+    let backup_worker_handle = tokio::spawn(backup_worker.run());
 
     Ok(ControlPlaneService::new(
         runtime,
@@ -177,5 +180,7 @@ pub async fn build_service(
             reconcile_service,
             (*lifecycle_service).clone(),
         ),
+        shutdown_tx,
+        vec![orchestrator_handle, backup_worker_handle],
     ))
 }

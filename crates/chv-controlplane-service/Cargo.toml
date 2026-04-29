@@ -13,6 +13,7 @@ chv-webui-bff = { path = "../chv-webui-bff" }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 chv-common = { path = "../chv-common" }
+chv-observability = { path = "../chv-observability" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -30,6 +31,7 @@ jsonwebtoken = { workspace = true }
 bcrypt.workspace = true
 chrono = "0.4"
 cron = "0.16"
+metrics = { workspace = true }
 
 [dev-dependencies]
 x509-parser = "0.16"
