@@ -1,0 +1,1 @@
+## 2026-04-30 - Adding ARIA label to FirewallRuleEditor\n**Learning:** Found a missing aria-label for an icon-only delete button in `ui/src/lib/components/networks/FirewallRuleEditor.svelte`.\n**Action:** Add `aria-label="Delete Rule"` to icon-only buttons for better accessibility for screen readers.
