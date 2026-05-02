@@ -32,6 +32,7 @@
 					type="button"
 					class="menu-close"
 					onclick={() => (open = false)}
+					aria-label="Close column menu"
 				>
 					<X size={14} />
 				</button>
