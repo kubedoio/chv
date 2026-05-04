@@ -39,15 +39,14 @@ impl<B: StorageBackend> StorageServer<B> {
         if let Some(db) = db_path {
             let db = db.to_path_buf();
             match tokio::task::spawn_blocking(move || SessionStore::new(&db)).await {
-                Ok(Ok(store)) => match tokio::task::spawn_blocking(move || store.list()).await {
-                    Ok(Ok(sessions)) => {
+                Ok(Ok(store)) => match store.list().await {
+                    Ok(sessions) => {
                         let table = self.inner.sessions();
                         for s in sessions {
                             table.upsert(s);
                         }
                         info!(count = table.list().len(), "hydrated sessions from SQLite");
                     }
-                    Ok(Err(e)) => tracing::warn!(error = %e, "failed to list sessions from SQLite"),
                     Err(e) => tracing::warn!(error = %e, "failed to list sessions from SQLite"),
                 },
                 Ok(Err(e)) => {

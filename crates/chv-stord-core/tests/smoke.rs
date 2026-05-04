@@ -602,7 +602,7 @@ async fn sqlite_persistence_roundtrip() {
 
     // Verify persisted to SQLite by opening a new store connection
     let store2 = SessionStore::new(&db_path).unwrap();
-    let sessions = store2.list().unwrap();
+    let sessions = store2.list().await.unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].volume_id, "vol-persist");
 
@@ -619,6 +619,6 @@ async fn sqlite_persistence_roundtrip() {
 
     // Verify removed from SQLite
     let store3 = SessionStore::new(&db_path).unwrap();
-    let sessions = store3.list().unwrap();
+    let sessions = store3.list().await.unwrap();
     assert!(sessions.is_empty());
 }

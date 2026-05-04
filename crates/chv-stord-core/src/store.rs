@@ -2,9 +2,11 @@ use crate::session::Session;
 use chv_errors::ChvError;
 use rusqlite::{params, Connection};
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct SessionStore {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SessionStore {
@@ -28,68 +30,96 @@ impl SessionStore {
         .map_err(|e| ChvError::Internal {
             reason: format!("sqlite init failed: {}", e),
         })?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
-    pub fn upsert(&self, session: &Session) -> Result<(), ChvError> {
-        self.conn.execute(
-            "INSERT INTO sessions (volume_id, attachment_handle, vm_id, export_kind, export_path, runtime_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(volume_id, attachment_handle) DO UPDATE SET
-               vm_id = excluded.vm_id,
-               export_kind = excluded.export_kind,
-               export_path = excluded.export_path,
-               runtime_status = excluded.runtime_status",
-            params![
-                session.volume_id,
-                session.attachment_handle,
-                session.vm_id.as_deref().unwrap_or(""),
-                session.export_kind,
-                session.export_path,
-                session.runtime_status,
-            ],
-        ).map_err(|e| ChvError::Internal { reason: format!("sqlite upsert failed: {}", e) })?;
-        Ok(())
+    pub async fn upsert(&self, session: &Session) -> Result<(), ChvError> {
+        let conn = self.conn.clone();
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "INSERT INTO sessions (volume_id, attachment_handle, vm_id, export_kind, export_path, runtime_status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(volume_id, attachment_handle) DO UPDATE SET
+                   vm_id = excluded.vm_id,
+                   export_kind = excluded.export_kind,
+                   export_path = excluded.export_path,
+                   runtime_status = excluded.runtime_status",
+                params![
+                    session.volume_id,
+                    session.attachment_handle,
+                    session.vm_id.as_deref().unwrap_or(""),
+                    session.export_kind,
+                    session.export_path,
+                    session.runtime_status,
+                ],
+            ).map_err(|e| ChvError::Internal { reason: format!("sqlite upsert failed: {}", e) })?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("spawn_blocking panicked: {}", e),
+        })?
     }
 
-    pub fn remove(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        self.conn
-            .execute(
+    pub async fn remove(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
+        let conn = self.conn.clone();
+        let volume_id = volume_id.to_string();
+        let handle = handle.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
                 "DELETE FROM sessions WHERE volume_id = ?1 AND attachment_handle = ?2",
                 params![volume_id, handle],
             )
             .map_err(|e| ChvError::Internal {
                 reason: format!("sqlite remove failed: {}", e),
             })?;
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("spawn_blocking panicked: {}", e),
+        })?
     }
 
-    pub fn list(&self) -> Result<Vec<Session>, ChvError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT volume_id, attachment_handle, vm_id, export_kind, export_path, runtime_status FROM sessions"
-        ).map_err(|e| ChvError::Internal { reason: format!("sqlite prepare failed: {}", e) })?;
-        let rows = stmt
-            .query_map([], |row| {
-                let vm_id: String = row.get(2)?;
-                Ok(Session {
-                    volume_id: row.get(0)?,
-                    attachment_handle: row.get(1)?,
-                    vm_id: if vm_id.is_empty() { None } else { Some(vm_id) },
-                    export_kind: row.get(3)?,
-                    export_path: row.get(4)?,
-                    runtime_status: row.get(5)?,
+    pub async fn list(&self) -> Result<Vec<Session>, ChvError> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT volume_id, attachment_handle, vm_id, export_kind, export_path, runtime_status FROM sessions"
+            ).map_err(|e| ChvError::Internal { reason: format!("sqlite prepare failed: {}", e) })?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let vm_id: String = row.get(2)?;
+                    Ok(Session {
+                        volume_id: row.get(0)?,
+                        attachment_handle: row.get(1)?,
+                        vm_id: if vm_id.is_empty() { None } else { Some(vm_id) },
+                        export_kind: row.get(3)?,
+                        export_path: row.get(4)?,
+                        runtime_status: row.get(5)?,
+                    })
                 })
-            })
-            .map_err(|e| ChvError::Internal {
-                reason: format!("sqlite query failed: {}", e),
-            })?;
-        let mut sessions = Vec::new();
-        for row in rows {
-            sessions.push(row.map_err(|e| ChvError::Internal {
-                reason: format!("sqlite row failed: {}", e),
-            })?);
-        }
-        Ok(sessions)
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("sqlite query failed: {}", e),
+                })?;
+            let mut sessions = Vec::new();
+            for row in rows {
+                sessions.push(row.map_err(|e| ChvError::Internal {
+                    reason: format!("sqlite row failed: {}", e),
+                })?);
+            }
+            Ok(sessions)
+        })
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("spawn_blocking panicked: {}", e),
+        })?
     }
 }
 
@@ -108,16 +138,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn store_roundtrip() {
+    #[tokio::test]
+    async fn store_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(&dir.path().join("stord.db")).unwrap();
         let s = dummy_session("vol-1", "h1");
-        store.upsert(&s).unwrap();
-        let list = store.list().unwrap();
+        store.upsert(&s).await.unwrap();
+        let list = store.list().await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].volume_id, "vol-1");
-        store.remove("vol-1", "h1").unwrap();
-        assert!(store.list().unwrap().is_empty());
+        store.remove("vol-1", "h1").await.unwrap();
+        assert!(store.list().await.unwrap().is_empty());
     }
 }

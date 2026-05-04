@@ -9,11 +9,11 @@
 
 | Severity | Found | Fixed | Deferred |
 |----------|-------|-------|----------|
-| CRITICAL | 35 | 14 | 21 |
-| HIGH | 100 | 32 | 68 |
+| CRITICAL | 35 | 15 | 20 |
+| HIGH | 100 | 34 | 66 |
 | MEDIUM | 60 | 8 | 52 |
 | LOW | 20 | 0 | 20 |
-| **Total** | **215** | **54** | **161** |
+| **Total** | **215** | **57** | **158** |
 
 ## Fixes Applied (25 files, +475/-201 lines)
 
@@ -84,17 +84,17 @@ These findings require structural refactoring, new crate boundaries, or integrat
 | 1 | CRITICAL | BFF bypasses control-plane boundary (snapshots, images, backups INSERT directly) | Requires architecture change + new gRPC endpoints | TODO(follow-up) in handlers |
 | 2 | CRITICAL | 15 operation types dispatch but have no agent handler | Requires agent-side implementation + protocol changes | Architecture gap |
 | 3 | CRITICAL | Undocumented wire protocol (correlation_id smuggling) | Requires proto schema redesign | ADR needed |
-| 4 | CRITICAL | Logs are text-formatted (not JSON) | Requires tracing subscriber reconfiguration across all binaries | Operational change |
+| 4 | CRITICAL | ~~Logs are text-formatted (not JSON)~~ | **FIXED** — `CHV_LOG_FORMAT=json` env var enables JSON logging | Done |
 | 5 | CRITICAL | No OpenTelemetry/distributed tracing | Requires new dependency + instrumentation across all crates | Phase N feature |
 | 6 | CRITICAL | Agent gRPC handlers have zero metrics | Requires metrics crate integration in agent-core | Phase N feature |
-| 7 | HIGH | stord blocking I/O on async runtime | Requires `spawn_blocking` wrapper + session refactor | Structural change |
+| 7 | HIGH | ~~stord blocking I/O on async runtime~~ | **FIXED** — `SessionStore` methods now use `spawn_blocking` | Done |
 | 8 | HIGH | Orchestrator tick dispatches 15 ops that always fail | Same as #2 above - agent handlers missing |
 | 9 | HIGH | report_service_versions N+1 sequential writes | Requires batch upsert in store layer |
-| 10 | HIGH | Reconciler cache lock held across serial loop | Requires lock scope refactoring |
+| 10 | HIGH | Reconciler cache lock held across serial loop | Already correct — lock dropped before I/O | Not an issue |
 | 11 | HIGH | DashMap non-atomic patterns in various places | Requires per-site audit and entry API migration |
 | 12 | HIGH | Zero integration tests | Requires test infrastructure (docker, fixtures) |
-| 13 | HIGH | RSA Marvin Attack via unused sqlx-mysql | Remove `mysql` feature from sqlx dependency |
-| 14 | HIGH | rustls-webpki reachable panic | Upgrade rustls-webpki >= 0.103.13 |
+| 13 | HIGH | RSA Marvin Attack via unused sqlx-mysql | Already verified — workspace uses `default-features = false`, no mysql | Not an issue |
+| 14 | HIGH | ~~rustls-webpki reachable panic~~ | **FIXED** — upgraded to v0.103.13 | Done |
 | 15 | MEDIUM | Dual SQLite abstraction (rusqlite + sqlx) | Requires stord migration to sqlx |
 | 16 | MEDIUM | Mixed SQL placeholder style (? and $N) | Cosmetic, low risk |
 | 17 | MEDIUM | Various naming inconsistencies | Cosmetic, requires coordinated rename |
@@ -113,8 +113,8 @@ All fixes maintain backward compatibility. No public API signatures changed. No 
 
 ## Recommendations for Follow-Up
 
-1. **Priority 1**: Remove unused MySQL/PostgreSQL sqlx features (fixes CVE)
-2. **Priority 2**: Upgrade rustls-webpki (fixes panic CVE)
-3. **Priority 3**: Add integration test infrastructure
-4. **Priority 4**: Implement missing agent handlers for 15 operation types
-5. **Priority 5**: Migrate to structured JSON logging
+1. **Priority 1**: Add OpenTelemetry/distributed tracing
+2. **Priority 2**: Add integration test infrastructure
+3. **Priority 3**: Implement missing agent handlers for 15 operation types
+4. **Priority 4**: Add metrics to agent gRPC handlers
+5. **Priority 5**: Batch upsert for report_service_versions

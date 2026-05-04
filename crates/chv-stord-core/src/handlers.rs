@@ -12,7 +12,7 @@ pub struct StorageServiceImpl<B: StorageBackend> {
     sessions: Arc<SessionTable>,
     metrics: Arc<Metrics>,
     backend_allowlist: Vec<String>,
-    store: Option<Arc<tokio::sync::Mutex<crate::store::SessionStore>>>,
+    store: Option<Arc<crate::store::SessionStore>>,
 }
 
 impl<B: StorageBackend> StorageServiceImpl<B> {
@@ -36,13 +36,12 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
     }
 
     pub fn set_store(&mut self, store: crate::store::SessionStore) {
-        self.store = Some(Arc::new(tokio::sync::Mutex::new(store)));
+        self.store = Some(Arc::new(store));
     }
 
     async fn persist_upsert(&self, session: &crate::session::Session) {
         if let Some(store) = &self.store {
-            let store = store.lock().await;
-            if let Err(e) = store.upsert(session) {
+            if let Err(e) = store.upsert(session).await {
                 tracing::error!(error = %e, "failed to persist session to SQLite");
             }
         }
@@ -50,8 +49,7 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
 
     async fn persist_remove(&self, volume_id: &str, handle: &str) {
         if let Some(store) = &self.store {
-            let store = store.lock().await;
-            if let Err(e) = store.remove(volume_id, handle) {
+            if let Err(e) = store.remove(volume_id, handle).await {
                 tracing::error!(error = %e, "failed to remove session from SQLite");
             }
         }

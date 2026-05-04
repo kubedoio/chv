@@ -10,11 +10,24 @@ pub fn prometheus_handle() -> Option<&'static PrometheusHandle> {
 }
 
 pub fn init_logger(filter: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+    let use_json = std::env::var("CHV_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    if use_json {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_target(true)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+    } else {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+    }
 
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
