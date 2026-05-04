@@ -249,14 +249,19 @@ impl ControlPlaneClient {
             return Ok(());
         }
 
-        let mut unsent = Vec::new();
-        for message in pending {
+        let total = pending.len();
+        for (i, message) in pending.iter().enumerate() {
             let kind = format!("{:?}", message.kind);
             tracing::info!(message_kind = %kind, "dispatching pending control-plane message");
-            if let Err(e) = self.dispatch_pending_message(&message).await {
-                tracing::warn!(message_kind = %kind, error = %e, "dispatch pending message failed");
-                unsent.push(message);
-                cache.replace_pending_control_plane_messages(unsent);
+            if let Err(e) = self.dispatch_pending_message(message).await {
+                tracing::warn!(
+                    message_kind = %kind,
+                    sent = i,
+                    remaining = total - i,
+                    error = %e,
+                    "dispatch pending message failed, re-queuing remaining"
+                );
+                cache.replace_pending_control_plane_messages(pending[i..].to_vec());
                 return Err(e);
             }
         }

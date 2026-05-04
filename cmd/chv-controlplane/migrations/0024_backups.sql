@@ -1,4 +1,7 @@
 -- Backup system schema v2: jobs (executions), schedules, restores
+-- SAFETY: This migration drops and recreates backup tables.
+-- Only safe before production data exists. The previous backup_history and backup_jobs
+-- tables (from earlier migrations) are replaced with the v2 schema.
 
 DROP TABLE IF EXISTS backup_history;
 DROP TABLE IF EXISTS backup_jobs;

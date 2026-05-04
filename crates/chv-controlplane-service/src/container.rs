@@ -9,7 +9,8 @@ use control_plane_node_api::control_plane_node_api as proto;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{error, info};
+use std::time::Duration;
+use tracing::{error, info, warn};
 
 pub struct ControlPlaneRuntime {
     bind_addr: SocketAddr,
@@ -110,7 +111,7 @@ pub struct ControlPlaneService {
     runtime: ControlPlaneRuntime,
     components: ControlPlaneComponents,
     shutdown_tx: tokio::sync::watch::Sender<()>,
-    worker_handles: Vec<tokio::task::JoinHandle<()>>,
+    worker_handles: tokio::sync::Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl ControlPlaneService {
@@ -124,14 +125,32 @@ impl ControlPlaneService {
             runtime,
             components,
             shutdown_tx,
-            worker_handles,
+            worker_handles: tokio::sync::Mutex::new(Some(worker_handles)),
         }
     }
 
-    pub fn shutdown(&self) {
+    pub async fn shutdown(&self) {
+        // Signal all workers to stop via the watch channel
         let _ = self.shutdown_tx.send(());
-        for handle in &self.worker_handles {
-            handle.abort();
+
+        // Take ownership of the handles so we can await them
+        let handles = self.worker_handles.lock().await.take();
+        if let Some(handles) = handles {
+            const GRACEFUL_TIMEOUT: Duration = Duration::from_secs(10);
+
+            for handle in handles {
+                let abort_handle = handle.abort_handle();
+                match tokio::time::timeout(GRACEFUL_TIMEOUT, handle).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        warn!("worker task panicked during shutdown: {}", e);
+                    }
+                    Err(_) => {
+                        warn!("worker task did not finish within {:?}, aborting", GRACEFUL_TIMEOUT);
+                        abort_handle.abort();
+                    }
+                }
+            }
         }
     }
 
@@ -183,7 +202,8 @@ impl ControlPlaneService {
         if self.runtime.tls_config().is_some() {
             info!(?addr, "starting gRPC server with TLS");
         } else {
-            info!(?addr, "starting gRPC server without TLS (plaintext)");
+            warn!(?addr, "gRPC server starting WITHOUT TLS — connections are unencrypted. \
+                Configure [tls] section with server_cert_path and server_key_path for production use.");
         }
 
         let mut server = tonic::transport::Server::builder();

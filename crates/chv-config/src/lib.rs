@@ -14,6 +14,15 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
     if current != "chv-dev-secret-change-in-production" && current.len() >= 32 {
         return current.to_string();
     }
+    if current == "chv-dev-secret-change-in-production" {
+        tracing::error!(
+            service = service_name,
+            "SECURITY: jwt_secret is set to the known default value. \
+             This is insecure — set a unique jwt_secret (>= 32 chars) in the {} config or CHV_JWT_SECRET env var. \
+             Auto-generating a random secret for this session.",
+            service_name
+        );
+    }
     if let Ok(secret) = std::fs::read_to_string(SHARED_SECRET_PATH) {
         let secret = secret.trim().to_string();
         if secret.len() >= 32 {
@@ -31,13 +40,16 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
                 std::fs::Permissions::from_mode(0o600),
             );
         }
-        tracing::info!(
-            "generated jwt_secret and saved to {} (shared by all CHV services)",
+        tracing::warn!(
+            "auto-generated jwt_secret and saved to {} (shared by all CHV services). \
+             For production, configure an explicit jwt_secret.",
             SHARED_SECRET_PATH
         );
     } else {
-        tracing::warn!(
-            "generated jwt_secret but could not write to {}. Set jwt_secret in {} config manually.",
+        tracing::error!(
+            "auto-generated jwt_secret but could not write to {}. \
+             Each service will generate its own secret — tokens will NOT be portable between services. \
+             Set jwt_secret explicitly in {} config.",
             SHARED_SECRET_PATH, service_name
         );
     }

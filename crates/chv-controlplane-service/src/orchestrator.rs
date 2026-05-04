@@ -60,30 +60,64 @@ impl Orchestrator {
     }
 
     async fn tick(&self) -> Result<(), ChvError> {
-        let rows = sqlx::query_as::<_, AcceptedOperationRow>(
+        // Atomically claim operations by marking them Running in the same query.
+        // This prevents double-dispatch if tick overlaps (takes longer than interval).
+        let claimed_rows = sqlx::query_as::<_, ClaimedOperationRow>(
             r#"
-            SELECT
-                o.operation_id,
-                o.operation_type,
-                o.resource_kind,
-                o.resource_id,
-                o.desired_generation,
-                o.correlation_id,
-                COALESCE(vds.target_node_id, vol.node_id, net.node_id) as node_id
-            FROM operations o
-            LEFT JOIN vm_desired_state vds ON o.resource_id = vds.vm_id
-            LEFT JOIN volumes vol ON o.resource_id = vol.volume_id
-            LEFT JOIN networks net ON o.resource_id = net.network_id
-            WHERE o.status = 'Accepted'
-            ORDER BY o.requested_at ASC
-            LIMIT 10
+            UPDATE operations SET status = 'Running', updated_by = 'orchestrator'
+            WHERE operation_id IN (
+                SELECT o.operation_id
+                FROM operations o
+                WHERE o.status = 'Accepted'
+                ORDER BY o.requested_at ASC
+                LIMIT 10
+            )
+            RETURNING
+                operation_id,
+                operation_type,
+                resource_kind,
+                resource_id,
+                desired_generation,
+                correlation_id
             "#,
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ChvError::Internal {
-            reason: format!("failed to query accepted operations: {e}"),
+            reason: format!("failed to claim accepted operations: {e}"),
         })?;
+
+        // Resolve node_id for each claimed operation
+        let mut rows = Vec::with_capacity(claimed_rows.len());
+        for claimed in claimed_rows {
+            let node_id: Option<String> = sqlx::query_scalar(
+                r#"
+                SELECT COALESCE(vds.target_node_id, vol.node_id, net.node_id)
+                FROM operations o
+                LEFT JOIN vm_desired_state vds ON o.resource_id = vds.vm_id
+                LEFT JOIN volumes vol ON o.resource_id = vol.volume_id
+                LEFT JOIN networks net ON o.resource_id = net.network_id
+                WHERE o.operation_id = ?
+                "#,
+            )
+            .bind(&claimed.operation_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to resolve node_id for operation {}: {e}", claimed.operation_id),
+            })?
+            .flatten();
+
+            rows.push(AcceptedOperationRow {
+                operation_id: claimed.operation_id,
+                operation_type: claimed.operation_type,
+                resource_kind: claimed.resource_kind,
+                resource_id: claimed.resource_id,
+                desired_generation: claimed.desired_generation,
+                correlation_id: claimed.correlation_id,
+                node_id,
+            });
+        }
 
         metrics::gauge!("orchestrator_operations_accepted").set(rows.len() as f64);
 
@@ -158,25 +192,7 @@ impl Orchestrator {
             .map(|g| g.to_string())
             .unwrap_or_else(|| "1".to_string());
 
-        // Mark as Running before dispatch
-        self.operation_repo
-            .update_status(&OperationStatusUpdateInput {
-                operation_id: OperationId::new(row.operation_id.clone()).map_err(|e| {
-                    ChvError::Internal {
-                        reason: format!("invalid operation_id: {e}"),
-                    }
-                })?,
-                status: OperationStatus::Running,
-                error_code: None,
-                error_message: None,
-                observed_generation: None,
-                updated_by: Some("orchestrator".into()),
-                updated_unix_ms: now_unix_ms(),
-            })
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to mark operation Running: {e}"),
-            })?;
+        // Status already set to Running by the atomic claim in tick()
 
         let ack = match row.operation_type.as_str() {
             "create" | "CreateVm" | "ResizeVm" => {
@@ -689,28 +705,34 @@ impl Orchestrator {
 
         let mut network_configs: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
-        for nic in &nic_rows {
-            if network_configs.contains_key(&nic.network_id) {
-                continue;
+        let unique_network_ids: Vec<&str> = nic_rows
+            .iter()
+            .map(|n| n.network_id.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !unique_network_ids.is_empty() {
+            let placeholders = unique_network_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query_str = format!(
+                "SELECT network_id, cidr, gateway FROM network_desired_state WHERE network_id IN ({})",
+                placeholders
+            );
+            let mut query = sqlx::query_as::<_, NetworkDesiredStateWithIdRow>(&query_str);
+            for id in &unique_network_ids {
+                query = query.bind(id);
             }
-            let row = sqlx::query_as::<_, NetworkDesiredStateRow>(
-                "SELECT cidr, gateway FROM network_desired_state WHERE network_id = ?",
-            )
-            .bind(&nic.network_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to query network desired state: {e}"),
-            })?;
-            let cidr = row
-                .as_ref()
-                .and_then(|r| r.cidr.clone())
-                .unwrap_or_default();
-            let gateway = row
-                .as_ref()
-                .and_then(|r| r.gateway.clone())
-                .unwrap_or_default();
-            network_configs.insert(nic.network_id.clone(), (cidr, gateway));
+            let net_rows = query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("failed to query network desired states: {e}"),
+                })?;
+            for nr in net_rows {
+                network_configs.insert(
+                    nr.network_id,
+                    (nr.cidr.unwrap_or_default(), nr.gateway.unwrap_or_default()),
+                );
+            }
         }
 
         let nics: Vec<AgentNicSpec> = nic_rows
@@ -842,6 +864,16 @@ fn validate_merged_overrides(overrides: &HypervisorOverrides) -> Result<(), Stri
 }
 
 #[derive(sqlx::FromRow)]
+struct ClaimedOperationRow {
+    operation_id: String,
+    operation_type: String,
+    resource_kind: String,
+    resource_id: String,
+    desired_generation: Option<i64>,
+    correlation_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
 struct AcceptedOperationRow {
     operation_id: String,
     operation_type: String,
@@ -894,7 +926,8 @@ struct VmNicRow {
 }
 
 #[derive(sqlx::FromRow)]
-struct NetworkDesiredStateRow {
+struct NetworkDesiredStateWithIdRow {
+    network_id: String,
     cidr: Option<String>,
     gateway: Option<String>,
 }

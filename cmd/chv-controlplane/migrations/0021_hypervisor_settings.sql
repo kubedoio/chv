@@ -25,7 +25,7 @@ CREATE TABLE hypervisor_profiles (
 );
 
 -- Built-in profiles
-INSERT INTO hypervisor_profiles (
+INSERT OR IGNORE INTO hypervisor_profiles (
     id, name, description,
     cpu_nested, cpu_amx, cpu_kvm_hyperv,
     memory_mergeable, memory_hugepages, memory_shared, memory_prefault,
@@ -43,7 +43,7 @@ INSERT INTO hypervisor_profiles (
     true
 );
 
-INSERT INTO hypervisor_profiles (
+INSERT OR IGNORE INTO hypervisor_profiles (
     id, name, description,
     cpu_nested, cpu_amx, cpu_kvm_hyperv,
     memory_mergeable, memory_hugepages, memory_shared, memory_prefault,
@@ -61,7 +61,7 @@ INSERT INTO hypervisor_profiles (
     true
 );
 
-INSERT INTO hypervisor_profiles (
+INSERT OR IGNORE INTO hypervisor_profiles (
     id, name, description,
     cpu_nested, cpu_amx, cpu_kvm_hyperv,
     memory_mergeable, memory_hugepages, memory_shared, memory_prefault,
@@ -102,7 +102,7 @@ CREATE TABLE hypervisor_settings (
 );
 
 -- Seed the singleton row with defaults
-INSERT INTO hypervisor_settings (id) VALUES (1);
+INSERT OR IGNORE INTO hypervisor_settings (id) VALUES (1);
 
 -- Per-VM override columns
 ALTER TABLE vms ADD COLUMN hv_cpu_nested BOOLEAN;

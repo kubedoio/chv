@@ -917,21 +917,16 @@ pub async fn get_vm_console(
         .await
         .unwrap_or_default();
 
-    // Return last 500 lines
-    let line_count = log_content.lines().count();
+    let lines: Vec<&str> = log_content.lines().collect();
+    let line_count = lines.len();
     let tail = if line_count > 500 {
-        log_content
-            .lines()
-            .skip(line_count - 500)
-            .collect::<Vec<_>>()
-            .join("\n")
+        lines[line_count - 500..].join("\n")
     } else {
         log_content
     };
 
     Ok(Json(json!({
         "vm_id": vm_id,
-        "log_path": log_path,
         "content": tail,
         "lines": line_count,
     })))
@@ -970,6 +965,7 @@ fn generate_console_token(
 pub async fn get_vm_console_url(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     axum::extract::Path(vm_id): axum::extract::Path<String>,
 ) -> Result<Json<Value>, BffError> {
     if !chv_common::validate_id(&vm_id) {
@@ -995,10 +991,28 @@ pub async fn get_vm_console_url(
     let token = generate_console_token(&vm_id, &claims.username, &state.jwt_secret)
         .map_err(|e| BffError::Internal(format!("failed to generate console token: {}", e)))?;
 
+    // Determine WebSocket scheme based on incoming request protocol.
+    // Use wss:// when the request arrived over HTTPS (detected via X-Forwarded-Proto header).
+    let is_tls = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|proto| proto.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+    let ws_scheme = if is_tls { "wss" } else { "ws" };
+
     // Return a full WS URL when the node has an agent_ws_address configured;
     // otherwise fall back to the relative path for single-node / proxy setups.
     let console_url = match agent_ws_address {
-        Some(addr) if !addr.is_empty() => format!("ws://{}/vms/{}/console?token={}", addr, vm_id, token),
+        Some(addr) if !addr.is_empty() => {
+            if !is_tls {
+                tracing::warn!(
+                    vm_id = %vm_id,
+                    node_id = %node_id,
+                    "console WebSocket URL uses plaintext ws:// — configure TLS and X-Forwarded-Proto for production"
+                );
+            }
+            format!("{}://{}/vms/{}/console?token={}", ws_scheme, addr, vm_id, token)
+        }
         _ => format!("/ws/vms/{}/console?token={}", vm_id, token),
     };
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
@@ -1088,7 +1102,10 @@ pub(crate) async fn require_vm_owner(
         .map_err(|e| BffError::Internal(format!("failed to check vm owner: {}", e)))?;
     match owner {
         Some(o) if o == user_id => Ok(()),
-        None => Ok(()), // backward compatibility: unowned resources are open
+        None => {
+            tracing::warn!(resource_id = %vm_id, "ownership check failed: resource has no owner_id set");
+            Err(BffError::Forbidden("resource has no owner; admin access required".into()))
+        }
         Some(_) => Err(BffError::Forbidden("you do not own this VM".into())),
     }
 }

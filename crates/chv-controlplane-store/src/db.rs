@@ -25,7 +25,7 @@ pub enum StoreError {
     Database(#[from] sqlx::Error),
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
-    #[error("resource not found: {entity} (id: {id})")]
+    #[error("{entity} with id '{id}' not found")]
     NotFound { entity: &'static str, id: String },
     #[error("invalid store configuration: {reason}")]
     InvalidConfiguration { reason: String },
@@ -61,7 +61,9 @@ pub fn build_connect_options(
 ) -> Result<SqliteConnectOptions, StoreError> {
     Ok(SqliteConnectOptions::from_str(&config.database_url)?
         .create_if_missing(true)
-        .pragma("foreign_keys", "ON"))
+        .pragma("journal_mode", "WAL")
+        .pragma("foreign_keys", "ON")
+        .busy_timeout(Duration::from_secs(5)))
 }
 
 pub fn build_pool_options(config: &ControlPlaneStoreConfig) -> SqlitePoolOptions {

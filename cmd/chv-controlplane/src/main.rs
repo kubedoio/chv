@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     service.run().await?;
-    service.shutdown();
+    service.shutdown().await;
 
     info!("chv-controlplane stopped");
     Ok(())

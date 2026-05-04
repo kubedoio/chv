@@ -32,13 +32,16 @@ impl NodeClientPool {
         node_id: &str,
         socket_path: &Path,
     ) -> Result<NodeClient, ChvError> {
+        // Atomically remove expired entries using remove_if to avoid TOCTOU race
+        self.clients.remove_if(node_id, |_, (_, created_at)| {
+            created_at.elapsed() >= self.ttl
+        });
+
+        // If a valid (non-expired) entry still exists, return it
         if let Some(entry) = self.clients.get(node_id) {
-            if entry.1.elapsed() < self.ttl {
-                return Ok(entry.0.clone());
-            }
-            drop(entry);
-            self.clients.remove(node_id);
+            return Ok(entry.0.clone());
         }
+
         let breaker = self
             .breakers
             .entry(node_id.to_string())

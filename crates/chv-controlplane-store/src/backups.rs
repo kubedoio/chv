@@ -453,7 +453,7 @@ impl BackupRepository {
         &self,
     ) -> Result<Vec<BackupScheduleRow>, StoreError> {
         sqlx::query_as::<_, BackupScheduleRow>(
-            "SELECT * FROM backup_schedules WHERE enabled = true",
+            "SELECT * FROM backup_schedules WHERE enabled = true ORDER BY created_at ASC LIMIT 100",
         )
         .fetch_all(&self.pool)
         .await
@@ -474,10 +474,12 @@ impl BackupRepository {
     }
 
     pub async fn list_pending_jobs(&self) -> Result<Vec<BackupJobRow>, StoreError> {
-        sqlx::query_as::<_, BackupJobRow>("SELECT * FROM backup_jobs WHERE status = 'Pending'")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(StoreError::from)
+        sqlx::query_as::<_, BackupJobRow>(
+            "SELECT * FROM backup_jobs WHERE status = 'Pending' ORDER BY created_at ASC LIMIT 50",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from)
     }
 
     // ── Restores ─────────────────────────────────────────────────────────────

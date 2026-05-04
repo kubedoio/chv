@@ -205,33 +205,43 @@ impl BackupWorker {
         &self,
         job: &chv_controlplane_store::BackupJobRow,
     ) -> Result<(), ChvError> {
-        // Find the VM's node_id
-        let node_id: Option<String> = sqlx::query_scalar("SELECT node_id FROM vms WHERE vm_id = ?")
-            .bind(&job.vm_id)
-            .fetch_optional(&self.pool)
+        // Mark as Running to prevent re-pickup
+        let now = chrono::Utc::now().to_rfc3339();
+        self.backup_repo
+            .update_job_status(&BackupJobStatusUpdateInput {
+                job_id: job.job_id.clone(),
+                status: "Running".into(),
+                started_at: Some(now),
+                completed_at: None,
+                error_message: None,
+                size_bytes: None,
+            })
             .await
             .map_err(|e| ChvError::Internal {
-                reason: format!("failed to query vm node_id: {e}"),
+                reason: format!("failed to mark backup job as Running: {e}"),
             })?;
 
-        let node_id = node_id.ok_or_else(|| ChvError::InvalidArgument {
+        // Find the VM's node_id and generation in a single query
+        let row: Option<(String, i64)> = sqlx::query_as(
+            "SELECT v.node_id, COALESCE(vos.observed_generation, 1) as generation \
+             FROM vms v \
+             LEFT JOIN vm_observed_state vos ON v.vm_id = vos.vm_id \
+             WHERE v.vm_id = ?",
+        )
+        .bind(&job.vm_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to query vm node_id and generation: {e}"),
+        })?;
+
+        let (node_id, generation) = row.ok_or_else(|| ChvError::InvalidArgument {
             field: "node_id".to_string(),
             reason: format!("vm {} has no target node", job.vm_id),
         })?;
 
         let socket_path = self.resolve_agent_socket(&node_id);
         let mut client = self.node_client_pool.get_or_connect(&node_id, &socket_path).await?;
-
-        let generation: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(observed_generation, 1) FROM vm_observed_state WHERE vm_id = ?",
-        )
-        .bind(&job.vm_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| ChvError::Internal {
-            reason: format!("failed to query vm generation: {e}"),
-        })?
-        .unwrap_or(1);
         let generation_str = generation.to_string();
         let snapshot_name = format!("backup-{}", job.job_id);
 

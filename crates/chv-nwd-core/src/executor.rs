@@ -118,13 +118,6 @@ impl LinuxExecutor {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    async fn run_ip_netns(namespace: &str, args: &[&str]) -> Result<(), ChvError> {
-        let mut cmd_args = vec!["netns", "exec", namespace];
-        cmd_args.extend(args);
-        Self::run_ip(&cmd_args).await
-    }
-
     async fn bridge_exists(name: &str) -> bool {
         Command::new("ip")
             .args(["link", "show", "dev", name])
@@ -260,6 +253,16 @@ impl LinuxExecutor {
             reason: format!("invalid prefix in CIDR: {}", cidr),
         })?;
 
+        if prefix == 0 || prefix > 30 {
+            return Err(ChvError::InvalidArgument {
+                field: "cidr".to_string(),
+                reason: format!(
+                    "prefix length /{} is not suitable for DHCP (must be 1-30)",
+                    prefix
+                ),
+            });
+        }
+
         let octets: Vec<&str> = ip.split('.').collect();
         if octets.len() != 4 {
             return Err(ChvError::InvalidArgument {
@@ -268,26 +271,68 @@ impl LinuxExecutor {
             });
         }
 
-        let (base, netmask) = match prefix {
-            16 => (format!("{}.{}", octets[0], octets[1]), "255.255.0.0"),
-            _ => (
-                format!("{}.{}.{}", octets[0], octets[1], octets[2]),
-                "255.255.255.0",
-            ),
-        };
+        let o0: u8 = octets[0].parse().map_err(|_| ChvError::InvalidArgument {
+            field: "cidr".to_string(),
+            reason: format!("invalid octet in IP: {}", cidr),
+        })?;
+        let o1: u8 = octets[1].parse().map_err(|_| ChvError::InvalidArgument {
+            field: "cidr".to_string(),
+            reason: format!("invalid octet in IP: {}", cidr),
+        })?;
+        let o2: u8 = octets[2].parse().map_err(|_| ChvError::InvalidArgument {
+            field: "cidr".to_string(),
+            reason: format!("invalid octet in IP: {}", cidr),
+        })?;
+        let o3: u8 = octets[3].parse().map_err(|_| ChvError::InvalidArgument {
+            field: "cidr".to_string(),
+            reason: format!("invalid octet in IP: {}", cidr),
+        })?;
 
-        let range_start = if prefix == 16 {
-            format!("{}.0.50", base)
-        } else {
-            format!("{}.50", base)
-        };
-        let range_end = if prefix == 16 {
-            format!("{}.255.250", base)
-        } else {
-            format!("{}.250", base)
-        };
+        let ip_u32 = u32::from_be_bytes([o0, o1, o2, o3]);
+        let mask: u32 = !0u32 << (32 - prefix);
+        let network = ip_u32 & mask;
+        let broadcast = network | !mask;
 
-        Ok((range_start, range_end, netmask.to_string()))
+        // Compute netmask string from prefix
+        let netmask_bytes = mask.to_be_bytes();
+        let netmask = format!(
+            "{}.{}.{}.{}",
+            netmask_bytes[0], netmask_bytes[1], netmask_bytes[2], netmask_bytes[3]
+        );
+
+        // DHCP range: skip the first few addresses (network + gateway) and last few (broadcast).
+        // For large subnets (>100 hosts), use offset of 50 from each end.
+        // For small subnets, start at network+2 (skip network and gateway) and end at broadcast-1.
+        let host_count = broadcast - network;
+        let offset_start = if host_count > 100 { 50 } else { 2 };
+        let offset_end = if host_count > 100 { 50 } else { 1 };
+
+        let range_start_u32 = network + offset_start;
+        let range_end_u32 = broadcast - offset_end;
+
+        if range_start_u32 >= range_end_u32 {
+            return Err(ChvError::InvalidArgument {
+                field: "cidr".to_string(),
+                reason: format!(
+                    "prefix length /{} results in too few addresses for a DHCP range",
+                    prefix
+                ),
+            });
+        }
+
+        let start_bytes = range_start_u32.to_be_bytes();
+        let end_bytes = range_end_u32.to_be_bytes();
+
+        let range_start = format!(
+            "{}.{}.{}.{}",
+            start_bytes[0], start_bytes[1], start_bytes[2], start_bytes[3]
+        );
+        let range_end = format!(
+            "{}.{}.{}.{}",
+            end_bytes[0], end_bytes[1], end_bytes[2], end_bytes[3]
+        );
+
+        Ok((range_start, range_end, netmask))
     }
 
     async fn is_dnsmasq_running(pid_path: &std::path::Path) -> bool {
@@ -387,7 +432,7 @@ impl LinuxExecutor {
         let conf_path = runtime_dir.join(format!("dnsmasq-{}.conf", network_id));
         let hosts_path = runtime_dir.join(format!("dnsmasq-{}.hosts", network_id));
 
-        Self::signal_by_pid_file(&pid_path, "").await;
+        Self::signal_by_pid_file(&pid_path, "-TERM").await;
 
         let _ = tokio::fs::remove_file(&pid_path).await;
         let _ = tokio::fs::remove_file(&conf_path).await;
@@ -692,6 +737,26 @@ impl NetworkExecutor for LinuxExecutor {
         target_port: u32,
         _mode: &str,
     ) -> Result<(), ChvError> {
+        // Validate protocol to prevent command injection
+        const ALLOWED_PROTOCOLS: &[&str] = &["tcp", "udp", "icmp", "sctp"];
+        if !ALLOWED_PROTOCOLS.contains(&protocol) {
+            return Err(ChvError::InvalidArgument {
+                field: "protocol".to_string(),
+                reason: format!(
+                    "invalid protocol '{}': must be one of tcp, udp, icmp, sctp",
+                    protocol
+                ),
+            });
+        }
+
+        // Validate target_ip to prevent command injection
+        if target_ip.parse::<std::net::IpAddr>().is_err() {
+            return Err(ChvError::InvalidArgument {
+                field: "target_ip".to_string(),
+                reason: format!("invalid IP address: '{}'", target_ip),
+            });
+        }
+
         let table = Self::sanitized_nft_table(network_id)?;
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
         Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;

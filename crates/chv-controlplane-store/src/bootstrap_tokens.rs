@@ -1,16 +1,24 @@
 use crate::{StoreError, StorePool};
-use chrono::Utc;
 
+/// Atomically validate and consume a one-time-use bootstrap token in a single UPDATE.
+/// All checks (existence, expiry, already-used) are pushed into the WHERE clause to
+/// eliminate the TOCTOU race between SELECT and UPDATE.
+const ATOMIC_CONSUME_SQL: &str = r#"
+UPDATE bootstrap_tokens
+SET used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+WHERE token_hash = $1
+  AND one_time_use = 1
+  AND used_at IS NULL
+  AND (expires_at IS NULL OR expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+RETURNING token_hash
+"#;
+
+/// Check token validity for multi-use tokens (no consumption needed).
 const VALIDATE_TOKEN_SQL: &str = r#"
 SELECT token_hash, one_time_use, used_at, expires_at
 FROM bootstrap_tokens
 WHERE token_hash = $1
-"#;
-
-const MARK_USED_SQL: &str = r#"
-UPDATE bootstrap_tokens
-SET used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-WHERE token_hash = $1 AND used_at IS NULL
 "#;
 
 #[derive(Clone)]
@@ -28,28 +36,49 @@ impl BootstrapTokenRepository {
         token: &str,
     ) -> Result<BootstrapTokenValidation, StoreError> {
         let token_hash = sha256(token);
+
+        // First, look up the token to determine its type and state.
         let row = sqlx::query_as::<_, BootstrapTokenRow>(VALIDATE_TOKEN_SQL)
             .bind(&token_hash)
             .fetch_optional(&self.pool)
             .await?;
-        match row {
-            None => Ok(BootstrapTokenValidation::Invalid),
-            Some(row) => {
-                if let Some(expires_at) = row.expires_at {
-                    if expires_at < Utc::now() {
-                        return Ok(BootstrapTokenValidation::Expired);
-                    }
+
+        let row = match row {
+            None => return Ok(BootstrapTokenValidation::Invalid),
+            Some(r) => r,
+        };
+
+        // For multi-use tokens, just check expiry — no consumption needed.
+        if !row.one_time_use {
+            if let Some(expires_at) = row.expires_at {
+                if expires_at < chrono::Utc::now() {
+                    return Ok(BootstrapTokenValidation::Expired);
                 }
-                if row.one_time_use {
-                    let result = sqlx::query(MARK_USED_SQL)
-                        .bind(&token_hash)
-                        .execute(&self.pool)
-                        .await?;
-                    if result.rows_affected() == 0 {
-                        return Ok(BootstrapTokenValidation::AlreadyUsed);
-                    }
+            }
+            return Ok(BootstrapTokenValidation::Valid);
+        }
+
+        // For one-time-use tokens, atomically consume via a single UPDATE … RETURNING.
+        // The WHERE clause checks: exists, not yet used, and not expired.
+        // This eliminates the TOCTOU race entirely.
+        let consumed: Option<(String,)> =
+            sqlx::query_as(ATOMIC_CONSUME_SQL)
+                .bind(&token_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        match consumed {
+            Some(_) => Ok(BootstrapTokenValidation::Valid),
+            None => {
+                // The atomic UPDATE didn't match. Determine why for a helpful response.
+                if row.used_at.is_some() {
+                    Ok(BootstrapTokenValidation::AlreadyUsed)
+                } else if row.expires_at.is_some_and(|e| e < chrono::Utc::now()) {
+                    Ok(BootstrapTokenValidation::Expired)
+                } else {
+                    // Raced with another consumer — token was used between our SELECT and UPDATE.
+                    Ok(BootstrapTokenValidation::AlreadyUsed)
                 }
-                Ok(BootstrapTokenValidation::Valid)
             }
         }
     }

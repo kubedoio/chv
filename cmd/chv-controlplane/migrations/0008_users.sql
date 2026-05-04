@@ -10,12 +10,12 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at text
 );
 
--- Bootstrap admin user (password: admin, bcrypt cost 12)
+-- Bootstrap admin user (account locked — must be activated via CLI: chv-ctl user reset-password admin)
 INSERT OR IGNORE INTO users (user_id, username, password_hash, role, display_name)
 VALUES (
     '00000000-0000-0000-0000-000000000001',
     'admin',
-    '$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m',
+    '!locked',
     'admin',
     'Administrator'
 );

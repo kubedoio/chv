@@ -439,7 +439,10 @@ pub(crate) async fn require_volume_owner(
         .map_err(|e| BffError::Internal(format!("failed to check volume owner: {}", e)))?;
     match owner {
         Some(o) if o == user_id => Ok(()),
-        None => Ok(()), // backward compatibility: unowned resources are open
+        None => {
+            tracing::warn!(resource_id = %volume_id, "ownership check failed: resource has no owner_id set");
+            Err(BffError::Forbidden("resource has no owner; admin access required".into()))
+        }
         Some(_) => Err(BffError::Forbidden("you do not own this volume".into())),
     }
 }

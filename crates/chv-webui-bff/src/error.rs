@@ -56,7 +56,7 @@ impl IntoResponse for BffError {
                     "used": used,
                     "requested": requested,
                 }));
-                return (StatusCode::FORBIDDEN, body).into_response();
+                return (StatusCode::TOO_MANY_REQUESTS, body).into_response();
             }
         };
 

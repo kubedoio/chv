@@ -284,7 +284,7 @@ async fn build_cloud_init_seed(
             source: e,
         })?;
 
-    let default_userdata = "#cloud-config\nusers:\n  - name: ubuntu\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    plain_text_passwd: ubuntu\n    lock_passwd: false\nchpasswd:\n  expire: false\nssh_pwauth: true\n";
+    let default_userdata = "#cloud-config\nusers:\n  - name: ubuntu\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    lock_passwd: true\n    ssh_authorized_keys: []\nssh_pwauth: false\n";
     let user_data = userdata.unwrap_or(default_userdata);
     tokio::fs::write(seed_dir.join("user-data"), user_data.as_bytes())
         .await

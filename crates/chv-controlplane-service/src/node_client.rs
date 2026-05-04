@@ -22,6 +22,8 @@ struct MethodCircuit {
     state: CircuitState,
     failures: Vec<Instant>,
     opened_at: Option<Instant>,
+    /// Limits HalfOpen state to a single concurrent probe request.
+    probe_in_flight: bool,
 }
 
 pub struct CircuitBreaker {
@@ -48,6 +50,7 @@ impl CircuitBreaker {
             state: CircuitState::Closed,
             failures: Vec::new(),
             opened_at: None,
+            probe_in_flight: false,
         });
 
         match entry.state {
@@ -57,6 +60,7 @@ impl CircuitBreaker {
                     if now.duration_since(opened_at) >= self.open_duration {
                         entry.state = CircuitState::HalfOpen;
                         entry.opened_at = None;
+                        entry.probe_in_flight = true;
                         Ok(())
                     } else {
                         Err(ChvError::BackendUnavailable {
@@ -66,10 +70,22 @@ impl CircuitBreaker {
                     }
                 } else {
                     entry.state = CircuitState::HalfOpen;
+                    entry.probe_in_flight = true;
                     Ok(())
                 }
             }
-            CircuitState::HalfOpen => Ok(()),
+            CircuitState::HalfOpen => {
+                if entry.probe_in_flight {
+                    // Only one probe request allowed in HalfOpen state
+                    Err(ChvError::BackendUnavailable {
+                        backend: "agent".to_string(),
+                        reason: format!("circuit breaker half-open probe in flight for {method}"),
+                    })
+                } else {
+                    entry.probe_in_flight = true;
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -79,6 +95,7 @@ impl CircuitBreaker {
             entry.state = CircuitState::Closed;
             entry.failures.clear();
             entry.opened_at = None;
+            entry.probe_in_flight = false;
         }
     }
 
@@ -89,12 +106,14 @@ impl CircuitBreaker {
             state: CircuitState::Closed,
             failures: Vec::new(),
             opened_at: None,
+            probe_in_flight: false,
         });
 
         match entry.state {
             CircuitState::HalfOpen => {
                 entry.state = CircuitState::Open;
                 entry.opened_at = Some(now);
+                entry.probe_in_flight = false;
                 metrics::counter!(
                     "chv_node_client_circuit_breaker_trips_total",
                     "method" => method.to_string(),

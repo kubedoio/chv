@@ -46,7 +46,12 @@ fn sanitize_path(path: &str) -> String {
 }
 
 fn is_uuid_like(segment: &str) -> bool {
-    segment.len() == 36
+    if segment.len() == 36
         && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
         && segment.matches('-').count() == 4
+    {
+        return true;
+    }
+    // Also catch short hex IDs (8+ chars) to prevent unbounded cardinality
+    segment.len() >= 8 && segment.chars().all(|c| c.is_ascii_hexdigit())
 }

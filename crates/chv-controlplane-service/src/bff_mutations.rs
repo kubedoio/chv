@@ -60,7 +60,13 @@ impl ControlPlaneMutationService {
         &self,
         ack: Result<proto::AckResponse, ControlPlaneServiceError>,
     ) -> Result<proto::AckResponse, BffError> {
-        let ack = ack.map_err(|e| BffError::Internal(e.to_string()))?;
+        let ack = ack.map_err(|e| match e {
+            ControlPlaneServiceError::NotFound(msg) => BffError::NotFound(msg),
+            ControlPlaneServiceError::InvalidArgument(msg) => BffError::BadRequest(msg),
+            ControlPlaneServiceError::Unauthorized(msg) => BffError::Unauthorized(msg),
+            ControlPlaneServiceError::Conflict(msg) => BffError::Conflict(msg),
+            _ => BffError::Internal(e.to_string()),
+        })?;
         if ack.result.as_ref().map(|r| r.status.as_str()) != Some("OK") {
             let msg = ack
                 .result

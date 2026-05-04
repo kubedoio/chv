@@ -766,10 +766,11 @@ pub async fn list_backup_jobs_api(
 }
 
 pub async fn create_backup_job_api(
-    _claims: crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
@@ -827,10 +828,11 @@ pub async fn create_backup_job_api(
 }
 
 pub async fn delete_backup_job_api(
-    _claims: crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     state
         .backup_repo
         .delete_schedule(&job_id)
@@ -878,10 +880,11 @@ pub async fn list_backup_history_api(
 }
 
 pub async fn run_backup_job_api(
-    _claims: crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     // "Run" a schedule by creating a backup job execution
     let schedule = state
         .backup_repo
@@ -920,10 +923,11 @@ pub async fn run_backup_job_api(
 }
 
 pub async fn toggle_backup_job_api(
-    _claims: crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let schedule = state
         .backup_repo
         .get_schedule(&job_id)
