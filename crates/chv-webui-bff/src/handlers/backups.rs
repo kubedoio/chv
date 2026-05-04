@@ -383,11 +383,11 @@ pub async fn execute_backup_job(
     let input = BackupJobCreateInput {
         vm_id: row.vm_id,
         volume_id: row.volume_id,
-        status: "Running".into(),
+        status: "Pending".into(),
         backup_type: row.backup_type,
         target_path: row.target_path,
         storage_backend: row.storage_backend,
-        started_at: Some(Utc::now().to_rfc3339()),
+        started_at: None,
         completed_at: None,
         error_message: None,
         size_bytes: None,
@@ -403,8 +403,7 @@ pub async fn execute_backup_job(
 
     Ok(Json(json!({
         "execution_id": execution_id,
-        "status": "Running",
-        "started_at": input.started_at,
+        "status": "Accepted",
     })))
 }
 
@@ -542,37 +541,47 @@ pub async fn update_backup_schedule(
     Path(schedule_id): Path<String>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    // Fetch existing record to preserve unspecified fields (correct PATCH semantics)
+    let existing = state
+        .backup_repo
+        .get_schedule(&schedule_id)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to get backup schedule: {}", e)))?
+        .ok_or_else(|| BffError::NotFound(format!("backup schedule {} not found", schedule_id)))?;
+
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .unwrap_or(&existing.vm_id)
         .to_string();
     let volume_id = payload
         .get("volume_id")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or(existing.volume_id);
     let name = payload
         .get("name")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .unwrap_or(&existing.name)
         .to_string();
     let cron_expression = payload
         .get("cron_expression")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .unwrap_or(&existing.cron_expression)
         .to_string();
     let retention_count = payload
         .get("retention_count")
         .and_then(|v| v.as_i64())
-        .unwrap_or(7);
+        .unwrap_or(existing.retention_count);
     let destination = payload
         .get("destination")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or(existing.destination);
     let enabled = payload
         .get("enabled")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(existing.enabled);
 
     let input = BackupScheduleUpdateInput {
         schedule_id,

@@ -346,7 +346,7 @@ pub async fn clone_vm_template(
     // Enforce quota inside the transaction to avoid races
     crate::handlers::vms::enforce_user_quota(
         &mut tx,
-        &claims.username,
+        &claims.sub,
         template.cpu_count,
         template.memory_bytes,
         volume_size_bytes,
@@ -361,13 +361,14 @@ pub async fn clone_vm_template(
     // Insert VM
     sqlx::query(
         r#"
-        INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
-        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO vms (vm_id, node_id, display_name, owner_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&vm_id)
     .bind(&node_id)
     .bind(&display_name)
+    .bind(&claims.sub)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
@@ -380,7 +381,7 @@ pub async fn clone_vm_template(
         "#,
     )
     .bind(&vm_id)
-    .bind(&claims.username)
+    .bind(&claims.sub)
     .bind(&node_id)
     .bind(template.cpu_count)
     .bind(template.memory_bytes)
@@ -413,7 +414,7 @@ pub async fn clone_vm_template(
         "#,
     )
     .bind(&volume_id)
-    .bind(&claims.username)
+    .bind(&claims.sub)
     .bind(&vm_id)
     .execute(&mut *tx)
     .await
@@ -452,7 +453,7 @@ pub async fn clone_vm_template(
             "#,
         )
         .bind(&network_id)
-        .bind(&claims.username)
+        .bind(&claims.sub)
         .execute(&mut *tx)
         .await
         .map_err(|e| BffError::Internal(format!("failed to insert network_desired_state: {}", e)))?;
@@ -498,7 +499,7 @@ pub async fn clone_vm_template(
     .bind(&operation_id)
     .bind(&idempotency_key)
     .bind(&vm_id)
-    .bind(&claims.username)
+    .bind(&claims.sub)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert operation: {}", e)))?;

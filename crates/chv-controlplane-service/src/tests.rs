@@ -57,6 +57,28 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
     }
 }
 
+fn test_admin_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let claims = chv_webui_bff::auth::Claims {
+        sub: "test-admin-id".to_string(),
+        username: "admin".to_string(),
+        role: "admin".to_string(),
+        exp,
+    };
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+    )
+    .expect("test token encoding should succeed")
+}
+
 #[tokio::test]
 async fn test_health_endpoint() {
     use axum::http::StatusCode;
@@ -144,7 +166,7 @@ async fn test_deep_health_endpoint() {
         .await
         .unwrap();
 
-    assert_eq!(response2.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response2.status(), StatusCode::OK);
     let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -177,9 +199,11 @@ async fn test_admin_nodes_endpoint() {
 
     let app = crate::api::router::admin_router(test_app_state(pool));
 
+    let token = test_admin_token();
     let response = app
         .oneshot(
             axum::http::Request::get("/admin/nodes")
+                .header("authorization", format!("Bearer {}", token))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -201,9 +225,11 @@ async fn test_admin_node_not_found() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let app = crate::api::router::admin_router(test_app_state(test_db.pool.clone()));
 
+    let token = test_admin_token();
     let response = app
         .oneshot(
             axum::http::Request::get("/admin/nodes/missing-node")
+                .header("authorization", format!("Bearer {}", token))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )

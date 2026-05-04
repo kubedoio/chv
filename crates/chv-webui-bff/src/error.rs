@@ -56,7 +56,7 @@ impl IntoResponse for BffError {
                     "used": used,
                     "requested": requested,
                 }));
-                return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+                return (StatusCode::FORBIDDEN, body).into_response();
             }
         };
 

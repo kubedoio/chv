@@ -196,10 +196,10 @@ pub async fn update_quota(
     sqlx::query(
         r#"
         UPDATE quotas SET
-            max_vms = ?,
-            max_cpu = ?,
-            max_memory_bytes = ?,
-            max_storage_bytes = ?,
+            max_vms = COALESCE(?, max_vms),
+            max_cpu = COALESCE(?, max_cpu),
+            max_memory_bytes = COALESCE(?, max_memory_bytes),
+            max_storage_bytes = COALESCE(?, max_storage_bytes),
             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
         WHERE user_id = ?
         "#,

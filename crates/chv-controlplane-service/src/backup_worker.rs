@@ -222,7 +222,17 @@ impl BackupWorker {
         let socket_path = self.resolve_agent_socket(&node_id);
         let mut client = self.node_client_pool.get_or_connect(&node_id, &socket_path).await?;
 
-        let generation = "1";
+        let generation: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(observed_generation, 1) FROM vm_observed_state WHERE vm_id = ?",
+        )
+        .bind(&job.vm_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to query vm generation: {e}"),
+        })?
+        .unwrap_or(1);
+        let generation_str = generation.to_string();
         let snapshot_name = format!("backup-{}", job.job_id);
 
         let ack = if let Some(volume_id) = &job.volume_id {
@@ -230,7 +240,7 @@ impl BackupWorker {
                 .snapshot_volume(
                     &node_id,
                     volume_id,
-                    generation,
+                    &generation_str,
                     &snapshot_name,
                     &job.job_id,
                     None,
@@ -242,7 +252,7 @@ impl BackupWorker {
                 .snapshot_vm(
                     &node_id,
                     &job.vm_id,
-                    generation,
+                    &generation_str,
                     destination,
                     &job.job_id,
                     None,

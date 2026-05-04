@@ -179,7 +179,7 @@ impl Orchestrator {
             })?;
 
         let ack = match row.operation_type.as_str() {
-            "create" | "CreateVm" => {
+            "create" | "CreateVm" | "ResizeVm" => {
                 // Desired-state path: build full agent spec and dispatch ApplyVmDesiredState
                 let vm_spec_json = self.build_agent_vm_spec(&row.resource_id).await?;
                 client
@@ -481,19 +481,36 @@ impl Orchestrator {
                         .and_then(|s| s.parse::<i64>().ok())
                     {
                         let volume_id = &row.resource_id;
-                        let _ = sqlx::query(
+                        if let Err(e) = sqlx::query(
                             "UPDATE volumes SET capacity_bytes = ? WHERE volume_id = ?",
                         )
                         .bind(new_size)
                         .bind(volume_id)
                         .execute(&self.pool)
-                        .await;
-                        let _ = sqlx::query(
+                        .await
+                        {
+                            tracing::error!(
+                                operation_id = %row.operation_id,
+                                volume_id = %volume_id,
+                                new_size = new_size,
+                                error = %e,
+                                "failed to persist resized capacity after successful dispatch"
+                            );
+                        }
+                        if let Err(e) = sqlx::query(
                             "UPDATE volume_desired_state SET resize_to_bytes = NULL WHERE volume_id = ?"
                         )
                         .bind(volume_id)
                         .execute(&self.pool)
-                        .await;
+                        .await
+                        {
+                            tracing::error!(
+                                operation_id = %row.operation_id,
+                                volume_id = %volume_id,
+                                error = %e,
+                                "failed to clear resize_to_bytes after successful dispatch"
+                            );
+                        }
                     }
                 }
 

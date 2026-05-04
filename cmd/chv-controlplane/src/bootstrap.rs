@@ -33,6 +33,22 @@ pub async fn build_service(
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
 
+    // Warn if the bootstrap admin password has not been changed
+    let default_hash = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m";
+    if let Ok(Some(hash)) = sqlx::query_scalar::<_, String>(
+        "SELECT password_hash FROM users WHERE username = 'admin'",
+    )
+    .fetch_optional(&pool)
+    .await
+    {
+        if hash == default_hash {
+            tracing::warn!(
+                "SECURITY: the default 'admin' user still has the bootstrap password. \
+                 Change it immediately via the UI or API."
+            );
+        }
+    }
+
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = BootstrapTokenRepository::new(pool.clone());
     let observed_state_repo = ObservedStateRepository::new(pool.clone());

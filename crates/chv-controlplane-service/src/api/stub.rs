@@ -70,7 +70,7 @@ pub async fn login_handler(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        + 7 * 24 * 60 * 60; // 7 days
+        + 24 * 60 * 60; // 24 hours
 
     let claims = Claims {
         sub: row.user_id.clone(),

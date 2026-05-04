@@ -95,7 +95,7 @@ pub fn require_operator_or_admin(claims: &Claims) -> Result<(), BffError> {
     if claims.role == "admin" || claims.role == "operator" {
         Ok(())
     } else {
-        Err(BffError::Unauthorized(
+        Err(BffError::Forbidden(
             "operator or admin role required".into(),
         ))
     }
@@ -105,7 +105,7 @@ pub fn require_admin(claims: &Claims) -> Result<(), BffError> {
     if claims.role == "admin" {
         Ok(())
     } else {
-        Err(BffError::Unauthorized("admin role required".into()))
+        Err(BffError::Forbidden("admin role required".into()))
     }
 }
 
@@ -130,7 +130,7 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
         let reject = |msg: &'static str| {
             (
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "message": msg, "code": 401 })),
+                Json(serde_json::json!({ "message": msg, "code": "UNAUTHORIZED" })),
             )
         };
 

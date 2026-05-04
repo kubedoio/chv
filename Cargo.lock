@@ -423,6 +423,7 @@ dependencies = [
  "chv-observability",
  "chv-webui-bff",
  "rustls",
+ "sqlx",
  "tokio",
  "tonic",
  "tracing",
