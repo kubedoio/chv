@@ -151,10 +151,13 @@ pub async fn deep_health_handler(State(state): State<AppState>) -> impl IntoResp
         "healthy"
     };
 
-    let status_code = if overall_status == "healthy" {
-        StatusCode::OK
-    } else {
+    let status_code = if overall_status == "unhealthy" {
         StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        // Both "healthy" and "degraded" return 200 — degraded means operational
+        // with reduced capacity, not unavailable. Returning 503 for degraded
+        // causes Kubernetes to restart pods that are still serving traffic.
+        StatusCode::OK
     };
 
     (

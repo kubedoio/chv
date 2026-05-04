@@ -14,6 +14,7 @@ chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
 chv-webui-bff = { path = "../../crates/chv-webui-bff" }
 chv-observability = { path = "../../crates/chv-observability" }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }

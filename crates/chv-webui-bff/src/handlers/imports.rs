@@ -139,9 +139,9 @@ pub async fn import_vm(
         .map_err(|e| BffError::Internal(format!("failed to get file metadata: {}", e)))?
         .len() as i64;
 
-    // Pick a healthy node
+    // Pick a healthy node (health_status is on node_observed_state, not nodes)
     let node_id = sqlx::query_scalar::<_, String>(
-        "SELECT node_id FROM nodes WHERE health_status = 'healthy' ORDER BY enrolled_at DESC LIMIT 1",
+        "SELECT n.node_id FROM nodes n JOIN node_observed_state nos ON n.node_id = nos.node_id WHERE nos.health_status = 'healthy' ORDER BY n.enrolled_at DESC LIMIT 1",
     )
     .fetch_optional(&state.pool)
     .await
@@ -162,13 +162,14 @@ pub async fn import_vm(
     // Insert VM
     let insert_vm = sqlx::query(
         r#"
-        INSERT INTO vms (vm_id, node_id, display_name, created_at, updated_at)
-        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        INSERT INTO vms (vm_id, node_id, display_name, owner_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         "#,
     )
     .bind(&vm_id)
     .bind(&node_id)
     .bind(&name)
+    .bind(&claims.sub)
     .execute(&mut *tx)
     .await;
 

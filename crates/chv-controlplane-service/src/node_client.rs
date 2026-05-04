@@ -42,7 +42,7 @@ impl CircuitBreaker {
     }
 
     pub fn check(&self, method: &str) -> Result<(), ChvError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let entry = inner.entry(method.to_string()).or_insert_with(|| MethodCircuit {
             state: CircuitState::Closed,
@@ -74,7 +74,7 @@ impl CircuitBreaker {
     }
 
     pub fn record_success(&self, method: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = inner.get_mut(method) {
             entry.state = CircuitState::Closed;
             entry.failures.clear();
@@ -83,7 +83,7 @@ impl CircuitBreaker {
     }
 
     pub fn record_failure(&self, method: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let entry = inner.entry(method.to_string()).or_insert_with(|| MethodCircuit {
             state: CircuitState::Closed,
@@ -149,6 +149,13 @@ pub struct NodeClient {
 
 impl NodeClient {
     pub async fn connect(socket_path: &Path) -> Result<Self, ChvError> {
+        Self::connect_with_breaker(socket_path, Arc::new(CircuitBreaker::new())).await
+    }
+
+    pub async fn connect_with_breaker(
+        socket_path: &Path,
+        circuit_breaker: Arc<CircuitBreaker>,
+    ) -> Result<Self, ChvError> {
         let path = socket_path.to_path_buf();
         let channel = Endpoint::try_from("http://[::]:50051")
             .map_err(|e| ChvError::InvalidArgument {
@@ -172,7 +179,7 @@ impl NodeClient {
                 channel.clone(),
             ),
             lifecycle: proto::lifecycle_service_client::LifecycleServiceClient::new(channel),
-            circuit_breaker: Arc::new(CircuitBreaker::new()),
+            circuit_breaker,
         })
     }
 

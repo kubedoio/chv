@@ -321,7 +321,7 @@ pub async fn mutate_node(
 
     let response = state
         .mutations
-        .mutate_node(node_id, action, claims.username)
+        .mutate_node(node_id, action, claims.sub)
         .await?;
 
     state.cache.invalidate("nodes:").await;

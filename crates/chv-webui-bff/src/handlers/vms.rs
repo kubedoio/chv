@@ -394,9 +394,10 @@ pub async fn create_vm(
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
     // Enforce quota inside the transaction to avoid races
+    // Use claims.sub (UUID) which matches the quotas table and vm_desired_state.requested_by
     enforce_user_quota(
         &mut tx,
-        &claims.username,
+        &claims.sub,
         cpu_count,
         memory_bytes,
         volume_size_bytes,
@@ -419,7 +420,7 @@ pub async fn create_vm(
     .bind(&vm_id)
     .bind(&node_id)
     .bind(&display_name)
-    .bind(&claims.username)
+    .bind(&claims.sub)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert vm: {}", e)))?;
@@ -506,7 +507,7 @@ pub async fn create_vm(
     .bind(&volume_id)
     .bind(&node_id)
     .bind(format!("{}-disk", display_name))
-    .bind(&claims.username)
+    .bind(&claims.sub)
     .bind(volume_size_bytes)
     .execute(&mut *tx)
     .await
@@ -668,7 +669,7 @@ pub async fn delete_vm(
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
-    require_vm_owner(&mut tx, &vm_id, &claims.username, claims.role == "admin").await?;
+    require_vm_owner(&mut tx, &vm_id, &claims.sub, claims.role == "admin").await?;
 
     sqlx::query(
         r#"
@@ -785,12 +786,12 @@ pub async fn resize_vm(
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
-    require_vm_owner(&mut tx, &vm_id, &claims.username, claims.role == "admin").await?;
+    require_vm_owner(&mut tx, &vm_id, &claims.sub, claims.role == "admin").await?;
 
     // Enforce quota using delta so we don't double-count this VM
     enforce_user_quota(
         &mut tx,
-        &claims.username,
+        &claims.sub,
         cpu_count - old_cpu,
         memory_bytes - old_memory,
         0, // storage unchanged on resize
@@ -876,11 +877,11 @@ pub async fn mutate_vm(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_vm_owner(&mut conn, &vm_id, &claims.username, claims.role == "admin").await?;
+    require_vm_owner(&mut conn, &vm_id, &claims.sub, claims.role == "admin").await?;
 
     let response = state
         .mutations
-        .mutate_vm(vm_id, action, force, claims.username)
+        .mutate_vm(vm_id, action, force, claims.sub)
         .await?;
 
     state.cache.invalidate("vms:").await;

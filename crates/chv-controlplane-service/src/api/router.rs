@@ -1,6 +1,7 @@
 use crate::api::{health, nodes, operations, stub};
 use axum::{
     http::StatusCode,
+    middleware,
     response::Json,
     routing::{delete, get, post},
     Router,
@@ -24,17 +25,25 @@ async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
 pub fn admin_router(bff_state: AppState) -> Router {
     let bff_router = chv_webui_bff::bff_router(bff_state.clone());
 
-    Router::new()
-        .merge(bff_router)
-        // Health & admin
-        .route("/health", get(health::health_handler))
-        .route("/health/deep", get(health::deep_health_handler))
-        .route("/ready", get(health::ready_handler))
-        .route("/metrics", get(health::metrics_handler))
+    let admin_routes = Router::new()
         .route("/admin/nodes", get(nodes::list_nodes))
         .route("/admin/nodes/{id}", get(nodes::get_node))
         .route("/admin/operations", get(operations::list_operations))
         .route("/admin/operations/{id}", get(operations::get_operation))
+        .route("/metrics", get(health::metrics_handler))
+        .layer(middleware::from_fn_with_state(
+            bff_state.clone(),
+            chv_webui_bff::auth::admin_middleware,
+        ));
+
+    Router::new()
+        .merge(bff_router)
+        // Health (unauthenticated — needed for load balancer probes)
+        .route("/health", get(health::health_handler))
+        .route("/health/deep", get(health::deep_health_handler))
+        .route("/ready", get(health::ready_handler))
+        // Admin-protected routes
+        .merge(admin_routes)
         // Auth stubs
         .route("/api/v1/auth/login", post(stub::login_handler))
         .route("/api/v1/auth/me", get(stub::me_handler))

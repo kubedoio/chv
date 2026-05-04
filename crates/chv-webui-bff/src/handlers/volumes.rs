@@ -225,7 +225,7 @@ pub async fn mutate_volume(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
+    require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
 
     let action = payload
         .get("action")
@@ -251,7 +251,7 @@ pub async fn mutate_volume(
             force,
             resize_bytes,
             vm_id,
-            claims.username,
+            claims.sub,
         )
         .await?;
 
@@ -282,7 +282,7 @@ pub async fn snapshot_volume(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
+    require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -291,7 +291,7 @@ pub async fn snapshot_volume(
 
     let response = state
         .mutations
-        .snapshot_volume(volume_id, snapshot_name, claims.username)
+        .snapshot_volume(volume_id, snapshot_name, claims.sub)
         .await?;
 
     state.cache.invalidate("volumes:").await;
@@ -321,7 +321,7 @@ pub async fn restore_volume_snapshot(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
+    require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -330,7 +330,7 @@ pub async fn restore_volume_snapshot(
 
     let response = state
         .mutations
-        .restore_volume_snapshot(volume_id, snapshot_name, claims.username)
+        .restore_volume_snapshot(volume_id, snapshot_name, claims.sub)
         .await?;
 
     state.cache.invalidate("volumes:").await;
@@ -360,7 +360,7 @@ pub async fn delete_volume_snapshot(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_volume_owner(&mut conn, &volume_id, &claims.username, claims.role == "admin").await?;
+    require_volume_owner(&mut conn, &volume_id, &claims.sub, claims.role == "admin").await?;
     let snapshot_name = payload
         .get("snapshot_name")
         .and_then(|v| v.as_str())
@@ -369,7 +369,7 @@ pub async fn delete_volume_snapshot(
 
     let response = state
         .mutations
-        .delete_volume_snapshot(volume_id, snapshot_name, claims.username)
+        .delete_volume_snapshot(volume_id, snapshot_name, claims.sub)
         .await?;
 
     state.cache.invalidate("volumes:").await;
@@ -399,7 +399,7 @@ pub async fn clone_volume(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_volume_owner(&mut conn, &source_volume_id, &claims.username, claims.role == "admin").await?;
+    require_volume_owner(&mut conn, &source_volume_id, &claims.sub, claims.role == "admin").await?;
     let target_volume_id = payload
         .get("target_volume_id")
         .and_then(|v| v.as_str())
@@ -408,7 +408,7 @@ pub async fn clone_volume(
 
     let response = state
         .mutations
-        .clone_volume(source_volume_id, target_volume_id, claims.username)
+        .clone_volume(source_volume_id, target_volume_id, claims.sub)
         .await?;
 
     state.cache.invalidate("volumes:").await;

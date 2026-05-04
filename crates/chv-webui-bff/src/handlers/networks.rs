@@ -285,7 +285,7 @@ pub async fn create_network(
     )
     .bind(&network_id)
     .bind(&name)
-    .bind(&claims.username)
+    .bind(&claims.sub)
     .execute(&mut *tx)
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert network: {}", e)))?;
@@ -350,7 +350,7 @@ pub async fn delete_network(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_network_owner(&mut conn, &network_id, &claims.username, claims.role == "admin").await?;
+    require_network_owner(&mut conn, &network_id, &claims.sub, claims.role == "admin").await?;
 
     let attached_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM vm_nic_desired_state WHERE network_id = ?")
@@ -411,7 +411,7 @@ pub async fn update_network(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_network_owner(&mut conn, &network_id, &claims.username, claims.role == "admin").await?;
+    require_network_owner(&mut conn, &network_id, &claims.sub, claims.role == "admin").await?;
 
     let exists =
         sqlx::query_scalar::<_, String>("SELECT network_id FROM networks WHERE network_id = ?")
@@ -605,7 +605,7 @@ pub async fn mutate_network(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
-    require_network_owner(&mut conn, &network_id, &claims.username, claims.role == "admin").await?;
+    require_network_owner(&mut conn, &network_id, &claims.sub, claims.role == "admin").await?;
 
     let action = payload
         .get("action")
@@ -620,7 +620,7 @@ pub async fn mutate_network(
 
     let response = state
         .mutations
-        .mutate_network(network_id, action, force, claims.username)
+        .mutate_network(network_id, action, force, claims.sub)
         .await?;
 
     state.cache.invalidate("networks:").await;

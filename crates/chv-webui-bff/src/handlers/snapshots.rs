@@ -139,7 +139,7 @@ pub async fn create_snapshot(
         .snapshot_vm(
             vm_id.clone(),
             snapshot_path.clone(),
-            claims.username.clone(),
+            claims.sub.clone(),
         )
         .await
         .map_err(|e| BffError::Internal(format!("failed to dispatch snapshot: {:?}", e)))?;
@@ -273,7 +273,7 @@ pub async fn restore_snapshot(
         .restore_snapshot(
             snapshot.vm_id.clone(),
             snapshot.snapshot_path.clone(),
-            claims.username.clone(),
+            claims.sub.clone(),
         )
         .await
         .map_err(|e| BffError::Internal(format!("failed to dispatch restore: {:?}", e)))?;
