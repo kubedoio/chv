@@ -18,8 +18,8 @@ const RATE_WINDOW_SECS: u64 = 60;
 static LOGIN_ATTEMPTS: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn check_rate_limit(username: &str) -> Result<(), BffError> {
-    let mut attempts = LOGIN_ATTEMPTS.blocking_lock();
+async fn check_rate_limit(username: &str) -> Result<(), BffError> {
+    let mut attempts = LOGIN_ATTEMPTS.lock().await;
     let now = Instant::now();
     let window = std::time::Duration::from_secs(RATE_WINDOW_SECS);
 
@@ -52,7 +52,7 @@ pub async fn login(
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing username".into()))?;
 
-    check_rate_limit(username)?;
+    check_rate_limit(username).await?;
 
     let password = payload
         .get("password")
