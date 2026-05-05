@@ -103,16 +103,27 @@ pub async fn create_snapshot(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Verify the VM exists
-    let exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
-        .bind(&vm_id)
-        .fetch_optional(&state.pool)
+    // Verify the VM exists and the caller owns it
+    let mut conn = state
+        .pool
+        .acquire()
         .await
-        .map_err(|e| BffError::Internal(format!("failed to check vm existence: {}", e)))?;
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    super::vms::require_vm_owner(&mut conn, &vm_id, &claims.sub, claims.role == "admin").await?;
 
-    if exists.is_none() {
-        return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
-    }
+    // Check VM power state for quiescence advisory
+    let runtime_status: Option<String> =
+        sqlx::query_scalar("SELECT runtime_status FROM vm_observed_state WHERE vm_id = ?")
+            .bind(&vm_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to get vm power state: {}", e)))?
+            .flatten();
+
+    let vm_is_running = runtime_status
+        .as_deref()
+        .map(|s| matches!(s, "Running" | "Starting" | "Resuming"))
+        .unwrap_or(false);
 
     let snapshot_id = chv_common::gen_short_id();
     let snapshot_path = state
@@ -140,6 +151,8 @@ pub async fn create_snapshot(
     .await
     .map_err(|e| BffError::Internal(format!("failed to insert snapshot: {}", e)))?;
 
+    crate::audit::log_mutation(&claims.sub, "create_snapshot", "vm", &vm_id);
+
     // Dispatch snapshot operation through control plane
     let response = state
         .mutations
@@ -156,6 +169,12 @@ pub async fn create_snapshot(
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
 
+    let warning = if vm_is_running && !includes_memory {
+        Some("VM is running; snapshot may not be crash-consistent. Consider pausing the VM or including memory for a consistent snapshot.")
+    } else {
+        None
+    };
+
     Ok(Json(json!({
         "accepted": true,
         "task_id": response.task_id,
@@ -163,6 +182,7 @@ pub async fn create_snapshot(
         "vm_id": vm_id,
         "summary": format!("Snapshot '{}' creation accepted for VM {}", name, vm_id),
         "next_refresh_path": format!("/v1/tasks/{}", response.task_id),
+        "warning": warning,
     })))
 }
 
@@ -203,6 +223,8 @@ pub async fn delete_snapshot(
         claims.role == "admin",
     )
     .await?;
+
+    crate::audit::log_mutation(&claims.sub, "delete_snapshot", "snapshot", &snapshot_id);
 
     sqlx::query("DELETE FROM vm_snapshots WHERE snapshot_id = ?")
         .bind(&snapshot_id)
@@ -247,6 +269,20 @@ pub async fn restore_snapshot(
     let snapshot =
         row.ok_or_else(|| BffError::NotFound(format!("snapshot {} not found", snapshot_id)))?;
 
+    // Verify the caller owns the VM this snapshot belongs to
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    super::vms::require_vm_owner(
+        &mut conn,
+        &snapshot.vm_id,
+        &claims.sub,
+        claims.role == "admin",
+    )
+    .await?;
+
     // Check VM power state — must be stopped before restoring a snapshot
     let runtime_status: Option<String> =
         sqlx::query_scalar("SELECT runtime_status FROM vm_observed_state WHERE vm_id = ?")
@@ -266,6 +302,8 @@ pub async fn restore_snapshot(
             "VM must be stopped before restoring a snapshot".into(),
         ));
     }
+
+    crate::audit::log_mutation(&claims.sub, "restore_snapshot", "snapshot", &snapshot_id);
 
     // Dispatch restore operation through control plane
     let response = state

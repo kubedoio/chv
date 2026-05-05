@@ -39,6 +39,7 @@ struct FirewallRuleRow {
 }
 
 pub async fn list_firewall_rules(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {

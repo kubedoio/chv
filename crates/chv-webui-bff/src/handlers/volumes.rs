@@ -5,6 +5,7 @@ use crate::router::AppState;
 use crate::BffError;
 
 pub async fn list_volumes(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -103,6 +104,7 @@ pub async fn list_volumes(
 }
 
 pub async fn get_volume(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {

@@ -1,6 +1,8 @@
+pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod correlation_middleware;
+pub mod csrf_middleware;
 pub mod error;
 pub mod handlers;
 pub mod metrics_middleware;

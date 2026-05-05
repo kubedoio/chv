@@ -18,6 +18,7 @@ struct StoragePoolRow {
 }
 
 pub async fn list_storage_pools(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(_payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {

@@ -14,6 +14,7 @@ pub struct CacheEntry {
 pub struct BffCache {
     inner: Arc<RwLock<HashMap<String, CacheEntry>>>,
     ttl: Duration,
+    max_entries: usize,
 }
 
 impl BffCache {
@@ -21,6 +22,7 @@ impl BffCache {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             ttl: Duration::from_secs(ttl_secs),
+            max_entries: 2000,
         }
     }
 
@@ -41,48 +43,29 @@ impl BffCache {
     }
 
     pub async fn set_with_ttl(&self, key: &str, data: String, ttl: Option<Duration>) {
-        // Evict expired entries without holding write lock during the scan
-        {
-            let guard = self.inner.read().await;
-            if guard.len() > 1000 {
-                let now = Instant::now();
-                let default_ttl = self.ttl;
-                let expired_keys: Vec<String> = guard
-                    .iter()
-                    .filter(|(_, entry)| {
-                        let entry_ttl = entry.ttl.unwrap_or(default_ttl);
-                        now.duration_since(entry.cached_at) >= entry_ttl
-                    })
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                drop(guard);
+        let mut guard = self.inner.write().await;
 
-                if !expired_keys.is_empty() {
-                    let mut write_guard = self.inner.write().await;
-                    let now = Instant::now();
-                    for k in &expired_keys {
-                        if let Some(entry) = write_guard.get(k) {
-                            let entry_ttl = entry.ttl.unwrap_or(default_ttl);
-                            if now.duration_since(entry.cached_at) >= entry_ttl {
-                                write_guard.remove(k);
-                            }
-                        }
-                    }
-                    // Insert the new entry while we hold the write lock
-                    write_guard.insert(
-                        key.to_string(),
-                        CacheEntry {
-                            data,
-                            cached_at: Instant::now(),
-                            ttl,
-                        },
-                    );
-                    return;
-                }
+        // Evict expired entries
+        let now = Instant::now();
+        let default_ttl = self.ttl;
+        guard.retain(|_, entry| {
+            let entry_ttl = entry.ttl.unwrap_or(default_ttl);
+            now.duration_since(entry.cached_at) < entry_ttl
+        });
+
+        // Hard cap: if still at limit, evict oldest entries
+        if guard.len() >= self.max_entries {
+            let mut entries: Vec<(String, Instant)> = guard
+                .iter()
+                .map(|(k, v)| (k.clone(), v.cached_at))
+                .collect();
+            entries.sort_by_key(|(_, t)| *t);
+            let evict_count = guard.len() - self.max_entries + 1;
+            for (k, _) in entries.into_iter().take(evict_count) {
+                guard.remove(&k);
             }
         }
 
-        let mut guard = self.inner.write().await;
         guard.insert(
             key.to_string(),
             CacheEntry {

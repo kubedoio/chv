@@ -138,12 +138,8 @@ import Button from '$lib/components/primitives/Button.svelte';
     if (!importFile) return;
     importing = true;
     try {
-      // Logic for import...
-      toast.success('Import sequence started');
+      toast.error('VM import is not yet implemented. Use the Images page to register images by URL.');
       importVMOpen = false;
-      loadData();
-    } catch (err: any) {
-      toast.error(err.message);
     } finally {
       importing = false;
     }
