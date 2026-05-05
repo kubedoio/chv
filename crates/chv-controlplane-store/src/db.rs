@@ -27,6 +27,12 @@ pub enum StoreError {
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("{entity} with id '{id}' not found")]
     NotFound { entity: &'static str, id: String },
+    #[error("stale generation for {entity} '{id}': incoming {incoming} not newer than current")]
+    StaleGeneration {
+        entity: &'static str,
+        id: String,
+        incoming: i64,
+    },
     #[error("invalid store configuration: {reason}")]
     InvalidConfiguration { reason: String },
 }

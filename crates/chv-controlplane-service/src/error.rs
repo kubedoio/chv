@@ -31,6 +31,14 @@ impl From<chv_controlplane_store::StoreError> for ControlPlaneServiceError {
             chv_controlplane_store::StoreError::NotFound { entity, id } => {
                 Self::NotFound(format!("{} with id {} not found", entity, id))
             }
+            chv_controlplane_store::StoreError::StaleGeneration {
+                entity,
+                id,
+                incoming,
+            } => Self::StaleGeneration {
+                expected: format!(">{} for {} '{}'", incoming, entity, id),
+                received: incoming.to_string(),
+            },
             _ => Self::Store(err),
         }
     }

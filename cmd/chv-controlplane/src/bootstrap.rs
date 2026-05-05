@@ -23,6 +23,23 @@ pub async fn build_service(
         ));
     }
 
+    let allow_insecure = std::env::var("CHV_ALLOW_INSECURE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if !allow_insecure {
+        if config.tls.server_cert_path.is_none() || config.tls.server_key_path.is_none() {
+            return Err(ControlPlaneServiceError::Internal(
+                "TLS required: set server_cert_path + server_key_path, or CHV_ALLOW_INSECURE=1 for dev".into(),
+            ));
+        }
+        if config.tls.client_ca_path.is_none() {
+            return Err(ControlPlaneServiceError::Internal(
+                "mTLS required: set client_ca_path for client certificate verification, or CHV_ALLOW_INSECURE=1 for dev".into(),
+            ));
+        }
+    }
+
     let store_config = ControlPlaneStoreConfig {
         database_url: config.database.url.clone(),
         migrations_dir: config.database.migrations_dir.clone(),

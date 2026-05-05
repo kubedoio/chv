@@ -70,6 +70,7 @@ ON CONFLICT (vm_id) DO UPDATE SET
     desired_power_state = EXCLUDED.desired_power_state,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE vm_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const UPSERT_VOLUME_SQL: &str = r#"
@@ -150,6 +151,7 @@ ON CONFLICT (volume_id) DO UPDATE SET
     clone_source_volume_id = EXCLUDED.clone_source_volume_id,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const UPSERT_NETWORK_SQL: &str = r#"
@@ -215,6 +217,7 @@ ON CONFLICT (network_id) DO UPDATE SET
     dns_scope_json = EXCLUDED.dns_scope_json,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE network_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const PATCH_VM_POWER_STATE_SQL: &str = r#"
@@ -249,6 +252,7 @@ ON CONFLICT (vm_id) DO UPDATE SET
     desired_power_state = EXCLUDED.desired_power_state,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE vm_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const PATCH_VM_RESOURCES_SQL: &str = r#"
@@ -259,7 +263,7 @@ UPDATE vm_desired_state SET
     requested_by = $5,
     target_node_id = COALESCE($6, target_node_id),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
-WHERE vm_id = $1
+WHERE vm_id = $1 AND desired_generation <= $4
 "#;
 
 const PATCH_VOLUME_ATTACHMENT_SQL: &str = r#"
@@ -291,6 +295,7 @@ ON CONFLICT (volume_id) DO UPDATE SET
     attached_vm_id = EXCLUDED.attached_vm_id,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const PATCH_NETWORK_STATUS_SQL: &str = r#"
@@ -319,6 +324,7 @@ ON CONFLICT (network_id) DO UPDATE SET
     updated_by = EXCLUDED.updated_by,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE network_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const PATCH_VOLUME_RESIZE_SQL: &str = r#"
@@ -350,6 +356,7 @@ ON CONFLICT (volume_id) DO UPDATE SET
     resize_to_bytes = EXCLUDED.resize_to_bytes,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const PATCH_VOLUME_SNAPSHOT_SQL: &str = r#"
@@ -384,6 +391,7 @@ ON CONFLICT (volume_id) DO UPDATE SET
     snapshot_name = EXCLUDED.snapshot_name,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 const PATCH_VOLUME_CLONE_SQL: &str = r#"
@@ -415,6 +423,7 @@ ON CONFLICT (volume_id) DO UPDATE SET
     clone_source_volume_id = EXCLUDED.clone_source_volume_id,
     requested_at = EXCLUDED.requested_at,
     updated_at = EXCLUDED.updated_at
+WHERE volume_desired_state.desired_generation <= EXCLUDED.desired_generation
 "#;
 
 #[derive(Clone)]
@@ -433,6 +442,7 @@ impl DesiredStateRepository {
 
     pub async fn upsert_vm(&self, input: &VmDesiredStateInput) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
+        let generation = generation_to_i64(input.desired_generation)?;
 
         sqlx::query(UPSERT_VM_SQL)
             .bind(input.vm_id.as_str())
@@ -444,9 +454,9 @@ impl DesiredStateRepository {
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query(UPSERT_VM_DESIRED_STATE_SQL)
+        let result = sqlx::query(UPSERT_VM_DESIRED_STATE_SQL)
             .bind(input.vm_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -460,6 +470,14 @@ impl DesiredStateRepository {
             .execute(&mut *tx)
             .await?;
 
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "vm",
+                id: input.vm_id.to_string(),
+                incoming: generation,
+            });
+        }
+
         tx.commit().await?;
         Ok(())
     }
@@ -468,9 +486,10 @@ impl DesiredStateRepository {
         &self,
         input: &VmPowerStatePatchInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(PATCH_VM_POWER_STATE_SQL)
+        let generation = generation_to_i64(input.desired_generation)?;
+        let result = sqlx::query(PATCH_VM_POWER_STATE_SQL)
             .bind(input.vm_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -488,6 +507,13 @@ impl DesiredStateRepository {
                 }
                 _ => StoreError::from(e),
             })?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "vm",
+                id: input.vm_id.to_string(),
+                incoming: generation,
+            });
+        }
         Ok(())
     }
 
@@ -495,11 +521,12 @@ impl DesiredStateRepository {
         &self,
         input: &VmResourcesPatchInput,
     ) -> Result<(), StoreError> {
+        let generation = generation_to_i64(input.desired_generation)?;
         let rows = sqlx::query(PATCH_VM_RESOURCES_SQL)
             .bind(input.vm_id.as_str())
             .bind(input.cpu_count)
             .bind(input.memory_bytes)
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.requested_by)
             .bind(input.target_node_id.as_ref().map(NodeId::as_str))
             .bind(input.requested_unix_ms)
@@ -515,6 +542,18 @@ impl DesiredStateRepository {
                 _ => StoreError::from(e),
             })?;
         if rows.rows_affected() == 0 {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM vm_desired_state WHERE vm_id = $1)")
+                    .bind(input.vm_id.as_str())
+                    .fetch_one(&self.pool)
+                    .await?;
+            if exists {
+                return Err(StoreError::StaleGeneration {
+                    entity: "vm",
+                    id: input.vm_id.to_string(),
+                    incoming: generation,
+                });
+            }
             return Err(StoreError::NotFound {
                 entity: "vm",
                 id: input.vm_id.to_string(),
@@ -525,6 +564,7 @@ impl DesiredStateRepository {
 
     pub async fn upsert_volume(&self, input: &VolumeDesiredStateInput) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
+        let generation = generation_to_i64(input.desired_generation)?;
 
         sqlx::query(UPSERT_VOLUME_SQL)
             .bind(input.volume_id.as_str())
@@ -537,9 +577,9 @@ impl DesiredStateRepository {
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query(UPSERT_VOLUME_DESIRED_STATE_SQL)
+        let result = sqlx::query(UPSERT_VOLUME_DESIRED_STATE_SQL)
             .bind(input.volume_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -560,6 +600,14 @@ impl DesiredStateRepository {
             .execute(&mut *tx)
             .await?;
 
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "volume",
+                id: input.volume_id.to_string(),
+                incoming: generation,
+            });
+        }
+
         tx.commit().await?;
         Ok(())
     }
@@ -568,9 +616,10 @@ impl DesiredStateRepository {
         &self,
         input: &VolumeAttachmentPatchInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(PATCH_VOLUME_ATTACHMENT_SQL)
+        let generation = generation_to_i64(input.desired_generation)?;
+        let result = sqlx::query(PATCH_VOLUME_ATTACHMENT_SQL)
             .bind(input.volume_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -580,8 +629,6 @@ impl DesiredStateRepository {
             .await
             .map_err(|e| match &e {
                 sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
-                    // In SQLite, FK violations don't report constraint names.
-                    // If attached_vm_id was provided, the vm FK is the likely culprit.
                     let (entity, id) = if input.attached_vm_id.is_some() {
                         (
                             "vm",
@@ -598,6 +645,13 @@ impl DesiredStateRepository {
                 }
                 _ => StoreError::from(e),
             })?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "volume",
+                id: input.volume_id.to_string(),
+                incoming: generation,
+            });
+        }
         Ok(())
     }
 
@@ -605,9 +659,10 @@ impl DesiredStateRepository {
         &self,
         input: &VolumeResizePatchInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(PATCH_VOLUME_RESIZE_SQL)
+        let generation = generation_to_i64(input.desired_generation)?;
+        let result = sqlx::query(PATCH_VOLUME_RESIZE_SQL)
             .bind(input.volume_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -624,6 +679,13 @@ impl DesiredStateRepository {
                 }
                 _ => StoreError::from(e),
             })?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "volume",
+                id: input.volume_id.to_string(),
+                incoming: generation,
+            });
+        }
         Ok(())
     }
 
@@ -631,9 +693,10 @@ impl DesiredStateRepository {
         &self,
         input: &VolumeSnapshotPatchInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(PATCH_VOLUME_SNAPSHOT_SQL)
+        let generation = generation_to_i64(input.desired_generation)?;
+        let result = sqlx::query(PATCH_VOLUME_SNAPSHOT_SQL)
             .bind(input.volume_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -651,13 +714,21 @@ impl DesiredStateRepository {
                 }
                 _ => StoreError::from(e),
             })?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "volume",
+                id: input.volume_id.to_string(),
+                incoming: generation,
+            });
+        }
         Ok(())
     }
 
     pub async fn set_volume_clone(&self, input: &VolumeClonePatchInput) -> Result<(), StoreError> {
-        sqlx::query(PATCH_VOLUME_CLONE_SQL)
+        let generation = generation_to_i64(input.desired_generation)?;
+        let result = sqlx::query(PATCH_VOLUME_CLONE_SQL)
             .bind(input.volume_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -679,11 +750,19 @@ impl DesiredStateRepository {
                 }
                 _ => StoreError::from(e),
             })?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "volume",
+                id: input.volume_id.to_string(),
+                incoming: generation,
+            });
+        }
         Ok(())
     }
 
     pub async fn upsert_network(&self, input: &NetworkDesiredStateInput) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
+        let generation = generation_to_i64(input.desired_generation)?;
 
         sqlx::query(UPSERT_NETWORK_SQL)
             .bind(input.network_id.as_str())
@@ -694,9 +773,9 @@ impl DesiredStateRepository {
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query(UPSERT_NETWORK_DESIRED_STATE_SQL)
+        let result = sqlx::query(UPSERT_NETWORK_DESIRED_STATE_SQL)
             .bind(input.network_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -713,6 +792,14 @@ impl DesiredStateRepository {
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "network",
+                id: input.network_id.to_string(),
+                incoming: generation,
+            });
+        }
 
         tx.commit().await?;
         Ok(())
@@ -724,6 +811,7 @@ impl DesiredStateRepository {
         exposures: &[NetworkExposureInput],
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
+        let generation = generation_to_i64(input.desired_generation)?;
 
         sqlx::query(UPSERT_NETWORK_SQL)
             .bind(input.network_id.as_str())
@@ -734,9 +822,9 @@ impl DesiredStateRepository {
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query(UPSERT_NETWORK_DESIRED_STATE_SQL)
+        let result = sqlx::query(UPSERT_NETWORK_DESIRED_STATE_SQL)
             .bind(input.network_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -753,6 +841,14 @@ impl DesiredStateRepository {
             .bind(input.requested_unix_ms)
             .execute(&mut *tx)
             .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "network",
+                id: input.network_id.to_string(),
+                incoming: generation,
+            });
+        }
 
         for exposure in exposures {
             sqlx::query(crate::network_exposures::UPSERT_SQL)
@@ -786,9 +882,10 @@ impl DesiredStateRepository {
         &self,
         input: &NetworkStatusPatchInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(PATCH_NETWORK_STATUS_SQL)
+        let generation = generation_to_i64(input.desired_generation)?;
+        let result = sqlx::query(PATCH_NETWORK_STATUS_SQL)
             .bind(input.network_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(generation)
             .bind(&input.desired_status)
             .bind(&input.requested_by)
             .bind(&input.updated_by)
@@ -804,6 +901,13 @@ impl DesiredStateRepository {
                 }
                 _ => StoreError::from(e),
             })?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration {
+                entity: "network",
+                id: input.network_id.to_string(),
+                incoming: generation,
+            });
+        }
         Ok(())
     }
 }
