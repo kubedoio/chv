@@ -439,7 +439,11 @@ async fn test_upsert_vm_rejects_stale_generation() {
     stale_input.requested_unix_ms = 2000;
 
     match repo.upsert_vm(&stale_input).await {
-        Err(StoreError::StaleGeneration { entity, id, incoming }) => {
+        Err(StoreError::StaleGeneration {
+            entity,
+            id,
+            incoming,
+        }) => {
             assert_eq!(entity, "vm");
             assert_eq!(id, "vm-gen-test");
             assert_eq!(incoming, 3);
@@ -481,11 +485,12 @@ async fn test_upsert_vm_accepts_newer_generation() {
 
     repo.upsert_vm(&newer_input).await.unwrap();
 
-    let gen: i64 =
-        sqlx::query_scalar("SELECT desired_generation FROM vm_desired_state WHERE vm_id = 'vm-gen-newer'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let gen: i64 = sqlx::query_scalar(
+        "SELECT desired_generation FROM vm_desired_state WHERE vm_id = 'vm-gen-newer'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(gen, 5);
 }
 

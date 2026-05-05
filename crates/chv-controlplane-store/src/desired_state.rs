@@ -517,10 +517,7 @@ impl DesiredStateRepository {
         Ok(())
     }
 
-    pub async fn set_vm_resources(
-        &self,
-        input: &VmResourcesPatchInput,
-    ) -> Result<(), StoreError> {
+    pub async fn set_vm_resources(&self, input: &VmResourcesPatchInput) -> Result<(), StoreError> {
         let generation = generation_to_i64(input.desired_generation)?;
         let rows = sqlx::query(PATCH_VM_RESOURCES_SQL)
             .bind(input.vm_id.as_str())
@@ -542,11 +539,12 @@ impl DesiredStateRepository {
                 _ => StoreError::from(e),
             })?;
         if rows.rows_affected() == 0 {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM vm_desired_state WHERE vm_id = $1)")
-                    .bind(input.vm_id.as_str())
-                    .fetch_one(&self.pool)
-                    .await?;
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM vm_desired_state WHERE vm_id = $1)",
+            )
+            .bind(input.vm_id.as_str())
+            .fetch_one(&self.pool)
+            .await?;
             if exists {
                 return Err(StoreError::StaleGeneration {
                     entity: "vm",

@@ -374,9 +374,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.runtime_dir.clone(),
     );
     let server_socket = config.socket_path.clone();
-    tokio::spawn(async move {
+    let mut agent_server_handle = tokio::spawn(async move {
         if let Err(e) = agent_server.serve(&server_socket).await {
-            warn!(error = %e, "agent server exited");
+            tracing::error!(error = %e, "agent server exited with error — node is unreachable");
         }
     });
 
@@ -453,6 +453,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ = sigint.recv() => {
                 info!("received SIGINT, shutting down gracefully");
+                supervisor.shutdown().await;
+                break;
+            }
+            _ = &mut agent_server_handle => {
+                tracing::error!("agent gRPC server exited unexpectedly — shutting down");
                 supervisor.shutdown().await;
                 break;
             }

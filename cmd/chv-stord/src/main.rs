@@ -3,6 +3,7 @@ use chv_observability::init_logger;
 use chv_stord_backends::LocalFileBackend;
 use chv_stord_core::StorageServer;
 use std::path::PathBuf;
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::info;
 
 #[tokio::main]
@@ -22,7 +23,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
     );
 
-    server.serve(&config.socket_path, None).await?;
+    let socket_path = config.socket_path.clone();
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
 
+    tokio::select! {
+        result = server.serve(&config.socket_path, None) => {
+            result?;
+        }
+        _ = sigterm.recv() => {
+            info!("received SIGTERM, shutting down");
+        }
+        _ = sigint.recv() => {
+            info!("received SIGINT, shutting down");
+        }
+    }
+
+    let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }

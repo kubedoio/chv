@@ -190,7 +190,13 @@ fn derive_gateway(cidr: &str) -> Option<String> {
     let ip_str = cidr.split('/').next()?;
     let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;
     let octets = ip.octets();
-    Some(format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3].wrapping_add(1)))
+    Some(format!(
+        "{}.{}.{}.{}",
+        octets[0],
+        octets[1],
+        octets[2],
+        octets[3].wrapping_add(1)
+    ))
 }
 
 #[cfg(test)]
@@ -209,6 +215,9 @@ mod tests {
     #[test]
     fn test_derive_gateway() {
         assert_eq!(derive_gateway("10.0.0.0/24"), Some("10.0.0.1".to_string()));
-        assert_eq!(derive_gateway("192.168.1.0/24"), Some("192.168.1.1".to_string()));
+        assert_eq!(
+            derive_gateway("192.168.1.0/24"),
+            Some("192.168.1.1".to_string())
+        );
     }
 }

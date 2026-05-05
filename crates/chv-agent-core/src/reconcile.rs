@@ -178,16 +178,14 @@ impl Reconciler {
                     // ~5 minutes at 10s tick interval — unrecoverable
                     error!(
                         degraded_ticks = self.degraded_ticks,
-                        stord_ok, nwd_ok,
-                        "node degraded too long, transitioning to Failed"
+                        stord_ok, nwd_ok, "node degraded too long, transitioning to Failed"
                     );
                     self.transition_state(NodeState::Failed).await?;
                     self.degraded_ticks = 0;
                 } else {
                     warn!(
                         degraded_ticks = self.degraded_ticks,
-                        stord_ok, nwd_ok,
-                        "node degraded, waiting for recovery"
+                        stord_ok, nwd_ok, "node degraded, waiting for recovery"
                     );
                 }
             }

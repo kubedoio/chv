@@ -1137,7 +1137,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "snapshotting vm via ch api");
 
-        let body = format!(r#"{{"destination_url":"file://{}"}}"#, destination);
+        let body =
+            serde_json::json!({"destination_url": format!("file://{}", destination)}).to_string();
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.snapshot", Some(&body)).await?;
         Self::expect_status(status, "vm.snapshot")?;
@@ -1154,7 +1155,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, source = %source, op = operation_id.unwrap_or("-"), "restoring snapshot via ch api");
 
-        let body = format!(r#"{{"source_url":"file://{}"}}"#, source);
+        let body = serde_json::json!({"source_url": format!("file://{}", source)}).to_string();
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.restore", Some(&body)).await?;
         Self::expect_status(status, "vm.restore")?;
@@ -1233,7 +1234,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         info!(vm_id = %vm_id, device_id = %device_id, op = operation_id.unwrap_or("-"), "hot-removing device via ch api");
 
-        let body = format!(r#"{{"id":"{}"}}"#, device_id);
+        let body = serde_json::json!({"id": device_id}).to_string();
         let status =
             Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.remove-device", Some(&body))
                 .await?;

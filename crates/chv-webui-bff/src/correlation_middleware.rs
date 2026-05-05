@@ -12,9 +12,8 @@ pub async fn extract_correlation_id(req: Request, next: Next) -> impl IntoRespon
     let mut response = next.run(req).await;
     response.headers_mut().insert(
         "x-correlation-id",
-        axum::http::HeaderValue::from_str(&correlation_id).unwrap_or_else(|_| {
-            axum::http::HeaderValue::from_static("unknown")
-        }),
+        axum::http::HeaderValue::from_str(&correlation_id)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("unknown")),
     );
     response
 }

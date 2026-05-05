@@ -119,9 +119,7 @@ impl From<ChvError> for tonic::Status {
                 tonic::Status::invalid_argument(format!("{field}: {reason}"))
             }
             ChvError::BadRequest { reason } => tonic::Status::invalid_argument(reason.clone()),
-            ChvError::Unauthorized { .. } => {
-                tonic::Status::unauthenticated("unauthorized")
-            }
+            ChvError::Unauthorized { .. } => tonic::Status::unauthenticated("unauthorized"),
             ChvError::QuotaExceeded { resource, .. } => {
                 tonic::Status::resource_exhausted(format!("{resource} quota exceeded"))
             }

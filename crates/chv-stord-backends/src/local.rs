@@ -73,9 +73,12 @@ impl LocalFileBackend {
             .status();
         match status {
             Ok(s) if s.success() => {
-                std::fs::rename(&raw_path, path).map_err(|e| ChvError::BackendUnavailable {
-                    backend: "local".to_string(),
-                    reason: format!("failed to rename converted image: {}", e),
+                std::fs::rename(&raw_path, path).map_err(|e| {
+                    let _ = std::fs::remove_file(&raw_path);
+                    ChvError::BackendUnavailable {
+                        backend: "local".to_string(),
+                        reason: format!("failed to rename converted image: {}", e),
+                    }
                 })?;
                 info!(path = %path.display(), "converted qcow2 seed image to raw");
                 Ok(())
@@ -88,7 +91,6 @@ impl LocalFileBackend {
                 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let _ = std::fs::remove_file(path);
                 Err(ChvError::BackendUnavailable {
                     backend: "local".to_string(),
                     reason: "seed image is qcow2 but qemu-img is not installed; install qemu-utils or convert the image to raw".to_string(),
@@ -538,12 +540,23 @@ impl StorageBackend for LocalFileBackend {
             });
         }
 
-        tokio::fs::copy(&snap, &path)
+        // Restore to a temp file first, then atomic rename to avoid
+        // corrupting the live volume if the copy fails mid-write.
+        let restore_tmp = path.with_extension("img.restore-tmp");
+        tokio::fs::copy(&snap, &restore_tmp)
             .await
             .map_err(|e| ChvError::BackendUnavailable {
                 backend: "local".to_string(),
-                reason: format!("failed to restore snapshot: {}", e),
+                reason: format!("failed to copy snapshot to temp file: {}", e),
             })?;
+
+        tokio::fs::rename(&restore_tmp, &path).await.map_err(|e| {
+            let _ = std::fs::remove_file(&restore_tmp);
+            ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("failed to rename restored snapshot into place: {}", e),
+            }
+        })?;
 
         info!(
             volume_id,

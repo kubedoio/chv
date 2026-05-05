@@ -15,7 +15,9 @@ SELECT
     started_at,
     completed_at,
     error_message,
-    size_bytes
+    size_bytes,
+    retry_count,
+    next_retry_at
 FROM backup_jobs
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?
@@ -36,7 +38,9 @@ SELECT
     started_at,
     completed_at,
     error_message,
-    size_bytes
+    size_bytes,
+    retry_count,
+    next_retry_at
 FROM backup_jobs
 WHERE job_id = ?
 "#;
@@ -102,7 +106,9 @@ SELECT
     started_at,
     completed_at,
     error_message,
-    size_bytes
+    size_bytes,
+    retry_count,
+    next_retry_at
 FROM backup_jobs
 WHERE vm_id = ?
 ORDER BY created_at DESC

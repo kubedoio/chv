@@ -1029,6 +1029,160 @@ impl NodeClient {
         };
         result
     }
+
+    pub async fn pause_vm(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::PauseVmRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+        };
+        let method = "pause_vm";
+        let span = tracing::info_span!("pause_vm", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .pause_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
+
+    pub async fn resume_vm(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::ResumeVmRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+        };
+        let method = "resume_vm";
+        let span = tracing::info_span!("resume_vm", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .resume_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
+
+    pub async fn power_button_vm(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        generation: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::PowerButtonVmRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+        };
+        let method = "power_button_vm";
+        let span = tracing::info_span!("power_button_vm", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .power_button_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
+
+    pub async fn coredump_vm(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        generation: &str,
+        destination: &str,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::CoredumpVmRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+            destination: destination.to_string(),
+        };
+        let method = "coredump_vm";
+        let span = tracing::info_span!("coredump_vm", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .coredump_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
 }
 
 fn with_operation_id_metadata<T>(req: T, operation_id: &str) -> tonic::Request<T> {
