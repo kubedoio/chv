@@ -60,10 +60,15 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         cidr: &str,
         range_start: &str,
         range_end: &str,
+        dns_servers: &[String],
     ) -> Result<(), ChvError>;
 
-    async fn ensure_dns_scope(&self, network_id: &str, forwarders: &[&str])
-        -> Result<(), ChvError>;
+    async fn ensure_dns_scope(
+        &self,
+        network_id: &str,
+        forwarders: &[&str],
+        static_records: &std::collections::HashMap<String, String>,
+    ) -> Result<(), ChvError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn expose_service(
@@ -635,91 +640,40 @@ impl NetworkExecutor for LinuxExecutor {
         &self,
         network_id: &str,
         _policy_version: &str,
-        _policy_json: &[u8],
+        policy_json: &[u8],
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
-        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
-        for (chain, hook) in [("input", "input"), ("forward", "forward")] {
-            Self::run_nft_idempotent(&[
-                "add",
-                "chain",
-                "inet",
-                &table,
-                chain,
-                &format!(
-                    "{{ type filter hook {} priority 0 ; policy accept ; }}",
-                    hook
-                ),
-            ])
-            .await?;
-        }
-        Self::run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            &table,
-            "input",
-            "ct",
-            "state",
-            "established,related",
-            "accept",
-        ])
-        .await?;
-        info!(network_id = %network_id, "firewall policy applied");
-        Ok(())
+        crate::firewall::apply_firewall_rules(&table, policy_json).await
     }
 
     async fn set_nat_policy(
         &self,
         network_id: &str,
         _policy_version: &str,
-        _policy_json: &[u8],
+        policy_json: &[u8],
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
-        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
-        Self::run_nft_idempotent(&[
-            "add",
-            "chain",
-            "inet",
-            &table,
-            "postrouting",
-            "{ type nat hook postrouting priority 100 ; policy accept ; }",
-        ])
-        .await?;
-        Self::run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            &table,
-            "postrouting",
-            "oif",
-            "!=",
-            "lo",
-            "masquerade",
-        ])
-        .await?;
-        info!(network_id = %network_id, "NAT policy applied");
-        Ok(())
+        crate::firewall::apply_nat_rules(&table, policy_json).await
     }
 
     async fn ensure_dhcp_scope(
         &self,
         network_id: &str,
-        _cidr: &str,
-        _range_start: &str,
-        _range_end: &str,
+        cidr: &str,
+        range_start: &str,
+        range_end: &str,
+        dns_servers: &[String],
     ) -> Result<(), ChvError> {
-        info!(network_id = %network_id, "DHCP scope accepted but not enforced by LinuxExecutor");
-        Ok(())
+        crate::dhcp::ensure_dhcp_scope(network_id, cidr, range_start, range_end, dns_servers).await
     }
 
     async fn ensure_dns_scope(
         &self,
         network_id: &str,
-        _forwarders: &[&str],
+        forwarders: &[&str],
+        static_records: &std::collections::HashMap<String, String>,
     ) -> Result<(), ChvError> {
-        info!(network_id = %network_id, "DNS scope accepted but not enforced by LinuxExecutor");
-        Ok(())
+        crate::dns::ensure_dns_scope(network_id, forwarders, static_records).await
     }
 
     #[allow(clippy::too_many_arguments)]

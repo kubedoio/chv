@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
@@ -17,6 +17,7 @@ pub struct Reconciler {
     pub nwd_socket: PathBuf,
     pub runtime_dir: PathBuf,
     reconcile_tick: u64,
+    degraded_ticks: u32,
 }
 
 /// Returns the per-VM runtime directory for the given VM.
@@ -40,6 +41,7 @@ impl Reconciler {
             nwd_socket,
             runtime_dir,
             reconcile_tick: 0,
+            degraded_ticks: 0,
         }
     }
 
@@ -131,9 +133,14 @@ impl Reconciler {
                 self.transition_state(NodeState::TenantReady).await?;
             }
             NodeState::TenantReady => {
-                self.reconcile_networks().await?;
-                self.reconcile_volumes().await?;
-                self.reconcile_vms().await?;
+                self.degraded_ticks = 0;
+                let net_ok = self.reconcile_networks().await.is_ok();
+                let vol_ok = self.reconcile_volumes().await.is_ok();
+                let vm_ok = self.reconcile_vms().await.is_ok();
+                if !net_ok && !vol_ok && !vm_ok {
+                    warn!("all reconcile operations failed, transitioning to Degraded");
+                    self.transition_state(NodeState::Degraded).await?;
+                }
             }
             NodeState::Failed => {
                 // Attempt recovery: if both daemons are healthy, restart bootstrap sequence
@@ -152,7 +159,39 @@ impl Reconciler {
                     warn!(stord_ok, nwd_ok, "remaining in Failed, daemons not healthy");
                 }
             }
-            NodeState::Degraded | NodeState::Draining | NodeState::Maintenance => {}
+            NodeState::Degraded => {
+                self.degraded_ticks += 1;
+                // Probe daemons to check if recovery is possible
+                let stord_ok = match StordClient::connect(&self.stord_socket).await {
+                    Ok(mut c) => c.health_probe().await.unwrap_or(false),
+                    Err(_) => false,
+                };
+                let nwd_ok = match NwdClient::connect(&self.nwd_socket).await {
+                    Ok(mut c) => c.health_probe().await.unwrap_or(false),
+                    Err(_) => false,
+                };
+                if stord_ok && nwd_ok {
+                    info!("recovered from Degraded, transitioning to TenantReady");
+                    self.transition_state(NodeState::TenantReady).await?;
+                    self.degraded_ticks = 0;
+                } else if self.degraded_ticks >= 30 {
+                    // ~5 minutes at 10s tick interval — unrecoverable
+                    error!(
+                        degraded_ticks = self.degraded_ticks,
+                        stord_ok, nwd_ok,
+                        "node degraded too long, transitioning to Failed"
+                    );
+                    self.transition_state(NodeState::Failed).await?;
+                    self.degraded_ticks = 0;
+                } else {
+                    warn!(
+                        degraded_ticks = self.degraded_ticks,
+                        stord_ok, nwd_ok,
+                        "node degraded, waiting for recovery"
+                    );
+                }
+            }
+            NodeState::Draining | NodeState::Maintenance => {}
         }
 
         Ok(())

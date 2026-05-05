@@ -396,6 +396,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 &scope.cidr,
                 &scope.range_start,
                 &scope.range_end,
+                &scope.dns_servers,
             )
             .await
         {
@@ -426,7 +427,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         };
 
         let fw: Vec<&str> = scope.forwarders.iter().map(|s| s.as_str()).collect();
-        match self.executor.ensure_dns_scope(&scope.network_id, &fw).await {
+        let static_records: std::collections::HashMap<String, String> = scope.static_records.into_iter().collect();
+        match self.executor.ensure_dns_scope(&scope.network_id, &fw, &static_records).await {
             Ok(()) => Ok(Response::new(Self::ok_result())),
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }

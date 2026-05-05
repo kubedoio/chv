@@ -534,6 +534,8 @@ dependencies = [
  "hyper-util",
  "prost",
  "rusqlite",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",

@@ -82,6 +82,7 @@ impl NetworkExecutor for MockExecutor {
         _cidr: &str,
         _range_start: &str,
         _range_end: &str,
+        _dns_servers: &[String],
     ) -> Result<(), ChvError> {
         Ok(())
     }
@@ -90,6 +91,7 @@ impl NetworkExecutor for MockExecutor {
         &self,
         _network_id: &str,
         _forwarders: &[&str],
+        _static_records: &std::collections::HashMap<String, String>,
     ) -> Result<(), ChvError> {
         Ok(())
     }
