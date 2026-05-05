@@ -10,17 +10,8 @@
 const COOKIE_NAME = 'chv_session';
 
 export function syncAuthCookieFromLocalStorage(): void {
-	if (typeof document === 'undefined') return;
-	try {
-		// Migration: if a token exists in localStorage from the old scheme,
-		// remove it. The server now sets HttpOnly cookies on login.
-		const legacyToken = localStorage.getItem('chv-api-token');
-		if (legacyToken) {
-			localStorage.removeItem('chv-api-token');
-		}
-	} catch {
-		// ignore
-	}
+	// No-op: auth uses localStorage tokens (set by login handler JSON response).
+	// HttpOnly cookie auth is not yet implemented in the BFF.
 }
 
 export function clearAuthCookie(): void {
