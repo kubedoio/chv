@@ -36,7 +36,7 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             let store = store.clone();
             let state = state.clone();
             match tokio::task::spawn_blocking(move || {
-                let store = store.lock().unwrap();
+                let store = store.lock().unwrap_or_else(|e| e.into_inner());
                 store.upsert(&state)
             })
             .await
@@ -57,7 +57,7 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             let store = store.clone();
             let network_id = network_id.to_string();
             match tokio::task::spawn_blocking(move || {
-                let store = store.lock().unwrap();
+                let store = store.lock().unwrap_or_else(|e| e.into_inner());
                 store.remove(&network_id)
             })
             .await

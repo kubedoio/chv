@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct FirewallRuleSpec {
     pub direction: String,
     pub protocol: String,
@@ -12,7 +11,6 @@ pub struct FirewallRuleSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct NatRuleSpec {
     pub source_cidr: String,
     pub dest_cidr: Option<String>,
@@ -20,7 +18,6 @@ pub struct NatRuleSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct DhcpScopeSpec {
     pub range_start: String,
     pub range_end: String,
@@ -28,14 +25,12 @@ pub struct DhcpScopeSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct DnsScopeSpec {
     pub forwarders: Option<Vec<String>>,
     pub static_records: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VmSpec {
     pub cpu_count: Option<i32>,
     pub memory_bytes: Option<i64>,
@@ -45,7 +40,6 @@ pub struct VmSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VolumeSpec {
     pub capacity_bytes: i64,
     pub volume_kind: Option<String>,
@@ -61,7 +55,6 @@ pub struct VolumeSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct NetworkSpec {
     pub network_class: Option<String>,
     pub exposures: Option<Vec<NetworkExposureSpec>>,
@@ -88,7 +81,6 @@ pub struct NetworkSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct NetworkExposureSpec {
     pub service_name: String,
     pub protocol: String,
@@ -100,7 +92,6 @@ pub struct NetworkExposureSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NodeSpec {
     pub desired_state: String,
     pub state_reason: Option<String>,
@@ -119,9 +110,10 @@ mod tests {
     }
 
     #[test]
-    fn vm_spec_rejects_unknown_field() {
+    fn vm_spec_accepts_unknown_field_for_forward_compat() {
         let json = r#"{"cpu_count": 2, "unknown": true}"#;
-        assert!(serde_json::from_str::<VmSpec>(json).is_err());
+        let spec: VmSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.cpu_count, Some(2));
     }
 
     #[test]
@@ -147,9 +139,10 @@ mod tests {
     }
 
     #[test]
-    fn network_exposure_spec_rejects_unknown_field() {
+    fn network_exposure_spec_accepts_unknown_field_for_forward_compat() {
         let json = r#"{"service_name": "web", "protocol": "tcp", "extra": 1}"#;
-        assert!(serde_json::from_str::<NetworkExposureSpec>(json).is_err());
+        let spec: NetworkExposureSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.service_name, "web");
     }
 
     #[test]

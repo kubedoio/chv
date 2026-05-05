@@ -159,9 +159,6 @@ pub async fn revoke_token(
     })))
 }
 
-pub fn sha256_hex_pub(input: &str) -> String {
-    chv_common::sha256_hex(input)
-}
 
 #[cfg(test)]
 mod tests {

@@ -53,10 +53,7 @@ async fn load_or_initialize_cache(config: &AgentConfig) -> NodeCache {
 }
 
 fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    chv_common::now_unix_ms()
 }
 
 async fn resolve_tls_paths(
@@ -369,9 +366,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let console_bind = config.console_bind.clone();
     let console_listener = ConsoleServer::try_bind(&console_bind).await.map_err(|e| {
-        eprintln!(
-            "FATAL: console server cannot bind to {}: {}",
-            console_bind, e
+        tracing::error!(
+            bind = %console_bind,
+            error = %e,
+            "FATAL: console server cannot bind"
         );
         e
     })?;

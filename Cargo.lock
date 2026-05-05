@@ -332,6 +332,7 @@ version = "0.1.0"
 dependencies = [
  "chv-agent-core",
  "chv-agent-runtime-ch",
+ "chv-common",
  "chv-config",
  "chv-errors",
  "chv-observability",
@@ -437,7 +438,6 @@ dependencies = [
  "axum",
  "bcrypt",
  "chrono",
- "chv-agent-core",
  "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",
@@ -496,8 +496,8 @@ dependencies = [
 name = "chv-errors"
 version = "0.1.0"
 dependencies = [
- "chv-stord-api",
  "thiserror 2.0.18",
+ "tonic",
 ]
 
 [[package]]

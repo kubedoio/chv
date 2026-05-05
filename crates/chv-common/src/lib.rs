@@ -8,21 +8,6 @@ pub mod types {
     use std::collections::HashMap;
 
     #[derive(Debug, Clone)]
-    pub struct RequestMeta {
-        pub operation_id: String,
-        pub request_unix_ms: i64,
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct OperationId(pub String);
-
-    #[derive(Debug, Clone)]
-    pub struct VolumeId(pub String);
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct BackendClass(pub String);
-
-    #[derive(Debug, Clone)]
     pub struct BackendLocator {
         pub backend_class: String,
         pub locator: String,
@@ -63,6 +48,16 @@ pub fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Compute FNV-1a hash for a string input.
+pub fn fnv1a_hash(input: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    hash
 }
 
 /// Validate that `id` contains only lowercase hex characters (a-f, 0-9).

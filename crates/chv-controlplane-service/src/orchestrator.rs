@@ -210,10 +210,27 @@ impl Orchestrator {
             .get_or_connect(node_id, &socket_path)
             .await?;
 
-        let generation = row
-            .desired_generation
-            .map(|g| g.to_string())
-            .unwrap_or_else(|| "1".to_string());
+        let generation = match row.desired_generation {
+            Some(g) => g.to_string(),
+            None => {
+                // Fetch the node's current observed_generation from the DB
+                // rather than defaulting to "1" which could cause stale operations.
+                let observed: Option<i64> = sqlx::query_scalar(
+                    "SELECT observed_generation FROM vm_observed_state WHERE vm_id = ?",
+                )
+                .bind(&row.resource_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!(
+                        "failed to fetch observed_generation for {}: {e}",
+                        row.resource_id
+                    ),
+                })?
+                .flatten();
+                observed.unwrap_or(1).to_string()
+            }
+        };
 
         // Status already set to Running by the atomic claim in tick()
 
@@ -268,12 +285,17 @@ impl Orchestrator {
                     .await
             }
             "RebootVm" => {
+                let force_reboot = row
+                    .correlation_id
+                    .as_deref()
+                    .map(|s| s.contains("force=true"))
+                    .unwrap_or(false);
                 client
                     .reboot_vm(
                         node_id,
                         &row.resource_id,
                         &generation,
-                        false,
+                        force_reboot,
                         &row.operation_id,
                         None,
                     )
@@ -995,8 +1017,5 @@ struct AgentNicSpec {
 }
 
 fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    chv_common::now_unix_ms()
 }

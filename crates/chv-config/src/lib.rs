@@ -14,6 +14,13 @@ fn resolve_jwt_secret(current: &str, service_name: &str) -> String {
     if current != "chv-dev-secret-change-in-production" && current.len() >= 32 {
         return current.to_string();
     }
+    // Check CHV_JWT_SECRET env var first
+    if let Ok(env_secret) = std::env::var("CHV_JWT_SECRET") {
+        if env_secret.len() >= 32 {
+            tracing::info!("loaded jwt_secret from CHV_JWT_SECRET env var");
+            return env_secret;
+        }
+    }
     if current == "chv-dev-secret-change-in-production" {
         tracing::error!(
             service = service_name,

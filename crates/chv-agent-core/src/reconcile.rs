@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
@@ -75,7 +75,7 @@ impl Reconciler {
 
     pub async fn run_once(&mut self) -> Result<(), ChvError> {
         self.reconcile_tick = self.reconcile_tick.wrapping_add(1);
-        info!(
+        debug!(
             state = %self.current_state().await.as_str(),
             "reconcile tick"
         );
@@ -203,7 +203,18 @@ impl Reconciler {
             let mut network_dns_scopes: std::collections::HashMap<String, serde_json::Value> =
                 std::collections::HashMap::new();
             for (net_id, frag) in &cache.network_fragments {
-                let spec = serde_json::from_slice::<serde_json::Value>(&frag.spec_json).ok();
+                let spec = match serde_json::from_slice::<serde_json::Value>(&frag.spec_json) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            network_id = %net_id,
+                            error = %e,
+                            fragment = %String::from_utf8_lossy(&frag.spec_json),
+                            "failed to parse network spec_json, falling back to defaults (bridge=br-<id>, cidr=10.0.0.0/24)"
+                        );
+                        None
+                    }
+                };
                 let cidr = spec
                     .as_ref()
                     .and_then(|v| {
@@ -1000,6 +1011,36 @@ impl Reconciler {
                     );
                     continue;
                 }
+            } else if spec.desired_state == "Deleted" {
+                let op_id = format!("reconcile-vm-delete-{}", vm_id);
+                // Stop the VM if it is still running
+                if record.runtime_status == "Running" {
+                    if let Err(e) = self.vm_runtime.stop_vm(vm_id, true, Some(&op_id)).await {
+                        warn!(vm_id = %vm_id, error = %e, "failed to stop vm before delete");
+                    }
+                }
+                // Clean up associated resources (volumes, NICs)
+                if let Err(e) = self.cleanup_vm(vm_id).await {
+                    warn!(vm_id = %vm_id, error = %e, "cleanup vm failed during delete");
+                }
+                // Remove from runtime
+                if let Err(e) = self.vm_runtime.delete_vm(vm_id, Some(&op_id)).await {
+                    warn!(vm_id = %vm_id, error = %e, "failed to delete vm");
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
+                    continue;
+                }
+                let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+                let _ = tokio::fs::remove_dir_all(&vm_dir).await;
+                self.vm_runtime.clear_failure_count(vm_id);
+                // Remove the fragment from cache so reconciler does not re-process it
+                let mut cache = self.cache.lock().await;
+                cache.vm_fragments.remove(vm_id);
+                cache.remove_vm_state(vm_id);
+                continue;
             }
 
             // Resize if cpus or memory changed

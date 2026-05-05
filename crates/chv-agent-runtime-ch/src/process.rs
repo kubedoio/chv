@@ -68,7 +68,7 @@ impl ProcessCloudHypervisorAdapter {
     }
 
     fn get_vm_socket(&self, vm_id: &str) -> Result<std::path::PathBuf, ChvError> {
-        let vms = self.vms.lock().unwrap();
+        let vms = self.vms.lock().unwrap_or_else(|e| e.into_inner());
         let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
             resource: "vm".to_string(),
             id: vm_id.to_string(),
@@ -394,7 +394,7 @@ impl ProcessCloudHypervisorAdapter {
                     Ok(n) => {
                         let data = buf[..n].to_vec();
                         {
-                            let mut sb = pty_scrollback.lock().unwrap();
+                            let mut sb = pty_scrollback.lock().unwrap_or_else(|e| e.into_inner());
                             sb.extend_from_slice(&data);
                             if sb.len() > CONSOLE_SCROLLBACK_BYTES {
                                 let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
@@ -741,7 +741,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // Dup the fd for the broadcaster BEFORE OwnedFd takes ownership
         let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
 
-        let mut map = self.vms.lock().unwrap();
+        let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(
             config.vm_id.clone(),
             VmProcess {
@@ -804,7 +804,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let (api_socket, pty_master_fd, pty_tx, pty_scrollback, broadcaster_alive) = {
-            let vms = self.vms.lock().unwrap();
+            let vms = self.vms.lock().unwrap_or_else(|e| e.into_inner());
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
                 id: vm_id.to_string(),
@@ -868,7 +868,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         if force {
             let log_path = {
-                let mut map = self.vms.lock().unwrap();
+                let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(mut proc) = map.remove(vm_id) {
                     // Clear in-memory scrollback before dropping the process.
                     if let Ok(mut sb) = proc.pty_scrollback.lock() {
@@ -920,7 +920,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // in the map so a later vm.boot can restart it; we truncate the
             // on-disk log so the existing writer task can continue appending.
             let (pty_scrollback, log_path) = {
-                let vms = self.vms.lock().unwrap();
+                let vms = self.vms.lock().unwrap_or_else(|e| e.into_inner());
                 let proc = vms.get(vm_id);
                 (
                     proc.map(|p| p.pty_scrollback.clone()),
@@ -954,7 +954,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let mut proc = {
-            let mut map = self.vms.lock().unwrap();
+            let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
             map.remove(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
                 id: vm_id.to_string(),
@@ -1068,7 +1068,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let mut cpu_percent = 0.0;
         {
-            let mut map = self.vms.lock().unwrap();
+            let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(proc) = map.get_mut(vm_id) {
                 if let Some(last_at) = proc.last_cpu_at {
                     let delta_secs = cpu_seconds - proc.last_cpu_seconds;

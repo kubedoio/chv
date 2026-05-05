@@ -195,8 +195,11 @@ pub async fn create_backup_job(
     state.cache.invalidate("overview").await;
 
     Ok(Json(json!({
+        "accepted": true,
+        "task_id": job_id,
         "job_id": job_id,
-        "status": "Pending",
+        "summary": format!("Creating backup job for VM '{}'", input.vm_id),
+        "next_refresh_path": format!("/api/v1/backups/jobs/{}", job_id),
     })))
 }
 
@@ -398,8 +401,11 @@ pub async fn execute_backup_job(
     state.cache.invalidate("overview").await;
 
     Ok(Json(json!({
-        "execution_id": execution_id,
-        "status": "Accepted",
+        "accepted": true,
+        "task_id": execution_id,
+        "job_id": job_id,
+        "summary": format!("Executing backup job '{}'", job_id),
+        "next_refresh_path": format!("/api/v1/backups/jobs/{}", execution_id),
     })))
 }
 
@@ -462,7 +468,12 @@ pub async fn create_backup_schedule(
         .map_err(|e| BffError::Internal(format!("failed to create backup schedule: {}", e)))?;
     state.cache.invalidate("overview").await;
 
-    Ok(Json(json!({ "schedule_id": schedule_id })))
+    Ok(Json(json!({
+        "accepted": true,
+        "task_id": null,
+        "schedule_id": schedule_id,
+        "summary": format!("Created backup schedule for VM '{}'", input.vm_id),
+    })))
 }
 
 pub async fn list_backup_schedules(
@@ -655,7 +666,13 @@ pub async fn create_backup_restore(
         .map_err(|e| BffError::Internal(format!("failed to create backup restore: {}", e)))?;
     state.cache.invalidate("overview").await;
 
-    Ok(Json(json!({ "restore_id": restore_id })))
+    Ok(Json(json!({
+        "accepted": true,
+        "task_id": restore_id,
+        "restore_id": restore_id,
+        "summary": format!("Restoring backup job '{}'", input.backup_job_id),
+        "next_refresh_path": format!("/api/v1/backups/restores/{}", restore_id),
+    })))
 }
 
 pub async fn list_backup_restores(

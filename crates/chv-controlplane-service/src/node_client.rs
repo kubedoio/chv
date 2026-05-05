@@ -1042,10 +1042,7 @@ fn with_operation_id_metadata<T>(req: T, operation_id: &str) -> tonic::Request<T
 }
 
 fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    chv_common::now_unix_ms()
 }
 
 fn now_iso() -> String {

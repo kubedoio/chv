@@ -49,7 +49,18 @@ impl From<ControlPlaneServiceError> for tonic::Status {
                     "stale generation: expected {expected}, received {received}"
                 ))
             }
-            _ => Status::internal(err.to_string()),
+            ControlPlaneServiceError::Store(ref e) => {
+                tracing::error!(error = %e, "store error");
+                Status::internal("internal error")
+            }
+            ControlPlaneServiceError::Internal(ref msg) => {
+                tracing::error!(error = %msg, "internal error");
+                Status::internal("internal error")
+            }
+            ControlPlaneServiceError::Io(ref e) => {
+                tracing::error!(error = %e, "io error");
+                Status::internal("internal error")
+            }
         }
     }
 }
