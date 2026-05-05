@@ -480,6 +480,62 @@ impl BackupRepository {
         .map_err(StoreError::from)
     }
 
+    pub async fn prune_old_jobs_for_vm(
+        &self,
+        vm_id: &str,
+        retention_count: i64,
+    ) -> Result<u64, StoreError> {
+        let result = sqlx::query(
+            "DELETE FROM backup_jobs WHERE job_id IN (\
+                SELECT job_id FROM backup_jobs \
+                WHERE vm_id = ? AND status IN ('Succeeded', 'Failed') \
+                ORDER BY created_at DESC \
+                LIMIT -1 OFFSET ?\
+            )",
+        )
+        .bind(vm_id)
+        .bind(retention_count)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn list_retryable_jobs(&self, now: &str) -> Result<Vec<BackupJobRow>, StoreError> {
+        sqlx::query_as::<_, BackupJobRow>(
+            "SELECT * FROM backup_jobs \
+             WHERE status = 'RetryPending' AND next_retry_at <= ? \
+             ORDER BY next_retry_at ASC LIMIT 20",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    pub async fn mark_for_retry(
+        &self,
+        job_id: &str,
+        retry_count: i64,
+        next_retry_at: &str,
+        error_message: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE backup_jobs SET \
+             status = 'RetryPending', \
+             retry_count = ?, \
+             next_retry_at = ?, \
+             error_message = ? \
+             WHERE job_id = ?",
+        )
+        .bind(retry_count)
+        .bind(next_retry_at)
+        .bind(error_message)
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ── Restores ─────────────────────────────────────────────────────────────
 
     pub async fn list_restores(
@@ -562,6 +618,8 @@ pub struct BackupJobRow {
     pub completed_at: Option<String>,
     pub error_message: Option<String>,
     pub size_bytes: Option<i64>,
+    pub retry_count: i64,
+    pub next_retry_at: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

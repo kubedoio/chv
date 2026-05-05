@@ -9,6 +9,8 @@ use std::str::FromStr;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
+const MAX_RETRIES: i64 = 3;
+
 /// Background worker that schedules backup jobs from cron expressions
 /// and executes pending backup jobs against node agents.
 pub struct BackupWorker {
@@ -161,6 +163,33 @@ impl BackupWorker {
                     .map_err(|e| ChvError::Internal {
                         reason: format!("failed to update schedule last_run_at: {e}"),
                     })?;
+
+                // Enforce retention: prune old completed jobs beyond retention_count
+                if schedule.retention_count > 0 {
+                    match self
+                        .backup_repo
+                        .prune_old_jobs_for_vm(&schedule.vm_id, schedule.retention_count)
+                        .await
+                    {
+                        Ok(pruned) if pruned > 0 => {
+                            info!(
+                                schedule_id = %schedule.schedule_id,
+                                vm_id = %schedule.vm_id,
+                                pruned_count = pruned,
+                                retention_count = schedule.retention_count,
+                                "pruned old backup jobs"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                schedule_id = %schedule.schedule_id,
+                                error = %e,
+                                "failed to prune old backup jobs"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -176,33 +205,76 @@ impl BackupWorker {
                 reason: format!("failed to list pending backup jobs: {e}"),
             })?;
 
-        for job in jobs {
-            if let Err(e) = self.execute_job(&job).await {
+        let now_str = chrono::Utc::now().to_rfc3339();
+        let retryable = self
+            .backup_repo
+            .list_retryable_jobs(&now_str)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to list retryable backup jobs: {e}"),
+            })?;
+
+        for job in jobs.iter().chain(retryable.iter()) {
+            if let Err(e) = self.execute_job(job).await {
                 warn!(
                     job_id = %job.job_id,
                     error = %e,
                     "failed to execute backup job"
                 );
 
-                // Mark as failed
-                let now = chrono::Utc::now().to_rfc3339();
-                if let Err(update_err) = self
-                    .backup_repo
-                    .update_job_status(&BackupJobStatusUpdateInput {
-                        job_id: job.job_id.clone(),
-                        status: "Failed".into(),
-                        started_at: Some(now.clone()),
-                        completed_at: Some(now),
-                        error_message: Some(e.to_string()),
-                        size_bytes: None,
-                    })
-                    .await
-                {
-                    error!(
-                        job_id = %job.job_id,
-                        error = %update_err,
-                        "failed to update job status after execution failure"
-                    );
+                // Check if we can retry
+                let new_retry_count = job.retry_count + 1;
+                if new_retry_count <= MAX_RETRIES {
+                    let backoff_secs = 60i64 * (1 << (new_retry_count - 1)); // 60s, 120s, 240s
+                    let next_retry = chrono::Utc::now()
+                        + chrono::Duration::seconds(backoff_secs);
+                    if let Err(retry_err) = self
+                        .backup_repo
+                        .mark_for_retry(
+                            &job.job_id,
+                            new_retry_count,
+                            &next_retry.to_rfc3339(),
+                            &e.to_string(),
+                        )
+                        .await
+                    {
+                        error!(
+                            job_id = %job.job_id,
+                            error = %retry_err,
+                            "failed to mark job for retry"
+                        );
+                    } else {
+                        info!(
+                            job_id = %job.job_id,
+                            retry = new_retry_count,
+                            next_retry_at = %next_retry.to_rfc3339(),
+                            "backup job scheduled for retry"
+                        );
+                    }
+                } else {
+                    // Permanently failed
+                    let now = chrono::Utc::now().to_rfc3339();
+                    if let Err(update_err) = self
+                        .backup_repo
+                        .update_job_status(&BackupJobStatusUpdateInput {
+                            job_id: job.job_id.clone(),
+                            status: "Failed".into(),
+                            started_at: Some(now.clone()),
+                            completed_at: Some(now),
+                            error_message: Some(format!(
+                                "permanently failed after {} retries: {}",
+                                MAX_RETRIES, e
+                            )),
+                            size_bytes: None,
+                        })
+                        .await
+                    {
+                        error!(
+                            job_id = %job.job_id,
+                            error = %update_err,
+                            "failed to update job status after exhausting retries"
+                        );
+                    }
                 }
             }
         }
@@ -324,20 +396,6 @@ impl BackupWorker {
                 if matches!(e, ChvError::BackendUnavailable { .. }) {
                     self.node_client_pool.evict(&node_id);
                 }
-                let now = chrono::Utc::now().to_rfc3339();
-                self.backup_repo
-                    .update_job_status(&BackupJobStatusUpdateInput {
-                        job_id: job.job_id.clone(),
-                        status: "Failed".into(),
-                        started_at: Some(now.clone()),
-                        completed_at: Some(now),
-                        error_message: Some(e.to_string()),
-                        size_bytes: None,
-                    })
-                    .await
-                    .map_err(|e2| ChvError::Internal {
-                        reason: format!("agent rejected backup job and status update failed: {e2}"),
-                    })?;
                 Err(e)
             }
         }
