@@ -56,7 +56,7 @@ impl IntoResponse for BffError {
                     "used": used,
                     "requested": requested,
                 }));
-                return (StatusCode::TOO_MANY_REQUESTS, body).into_response();
+                return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
             }
         };
 

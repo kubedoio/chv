@@ -8,6 +8,7 @@ name = "chv-agent"
 path = "src/main.rs"
 
 [dependencies]
+chv-common = { path = "../../crates/chv-common" }
 chv-config = { path = "../../crates/chv-config" }
 chv-observability = { path = "../../crates/chv-observability" }
 chv-agent-core = { path = "../../crates/chv-agent-core" }

@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-chv-stord-api = { path = "../../gen/rust/chv-stord-api" }
 thiserror = { workspace = true }
+tonic = { workspace = true }

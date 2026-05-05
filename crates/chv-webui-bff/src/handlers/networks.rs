@@ -324,14 +324,10 @@ pub async fn create_network(
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
     Ok(Json(json!({
+        "accepted": true,
+        "task_id": null,
         "network_id": network_id,
-        "name": name,
-        "cidr": cidr,
-        "gateway": gateway,
-        "dhcp_enabled": dhcp_enabled,
-        "ipam_mode": ipam_mode,
-        "is_default": is_default,
-        "dns_enabled": dns_enabled,
+        "summary": format!("Creating network '{}'", name),
     })))
 }
 
@@ -391,8 +387,10 @@ pub async fn delete_network(
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
     Ok(Json(json!({
-        "deleted": true,
+        "accepted": true,
+        "task_id": null,
         "network_id": network_id,
+        "summary": format!("Deleted network '{}'", network_id),
     })))
 }
 

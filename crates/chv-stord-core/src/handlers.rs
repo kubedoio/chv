@@ -7,6 +7,31 @@ use chv_stord_backends::StorageBackend;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+pub(crate) trait ChvErrorProtoExt {
+    fn to_proto_result(&self) -> proto::Result;
+    #[allow(dead_code)]
+    fn ok_proto_result() -> proto::Result;
+}
+
+impl ChvErrorProtoExt for ChvError {
+    fn to_proto_result(&self) -> proto::Result {
+        let (status, error_code, human_summary) = self.to_result_fields();
+        proto::Result {
+            status: status.to_string(),
+            error_code: error_code.to_string(),
+            human_summary,
+        }
+    }
+
+    fn ok_proto_result() -> proto::Result {
+        proto::Result {
+            status: ErrorCode::OK.to_string(),
+            error_code: ErrorCode::OK.to_string(),
+            human_summary: String::new(),
+        }
+    }
+}
+
 pub struct StorageServiceImpl<B: StorageBackend> {
     backend: Arc<B>,
     sessions: Arc<SessionTable>,

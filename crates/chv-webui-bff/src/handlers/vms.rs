@@ -636,9 +636,11 @@ pub async fn create_vm(
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
     Ok(Json(json!({
+        "accepted": true,
+        "task_id": operation_id,
         "vm_id": vm_id,
-        "operation_id": operation_id,
-        "status": "Accepted",
+        "summary": format!("Creating VM '{}'", display_name),
+        "next_refresh_path": format!("/api/v1/tasks/{}", operation_id),
     })))
 }
 
@@ -720,9 +722,11 @@ pub async fn delete_vm(
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
     Ok(Json(json!({
+        "accepted": true,
+        "task_id": operation_id,
         "vm_id": vm_id,
-        "operation_id": operation_id,
-        "status": "Accepted",
+        "summary": format!("Deleting VM '{}'", vm_id),
+        "next_refresh_path": format!("/api/v1/tasks/{}", operation_id),
     })))
 }
 
@@ -848,9 +852,11 @@ pub async fn resize_vm(
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
     Ok(Json(json!({
+        "accepted": true,
+        "task_id": operation_id,
         "vm_id": vm_id,
-        "operation_id": operation_id,
-        "status": "Accepted",
+        "summary": format!("Resizing VM '{}' to {} vCPU, {} bytes memory", vm_id, cpu_count, memory_bytes),
+        "next_refresh_path": format!("/api/v1/tasks/{}", operation_id),
     })))
 }
 
@@ -1234,11 +1240,7 @@ pub(crate) async fn enforce_user_quota(
 /// Sets the locally-administered bit to avoid conflicts with OUI space.
 pub(crate) fn generate_mac(vm_id: &str, network_id: &str) -> String {
     let input = format!("{}:{}", vm_id, network_id);
-    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-    for byte in input.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    let hash = chv_common::fnv1a_hash(&input);
     let octets = [
         0x02, // locally administered
         ((hash >> 8) & 0xFF) as u8,
@@ -1258,12 +1260,7 @@ pub(crate) fn generate_mac(vm_id: &str, network_id: &str) -> String {
 pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
     if cidr.is_empty() {
         // Fallback to deterministic 10.x.x.x when no CIDR is configured
-        let input = vm_id;
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for byte in input.bytes() {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
+        let hash = chv_common::fnv1a_hash(vm_id);
         let o2 = ((hash >> 8) & 0xFF) as u8;
         let o3 = ((hash >> 16) & 0xFF) as u8;
         let o4 = ((hash >> 24) & 0xFF) as u8;
@@ -1296,11 +1293,7 @@ pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
 
     // Deterministic offset from hash of vm_id + network_id
     let input = format!("{}-{}", vm_id, network_id);
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in input.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    let hash = chv_common::fnv1a_hash(&input);
     let offset = (hash % usable_hosts as u64) as u32;
 
     // +2 to skip .0 (network) and .1 (gateway)

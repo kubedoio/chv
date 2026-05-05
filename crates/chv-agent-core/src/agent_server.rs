@@ -285,8 +285,18 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             );
             self.persist_cache(&cache).await;
 
-            let spec =
-                serde_json::from_slice::<serde_json::Value>(&frag.spec_json).unwrap_or_default();
+            let spec = match serde_json::from_slice::<serde_json::Value>(&frag.spec_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        network_id = %inner.network_id,
+                        error = %e,
+                        fragment = %String::from_utf8_lossy(&frag.spec_json),
+                        "failed to parse network spec_json, falling back to defaults (bridge=br0, cidr=10.0.0.0/24)"
+                    );
+                    serde_json::Value::default()
+                }
+            };
             let bridge = spec
                 .get("bridge_name")
                 .and_then(|v| v.as_str())
@@ -329,7 +339,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                     let tport = exp.get("target_port").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     let mode = exp.get("mode").and_then(|v| v.as_str()).unwrap_or("nat");
                     if !eid.is_empty() {
-                        let _ = nwd
+                        if let Err(e) = nwd
                             .expose_service(
                                 &inner.network_id,
                                 eid,
@@ -340,7 +350,10 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                                 mode,
                                 Some(&meta.operation_id),
                             )
-                            .await;
+                            .await
+                        {
+                            warn!(network_id = %inner.network_id, exposure_id = %eid, error = %e, "failed to expose service");
+                        }
                     }
                 }
             }
@@ -349,9 +362,12 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             if let Some(rules) = spec.get("firewall_rules") {
                 let fw_op_id = format!("{}-firewall", meta.operation_id);
                 let policy_json = serde_json::to_vec(rules).unwrap_or_default();
-                let _ = nwd
+                if let Err(e) = nwd
                     .set_firewall_policy(&inner.network_id, "v1", policy_json, Some(&fw_op_id))
-                    .await;
+                    .await
+                {
+                    warn!(network_id = %inner.network_id, error = %e, "failed to set firewall policy");
+                }
             }
 
             // NAT policy
@@ -365,9 +381,12 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                     .get("nat_rules")
                     .map(|v| serde_json::to_vec(v).unwrap_or_default())
                     .unwrap_or_default();
-                let _ = nwd
+                if let Err(e) = nwd
                     .set_nat_policy(&inner.network_id, "v1", policy_json, Some(&nat_op_id))
-                    .await;
+                    .await
+                {
+                    warn!(network_id = %inner.network_id, error = %e, "failed to set NAT policy");
+                }
             }
 
             // DHCP scope
@@ -395,7 +414,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let _ = nwd
+                    if let Err(e) = nwd
                         .ensure_dhcp_scope(
                             &inner.network_id,
                             cidr,
@@ -404,7 +423,10 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                             dns_servers,
                             Some(&dhcp_op_id),
                         )
-                        .await;
+                        .await
+                    {
+                        warn!(network_id = %inner.network_id, error = %e, "failed to ensure DHCP scope");
+                    }
                 }
             }
 
@@ -434,14 +456,17 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let _ = nwd
+                    if let Err(e) = nwd
                         .ensure_dns_scope(
                             &inner.network_id,
                             forwarders,
                             static_records,
                             Some(&dns_op_id),
                         )
-                        .await;
+                        .await
+                    {
+                        warn!(network_id = %inner.network_id, error = %e, "failed to ensure DNS scope");
+                    }
                 }
             }
         }

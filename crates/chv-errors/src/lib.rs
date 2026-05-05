@@ -1,5 +1,3 @@
-use chv_stord_api::chv_stord_api as proto;
-
 #[derive(Debug, thiserror::Error)]
 pub enum ChvError {
     #[error("not found: {resource} {id}")]
@@ -10,6 +8,20 @@ pub enum ChvError {
 
     #[error("invalid argument: {field} — {reason}")]
     InvalidArgument { field: String, reason: String },
+
+    #[error("bad request: {reason}")]
+    BadRequest { reason: String },
+
+    #[error("unauthorized: {reason}")]
+    Unauthorized { reason: String },
+
+    #[error("quota exceeded: {resource} — limit {limit}, used {used}, requested {requested}")]
+    QuotaExceeded {
+        resource: String,
+        limit: i64,
+        used: i64,
+        requested: i64,
+    },
 
     #[error("backend unavailable: {backend} — {reason}")]
     BackendUnavailable { backend: String, reason: String },
@@ -50,6 +62,9 @@ impl ErrorCode {
     pub const NOT_FOUND: &str = "NOT_FOUND";
     pub const ALREADY_EXISTS: &str = "ALREADY_EXISTS";
     pub const INVALID_ARGUMENT: &str = "INVALID_ARGUMENT";
+    pub const BAD_REQUEST: &str = "BAD_REQUEST";
+    pub const UNAUTHORIZED: &str = "UNAUTHORIZED";
+    pub const QUOTA_EXCEEDED: &str = "QUOTA_EXCEEDED";
     pub const BACKEND_UNAVAILABLE: &str = "BACKEND_UNAVAILABLE";
     pub const NETWORK_UNAVAILABLE: &str = "NETWORK_UNAVAILABLE";
     pub const CONFLICT: &str = "CONFLICT";
@@ -65,6 +80,9 @@ impl ChvError {
             ChvError::NotFound { .. } => ErrorCode::NOT_FOUND,
             ChvError::AlreadyExists { .. } => ErrorCode::ALREADY_EXISTS,
             ChvError::InvalidArgument { .. } => ErrorCode::INVALID_ARGUMENT,
+            ChvError::BadRequest { .. } => ErrorCode::BAD_REQUEST,
+            ChvError::Unauthorized { .. } => ErrorCode::UNAUTHORIZED,
+            ChvError::QuotaExceeded { .. } => ErrorCode::QUOTA_EXCEEDED,
             ChvError::BackendUnavailable { .. } => ErrorCode::BACKEND_UNAVAILABLE,
             ChvError::NetworkUnavailable { .. } => ErrorCode::NETWORK_UNAVAILABLE,
             ChvError::Conflict { .. } => ErrorCode::CONFLICT,
@@ -86,21 +104,50 @@ impl ChvError {
     pub fn ok_result_fields() -> (&'static str, &'static str, String) {
         (ErrorCode::OK, ErrorCode::OK, String::new())
     }
+}
 
-    pub fn to_proto_result(&self) -> proto::Result {
-        let (status, error_code, human_summary) = self.to_result_fields();
-        proto::Result {
-            status: status.to_string(),
-            error_code: error_code.to_string(),
-            human_summary,
-        }
-    }
-
-    pub fn ok_proto_result() -> proto::Result {
-        proto::Result {
-            status: ErrorCode::OK.to_string(),
-            error_code: ErrorCode::OK.to_string(),
-            human_summary: String::new(),
+impl From<ChvError> for tonic::Status {
+    fn from(err: ChvError) -> tonic::Status {
+        match &err {
+            ChvError::NotFound { resource, id } => {
+                tonic::Status::not_found(format!("{resource} {id}"))
+            }
+            ChvError::AlreadyExists { resource, id } => {
+                tonic::Status::already_exists(format!("{resource} {id}"))
+            }
+            ChvError::InvalidArgument { field, reason } => {
+                tonic::Status::invalid_argument(format!("{field}: {reason}"))
+            }
+            ChvError::BadRequest { reason } => tonic::Status::invalid_argument(reason.clone()),
+            ChvError::Unauthorized { .. } => {
+                tonic::Status::unauthenticated("unauthorized")
+            }
+            ChvError::QuotaExceeded { resource, .. } => {
+                tonic::Status::resource_exhausted(format!("{resource} quota exceeded"))
+            }
+            ChvError::Conflict { resource, id } => {
+                tonic::Status::already_exists(format!("{resource} {id}"))
+            }
+            ChvError::StaleGeneration {
+                resource,
+                id,
+                expected,
+                got,
+            } => tonic::Status::failed_precondition(format!(
+                "stale generation on {resource} {id}: expected >= {expected}, got {got}"
+            )),
+            ChvError::BackendUnavailable { backend, .. } => {
+                tonic::Status::unavailable(format!("{backend} unavailable"))
+            }
+            ChvError::ControlPlaneUnavailable { .. } => {
+                tonic::Status::unavailable("control plane unavailable")
+            }
+            ChvError::NetworkUnavailable { resource, .. } => {
+                tonic::Status::unavailable(format!("{resource} unavailable"))
+            }
+            ChvError::Io { .. } | ChvError::Internal { .. } => {
+                tonic::Status::internal("internal error")
+            }
         }
     }
 }

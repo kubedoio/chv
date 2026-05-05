@@ -13,4 +13,3 @@ pub use domain::{
     ResourceKind, ResourceRef,
 };
 pub use fragment::{NetworkExposureSpec, NetworkSpec, NodeSpec, VmSpec, VolumeSpec};
-pub use state::{NodeLifecycleState, ResourceState, VersionedState};

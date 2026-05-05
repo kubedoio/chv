@@ -157,14 +157,12 @@ pub async fn create_snapshot(
     state.cache.invalidate("overview").await;
 
     Ok(Json(json!({
+        "accepted": true,
+        "task_id": response.task_id,
         "snapshot_id": snapshot_id,
         "vm_id": vm_id,
-        "name": name,
-        "description": description,
-        "includes_memory": includes_memory,
-        "snapshot_path": snapshot_path,
-        "status": "creating",
-        "task_id": response.task_id,
+        "summary": format!("Snapshot '{}' creation accepted for VM {}", name, vm_id),
+        "next_refresh_path": format!("/v1/tasks/{}", response.task_id),
     })))
 }
 
@@ -210,8 +208,9 @@ pub async fn delete_snapshot(
     state.cache.invalidate("overview").await;
 
     Ok(Json(json!({
+        "accepted": true,
         "snapshot_id": snapshot_id,
-        "status": "deleted",
+        "summary": format!("Snapshot {} deleted", snapshot_id),
     })))
 }
 
@@ -284,10 +283,11 @@ pub async fn restore_snapshot(
     state.cache.invalidate("overview").await;
 
     Ok(Json(json!({
+        "accepted": true,
+        "task_id": response.task_id,
         "snapshot_id": snapshot_id,
         "vm_id": snapshot.vm_id,
-        "snapshot_path": snapshot.snapshot_path,
-        "status": "restoring",
-        "task_id": response.task_id,
+        "summary": format!("Snapshot restore accepted for VM {}", snapshot.vm_id),
+        "next_refresh_path": format!("/v1/tasks/{}", response.task_id),
     })))
 }
