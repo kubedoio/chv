@@ -1,4 +1,7 @@
-use axum::{extract::{Extension, State}, response::Json};
+use axum::{
+    extract::{Extension, State},
+    response::Json,
+};
 use serde_json::{json, Value};
 
 use crate::handlers::hypervisor_settings::validate_vm_overrides;
@@ -23,7 +26,9 @@ pub async fn list_vms(
         .clamp(1, 200);
     let cache_key = format!("vms:list:{}:{}", page, page_size);
     if let Some(cached) = state.cache.get(&cache_key).await {
-        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+        return Ok(Json(
+            serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?,
+        ));
     }
 
     let offset = (page - 1) * page_size;
@@ -754,25 +759,25 @@ pub async fn resize_vm(
         return Err(BffError::BadRequest("memory must be > 0".into()));
     }
 
-    let exists =
-        sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
-            .bind(&vm_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| BffError::Internal(format!("failed to check vm existence: {}", e)))?;
+    let exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
+        .bind(&vm_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to check vm existence: {}", e)))?;
 
     if exists.is_none() {
         return Err(BffError::NotFound(format!("vm {} not found", vm_id)));
     }
 
     // Fetch current resource usage for delta-based quota check
-    let current: (Option<i64>, Option<i64>) = sqlx::query_as(
-        "SELECT cpu_count, memory_bytes FROM vm_desired_state WHERE vm_id = ?"
-    )
-    .bind(&vm_id)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to read current vm resources: {}", e)))?;
+    let current: (Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT cpu_count, memory_bytes FROM vm_desired_state WHERE vm_id = ?")
+            .bind(&vm_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|e| {
+                BffError::Internal(format!("failed to read current vm resources: {}", e))
+            })?;
     let old_cpu = current.0.unwrap_or(0);
     let old_memory = current.1.unwrap_or(0);
 
@@ -896,7 +901,7 @@ pub async fn mutate_vm(
 
 pub async fn get_vm_console(
     State(state): State<AppState>,
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
     let vm_id = payload
@@ -907,6 +912,13 @@ pub async fn get_vm_console(
     if !chv_common::validate_id(vm_id) {
         return Err(BffError::BadRequest("invalid vm_id format".into()));
     }
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    require_vm_owner(&mut conn, vm_id, &claims.sub, claims.role == "admin").await?;
 
     let log_path = state
         .agent_runtime_dir
@@ -936,6 +948,7 @@ pub async fn get_vm_console(
 struct ConsoleTokenClaims {
     sub: String,
     username: String,
+    aud: String,
     exp: u64,
 }
 
@@ -952,6 +965,7 @@ fn generate_console_token(
     let claims = ConsoleTokenClaims {
         sub: vm_id.to_string(),
         username: username.to_string(),
+        aud: "chv:console".to_string(),
         exp,
     };
     let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
@@ -972,6 +986,13 @@ pub async fn get_vm_console_url(
         return Err(BffError::BadRequest("invalid vm_id format".into()));
     }
 
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    require_vm_owner(&mut conn, &vm_id, &claims.sub, claims.role == "admin").await?;
+
     let node_id: Option<String> = sqlx::query_scalar("SELECT node_id FROM vms WHERE vm_id = ?")
         .bind(&vm_id)
         .fetch_optional(&state.pool)
@@ -980,13 +1001,12 @@ pub async fn get_vm_console_url(
 
     let node_id = node_id.ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
 
-    let agent_ws_address: Option<String> = sqlx::query_scalar(
-        "SELECT agent_ws_address FROM nodes WHERE node_id = ?"
-    )
-    .bind(&node_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| BffError::Internal(format!("failed to look up node: {}", e)))?;
+    let agent_ws_address: Option<String> =
+        sqlx::query_scalar("SELECT agent_ws_address FROM nodes WHERE node_id = ?")
+            .bind(&node_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to look up node: {}", e)))?;
 
     let token = generate_console_token(&vm_id, &claims.username, &state.jwt_secret)
         .map_err(|e| BffError::Internal(format!("failed to generate console token: {}", e)))?;
@@ -1011,7 +1031,10 @@ pub async fn get_vm_console_url(
                     "console WebSocket URL uses plaintext ws:// — configure TLS and X-Forwarded-Proto for production"
                 );
             }
-            format!("{}://{}/vms/{}/console?token={}", ws_scheme, addr, vm_id, token)
+            format!(
+                "{}://{}/vms/{}/console?token={}",
+                ws_scheme, addr, vm_id, token
+            )
         }
         _ => format!("/ws/vms/{}/console?token={}", vm_id, token),
     };
@@ -1104,7 +1127,9 @@ pub(crate) async fn require_vm_owner(
         Some(o) if o == user_id => Ok(()),
         None => {
             tracing::warn!(resource_id = %vm_id, "ownership check failed: resource has no owner_id set");
-            Err(BffError::Forbidden("resource has no owner; admin access required".into()))
+            Err(BffError::Forbidden(
+                "resource has no owner; admin access required".into(),
+            ))
         }
         Some(_) => Err(BffError::Forbidden("you do not own this VM".into())),
     }

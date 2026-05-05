@@ -1,9 +1,9 @@
+use crate::node_client::{CircuitBreaker, NodeClient};
+use chv_errors::ChvError;
 use dashmap::DashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use crate::node_client::{CircuitBreaker, NodeClient};
-use chv_errors::ChvError;
 
 #[derive(Clone)]
 pub struct NodeClientPool {

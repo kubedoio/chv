@@ -251,6 +251,17 @@ ON CONFLICT (vm_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 "#;
 
+const PATCH_VM_RESOURCES_SQL: &str = r#"
+UPDATE vm_desired_state SET
+    cpu_count = $2,
+    memory_bytes = $3,
+    desired_generation = $4,
+    requested_by = $5,
+    target_node_id = COALESCE($6, target_node_id),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
+WHERE vm_id = $1
+"#;
+
 const PATCH_VOLUME_ATTACHMENT_SQL: &str = r#"
 INSERT INTO volume_desired_state (
     volume_id,
@@ -477,6 +488,38 @@ impl DesiredStateRepository {
                 }
                 _ => StoreError::from(e),
             })?;
+        Ok(())
+    }
+
+    pub async fn set_vm_resources(
+        &self,
+        input: &VmResourcesPatchInput,
+    ) -> Result<(), StoreError> {
+        let rows = sqlx::query(PATCH_VM_RESOURCES_SQL)
+            .bind(input.vm_id.as_str())
+            .bind(input.cpu_count)
+            .bind(input.memory_bytes)
+            .bind(generation_to_i64(input.desired_generation)?)
+            .bind(&input.requested_by)
+            .bind(input.target_node_id.as_ref().map(NodeId::as_str))
+            .bind(input.requested_unix_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => {
+                    StoreError::NotFound {
+                        entity: "vm",
+                        id: input.vm_id.to_string(),
+                    }
+                }
+                _ => StoreError::from(e),
+            })?;
+        if rows.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "vm",
+                id: input.vm_id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -794,6 +837,17 @@ pub struct VmPowerStatePatchInput {
     pub updated_by: Option<String>,
     pub target_node_id: Option<NodeId>,
     pub desired_power_state: Option<String>,
+    pub requested_unix_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct VmResourcesPatchInput {
+    pub vm_id: ResourceId,
+    pub cpu_count: i32,
+    pub memory_bytes: i64,
+    pub desired_generation: Generation,
+    pub requested_by: Option<String>,
+    pub target_node_id: Option<NodeId>,
     pub requested_unix_ms: i64,
 }
 

@@ -449,9 +449,7 @@ impl BackupRepository {
         Ok(())
     }
 
-    pub async fn list_enabled_schedules(
-        &self,
-    ) -> Result<Vec<BackupScheduleRow>, StoreError> {
+    pub async fn list_enabled_schedules(&self) -> Result<Vec<BackupScheduleRow>, StoreError> {
         sqlx::query_as::<_, BackupScheduleRow>(
             "SELECT * FROM backup_schedules WHERE enabled = true ORDER BY created_at ASC LIMIT 100",
         )

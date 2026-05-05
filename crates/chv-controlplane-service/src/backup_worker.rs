@@ -20,7 +20,12 @@ pub struct BackupWorker {
 }
 
 impl BackupWorker {
-    pub fn new(pool: StorePool, backup_repo: BackupRepository, agent_socket_pattern: String, node_client_pool: NodeClientPool) -> Self {
+    pub fn new(
+        pool: StorePool,
+        backup_repo: BackupRepository,
+        agent_socket_pattern: String,
+        node_client_pool: NodeClientPool,
+    ) -> Self {
         Self {
             pool,
             backup_repo,
@@ -94,9 +99,13 @@ impl BackupWorker {
         schedule: &chv_controlplane_store::BackupScheduleRow,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), ChvError> {
-        let cron = Schedule::from_str(&schedule.cron_expression).map_err(|e| ChvError::Internal {
-            reason: format!("invalid cron expression '{}': {e}", schedule.cron_expression),
-        })?;
+        let cron =
+            Schedule::from_str(&schedule.cron_expression).map_err(|e| ChvError::Internal {
+                reason: format!(
+                    "invalid cron expression '{}': {e}",
+                    schedule.cron_expression
+                ),
+            })?;
 
         let last_run = schedule
             .last_run_at
@@ -130,13 +139,13 @@ impl BackupWorker {
                     size_bytes: None,
                 };
 
-                let job_id = self
-                    .backup_repo
-                    .create_job(&input)
-                    .await
-                    .map_err(|e| ChvError::Internal {
-                        reason: format!("failed to create backup job from schedule: {e}"),
-                    })?;
+                let job_id =
+                    self.backup_repo
+                        .create_job(&input)
+                        .await
+                        .map_err(|e| ChvError::Internal {
+                            reason: format!("failed to create backup job from schedule: {e}"),
+                        })?;
 
                 info!(
                     schedule_id = %schedule.schedule_id,
@@ -241,7 +250,10 @@ impl BackupWorker {
         })?;
 
         let socket_path = self.resolve_agent_socket(&node_id);
-        let mut client = self.node_client_pool.get_or_connect(&node_id, &socket_path).await?;
+        let mut client = self
+            .node_client_pool
+            .get_or_connect(&node_id, &socket_path)
+            .await?;
         let generation_str = generation.to_string();
         let snapshot_name = format!("backup-{}", job.job_id);
 
@@ -324,9 +336,7 @@ impl BackupWorker {
                     })
                     .await
                     .map_err(|e2| ChvError::Internal {
-                        reason: format!(
-                            "agent rejected backup job and status update failed: {e2}"
-                        ),
+                        reason: format!("agent rejected backup job and status update failed: {e2}"),
                     })?;
                 Err(e)
             }

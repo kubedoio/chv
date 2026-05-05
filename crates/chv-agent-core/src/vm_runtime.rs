@@ -100,9 +100,12 @@ impl VmRuntime {
         rec.runtime_status = "Running".to_string();
         rec.consecutive_failures = 0;
         drop(map);
-        self.failure_counts.lock().map_err(|_| ChvError::Internal {
-            reason: "failure_counts mutex poisoned".to_string(),
-        })?.remove(vm_id);
+        self.failure_counts
+            .lock()
+            .map_err(|_| ChvError::Internal {
+                reason: "failure_counts mutex poisoned".to_string(),
+            })?
+            .remove(vm_id);
         Ok(())
     }
 
@@ -124,9 +127,12 @@ impl VmRuntime {
 
     pub async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.delete_vm(vm_id, operation_id).await?;
-        self.vms.lock().map_err(|_| ChvError::Internal {
-            reason: "vms mutex poisoned".to_string(),
-        })?.remove(vm_id);
+        self.vms
+            .lock()
+            .map_err(|_| ChvError::Internal {
+                reason: "vms mutex poisoned".to_string(),
+            })?
+            .remove(vm_id);
         Ok(())
     }
 

@@ -781,13 +781,13 @@ impl Reconciler {
 
         // Create missing VMs
         for vm_id in desired.difference(&actual) {
-            let generation = {
+            let (generation, raw) = {
                 let cache = self.cache.lock().await;
-                cache.vm_fragments.get(vm_id).map(|f| f.generation.clone())
-            };
-            let Some(generation) = generation else {
-                warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
-                continue;
+                let Some(fragment) = cache.vm_fragments.get(vm_id) else {
+                    warn!(vm_id = %vm_id, "vm fragment missing during reconcile");
+                    continue;
+                };
+                (fragment.generation.clone(), fragment.spec_json.clone())
             };
             let failures = self
                 .vm_runtime
@@ -797,13 +797,6 @@ impl Reconciler {
                 continue;
             }
             let op_id = format!("reconcile-vm-create-{}", vm_id);
-            let raw = {
-                let cache = self.cache.lock().await;
-                let Some(fragment) = cache.vm_fragments.get(vm_id) else {
-                    continue;
-                };
-                fragment.spec_json.clone()
-            };
             let raw = match std::str::from_utf8(&raw) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1014,7 +1007,12 @@ impl Reconciler {
                 let op_id = format!("reconcile-vm-resize-{}", vm_id);
                 if let Err(e) = self
                     .vm_runtime
-                    .resize_vm(vm_id, Some(spec.cpus), Some(spec.memory_bytes), Some(&op_id))
+                    .resize_vm(
+                        vm_id,
+                        Some(spec.cpus),
+                        Some(spec.memory_bytes),
+                        Some(&op_id),
+                    )
                     .await
                 {
                     warn!(vm_id = %vm_id, error = %e, "failed to resize vm");
@@ -1026,7 +1024,8 @@ impl Reconciler {
                     continue;
                 }
                 // Update stored config so we don't resize every tick
-                self.vm_runtime.update_vm_config(vm_id, spec.cpus, spec.memory_bytes);
+                self.vm_runtime
+                    .update_vm_config(vm_id, spec.cpus, spec.memory_bytes);
             }
         }
 

@@ -738,6 +738,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let pty_scrollback = Arc::new(std::sync::Mutex::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
 
+        // Dup the fd for the broadcaster BEFORE OwnedFd takes ownership
+        let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
+
         let mut map = self.vms.lock().unwrap();
         map.insert(
             config.vm_id.clone(),
@@ -755,7 +758,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         drop(map);
 
         // Spawn background broadcaster: read PTY output and fan out via broadcast channel
-        let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
         if broadcaster_fd >= 0 {
             Self::spawn_pty_broadcaster(
                 config.vm_id.clone(),

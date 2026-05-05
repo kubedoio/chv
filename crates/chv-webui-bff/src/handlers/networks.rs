@@ -22,7 +22,9 @@ pub async fn list_networks(
         .clamp(1, 200);
     let cache_key = format!("networks:list:{}:{}", page, page_size);
     if let Some(cached) = state.cache.get(&cache_key).await {
-        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+        return Ok(Json(
+            serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?,
+        ));
     }
 
     let offset = (page - 1) * page_size;
@@ -537,16 +539,19 @@ pub(crate) async fn require_network_owner(
     if is_admin {
         return Ok(());
     }
-    let owner: Option<String> = sqlx::query_scalar("SELECT owner_id FROM networks WHERE network_id = ?")
-        .bind(network_id)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(|e| BffError::Internal(format!("failed to check network owner: {}", e)))?;
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT owner_id FROM networks WHERE network_id = ?")
+            .bind(network_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| BffError::Internal(format!("failed to check network owner: {}", e)))?;
     match owner {
         Some(o) if o == user_id => Ok(()),
         None => {
             tracing::warn!(resource_id = %network_id, "ownership check failed: resource has no owner_id set");
-            Err(BffError::Forbidden("resource has no owner; admin access required".into()))
+            Err(BffError::Forbidden(
+                "resource has no owner; admin access required".into(),
+            ))
         }
         Some(_) => Err(BffError::Forbidden("you do not own this network".into())),
     }

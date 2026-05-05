@@ -61,11 +61,10 @@ impl BootstrapTokenRepository {
         // For one-time-use tokens, atomically consume via a single UPDATE … RETURNING.
         // The WHERE clause checks: exists, not yet used, and not expired.
         // This eliminates the TOCTOU race entirely.
-        let consumed: Option<(String,)> =
-            sqlx::query_as(ATOMIC_CONSUME_SQL)
-                .bind(&token_hash)
-                .fetch_optional(&self.pool)
-                .await?;
+        let consumed: Option<(String,)> = sqlx::query_as(ATOMIC_CONSUME_SQL)
+            .bind(&token_hash)
+            .fetch_optional(&self.pool)
+            .await?;
 
         match consumed {
             Some(_) => Ok(BootstrapTokenValidation::Valid),

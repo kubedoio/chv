@@ -19,7 +19,7 @@ struct SnapshotRow {
 }
 
 pub async fn list_vm_snapshots(
-    BearerToken(_claims): BearerToken,
+    BearerToken(claims): BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
@@ -27,6 +27,13 @@ pub async fn list_vm_snapshots(
         .get("vm_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing vm_id".into()))?;
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    super::vms::require_vm_owner(&mut conn, vm_id, &claims.sub, claims.role == "admin").await?;
 
     let rows = sqlx::query_as::<_, SnapshotRow>(
         r#"
@@ -136,11 +143,7 @@ pub async fn create_snapshot(
     // Dispatch snapshot operation through control plane
     let response = state
         .mutations
-        .snapshot_vm(
-            vm_id.clone(),
-            snapshot_path.clone(),
-            claims.sub.clone(),
-        )
+        .snapshot_vm(vm_id.clone(), snapshot_path.clone(), claims.sub.clone())
         .await
         .map_err(|e| BffError::Internal(format!("failed to dispatch snapshot: {:?}", e)))?;
 
@@ -152,7 +155,6 @@ pub async fn create_snapshot(
     );
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,
@@ -190,19 +192,14 @@ pub async fn delete_snapshot(
     .map_err(|e| BffError::Internal(format!("failed to look up snapshot: {}", e)))?
     .ok_or_else(|| BffError::NotFound(format!("snapshot {} not found", snapshot_id)))?;
 
-    // Verify the VM this snapshot belongs to still exists (ownership check)
-    let vm_exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
-        .bind(&snapshot.vm_id)
-        .fetch_optional(&state.pool)
+    // Verify the user owns the VM this snapshot belongs to
+    let mut conn = state
+        .pool
+        .acquire()
         .await
-        .map_err(|e| BffError::Internal(format!("failed to verify vm access: {}", e)))?;
-
-    if vm_exists.is_none() {
-        return Err(BffError::NotFound(format!(
-            "vm {} for snapshot {} not found",
-            snapshot.vm_id, snapshot_id
-        )));
-    }
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    super::vms::require_vm_owner(&mut conn, &snapshot.vm_id, &claims.sub, claims.role == "admin")
+        .await?;
 
     sqlx::query("DELETE FROM vm_snapshots WHERE snapshot_id = ?")
         .bind(&snapshot_id)
@@ -211,7 +208,6 @@ pub async fn delete_snapshot(
         .map_err(|e| BffError::Internal(format!("failed to delete snapshot: {}", e)))?;
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,
@@ -286,7 +282,6 @@ pub async fn restore_snapshot(
     );
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "snapshot_id": snapshot_id,

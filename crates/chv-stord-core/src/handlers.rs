@@ -117,14 +117,16 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         if req.volume_id.is_empty() {
             return Ok(Response::new(proto::OpenVolumeResponse {
-                result: Some(ChvError::InvalidArgument {
-                    field: "volume_id".to_string(),
-                    reason: "volume_id must not be empty".to_string(),
-                }.to_proto_result()),
+                result: Some(
+                    ChvError::InvalidArgument {
+                        field: "volume_id".to_string(),
+                        reason: "volume_id must not be empty".to_string(),
+                    }
+                    .to_proto_result(),
+                ),
                 volume_id: req.volume_id,
                 attachment_handle: String::new(),
                 export_kind: String::new(),
@@ -236,7 +238,6 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         if let Some(s) = self.sessions.get(&req.volume_id, &req.attachment_handle) {
             if let Err(e) = self.backend.close(&s.volume_id, &s.attachment_handle).await {
@@ -310,12 +311,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
     ) -> Result<Response<proto::AttachVolumeToVmResponse>, Status> {
         self.metrics.increment_counter("stord_attach_volume_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         if self
             .sessions
@@ -405,12 +405,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
     ) -> Result<Response<proto::Result>, Status> {
         self.metrics.increment_counter("stord_detach_volume_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         // TODO: add a secondary index or find_by_volume_and_vm method if this becomes a hot path.
         let sessions = self.sessions.list();
@@ -464,18 +463,20 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
     ) -> Result<Response<proto::Result>, Status> {
         self.metrics.increment_counter("stord_resize_volume_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         if req.new_size_bytes == 0 {
-            return Ok(Response::new(ChvError::InvalidArgument {
-                field: "new_size_bytes".to_string(),
-                reason: "new_size_bytes must be > 0".to_string(),
-            }.to_proto_result()));
+            return Ok(Response::new(
+                ChvError::InvalidArgument {
+                    field: "new_size_bytes".to_string(),
+                    reason: "new_size_bytes must be > 0".to_string(),
+                }
+                .to_proto_result(),
+            ));
         }
 
         let sessions = self.sessions.list();
@@ -507,12 +508,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         self.metrics
             .increment_counter("stord_prepare_snapshot_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
@@ -542,12 +542,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
     ) -> Result<Response<proto::Result>, Status> {
         self.metrics.increment_counter("stord_prepare_clone_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
@@ -578,12 +577,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         self.metrics
             .increment_counter("stord_restore_snapshot_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
@@ -614,12 +612,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         self.metrics
             .increment_counter("stord_delete_snapshot_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
@@ -650,12 +647,11 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         self.metrics
             .increment_counter("stord_set_device_policy_total");
         let req = request.into_inner();
-        let span = req
+        let _span = req
             .meta
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = span.enter();
 
         let sessions = self.sessions.list();
         let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);

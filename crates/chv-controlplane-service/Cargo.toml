@@ -33,6 +33,7 @@ chrono = "0.4"
 cron = "0.16"
 dashmap = { workspace = true }
 metrics = { workspace = true }
+futures = "0.3"
 
 [dev-dependencies]
 x509-parser = "0.16"

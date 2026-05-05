@@ -104,7 +104,10 @@ impl Orchestrator {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| ChvError::Internal {
-                reason: format!("failed to resolve node_id for operation {}: {e}", claimed.operation_id),
+                reason: format!(
+                    "failed to resolve node_id for operation {}: {e}",
+                    claimed.operation_id
+                ),
             })?
             .flatten();
 
@@ -121,12 +124,29 @@ impl Orchestrator {
 
         metrics::gauge!("orchestrator_operations_accepted").set(rows.len() as f64);
 
-        for row in rows {
-            let start = std::time::Instant::now();
-            let dispatch_result = self.dispatch_operation(&row).await;
-            let duration = start.elapsed().as_secs_f64();
+        type DispatchFut<'a> = std::pin::Pin<
+            Box<dyn std::future::Future<Output = (usize, Result<(), ChvError>, f64)> + Send + 'a>,
+        >;
+        let mut futs: Vec<DispatchFut<'_>> = Vec::with_capacity(rows.len());
 
-            let status_label = if dispatch_result.is_ok() { "success" } else { "failure" };
+        for (idx, row) in rows.iter().enumerate() {
+            futs.push(Box::pin(async move {
+                let start = std::time::Instant::now();
+                let result = self.dispatch_operation(row).await;
+                let duration = start.elapsed().as_secs_f64();
+                (idx, result, duration)
+            }));
+        }
+
+        let dispatch_results = futures::future::join_all(futs).await;
+
+        for (idx, dispatch_result, duration) in dispatch_results {
+            let row = &rows[idx];
+            let status_label = if dispatch_result.is_ok() {
+                "success"
+            } else {
+                "failure"
+            };
             metrics::counter!(
                 "orchestrator_operations_dispatched_total",
                 "type" => row.operation_type.clone(),
@@ -185,7 +205,10 @@ impl Orchestrator {
             })?;
 
         let socket_path = self.resolve_agent_socket(node_id);
-        let mut client = self.node_client_pool.get_or_connect(node_id, &socket_path).await?;
+        let mut client = self
+            .node_client_pool
+            .get_or_connect(node_id, &socket_path)
+            .await?;
 
         let generation = row
             .desired_generation
@@ -497,13 +520,12 @@ impl Orchestrator {
                         .and_then(|s| s.parse::<i64>().ok())
                     {
                         let volume_id = &row.resource_id;
-                        if let Err(e) = sqlx::query(
-                            "UPDATE volumes SET capacity_bytes = ? WHERE volume_id = ?",
-                        )
-                        .bind(new_size)
-                        .bind(volume_id)
-                        .execute(&self.pool)
-                        .await
+                        if let Err(e) =
+                            sqlx::query("UPDATE volumes SET capacity_bytes = ? WHERE volume_id = ?")
+                                .bind(new_size)
+                                .bind(volume_id)
+                                .execute(&self.pool)
+                                .await
                         {
                             tracing::error!(
                                 operation_id = %row.operation_id,
@@ -712,7 +734,11 @@ impl Orchestrator {
             .into_iter()
             .collect();
         if !unique_network_ids.is_empty() {
-            let placeholders = unique_network_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let placeholders = unique_network_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
             let query_str = format!(
                 "SELECT network_id, cidr, gateway FROM network_desired_state WHERE network_id IN ({})",
                 placeholders

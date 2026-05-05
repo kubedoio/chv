@@ -50,7 +50,9 @@ impl ConsoleServer {
             vm_runtime,
             jwt_secret,
             rate_limiter: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            consumed_tokens: Arc::new(tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap()))),
+            consumed_tokens: Arc::new(tokio::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(2048).unwrap(),
+            ))),
         }
     }
 
@@ -449,41 +451,61 @@ mod tests {
     async fn rate_limit_blocks_rapid_requests() {
         let rate_limiter = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         // First request should pass
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter)
+            .await
+            .is_none());
         // Immediate second request should be blocked
         assert!(
-            ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_some(),
+            ConsoleServer::check_rate_limit("vm-1", &rate_limiter)
+                .await
+                .is_some(),
             "rapid request should be rate limited"
         );
         // Different VM should pass
-        assert!(ConsoleServer::check_rate_limit("vm-2", &rate_limiter).await.is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-2", &rate_limiter)
+            .await
+            .is_none());
     }
 
     #[tokio::test]
     async fn rate_limit_allows_after_cooldown() {
         let rate_limiter = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_none());
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_some());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter)
+            .await
+            .is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter)
+            .await
+            .is_some());
         // Manually expire the entry
         rate_limiter
             .lock()
             .await
             .insert("vm-1".to_string(), Instant::now() - Duration::from_secs(10));
-        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter).await.is_none());
+        assert!(ConsoleServer::check_rate_limit("vm-1", &rate_limiter)
+            .await
+            .is_none());
     }
 
     #[tokio::test]
     async fn replay_prevention_blocks_reused_token() {
-        let consumed = Arc::new(tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(2048).unwrap())));
+        let consumed = Arc::new(tokio::sync::Mutex::new(LruCache::new(
+            NonZeroUsize::new(2048).unwrap(),
+        )));
         let token = "token-abc";
         // First use should pass
-        assert!(ConsoleServer::check_replay(token, &consumed).await.is_none());
+        assert!(ConsoleServer::check_replay(token, &consumed)
+            .await
+            .is_none());
         // Reuse should be blocked
         assert!(
-            ConsoleServer::check_replay(token, &consumed).await.is_some(),
+            ConsoleServer::check_replay(token, &consumed)
+                .await
+                .is_some(),
             "reused token should be blocked"
         );
         // Different token should pass
-        assert!(ConsoleServer::check_replay("token-def", &consumed).await.is_none());
+        assert!(ConsoleServer::check_replay("token-def", &consumed)
+            .await
+            .is_none());
     }
 }

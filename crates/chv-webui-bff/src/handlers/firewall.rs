@@ -166,7 +166,6 @@ pub async fn create_firewall_rule(
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "id": rule_id,
         "network_id": network_id,
@@ -213,7 +212,6 @@ pub async fn delete_firewall_rule(
         .map_err(|e| BffError::Internal(format!("failed to delete firewall_rule: {}", e)))?;
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "deleted": true,

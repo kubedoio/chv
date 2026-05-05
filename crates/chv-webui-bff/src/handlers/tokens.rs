@@ -33,7 +33,7 @@ pub async fn list_tokens(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "list_tokens db query failed");
-        BffError::Internal("failed to list tokens".into())
+        BffError::Internal(format!("failed to list tokens: {e}"))
     })?;
 
     let count = rows.len();
@@ -93,7 +93,7 @@ pub async fn create_token(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "create_token db insert failed");
-        BffError::Internal("failed to create token".into())
+        BffError::Internal(format!("failed to create token: {e}"))
     })?;
 
     let created_at =
@@ -103,7 +103,6 @@ pub async fn create_token(
             .await
             .unwrap_or_else(|_| "unknown".to_string());
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "token_id": token_id,
@@ -136,7 +135,7 @@ pub async fn revoke_token(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "revoke_token fetch failed");
-        BffError::Internal("failed to check token existence".into())
+        BffError::Internal(format!("failed to check token existence: {e}"))
     })?;
 
     if exists.is_none() {
@@ -150,10 +149,9 @@ pub async fn revoke_token(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "revoke_token db delete failed");
-            BffError::Internal("failed to revoke token".into())
+            BffError::Internal(format!("failed to revoke token: {e}"))
         })?;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "revoked": true,

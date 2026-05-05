@@ -17,7 +17,8 @@ pub struct ControlPlaneRuntime {
     runtime_dir: PathBuf,
     tls_config: Option<tonic::transport::ServerTlsConfig>,
     http_shutdown_tx: tokio::sync::watch::Sender<()>,
-    http_join_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>>,
+    http_join_handle:
+        tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>>,
     shutdown_rx: tokio::sync::watch::Receiver<()>,
 }
 
@@ -146,7 +147,10 @@ impl ControlPlaneService {
                         warn!("worker task panicked during shutdown: {}", e);
                     }
                     Err(_) => {
-                        warn!("worker task did not finish within {:?}, aborting", GRACEFUL_TIMEOUT);
+                        warn!(
+                            "worker task did not finish within {:?}, aborting",
+                            GRACEFUL_TIMEOUT
+                        );
                         abort_handle.abort();
                     }
                 }

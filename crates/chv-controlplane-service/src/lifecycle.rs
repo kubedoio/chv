@@ -4,7 +4,8 @@ use chv_controlplane_store::{
     DesiredStateRepository, EventAppendInput, EventRepository, NetworkStatusPatchInput,
     NodeDrainIntentInput, NodeRepository, NodeSchedulingPatchInput, NodeStatePatchInput,
     OperationCreateInput, OperationRepository, OperationStatusUpdateInput, VmDesiredStateInput,
-    VmPowerStatePatchInput, VolumeAttachmentPatchInput, VolumeResizePatchInput,
+    VmPowerStatePatchInput, VmResourcesPatchInput, VolumeAttachmentPatchInput,
+    VolumeResizePatchInput,
 };
 use chv_controlplane_types::domain::{
     EventSeverity, EventType, Generation, NodeId, NodeState, OperationId, OperationStatus,
@@ -327,6 +328,12 @@ impl LifecycleServiceImplementation {
                     ControlPlaneServiceError::Internal(format!("invalid operation_id: {}", e))
                 })?;
 
+        let caller_correlation_id = if meta.operation_id.trim().is_empty() {
+            None
+        } else {
+            Some(meta.operation_id.trim().to_string())
+        };
+
         let receipt = self
             .operation_repo
             .create_or_get(&OperationCreateInput {
@@ -340,7 +347,7 @@ impl LifecycleServiceImplementation {
                 updated_by: None,
                 desired_generation: Some(desired_generation),
                 observed_generation: None,
-                correlation_id: None,
+                correlation_id: caller_correlation_id.clone(),
                 requested_unix_ms: now,
             })
             .await?;
@@ -356,7 +363,7 @@ impl LifecycleServiceImplementation {
                 operation_id: Some(receipt.operation_id.clone()),
                 actor_id: None,
                 requested_by: Self::normalize_requested_by(meta),
-                correlation_id: None,
+                correlation_id: caller_correlation_id,
                 message: format!("{} started", operation_type),
                 details: None,
             })
@@ -706,9 +713,23 @@ impl LifecycleService for LifecycleServiceImplementation {
             )
             .await?;
 
-        // Record intent accepted; actual resize is orchestrated by the reconciler
-        // dispatching to the agent's resize_vm RPC.
-        let _ = (&node_id, &vm_id);
+        let desired_generation = Self::desired_generation_from_meta(&meta)?;
+
+        self.persist_intent_and_accept(&operation_id, || async {
+            self.desired_state_repo
+                .set_vm_resources(&VmResourcesPatchInput {
+                    vm_id: vm_id.clone(),
+                    cpu_count: request.desired_vcpus.unwrap_or(0) as i32,
+                    memory_bytes: request.desired_memory_bytes.unwrap_or(0) as i64,
+                    desired_generation,
+                    requested_by: Self::normalize_requested_by(&meta),
+                    target_node_id: Some(node_id.clone()),
+                    requested_unix_ms: Self::now_ms(),
+                })
+                .await
+        })
+        .await?;
+
         Ok(Self::ok_ack(&operation_id, "resize vm accepted"))
     }
 
@@ -1437,11 +1458,19 @@ impl LifecycleService for LifecycleServiceImplementation {
             .await?;
 
         if !request.destination.is_empty() {
-            let _ = sqlx::query("UPDATE operations SET correlation_id = ? WHERE operation_id = ?")
-                .bind(&request.destination)
-                .bind(operation_id.as_str())
-                .execute(self.operation_repo.pool())
-                .await;
+            if let Err(e) =
+                sqlx::query("UPDATE operations SET correlation_id = ? WHERE operation_id = ?")
+                    .bind(&request.destination)
+                    .bind(operation_id.as_str())
+                    .execute(self.operation_repo.pool())
+                    .await
+            {
+                tracing::error!(
+                    error = %e,
+                    operation_id = %operation_id,
+                    "failed to set snapshot destination correlation_id"
+                );
+            }
         }
 
         self.accept_operation(&operation_id).await?;
@@ -1469,11 +1498,19 @@ impl LifecycleService for LifecycleServiceImplementation {
             .await?;
 
         if !request.source.is_empty() {
-            let _ = sqlx::query("UPDATE operations SET correlation_id = ? WHERE operation_id = ?")
-                .bind(&request.source)
-                .bind(operation_id.as_str())
-                .execute(self.operation_repo.pool())
-                .await;
+            if let Err(e) =
+                sqlx::query("UPDATE operations SET correlation_id = ? WHERE operation_id = ?")
+                    .bind(&request.source)
+                    .bind(operation_id.as_str())
+                    .execute(self.operation_repo.pool())
+                    .await
+            {
+                tracing::error!(
+                    error = %e,
+                    operation_id = %operation_id,
+                    "failed to set restore source correlation_id"
+                );
+            }
         }
 
         self.accept_operation(&operation_id).await?;

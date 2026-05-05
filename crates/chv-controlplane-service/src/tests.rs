@@ -150,7 +150,10 @@ async fn test_deep_health_endpoint() {
     assert_eq!(checks["database"]["status"], "pass");
     assert_eq!(checks["agent_socket_dir"]["status"], "pass");
     assert_eq!(checks["agent_connectivity"]["status"], "skipped");
-    assert_eq!(checks["agent_connectivity"]["detail"], "no agent sockets found");
+    assert_eq!(
+        checks["agent_connectivity"]["detail"],
+        "no agent sockets found"
+    );
 
     // Scenario 2: directory does not exist -> degraded
     let mut app_state2 = test_app_state(test_db.pool.clone());
