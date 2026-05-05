@@ -343,6 +343,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Enforce mTLS post-enrollment (unless dev mode)
+    let allow_insecure = std::env::var("CHV_ALLOW_INSECURE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !allow_insecure && cache.enrollment_complete {
+        let has_certs = cache.certificate_path.is_some()
+            && cache.private_key_path.is_some()
+            && cache.ca_path.is_some();
+        if !has_certs {
+            return Err(
+                "mTLS required: agent is enrolled but TLS credentials are missing. Set CHV_ALLOW_INSECURE=1 for dev"
+                    .into(),
+            );
+        }
+    }
+
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
         Arc::new(ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
     let vm_runtime = VmRuntime::new(adapter);

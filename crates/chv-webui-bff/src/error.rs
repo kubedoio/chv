@@ -75,6 +75,12 @@ impl From<chv_controlplane_store::StoreError> for BffError {
             chv_controlplane_store::StoreError::NotFound { entity, id } => {
                 BffError::NotFound(format!("{} {} not found", entity, id))
             }
+            chv_controlplane_store::StoreError::StaleGeneration { entity, id, .. } => {
+                BffError::Conflict(format!(
+                    "{} {} was modified by another request (stale generation)",
+                    entity, id
+                ))
+            }
             _ => BffError::Internal(err.to_string()),
         }
     }

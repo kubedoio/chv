@@ -406,3 +406,176 @@ async fn test_ack_node_generation_rejects_missing_observed_row() {
             .unwrap();
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn test_upsert_vm_rejects_stale_generation() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+
+    let input = VmDesiredStateInput {
+        vm_id: ResourceId::new("vm-gen-test").unwrap(),
+        node_id: None,
+        display_name: "gen-test".to_string(),
+        tenant_id: None,
+        placement_policy: None,
+        desired_generation: Generation::new(5),
+        desired_status: Some("Running".to_string()),
+        requested_by: Some("test".to_string()),
+        updated_by: Some("test".to_string()),
+        target_node_id: None,
+        cpu_count: Some(2),
+        memory_bytes: Some(1024),
+        image_ref: Some("img".to_string()),
+        boot_mode: None,
+        desired_power_state: Some("on".to_string()),
+        requested_unix_ms: 1000,
+    };
+
+    repo.upsert_vm(&input).await.unwrap();
+
+    let mut stale_input = input.clone();
+    stale_input.desired_generation = Generation::new(3);
+    stale_input.requested_unix_ms = 2000;
+
+    match repo.upsert_vm(&stale_input).await {
+        Err(StoreError::StaleGeneration { entity, id, incoming }) => {
+            assert_eq!(entity, "vm");
+            assert_eq!(id, "vm-gen-test");
+            assert_eq!(incoming, 3);
+        }
+        other => panic!("Expected StaleGeneration, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_upsert_vm_accepts_newer_generation() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+
+    let input = VmDesiredStateInput {
+        vm_id: ResourceId::new("vm-gen-newer").unwrap(),
+        node_id: None,
+        display_name: "gen-newer".to_string(),
+        tenant_id: None,
+        placement_policy: None,
+        desired_generation: Generation::new(3),
+        desired_status: Some("Running".to_string()),
+        requested_by: Some("test".to_string()),
+        updated_by: Some("test".to_string()),
+        target_node_id: None,
+        cpu_count: Some(2),
+        memory_bytes: Some(1024),
+        image_ref: Some("img".to_string()),
+        boot_mode: None,
+        desired_power_state: Some("on".to_string()),
+        requested_unix_ms: 1000,
+    };
+
+    repo.upsert_vm(&input).await.unwrap();
+
+    let mut newer_input = input.clone();
+    newer_input.desired_generation = Generation::new(5);
+    newer_input.requested_unix_ms = 2000;
+
+    repo.upsert_vm(&newer_input).await.unwrap();
+
+    let gen: i64 =
+        sqlx::query_scalar("SELECT desired_generation FROM vm_desired_state WHERE vm_id = 'vm-gen-newer'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(gen, 5);
+}
+
+#[tokio::test]
+async fn test_upsert_vm_accepts_same_generation_idempotent() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+
+    let input = VmDesiredStateInput {
+        vm_id: ResourceId::new("vm-gen-idem").unwrap(),
+        node_id: None,
+        display_name: "gen-idem".to_string(),
+        tenant_id: None,
+        placement_policy: None,
+        desired_generation: Generation::new(5),
+        desired_status: Some("Running".to_string()),
+        requested_by: Some("test".to_string()),
+        updated_by: Some("test".to_string()),
+        target_node_id: None,
+        cpu_count: Some(2),
+        memory_bytes: Some(1024),
+        image_ref: Some("img".to_string()),
+        boot_mode: None,
+        desired_power_state: Some("on".to_string()),
+        requested_unix_ms: 1000,
+    };
+
+    repo.upsert_vm(&input).await.unwrap();
+    repo.upsert_vm(&input).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_set_vm_resources_stale_vs_not_found() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+    let repo = DesiredStateRepository::new(pool.clone());
+
+    // First, create a VM with generation 5
+    let vm_input = VmDesiredStateInput {
+        vm_id: ResourceId::new("vm-res-test").unwrap(),
+        node_id: None,
+        display_name: "res-test".to_string(),
+        tenant_id: None,
+        placement_policy: None,
+        desired_generation: Generation::new(5),
+        desired_status: Some("Running".to_string()),
+        requested_by: Some("test".to_string()),
+        updated_by: Some("test".to_string()),
+        target_node_id: None,
+        cpu_count: Some(2),
+        memory_bytes: Some(1024),
+        image_ref: Some("img".to_string()),
+        boot_mode: None,
+        desired_power_state: Some("on".to_string()),
+        requested_unix_ms: 1000,
+    };
+    repo.upsert_vm(&vm_input).await.unwrap();
+
+    // Stale generation → StaleGeneration error
+    let stale_patch = VmResourcesPatchInput {
+        vm_id: ResourceId::new("vm-res-test").unwrap(),
+        cpu_count: Some(4),
+        memory_bytes: None,
+        desired_generation: Generation::new(3),
+        requested_by: Some("test".to_string()),
+        target_node_id: None,
+        requested_unix_ms: 2000,
+    };
+    match repo.set_vm_resources(&stale_patch).await {
+        Err(StoreError::StaleGeneration { entity, .. }) => {
+            assert_eq!(entity, "vm");
+        }
+        other => panic!("Expected StaleGeneration, got {:?}", other),
+    }
+
+    // Non-existent VM → NotFound error
+    let missing_patch = VmResourcesPatchInput {
+        vm_id: ResourceId::new("vm-nonexistent").unwrap(),
+        cpu_count: Some(4),
+        memory_bytes: None,
+        desired_generation: Generation::new(10),
+        requested_by: Some("test".to_string()),
+        target_node_id: None,
+        requested_unix_ms: 2000,
+    };
+    match repo.set_vm_resources(&missing_patch).await {
+        Err(StoreError::NotFound { entity, .. }) => {
+            assert_eq!(entity, "vm");
+        }
+        other => panic!("Expected NotFound, got {:?}", other),
+    }
+}
