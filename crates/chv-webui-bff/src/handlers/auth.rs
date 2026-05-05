@@ -78,10 +78,7 @@ pub async fn login(
         None => (None, DUMMY_HASH.to_string()),
     };
 
-    let valid = bcrypt::verify(password, &hash_to_check).map_err(|e| {
-        tracing::error!(error = %e, "bcrypt verification failed");
-        BffError::Internal("authentication service unavailable".into())
-    })?;
+    let valid = bcrypt::verify(password, &hash_to_check).unwrap_or(false);
 
     let user = match user_row {
         Some(u) if valid => u,
