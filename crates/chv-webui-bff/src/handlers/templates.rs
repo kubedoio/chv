@@ -24,7 +24,10 @@ struct VMTemplateRow {
     created_at: String,
 }
 
-pub async fn list_vm_templates(State(state): State<AppState>) -> Result<Json<Value>, BffError> {
+pub async fn list_vm_templates(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, BffError> {
     let rows = sqlx::query_as::<_, VMTemplateRow>(
         r#"
         SELECT
@@ -532,6 +535,7 @@ struct CloudInitTemplateRow {
 }
 
 pub async fn list_cloud_init_templates(
+    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, BffError> {
     let rows = sqlx::query_as::<_, CloudInitTemplateRow>(

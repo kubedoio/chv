@@ -119,6 +119,19 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Err(e) => return Ok(Response::new(Self::err_result(&e))),
         };
 
+        // IFNAMSIZ limit: Linux interface names must be <= 15 bytes
+        if spec.bridge_name.len() > 15 {
+            let e = ChvError::InvalidArgument {
+                field: "bridge_name".to_string(),
+                reason: format!(
+                    "exceeds IFNAMSIZ limit (15 chars): '{}' is {} chars",
+                    spec.bridge_name,
+                    spec.bridge_name.len()
+                ),
+            };
+            return Ok(Response::new(Self::err_result(&e)));
+        }
+
         // Idempotency: if already ensured with same network_id, return OK
         if let Some(existing) = self.topologies.get(&spec.network_id) {
             if existing.bridge_name == spec.bridge_name

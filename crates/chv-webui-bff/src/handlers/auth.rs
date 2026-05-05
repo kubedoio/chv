@@ -1,6 +1,9 @@
 use axum::{extract::State, response::Json};
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 use crate::router::AppState;
 use crate::BffError;
@@ -8,6 +11,29 @@ use crate::BffError;
 /// Dummy bcrypt hash used when the username is not found, so that bcrypt::verify
 /// always runs and response time is constant regardless of whether the user exists.
 const DUMMY_HASH: &str = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m";
+
+const MAX_LOGIN_ATTEMPTS: u32 = 10;
+const RATE_WINDOW_SECS: u64 = 60;
+
+static LOGIN_ATTEMPTS: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn check_rate_limit(username: &str) -> Result<(), BffError> {
+    let mut attempts = LOGIN_ATTEMPTS.blocking_lock();
+    let now = Instant::now();
+    let window = std::time::Duration::from_secs(RATE_WINDOW_SECS);
+
+    let entry = attempts.entry(username.to_string()).or_default();
+    entry.retain(|t| now.duration_since(*t) < window);
+
+    if entry.len() >= MAX_LOGIN_ATTEMPTS as usize {
+        return Err(BffError::TooManyRequests(
+            "too many login attempts, try again later".into(),
+        ));
+    }
+    entry.push(now);
+    Ok(())
+}
 
 #[derive(sqlx::FromRow)]
 struct UserRow {
@@ -25,6 +51,8 @@ pub async fn login(
         .get("username")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BffError::BadRequest("missing username".into()))?;
+
+    check_rate_limit(username)?;
 
     let password = payload
         .get("password")

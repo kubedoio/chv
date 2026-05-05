@@ -90,9 +90,15 @@ impl<B: StorageBackend> StorageServer<B> {
 
         let uds_stream = UnixListenerStream::new(uds);
 
+        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        health_reporter
+            .set_serving::<StorageServiceServer<StorageServiceImpl<B>>>()
+            .await;
+
         info!(socket = %socket_path.display(), "starting chv-stord server");
 
         Server::builder()
+            .add_service(health_service)
             .add_service(StorageServiceServer::new(self.inner))
             .serve_with_incoming(uds_stream)
             .await

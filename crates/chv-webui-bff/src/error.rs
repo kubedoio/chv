@@ -12,6 +12,7 @@ pub enum BffError {
     Unauthorized(String),
     Forbidden(String),
     Conflict(String),
+    TooManyRequests(String),
     QuotaExceeded {
         resource: String,
         limit: i64,
@@ -36,6 +37,9 @@ impl IntoResponse for BffError {
             BffError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone(), "UNAUTHORIZED"),
             BffError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone(), "FORBIDDEN"),
             BffError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), "CONFLICT"),
+            BffError::TooManyRequests(msg) => {
+                (StatusCode::TOO_MANY_REQUESTS, msg.clone(), "RATE_LIMITED")
+            }
             BffError::QuotaExceeded {
                 resource,
                 limit,

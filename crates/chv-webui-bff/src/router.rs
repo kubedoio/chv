@@ -413,6 +413,9 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             crate::metrics_middleware::track_metrics,
         ))
         .layer(axum::middleware::from_fn(
+            crate::csrf_middleware::csrf_protection,
+        ))
+        .layer(axum::middleware::from_fn(
             crate::correlation_middleware::extract_correlation_id,
         ))
 }

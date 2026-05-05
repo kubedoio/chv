@@ -890,6 +890,8 @@ pub async fn mutate_vm(
         .map_err(|e| BffError::Internal(format!("failed to acquire connection: {}", e)))?;
     require_vm_owner(&mut conn, &vm_id, &claims.sub, claims.role == "admin").await?;
 
+    crate::audit::log_mutation(&claims.sub, &action, "vm", &vm_id);
+
     let response = state
         .mutations
         .mutate_vm(vm_id, action, force, claims.sub)

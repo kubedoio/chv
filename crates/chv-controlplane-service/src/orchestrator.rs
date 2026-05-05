@@ -5,6 +5,7 @@ use chv_controlplane_store::{
 };
 use chv_controlplane_types::domain::{OperationId, OperationStatus};
 use chv_errors::ChvError;
+use chv_observability::{CHV_NODES_READY, CHV_OPERATION_DURATION_SECONDS, CHV_VMS_TOTAL};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -60,6 +61,20 @@ impl Orchestrator {
     }
 
     async fn tick(&self) -> Result<(), ChvError> {
+        // Update ADR-009 gauges
+        let vm_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+        metrics::gauge!(CHV_VMS_TOTAL).set(vm_count as f64);
+
+        let node_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE status = 'ready'")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
+        metrics::gauge!(CHV_NODES_READY).set(node_count as f64);
+
         // Atomically claim operations by marking them Running in the same query.
         // This prevents double-dispatch if tick overlaps (takes longer than interval).
         let claimed_rows = sqlx::query_as::<_, ClaimedOperationRow>(
@@ -156,6 +171,11 @@ impl Orchestrator {
             metrics::histogram!(
                 "orchestrator_dispatch_duration_seconds",
                 "type" => row.operation_type.clone(),
+            )
+            .record(duration);
+            metrics::histogram!(
+                CHV_OPERATION_DURATION_SECONDS,
+                "operation" => row.operation_type.clone(),
             )
             .record(duration);
 

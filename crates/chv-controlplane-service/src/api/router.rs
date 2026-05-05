@@ -1,8 +1,9 @@
 use crate::api::{health, nodes, operations, stub};
 use axum::{
+    extract::Request,
     http::StatusCode,
-    middleware,
-    response::Json,
+    middleware::{self, Next},
+    response::{IntoResponse, Json},
     routing::{delete, get, post},
     Router,
 };
@@ -20,6 +21,24 @@ async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
             }
         })),
     )
+}
+
+async fn security_headers(req: Request, next: Next) -> impl IntoResponse {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-security-policy",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    headers.insert(
+        "referrer-policy",
+        "strict-origin-when-cross-origin".parse().unwrap(),
+    );
+    response
 }
 
 pub fn admin_router(bff_state: AppState) -> Router {
@@ -99,5 +118,6 @@ pub fn admin_router(bff_state: AppState) -> Router {
         )
         .route("/api/v1/install/repair", post(stub::repair_install_stub))
         .fallback(not_found_handler)
+        .layer(middleware::from_fn(security_headers))
         .with_state(bff_state)
 }
