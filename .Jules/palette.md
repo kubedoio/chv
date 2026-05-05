@@ -1,0 +1,3 @@
+## 2025-02-12 - ARIA Accordion Attributes
+**Learning:** Found an accordion structure (`EventList.svelte`) that had `aria-expanded` on the trigger but lacked `aria-controls` to link to the target content. Additionally, the expanded content was missing an `id` matching the `aria-controls`, along with `role="region"` and `aria-labelledby` linking back to the trigger button.
+**Action:** When creating or fixing an accordion component, make sure it has both `aria-expanded` and `aria-controls` on the button trigger, and ensure the expanded panel contains an `id`, `role="region"`, and `aria-labelledby`.
