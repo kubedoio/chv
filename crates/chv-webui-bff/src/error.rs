@@ -6,7 +6,6 @@ use serde_json::json;
 
 #[derive(Debug)]
 pub enum BffError {
-    NotImplemented,
     Internal(String),
     NotFound(String),
     BadRequest(String),
@@ -24,11 +23,6 @@ pub enum BffError {
 impl IntoResponse for BffError {
     fn into_response(self) -> axum::response::Response {
         let (status, message, code) = match &self {
-            BffError::NotImplemented => (
-                StatusCode::NOT_IMPLEMENTED,
-                "Not implemented".to_string(),
-                "NOT_IMPLEMENTED",
-            ),
             BffError::Internal(msg) => {
                 tracing::error!(error = %msg, "internal server error");
                 (
