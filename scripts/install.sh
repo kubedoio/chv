@@ -635,6 +635,22 @@ generate_certs() {
         chmod 644 "$CHV_CONFIG_DIR/certs/ca.crt"
         chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/ca.key" "$CHV_CONFIG_DIR/certs/ca.crt"
     fi
+
+    if [ ! -f "$CHV_CONFIG_DIR/certs/server.key" ]; then
+        openssl genrsa -out "$CHV_CONFIG_DIR/certs/server.key" 2048 2>/dev/null
+        openssl req -new -key "$CHV_CONFIG_DIR/certs/server.key" \
+            -out "$CHV_CONFIG_DIR/certs/server.csr" \
+            -subj "/O=CHV/CN=chv-controlplane" 2>/dev/null
+        openssl x509 -req -in "$CHV_CONFIG_DIR/certs/server.csr" \
+            -CA "$CHV_CONFIG_DIR/certs/ca.crt" -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
+            -CAcreateserial -out "$CHV_CONFIG_DIR/certs/server.crt" \
+            -days 825 -sha256 \
+            -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1") 2>/dev/null
+        rm -f "$CHV_CONFIG_DIR/certs/server.csr"
+        chmod 640 "$CHV_CONFIG_DIR/certs/server.key"
+        chmod 644 "$CHV_CONFIG_DIR/certs/server.crt"
+        chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/server.key" "$CHV_CONFIG_DIR/certs/server.crt"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -754,6 +770,9 @@ acquire_timeout_secs = 5
 [tls]
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 ca_key_path = "${CHV_CONFIG_DIR}/certs/ca.key"
+server_cert_path = "${CHV_CONFIG_DIR}/certs/server.crt"
+server_key_path = "${CHV_CONFIG_DIR}/certs/server.key"
+client_ca_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/controlplane.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/controlplane.toml"
@@ -762,7 +781,7 @@ EOF
 socket_path = "/run/chv/agent/api.sock"
 runtime_dir = "${CHV_DATA_DIR}/agent"
 log_level = "info"
-control_plane_addr = "http://127.0.0.1:8443"
+control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"
