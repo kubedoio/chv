@@ -135,11 +135,7 @@ impl LinuxExecutor {
         // Linux interface names are limited to 15 bytes (IFNAMSIZ - 1).
         // Derive a stable compact tap name from the nic_id so very long IDs
         // (e.g. UUID-derived values) do not break `ip tuntap add`.
-        let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-        for byte in nic_id.bytes() {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
-        }
+        let hash = chv_common::fnv1a_hash(nic_id);
         format!("tap-{:08x}", (hash & 0xffff_ffff) as u32)
     }
 

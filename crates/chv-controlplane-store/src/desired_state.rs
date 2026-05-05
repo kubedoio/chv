@@ -253,8 +253,8 @@ ON CONFLICT (vm_id) DO UPDATE SET
 
 const PATCH_VM_RESOURCES_SQL: &str = r#"
 UPDATE vm_desired_state SET
-    cpu_count = $2,
-    memory_bytes = $3,
+    cpu_count = COALESCE($2, cpu_count),
+    memory_bytes = COALESCE($3, memory_bytes),
     desired_generation = $4,
     requested_by = $5,
     target_node_id = COALESCE($6, target_node_id),
@@ -843,8 +843,8 @@ pub struct VmPowerStatePatchInput {
 #[derive(Clone)]
 pub struct VmResourcesPatchInput {
     pub vm_id: ResourceId,
-    pub cpu_count: i32,
-    pub memory_bytes: i64,
+    pub cpu_count: Option<i32>,
+    pub memory_bytes: Option<i64>,
     pub desired_generation: Generation,
     pub requested_by: Option<String>,
     pub target_node_id: Option<NodeId>,

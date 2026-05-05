@@ -719,8 +719,8 @@ impl LifecycleService for LifecycleServiceImplementation {
             self.desired_state_repo
                 .set_vm_resources(&VmResourcesPatchInput {
                     vm_id: vm_id.clone(),
-                    cpu_count: request.desired_vcpus.unwrap_or(0) as i32,
-                    memory_bytes: request.desired_memory_bytes.unwrap_or(0) as i64,
+                    cpu_count: request.desired_vcpus.map(|v| v as i32),
+                    memory_bytes: request.desired_memory_bytes.map(|v| v as i64),
                     desired_generation,
                     requested_by: Self::normalize_requested_by(&meta),
                     target_node_id: Some(node_id.clone()),
