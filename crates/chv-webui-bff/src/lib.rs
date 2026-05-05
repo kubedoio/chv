@@ -8,7 +8,7 @@ pub mod mutations;
 pub mod router;
 
 pub use auth::BearerToken;
+pub use cache::BffCache;
 pub use error::BffError;
 pub use mutations::MutationService;
-pub use cache::BffCache;
 pub use router::{bff_router, AppState};

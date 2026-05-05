@@ -12,6 +12,7 @@ struct ExportRow {
     filename: String,
     export_path: String,
     status: String,
+    vm_id: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -34,6 +35,13 @@ pub async fn export_vm(
     if !chv_common::validate_id(&vm_id) {
         return Err(BffError::BadRequest("invalid vm_id format".into()));
     }
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    super::vms::require_vm_owner(&mut conn, &vm_id, &claims.sub, claims.role == "admin").await?;
 
     // Verify VM exists
     let vm = sqlx::query_as::<_, VmRow>("SELECT display_name FROM vms WHERE vm_id = ?")
@@ -142,7 +150,6 @@ pub async fn export_vm(
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "export_id": export_id,
         "filename": filename,
@@ -151,7 +158,7 @@ pub async fn export_vm(
 }
 
 pub async fn download_export(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(export_id): Path<String>,
 ) -> Result<axum::response::Response, BffError> {
@@ -160,13 +167,21 @@ pub async fn download_export(
     }
 
     let row = sqlx::query_as::<_, ExportRow>(
-        "SELECT filename, export_path, status FROM vm_exports WHERE export_id = ?",
+        "SELECT filename, export_path, status, vm_id FROM vm_exports WHERE export_id = ?",
     )
     .bind(&export_id)
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| BffError::Internal(format!("failed to look up export: {}", e)))?
     .ok_or_else(|| BffError::NotFound(format!("export {} not found", export_id)))?;
+
+    let mut conn = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
+    super::vms::require_vm_owner(&mut conn, &row.vm_id, &claims.sub, claims.role == "admin")
+        .await?;
 
     if row.status != "ready" {
         return Err(BffError::BadRequest("export is not ready".into()));

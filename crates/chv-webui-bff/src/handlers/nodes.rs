@@ -23,7 +23,9 @@ pub async fn list_nodes(
         .clamp(1, 200);
     let cache_key = format!("nodes:list:{}:{}", page, page_size);
     if let Some(cached) = state.cache.get(&cache_key).await {
-        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+        return Ok(Json(
+            serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?,
+        ));
     }
 
     let offset = (page - 1) * page_size;

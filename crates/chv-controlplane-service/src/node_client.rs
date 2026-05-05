@@ -2,8 +2,8 @@ use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
@@ -46,12 +46,14 @@ impl CircuitBreaker {
     pub fn check(&self, method: &str) -> Result<(), ChvError> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        let entry = inner.entry(method.to_string()).or_insert_with(|| MethodCircuit {
-            state: CircuitState::Closed,
-            failures: Vec::new(),
-            opened_at: None,
-            probe_in_flight: false,
-        });
+        let entry = inner
+            .entry(method.to_string())
+            .or_insert_with(|| MethodCircuit {
+                state: CircuitState::Closed,
+                failures: Vec::new(),
+                opened_at: None,
+                probe_in_flight: false,
+            });
 
         match entry.state {
             CircuitState::Closed => Ok(()),
@@ -102,12 +104,14 @@ impl CircuitBreaker {
     pub fn record_failure(&self, method: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        let entry = inner.entry(method.to_string()).or_insert_with(|| MethodCircuit {
-            state: CircuitState::Closed,
-            failures: Vec::new(),
-            opened_at: None,
-            probe_in_flight: false,
-        });
+        let entry = inner
+            .entry(method.to_string())
+            .or_insert_with(|| MethodCircuit {
+                state: CircuitState::Closed,
+                failures: Vec::new(),
+                opened_at: None,
+                probe_in_flight: false,
+            });
 
         match entry.state {
             CircuitState::HalfOpen => {
@@ -121,7 +125,9 @@ impl CircuitBreaker {
                 .increment(1);
             }
             CircuitState::Closed => {
-                entry.failures.retain(|&t| now.duration_since(t) < self.failure_window);
+                entry
+                    .failures
+                    .retain(|&t| now.duration_since(t) < self.failure_window);
                 entry.failures.push(now);
                 if entry.failures.len() >= self.failure_threshold {
                     entry.state = CircuitState::Open;
@@ -139,11 +145,7 @@ impl CircuitBreaker {
     }
 }
 
-async fn with_timeout<F, T>(
-    future: F,
-    backend: &str,
-    method: &str,
-) -> Result<T, ChvError>
+async fn with_timeout<F, T>(future: F, backend: &str, method: &str) -> Result<T, ChvError>
 where
     F: std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>>,
 {

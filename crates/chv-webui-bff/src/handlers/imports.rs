@@ -286,7 +286,6 @@ pub async fn import_vm(
     state.cache.invalidate("volumes:").await;
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "id": vm_id,
         "name": name,

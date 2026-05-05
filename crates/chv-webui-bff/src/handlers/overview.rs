@@ -12,13 +12,18 @@ pub async fn get_overview(
 ) -> Result<Json<Value>, BffError> {
     let cache_key = "overview";
     if let Some(cached) = state.cache.get(cache_key).await {
-        return Ok(Json(serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?));
+        return Ok(Json(
+            serde_json::from_str(&cached).map_err(|e| BffError::Internal(e.to_string()))?,
+        ));
     }
 
     let nodes_total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM nodes")
         .fetch_one(&state.pool)
         .await
-        .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query nodes_total"); 0 });
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "overview: failed to query nodes_total");
+            0
+        });
 
     let nodes_degraded = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM node_observed_state WHERE health_status IN ('degraded', 'warning', 'critical')"
@@ -32,44 +37,65 @@ pub async fn get_overview(
     )
     .fetch_one(&state.pool)
     .await
-    .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query maintenance_nodes"); 0 });
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query maintenance_nodes");
+        0
+    });
 
     let vms_total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM vms")
         .fetch_one(&state.pool)
         .await
-        .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query vms_total"); 0 });
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "overview: failed to query vms_total");
+            0
+        });
 
     let vms_running = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM vm_observed_state WHERE runtime_status = 'Running'",
     )
     .fetch_one(&state.pool)
     .await
-    .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query vms_running"); 0 });
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query vms_running");
+        0
+    });
 
     let active_tasks = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM operations WHERE status IN ('Pending', 'Accepted', 'Running')",
     )
     .fetch_one(&state.pool)
     .await
-    .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query active_tasks"); 0 });
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query active_tasks");
+        0
+    });
 
     let unresolved_alerts =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alerts WHERE status != 'resolved'")
             .fetch_one(&state.pool)
             .await
-            .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query unresolved_alerts"); 0 });
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "overview: failed to query unresolved_alerts");
+                0
+            });
 
     let networks_total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM networks")
         .fetch_one(&state.pool)
         .await
-        .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query networks_total"); 0 });
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "overview: failed to query networks_total");
+            0
+        });
 
     let networks_healthy = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM network_observed_state WHERE health_status = 'healthy'",
     )
     .fetch_one(&state.pool)
     .await
-    .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query networks_healthy"); 0 });
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query networks_healthy");
+        0
+    });
 
     let alerts_rows = sqlx::query_as::<_, AlertRow>(
         r#"
@@ -85,7 +111,10 @@ pub async fn get_overview(
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query alerts"); Vec::new() });
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query alerts");
+        Vec::new()
+    });
 
     let alerts: Vec<Value> = alerts_rows
         .into_iter()
@@ -115,7 +144,10 @@ pub async fn get_overview(
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_else(|e| { warn!(error = %e, "overview: failed to query recent_tasks"); Vec::new() });
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "overview: failed to query recent_tasks");
+        Vec::new()
+    });
 
     let recent_tasks: Vec<Value> = tasks_rows
         .into_iter()
@@ -151,7 +183,10 @@ pub async fn get_overview(
         "state": "ready",
     }));
     if let Ok(json) = serde_json::to_string(&response.0) {
-        state.cache.set_with_ttl(cache_key, json, Some(std::time::Duration::from_secs(10))).await;
+        state
+            .cache
+            .set_with_ttl(cache_key, json, Some(std::time::Duration::from_secs(10)))
+            .await;
     }
     Ok(response)
 }

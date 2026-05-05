@@ -130,7 +130,6 @@ pub async fn create_user(
     })?;
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "user_id": user_id,
         "username": username,
@@ -231,7 +230,6 @@ pub async fn update_user(
     }
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "user_id": user_id,
         "username": row.username,
@@ -284,7 +282,6 @@ pub async fn delete_user(
             BffError::Internal("failed to delete user".into())
         })?;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "deleted": true,

@@ -124,7 +124,6 @@ pub async fn create_vm_template(
     .map_err(|e| BffError::Internal(format!("failed to create vm_template: {}", e)))?;
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "id": template_id,
         "node_id": "",
@@ -185,7 +184,6 @@ pub async fn delete_vm_template(
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete vm_template: {}", e)))?;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "deleted": true,
@@ -512,7 +510,6 @@ pub async fn clone_vm_template(
     state.cache.invalidate("networks:").await;
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "vm_id": vm_id,
         "name": display_name,
@@ -613,7 +610,6 @@ pub async fn create_cloud_init_template(
     let variables = extract_template_variables(content);
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "id": template_id,
         "name": name,
@@ -650,7 +646,6 @@ pub async fn delete_cloud_init_template(
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete cloud_init_template: {}", e)))?;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "deleted": true,

@@ -19,6 +19,7 @@ pub struct ControlPlaneMutationService {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)]
 struct VolumeLookupRow {
     node_id: String,
     vm_id: Option<String>,
@@ -382,7 +383,9 @@ impl MutationService for ControlPlaneMutationService {
                     .await
             }
             "resize" => {
-                let new_size = resize_bytes.unwrap_or(row.size_bytes as u64);
+                let new_size = resize_bytes.ok_or_else(|| {
+                    BffError::BadRequest("resize_bytes is required for resize action".into())
+                })?;
                 self.lifecycle_service
                     .resize_volume(proto::ResizeVolumeRequest {
                         meta,

@@ -8,8 +8,6 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
-
-
 fn extract_op_id<T>(request: &Request<T>) -> Option<String> {
     request
         .metadata()
@@ -39,7 +37,8 @@ impl proto::enrollment_service_server::EnrollmentService for EnrollmentServer {
         let resp = self
             .service
             .enroll_node(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -53,7 +52,8 @@ impl proto::enrollment_service_server::EnrollmentService for EnrollmentServer {
         let resp = self
             .service
             .rotate_node_certificate(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -67,7 +67,8 @@ impl proto::enrollment_service_server::EnrollmentService for EnrollmentServer {
         let resp = self
             .service
             .report_bootstrap_result(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -94,7 +95,8 @@ impl proto::inventory_service_server::InventoryService for InventoryServer {
         let resp = self
             .service
             .report_node_inventory(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "report_node_inventory failed");
                 tonic::Status::from(e)
@@ -111,7 +113,8 @@ impl proto::inventory_service_server::InventoryService for InventoryServer {
         let resp = self
             .service
             .report_service_versions(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "report_service_versions failed");
                 tonic::Status::from(e)
@@ -141,7 +144,8 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         let resp = self
             .service
             .report_node_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "report_node_state failed");
                 tonic::Status::from(e)
@@ -158,7 +162,8 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         let resp = self
             .service
             .report_vm_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "report_vm_state failed");
                 tonic::Status::from(e)
@@ -175,7 +180,8 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         let resp = self
             .service
             .report_volume_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "report_volume_state failed");
                 tonic::Status::from(e)
@@ -192,7 +198,8 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         let resp = self
             .service
             .report_network_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "report_network_state failed");
                 tonic::Status::from(e)
@@ -209,7 +216,8 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         let resp = self
             .service
             .publish_event(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "publish_event failed");
                 tonic::Status::from(e)
@@ -226,7 +234,8 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         let resp = self
             .service
             .publish_alert(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "publish_alert failed");
                 tonic::Status::from(e)
@@ -256,7 +265,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .create_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -270,7 +280,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .start_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -284,7 +295,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .stop_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -298,7 +310,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .reboot_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -312,7 +325,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .delete_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -326,7 +340,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .resize_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -340,7 +355,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .attach_volume(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -354,7 +370,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .detach_volume(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -368,7 +385,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .resize_volume(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -382,7 +400,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .snapshot_volume(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -396,7 +415,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .restore_volume(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -410,7 +430,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .delete_volume_snapshot(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -424,7 +445,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .clone_volume(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -438,7 +460,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .pause_node_scheduling(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -452,7 +475,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .resume_node_scheduling(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -466,7 +490,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .drain_node(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -480,7 +505,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .enter_maintenance(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -494,7 +520,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .exit_maintenance(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -508,7 +535,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .pause_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -522,7 +550,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .resume_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -536,7 +565,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .power_button_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -550,7 +580,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .add_disk(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -564,7 +595,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .remove_device(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -578,7 +610,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .add_net(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -592,7 +625,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .resize_disk(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -606,7 +640,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .snapshot_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -620,7 +655,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .restore_snapshot(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -634,7 +670,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .coredump_vm(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -648,7 +685,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .start_network(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -662,7 +700,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .stop_network(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -676,7 +715,8 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         let resp = self
             .service
             .restart_network(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -712,7 +752,8 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
         let resp = self
             .service
             .apply_node_desired_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -726,7 +767,8 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
         let resp = self
             .service
             .apply_vm_desired_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -740,7 +782,8 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
         let resp = self
             .service
             .apply_volume_desired_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -754,7 +797,8 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
         let resp = self
             .service
             .apply_network_desired_state(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
@@ -768,7 +812,8 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
         let resp = self
             .service
             .acknowledge_desired_state_version(request.into_inner())
-            .instrument(_span).await
+            .instrument(_span)
+            .await
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }

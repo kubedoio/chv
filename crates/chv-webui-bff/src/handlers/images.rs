@@ -147,7 +147,6 @@ pub async fn import_image(
     .map_err(|e| BffError::Internal(format!("failed to insert image: {}", e)))?;
     state.cache.invalidate("overview").await;
 
-
     Ok(Json(json!({
         "image_id": image_id,
         "name": name,
@@ -195,7 +194,6 @@ pub async fn delete_image(
         .await
         .map_err(|e| BffError::Internal(format!("failed to delete image: {}", e)))?;
     state.cache.invalidate("overview").await;
-
 
     Ok(Json(json!({
         "deleted": true,

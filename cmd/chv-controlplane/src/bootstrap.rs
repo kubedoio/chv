@@ -35,11 +35,10 @@ pub async fn build_service(
 
     // Warn if the bootstrap admin password has not been changed
     let default_hash = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m";
-    if let Ok(Some(hash)) = sqlx::query_scalar::<_, String>(
-        "SELECT password_hash FROM users WHERE username = 'admin'",
-    )
-    .fetch_optional(&pool)
-    .await
+    if let Ok(Some(hash)) =
+        sqlx::query_scalar::<_, String>("SELECT password_hash FROM users WHERE username = 'admin'")
+            .fetch_optional(&pool)
+            .await
     {
         if hash == default_hash {
             tracing::warn!(

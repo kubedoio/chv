@@ -23,8 +23,9 @@ pub use db::{
 };
 pub use desired_state::{
     DesiredStateRepository, NetworkDesiredStateInput, NetworkStatusPatchInput, VmDesiredStateInput,
-    VmPowerStatePatchInput, VolumeAttachmentPatchInput, VolumeClonePatchInput,
-    VolumeDesiredStateInput, VolumeResizePatchInput, VolumeSnapshotPatchInput,
+    VmPowerStatePatchInput, VmResourcesPatchInput, VolumeAttachmentPatchInput,
+    VolumeClonePatchInput, VolumeDesiredStateInput, VolumeResizePatchInput,
+    VolumeSnapshotPatchInput,
 };
 pub use events::{EventAppendInput, EventRepository};
 pub use hypervisor_settings::{

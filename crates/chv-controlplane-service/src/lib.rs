@@ -1,4 +1,5 @@
 pub mod api;
+mod backup_worker;
 mod bff_mutations;
 mod container;
 mod enrollment;
@@ -7,12 +8,12 @@ mod inventory;
 mod lifecycle;
 mod node_client;
 mod node_client_pool;
-mod backup_worker;
 mod orchestrator;
 mod reconcile;
 mod server;
 mod telemetry;
 
+pub use backup_worker::BackupWorker;
 pub use bff_mutations::ControlPlaneMutationService;
 pub use container::{ControlPlaneComponents, ControlPlaneRuntime, ControlPlaneService};
 pub use enrollment::{
@@ -24,7 +25,6 @@ pub use inventory::{InventoryService, InventoryServiceImplementation};
 pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
 pub use node_client::NodeClient;
 pub use node_client_pool::NodeClientPool;
-pub use backup_worker::BackupWorker;
 pub use orchestrator::Orchestrator;
 pub use reconcile::{ReconcileService, ReconcileServiceImplementation};
 pub use server::{

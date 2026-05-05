@@ -35,13 +35,19 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
         if let Some(store) = &self.store {
             let store = store.clone();
             let state = state.clone();
-            if let Err(e) = tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 let store = store.lock().unwrap();
                 store.upsert(&state)
             })
             .await
             {
-                tracing::error!(error = %e, "failed to join persist topology task");
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "failed to persist topology state to SQLite");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to join persist topology task");
+                }
             }
         }
     }
@@ -50,13 +56,19 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
         if let Some(store) = &self.store {
             let store = store.clone();
             let network_id = network_id.to_string();
-            if let Err(e) = tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 let store = store.lock().unwrap();
                 store.remove(&network_id)
             })
             .await
             {
-                tracing::error!(error = %e, "failed to join remove topology task");
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "failed to remove topology state from SQLite");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to join remove topology task");
+                }
             }
         }
     }
@@ -101,7 +113,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         let spec = match Self::map_topology_spec(req.topology) {
             Ok(s) => s,
@@ -154,7 +165,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         if let Some(state) = self.topologies.get(&req.network_id) {
             if let Err(e) = self.executor.delete_topology(&req.network_id, &state).await {
@@ -220,7 +230,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         let nic = req.nic.ok_or_else(|| ChvError::InvalidArgument {
             field: "nic".to_string(),
@@ -288,7 +297,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         match self.executor.detach_vm_nic(&req.nic_id).await {
             Ok(()) => Ok(Response::new(Self::ok_result())),
@@ -308,7 +316,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         let policy = req.policy.ok_or_else(|| ChvError::InvalidArgument {
             field: "policy".to_string(),
@@ -340,7 +347,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         let policy = req.policy.ok_or_else(|| ChvError::InvalidArgument {
             field: "policy".to_string(),
@@ -373,7 +379,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         let scope = req.scope.ok_or_else(|| ChvError::InvalidArgument {
             field: "scope".to_string(),
@@ -410,7 +415,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         let scope = req.scope.ok_or_else(|| ChvError::InvalidArgument {
             field: "scope".to_string(),
@@ -439,7 +443,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         let exposure = req.exposure.ok_or_else(|| ChvError::InvalidArgument {
             field: "exposure".to_string(),
@@ -480,7 +483,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .as_ref()
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
-        let _enter = _span.enter();
 
         match self
             .executor
