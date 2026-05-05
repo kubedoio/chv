@@ -5,6 +5,19 @@ use tracing::info;
 
 const RUNTIME_DIR: &str = "/run/chv/nwd";
 
+fn is_valid_hostname(hostname: &str) -> bool {
+    if hostname.is_empty() || hostname.len() > 253 {
+        return false;
+    }
+    hostname.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
+}
+
 fn conf_path(network_id: &str) -> PathBuf {
     PathBuf::from(RUNTIME_DIR).join(format!("dnsmasq-{}.conf", network_id))
 }
@@ -77,6 +90,15 @@ pub async fn ensure_dns_scope(
 
     // Add static records (hostname -> IP)
     for (hostname, ip) in static_records {
+        if !is_valid_hostname(hostname) {
+            return Err(ChvError::InvalidArgument {
+                field: "static_records".to_string(),
+                reason: format!(
+                    "invalid hostname '{}': must be RFC 1123 compliant (alphanumeric, hyphens, max 253 chars)",
+                    hostname
+                ),
+            });
+        }
         if ip.parse::<std::net::IpAddr>().is_err() {
             return Err(ChvError::InvalidArgument {
                 field: "static_records".to_string(),

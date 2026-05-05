@@ -494,6 +494,52 @@ impl Orchestrator {
                     )
                     .await
             }
+            "PauseVm" => {
+                client
+                    .pause_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "ResumeVm" => {
+                client
+                    .resume_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "PowerButtonVm" => {
+                client
+                    .power_button_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
+            "CoredumpVm" => {
+                let destination = row.correlation_id.as_deref().unwrap_or("");
+                client
+                    .coredump_vm(
+                        node_id,
+                        &row.resource_id,
+                        &generation,
+                        destination,
+                        &row.operation_id,
+                        None,
+                    )
+                    .await
+            }
             other => {
                 return Err(ChvError::Internal {
                     reason: format!("unsupported operation_type for dispatch: {other}"),
@@ -630,15 +676,14 @@ impl Orchestrator {
     }
 
     async fn require_node_schedulable(&self, node_id: &str) -> Result<(), ChvError> {
-        let observed_state: Option<String> = sqlx::query_scalar(
-            "SELECT observed_state FROM node_observed_state WHERE node_id = ?",
-        )
-        .bind(node_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| ChvError::Internal {
-            reason: format!("failed to check node state for {}: {e}", node_id),
-        })?;
+        let observed_state: Option<String> =
+            sqlx::query_scalar("SELECT observed_state FROM node_observed_state WHERE node_id = ?")
+                .bind(node_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("failed to check node state for {}: {e}", node_id),
+                })?;
 
         let scheduling_paused: Option<bool> = sqlx::query_scalar(
             "SELECT scheduling_paused FROM node_desired_state WHERE node_id = ?",
@@ -653,10 +698,7 @@ impl Orchestrator {
         if scheduling_paused.unwrap_or(false) {
             return Err(ChvError::InvalidArgument {
                 field: "node_id".to_string(),
-                reason: format!(
-                    "node {} has scheduling paused",
-                    node_id
-                ),
+                reason: format!("node {} has scheduling paused", node_id),
             });
         }
 

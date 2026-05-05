@@ -273,7 +273,7 @@ impl LifecycleServiceImplementation {
     }
 
     async fn require_node_exists(&self, node_id: &NodeId) -> Result<(), ControlPlaneServiceError> {
-        let row = sqlx::query("SELECT 1 FROM nodes WHERE node_id = $1")
+        let row = sqlx::query("SELECT 1 FROM nodes WHERE node_id = ?")
             .bind(node_id.as_str())
             .fetch_optional(self.node_repo.pool())
             .await

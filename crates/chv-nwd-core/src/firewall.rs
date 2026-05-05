@@ -75,18 +75,13 @@ fn is_valid_cidr(cidr: &str) -> bool {
 fn is_valid_port_spec(port: &str) -> bool {
     if port.contains('-') {
         let parts: Vec<&str> = port.splitn(2, '-').collect();
-        parts.len() == 2
-            && parts[0].parse::<u16>().is_ok()
-            && parts[1].parse::<u16>().is_ok()
+        parts.len() == 2 && parts[0].parse::<u16>().is_ok() && parts[1].parse::<u16>().is_ok()
     } else {
         port.parse::<u16>().is_ok()
     }
 }
 
-pub async fn apply_firewall_rules(
-    table: &str,
-    policy_json: &[u8],
-) -> Result<(), ChvError> {
+pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvError> {
     let rules: Vec<FirewallRule> = if policy_json.is_empty() {
         Vec::new()
     } else {
@@ -104,11 +99,23 @@ pub async fn apply_firewall_rules(
     run_nft_idempotent(&["add", "table", "inet", table]).await?;
 
     // Create chains if needed
-    for (chain, hook) in [("input", "input"), ("forward", "forward"), ("output", "output")] {
+    for (chain, hook) in [
+        ("input", "input"),
+        ("forward", "forward"),
+        ("output", "output"),
+    ] {
         run_nft_idempotent(&[
-            "add", "chain", "inet", table, chain,
-            &format!("{{ type filter hook {} priority 0 ; policy accept ; }}", hook),
-        ]).await?;
+            "add",
+            "chain",
+            "inet",
+            table,
+            chain,
+            &format!(
+                "{{ type filter hook {} priority 0 ; policy accept ; }}",
+                hook
+            ),
+        ])
+        .await?;
     }
 
     // Flush existing rules in filter chains (atomic replace)
@@ -118,9 +125,17 @@ pub async fn apply_firewall_rules(
 
     // Always add conntrack established/related rule first
     run_nft(&[
-        "add", "rule", "inet", table, "input",
-        "ct", "state", "established,related", "accept",
-    ]).await?;
+        "add",
+        "rule",
+        "inet",
+        table,
+        "input",
+        "ct",
+        "state",
+        "established,related",
+        "accept",
+    ])
+    .await?;
 
     // Apply user rules
     for rule in &rules {
@@ -178,10 +193,7 @@ pub struct NatRule {
     pub masquerade: Option<bool>,
 }
 
-pub async fn apply_nat_rules(
-    table: &str,
-    policy_json: &[u8],
-) -> Result<(), ChvError> {
+pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvError> {
     let rules: Vec<NatRule> = if policy_json.is_empty() {
         Vec::new()
     } else {
@@ -211,9 +223,14 @@ pub async fn apply_nat_rules(
     // Ensure table and postrouting chain exist
     run_nft_idempotent(&["add", "table", "inet", table]).await?;
     run_nft_idempotent(&[
-        "add", "chain", "inet", table, "postrouting",
+        "add",
+        "chain",
+        "inet",
+        table,
+        "postrouting",
         "{ type nat hook postrouting priority 100 ; policy accept ; }",
-    ]).await?;
+    ])
+    .await?;
 
     // Flush existing NAT rules
     let _ = run_nft(&["flush", "chain", "inet", table, "postrouting"]).await;
@@ -221,9 +238,17 @@ pub async fn apply_nat_rules(
     if rules.is_empty() {
         // Default: masquerade all non-loopback traffic
         run_nft(&[
-            "add", "rule", "inet", table, "postrouting",
-            "oif", "!=", "lo", "masquerade",
-        ]).await?;
+            "add",
+            "rule",
+            "inet",
+            table,
+            "postrouting",
+            "oif",
+            "!=",
+            "lo",
+            "masquerade",
+        ])
+        .await?;
     } else {
         for rule in &rules {
             let mut args: Vec<&str> = vec!["add", "rule", "inet", table, "postrouting"];

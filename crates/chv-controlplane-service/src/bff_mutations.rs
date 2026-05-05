@@ -91,7 +91,7 @@ impl MutationService for ControlPlaneMutationService {
     ) -> Result<MutateVmResponse, BffError> {
         // Look up the VM's node_id from the vms table.
         let node_id =
-            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = $1")
+            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = ?")
                 .bind(&vm_id)
                 .fetch_one(&self.pool)
                 .await
@@ -191,7 +191,7 @@ impl MutationService for ControlPlaneMutationService {
         requested_by: String,
     ) -> Result<MutateVmResponse, BffError> {
         let node_id =
-            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = $1")
+            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = ?")
                 .bind(&vm_id)
                 .fetch_one(&self.pool)
                 .await
@@ -229,7 +229,7 @@ impl MutationService for ControlPlaneMutationService {
         requested_by: String,
     ) -> Result<MutateVmResponse, BffError> {
         let node_id =
-            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = $1")
+            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = ?")
                 .bind(&vm_id)
                 .fetch_one(&self.pool)
                 .await
@@ -345,7 +345,7 @@ impl MutationService for ControlPlaneMutationService {
                 v.capacity_bytes as size_bytes
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
-            WHERE v.volume_id = $1
+            WHERE v.volume_id = ?
             "#,
         )
         .bind(&volume_id)
@@ -425,7 +425,7 @@ impl MutationService for ControlPlaneMutationService {
                 v.capacity_bytes as size_bytes
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
-            WHERE v.volume_id = $1
+            WHERE v.volume_id = ?
             "#,
         )
         .bind(&volume_id)
@@ -472,7 +472,7 @@ impl MutationService for ControlPlaneMutationService {
                 v.capacity_bytes as size_bytes
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
-            WHERE v.volume_id = $1
+            WHERE v.volume_id = ?
             "#,
         )
         .bind(&volume_id)
@@ -519,7 +519,7 @@ impl MutationService for ControlPlaneMutationService {
                 v.capacity_bytes as size_bytes
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
-            WHERE v.volume_id = $1
+            WHERE v.volume_id = ?
             "#,
         )
         .bind(&volume_id)
@@ -566,7 +566,7 @@ impl MutationService for ControlPlaneMutationService {
                 v.capacity_bytes as size_bytes
             FROM volumes v
             JOIN volume_desired_state vds ON v.volume_id = vds.volume_id
-            WHERE v.volume_id = $1
+            WHERE v.volume_id = ?
             "#,
         )
         .bind(&source_volume_id)
@@ -607,7 +607,7 @@ impl MutationService for ControlPlaneMutationService {
         requested_by: String,
     ) -> Result<MutateNetworkResponse, BffError> {
         let node_id = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT node_id FROM networks WHERE network_id = $1",
+            "SELECT node_id FROM networks WHERE network_id = ?",
         )
         .bind(&network_id)
         .fetch_one(&self.pool)

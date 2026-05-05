@@ -146,10 +146,11 @@ pub async fn list_backup_history(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn create_backup_job(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
@@ -273,10 +274,11 @@ pub async fn get_backup_job(
 }
 
 pub async fn delete_backup_job(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     state
         .backup_repo
         .delete_job(&job_id)
@@ -288,11 +290,12 @@ pub async fn delete_backup_job(
 }
 
 pub async fn update_backup_job(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(job_id): Path<String>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let row = state
         .backup_repo
         .get_job(&job_id)
@@ -369,10 +372,11 @@ pub async fn update_backup_job(
 }
 
 pub async fn execute_backup_job(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let row = state
         .backup_repo
         .get_job(&job_id)
@@ -414,10 +418,11 @@ pub async fn execute_backup_job(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn create_backup_schedule(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let vm_id = payload
         .get("vm_id")
         .and_then(|v| v.as_str())
@@ -542,11 +547,12 @@ pub async fn get_backup_schedule(
 }
 
 pub async fn update_backup_schedule(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(schedule_id): Path<String>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     // Fetch existing record to preserve unspecified fields (correct PATCH semantics)
     let existing = state
         .backup_repo
@@ -611,10 +617,11 @@ pub async fn update_backup_schedule(
 }
 
 pub async fn delete_backup_schedule(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     Path(schedule_id): Path<String>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     state
         .backup_repo
         .delete_schedule(&schedule_id)
@@ -630,10 +637,11 @@ pub async fn delete_backup_schedule(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn create_backup_restore(
-    crate::auth::BearerToken(_claims): crate::auth::BearerToken,
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    crate::auth::require_operator_or_admin(&claims)?;
     let backup_job_id = payload
         .get("backup_job_id")
         .and_then(|v| v.as_str())

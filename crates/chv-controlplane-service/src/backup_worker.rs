@@ -197,22 +197,42 @@ impl BackupWorker {
     }
 
     async fn run_executor(&self) -> Result<(), ChvError> {
-        let jobs = self
-            .backup_repo
-            .list_pending_jobs()
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to list pending backup jobs: {e}"),
-            })?;
+        // Atomically claim pending jobs by setting status to Running in a single query.
+        // This prevents double-execution if multiple backup workers run concurrently.
+        let jobs: Vec<chv_controlplane_store::BackupJobRow> = sqlx::query_as(
+            "UPDATE backup_jobs SET status = 'Running', started_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+             WHERE job_id IN ( \
+                 SELECT job_id FROM backup_jobs WHERE status = 'Pending' \
+                 ORDER BY created_at ASC LIMIT 10 \
+             ) \
+             RETURNING job_id, vm_id, volume_id, status, backup_type, target_path, \
+                       storage_backend, created_at, started_at, completed_at, \
+                       error_message, size_bytes, retry_count, next_retry_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to claim pending backup jobs: {e}"),
+        })?;
 
         let now_str = chrono::Utc::now().to_rfc3339();
-        let retryable = self
-            .backup_repo
-            .list_retryable_jobs(&now_str)
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to list retryable backup jobs: {e}"),
-            })?;
+        let retryable: Vec<chv_controlplane_store::BackupJobRow> = sqlx::query_as(
+            "UPDATE backup_jobs SET status = 'Running', started_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+             WHERE job_id IN ( \
+                 SELECT job_id FROM backup_jobs \
+                 WHERE status = 'RetryPending' AND next_retry_at <= ? \
+                 ORDER BY next_retry_at ASC LIMIT 10 \
+             ) \
+             RETURNING job_id, vm_id, volume_id, status, backup_type, target_path, \
+                       storage_backend, created_at, started_at, completed_at, \
+                       error_message, size_bytes, retry_count, next_retry_at",
+        )
+        .bind(&now_str)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to claim retryable backup jobs: {e}"),
+        })?;
 
         for job in jobs.iter().chain(retryable.iter()) {
             if let Err(e) = self.execute_job(job).await {
@@ -226,8 +246,7 @@ impl BackupWorker {
                 let new_retry_count = job.retry_count + 1;
                 if new_retry_count <= MAX_RETRIES {
                     let backoff_secs = 60i64 * (1 << (new_retry_count - 1)); // 60s, 120s, 240s
-                    let next_retry = chrono::Utc::now()
-                        + chrono::Duration::seconds(backoff_secs);
+                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
                     if let Err(retry_err) = self
                         .backup_repo
                         .mark_for_retry(
@@ -286,21 +305,7 @@ impl BackupWorker {
         &self,
         job: &chv_controlplane_store::BackupJobRow,
     ) -> Result<(), ChvError> {
-        // Mark as Running to prevent re-pickup
-        let now = chrono::Utc::now().to_rfc3339();
-        self.backup_repo
-            .update_job_status(&BackupJobStatusUpdateInput {
-                job_id: job.job_id.clone(),
-                status: "Running".into(),
-                started_at: Some(now),
-                completed_at: None,
-                error_message: None,
-                size_bytes: None,
-            })
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to mark backup job as Running: {e}"),
-            })?;
+        // Job already claimed as Running by the atomic UPDATE...RETURNING in run_executor.
 
         // Find the VM's node_id and generation in a single query
         let row: Option<(String, i64)> = sqlx::query_as(

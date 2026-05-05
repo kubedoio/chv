@@ -159,7 +159,6 @@ pub async fn revoke_token(
     })))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

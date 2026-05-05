@@ -196,8 +196,13 @@ pub async fn delete_snapshot(
         .acquire()
         .await
         .map_err(|e| BffError::Internal(format!("db connection: {e}")))?;
-    super::vms::require_vm_owner(&mut conn, &snapshot.vm_id, &claims.sub, claims.role == "admin")
-        .await?;
+    super::vms::require_vm_owner(
+        &mut conn,
+        &snapshot.vm_id,
+        &claims.sub,
+        claims.role == "admin",
+    )
+    .await?;
 
     sqlx::query("DELETE FROM vm_snapshots WHERE snapshot_id = ?")
         .bind(&snapshot_id)
