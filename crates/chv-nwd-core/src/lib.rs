@@ -1,4 +1,7 @@
+pub mod dhcp;
+pub mod dns;
 pub mod executor;
+pub mod firewall;
 pub mod handlers;
 pub mod server;
 pub mod state;

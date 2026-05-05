@@ -204,6 +204,11 @@ impl Orchestrator {
                 reason: format!("operation {} has no target node", row.operation_id),
             })?;
 
+        // Schedulability check: operations that place new workloads require TenantReady
+        if Self::requires_schedulable_node(&row.operation_type) {
+            self.require_node_schedulable(node_id).await?;
+        }
+
         let socket_path = self.resolve_agent_socket(node_id);
         let mut client = self
             .node_client_pool
@@ -614,6 +619,63 @@ impl Orchestrator {
             PathBuf::from(self.agent_socket_pattern.replace("{node_id}", node_id))
         } else {
             PathBuf::from(&self.agent_socket_pattern)
+        }
+    }
+
+    fn requires_schedulable_node(operation_type: &str) -> bool {
+        matches!(
+            operation_type,
+            "create" | "CreateVm" | "MigrateVm" | "ResizeVm"
+        )
+    }
+
+    async fn require_node_schedulable(&self, node_id: &str) -> Result<(), ChvError> {
+        let observed_state: Option<String> = sqlx::query_scalar(
+            "SELECT observed_state FROM node_observed_state WHERE node_id = ?",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to check node state for {}: {e}", node_id),
+        })?;
+
+        let scheduling_paused: Option<bool> = sqlx::query_scalar(
+            "SELECT scheduling_paused FROM node_desired_state WHERE node_id = ?",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to check scheduling_paused for {}: {e}", node_id),
+        })?;
+
+        if scheduling_paused.unwrap_or(false) {
+            return Err(ChvError::InvalidArgument {
+                field: "node_id".to_string(),
+                reason: format!(
+                    "node {} has scheduling paused",
+                    node_id
+                ),
+            });
+        }
+
+        match observed_state.as_deref() {
+            Some("TenantReady") => Ok(()),
+            Some(state) => Err(ChvError::InvalidArgument {
+                field: "node_id".to_string(),
+                reason: format!(
+                    "node {} is in state '{}', must be TenantReady for placement",
+                    node_id, state
+                ),
+            }),
+            None => Err(ChvError::InvalidArgument {
+                field: "node_id".to_string(),
+                reason: format!(
+                    "node {} has no observed state, cannot accept placements",
+                    node_id
+                ),
+            }),
         }
     }
 
