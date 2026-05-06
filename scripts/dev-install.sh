@@ -6,7 +6,7 @@
 #   Network: default (CIDR derived from INSTALL_CHV_BRIDGE_CIDR)
 #   VM:      test-1 (1 CPU, 512 MB RAM, 10 GB disk)
 #
-# Usage: sudo ./scripts/dev-install.sh [--no-uninstall] [--no-seed] [--install-only]
+# Usage: sudo ./scripts/dev-install.sh [--no-uninstall] [--no-seed] [--install-only] [--wipe]
 #
 # Predefined dev defaults (override via environment):
 #   INSTALL_CHV_BRIDGE_IFACE  - default: ens19
@@ -17,6 +17,7 @@
 #   --no-uninstall   Skip the uninstall step (useful for first install)
 #   --no-seed        Skip creating the default network and test-1 VM
 #   --install-only   Skip uninstall + build; run install.sh with existing tarball
+#   --wipe           Full teardown before clean install (removes certs, DB, network)
 
 set -euo pipefail
 
@@ -26,11 +27,13 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NO_UNINSTALL=0
 NO_SEED=0
 INSTALL_ONLY=0
+WIPE=0
 for arg in "$@"; do
     case "$arg" in
         --no-uninstall) NO_UNINSTALL=1 ;;
         --no-seed) NO_SEED=1 ;;
         --install-only) INSTALL_ONLY=1 ;;
+        --wipe) WIPE=1 ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
 done
@@ -283,6 +286,7 @@ next_step "Running installer..."
 export INSTALL_CHV_TARBALL_PATH="$(realpath "$TARBALL")"
 export INSTALL_CHV_VERSION="$VERSION"
 export INSTALL_CHV_NO_SEED="$NO_SEED"
+export INSTALL_CHV_WIPE="$WIPE"
 
 "$PROJECT_ROOT/scripts/install.sh"
 

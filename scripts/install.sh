@@ -3,6 +3,7 @@
 # Usage:
 #   curl -sfL https://get.cellhv.com/ | sh -
 #   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.0.0.2 sh -
+#   ./scripts/install.sh --wipe    # Full teardown before clean install
 #
 # Environment variables:
 #   INSTALL_CHV_VERSION         - Version to install (default: latest)
@@ -13,6 +14,7 @@
 #   INSTALL_CHV_BRIDGE_NAME     - Bridge name (default: chvbr0)
 #   INSTALL_CHV_BRIDGE_CIDR     - Bridge CIDR (default: 10.200.0.1/24)
 #   INSTALL_CHV_NO_SEED         - Set to "1" to skip default network + test VM creation
+#   INSTALL_CHV_WIPE            - Set to "1" to fully wipe previous deployment first
 
 set -euo pipefail
 
@@ -24,6 +26,14 @@ INSTALL_CHV_TARBALL_PATH="${INSTALL_CHV_TARBALL_PATH:-}"
 INSTALL_CHV_SKIP_DEPS="${INSTALL_CHV_SKIP_DEPS:-0}"
 INSTALL_CHV_SKIP_CLOUD_HV="${INSTALL_CHV_SKIP_CLOUD_HV:-0}"
 INSTALL_CHV_NO_SEED="${INSTALL_CHV_NO_SEED:-0}"
+INSTALL_CHV_WIPE="${INSTALL_CHV_WIPE:-0}"
+
+# Parse CLI flags
+for arg in "$@"; do
+    case "$arg" in
+        --wipe) INSTALL_CHV_WIPE="1" ;;
+    esac
+done
 
 # Network defaults
 INSTALL_CHV_BRIDGE_IFACE="${INSTALL_CHV_BRIDGE_IFACE:-ens19}"
@@ -651,6 +661,22 @@ generate_certs() {
         chmod 644 "$CHV_CONFIG_DIR/certs/server.crt"
         chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/server.key" "$CHV_CONFIG_DIR/certs/server.crt"
     fi
+
+    # Agent client certificate (for mTLS to control plane)
+    if [ ! -f "$CHV_CONFIG_DIR/certs/agent-client.key" ]; then
+        openssl genrsa -out "$CHV_CONFIG_DIR/certs/agent-client.key" 2048 2>/dev/null
+        openssl req -new -key "$CHV_CONFIG_DIR/certs/agent-client.key" \
+            -out "$CHV_CONFIG_DIR/certs/agent-client.csr" \
+            -subj "/O=CHV/CN=chv-agent" 2>/dev/null
+        openssl x509 -req -in "$CHV_CONFIG_DIR/certs/agent-client.csr" \
+            -CA "$CHV_CONFIG_DIR/certs/ca.crt" -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
+            -CAcreateserial -out "$CHV_CONFIG_DIR/certs/agent-client.crt" \
+            -days 825 -sha256 2>/dev/null
+        rm -f "$CHV_CONFIG_DIR/certs/agent-client.csr"
+        chmod 640 "$CHV_CONFIG_DIR/certs/agent-client.key"
+        chmod 644 "$CHV_CONFIG_DIR/certs/agent-client.crt"
+        chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/agent-client.key" "$CHV_CONFIG_DIR/certs/agent-client.crt"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -1074,7 +1100,22 @@ start_services() {
     # Ensure agent cache is cleared so reinstall triggers fresh enrollment
     rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
 
+    # Pre-place agent client cert so mTLS works immediately
+    mkdir -p /run/chv/agent
+    cp "$CHV_CONFIG_DIR/certs/agent-client.crt" /run/chv/agent/agent.crt
+    cp "$CHV_CONFIG_DIR/certs/agent-client.key" /run/chv/agent/agent.key
+    cp "$CHV_CONFIG_DIR/certs/ca.crt" /run/chv/agent/ca.crt
+    chown "$CHV_USER":"$CHV_USER" /run/chv/agent/agent.crt /run/chv/agent/agent.key /run/chv/agent/ca.crt
+    chmod 640 /run/chv/agent/agent.key
+
     systemctl enable --now chv-agent
+
+    # Get auth token for API polling
+    local auth_token
+    auth_token=$(curl -sf "http://127.0.0.1:8080/v1/auth/login" \
+        -X POST -H "Content-Type: application/json" \
+        -d '{"username":"admin","password":"admin"}' 2>/dev/null \
+        | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "")
 
     info "Waiting for agent enrollment (up to 60s)..."
     attempt=1
@@ -1082,7 +1123,9 @@ start_services() {
         local node_count
         node_count=0
         node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
-            -X POST -H "Content-Type: application/json" -d '{}' 2>/dev/null \
+            -X POST -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${auth_token}" \
+            -d '{}' 2>/dev/null \
             | grep -o '"total_items":[0-9]*' | grep -o '[0-9]*' || echo "0")
         if [ "${node_count}" -gt 0 ] 2>/dev/null; then
             info "Node enrolled successfully."
@@ -1098,6 +1141,44 @@ start_services() {
 }
 
 # -----------------------------------------------------------------------------
+# Wipe Deployment (--wipe flag: full teardown including certs, data, network)
+# -----------------------------------------------------------------------------
+wipe_deployment() {
+    info "Wiping previous CHV deployment (--wipe)..."
+    # Stop and disable all services
+    for svc in chv-agent chv-controlplane chv-stord chv-nwd; do
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+    done
+    remove_running_chv_processes
+    # Remove systemd units
+    rm -f /etc/systemd/system/chv-*.service
+    systemctl daemon-reload
+    # Remove ALL data, config, certs, runtime
+    rm -rf "${CHV_CONFIG_DIR}"
+    rm -rf "${CHV_DATA_DIR}"
+    rm -rf "${CHV_RUN_DIR}"
+    rm -rf "${CHV_LOG_DIR}"
+    rm -rf "${CHV_UI_DIR}"
+    rm -rf "${CHV_MIGRATIONS_DIR}"
+    # Remove binaries
+    rm -f /usr/local/bin/chv-controlplane /usr/local/bin/chv-agent \
+          /usr/local/bin/chv-stord /usr/local/bin/chv-nwd
+    # Remove nginx config
+    rm -f /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
+    # Remove bridge network
+    if ip link show "${INSTALL_CHV_BRIDGE_NAME}" &>/dev/null; then
+        ip link set "${INSTALL_CHV_BRIDGE_NAME}" down 2>/dev/null || true
+        ip link delete "${INSTALL_CHV_BRIDGE_NAME}" 2>/dev/null || true
+    fi
+    # Remove iptables NAT rules
+    local bridge_subnet
+    bridge_subnet=$(echo "${INSTALL_CHV_BRIDGE_CIDR}" | sed 's|/[0-9]*$||' | sed 's|\.[0-9]*$|.0/24|')
+    iptables -t nat -D POSTROUTING -s "${bridge_subnet}" ! -o "${INSTALL_CHV_BRIDGE_NAME}" -j MASQUERADE 2>/dev/null || true
+    info "Wipe complete. Starting fresh install."
+}
+
+# -----------------------------------------------------------------------------
 # Cleanup
 # -----------------------------------------------------------------------------
 cleanup() {
@@ -1110,6 +1191,10 @@ cleanup() {
 # Main
 # -----------------------------------------------------------------------------
 trap cleanup EXIT
+
+if [ "$INSTALL_CHV_WIPE" = "1" ]; then
+    wipe_deployment
+fi
 
 install_dependencies
 setup_user_and_dirs
