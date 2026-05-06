@@ -29,30 +29,18 @@
       const nodeMap = new Map(nodes.map((n: any) => [n.id, n.name]));
 
       // Load metrics for running VMs
-      const vmsWithMetrics = await Promise.all(
-        vmList
+      const vmsWithMetrics = vmList
           .filter((vm: VM) => vm.actual_state === 'running')
-          .map(async (vm: VM) => {
-            try {
-              const metrics = await client.getVMMetrics(vm.id);
-              return {
-                ...vm,
-                cpuUsage: metrics?.current?.cpu?.usage_percent || 0,
-                memoryUsage: metrics?.current?.memory?.usage_percent || 0,
-                diskUsage: metrics?.current?.disk?.read_bytes || 0,
-                nodeName: nodeMap.get((vm as any).node_id) || 'Unknown'
-              };
-            } catch (e) {
-              return {
-                ...vm,
-                cpuUsage: 0,
-                memoryUsage: 0,
-                diskUsage: 0,
-                nodeName: nodeMap.get((vm as any).node_id) || 'Unknown'
-              };
-            }
-          })
-      );
+          .map((vm: VM) => {
+            // VM metrics endpoint not yet implemented; show placeholder data
+            return {
+              ...vm,
+              cpuUsage: 0,
+              memoryUsage: 0,
+              diskUsage: 0,
+              nodeName: nodeMap.get((vm as any).node_id) || 'Unknown'
+            };
+          });
 
       vms = vmsWithMetrics;
     } catch (e) {

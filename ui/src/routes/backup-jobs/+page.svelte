@@ -6,7 +6,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     ShieldCheck, Activity, Upload, Download, RefreshCcw, Search, ChevronRight
   } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import InventoryTable from '$lib/components/shell/InventoryTable.svelte';

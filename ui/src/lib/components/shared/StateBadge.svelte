@@ -44,20 +44,20 @@
     transition: all 0.3s ease;
   }
   
-  .text-success-dark { color: #15803d; }
-  .text-warning-dark { color: #a16207; }
-  .text-danger-dark { color: #b91c1c; }
+  .text-success-dark { color: var(--color-success-dark); }
+  .text-warning-dark { color: var(--color-warning-dark); }
+  .text-danger-dark { color: var(--color-danger-dark); }
   
-  .glow-success { box-shadow: 0 0 10px rgba(34, 197, 94, 0.1); }
-  .glow-warning { box-shadow: 0 0 10px rgba(234, 179, 8, 0.1); }
-  .glow-danger { box-shadow: 0 0 10px rgba(239, 68, 68, 0.1); }
+  .glow-success { box-shadow: 0 0 10px var(--color-success-glow); }
+  .glow-warning { box-shadow: 0 0 10px var(--color-warning-glow); }
+  .glow-danger { box-shadow: 0 0 10px var(--color-danger-glow); }
 
-  .bg-success\/15 { background-color: rgba(34, 197, 94, 0.15); }
-  .bg-warning\/15 { background-color: rgba(234, 179, 8, 0.15); }
-  .bg-danger\/15 { background-color: rgba(239, 68, 68, 0.15); }
+  .bg-success\/15 { background-color: var(--color-success-light); }
+  .bg-warning\/15 { background-color: var(--color-warning-light); }
+  .bg-danger\/15 { background-color: var(--color-danger-light); }
 
-  .border-success\/20 { border-color: rgba(34, 197, 94, 0.2); }
-  .border-warning\/20 { border-color: rgba(234, 179, 8, 0.2); }
-  .border-danger\/20 { border-color: rgba(239, 68, 68, 0.2); }
+  .border-success\/20 { border-color: var(--color-success-glow); }
+  .border-warning\/20 { border-color: var(--color-warning-glow); }
+  .border-danger\/20 { border-color: var(--color-danger-glow); }
 </style>
 

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import Badge from '../Badge.svelte';
+	import { useTableSorting } from './useTableSorting';
 
 	interface Column {
 		key: string;
@@ -20,9 +21,22 @@
 		emptyTitle?: string;
 		emptyDescription?: string;
 		actionCell?: Snippet<[Record<string, unknown>]>;
+		sortColumn?: string | null;
+		sortDirection?: 'asc' | 'desc' | null;
+		onSort?: (column: string, direction: 'asc' | 'desc' | null) => void;
 	}
 
-	let { columns, rows, rowHref, emptyTitle, emptyDescription, actionCell }: Props = $props();
+	let { columns, rows, rowHref, emptyTitle, emptyDescription, actionCell, sortColumn = null, sortDirection = null, onSort }: Props = $props();
+
+	const sorting = $derived(useTableSorting({ sortColumn, sortDirection, onSort }));
+
+	function ariaSort(column: Column): 'ascending' | 'descending' | 'none' | undefined {
+		if (!column.sortable) return undefined;
+		const dir = sorting.getSortDirection(column.key);
+		if (dir === 'asc') return 'ascending';
+		if (dir === 'desc') return 'descending';
+		return 'none';
+	}
 
 	function renderCell(row: Record<string, unknown>, key: string): string {
 		const value = row[key];
@@ -58,7 +72,11 @@
 			<thead>
 				<tr>
 					{#each columns as column}
-						<th>
+						<th
+							aria-sort={ariaSort(column)}
+							class:resource-table__th--sortable={column.sortable}
+							onclick={column.sortable ? () => sorting.handleSort(column.key) : undefined}
+						>
 							{column.label}
 						</th>
 					{/each}
@@ -131,6 +149,15 @@
 		text-transform: uppercase;
 		color: var(--shell-text-muted);
 		background: rgba(247, 242, 234, 0.75);
+	}
+
+	.resource-table__th--sortable {
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.resource-table__th--sortable:hover {
+		color: var(--shell-text);
 	}
 
 	.resource-table tbody tr:hover {

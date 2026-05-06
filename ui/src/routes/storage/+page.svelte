@@ -4,7 +4,7 @@ import Button from '$lib/components/primitives/Button.svelte';
   import { goto } from '$app/navigation';
   import { HardDrive, Plus, Database, ShieldCheck } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
   import FilterBar from '$lib/components/shared/FilterBar.svelte';
   import CreateStoragePoolModal from '$lib/components/storage/CreateStoragePoolModal.svelte';

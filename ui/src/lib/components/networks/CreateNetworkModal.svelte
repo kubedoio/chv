@@ -5,7 +5,7 @@
 	import Select from '$lib/components/primitives/Select.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { createNetwork, updateNetwork } from '$lib/bff/networks';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import type { CreateNetworkInput, NetworkDetailModel, UpdateNetworkInput } from '$lib/bff/types';
 
 	interface Props {

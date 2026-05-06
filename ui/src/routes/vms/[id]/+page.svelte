@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import type { PageData } from './$types';
-	import { getStoredToken, createAPIClient } from '$lib/api/client';
+	import { getStoredToken } from '$lib/api/client';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
@@ -63,8 +63,8 @@
 		if (!detail.summary.vm_id) return;
 		snapshotsLoading = true;
 		try {
-			const client = createAPIClient();
-			snapshots = await client.listVMSnapshots(detail.summary.vm_id);
+			// Snapshot list endpoint not yet implemented on the server
+			snapshots = [];
 		} catch (err: any) {
 			snapshotsError = err.message || 'Snapshot registry inaccessible';
 		} finally {
@@ -124,6 +124,7 @@
 			requestedVmId={data.requestedVmId}
 			currentTab={detail.currentTab}
 			nodeId={detail.summary.node_id}
+			errorMessage={detail.errorMessage}
 			onRetry={retryDetailLoad}
 		/>
 	{:else if detail.state === 'empty'}

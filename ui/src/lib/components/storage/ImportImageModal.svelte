@@ -4,7 +4,7 @@
 	import Input from '../primitives/Input.svelte';
 	import { importImage } from '$lib/bff/images';
 	import { getStoredToken } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 
 	interface Props {
 		open?: boolean;

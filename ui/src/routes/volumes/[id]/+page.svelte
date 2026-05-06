@@ -6,7 +6,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { mutateVolume } from '$lib/bff/volumes';
 	import { listVms } from '$lib/bff/vms';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';

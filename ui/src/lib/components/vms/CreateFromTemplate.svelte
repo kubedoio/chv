@@ -3,7 +3,7 @@
   import FormField from '$lib/components/shared/FormField.svelte';
   import Input from '$lib/components/primitives/TextInput.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import type { VMTemplate, Image, Network, StoragePool, VM, CloudInitTemplate } from '$lib/api/types';
   import { onMount } from 'svelte';
 
