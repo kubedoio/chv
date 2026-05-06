@@ -1041,25 +1041,14 @@ EOF
 start_services() {
     info "Enabling and starting CHV services..."
 
+    # Phase 1: Start controlplane briefly to run migrations and create schema
     systemctl enable --now chv-controlplane
 
     info "Waiting for control plane to apply database migrations (up to 30s)..."
     local attempt=1
     while [ $attempt -le 30 ]; do
-        if [ -f "${CHV_DB_PATH}" ] && \
-           ( /usr/local/bin/chv-controlplane --check-db "${CHV_DB_PATH}" 2>/dev/null \
-             || ( cmd_exists sqlite3 && sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" "SELECT 1 FROM bootstrap_tokens LIMIT 1;" &>/dev/null 2>&1 ) ); then
-            info "Database ready."
-            break
-        fi
-        sleep 1
-        ((attempt++))
-    done
-    # Fallback: wait for HTTP health endpoint (doesn't require sqlite3 on host)
-    attempt=1
-    while [ $attempt -le 30 ]; do
         if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
-            info "Control plane API is up."
+            info "Control plane API is up (migrations applied)."
             break
         fi
         sleep 1
@@ -1069,7 +1058,14 @@ start_services() {
         fatal "Control plane did not become healthy within 30s. Check: journalctl -u chv-controlplane -n 50"
     fi
 
-    # Insert bootstrap token directly into the SQLite database
+    # Phase 2: Stop controlplane so we can safely write to the DB with sqlite3 CLI.
+    # The bundled SQLite in the controlplane and system sqlite3 are different builds;
+    # concurrent WAL access between them causes SQLITE_IOERR_SHORT_READ (error 522).
+    info "Stopping control plane for bootstrap token seeding..."
+    systemctl stop chv-controlplane
+    sleep 1
+
+    # Insert bootstrap token while no other process has the DB open
     info "Inserting bootstrap token into database..."
     local token_hash
     token_hash=$(printf '%s' "$BOOTSTRAP_TOKEN" | sha256sum | awk '{print $1}')
@@ -1099,6 +1095,22 @@ start_services() {
         fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
     fi
     chown "${CHV_USER}:${CHV_USER}" "${CHV_DB_PATH}" "${CHV_DB_PATH}-wal" "${CHV_DB_PATH}-shm" 2>/dev/null || true
+
+    # Phase 3: Restart controlplane now that token is seeded and DB is clean
+    info "Restarting control plane..."
+    systemctl start chv-controlplane
+    attempt=1
+    while [ $attempt -le 30 ]; do
+        if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
+            info "Control plane API is up."
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+    if [ $attempt -gt 30 ]; then
+        fatal "Control plane did not become healthy after restart. Check: journalctl -u chv-controlplane -n 50"
+    fi
 
     # Ensure agent cache is cleared so reinstall triggers fresh enrollment
     rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
