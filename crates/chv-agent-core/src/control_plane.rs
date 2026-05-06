@@ -36,7 +36,9 @@ impl ControlPlaneClient {
                     source: e,
                 })?;
                 let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
-                let mut tls = tonic::transport::ClientTlsConfig::new().identity(identity);
+                let mut tls = tonic::transport::ClientTlsConfig::new()
+                    .domain_name("localhost")
+                    .identity(identity);
                 if let Some(ca) = ca_cert_path {
                     let ca_pem = tokio::fs::read(ca).await.map_err(|e| ChvError::Io {
                         path: ca.to_string_lossy().to_string(),
