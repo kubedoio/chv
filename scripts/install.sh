@@ -604,6 +604,28 @@ seed_dev_resources() {
         return
     fi
 
+    # Wait for node to reach TenantReady before attempting VM placement
+    info "Waiting for node to reach TenantReady (up to 60s)..."
+    attempt=1
+    while [ $attempt -le 60 ]; do
+        local nodes_json
+        nodes_json=$(curl -sf -X POST "${api_base}/v1/nodes" \
+            -H "Content-Type: application/json" \
+            -H "$auth_header" \
+            -d '{}' 2>/dev/null || echo "")
+        if echo "$nodes_json" | grep -q '"state":"TenantReady"'; then
+            info "Node is TenantReady, proceeding with VM creation."
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+    if [ $attempt -gt 60 ]; then
+        warn "No node reached TenantReady within 60s, skipping test VM creation."
+        warn "Check node state: journalctl -u chv-agent -n 50"
+        return
+    fi
+
     local vm_response
     vm_response=$(curl -sf -X POST "${api_base}/v1/vms/create" \
         -H "Content-Type: application/json" \
