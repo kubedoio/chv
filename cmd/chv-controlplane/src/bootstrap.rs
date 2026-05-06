@@ -107,11 +107,14 @@ pub async fn build_service(
         })?;
     let (http_shutdown_tx, mut http_shutdown_rx) = tokio::sync::watch::channel(());
     let http_join_handle = tokio::spawn(async move {
-        axum::serve(http_listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = http_shutdown_rx.changed().await;
-            })
-            .await
+        axum::serve(
+            http_listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = http_shutdown_rx.changed().await;
+        })
+        .await
     });
 
     let cert_issuer = if let (Some(ca_cert_path), Some(ca_key_path)) =
