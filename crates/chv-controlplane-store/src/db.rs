@@ -70,6 +70,7 @@ pub fn build_connect_options(
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .pragma("foreign_keys", "ON")
+        .pragma("mmap_size", "0")
         .busy_timeout(Duration::from_secs(5)))
 }
 
