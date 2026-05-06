@@ -1,4 +1,4 @@
-use crate::api::{health, nodes, operations, stub};
+use crate::api::{bootstrap, health, nodes, operations, stub};
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -61,6 +61,11 @@ pub fn admin_router(bff_state: AppState) -> Router {
         .route("/health", get(health::health_handler))
         .route("/health/deep", get(health::deep_health_handler))
         .route("/ready", get(health::ready_handler))
+        // Internal management (unauthenticated — protected by localhost-only check in handler)
+        .route(
+            "/internal/bootstrap-token",
+            post(bootstrap::seed_bootstrap_token),
+        )
         // Admin-protected routes
         .merge(admin_routes)
         // Auth stubs

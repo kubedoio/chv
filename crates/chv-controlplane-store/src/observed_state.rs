@@ -11,7 +11,8 @@ INSERT INTO node_observed_state (
     state_reason,
     entered_at,
     observed_at,
-    updated_at
+    updated_at,
+    last_seen_at
 )
 VALUES (
     $1,
@@ -22,7 +23,8 @@ VALUES (
     $6,
     CASE WHEN $7 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch') END,
     strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch')
+    strftime('%Y-%m-%dT%H:%M:%SZ', $8 / 1000.0, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 )
 ON CONFLICT (node_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
@@ -32,7 +34,8 @@ ON CONFLICT (node_id) DO UPDATE SET
     state_reason = EXCLUDED.state_reason,
     entered_at = EXCLUDED.entered_at,
     observed_at = EXCLUDED.observed_at,
-    updated_at = EXCLUDED.updated_at
+    updated_at = EXCLUDED.updated_at,
+    last_seen_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 "#;
 
 const UPSERT_VM_OBSERVED_STATE_SQL: &str = r#"

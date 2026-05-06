@@ -147,6 +147,34 @@ impl OperationRepository {
             .await?;
         Ok(())
     }
+
+    pub async fn mark_for_retry(
+        &self,
+        operation_id: &OperationId,
+        retry_count: i32,
+        next_retry_at: &str,
+        error_message: &str,
+        updated_unix_ms: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"UPDATE operations SET
+                status = 'RetryPending',
+                retry_count = $2,
+                next_retry_at = $3,
+                error_message = $4,
+                updated_by = 'orchestrator',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $5 / 1000.0, 'unixepoch')
+            WHERE operation_id = $1"#,
+        )
+        .bind(operation_id.as_str())
+        .bind(retry_count)
+        .bind(next_retry_at)
+        .bind(error_message)
+        .bind(updated_unix_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
