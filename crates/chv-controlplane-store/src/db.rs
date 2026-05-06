@@ -67,7 +67,8 @@ pub fn build_connect_options(
 ) -> Result<SqliteConnectOptions, StoreError> {
     Ok(SqliteConnectOptions::from_str(&config.database_url)?
         .create_if_missing(true)
-        .pragma("journal_mode", "WAL")
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .pragma("foreign_keys", "ON")
         .busy_timeout(Duration::from_secs(5)))
 }

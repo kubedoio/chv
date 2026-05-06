@@ -1048,7 +1048,7 @@ start_services() {
     while [ $attempt -le 30 ]; do
         if [ -f "${CHV_DB_PATH}" ] && \
            ( /usr/local/bin/chv-controlplane --check-db "${CHV_DB_PATH}" 2>/dev/null \
-             || ( cmd_exists sqlite3 && sqlite3 "${CHV_DB_PATH}" "SELECT 1 FROM bootstrap_tokens LIMIT 1;" &>/dev/null 2>&1 ) ); then
+             || ( cmd_exists sqlite3 && sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" "SELECT 1 FROM bootstrap_tokens LIMIT 1;" &>/dev/null 2>&1 ) ); then
             info "Database ready."
             break
         fi
@@ -1084,7 +1084,7 @@ start_services() {
     if [ -n "$expires" ]; then
         expires_sql="'${expires}'"
     fi
-    sqlite3 "${CHV_DB_PATH}" \
+    sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
         "INSERT OR REPLACE INTO bootstrap_tokens
          (token_hash, description, one_time_use, used_at, expires_at, created_at, updated_at)
          VALUES ('${token_hash}', 'All-in-one installer', 1, NULL,
@@ -1093,12 +1093,12 @@ start_services() {
                  strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
 
     local seeded_tokens
-    seeded_tokens=$(sqlite3 "${CHV_DB_PATH}" \
+    seeded_tokens=$(sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
         "SELECT COUNT(*) FROM bootstrap_tokens WHERE token_hash='${token_hash}';" 2>/dev/null || echo "0")
     if [ "${seeded_tokens}" -lt 1 ] 2>/dev/null; then
         fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
     fi
-    chown "${CHV_USER}:${CHV_USER}" "${CHV_DB_PATH}"
+    chown "${CHV_USER}:${CHV_USER}" "${CHV_DB_PATH}" "${CHV_DB_PATH}-wal" "${CHV_DB_PATH}-shm" 2>/dev/null || true
 
     # Ensure agent cache is cleared so reinstall triggers fresh enrollment
     rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"

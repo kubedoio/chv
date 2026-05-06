@@ -290,7 +290,7 @@ export INSTALL_CHV_WIPE="$WIPE"
 
 "$PROJECT_ROOT/scripts/install.sh"
 
-chown chv:chv /var/lib/chv/controlplane.db 2>/dev/null || true
+chown chv:chv /var/lib/chv/controlplane.db /var/lib/chv/controlplane.db-wal /var/lib/chv/controlplane.db-shm 2>/dev/null || true
 
 echo ""
 echo "Dev install complete! Version: $VERSION"
