@@ -11,7 +11,7 @@
 	import HypervisorSelectField from '$lib/components/settings/HypervisorSelectField.svelte';
 	import HypervisorTextField from '$lib/components/settings/HypervisorTextField.svelte';
 	import HypervisorProfilePanel from '$lib/components/settings/HypervisorProfilePanel.svelte';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import {
 		updateHypervisorSettings,

@@ -114,25 +114,25 @@
       case 'error':
         return 'text-red-500';
       default:
-        return 'text-slate-400';
+        return 'text-[var(--color-neutral-400)]';
     }
   }
 </script>
 
 <aside 
-  class="h-screen flex flex-col bg-[#252532] text-slate-300 w-64 border-r border-[#1e1e28]"
+  class="h-screen flex flex-col bg-[var(--bg-sidebar)] text-[var(--color-neutral-300)] w-64 border-r border-[var(--shell-line)]"
   role="navigation"
   aria-label="Main navigation"
 >
   <!-- Header -->
-  <header class="h-14 flex items-center px-4 border-b border-[#1e1e28] bg-[#1e1e28]">
+  <header class="h-14 flex items-center px-4 border-b border-[var(--shell-line)] bg-[var(--color-neutral-800)]">
     <div class="flex items-center gap-3">
-      <div class="w-8 h-8 rounded bg-gradient-to-br from-[#e57035] to-[#d14a28] flex items-center justify-center">
+      <div class="w-8 h-8 rounded bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-dark)] flex items-center justify-center">
         <Database class="text-white" size={18} />
       </div>
       <div>
         <div class="text-sm font-semibold text-white">CHV Manager</div>
-        <div class="text-[10px] text-slate-500">Virtualization Platform</div>
+        <div class="text-[10px] text-[var(--color-neutral-500)]">Virtualization Platform</div>
       </div>
     </div>
   </header>
@@ -146,13 +146,13 @@
     <ul role="tree">
       <!-- Datacenter -->
       <li class="select-none">
-        <div class="mx-2 rounded-md {isActive('/') ? 'bg-[#e57035]/15 text-[#ff9a65]' : 'hover:bg-white/5'}">
+        <div class="mx-2 rounded-md {isActive('/') ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : 'hover:bg-white/5'}">
           <a
             href="/"
             class="flex items-center gap-2 px-3 py-2 text-sm"
             aria-current={isActive('/') ? 'page' : undefined}
           >
-            <Database size={16} class={isActive('/') ? 'text-[#e57035]' : 'text-slate-400'} />
+            <Database size={16} class={isActive('/') ? 'text-[var(--color-primary)]' : 'text-[var(--color-neutral-400)]'} />
             <span class="flex-1 truncate font-medium">Datacenter</span>
           </a>
         </div>
@@ -160,14 +160,14 @@
         <!-- Overview -->
         <ul class="mt-0.5">
           <li class="select-none">
-            <div class="mx-2 rounded-md {isActive('/') ? 'bg-[#e57035]/15 text-[#ff9a65]' : 'hover:bg-white/5'}"
+            <div class="mx-2 rounded-md {isActive('/') ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : 'hover:bg-white/5'}"
                  style="margin-left: 1.25rem;">
               <a
                 href="/"
                 class="flex items-center gap-2 px-3 py-2 text-sm"
                 aria-current={isActive('/') ? 'page' : undefined}
               >
-                <LayoutGrid size={16} class={isActive('/') ? 'text-[#e57035]' : 'text-slate-400'} />
+                <LayoutGrid size={16} class={isActive('/') ? 'text-[var(--color-primary)]' : 'text-[var(--color-neutral-400)]'} />
                 <span class="truncate">Overview</span>
               </a>
             </div>
@@ -185,11 +185,11 @@
             aria-expanded={isExpanded('nodes')}
           >
             {#if isExpanded('nodes')}
-              <ChevronDown size={14} class="text-slate-400" />
+              <ChevronDown size={14} class="text-[var(--color-neutral-400)]" />
             {:else}
-              <ChevronRight size={14} class="text-slate-400" />
+              <ChevronRight size={14} class="text-[var(--color-neutral-400)]" />
             {/if}
-            <FolderTree size={16} class="text-slate-400" />
+            <FolderTree size={16} class="text-[var(--color-neutral-400)]" />
             <span class="flex-1 truncate font-medium">Nodes</span>
           </button>
         </div>
@@ -200,7 +200,7 @@
               <li class="select-none">
                 <!-- Node -->
                 <div 
-                  class="mx-2 rounded-md {isActive(`/nodes/${node.id}`) ? 'bg-[#e57035]/15 text-[#ff9a65]' : 'hover:bg-white/5'}"
+                  class="mx-2 rounded-md {isActive(`/nodes/${node.id}`) ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : 'hover:bg-white/5'}"
                   style="margin-left: 1.25rem;"
                 >
                   <button
@@ -210,9 +210,9 @@
                     aria-expanded={isExpanded(node.id)}
                   >
                     {#if isExpanded(node.id)}
-                      <ChevronDown size={14} class="text-slate-400" />
+                      <ChevronDown size={14} class="text-[var(--color-neutral-400)]" />
                     {:else}
-                      <ChevronRight size={14} class="text-slate-400" />
+                      <ChevronRight size={14} class="text-[var(--color-neutral-400)]" />
                     {/if}
                     <Circle size={8} class={getStatusColor(node.status)} fill="currentColor" />
                     <span class="truncate font-medium">{node.name}</span>
@@ -224,7 +224,7 @@
                     <!-- Virtual Machines -->
                     <li class="select-none">
                       <div 
-                        class="mx-2 rounded-md {isActive(`/nodes/${node.id}/vms`) ? 'bg-[#e57035]/15 text-[#ff9a65]' : 'hover:bg-white/5'}"
+                        class="mx-2 rounded-md {isActive(`/nodes/${node.id}/vms`) ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : 'hover:bg-white/5'}"
                         style="margin-left: 2rem;"
                       >
                         <button
@@ -234,14 +234,14 @@
                           aria-expanded={isExpanded(`${node.id}-vms`)}
                         >
                           {#if isExpanded(`${node.id}-vms`)}
-                            <ChevronDown size={14} class="text-slate-400" />
+                            <ChevronDown size={14} class="text-[var(--color-neutral-400)]" />
                           {:else}
-                            <ChevronRight size={14} class="text-slate-400" />
+                            <ChevronRight size={14} class="text-[var(--color-neutral-400)]" />
                           {/if}
-                          <Server size={16} class="text-slate-400" />
+                          <Server size={16} class="text-[var(--color-neutral-400)]" />
                           <span class="truncate">Virtual Machines</span>
                           {#if vms.length > 0}
-                            <span class="ml-auto bg-[#e57035] text-white text-[10px] px-1.5 py-0.5 rounded min-w-[1.25rem] text-center">
+                            <span class="ml-auto bg-[var(--color-primary)] text-white text-[10px] px-1.5 py-0.5 rounded min-w-[1.25rem] text-center">
                               {vms.length}
                             </span>
                           {/if}
@@ -253,7 +253,7 @@
                           {#each vms as vm}
                             <li class="select-none">
                               <div 
-                                class="mx-2 rounded-md {isActive(`/vms/${vm.id}`) ? 'bg-[#e57035]/15 text-[#ff9a65]' : 'hover:bg-white/5'}"
+                                class="mx-2 rounded-md {isActive(`/vms/${vm.id}`) ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : 'hover:bg-white/5'}"
                                 style="margin-left: 2.75rem;"
                               >
                                 <a
@@ -274,7 +274,7 @@
                     <!-- cell storage -->
                     <li class="select-none">
                       <div 
-                        class="mx-2 rounded-md {isActive(`/nodes/${node.id}/storage`) ? 'bg-[#e57035]/15 text-[#ff9a65]' : 'hover:bg-white/5'}"
+                        class="mx-2 rounded-md {isActive(`/nodes/${node.id}/storage`) ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : 'hover:bg-white/5'}"
                         style="margin-left: 2rem;"
                       >
                         <a
@@ -283,10 +283,10 @@
                           aria-current={isActive(`/nodes/${node.id}/storage`) ? 'page' : undefined}
                         >
                           <span class="w-5"></span>
-                          <HardDrive size={16} class="text-slate-400" />
+                          <HardDrive size={16} class="text-[var(--color-neutral-400)]" />
                           <span class="truncate">cell storage</span>
                           {#if node.resources?.storagePools}
-                            <span class="ml-auto text-xs text-slate-500">{node.resources.storagePools}</span>
+                            <span class="ml-auto text-xs text-[var(--color-neutral-500)]">{node.resources.storagePools}</span>
                           {/if}
                         </a>
                       </div>
@@ -302,7 +302,7 @@
   </nav>
   
   <!-- Footer -->
-  <footer class="border-t border-[#1e1e28] p-3 bg-[#1e1e28]">
+  <footer class="border-t border-[var(--shell-line)] p-3 bg-[var(--color-neutral-800)]">
     <UserMenu userName="Administrator" userEmail="admin@chv.local" />
   </footer>
 </aside>
@@ -315,11 +315,11 @@
     background: transparent;
   }
   nav::-webkit-scrollbar-thumb {
-    background: #334155;
+    background: var(--color-neutral-600);
     border-radius: 3px;
   }
   nav::-webkit-scrollbar-thumb:hover {
-    background: #475569;
+    background: var(--color-neutral-500);
   }
   
   @media (max-width: 768px) {

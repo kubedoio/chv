@@ -16,6 +16,7 @@ export type ImageListItem = {
 export type ImagesListModel = {
 	items: ImageListItem[];
 	state: 'ready' | 'empty' | 'error';
+	errorMessage?: string;
 	filters: { current: Record<string, string>; applied: Record<string, string> };
 	page: { page: number; pageSize: number; totalItems: number };
 };
@@ -62,11 +63,13 @@ export const load: PageLoad = async ({ url }) => {
 
 		return { images: model };
 	} catch (err) {
+		const message = err instanceof Error ? err.message : 'Failed to load images';
 		// eslint-disable-next-line no-console
-		console.error('BFF listImages error:', err);
+		console.error('[images-loader]', message, err);
 		const model: ImagesListModel = {
 			items: [],
 			state: 'error',
+			errorMessage: message,
 			filters: { current, applied: {} },
 			page: { page, pageSize, totalItems: 0 }
 		};

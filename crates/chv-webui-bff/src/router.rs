@@ -128,36 +128,18 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             post(crate::handlers::snapshots::list_vm_snapshots),
         )
         .route("/v1/quotas", post(crate::handlers::quotas::list_quotas))
-        .route("/api/v1/quotas", post(crate::handlers::quotas::list_quotas))
         .route("/v1/quotas/me", post(crate::handlers::quotas::get_my_quota))
         .route(
-            "/api/v1/quotas/me",
-            post(crate::handlers::quotas::get_my_quota),
-        )
-        .route(
             "/v1/quotas/:user_id",
-            get(crate::handlers::quotas::get_quota),
-        )
-        .route(
-            "/api/v1/quotas/:user_id",
             get(crate::handlers::quotas::get_quota),
         )
         .route(
             "/v1/quotas/:user_id/usage",
             post(crate::handlers::quotas::get_usage),
         )
-        .route(
-            "/api/v1/quotas/:user_id/usage",
-            post(crate::handlers::quotas::get_usage),
-        )
         .route("/v1/usage", post(crate::handlers::quotas::get_usage))
-        .route("/api/v1/usage", post(crate::handlers::quotas::get_usage))
         .route(
             "/v1/quotas/check",
-            post(crate::handlers::quotas::check_quota),
-        )
-        .route(
-            "/api/v1/quotas/check",
             post(crate::handlers::quotas::check_quota),
         )
         .route("/v1/tokens", post(crate::handlers::tokens::list_tokens))
@@ -387,16 +369,7 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             post(crate::handlers::quotas::create_quota),
         )
         .route(
-            "/api/v1/quotas/create",
-            post(crate::handlers::quotas::create_quota),
-        )
-        .route(
             "/v1/quotas/:user_id",
-            patch(crate::handlers::quotas::update_quota)
-                .delete(crate::handlers::quotas::delete_quota),
-        )
-        .route(
-            "/api/v1/quotas/:user_id",
             patch(crate::handlers::quotas::update_quota)
                 .delete(crate::handlers::quotas::delete_quota),
         )

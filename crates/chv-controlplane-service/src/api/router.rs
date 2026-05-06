@@ -1,4 +1,4 @@
-use crate::api::{bootstrap, health, nodes, operations, stub};
+use crate::api::{auth, bootstrap, health, nodes, operations, stub};
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -50,6 +50,12 @@ pub fn admin_router(bff_state: AppState) -> Router {
         .route("/admin/operations", get(operations::list_operations))
         .route("/admin/operations/{id}", get(operations::get_operation))
         .route("/metrics", get(health::metrics_handler))
+        .route("/api/v1/install/status", get(stub::get_install_status_stub))
+        .route(
+            "/api/v1/install/bootstrap",
+            post(stub::bootstrap_install_stub),
+        )
+        .route("/api/v1/install/repair", post(stub::repair_install_stub))
         .layer(middleware::from_fn_with_state(
             bff_state.clone(),
             chv_webui_bff::auth::admin_middleware,
@@ -68,10 +74,10 @@ pub fn admin_router(bff_state: AppState) -> Router {
         )
         // Admin-protected routes
         .merge(admin_routes)
-        // Auth stubs
-        .route("/api/v1/auth/login", post(stub::login_handler))
-        .route("/api/v1/auth/me", get(stub::me_handler))
-        .route("/api/v1/auth/logout", post(stub::logout_handler))
+        // Auth routes
+        .route("/api/v1/auth/login", post(auth::login_handler))
+        .route("/api/v1/auth/me", get(auth::me_handler))
+        .route("/api/v1/auth/logout", post(auth::logout_handler))
         // Resource list stubs (return empty arrays so the UI renders empty states)
         .route("/api/v1/nodes", get(stub::list_nodes_stub))
         .route("/api/v1/vms", get(stub::list_vms_stub))
@@ -115,13 +121,6 @@ pub fn admin_router(bff_state: AppState) -> Router {
         )
         .route("/api/v1/quotas", get(stub::list_quotas_stub))
         .route("/api/v1/usage", get(stub::get_usage_stub))
-        // Install stubs
-        .route("/api/v1/install/status", get(stub::get_install_status_stub))
-        .route(
-            "/api/v1/install/bootstrap",
-            post(stub::bootstrap_install_stub),
-        )
-        .route("/api/v1/install/repair", post(stub::repair_install_stub))
         .fallback(not_found_handler)
         .layer(middleware::from_fn(security_headers))
         .with_state(bff_state)

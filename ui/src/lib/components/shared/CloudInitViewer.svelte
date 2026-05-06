@@ -1,7 +1,7 @@
 <script lang="ts">
   import Modal from '$lib/components/primitives/Modal.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import type { CloudInitTemplate } from '$lib/api/types';
   import { Copy, Check } from 'lucide-svelte';
 

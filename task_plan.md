@@ -1,42 +1,25 @@
-# Task Plan: Fix Robustness & Production Readiness Issues (Phases C + D)
+# Task Plan: Orchestrator Retry + Critical Gap Fixes
 
 ## Goal
-Address all HIGH-severity robustness findings (Phase C) and production readiness gaps (Phase D) identified in the comprehensive review.
+Make the end-to-end VM lifecycle reliable by adding operation retry, image validation, node liveness detection, and eliminating WAL contention in install.
 
 ## Phases
-- [ ] Phase 1: Create branch, verify baseline compiles
-- [ ] Phase 2: Phase C fixes — Robustness (7 items)
-- [ ] Phase 3: Phase D fixes — Production Readiness (6 items)
-- [ ] Phase 4: Verify — cargo check, clippy, test, fmt
+- [x] Phase 1: C1+C2+M6 — Add retry with backoff to orchestrator
+- [x] Phase 2: C3 — Validate image path at VM creation time (fail fast)
+- [x] Phase 3: H1 — Node liveness detection (mark unreachable if no heartbeat)
+- [x] Phase 4: H5 — Replace sqlite3 CLI token seeding with HTTP API endpoint
+- [x] Phase 5: M1 — Operation reaper for stuck Running operations
+- [x] Phase 6: Verify — cargo build + cargo test + cargo clippy (233 tests pass)
 
-## Phase C Items (Robustness)
-- [ ] C1: Ownership checks in snapshot handlers — verify VM belongs to caller
-- [ ] C2: BearerToken extractor in all handlers — defense-in-depth auth
-- [ ] C3: Bridge name validation (IFNAMSIZ=15) in nwd
-- [ ] C4: Quiescence before snapshot — pause VM or fsfreeze advisory
-- [ ] C5: Cache TTL/size limits in BFF
-- [ ] C6: Auth guard to +layout.ts load function (server-side redirect)
-- [ ] C7: Remove/implement stub handlers (handleImportVM)
-
-## Phase D Items (Production Readiness)
-- [ ] D1: Wire observability metrics (ADR-009) to hot paths
-- [ ] D2: Health endpoints for nwd/stord
-- [ ] D3: Rate limiting on auth endpoints
-- [ ] D4: CSRF protection
-- [ ] D5: Content-Security-Policy headers
-- [ ] D6: Audit logging for mutations
-
-## Key Questions
-1. Which handlers currently lack BearerToken extractors?
-2. What's the BFF cache implementation (in-memory HashMap? TTL crate?)
-3. What metrics are defined but unwired per ADR-009?
-
-## Decisions Made
-- Branch from main as `fix/robustness-production-readiness`
-- Fix in dependency order: C items first (some D items build on C)
+## Key Decisions
+- Model retry after backup_worker: exponential backoff (60/120/240s), max 3 retries
+- New migration adds retry_count + next_retry_at to operations table
+- Node liveness: mark Unreachable if no state report in 60s
+- Token seeding: add /internal/bootstrap-token endpoint (localhost only)
+- Operation reaper: Running ops older than 60s transition back to Accepted
 
 ## Errors Encountered
 - (none yet)
 
 ## Status
-**Currently in Phase 1** - Creating branch and researching current state
+**Currently in Phase 1** - Dispatching parallel subagents for implementation

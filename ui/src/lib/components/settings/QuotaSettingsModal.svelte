@@ -3,7 +3,7 @@
   import FormField from '../shared/FormField.svelte';
   import Input from '../primitives/Input.svelte';
   import { createAPIClient } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import type { Quota, UserInfo } from '$lib/api/types';
 
   interface Props {

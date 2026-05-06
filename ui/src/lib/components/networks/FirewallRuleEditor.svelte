@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { Plus, Trash2, Shield, ArrowUp, ArrowDown } from 'lucide-svelte';
   import { getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import {
     listFirewallRules,
     createFirewallRule,

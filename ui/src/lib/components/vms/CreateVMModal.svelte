@@ -4,7 +4,7 @@
 	import { listImages } from '$lib/bff/images';
 	import { listNetworks } from '$lib/bff/networks';
 	import { getStoredToken } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import VmStep1Form from './VmStep1Form.svelte';
 	import VmStep2Form from './VmStep2Form.svelte';
 	import VmReviewPanel from './VmReviewPanel.svelte';

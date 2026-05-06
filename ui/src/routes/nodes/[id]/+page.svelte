@@ -3,7 +3,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import { getStoredToken } from '$lib/api/client';
 	import { mutateNode } from '$lib/bff/nodes';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';

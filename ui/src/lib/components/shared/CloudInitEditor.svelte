@@ -3,7 +3,7 @@
   import FormField from '$lib/components/shared/FormField.svelte';
   import Input from '$lib/components/primitives/TextInput.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import { Copy, Check, Eye, EyeOff, Variable, FileCode } from 'lucide-svelte';
 
   interface Props {

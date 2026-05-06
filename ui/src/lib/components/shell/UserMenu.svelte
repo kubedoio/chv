@@ -5,7 +5,7 @@
   import { theme } from '$lib/stores/theme.svelte';
   import { goto } from '$app/navigation';
   import { createAPIClient, clearToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   
   interface Props {
     userName?: string;
@@ -131,19 +131,19 @@
   <button
     bind:this={triggerElement}
     type="button"
-    class="w-full flex items-center gap-3 px-2 py-2 rounded hover:bg-slate-800/50 cursor-pointer transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#e57035] focus-visible:outline-offset-2"
+    class="w-full flex items-center gap-3 px-2 py-2 rounded hover:bg-[var(--color-neutral-800)]/50 cursor-pointer transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-primary)] focus-visible:outline-offset-2"
     onclick={toggleMenu}
     onkeydown={handleKeyDown}
     aria-haspopup="true"
     aria-expanded={isOpen}
     aria-controls="user-menu"
   >
-    <div class="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-semibold shrink-0">
+    <div class="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-dark)] flex items-center justify-center text-white text-xs font-semibold shrink-0">
       {userName.charAt(0).toUpperCase()}
     </div>
     <div class="flex-1 min-w-0 text-left">
       <div class="text-sm font-medium text-white truncate">{userName}</div>
-      <div class="text-[10px] text-slate-500 truncate">{userEmail}</div>
+      <div class="text-[10px] text-[var(--color-neutral-500)] truncate">{userEmail}</div>
     </div>
   </button>
   
@@ -152,7 +152,7 @@
     <div
       bind:this={menuElement}
       id="user-menu"
-      class="absolute left-0 right-0 bottom-full mb-2 bg-[#1e1e28] border border-[#3a3a4a] rounded-lg shadow-xl overflow-hidden z-50"
+      class="absolute left-0 right-0 bottom-full mb-2 bg-[var(--color-neutral-800)] border border-[var(--color-neutral-700)] rounded-lg shadow-xl overflow-hidden z-50"
       role="menu"
       aria-orientation="vertical"
       aria-labelledby="user-menu-trigger"
@@ -164,7 +164,7 @@
         {@const Icon = item.icon}
         <button
           type="button"
-          class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-300 hover:bg-[#e57035]/15 hover:text-[#ff9a65] transition-colors duration-150 focus-visible:outline-none focus-visible:bg-[#e57035]/15 focus-visible:text-[#ff9a65] {focusIndex === index ? 'bg-[#e57035]/15 text-[#ff9a65]' : ''}"
+          class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[var(--color-neutral-300)] hover:bg-[var(--color-primary)]/15 hover:text-[var(--color-primary-light)] transition-colors duration-150 focus-visible:outline-none focus-visible:bg-[var(--color-primary)]/15 focus-visible:text-[var(--color-primary-light)] {focusIndex === index ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : ''}"
           role="menuitem"
           onclick={() => handleItemClick(item.href)}
           tabindex="-1"
@@ -177,7 +177,7 @@
       <!-- Theme Toggle -->
       <button
         type="button"
-        class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-300 hover:bg-[#e57035]/15 hover:text-[#ff9a65] transition-colors duration-150 focus-visible:outline-none focus-visible:bg-[#e57035]/15 focus-visible:text-[#ff9a65] {focusIndex === menuItems.length ? 'bg-[#e57035]/15 text-[#ff9a65]' : ''}"
+        class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[var(--color-neutral-300)] hover:bg-[var(--color-primary)]/15 hover:text-[var(--color-primary-light)] transition-colors duration-150 focus-visible:outline-none focus-visible:bg-[var(--color-primary)]/15 focus-visible:text-[var(--color-primary-light)] {focusIndex === menuItems.length ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]' : ''}"
         role="menuitem"
         onclick={handleThemeToggle}
         tabindex="-1"
@@ -187,12 +187,12 @@
       </button>
       
       <!-- Divider -->
-      <div class="h-px bg-[#3a3a4a] my-1"></div>
+      <div class="h-px bg-[var(--color-neutral-700)] my-1"></div>
       
       <!-- Logout -->
       <button
         type="button"
-        class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-300 hover:bg-red-500/15 hover:text-red-400 transition-colors duration-150 focus-visible:outline-none focus-visible:bg-red-500/15 focus-visible:text-red-400 {focusIndex === menuItems.length + 1 ? 'bg-red-500/15 text-red-400' : ''}"
+        class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[var(--color-neutral-300)] hover:bg-red-500/15 hover:text-red-400 transition-colors duration-150 focus-visible:outline-none focus-visible:bg-red-500/15 focus-visible:text-red-400 {focusIndex === menuItems.length + 1 ? 'bg-red-500/15 text-red-400' : ''}"
         role="menuitem"
         onclick={handleLogout}
         tabindex="-1"

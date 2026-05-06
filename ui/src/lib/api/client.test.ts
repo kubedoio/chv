@@ -37,7 +37,7 @@ describe('createAPIClient', () => {
 			ok: true,
 			status: 200,
 			headers: jsonHeaders(),
-			json: async () => ({ ok: true })
+			json: async () => ([])
 		});
 
 		vi.stubGlobal('fetch', fetchMock);
@@ -47,13 +47,12 @@ describe('createAPIClient', () => {
 		});
 
 		client.setToken('token-123');
-		await client.validateLogin();
+		await client.listNodes();
 
 		expect(getStoredToken()).toBe('token-123');
 		expect(fetchMock).toHaveBeenCalledWith(
-			'http://controller.example/api/v1/login/validate',
+			'http://controller.example/api/v1/nodes',
 			expect.objectContaining({
-				method: 'POST',
 				headers: expect.any(Headers)
 			})
 		);

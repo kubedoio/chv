@@ -7,6 +7,7 @@ import type { VmSummary, RelatedTask, AttachedVolume, AttachedNic } from '$lib/b
 export type VmDetailModel = {
 	state: 'ready' | 'empty' | 'error';
 	currentTab: string;
+	errorMessage?: string;
 	summary: {
 		vm_id: string;
 		name: string;
@@ -116,10 +117,13 @@ export const load: PageLoad = async ({ params, url }) => {
 		}
 		const detail = buildDetailModel(res.summary ?? null, currentTab, consoleUrl);
 		return { detail, requestedVmId: params.id };
-	} catch {
+	} catch (err) {
+		const message = err instanceof Error ? err.message : 'Failed to load VM details';
+		console.error('[vm-detail-loader]', message, err);
 		const detail: VmDetailModel = {
 			state: 'error',
 			currentTab,
+			errorMessage: message,
 			summary: {
 				vm_id: params.id,
 				name: '',
