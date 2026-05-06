@@ -229,7 +229,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     let inventory = reporter.build_inventory();
                     let versions = reporter.build_versions();
-                    match EnrollmentClient::connect(&config.control_plane_addr).await {
+                    let tls_cert = cache
+                        .certificate_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .or_else(|| config.tls_cert_path.clone());
+                    let tls_key = cache
+                        .private_key_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .or_else(|| config.tls_key_path.clone());
+                    let ca_cert = cache
+                        .ca_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .or_else(|| config.ca_cert_path.clone());
+                    match EnrollmentClient::connect_with_tls(
+                        &config.control_plane_addr,
+                        tls_cert.as_deref(),
+                        tls_key.as_deref(),
+                        ca_cert.as_deref(),
+                    )
+                    .await
+                    {
                         Ok(mut client) => {
                             match client.enroll_node(token, inventory, versions).await {
                                 Ok(resp) => {

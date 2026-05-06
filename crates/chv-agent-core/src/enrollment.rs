@@ -58,12 +58,20 @@ impl EnrollmentClient {
                 })?;
                 tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
             }
-            endpoint = endpoint
-                .tls_config(tls)
-                .map_err(|e| ChvError::InvalidArgument {
+            endpoint = endpoint.tls_config(tls).map_err(|e| {
+                let mut reason = e.to_string();
+                let mut source: Option<&dyn std::error::Error> =
+                    std::error::Error::source(&e);
+                while let Some(s) = source {
+                    reason.push_str(": ");
+                    reason.push_str(&s.to_string());
+                    source = s.source();
+                }
+                ChvError::InvalidArgument {
                     field: "tls_config".to_string(),
-                    reason: e.to_string(),
-                })?;
+                    reason,
+                }
+            })?;
         }
 
         let channel = endpoint

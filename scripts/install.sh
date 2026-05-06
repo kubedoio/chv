@@ -640,7 +640,9 @@ generate_certs() {
         openssl genrsa -out "$CHV_CONFIG_DIR/certs/ca.key" 4096 2>/dev/null
         openssl req -x509 -new -nodes -key "$CHV_CONFIG_DIR/certs/ca.key" \
             -sha256 -days 3650 -out "$CHV_CONFIG_DIR/certs/ca.crt" \
-            -subj "/O=CHV/CN=chv-ca" 2>/dev/null
+            -subj "/O=CHV/CN=chv-ca" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
         chmod 640 "$CHV_CONFIG_DIR/certs/ca.key"
         chmod 644 "$CHV_CONFIG_DIR/certs/ca.crt"
         chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/ca.key" "$CHV_CONFIG_DIR/certs/ca.crt"
@@ -655,7 +657,7 @@ generate_certs() {
             -CA "$CHV_CONFIG_DIR/certs/ca.crt" -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
             -CAcreateserial -out "$CHV_CONFIG_DIR/certs/server.crt" \
             -days 825 -sha256 \
-            -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1") 2>/dev/null
+            -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth") 2>/dev/null
         rm -f "$CHV_CONFIG_DIR/certs/server.csr"
         chmod 640 "$CHV_CONFIG_DIR/certs/server.key"
         chmod 644 "$CHV_CONFIG_DIR/certs/server.crt"
@@ -671,7 +673,8 @@ generate_certs() {
         openssl x509 -req -in "$CHV_CONFIG_DIR/certs/agent-client.csr" \
             -CA "$CHV_CONFIG_DIR/certs/ca.crt" -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
             -CAcreateserial -out "$CHV_CONFIG_DIR/certs/agent-client.crt" \
-            -days 825 -sha256 2>/dev/null
+            -days 825 -sha256 \
+            -extfile <(printf "keyUsage=digitalSignature\nextendedKeyUsage=clientAuth") 2>/dev/null
         rm -f "$CHV_CONFIG_DIR/certs/agent-client.csr"
         chmod 640 "$CHV_CONFIG_DIR/certs/agent-client.key"
         chmod 644 "$CHV_CONFIG_DIR/certs/agent-client.crt"
