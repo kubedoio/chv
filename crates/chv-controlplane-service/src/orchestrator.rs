@@ -220,26 +220,23 @@ impl Orchestrator {
                 );
 
                 // Check current retry count
-                let retry_count: i32 = sqlx::query_scalar(
-                    "SELECT retry_count FROM operations WHERE operation_id = ?",
-                )
-                .bind(&row.operation_id)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or(0);
+                let retry_count: i32 =
+                    sqlx::query_scalar("SELECT retry_count FROM operations WHERE operation_id = ?")
+                        .bind(&row.operation_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .unwrap_or(0);
 
                 let new_retry_count = retry_count + 1;
                 if new_retry_count <= MAX_DISPATCH_RETRIES {
                     // Schedule retry with exponential backoff: 10s, 20s, 40s
                     let backoff_secs = 10i64 * (1 << (new_retry_count - 1));
-                    let next_retry =
-                        chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
-                    let op_id =
-                        OperationId::new(row.operation_id.clone()).map_err(|e| {
-                            ChvError::Internal {
-                                reason: format!("invalid operation_id: {e}"),
-                            }
-                        })?;
+                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
+                    let op_id = OperationId::new(row.operation_id.clone()).map_err(|e| {
+                        ChvError::Internal {
+                            reason: format!("invalid operation_id: {e}"),
+                        }
+                    })?;
                     if let Err(retry_err) = self
                         .operation_repo
                         .mark_for_retry(
@@ -269,10 +266,11 @@ impl Orchestrator {
                     if let Err(update_err) = self
                         .operation_repo
                         .update_status(&OperationStatusUpdateInput {
-                            operation_id: OperationId::new(row.operation_id.clone())
-                                .map_err(|e| ChvError::Internal {
+                            operation_id: OperationId::new(row.operation_id.clone()).map_err(
+                                |e| ChvError::Internal {
                                     reason: format!("invalid operation_id: {e}"),
-                                })?,
+                                },
+                            )?,
                             status: OperationStatus::Failed,
                             error_code: Some("DISPATCH_FAILED".into()),
                             error_message: Some(format!(
@@ -317,7 +315,10 @@ impl Orchestrator {
 
         let reaped = result.rows_affected();
         if reaped > 0 {
-            warn!(count = reaped, "reaped stuck Running operations back to Accepted");
+            warn!(
+                count = reaped,
+                "reaped stuck Running operations back to Accepted"
+            );
         }
         Ok(reaped)
     }

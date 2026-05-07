@@ -95,23 +95,11 @@ pub trait StorageBackend: Send + Sync + 'static {
         block_size: u64,
     ) -> Result<(), ChvError>;
 
-    async fn get_dirty_bitmap(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<Vec<u8>, ChvError>;
+    async fn get_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError>;
 
-    async fn clear_dirty_bitmap(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<(), ChvError>;
+    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError>;
 
-    async fn disable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<(), ChvError>;
+    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError>;
 
     async fn read_block(
         &self,
@@ -129,11 +117,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         data: &[u8],
     ) -> Result<(), ChvError>;
 
-    async fn volume_size(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<u64, ChvError>;
+    async fn volume_size(&self, volume_id: &str, handle: &str) -> Result<u64, ChvError>;
 
     async fn create_receiving_volume(
         &self,
@@ -142,8 +126,5 @@ pub trait StorageBackend: Send + Sync + 'static {
         format: &str,
     ) -> Result<VolumeExport, ChvError>;
 
-    async fn delete_volume(
-        &self,
-        volume_id: &str,
-    ) -> Result<(), ChvError>;
+    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError>;
 }

@@ -480,15 +480,14 @@ impl StorageBackend for LVMBackend {
         };
         let mut map = self.dirty_trackers.write().await;
         map.insert(handle.to_string(), tracker);
-        info!(volume_id, handle, block_size, bitmap_bytes, "enabled dirty tracking for LVM volume");
+        info!(
+            volume_id,
+            handle, block_size, bitmap_bytes, "enabled dirty tracking for LVM volume"
+        );
         Ok(())
     }
 
-    async fn get_dirty_bitmap(
-        &self,
-        _volume_id: &str,
-        handle: &str,
-    ) -> Result<Vec<u8>, ChvError> {
+    async fn get_dirty_bitmap(&self, _volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError> {
         let map = self.dirty_trackers.read().await;
         match map.get(handle) {
             Some(t) => Ok(t.bitmap.clone()),
@@ -499,11 +498,7 @@ impl StorageBackend for LVMBackend {
         }
     }
 
-    async fn clear_dirty_bitmap(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<(), ChvError> {
+    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
         let mut map = self.dirty_trackers.write().await;
         match map.get_mut(handle) {
             Some(t) => {
@@ -518,11 +513,7 @@ impl StorageBackend for LVMBackend {
         }
     }
 
-    async fn disable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<(), ChvError> {
+    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
         let mut map = self.dirty_trackers.write().await;
         map.remove(handle);
         info!(volume_id, handle, "disabled dirty tracking for LVM volume");
@@ -544,10 +535,11 @@ impl StorageBackend for LVMBackend {
                 path: path.display().to_string(),
                 source: e,
             })?;
-            file.seek(SeekFrom::Start(offset)).map_err(|e| ChvError::Io {
-                path: path.display().to_string(),
-                source: e,
-            })?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| ChvError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
             let mut buf = vec![0u8; length as usize];
             file.read_exact(&mut buf).map_err(|e| ChvError::Io {
                 path: path.display().to_string(),
@@ -581,10 +573,11 @@ impl StorageBackend for LVMBackend {
                     path: path.display().to_string(),
                     source: e,
                 })?;
-            file.seek(SeekFrom::Start(offset)).map_err(|e| ChvError::Io {
-                path: path.display().to_string(),
-                source: e,
-            })?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| ChvError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
             file.write_all(&data_owned).map_err(|e| ChvError::Io {
                 path: path.display().to_string(),
                 source: e,
@@ -615,11 +608,7 @@ impl StorageBackend for LVMBackend {
         Ok(())
     }
 
-    async fn volume_size(
-        &self,
-        volume_id: &str,
-        _handle: &str,
-    ) -> Result<u64, ChvError> {
+    async fn volume_size(&self, volume_id: &str, _handle: &str) -> Result<u64, ChvError> {
         let path = self.volume_path(volume_id)?;
         std::fs::metadata(&path)
             .map(|m| m.len())
@@ -672,10 +661,7 @@ impl StorageBackend for LVMBackend {
         })
     }
 
-    async fn delete_volume(
-        &self,
-        volume_id: &str,
-    ) -> Result<(), ChvError> {
+    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
         Self::sanitize_id(volume_id)?;
         let out = Command::new("lvremove")
             .args(["-y", &format!("{}/{}", self.vg_name, volume_id)])

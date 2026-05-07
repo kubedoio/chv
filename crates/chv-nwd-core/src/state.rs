@@ -10,6 +10,7 @@ pub struct TopologyState {
     pub subnet_cidr: String,
     pub gateway_ip: String,
     pub runtime_status: String,
+    pub vni: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -54,6 +55,7 @@ mod tests {
             subnet_cidr: "10.0.0.0/24".to_string(),
             gateway_ip: "10.0.0.1".to_string(),
             runtime_status: "ensured".to_string(),
+            vni: None,
         }
     }
 

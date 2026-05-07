@@ -1630,39 +1630,46 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::UpdateOverlayRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateOverlayResponse>, Status> {
-            Ok(Response::new(chv_nwd_api::chv_nwd_api::UpdateOverlayResponse {
-                result: Some(chv_nwd_api::chv_nwd_api::Result {
-                    status: "ok".to_string(),
-                    error_code: "".to_string(),
-                    human_summary: "".to_string(),
-                }),
-            }))
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::UpdateOverlayResponse {
+                    result: Some(chv_nwd_api::chv_nwd_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                },
+            ))
         }
 
         async fn update_security_policy(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::SecurityPolicy>,
-        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status> {
-            Ok(Response::new(chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse {
-                result: Some(chv_nwd_api::chv_nwd_api::Result {
-                    status: "ok".to_string(),
-                    error_code: "".to_string(),
-                    human_summary: "".to_string(),
-                }),
-            }))
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse {
+                    result: Some(chv_nwd_api::chv_nwd_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                },
+            ))
         }
 
         async fn update_rate_limit(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::RateLimitPolicy>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateRateLimitResponse>, Status> {
-            Ok(Response::new(chv_nwd_api::chv_nwd_api::UpdateRateLimitResponse {
-                result: Some(chv_nwd_api::chv_nwd_api::Result {
-                    status: "ok".to_string(),
-                    error_code: "".to_string(),
-                    human_summary: "".to_string(),
-                }),
-            }))
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::UpdateRateLimitResponse {
+                    result: Some(chv_nwd_api::chv_nwd_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                },
+            ))
         }
 
         async fn get_overlay_status(

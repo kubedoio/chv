@@ -1,16 +1,20 @@
-use crate::executor::{NetworkExecutor, TopologyApplyResult};
+use crate::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
 use crate::state::{TopologyState, TopologyTable};
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
 use chv_observability::{operation_span, Metrics};
+use dashmap::DashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tracing::info;
 
 pub struct NetworkServiceImpl<E: NetworkExecutor> {
     executor: Arc<E>,
     topologies: Arc<TopologyTable>,
     metrics: Arc<Metrics>,
     store: Option<Arc<std::sync::Mutex<crate::store::TopologyStore>>>,
+    security_policies: Arc<DashMap<String, proto::SecurityPolicy>>,
+    rate_limit_policies: Arc<DashMap<String, proto::RateLimitPolicy>>,
 }
 
 impl<E: NetworkExecutor> NetworkServiceImpl<E> {
@@ -20,6 +24,8 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             topologies,
             metrics,
             store: None,
+            security_policies: Arc::new(DashMap::new()),
+            rate_limit_policies: Arc::new(DashMap::new()),
         }
     }
 
@@ -149,6 +155,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 namespace_handle: _,
                 bridge_handle: _,
             }) => {
+                let vni = if spec.vni > 0 { Some(spec.vni) } else { None };
                 let state = TopologyState {
                     network_id: spec.network_id.clone(),
                     tenant_id: spec.tenant_id.clone(),
@@ -157,6 +164,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     subnet_cidr: spec.subnet_cidr.clone(),
                     gateway_ip: spec.gateway_ip.clone(),
                     runtime_status: "ensured".to_string(),
+                    vni,
                 };
                 self.topologies.upsert(state.clone());
                 self.persist_upsert(&state).await;
@@ -516,8 +524,78 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
 
     async fn update_overlay(
         &self,
-        _request: Request<proto::UpdateOverlayRequest>,
+        request: Request<proto::UpdateOverlayRequest>,
     ) -> Result<Response<proto::UpdateOverlayResponse>, Status> {
+        self.metrics.increment_counter("nwd_update_overlay_total");
+        let req = request.into_inner();
+
+        let state = match self.topologies.get(&req.network_id) {
+            Some(s) => s,
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: req.network_id.clone(),
+                };
+                return Ok(Response::new(proto::UpdateOverlayResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        };
+
+        if req.vni == 0 {
+            let e = ChvError::InvalidArgument {
+                field: "vni".to_string(),
+                reason: "VNI must be > 0 for overlay update".to_string(),
+            };
+            return Ok(Response::new(proto::UpdateOverlayResponse {
+                result: Some(Self::err_result(&e)),
+            }));
+        }
+
+        // Sync FDB entries for peer VTEPs
+        for fdb in &req.fdb_entries {
+            if let Err(e) = self
+                .executor
+                .add_fdb_entry(
+                    &state.namespace_name,
+                    req.vni,
+                    &fdb.mac_address,
+                    &fdb.vtep_ip,
+                )
+                .await
+            {
+                return Ok(Response::new(proto::UpdateOverlayResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        }
+
+        // Add broadcast FDB entries for VTEP endpoints (BUM traffic)
+        for vtep in &req.vtep_endpoints {
+            if let Err(e) = self
+                .executor
+                .add_fdb_entry(
+                    &state.namespace_name,
+                    req.vni,
+                    "00:00:00:00:00:00",
+                    &vtep.vtep_ip,
+                )
+                .await
+            {
+                return Ok(Response::new(proto::UpdateOverlayResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        }
+
+        info!(
+            network_id = %req.network_id,
+            vni = req.vni,
+            fdb_count = req.fdb_entries.len(),
+            vtep_count = req.vtep_endpoints.len(),
+            "overlay updated"
+        );
+
         Ok(Response::new(proto::UpdateOverlayResponse {
             result: Some(Self::ok_result()),
         }))
@@ -525,8 +603,21 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
 
     async fn update_security_policy(
         &self,
-        _request: Request<proto::SecurityPolicy>,
+        request: Request<proto::SecurityPolicy>,
     ) -> Result<Response<proto::UpdateSecurityPolicyResponse>, Status> {
+        self.metrics
+            .increment_counter("nwd_update_security_policy_total");
+        let policy = request.into_inner();
+
+        let key = format!("{}:{}", policy.network_id, policy.vm_id);
+        info!(
+            vm_id = %policy.vm_id,
+            network_id = %policy.network_id,
+            rule_count = policy.rules.len(),
+            "security policy stored (eBPF enforcement deferred)"
+        );
+        self.security_policies.insert(key, policy);
+
         Ok(Response::new(proto::UpdateSecurityPolicyResponse {
             result: Some(Self::ok_result()),
         }))
@@ -534,8 +625,21 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
 
     async fn update_rate_limit(
         &self,
-        _request: Request<proto::RateLimitPolicy>,
+        request: Request<proto::RateLimitPolicy>,
     ) -> Result<Response<proto::UpdateRateLimitResponse>, Status> {
+        self.metrics
+            .increment_counter("nwd_update_rate_limit_total");
+        let policy = request.into_inner();
+
+        info!(
+            vm_id = %policy.vm_id,
+            rate_bps = policy.rate_bps,
+            burst_bytes = policy.burst_bytes,
+            "rate limit policy stored (tc/eBPF enforcement deferred)"
+        );
+        self.rate_limit_policies
+            .insert(policy.vm_id.clone(), policy);
+
         Ok(Response::new(proto::UpdateRateLimitResponse {
             result: Some(Self::ok_result()),
         }))
@@ -545,12 +649,52 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         &self,
         request: Request<proto::GetOverlayStatusRequest>,
     ) -> Result<Response<proto::OverlayStatus>, Status> {
-        let network_id = request.into_inner().network_id;
+        let req = request.into_inner();
+
+        let state = match self.topologies.get(&req.network_id) {
+            Some(s) => s,
+            None => {
+                return Ok(Response::new(proto::OverlayStatus {
+                    network_id: req.network_id,
+                    vni: 0,
+                    vxlan_interface_up: false,
+                    fdb_entry_count: 0,
+                    ebpf_programs_loaded: 0,
+                }));
+            }
+        };
+
+        // Try to determine VNI from topology; for now look it up from state
+        // In a full implementation, TopologyState would track VNI.
+        // We use a best-effort approach: check if any overlay exists.
+        let vni = state.vni.unwrap_or(0);
+        if vni == 0 {
+            return Ok(Response::new(proto::OverlayStatus {
+                network_id: req.network_id,
+                vni: 0,
+                vxlan_interface_up: false,
+                fdb_entry_count: 0,
+                ebpf_programs_loaded: 0,
+            }));
+        }
+
+        let status_info: OverlayStatusInfo = match self
+            .executor
+            .get_overlay_status(&state.namespace_name, vni)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => OverlayStatusInfo {
+                vxlan_interface_up: false,
+                fdb_entry_count: 0,
+            },
+        };
+
         Ok(Response::new(proto::OverlayStatus {
-            network_id,
-            vni: 0,
-            vxlan_interface_up: false,
-            fdb_entry_count: 0,
+            network_id: req.network_id,
+            vni,
+            vxlan_interface_up: status_info.vxlan_interface_up,
+            fdb_entry_count: status_info.fdb_entry_count,
             ebpf_programs_loaded: 0,
         }))
     }

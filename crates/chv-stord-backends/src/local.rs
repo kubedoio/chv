@@ -671,9 +671,7 @@ impl StorageBackend for LocalFileBackend {
             });
         }
         let path = self.path_from_handle(volume_id, handle)?;
-        let file_len = std::fs::metadata(&path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let num_blocks = file_len.div_ceil(block_size);
         let bitmap_bytes = num_blocks.div_ceil(8) as usize;
         let tracker = DirtyTracker {
@@ -682,15 +680,14 @@ impl StorageBackend for LocalFileBackend {
         };
         let mut map = self.dirty_trackers.write().await;
         map.insert(handle.to_string(), tracker);
-        info!(volume_id, handle, block_size, bitmap_bytes, "enabled dirty tracking");
+        info!(
+            volume_id,
+            handle, block_size, bitmap_bytes, "enabled dirty tracking"
+        );
         Ok(())
     }
 
-    async fn get_dirty_bitmap(
-        &self,
-        _volume_id: &str,
-        handle: &str,
-    ) -> Result<Vec<u8>, ChvError> {
+    async fn get_dirty_bitmap(&self, _volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError> {
         let map = self.dirty_trackers.read().await;
         match map.get(handle) {
             Some(t) => Ok(t.bitmap.clone()),
@@ -701,11 +698,7 @@ impl StorageBackend for LocalFileBackend {
         }
     }
 
-    async fn clear_dirty_bitmap(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<(), ChvError> {
+    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
         let mut map = self.dirty_trackers.write().await;
         match map.get_mut(handle) {
             Some(t) => {
@@ -720,11 +713,7 @@ impl StorageBackend for LocalFileBackend {
         }
     }
 
-    async fn disable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<(), ChvError> {
+    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
         let mut map = self.dirty_trackers.write().await;
         map.remove(handle);
         info!(volume_id, handle, "disabled dirty tracking");
@@ -744,10 +733,11 @@ impl StorageBackend for LocalFileBackend {
                 path: path.display().to_string(),
                 source: e,
             })?;
-            file.seek(SeekFrom::Start(offset)).map_err(|e| ChvError::Io {
-                path: path.display().to_string(),
-                source: e,
-            })?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| ChvError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
             let mut buf = vec![0u8; length as usize];
             file.read_exact(&mut buf).map_err(|e| ChvError::Io {
                 path: path.display().to_string(),
@@ -779,10 +769,11 @@ impl StorageBackend for LocalFileBackend {
                     path: path.display().to_string(),
                     source: e,
                 })?;
-            file.seek(SeekFrom::Start(offset)).map_err(|e| ChvError::Io {
-                path: path.display().to_string(),
-                source: e,
-            })?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| ChvError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
             file.write_all(&data_owned).map_err(|e| ChvError::Io {
                 path: path.display().to_string(),
                 source: e,
@@ -813,11 +804,7 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
-    async fn volume_size(
-        &self,
-        volume_id: &str,
-        handle: &str,
-    ) -> Result<u64, ChvError> {
+    async fn volume_size(&self, volume_id: &str, handle: &str) -> Result<u64, ChvError> {
         let path = self.path_from_handle(volume_id, handle)?;
         std::fs::metadata(&path)
             .map(|m| m.len())
@@ -858,10 +845,7 @@ impl StorageBackend for LocalFileBackend {
         })
     }
 
-    async fn delete_volume(
-        &self,
-        volume_id: &str,
-    ) -> Result<(), ChvError> {
+    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
         let primary = self.runtime_dir.join(format!("{}.img", volume_id));
         if primary.exists() {
             tokio::fs::remove_file(&primary)

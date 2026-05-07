@@ -1093,7 +1093,8 @@ mod tests {
         async fn update_security_policy(
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::SecurityPolicy>,
-        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status> {
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status>
+        {
             Err(Status::unimplemented(""))
         }
 

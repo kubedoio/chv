@@ -1,8 +1,10 @@
 use crate::handlers::StorageServiceImpl;
+use crate::migration::service::StorageMigrationServiceImpl;
 use crate::session::SessionTable;
 use crate::store::SessionStore;
 use chv_errors::ChvError;
 use chv_observability::Metrics;
+use chv_stord_api::chv_stord_api::storage_migration_service_server::StorageMigrationServiceServer;
 use chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer;
 use chv_stord_backends::StorageBackend;
 use std::os::unix::fs::PermissionsExt;
@@ -15,6 +17,7 @@ use tracing::info;
 
 pub struct StorageServer<B: StorageBackend> {
     inner: StorageServiceImpl<B>,
+    migration_service: StorageMigrationServiceImpl<B>,
 }
 
 impl<B: StorageBackend> StorageServer<B> {
@@ -26,12 +29,20 @@ impl<B: StorageBackend> StorageServer<B> {
     ) -> Self {
         let backend = Arc::new(backend);
         let sessions = Arc::new(SessionTable::new());
-        let mut inner =
-            StorageServiceImpl::new(backend, sessions, Arc::new(metrics), backend_allowlist);
+        let mut inner = StorageServiceImpl::new(
+            backend.clone(),
+            sessions,
+            Arc::new(metrics),
+            backend_allowlist,
+        );
         if let Some(store) = store {
             inner.set_store(store);
         }
-        Self { inner }
+        let migration_service = StorageMigrationServiceImpl::new(backend);
+        Self {
+            inner,
+            migration_service,
+        }
     }
 
     pub async fn serve(self, socket_path: &Path, db_path: Option<&Path>) -> Result<(), ChvError> {
@@ -100,6 +111,7 @@ impl<B: StorageBackend> StorageServer<B> {
         Server::builder()
             .add_service(health_service)
             .add_service(StorageServiceServer::new(self.inner))
+            .add_service(StorageMigrationServiceServer::new(self.migration_service))
             .serve_with_incoming(uds_stream)
             .await
             .map_err(|e| ChvError::Internal {
