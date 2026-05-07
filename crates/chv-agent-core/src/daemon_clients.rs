@@ -503,6 +503,9 @@ impl NwdClient {
                 subnet_cidr: subnet_cidr.to_string(),
                 gateway_ip: gateway_ip.to_string(),
                 options: std::collections::HashMap::new(),
+                vni: 0,
+                vtep_endpoints: vec![],
+                overlay_type: 0,
             }),
         };
         let span = tracing::info_span!(
@@ -1077,6 +1080,34 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::WithdrawServiceExposureRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_overlay(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::UpdateOverlayRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateOverlayResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_security_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SecurityPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_rate_limit(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::RateLimitPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateRateLimitResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_overlay_status(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetOverlayStatusRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::OverlayStatus>, Status> {
             Err(Status::unimplemented(""))
         }
     }

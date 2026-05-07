@@ -513,4 +513,45 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }
     }
+
+    async fn update_overlay(
+        &self,
+        _request: Request<proto::UpdateOverlayRequest>,
+    ) -> Result<Response<proto::UpdateOverlayResponse>, Status> {
+        Ok(Response::new(proto::UpdateOverlayResponse {
+            result: Some(Self::ok_result()),
+        }))
+    }
+
+    async fn update_security_policy(
+        &self,
+        _request: Request<proto::SecurityPolicy>,
+    ) -> Result<Response<proto::UpdateSecurityPolicyResponse>, Status> {
+        Ok(Response::new(proto::UpdateSecurityPolicyResponse {
+            result: Some(Self::ok_result()),
+        }))
+    }
+
+    async fn update_rate_limit(
+        &self,
+        _request: Request<proto::RateLimitPolicy>,
+    ) -> Result<Response<proto::UpdateRateLimitResponse>, Status> {
+        Ok(Response::new(proto::UpdateRateLimitResponse {
+            result: Some(Self::ok_result()),
+        }))
+    }
+
+    async fn get_overlay_status(
+        &self,
+        request: Request<proto::GetOverlayStatusRequest>,
+    ) -> Result<Response<proto::OverlayStatus>, Status> {
+        let network_id = request.into_inner().network_id;
+        Ok(Response::new(proto::OverlayStatus {
+            network_id,
+            vni: 0,
+            vxlan_interface_up: false,
+            fdb_entry_count: 0,
+            ebpf_programs_loaded: 0,
+        }))
+    }
 }

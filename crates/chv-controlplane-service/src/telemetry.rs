@@ -43,6 +43,11 @@ pub trait TelemetryService: Send + Sync {
         &self,
         request: proto::PublishAlertRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn report_migration_progress(
+        &self,
+        request: proto::MigrationProgress,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
 #[derive(Clone)]
@@ -467,6 +472,22 @@ impl TelemetryService for TelemetryServiceImplementation {
                 node_observed_generation: "".into(),
                 error_code: "".into(),
                 human_summary: SUMMARY_ALERT_PUBLISHED.into(),
+            }),
+        })
+    }
+
+    async fn report_migration_progress(
+        &self,
+        request: proto::MigrationProgress,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let _ = request;
+        Ok(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: "".into(),
+                status: STATUS_OK.into(),
+                node_observed_generation: "".into(),
+                error_code: "".into(),
+                human_summary: "migration progress received".into(),
             }),
         })
     }
