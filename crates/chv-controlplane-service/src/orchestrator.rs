@@ -1,4 +1,5 @@
 use crate::node_client_pool::NodeClientPool;
+use crate::overlay::OverlayManager;
 use chv_controlplane_store::{
     HypervisorSettingsRepository, HypervisorSettingsRow, OperationRepository,
     OperationStatusUpdateInput, StorePool,
@@ -23,6 +24,7 @@ pub struct Orchestrator {
     firmware_path: String,
     tick_interval: Duration,
     node_client_pool: NodeClientPool,
+    overlay_manager: Option<OverlayManager>,
 }
 
 impl Orchestrator {
@@ -42,7 +44,14 @@ impl Orchestrator {
             firmware_path,
             tick_interval: Duration::from_secs(2),
             node_client_pool,
+            overlay_manager: None,
         }
+    }
+
+    /// Set the overlay manager for post-migration FDB updates and gratuitous ARP.
+    pub fn with_overlay_manager(mut self, overlay_manager: OverlayManager) -> Self {
+        self.overlay_manager = Some(overlay_manager);
+        self
     }
 
     pub async fn run(self, mut shutdown_rx: tokio::sync::watch::Receiver<()>) {
@@ -297,14 +306,19 @@ impl Orchestrator {
     }
 
     async fn reap_stuck_operations(&self) -> Result<u64, ChvError> {
-        // Operations stuck in Running for more than 60 seconds are likely orphaned
-        // (orchestrator crashed between claiming and completing dispatch).
-        // Transition them back to Accepted for re-dispatch.
         let result = sqlx::query(
             r#"
             UPDATE operations SET status = 'Accepted', updated_by = 'reaper'
             WHERE status = 'Running'
-              AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-60 seconds')
+              AND (
+                (operation_type = 'MigrateVm' AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7200 seconds'))
+                OR
+                (operation_type IN ('SnapshotVm', 'RestoreSnapshot', 'SnapshotVolume', 'RestoreVolume', 'CloneVolume') AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-600 seconds'))
+                OR
+                (operation_type = 'StartVm' AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-300 seconds'))
+                OR
+                (operation_type NOT IN ('MigrateVm', 'SnapshotVm', 'RestoreSnapshot', 'SnapshotVolume', 'RestoreVolume', 'CloneVolume', 'StartVm') AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-120 seconds'))
+              )
             "#,
         )
         .execute(&self.pool)
@@ -747,6 +761,7 @@ impl Orchestrator {
                     &self.node_client_pool,
                     &self.agent_socket_pattern,
                     &mut state,
+                    self.overlay_manager.as_ref(),
                 )
                 .await;
 

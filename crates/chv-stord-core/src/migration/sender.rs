@@ -1,8 +1,7 @@
 use crate::migration::flow_control::SendWindow;
 use chv_stord_api::chv_stord_api::{
     migration_message, storage_migration_service_client::StorageMigrationServiceClient, AckStatus,
-    BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
-    RoundStart,
+    BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage,
 };
 use chv_stord_backends::StorageBackend;
 use std::sync::Arc;
@@ -264,122 +263,6 @@ impl<B: StorageBackend> MigrationSender<B> {
         }
 
         Ok(sequence_num)
-    }
-
-    /// Perform a dirty sync round: read dirty bitmap, send only dirty blocks.
-    #[allow(dead_code)]
-    pub async fn dirty_sync_round(
-        &mut self,
-        tx: &mpsc::Sender<MigrationMessage>,
-        inbound: &mut tonic::Streaming<MigrationMessage>,
-        round_num: u32,
-    ) -> Result<u64, tonic::Status> {
-        let bitmap = self
-            .backend
-            .get_dirty_bitmap(&self.volume_id, &self.handle)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("get_dirty_bitmap failed: {e}")))?;
-
-        self.backend
-            .clear_dirty_bitmap(&self.volume_id, &self.handle)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("clear_dirty_bitmap failed: {e}")))?;
-
-        let dirty_block_count = bitmap.iter().map(|b| b.count_ones() as u64).sum::<u64>();
-
-        // Send RoundStart
-        let round_start_msg = MigrationMessage {
-            payload: Some(migration_message::Payload::RoundStart(RoundStart {
-                round_num,
-                dirty_block_count,
-            })),
-        };
-        tx.send(round_start_msg)
-            .await
-            .map_err(|_| tonic::Status::internal("failed to send RoundStart: channel closed"))?;
-
-        let mut blocks_sent: u64 = 0;
-        let mut bytes_sent: u64 = 0;
-        let mut sequence_num = self.send_window.last_ack_sequence(); // continue from previous
-
-        // Iterate bitmap bits
-        for (byte_idx, byte) in bitmap.iter().enumerate() {
-            for bit_idx in 0..8u32 {
-                if byte & (1 << bit_idx) == 0 {
-                    continue;
-                }
-
-                let block_index = (byte_idx as u64) * 8 + bit_idx as u64;
-                let offset = block_index * self.block_size;
-
-                // Wait if send window is full
-                while !self.send_window.can_send() {
-                    self.wait_for_ack(inbound).await?;
-                }
-
-                let data = self
-                    .backend
-                    .read_block(&self.volume_id, &self.handle, offset, self.block_size)
-                    .await
-                    .map_err(|e| {
-                        tonic::Status::internal(format!(
-                            "read_block failed at offset {offset}: {e}"
-                        ))
-                    })?;
-
-                let is_sparse = is_all_zeros(&data);
-                let crc32 = if is_sparse { 0 } else { crc32fast::hash(&data) };
-                let data_len = data.len() as u64;
-                let chunk_data = if is_sparse { Vec::new() } else { data };
-
-                sequence_num += 1;
-                let chunk_msg = MigrationMessage {
-                    payload: Some(migration_message::Payload::Chunk(BlockChunk {
-                        offset,
-                        data: chunk_data,
-                        crc32,
-                        is_sparse,
-                        sequence_num,
-                    })),
-                };
-
-                tx.send(chunk_msg).await.map_err(|_| {
-                    tonic::Status::internal("failed to send BlockChunk: channel closed")
-                })?;
-
-                self.send_window.sent();
-                blocks_sent += 1;
-                bytes_sent += data_len;
-
-                if self.send_window.should_check_ack() {
-                    self.try_receive_ack(inbound).await?;
-                }
-            }
-        }
-
-        // Drain remaining acks for this round
-        while self.send_window.last_ack_sequence() < sequence_num {
-            self.wait_for_ack(inbound).await?;
-        }
-
-        // Send RoundComplete
-        let round_complete_msg = MigrationMessage {
-            payload: Some(migration_message::Payload::RoundComplete(RoundComplete {
-                round_num,
-                blocks_sent,
-                bytes_sent,
-            })),
-        };
-        tx.send(round_complete_msg)
-            .await
-            .map_err(|_| tonic::Status::internal("failed to send RoundComplete: channel closed"))?;
-
-        debug!(
-            round_num,
-            blocks_sent, bytes_sent, "dirty sync round complete"
-        );
-
-        Ok(blocks_sent)
     }
 
     /// Block until an Ack is received from the inbound stream.

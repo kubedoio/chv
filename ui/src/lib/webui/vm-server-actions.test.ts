@@ -77,9 +77,10 @@ describe('handleVmMutation', () => {
 
 	it('accepts delete action and calls deleteVm', async () => {
 		const deleteVm = vi.mocked(vmsModule.deleteVm).mockResolvedValue({
+			accepted: true,
+			task_id: 'op-1',
 			vm_id: 'vm-1',
-			operation_id: 'op-1',
-			status: 'accepted'
+			summary: 'Delete instance accepted'
 		});
 		const formData = new FormData();
 		formData.set('vm_id', 'vm-1');

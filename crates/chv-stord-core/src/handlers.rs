@@ -9,8 +9,6 @@ use tonic::{Request, Response, Status};
 
 pub(crate) trait ChvErrorProtoExt {
     fn to_proto_result(&self) -> proto::Result;
-    #[allow(dead_code)]
-    fn ok_proto_result() -> proto::Result;
 }
 
 impl ChvErrorProtoExt for ChvError {
@@ -20,14 +18,6 @@ impl ChvErrorProtoExt for ChvError {
             status: status.to_string(),
             error_code: error_code.to_string(),
             human_summary,
-        }
-    }
-
-    fn ok_proto_result() -> proto::Result {
-        proto::Result {
-            status: ErrorCode::OK.to_string(),
-            error_code: ErrorCode::OK.to_string(),
-            human_summary: String::new(),
         }
     }
 }
@@ -694,6 +684,43 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         if let Err(e) = self
             .backend
             .set_device_policy(&s.volume_id, &s.attachment_handle, &policy)
+            .await
+        {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
+        Ok(Response::new(Self::ok_result()))
+    }
+
+    async fn disable_dirty_tracking(
+        &self,
+        request: Request<proto::DisableDirtyTrackingRequest>,
+    ) -> Result<Response<proto::Result>, Status> {
+        self.metrics
+            .increment_counter("stord_disable_dirty_tracking_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+
+        let sessions = self.sessions.list();
+        let session = sessions.into_iter().find(|s| s.volume_id == req.volume_id);
+
+        let Some(s) = session else {
+            // If no active session, dirty tracking is already effectively disabled.
+            // Return success to make the call idempotent.
+            tracing::info!(
+                volume_id = %req.volume_id,
+                "disable_dirty_tracking: no active session, treating as already disabled"
+            );
+            return Ok(Response::new(Self::ok_result()));
+        };
+
+        if let Err(e) = self
+            .backend
+            .disable_dirty_tracking(&s.volume_id, &s.attachment_handle)
             .await
         {
             return Ok(Response::new(e.to_proto_result()));
