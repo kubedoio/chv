@@ -1763,11 +1763,90 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
 
     async fn migrate_vm(
         &self,
-        _req: Request<proto::MigrateVmRequest>,
+        req: Request<proto::MigrateVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
-        Err(Status::unimplemented(
-            "migrate_vm not yet implemented on agent",
-        ))
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+
+        let my_node_id = {
+            let cache = self.cache.lock().await;
+            cache.node_id.clone()
+        };
+
+        let role = crate::migration::determine_role(
+            &my_node_id,
+            &inner.source_node_id,
+            &inner.destination_node_id,
+        )
+        .ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "this node ({}) is neither source ({}) nor destination ({})",
+                my_node_id, inner.source_node_id, inner.destination_node_id
+            ))
+        })?;
+
+        let vm_id = inner.vm_id.clone();
+        let vm_runtime = self.vm_runtime.clone();
+
+        match role {
+            crate::migration::MigrationRole::Source => {
+                // Source agent: initiate send-migration to the destination.
+                let dest_host = crate::migration::extract_destination_host(&inner);
+                let dest_port = crate::migration::DEFAULT_MIGRATION_PORT;
+                let destination_url =
+                    crate::migration::build_destination_url(&dest_host, dest_port);
+
+                tracing::info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    destination_url = %destination_url,
+                    "source agent: ACKing migrate_vm, spawning send-migration task"
+                );
+
+                crate::migration::spawn_source_migration(
+                    vm_runtime,
+                    vm_id,
+                    operation_id.clone(),
+                    destination_url,
+                );
+            }
+            crate::migration::MigrationRole::Destination => {
+                // Destination agent: open receive-migration socket.
+                let port = crate::migration::allocate_migration_port().map_err(|e| {
+                    Status::resource_exhausted(format!("failed to allocate migration port: {}", e))
+                })?;
+                let receiver_url = crate::migration::build_receiver_url(port);
+
+                tracing::info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    receiver_url = %receiver_url,
+                    "destination agent: ACKing migrate_vm, spawning receive-migration task"
+                );
+
+                crate::migration::spawn_destination_migration(
+                    vm_runtime,
+                    vm_id,
+                    operation_id.clone(),
+                    receiver_url,
+                );
+            }
+        }
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: format!("migration accepted as {:?}", role),
+            }),
+        }))
     }
 }
 

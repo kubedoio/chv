@@ -7,6 +7,7 @@ pub mod daemon_clients;
 pub mod enrollment;
 pub mod health;
 pub mod inventory;
+pub mod migration;
 pub mod reconcile;
 pub mod spec;
 pub mod state_machine;
