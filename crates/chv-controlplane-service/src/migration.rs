@@ -4,6 +4,7 @@
 //! Handles rollback at each phase according to spec.
 
 use crate::node_client_pool::NodeClientPool;
+use crate::overlay::OverlayManager;
 use chv_controlplane_store::StorePool;
 use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
@@ -74,6 +75,11 @@ pub struct MigrationConfig {
     pub max_convergence_rounds: u32,
     pub block_size_bytes: u32,
     pub total_timeout_seconds: u32,
+    /// Multiplier applied to all phase timeouts for slow storage (default 1.0).
+    ///
+    /// A value > 1.0 extends all phase timeouts proportionally, useful for
+    /// migrations involving slow backends (e.g., NFS, remote storage).
+    pub timeout_multiplier: f64,
 }
 
 impl Default for MigrationConfig {
@@ -83,6 +89,7 @@ impl Default for MigrationConfig {
             max_convergence_rounds: 10,
             block_size_bytes: 4_194_304, // 4MB
             total_timeout_seconds: 0,    // 0 = use calculated default
+            timeout_multiplier: 1.0,
         }
     }
 }
@@ -108,6 +115,11 @@ impl MigrationConfig {
                 defaults.block_size_bytes
             },
             total_timeout_seconds: proto.total_timeout_seconds,
+            timeout_multiplier: if proto.timeout_multiplier > 0.0 {
+                proto.timeout_multiplier
+            } else {
+                defaults.timeout_multiplier
+            },
         }
     }
 
@@ -118,11 +130,12 @@ impl MigrationConfig {
             max_convergence_rounds: self.max_convergence_rounds,
             block_size_bytes: self.block_size_bytes,
             total_timeout_seconds: self.total_timeout_seconds,
+            timeout_multiplier: self.timeout_multiplier,
         }
     }
 
     /// Parse from correlation_id format:
-    /// `source={source_node_id}:dest={dest_node_id}:threshold={N}:rounds={N}:block_size={N}:timeout={N}`
+    /// `source={source_node_id}:dest={dest_node_id}:threshold={N}:rounds={N}:block_size={N}:timeout={N}:timeout_multiplier={F}`
     pub fn from_correlation_id(corr: &str) -> (String, String, Self) {
         let mut source_node = String::new();
         let mut dest_node = String::new();
@@ -148,6 +161,12 @@ impl MigrationConfig {
             } else if let Some(val) = part.strip_prefix("timeout=") {
                 if let Ok(v) = val.parse::<u32>() {
                     config.total_timeout_seconds = v;
+                }
+            } else if let Some(val) = part.strip_prefix("timeout_multiplier=") {
+                if let Ok(v) = val.parse::<f64>() {
+                    if v > 0.0 {
+                        config.timeout_multiplier = v;
+                    }
                 }
             }
         }
@@ -190,17 +209,26 @@ impl PhaseTimeouts {
     /// - MemoryMigration: memory_size_gb * 30s + 120s
     /// - Paused (final sync): 60s
     /// - Total: sum + 300s buffer
-    pub fn calculate(disk_size_gb: u64, memory_size_gb: u64) -> Self {
-        let precopy_disk_secs = disk_size_gb.max(1) * 60;
-        let converging_disk_per_round_secs = 300;
-        let converging_disk_total_secs = 3000;
-        let memory_migration_secs = memory_size_gb.max(1) * 30 + 120;
-        let paused_secs = 60;
+    ///
+    /// The `timeout_multiplier` is applied to all phase timeouts to accommodate
+    /// slow storage backends. A multiplier of 1.0 leaves timeouts unchanged.
+    pub fn calculate(disk_size_gb: u64, memory_size_gb: u64, timeout_multiplier: f64) -> Self {
+        let multiplier = if timeout_multiplier > 0.0 {
+            timeout_multiplier
+        } else {
+            1.0
+        };
+
+        let precopy_disk_secs = ((disk_size_gb.max(1) * 60) as f64 * multiplier) as u64;
+        let converging_disk_per_round_secs = (300.0 * multiplier) as u64;
+        let converging_disk_total_secs = (3000.0 * multiplier) as u64;
+        let memory_migration_secs = ((memory_size_gb.max(1) * 30 + 120) as f64 * multiplier) as u64;
+        let paused_secs = (60.0 * multiplier) as u64;
         let total_secs = precopy_disk_secs
             + converging_disk_total_secs
             + memory_migration_secs
             + paused_secs
-            + 300;
+            + (300.0 * multiplier) as u64;
 
         Self {
             precopy_disk_secs,
@@ -211,6 +239,142 @@ impl PhaseTimeouts {
             total_secs,
         }
     }
+}
+
+/// Maximum allowed age of a source node heartbeat for migration to proceed.
+const SOURCE_NODE_HEARTBEAT_MAX_AGE_SECS: i64 = 30;
+
+/// Validate preconditions before starting a migration.
+///
+/// Checks:
+/// 1. Source node heartbeat is within 30 seconds (node is healthy and reachable).
+/// 2. Destination node is in a schedulable state (not Maintenance, Draining, Failed, etc.).
+/// 3. No other migration is currently in progress for the same VM.
+///
+/// These checks prevent wasted multi-hour migrations that would inevitably fail.
+async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Result<(), ChvError> {
+    // Check 1: Source node heartbeat freshness.
+    // The node_observed_state.last_seen_at is updated on every state report from the agent.
+    let source_last_seen: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT last_seen_at FROM node_observed_state WHERE node_id = ?")
+            .bind(&state.source_node_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to query source node heartbeat: {e}"),
+            })?;
+
+    match source_last_seen {
+        None => {
+            return Err(ChvError::PreconditionFailed {
+                reason: format!(
+                    "source node '{}' has no observed state record (never reported)",
+                    state.source_node_id
+                ),
+            });
+        }
+        Some((None,)) => {
+            return Err(ChvError::PreconditionFailed {
+                reason: format!(
+                    "source node '{}' has no last_seen_at timestamp",
+                    state.source_node_id
+                ),
+            });
+        }
+        Some((Some(last_seen_str),)) => {
+            let last_seen =
+                chrono::NaiveDateTime::parse_from_str(&last_seen_str, "%Y-%m-%dT%H:%M:%SZ")
+                    .map_err(|e| ChvError::Internal {
+                        reason: format!(
+                            "failed to parse source node last_seen_at '{}': {e}",
+                            last_seen_str
+                        ),
+                    })?;
+            let now = chrono::Utc::now().naive_utc();
+            let age_secs = (now - last_seen).num_seconds();
+
+            if age_secs > SOURCE_NODE_HEARTBEAT_MAX_AGE_SECS {
+                return Err(ChvError::PreconditionFailed {
+                    reason: format!(
+                        "source node '{}' last heartbeat was {}s ago (max {}s), node may be unhealthy",
+                        state.source_node_id, age_secs, SOURCE_NODE_HEARTBEAT_MAX_AGE_SECS
+                    ),
+                });
+            }
+        }
+    }
+
+    // Check 2: Destination node is in a schedulable state.
+    // We check node_desired_state.desired_state — nodes in Maintenance, Draining, or Failed
+    // states should not receive new workloads.
+    let dest_state: Option<(String, bool)> =
+        sqlx::query_as("SELECT desired_state, scheduling_paused FROM node_desired_state WHERE node_id = ?")
+            .bind(&state.dest_node_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to query destination node state: {e}"),
+            })?;
+
+    match dest_state {
+        None => {
+            return Err(ChvError::PreconditionFailed {
+                reason: format!(
+                    "destination node '{}' has no desired state record",
+                    state.dest_node_id
+                ),
+            });
+        }
+        Some((state_str, scheduling_paused)) => {
+            match state_str.as_str() {
+                "Maintenance" | "Draining" | "Failed" | "Unreachable" => {
+                    return Err(ChvError::PreconditionFailed {
+                        reason: format!(
+                            "destination node '{}' is in state '{}', not eligible to receive migrations",
+                            state.dest_node_id, state_str
+                        ),
+                    });
+                }
+                _ => {}
+            }
+
+            if scheduling_paused {
+                return Err(ChvError::PreconditionFailed {
+                    reason: format!(
+                        "destination node '{}' has scheduling paused",
+                        state.dest_node_id
+                    ),
+                });
+            }
+        }
+    }
+
+    // Check 3: No other migration currently in progress for the same VM.
+    // Query the migrations table directly — active migrations are in non-terminal phases.
+    let active_migration: Option<(String, String)> = sqlx::query_as(
+        r#"SELECT migration_id, phase FROM migrations
+           WHERE vm_id = ? AND phase NOT IN ('Completed', 'Failed', 'RolledBack')
+           AND migration_id != ?
+           LIMIT 1"#,
+    )
+    .bind(&state.vm_id)
+    .bind(&state.migration_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ChvError::Internal {
+        reason: format!("failed to query active migrations for vm: {e}"),
+    })?;
+
+    if let Some((existing_id, existing_phase)) = active_migration {
+        return Err(ChvError::PreconditionFailed {
+            reason: format!(
+                "VM '{}' already has an active migration '{}' in phase '{}'",
+                state.vm_id, existing_id, existing_phase
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Execute the full migration state machine.
@@ -224,7 +388,7 @@ impl PhaseTimeouts {
 ///
 /// Returns Ok(()) if migration completed successfully, Err if failed or rolled back.
 #[tracing::instrument(
-    skip(pool, node_client_pool, state),
+    skip(pool, node_client_pool, state, overlay_manager),
     fields(
         migration_id = %state.migration_id,
         vm_id = %state.vm_id,
@@ -237,6 +401,7 @@ pub async fn execute_migration(
     node_client_pool: &NodeClientPool,
     agent_socket_pattern: &str,
     state: &mut MigrationState,
+    overlay_manager: Option<&OverlayManager>,
 ) -> Result<(), ChvError> {
     info!(
         migration_id = %state.migration_id,
@@ -245,10 +410,19 @@ pub async fn execute_migration(
         dest = %state.dest_node_id,
         "starting live migration"
     );
+    metrics::counter!("chv_migration_started_total").increment(1);
+
+    // Validate preconditions before committing to the migration.
+    // These checks prevent wasted multi-hour migrations that would inevitably fail.
+    validate_preconditions(pool, state).await?;
 
     // Look up VM disk and memory sizes for timeout calculation
     let (disk_size_gb, memory_size_gb) = get_vm_sizes(pool, &state.vm_id).await?;
-    let timeouts = PhaseTimeouts::calculate(disk_size_gb, memory_size_gb);
+    let timeouts = PhaseTimeouts::calculate(
+        disk_size_gb,
+        memory_size_gb,
+        state.config.timeout_multiplier,
+    );
 
     // Use configured total_timeout if provided, otherwise use calculated
     let total_timeout = if state.config.total_timeout_seconds > 0 {
@@ -261,6 +435,8 @@ pub async fn execute_migration(
         // Phase 1: PreCopyDisk - dispatch migrate_vm to source agent
         transition_phase(pool, state, MigrationPhase::PreCopyDisk).await?;
 
+        let vm_generation = get_vm_generation(pool, &state.vm_id).await?;
+
         let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
         let mut source_client = node_client_pool
             .get_or_connect(&state.source_node_id, &source_socket)
@@ -271,7 +447,7 @@ pub async fn execute_migration(
             source_client.migrate_vm(
                 &state.source_node_id,
                 &state.vm_id,
-                "1",
+                &vm_generation,
                 &state.source_node_id,
                 &state.dest_node_id,
                 state.config.to_proto(),
@@ -407,7 +583,7 @@ pub async fn execute_migration(
             dest_client.resume_vm(
                 &state.dest_node_id,
                 &state.vm_id,
-                "1",
+                &vm_generation,
                 &state.operation_id,
                 None,
             ),
@@ -446,11 +622,21 @@ pub async fn execute_migration(
             }
         }
 
-        // Phase 5: Completed
-        transition_phase(pool, state, MigrationPhase::Completed).await?;
+        // Phase 5: Completed — transition phase and update placement atomically
+        // to prevent split-brain if crash occurs between the two operations.
+        complete_migration_atomically(pool, state).await?;
 
-        // Update VM placement to destination node
-        update_vm_placement(pool, &state.vm_id, &state.dest_node_id).await?;
+        // Best-effort: update overlay FDB entries and send gratuitous ARP
+        if let Some(overlay) = overlay_manager {
+            notify_overlay_after_migration(
+                pool,
+                overlay,
+                node_client_pool,
+                agent_socket_pattern,
+                state,
+            )
+            .await;
+        }
 
         Ok(())
     })
@@ -458,23 +644,35 @@ pub async fn execute_migration(
 
     match migration_result {
         Ok(Ok(())) => {
+            metrics::counter!("chv_migration_completed_total").increment(1);
             info!(
                 migration_id = %state.migration_id,
                 "migration completed successfully"
             );
+            // Best-effort: disable dirty tracking on source volumes
+            disable_source_dirty_tracking(pool, node_client_pool, agent_socket_pattern, state)
+                .await;
             Ok(())
         }
         Ok(Err(e)) => {
+            metrics::counter!("chv_migration_failed_total").increment(1);
             // Migration failed (already marked Failed or RolledBack in the inner logic)
+            // Best-effort: disable dirty tracking on source volumes
+            disable_source_dirty_tracking(pool, node_client_pool, agent_socket_pattern, state)
+                .await;
             Err(e)
         }
         Err(_elapsed) => {
+            metrics::counter!("chv_migration_failed_total").increment(1);
             // Total timeout exceeded
             error!(
                 migration_id = %state.migration_id,
                 "total migration timeout exceeded"
             );
             transition_phase(pool, state, MigrationPhase::Failed).await?;
+            // Best-effort: disable dirty tracking on source volumes
+            disable_source_dirty_tracking(pool, node_client_pool, agent_socket_pattern, state)
+                .await;
             Err(ChvError::Internal {
                 reason: format!(
                     "migration {} exceeded total timeout of {}s",
@@ -528,11 +726,14 @@ async fn rollback_paused(
 
     match resume_source {
         Ok(mut client) => {
+            let gen = get_vm_generation(pool, &state.vm_id)
+                .await
+                .unwrap_or_else(|_| "1".to_string());
             match client
                 .resume_vm(
                     &state.source_node_id,
                     &state.vm_id,
-                    "1",
+                    &gen,
                     &state.operation_id,
                     None,
                 )
@@ -568,17 +769,112 @@ async fn rollback_paused(
     Ok(())
 }
 
+/// Disable dirty tracking on all source volumes after migration completes (success or failure).
+///
+/// Per ADR-012: "Dirty tracking MUST be disabled on source after migration completes
+/// (success or failure)." Leaving it enabled causes ~15-20% I/O degradation.
+///
+/// This is best-effort: failures are logged as warnings but do not fail the overall operation.
+async fn disable_source_dirty_tracking(
+    pool: &StorePool,
+    node_client_pool: &NodeClientPool,
+    agent_socket_pattern: &str,
+    state: &MigrationState,
+) {
+    let volume_ids = match get_vm_volume_ids(pool, &state.vm_id).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(
+                migration_id = %state.migration_id,
+                vm_id = %state.vm_id,
+                error = %e,
+                "failed to query volumes for dirty tracking cleanup; \
+                 source volumes may retain dirty tracking overhead"
+            );
+            return;
+        }
+    };
+
+    if volume_ids.is_empty() {
+        return;
+    }
+
+    let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
+    let source_client = match node_client_pool
+        .get_or_connect(&state.source_node_id, &source_socket)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                migration_id = %state.migration_id,
+                source_node = %state.source_node_id,
+                error = %e,
+                "failed to connect to source agent for dirty tracking cleanup; \
+                 source volumes may retain dirty tracking overhead"
+            );
+            return;
+        }
+    };
+
+    for volume_id in &volume_ids {
+        let mut client = source_client.clone();
+        match client
+            .disable_dirty_tracking(&state.source_node_id, volume_id, &state.operation_id, None)
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    migration_id = %state.migration_id,
+                    volume_id = %volume_id,
+                    source_node = %state.source_node_id,
+                    "disabled dirty tracking on source volume"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    migration_id = %state.migration_id,
+                    volume_id = %volume_id,
+                    source_node = %state.source_node_id,
+                    error = %e,
+                    "failed to disable dirty tracking on source volume; \
+                     volume may retain ~15-20%% I/O overhead until manually cleared"
+                );
+            }
+        }
+    }
+}
+
+/// Query the volume IDs attached to a VM.
+async fn get_vm_volume_ids(pool: &StorePool, vm_id: &str) -> Result<Vec<String>, ChvError> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ?")
+            .bind(vm_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to query volumes for VM {vm_id}: {e}"),
+            })?;
+
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
 /// Wait for disk convergence by polling the migration record.
-/// The agent reports progress via telemetry, updating the migrations table.
+/// The agent reports progress via telemetry updates to `bytes_transferred` and `total_bytes`.
+/// Convergence is achieved when dirty_blocks_remaining (reported by agent) drops below threshold,
+/// OR when bytes_transferred >= total_bytes (indicating bulk copy complete and iterative
+/// sync has finished).
 async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Result<(), ChvError> {
     let max_rounds = state.config.max_convergence_rounds;
     let threshold = state.config.dirty_threshold_blocks as i64;
+    let mut poll_count: u32 = 0;
 
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
+        poll_count += 1;
 
-        let row: Option<(String, i64, i64)> = sqlx::query_as(
-            "SELECT phase, convergence_round, dirty_blocks_remaining FROM migrations WHERE migration_id = ?",
+        let row: Option<(String, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT phase, convergence_round, dirty_blocks_remaining, bytes_transferred, total_bytes FROM migrations WHERE migration_id = ?",
         )
         .bind(&state.migration_id)
         .fetch_optional(pool)
@@ -588,7 +884,7 @@ async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Resul
         })?;
 
         match row {
-            Some((phase, round, dirty_remaining)) => {
+            Some((phase, round, dirty_remaining, bytes_transferred, total_bytes)) => {
                 if phase == "Failed" || phase == "RolledBack" {
                     return Err(ChvError::Internal {
                         reason: format!(
@@ -598,19 +894,29 @@ async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Resul
                     });
                 }
 
-                // Convergence achieved when dirty blocks below threshold
-                if dirty_remaining <= threshold {
+                // Primary check: agent-reported dirty blocks below threshold
+                if dirty_remaining >= 0 && dirty_remaining <= threshold {
                     return Ok(());
                 }
 
-                // Max rounds exceeded
-                if round >= max_rounds as i64 {
-                    return Err(ChvError::Internal {
-                        reason: format!(
-                            "migration {} exceeded max convergence rounds ({}) with {} dirty blocks remaining",
-                            state.migration_id, max_rounds, dirty_remaining
-                        ),
-                    });
+                // Secondary check: bytes_transferred indicates bulk copy complete
+                if total_bytes > 0 && bytes_transferred >= total_bytes && dirty_remaining <= 0 {
+                    return Ok(());
+                }
+
+                // Max rounds exceeded (each round is 5s, so max_rounds polls)
+                if round >= max_rounds as i64 || poll_count >= max_rounds * 6 {
+                    // Force convergence if we've waited long enough — the agent
+                    // may not be updating dirty_blocks_remaining. Proceed to
+                    // memory migration phase which will do a final sync.
+                    warn!(
+                        migration_id = %state.migration_id,
+                        rounds = round,
+                        poll_count = poll_count,
+                        dirty_remaining = dirty_remaining,
+                        "convergence round limit reached, forcing transition to memory migration"
+                    );
+                    return Ok(());
                 }
             }
             None => {
@@ -785,6 +1091,23 @@ pub async fn update_migration_progress(
     Ok(())
 }
 
+/// Fetch the current generation for a VM from the desired state store.
+async fn get_vm_generation(pool: &StorePool, vm_id: &str) -> Result<String, ChvError> {
+    let gen: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT generation FROM vm_desired_state WHERE vm_id = ?")
+            .bind(vm_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to fetch generation for VM {vm_id}: {e}"),
+            })?;
+
+    match gen {
+        Some((Some(g),)) => Ok(g.to_string()),
+        _ => Ok("1".to_string()),
+    }
+}
+
 /// Get VM disk and memory sizes in GB for timeout calculation.
 async fn get_vm_sizes(pool: &StorePool, vm_id: &str) -> Result<(u64, u64), ChvError> {
     let row: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
@@ -812,20 +1135,64 @@ async fn get_vm_sizes(pool: &StorePool, vm_id: &str) -> Result<(u64, u64), ChvEr
     Ok((disk_gb.max(1), memory_gb.max(1)))
 }
 
-/// Update VM placement after successful migration.
-async fn update_vm_placement(
+fn migration_bridge_name(net_id: &str) -> String {
+    if net_id == "default" {
+        return "chvbr0".to_string();
+    }
+    let candidate = format!("br-{}", net_id);
+    if candidate.len() <= 15 {
+        return candidate;
+    }
+    let prefix: String = net_id.chars().take(8).collect();
+    let hash = {
+        let mut h: u32 = 0x811c9dc5;
+        for b in net_id.as_bytes() {
+            h = h.wrapping_mul(0x01000193) ^ (*b as u32);
+        }
+        format!("{:04x}", h & 0xffff)
+    };
+    format!("br-{}{}", prefix, hash)
+}
+
+/// Atomically mark migration as Completed AND update VM placement.
+/// Both operations run in a single SQLite transaction to prevent split-brain
+/// if a crash occurs between them.
+async fn complete_migration_atomically(
     pool: &StorePool,
-    vm_id: &str,
-    dest_node_id: &str,
+    state: &mut MigrationState,
 ) -> Result<(), ChvError> {
+    let mut tx = pool.begin().await.map_err(|e| ChvError::Internal {
+        reason: format!("failed to begin transaction for migration completion: {e}"),
+    })?;
+
+    sqlx::query(
+        r#"UPDATE migrations
+           SET phase = 'Completed',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+               completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+           WHERE migration_id = ?"#,
+    )
+    .bind(&state.migration_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ChvError::Internal {
+        reason: format!("failed to mark migration completed: {e}"),
+    })?;
+
     sqlx::query("UPDATE vm_desired_state SET target_node_id = ? WHERE vm_id = ?")
-        .bind(dest_node_id)
-        .bind(vm_id)
-        .execute(pool)
+        .bind(&state.dest_node_id)
+        .bind(&state.vm_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| ChvError::Internal {
-            reason: format!("failed to update VM placement after migration: {e}"),
+            reason: format!("failed to update VM placement: {e}"),
         })?;
+
+    tx.commit().await.map_err(|e| ChvError::Internal {
+        reason: format!("failed to commit migration completion transaction: {e}"),
+    })?;
+
+    state.phase = MigrationPhase::Completed;
     Ok(())
 }
 
@@ -849,8 +1216,149 @@ fn proto_phase_to_str(phase: i32) -> &'static str {
         x if x == proto::MigrationPhase::Completed as i32 => "Completed",
         x if x == proto::MigrationPhase::Failed as i32 => "Failed",
         x if x == proto::MigrationPhase::RolledBack as i32 => "RolledBack",
-        _ => "Pending",
+        _ => "Unknown",
     }
+}
+
+/// VM NIC info needed for post-migration overlay update.
+struct VmNicInfo {
+    network_id: String,
+    mac_address: String,
+    ip_address: String,
+    vni: i32,
+}
+
+/// Fetch all NICs for a VM that are on overlay networks (vni > 0).
+async fn get_vm_overlay_nics(pool: &StorePool, vm_id: &str) -> Result<Vec<VmNicInfo>, ChvError> {
+    let rows: Vec<(String, String, String, i32)> = sqlx::query_as(
+        r#"SELECT vn.network_id, vn.mac_address, vn.ip_address, COALESCE(n.vni, 0)
+           FROM vm_nic_desired_state vn
+           JOIN networks n ON n.network_id = vn.network_id
+           WHERE vn.vm_id = ? AND COALESCE(n.vni, 0) > 0
+             AND vn.mac_address IS NOT NULL"#,
+    )
+    .bind(vm_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ChvError::Internal {
+        reason: format!("failed to query VM NIC overlay info: {e}"),
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(network_id, mac_address, ip_address, vni)| VmNicInfo {
+            network_id,
+            mac_address,
+            ip_address,
+            vni,
+        })
+        .collect())
+}
+
+/// Best-effort post-migration overlay notification.
+///
+/// Re-points FDB entries on all peer nodes and sends gratuitous ARP from the
+/// destination node. Failures are logged as warnings but do not fail the
+/// migration — the overlay is eventually consistent and will reconcile on the
+/// next heartbeat cycle.
+async fn notify_overlay_after_migration(
+    pool: &StorePool,
+    overlay: &OverlayManager,
+    node_client_pool: &NodeClientPool,
+    agent_socket_pattern: &str,
+    state: &MigrationState,
+) {
+    let nics = match get_vm_overlay_nics(pool, &state.vm_id).await {
+        Ok(nics) => nics,
+        Err(e) => {
+            warn!(
+                migration_id = %state.migration_id,
+                vm_id = %state.vm_id,
+                error = %e,
+                "failed to query VM NICs for post-migration overlay update"
+            );
+            return;
+        }
+    };
+
+    if nics.is_empty() {
+        return;
+    }
+
+    // Bridge name follows the standard naming convention on the node
+    // (first 8 chars of network_id prefixed with "br-"). The agent resolves
+    // the actual interface; we pass our best guess for the ARP request.
+    for nic in &nics {
+        let bridge_name = migration_bridge_name(&nic.network_id);
+
+        // 1. Re-point FDB entries on all peers
+        if let Err(e) = overlay
+            .on_vm_migrated(
+                &nic.network_id,
+                &nic.mac_address,
+                &nic.ip_address,
+                &state.dest_node_id,
+                &bridge_name,
+                nic.vni,
+                &state.operation_id,
+            )
+            .await
+        {
+            warn!(
+                migration_id = %state.migration_id,
+                vm_id = %state.vm_id,
+                network_id = %nic.network_id,
+                error = %e,
+                "post-migration overlay FDB update failed (best-effort)"
+            );
+        }
+
+        // 2. Send gratuitous ARP from the destination node
+        let dest_socket = resolve_agent_socket(agent_socket_pattern, &state.dest_node_id);
+        match node_client_pool
+            .get_or_connect(&state.dest_node_id, &dest_socket)
+            .await
+        {
+            Ok(mut client) => {
+                if let Err(e) = client
+                    .send_gratuitous_arp(
+                        &state.dest_node_id,
+                        &nic.network_id,
+                        &nic.ip_address,
+                        &bridge_name,
+                        &state.operation_id,
+                        Some("control-plane"),
+                    )
+                    .await
+                {
+                    warn!(
+                        migration_id = %state.migration_id,
+                        vm_id = %state.vm_id,
+                        network_id = %nic.network_id,
+                        vm_ip = %nic.ip_address,
+                        error = %e,
+                        "post-migration gratuitous ARP failed (best-effort)"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    migration_id = %state.migration_id,
+                    vm_id = %state.vm_id,
+                    dest_node_id = %state.dest_node_id,
+                    error = %e,
+                    "failed to connect to dest node for gratuitous ARP (best-effort)"
+                );
+            }
+        }
+    }
+
+    info!(
+        migration_id = %state.migration_id,
+        vm_id = %state.vm_id,
+        nic_count = nics.len(),
+        "post-migration overlay update completed"
+    );
 }
 
 #[cfg(test)]
@@ -920,8 +1428,8 @@ mod tests {
 
     #[test]
     fn test_phase_timeout_calculation() {
-        // 100GB disk, 16GB memory
-        let timeouts = PhaseTimeouts::calculate(100, 16);
+        // 100GB disk, 16GB memory, default multiplier
+        let timeouts = PhaseTimeouts::calculate(100, 16, 1.0);
 
         assert_eq!(timeouts.precopy_disk_secs, 6000); // 100 * 60
         assert_eq!(timeouts.converging_disk_per_round_secs, 300);
@@ -934,7 +1442,7 @@ mod tests {
     #[test]
     fn test_phase_timeout_minimum_sizes() {
         // 0GB disk, 0GB memory - should use minimum of 1GB
-        let timeouts = PhaseTimeouts::calculate(0, 0);
+        let timeouts = PhaseTimeouts::calculate(0, 0, 1.0);
 
         assert_eq!(timeouts.precopy_disk_secs, 60); // max(0,1) * 60
         assert_eq!(timeouts.memory_migration_secs, 150); // max(0,1) * 30 + 120
@@ -947,6 +1455,7 @@ mod tests {
         assert_eq!(config.max_convergence_rounds, 10);
         assert_eq!(config.block_size_bytes, 4_194_304);
         assert_eq!(config.total_timeout_seconds, 0);
+        assert_eq!(config.timeout_multiplier, 1.0);
     }
 
     #[test]
@@ -984,6 +1493,7 @@ mod tests {
             max_convergence_rounds: 15,
             block_size_bytes: 8_388_608,
             total_timeout_seconds: 7200,
+            timeout_multiplier: 2.0,
         };
         let config = MigrationConfig::from_proto(&proto_config);
 
@@ -1000,6 +1510,7 @@ mod tests {
             max_convergence_rounds: 0,
             block_size_bytes: 0,
             total_timeout_seconds: 0,
+            timeout_multiplier: 0.0,
         };
         let config = MigrationConfig::from_proto(&proto_config);
         let defaults = MigrationConfig::default();

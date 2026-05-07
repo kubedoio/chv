@@ -1,8 +1,7 @@
 use crate::migration::flow_control::SendWindow;
 use chv_stord_api::chv_stord_api::{
     migration_message, storage_migration_service_client::StorageMigrationServiceClient, AckStatus,
-    BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
-    RoundStart,
+    BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage,
 };
 use chv_stord_backends::StorageBackend;
 use std::sync::Arc;
@@ -16,6 +15,11 @@ const DEFAULT_BLOCK_SIZE: u64 = 4_194_304; // 4 MB
 ///
 /// This is invoked by the control plane / agent to migrate a volume
 /// from the local node to a remote peer's stord.
+///
+/// Flow control: the sender maintains a sliding window of at most
+/// `send_window_size` (default 16) unacknowledged chunks. The receiver
+/// sends an acknowledgment for every chunk written, allowing the sender
+/// to track `last_acknowledged_offset` for stream resumability.
 pub struct MigrationSender<B: StorageBackend> {
     backend: Arc<B>,
     volume_id: String,
@@ -38,6 +42,16 @@ impl<B: StorageBackend> MigrationSender<B> {
     pub fn with_block_size(mut self, block_size: u64) -> Self {
         self.block_size = block_size;
         self
+    }
+
+    pub fn with_send_window_size(mut self, size: u32) -> Self {
+        self.send_window = SendWindow::with_window_size(size);
+        self
+    }
+
+    /// Returns the last acknowledged offset, useful for resumability.
+    pub fn last_acknowledged_offset(&self) -> u64 {
+        self.send_window.last_acknowledged_offset()
     }
 
     /// Start a migration to a peer node at the given gRPC endpoint.
@@ -68,7 +82,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             .await
             .map_err(|e| tonic::Status::internal(format!("failed to get volume size: {e}")))?;
 
-        // Send InitMigration
+        // Send InitMigration with send_window_size for negotiation
         let init_msg = MigrationMessage {
             payload: Some(migration_message::Payload::Init(InitMigration {
                 volume_id: self.volume_id.clone(),
@@ -76,6 +90,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                 block_size: self.block_size as u32,
                 format: "raw".to_string(),
                 checksum_type: "crc32".to_string(),
+                send_window_size: self.send_window.window_size(),
             })),
         };
         tx.send(init_msg)
@@ -86,6 +101,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             volume_id = %self.volume_id,
             volume_size,
             block_size = self.block_size,
+            send_window_size = self.send_window.window_size(),
             "sent InitMigration to peer"
         );
 
@@ -121,6 +137,7 @@ impl<B: StorageBackend> MigrationSender<B> {
         info!(
             volume_id = %self.volume_id,
             total_chunks,
+            last_ack_offset = self.send_window.last_acknowledged_offset(),
             "bulk copy phase complete"
         );
 
@@ -181,6 +198,10 @@ impl<B: StorageBackend> MigrationSender<B> {
     }
 
     /// Perform the bulk copy phase: read all blocks and stream them to the receiver.
+    ///
+    /// The sender computes CRC32 for each chunk and respects the send window.
+    /// When the window is full (default 16 in-flight), the sender blocks
+    /// until acknowledgments are received from the destination.
     async fn bulk_copy(
         &mut self,
         tx: &mpsc::Sender<MigrationMessage>,
@@ -228,130 +249,20 @@ impl<B: StorageBackend> MigrationSender<B> {
 
             self.send_window.sent();
 
-            // Check for acks non-blockingly if there might be some
-            if self.send_window.should_request_ack() {
+            // Non-blocking check for acks to keep the window sliding
+            if self.send_window.should_check_ack() {
                 self.try_receive_ack(inbound).await?;
             }
 
             offset += self.block_size;
         }
 
-        // Drain remaining acks
-        while !self.send_window.can_send() {
+        // Drain all remaining in-flight acks before completing the phase
+        while self.send_window.last_ack_sequence() < sequence_num {
             self.wait_for_ack(inbound).await?;
         }
 
         Ok(sequence_num)
-    }
-
-    /// Perform a dirty sync round: read dirty bitmap, send only dirty blocks.
-    #[allow(dead_code)]
-    pub async fn dirty_sync_round(
-        &mut self,
-        tx: &mpsc::Sender<MigrationMessage>,
-        inbound: &mut tonic::Streaming<MigrationMessage>,
-        round_num: u32,
-    ) -> Result<u64, tonic::Status> {
-        let bitmap = self
-            .backend
-            .get_dirty_bitmap(&self.volume_id, &self.handle)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("get_dirty_bitmap failed: {e}")))?;
-
-        self.backend
-            .clear_dirty_bitmap(&self.volume_id, &self.handle)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("clear_dirty_bitmap failed: {e}")))?;
-
-        let dirty_block_count = bitmap.iter().map(|b| b.count_ones() as u64).sum::<u64>();
-
-        // Send RoundStart
-        let round_start_msg = MigrationMessage {
-            payload: Some(migration_message::Payload::RoundStart(RoundStart {
-                round_num,
-                dirty_block_count,
-            })),
-        };
-        tx.send(round_start_msg)
-            .await
-            .map_err(|_| tonic::Status::internal("failed to send RoundStart: channel closed"))?;
-
-        let mut blocks_sent: u64 = 0;
-        let mut bytes_sent: u64 = 0;
-        let mut sequence_num = self.send_window.ack_interval(); // continue from bulk
-
-        // Iterate bitmap bits
-        for (byte_idx, byte) in bitmap.iter().enumerate() {
-            for bit_idx in 0..8u32 {
-                if byte & (1 << bit_idx) == 0 {
-                    continue;
-                }
-
-                let block_index = (byte_idx as u64) * 8 + bit_idx as u64;
-                let offset = block_index * self.block_size;
-
-                // Wait if send window is full
-                while !self.send_window.can_send() {
-                    self.wait_for_ack(inbound).await?;
-                }
-
-                let data = self
-                    .backend
-                    .read_block(&self.volume_id, &self.handle, offset, self.block_size)
-                    .await
-                    .map_err(|e| {
-                        tonic::Status::internal(format!(
-                            "read_block failed at offset {offset}: {e}"
-                        ))
-                    })?;
-
-                let is_sparse = is_all_zeros(&data);
-                let crc32 = if is_sparse { 0 } else { crc32fast::hash(&data) };
-                let chunk_data = if is_sparse { Vec::new() } else { data.clone() };
-
-                sequence_num += 1;
-                let chunk_msg = MigrationMessage {
-                    payload: Some(migration_message::Payload::Chunk(BlockChunk {
-                        offset,
-                        data: chunk_data,
-                        crc32,
-                        is_sparse,
-                        sequence_num,
-                    })),
-                };
-
-                tx.send(chunk_msg).await.map_err(|_| {
-                    tonic::Status::internal("failed to send BlockChunk: channel closed")
-                })?;
-
-                self.send_window.sent();
-                blocks_sent += 1;
-                bytes_sent += data.len() as u64;
-
-                if self.send_window.should_request_ack() {
-                    self.try_receive_ack(inbound).await?;
-                }
-            }
-        }
-
-        // Send RoundComplete
-        let round_complete_msg = MigrationMessage {
-            payload: Some(migration_message::Payload::RoundComplete(RoundComplete {
-                round_num,
-                blocks_sent,
-                bytes_sent,
-            })),
-        };
-        tx.send(round_complete_msg)
-            .await
-            .map_err(|_| tonic::Status::internal("failed to send RoundComplete: channel closed"))?;
-
-        debug!(
-            round_num,
-            blocks_sent, bytes_sent, "dirty sync round complete"
-        );
-
-        Ok(blocks_sent)
     }
 
     /// Block until an Ack is received from the inbound stream.
@@ -362,7 +273,12 @@ impl<B: StorageBackend> MigrationSender<B> {
         let timeout = self.send_window.timeout();
         let msg = tokio::time::timeout(timeout, inbound.message())
             .await
-            .map_err(|_| tonic::Status::deadline_exceeded("timed out waiting for Ack"))?
+            .map_err(|_| {
+                tonic::Status::deadline_exceeded(format!(
+                    "timed out waiting for Ack (last_ack_offset={})",
+                    self.send_window.last_acknowledged_offset()
+                ))
+            })?
             .map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?
             .ok_or_else(|| tonic::Status::internal("stream closed while waiting for Ack"))?;
 
@@ -374,8 +290,10 @@ impl<B: StorageBackend> MigrationSender<B> {
         &mut self,
         inbound: &mut tonic::Streaming<MigrationMessage>,
     ) -> Result<(), tonic::Status> {
-        // Use a very short timeout to check if there's a pending message
-        match tokio::time::timeout(std::time::Duration::from_millis(1), inbound.message()).await {
+        // Use a short timeout to check if there's a pending message.
+        // 50ms balances responsiveness (not blocking sends too long) against
+        // avoiding excessive timer-wheel firings that 1ms would cause.
+        match tokio::time::timeout(std::time::Duration::from_millis(50), inbound.message()).await {
             Ok(Ok(Some(msg))) => self.handle_inbound_message(msg),
             Ok(Ok(None)) => Err(tonic::Status::internal("stream closed unexpectedly")),
             Ok(Err(e)) => Err(tonic::Status::internal(format!("stream error: {e}"))),
@@ -391,6 +309,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                 if ack.status() == AckStatus::AckCrcMismatch {
                     warn!(
                         sequence = ack.last_sequence_num,
+                        offset = ack.last_offset,
                         "receiver reported CRC mismatch"
                     );
                     return Err(tonic::Status::data_loss(
@@ -400,11 +319,19 @@ impl<B: StorageBackend> MigrationSender<B> {
                 if ack.status() == AckStatus::AckWriteError {
                     error!(
                         sequence = ack.last_sequence_num,
+                        offset = ack.last_offset,
                         "receiver reported write error"
                     );
                     return Err(tonic::Status::internal("write error reported by receiver"));
                 }
-                self.send_window.acked(ack.last_sequence_num);
+                self.send_window
+                    .acked_with_offset(ack.last_sequence_num, ack.last_offset);
+                debug!(
+                    sequence = ack.last_sequence_num,
+                    offset = ack.last_offset,
+                    unacked = self.send_window.unacked_count(),
+                    "ack received"
+                );
                 Ok(())
             }
             Some(migration_message::Payload::Backpressure(ref bp)) => {
@@ -442,9 +369,5 @@ pub async fn start_migration_to_peer<B: StorageBackend>(
 
 /// Check if a byte slice is all zeros (indicates a sparse block).
 fn is_all_zeros(data: &[u8]) -> bool {
-    // Process in 8-byte chunks for efficiency
-    let (prefix, aligned, suffix) = unsafe { data.align_to::<u64>() };
-    prefix.iter().all(|&b| b == 0)
-        && aligned.iter().all(|&w| w == 0)
-        && suffix.iter().all(|&b| b == 0)
+    data.iter().all(|&b| b == 0)
 }

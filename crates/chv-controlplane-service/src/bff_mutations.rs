@@ -6,6 +6,7 @@ use chv_webui_bff_api::chv_webui_bff_v1::{
     MutateNetworkResponse, MutateNodeResponse, MutateVmResponse, MutateVolumeResponse,
 };
 use control_plane_node_api::control_plane_node_api as proto;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,10 @@ use crate::ControlPlaneServiceError;
 pub struct ControlPlaneMutationService {
     pool: StorePool,
     lifecycle_service: Arc<dyn LifecycleService>,
+    /// Monotonic generation counter. Tracks the last generation value issued
+    /// so that NTP clock adjustments (rollbacks) cannot produce a generation
+    /// lower than one already in use.
+    last_generation: Arc<AtomicU64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -31,6 +36,7 @@ impl ControlPlaneMutationService {
         Self {
             pool,
             lifecycle_service,
+            last_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -41,13 +47,25 @@ impl ControlPlaneMutationService {
             .as_millis() as i64
     }
 
-    fn fresh_generation() -> Generation {
-        // Use current time in milliseconds as a monotonic generation.
-        Generation::new(Self::now_ms() as u64)
+    fn fresh_generation(&self) -> Generation {
+        let clock_ms = Self::now_ms() as u64;
+        let mut prev = self.last_generation.load(Ordering::Acquire);
+        loop {
+            let next = if clock_ms > prev { clock_ms } else { prev + 1 };
+            match self.last_generation.compare_exchange_weak(
+                prev,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Generation::new(next),
+                Err(actual) => prev = actual,
+            }
+        }
     }
 
     fn build_meta(&self, node_id: String, requested_by: String) -> Option<proto::RequestMeta> {
-        let generation = Self::fresh_generation();
+        let generation = self.fresh_generation();
         Some(proto::RequestMeta {
             operation_id: "".into(),
             requested_by,

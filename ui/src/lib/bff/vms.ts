@@ -50,7 +50,7 @@ export async function mutateVm(
 export async function deleteVm(
 	req: { vm_id: string; requested_by: string },
 	token?: string
-): Promise<{ vm_id: string; operation_id: string; status: string }> {
+): Promise<{ accepted: boolean; task_id: string; vm_id: string; summary: string }> {
 	return bffFetch(BFFEndpoints.deleteVm, { method: 'POST', body: JSON.stringify(req), token });
 }
 
