@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import Modal from '../primitives/Modal.svelte';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import { AlertTriangle } from 'lucide-svelte';
   import type { VM } from '$lib/api/types';
   

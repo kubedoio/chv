@@ -19,6 +19,7 @@
 		requestedVmId?: string;
 		currentTab?: string;
 		nodeId?: string;
+		errorMessage?: string;
 		onRetry?: () => void;
 	}
 
@@ -27,6 +28,7 @@
 		requestedVmId,
 		currentTab,
 		nodeId,
+		errorMessage,
 		onRetry
 	}: Props = $props();
 </script>
@@ -110,7 +112,11 @@
 
 		<SectionCard title="Failure Shape" icon={Activity}>
 			<div class="recovery-facts">
-				<p>No guest summary was returned for this route.</p>
+				{#if errorMessage}
+					<p><strong>Error:</strong> {errorMessage}</p>
+				{:else}
+					<p>No guest summary was returned for this route.</p>
+				{/if}
 				<span>The page stayed in recovery mode rather than showing stale runtime controls.</span>
 			</div>
 		</SectionCard>

@@ -21,6 +21,9 @@ message TopologySpec {
   string subnet_cidr = 5;
   string gateway_ip = 6;
   map<string, string> options = 7;
+  uint32 vni = 8;                           // 0 = no overlay (bridge-only)
+  repeated VtepEndpoint vtep_endpoints = 9; // peer VTEPs for this network
+  OverlayType overlay_type = 10;
 }
 
 message NicSpec {
@@ -163,4 +166,126 @@ service NetworkService {
   rpc WithdrawServiceExposure(WithdrawServiceExposureRequest) returns (Result);
   rpc GetNetworkHealth(NetworkHealthRequest) returns (NetworkHealthResponse);
   rpc ListNamespaceState(ListNamespaceStateRequest) returns (ListNamespaceStateResponse);
+  rpc UpdateOverlay(UpdateOverlayRequest) returns (UpdateOverlayResponse);
+  rpc SendGratuitousArp(SendGratuitousArpRequest) returns (SendGratuitousArpResponse);
+  rpc UpdateSecurityPolicy(SecurityPolicy) returns (UpdateSecurityPolicyResponse);
+  rpc UpdateRateLimit(RateLimitPolicy) returns (UpdateRateLimitResponse);
+  rpc GetOverlayStatus(GetOverlayStatusRequest) returns (OverlayStatus);
+}
+
+// ---------------------------------------------------------------------------
+// VXLAN overlay support
+// ---------------------------------------------------------------------------
+
+enum OverlayType {
+  OVERLAY_NONE = 0;   // bridge-only (single node)
+  OVERLAY_VXLAN = 1;  // kernel VXLAN
+}
+
+message VtepEndpoint {
+  string node_id = 1;
+  string vtep_ip = 2;
+  uint32 vtep_port = 3; // default 4789
+}
+
+// ---------------------------------------------------------------------------
+// Security policy
+// ---------------------------------------------------------------------------
+
+enum Direction {
+  DIRECTION_BOTH = 0;
+  DIRECTION_INGRESS = 1;
+  DIRECTION_EGRESS = 2;
+}
+
+enum Protocol {
+  PROTOCOL_ANY = 0;
+  PROTOCOL_TCP = 1;
+  PROTOCOL_UDP = 2;
+  PROTOCOL_ICMP = 3;
+}
+
+enum PolicyAction {
+  POLICY_DENY = 0;
+  POLICY_ALLOW = 1;
+}
+
+message PortRange {
+  uint32 min = 1; // 0 = any
+  uint32 max = 2; // 0 = same as min (single port)
+}
+
+message SecurityRule {
+  Direction direction = 1;
+  Protocol protocol = 2;
+  string src_cidr = 3;
+  string dst_cidr = 4;
+  PortRange src_port = 5;
+  PortRange dst_port = 6;
+  PolicyAction action = 7;
+  uint32 priority = 8;
+}
+
+message SecurityPolicy {
+  string vm_id = 1;
+  string network_id = 2;
+  PolicyAction default_action = 3;
+  repeated SecurityRule rules = 4;
+}
+
+message RateLimitPolicy {
+  string vm_id = 1;
+  uint64 rate_bps = 2;    // bytes per second
+  uint64 burst_bytes = 3; // max burst
+}
+
+// ---------------------------------------------------------------------------
+// Overlay management messages
+// ---------------------------------------------------------------------------
+
+message FdbEntry {
+  string mac_address = 1;
+  string vtep_ip = 2;
+}
+
+message UpdateOverlayRequest {
+  string network_id = 1;
+  uint32 vni = 2;
+  repeated VtepEndpoint vtep_endpoints = 3;
+  repeated FdbEntry fdb_entries = 4;
+}
+
+message UpdateOverlayResponse {
+  Result result = 1;
+}
+
+message SendGratuitousArpRequest {
+  Meta meta = 1;
+  string network_id = 2;
+  string vm_ip = 3;
+  string bridge_name = 4;
+}
+
+message SendGratuitousArpResponse {
+  Result result = 1;
+}
+
+message UpdateSecurityPolicyResponse {
+  Result result = 1;
+}
+
+message UpdateRateLimitResponse {
+  Result result = 1;
+}
+
+message GetOverlayStatusRequest {
+  string network_id = 1;
+}
+
+message OverlayStatus {
+  string network_id = 1;
+  uint32 vni = 2;
+  bool vxlan_interface_up = 3;
+  uint32 fdb_entry_count = 4;
+  uint32 ebpf_programs_loaded = 5;
 }

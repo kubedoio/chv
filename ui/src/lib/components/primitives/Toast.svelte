@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { toast, type ToastType } from '$lib/stores/toast';
+	import { toast, type ToastType } from '$lib/stores/toast.svelte';
 	import { CheckCircle2, AlertTriangle, Info as InfoIcon, X } from 'lucide-svelte';
 
 	interface Props {

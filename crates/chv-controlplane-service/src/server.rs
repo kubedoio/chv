@@ -242,6 +242,24 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
             })?;
         Ok(Response::new(resp))
     }
+
+    async fn report_migration_progress(
+        &self,
+        request: Request<proto::MigrationProgress>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        let _span = tracing::info_span!("report_migration_progress", %op_id);
+        let resp = self
+            .service
+            .report_migration_progress(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "report_migration_progress failed");
+                tonic::Status::from(e)
+            })?;
+        Ok(Response::new(resp))
+    }
 }
 
 pub struct LifecycleServer {
@@ -728,6 +746,51 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
         Err(tonic::Status::unimplemented(
             "ping_vmm not supported on control plane",
         ))
+    }
+
+    async fn migrate_vm(
+        &self,
+        request: Request<proto::MigrateVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        let _span = tracing::info_span!("migrate_vm", %op_id);
+        let resp = self
+            .service
+            .migrate_vm(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn update_overlay(
+        &self,
+        request: Request<proto::UpdateOverlayRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        let _span = tracing::info_span!("update_overlay", %op_id);
+        let resp = self
+            .service
+            .update_overlay(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        request: Request<proto::SendGratuitousArpRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        let _span = tracing::info_span!("send_gratuitous_arp", %op_id);
+        let resp = self
+            .service
+            .send_gratuitous_arp(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
     }
 }
 

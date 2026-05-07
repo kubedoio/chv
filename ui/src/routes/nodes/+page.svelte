@@ -9,7 +9,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { Plus, AlertCircle, ShieldCheck } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import type { CreateNodeInput, CreateNodeResponse } from '$lib/api/types';
 
 	let { data }: { data: PageData } = $props();

@@ -18,6 +18,7 @@ async-trait = { workspace = true }
 dashmap = { workspace = true }
 tokio-stream = { workspace = true }
 rusqlite = { workspace = true }
+crc32fast = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

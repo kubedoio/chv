@@ -98,7 +98,10 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
     // Ensure table exists
     run_nft_idempotent(&["add", "table", "inet", table]).await?;
 
-    // Create chains if needed
+    // Create chains if needed.
+    // Use priority 0 for filter hooks (standard nftables convention for filter chains).
+    // Within each chain, rule evaluation order is positional — we enforce the correct
+    // ordering below: conntrack first, then drop/reject rules, then accept rules.
     for (chain, hook) in [
         ("input", "input"),
         ("forward", "forward"),
@@ -111,7 +114,7 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
             table,
             chain,
             &format!(
-                "{{ type filter hook {} priority 0 ; policy accept ; }}",
+                "{{ type filter hook {} priority filter ; policy drop ; }}",
                 hook
             ),
         ])
@@ -120,7 +123,9 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
 
     // Flush existing rules in filter chains (atomic replace)
     for chain in ["input", "forward", "output"] {
-        let _ = run_nft(&["flush", "chain", "inet", table, chain]).await;
+        if let Err(e) = run_nft(&["flush", "chain", "inet", table, chain]).await {
+            tracing::warn!(table, chain, error = %e, "failed to flush nftables chain");
+        }
     }
 
     // Always add conntrack established/related rule first
@@ -137,8 +142,16 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
     ])
     .await?;
 
-    // Apply user rules
-    for rule in &rules {
+    // Apply user rules in priority order: deny/reject rules first, then accept rules.
+    // This ensures that deny rules are evaluated before allows within the same chain,
+    // preventing a broad accept from shadowing a more specific deny.
+    let ordered_rules: Vec<&FirewallRule> = rules
+        .iter()
+        .filter(|r| r.action == "drop" || r.action == "reject")
+        .chain(rules.iter().filter(|r| r.action == "accept"))
+        .collect();
+
+    for rule in ordered_rules {
         let chain = match rule.direction.as_str() {
             "inbound" => "input",
             "outbound" => "output",
@@ -233,7 +246,9 @@ pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvE
     .await?;
 
     // Flush existing NAT rules
-    let _ = run_nft(&["flush", "chain", "inet", table, "postrouting"]).await;
+    if let Err(e) = run_nft(&["flush", "chain", "inet", table, "postrouting"]).await {
+        tracing::warn!(table, error = %e, "failed to flush postrouting chain");
+    }
 
     if rules.is_empty() {
         // Default: masquerade all non-loopback traffic

@@ -1,5 +1,8 @@
 pub mod dhcp;
 pub mod dns;
+pub mod ebpf;
+pub mod ebpf_linux;
+pub mod ebpf_stub;
 pub mod executor;
 pub mod firewall;
 pub mod handlers;

@@ -166,7 +166,9 @@ import Button from '$lib/components/primitives/Button.svelte';
 	<main class="inventory-main">
 		<section class="inventory-table-area">
 			{#if model.state === 'error'}
-				<ErrorState />
+				<ErrorState
+					description={model.errorMessage ?? 'The control plane responded with an error or is unreachable.'}
+				/>
 			{:else if model.state === 'empty'}
 				<EmptyInfrastructureState
 					title="No artifacts detected"

@@ -47,6 +47,7 @@ tokio-stream = "0.1"
 dashmap = "6"
 tempfile = "3"
 tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
 hyper-util = { version = "0.1", features = ["client", "server", "tokio"] }
 metrics-exporter-prometheus = "0.16"
 jsonwebtoken = "9"
@@ -55,3 +56,5 @@ axum = "0.7"
 bcrypt = "0.15"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "migrate", "derive", "json", "uuid", "chrono"] }
 nix = { version = "0.29", features = ["term", "ioctl", "process"] }
+crc32fast = "1"
+moka = { version = "0.12", features = ["future"] }

@@ -3,7 +3,7 @@ import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import { Cpu, HardDrive, Network, Server, Settings, AlertTriangle, Activity, ShieldCheck, RefreshCcw } from 'lucide-svelte';
   import { createAPIClient, getStoredRole } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import StatusBadge from '$lib/components/shell/StatusBadge.svelte';

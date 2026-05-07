@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import InstallStatusPanel from '$lib/components/shared/InstallStatusPanel.svelte';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
   import type { InstallStatusResponse, InstallActionResponse } from '$lib/api/types';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';
 

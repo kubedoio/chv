@@ -203,6 +203,7 @@ pub enum NodeState {
     Draining,
     Maintenance,
     Failed,
+    Unreachable,
 }
 
 impl NodeState {
@@ -218,6 +219,7 @@ impl NodeState {
             Self::Draining => "Draining",
             Self::Maintenance => "Maintenance",
             Self::Failed => "Failed",
+            Self::Unreachable => "Unreachable",
         }
     }
 
@@ -258,6 +260,7 @@ impl FromStr for NodeState {
             "Draining" => Ok(Self::Draining),
             "Maintenance" => Ok(Self::Maintenance),
             "Failed" => Ok(Self::Failed),
+            "Unreachable" => Ok(Self::Unreachable),
             _ => Err(ParseNodeStateError),
         }
     }
@@ -268,6 +271,7 @@ pub enum OperationStatus {
     Pending,
     Accepted,
     Running,
+    RetryPending,
     Succeeded,
     Failed,
     Rejected,
@@ -281,6 +285,7 @@ impl OperationStatus {
             Self::Pending => "Pending",
             Self::Accepted => "Accepted",
             Self::Running => "Running",
+            Self::RetryPending => "RetryPending",
             Self::Succeeded => "Succeeded",
             Self::Failed => "Failed",
             Self::Rejected => "Rejected",
@@ -322,6 +327,7 @@ impl FromStr for OperationStatus {
             "Pending" => Ok(Self::Pending),
             "Accepted" => Ok(Self::Accepted),
             "Running" => Ok(Self::Running),
+            "RetryPending" => Ok(Self::RetryPending),
             "Succeeded" => Ok(Self::Succeeded),
             "Failed" => Ok(Self::Failed),
             "Rejected" => Ok(Self::Rejected),

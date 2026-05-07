@@ -12,7 +12,7 @@
 	import { selection } from '$lib/stores/selection.svelte';
 	import { clearToken, getStoredToken } from '$lib/api/client';
 	import { mutateVm, deleteVm } from '$lib/bff/vms';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import { buildInstanceActions } from '$lib/shell/instance-actions';
 	import InstanceContextMenu from './InstanceContextMenu.svelte';
 	import DeleteInstanceDialog from '$lib/components/vms/DeleteInstanceDialog.svelte';

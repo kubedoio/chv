@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { syncAuthCookieFromLocalStorage } from '$lib/bff/auth-cookie';
-  import { toast } from '$lib/stores/toast';
+  import { toast } from '$lib/stores/toast.svelte';
 
   let username = '';
   let password = '';

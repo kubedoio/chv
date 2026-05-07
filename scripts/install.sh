@@ -1080,58 +1080,69 @@ start_services() {
         fatal "Control plane did not become healthy within 30s. Check: journalctl -u chv-controlplane -n 50"
     fi
 
-    # Phase 2: Stop controlplane so we can safely write to the DB with sqlite3 CLI.
-    # The bundled SQLite in the controlplane and system sqlite3 are different builds;
-    # concurrent WAL access between them causes SQLITE_IOERR_SHORT_READ (error 522).
-    info "Stopping control plane for bootstrap token seeding..."
-    systemctl stop chv-controlplane
-    sleep 1
+    # Phase 2: Seed bootstrap token via HTTP API (no restart needed).
+    # This avoids WAL contention between system sqlite3 and the bundled SQLite
+    # in the controlplane process (which caused SQLITE_IOERR_SHORT_READ error 522).
+    info "Seeding bootstrap token via API..."
+    local seed_response
+    seed_response=$(curl -sf -X POST "http://127.0.0.1:8080/internal/bootstrap-token" \
+        -H "Content-Type: application/json" \
+        -d "{\"token\": \"${BOOTSTRAP_TOKEN}\", \"description\": \"All-in-one installer\", \"one_time_use\": true}" 2>/dev/null) || true
 
-    # Insert bootstrap token while no other process has the DB open
-    info "Inserting bootstrap token into database..."
-    local token_hash
-    token_hash=$(printf '%s' "$BOOTSTRAP_TOKEN" | sha256sum | awk '{print $1}')
-    local expires
-    expires=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-              || date -u -v+1H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-              || echo "")
-    if ! cmd_exists sqlite3; then
-        fatal "sqlite3 is required to seed bootstrap tokens. Install sqlite3 or rerun without INSTALL_CHV_SKIP_DEPS=1."
-    fi
-    local expires_sql="NULL"
-    if [ -n "$expires" ]; then
-        expires_sql="'${expires}'"
-    fi
-    sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
-        "INSERT OR REPLACE INTO bootstrap_tokens
-         (token_hash, description, one_time_use, used_at, expires_at, created_at, updated_at)
-         VALUES ('${token_hash}', 'All-in-one installer', 1, NULL,
-                 ${expires_sql},
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
-
-    local seeded_tokens
-    seeded_tokens=$(sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
-        "SELECT COUNT(*) FROM bootstrap_tokens WHERE token_hash='${token_hash}';" 2>/dev/null || echo "0")
-    if [ "${seeded_tokens}" -lt 1 ] 2>/dev/null; then
-        fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
-    fi
-    chown "${CHV_USER}:${CHV_USER}" "${CHV_DB_PATH}" "${CHV_DB_PATH}-wal" "${CHV_DB_PATH}-shm" 2>/dev/null || true
-
-    # Phase 3: Restart controlplane now that token is seeded and DB is clean
-    info "Restarting control plane..."
-    systemctl start chv-controlplane
-    attempt=1
-    while [ $attempt -le 30 ]; do
-        if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
-            info "Control plane API is up."
-            break
-        fi
+    if echo "$seed_response" | grep -q '"status":"ok"'; then
+        info "Bootstrap token seeded via API successfully."
+    else
+        # Fallback: stop controlplane, use sqlite3 CLI, then restart.
+        # This path handles older controlplane builds that lack the /internal/bootstrap-token endpoint.
+        warn "API seeding failed (response: ${seed_response:-empty}), falling back to sqlite3 CLI..."
+        systemctl stop chv-controlplane
         sleep 1
-        ((attempt++))
-    done
-    if [ $attempt -gt 30 ]; then
-        fatal "Control plane did not become healthy after restart. Check: journalctl -u chv-controlplane -n 50"
+
+        info "Inserting bootstrap token into database via sqlite3..."
+        local token_hash
+        token_hash=$(printf '%s' "$BOOTSTRAP_TOKEN" | sha256sum | awk '{print $1}')
+        local expires
+        expires=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                  || date -u -v+1H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                  || echo "")
+        if ! cmd_exists sqlite3; then
+            fatal "sqlite3 is required to seed bootstrap tokens. Install sqlite3 or rerun without INSTALL_CHV_SKIP_DEPS=1."
+        fi
+        local expires_sql="NULL"
+        if [ -n "$expires" ]; then
+            expires_sql="'${expires}'"
+        fi
+        sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
+            "INSERT OR REPLACE INTO bootstrap_tokens
+             (token_hash, description, one_time_use, used_at, expires_at, created_at, updated_at)
+             VALUES ('${token_hash}', 'All-in-one installer', 1, NULL,
+                     ${expires_sql},
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+
+        local seeded_tokens
+        seeded_tokens=$(sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
+            "SELECT COUNT(*) FROM bootstrap_tokens WHERE token_hash='${token_hash}';" 2>/dev/null || echo "0")
+        if [ "${seeded_tokens}" -lt 1 ] 2>/dev/null; then
+            fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
+        fi
+        chown "${CHV_USER}:${CHV_USER}" "${CHV_DB_PATH}" "${CHV_DB_PATH}-wal" "${CHV_DB_PATH}-shm" 2>/dev/null || true
+
+        # Restart controlplane after sqlite3 seeding
+        info "Restarting control plane..."
+        systemctl start chv-controlplane
+        attempt=1
+        while [ $attempt -le 30 ]; do
+            if curl -sf "http://127.0.0.1:8080/health" &>/dev/null; then
+                info "Control plane API is up."
+                break
+            fi
+            sleep 1
+            ((attempt++))
+        done
+        if [ $attempt -gt 30 ]; then
+            fatal "Control plane did not become healthy after restart. Check: journalctl -u chv-controlplane -n 50"
+        fi
     fi
 
     # Ensure agent cache is cleared so reinstall triggers fresh enrollment

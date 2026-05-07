@@ -161,6 +161,36 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
         Ok(true)
     }
 
+    async fn send_migration(
+        &self,
+        _vm_id: &str,
+        _destination_url: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn receive_migration(
+        &self,
+        _vm_id: &str,
+        _receiver_url: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn get_vm_state(&self, vm_id: &str) -> Result<String, ChvError> {
+        let map = self.vms.lock().unwrap();
+        if map.contains_key(vm_id) {
+            Ok("Running".to_string())
+        } else {
+            Err(ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            })
+        }
+    }
+
     async fn coredump(
         &self,
         _vm_id: &str,

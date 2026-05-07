@@ -2,7 +2,7 @@ use crate::error::ControlPlaneServiceError;
 use async_trait::async_trait;
 use chv_controlplane_store::{
     BootstrapTokenRepository, BootstrapTokenValidation, NodeBootstrapResultInput,
-    NodeInventoryInput, NodeRepository, NodeUpsertInput, NodeVersionInput,
+    NodeInventoryInput, NodeRepository, NodeUpsertInput, NodeVersionInput, VtepRepository,
 };
 use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
@@ -47,6 +47,7 @@ pub struct EnrollmentServiceImplementation {
     node_repo: NodeRepository,
     token_repo: BootstrapTokenRepository,
     cert_issuer: Option<Arc<dyn CertificateIssuer>>,
+    vtep_repo: VtepRepository,
 }
 
 impl EnrollmentServiceImplementation {
@@ -54,11 +55,13 @@ impl EnrollmentServiceImplementation {
         node_repo: NodeRepository,
         token_repo: BootstrapTokenRepository,
         cert_issuer: Option<Arc<dyn CertificateIssuer>>,
+        vtep_repo: VtepRepository,
     ) -> Self {
         Self {
             node_repo,
             token_repo,
             cert_issuer,
+            vtep_repo,
         }
     }
 
@@ -204,6 +207,21 @@ impl EnrollmentService for EnrollmentServiceImplementation {
                 reported_unix_ms: now,
             })
             .await?;
+
+        // Register VTEP for overlay networking
+        if !inventory.vtep_ip.is_empty() {
+            if let Err(e) = self
+                .vtep_repo
+                .register_vtep(
+                    node_id.as_str(),
+                    &inventory.vtep_ip,
+                    4789, // default VXLAN port
+                )
+                .await
+            {
+                tracing::warn!(node_id = %node_id, error = %e, "failed to register VTEP during enrollment");
+            }
+        }
 
         Ok(proto::EnrollmentResponse {
             result: Some(proto::ResultMeta {

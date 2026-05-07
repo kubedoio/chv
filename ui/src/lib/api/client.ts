@@ -1,6 +1,6 @@
 import { env } from '$env/dynamic/public';
 import { goto } from '$app/navigation';
-import { toast } from '$lib/stores/toast';
+import { toast } from '$lib/stores/toast.svelte';
 import type {
   APIErrorEnvelope,
   CreateNetworkInput,
@@ -11,21 +11,15 @@ import type {
   UpdateNodeInput,
   Event,
   Image,
-  ImportProgress,
   InstallActionResponse,
   InstallStatusResponse,
   LoginResponse,
   Network,
-  Node,
   NodeWithResources,
   Operation,
   StoragePool,
   UserInfo,
   VM,
-  VMMetrics,
-  VMMetricsResponse,
-  BulkVMResponse,
-  VMSnapshot,
   VMTemplate,
   CreateVMTemplateInput,
   CloneFromTemplateInput,
@@ -33,15 +27,7 @@ import type {
   CreateCloudInitTemplateInput,
   RenderCloudInitTemplateInput,
   RenderCloudInitTemplateResponse,
-  VLANNetwork,
-  CreateVLANInput,
-  DHCPServerConfig,
-  ConfigureDHCPInput,
-  DHCPLease,
-  FirewallRule,
-  CreateFirewallRuleInput,
   Quota,
-  Usage,
   UsageWithQuota,
   CheckQuotaRequest,
   CheckQuotaResponse,
@@ -301,37 +287,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     return parseJSONResponse<T>(response, path);
   }
 
-  async function upload<T>(path: string, formData: FormData): Promise<T> {
-    if (token) {
-      // Note: Don't set Content-Type header manually for FormData,
-      // the browser will do it automatically and include the boundary.
-    }
-
-    const headers = new Headers();
-    if (token) {
-      headers.set('Authorization', `Bearer ${token}`);
-    }
-
-    let response: Response;
-    try {
-      response = await fetch(`${baseUrl}${path}`, {
-        method: 'POST',
-        headers,
-        body: formData
-      });
-    } catch (fetchError) {
-      const message = getUserFriendlyMessage(fetchError);
-      toast.error(message);
-      throw new Error(message);
-    }
-
-    if (!response.ok) {
-      // Same error handling as request function... (simplified for now)
-      throw new Error(`Upload failed with status ${response.status}`);
-    }
-
-    return parseJSONResponse<T>(response, path);
-  }
 
   return {
     setToken(next: string) {
@@ -341,15 +296,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     clearToken() {
       token = '';
       clearToken();
-    },
-    createToken(name: string) {
-      return request<{ id: string; token: string; message: string }>('/api/v1/tokens', {
-        method: 'POST',
-        body: JSON.stringify({ name })
-      });
-    },
-    validateLogin() {
-      return request<{ ok: boolean }>('/api/v1/login/validate', { method: 'POST' });
     },
     getInstallStatus() {
       return request<InstallStatusResponse>('/api/v1/install/status');
@@ -412,9 +358,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(data)
       });
     },
-    uploadImage(formData: FormData) {
-      return upload<Image>('/api/v1/images/upload', formData);
-    },
     listVMs() {
       return request<VM[]>('/api/v1/vms');
     },
@@ -430,58 +373,11 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     getVM(id: string) {
       return request<VM>(`/api/v1/vms/${id}`);
     },
-    startVM(id: string) {
-      return request<VM>(`/api/v1/vms/${id}/start`, { method: 'POST' });
-    },
-    stopVM(id: string) {
-      return request<VM>(`/api/v1/vms/${id}/stop`, { method: 'POST' });
-    },
-    restartVM(id: string) {
-      return request<{ message: string }>(`/api/v1/vms/${id}/restart`, { method: 'POST' });
-    },
     deleteVM(id: string) {
       return request<void>(`/api/v1/vms/${id}`, { method: 'DELETE' });
     },
     listEvents(query = '') {
       return request<Event[]>(`/api/v1/events${query}`);
-    },
-    getVMMetrics(id: string) {
-      return request<VMMetricsResponse>(`/api/v1/vms/${id}/metrics`);
-    },
-    bulkStartVMs(ids: string[]) {
-      return request<BulkVMResponse>('/api/v1/vms/bulk/start', {
-        method: 'POST',
-        body: JSON.stringify({ ids })
-      });
-    },
-    bulkStopVMs(ids: string[]) {
-      return request<BulkVMResponse>('/api/v1/vms/bulk/stop', {
-        method: 'POST',
-        body: JSON.stringify({ ids })
-      });
-    },
-    bulkDeleteVMs(ids: string[]) {
-      return request<BulkVMResponse>('/api/v1/vms/bulk/delete', {
-        method: 'POST',
-        body: JSON.stringify({ ids })
-      });
-    },
-    getVMConsoleURL(id: string) {
-      return request<{ ws_url: string; message: string }>(`/api/v1/vms/${id}/console`);
-    },
-    getVMStatus(id: string) {
-      return request<{
-        id: string;
-        actual_state: string;
-        desired_state: string;
-        pid: number;
-        uptime: number;
-        last_error: string;
-        updated_at: string;
-      }>(`/api/v1/vms/${id}/status`);
-    },
-    getImageProgress(id: string) {
-      return request<ImportProgress>(`/api/v1/images/${id}/progress`);
     },
     login(username: string, password: string) {
       return request<LoginResponse>('/api/v1/auth/login', {
@@ -494,31 +390,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     },
     getCurrentUser() {
       return request<UserInfo>('/api/v1/auth/me');
-    },
-    async listVMSnapshots(id: string) {
-      const res = await request<{ items: VMSnapshot[] }>('/api/v1/vms/snapshots', {
-        method: 'POST',
-        body: JSON.stringify({ vm_id: id })
-      });
-      return res.items ?? [];
-    },
-    createVMSnapshot(id: string, data?: { name?: string; description?: string; includes_memory?: boolean }) {
-      return request<VMSnapshot>('/api/v1/vms/snapshots/create', {
-        method: 'POST',
-        body: JSON.stringify({ vm_id: id, ...(data ?? {}) })
-      });
-    },
-    restoreVMSnapshot(_vmId: string, snapId: string) {
-      return request<{ status: string }>('/api/v1/vms/snapshots/restore', {
-        method: 'POST',
-        body: JSON.stringify({ snapshot_id: snapId })
-      });
-    },
-    deleteVMSnapshot(_vmId: string, snapId: string) {
-      return request<{ status: string }>('/api/v1/vms/snapshots/delete', {
-        method: 'POST',
-        body: JSON.stringify({ snapshot_id: snapId })
-      });
     },
     // Node management endpoints
     listNodes() {
@@ -533,9 +404,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     getNode(nodeId: string) {
       return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`);
     },
-    getNodeMetrics(nodeId: string) {
-      return request<any>(`/api/v1/nodes/${nodeId}/metrics`);
-    },
     updateNode(nodeId: string, data: UpdateNodeInput) {
       return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`, {
         method: 'PATCH',
@@ -544,71 +412,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     },
     deleteNode(nodeId: string) {
       return request<void>(`/api/v1/nodes/${nodeId}`, { method: 'DELETE' });
-    },
-    setNodeMaintenance(nodeId: string, enabled: boolean) {
-      return request<{ message: string; maintenance: boolean; status: string }>(`/api/v1/nodes/${nodeId}/maintenance`, {
-        method: 'POST',
-        body: JSON.stringify({ enabled })
-      });
-    },
-    discoverNode(nodeId: string) {
-      return request<{
-        node_id: string;
-        discovered: string[];
-        added: string[];
-        count: number;
-      }>(`/api/v1/nodes/${nodeId}/discover`, { method: 'POST' });
-    },
-    // Node-scoped resource endpoints
-    listNodeVMs(nodeId: string) {
-      return request<{
-        node_id: string;
-        node_name: string;
-        resources: VM[];
-        count: number;
-      }>(`/api/v1/nodes/${nodeId}/vms`);
-    },
-    listNodeImages(nodeId: string) {
-      return request<{
-        node_id: string;
-        node_name: string;
-        resources: Image[];
-        count: number;
-      }>(`/api/v1/nodes/${nodeId}/images`);
-    },
-    listNodeStoragePools(nodeId: string) {
-      return request<{
-        node_id: string;
-        node_name: string;
-        resources: StoragePool[];
-        count: number;
-      }>(`/api/v1/nodes/${nodeId}/storage`);
-    },
-    listNodeNetworks(nodeId: string) {
-      return request<{
-        node_id: string;
-        node_name: string;
-        resources: Network[];
-        count: number;
-      }>(`/api/v1/nodes/${nodeId}/networks`);
-    },
-    // VM Power Actions
-    shutdownVM(id: string, timeout?: number) {
-      const query = timeout ? `?timeout=${timeout}` : '';
-      return request<{ message: string; timeout: number }>(`/api/v1/vms/${id}/shutdown${query}`, { method: 'POST' });
-    },
-    forceStopVM(id: string) {
-      return request<{ message: string }>(`/api/v1/vms/${id}/force-stop`, { method: 'POST' });
-    },
-    resetVM(id: string) {
-      return request<{ message: string }>(`/api/v1/vms/${id}/reset`, { method: 'POST' });
-    },
-    restartVMWithOptions(id: string, graceful?: boolean, timeout?: number) {
-      const params = new URLSearchParams();
-      if (graceful !== undefined) params.append('graceful', String(graceful));
-      if (timeout !== undefined) params.append('timeout', String(timeout));
-      const query = params.toString() ? `?${params.toString()}` : '';
-      return request<{ message: string; graceful: boolean; timeout: number }>(`/api/v1/vms/${id}/restart${query}`, { method: 'POST' });
     },
     // VM Templates
     listVMTemplates() {
@@ -657,65 +460,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(data)
       });
     },
-    applyCloudInit(vmId: string, data: { template_id?: string; variables?: Record<string, string>; user_data?: string }) {
-      return request<{ message: string; vm_id: string; warning: string }>(`/api/v1/vms/${vmId}/cloud-init/apply`, {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    // VLAN endpoints
-    listVLANs(networkId: string) {
-      return request<VLANNetwork[]>(`/api/v1/networks/${networkId}/vlans`);
-    },
-    createVLAN(networkId: string, data: CreateVLANInput) {
-      return request<VLANNetwork>(`/api/v1/networks/${networkId}/vlans`, {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    deleteVLAN(networkId: string, vlanId: string) {
-      return request<{ success: boolean }>(`/api/v1/networks/${networkId}/vlans/${vlanId}`, {
-        method: 'DELETE'
-      });
-    },
-    // DHCP endpoints
-    getDHCPStatus(networkId: string) {
-      return request<DHCPServerConfig>(`/api/v1/networks/${networkId}/dhcp`);
-    },
-    configureDHCP(networkId: string, data: ConfigureDHCPInput) {
-      return request<DHCPServerConfig>(`/api/v1/networks/${networkId}/dhcp`, {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    startDHCPServer(networkId: string) {
-      return request<{ message: string; is_running: boolean }>(`/api/v1/networks/${networkId}/dhcp/start`, {
-        method: 'POST'
-      });
-    },
-    stopDHCPServer(networkId: string) {
-      return request<{ message: string; is_running: boolean }>(`/api/v1/networks/${networkId}/dhcp/stop`, {
-        method: 'POST'
-      });
-    },
-    getDHCPLeases(networkId: string) {
-      return request<DHCPLease[]>(`/api/v1/networks/${networkId}/dhcp/leases`);
-    },
-    // Firewall endpoints
-    listFirewallRules(vmId: string) {
-      return request<FirewallRule[]>(`/api/v1/vms/${vmId}/firewall/rules`);
-    },
-    createFirewallRule(vmId: string, data: CreateFirewallRuleInput) {
-      return request<FirewallRule>(`/api/v1/vms/${vmId}/firewall/rules`, {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    deleteFirewallRule(vmId: string, ruleId: string) {
-      return request<{ success: boolean }>(`/api/v1/vms/${vmId}/firewall/rules/${ruleId}`, {
-        method: 'DELETE'
-      });
-    },
     // Backup Jobs
     listBackupJobs() {
       return request<BackupJobResponse[]>('/api/v1/backup-jobs');
@@ -742,24 +486,9 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     listBackupHistory() {
       return request<BackupHistory[]>('/api/v1/backup-history');
     },
-    // Export/Import
-    exportVM(vmId: string) {
-      return request<{ export_id: string; filename: string; download_url: string }>(`/api/v1/vms/${vmId}/export`, { method: 'POST' });
-    },
-    downloadExport(exportId: string) {
-      return fetch(`${baseUrl}/api/v1/exports/${exportId}/download`, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-    },
-    importVM(file: File, name: string) {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('name', name);
-      return upload<VM>('/api/v1/vms/import', formData);
-    },
     // Quota endpoints
     listQuotas() {
-      return request<Quota[]>('/v1/quotas');
+      return request<Quota[]>('/v1/quotas', { method: 'POST' });
     },
     createQuota(data: SetQuotaInput) {
       return request<Quota>('/v1/quotas/create', {
@@ -780,7 +509,7 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       });
     },
     getUsage() {
-      return request<UsageWithQuota>('/v1/usage');
+      return request<UsageWithQuota>('/v1/usage', { method: 'POST' });
     },
     getUserUsage(userId: string) {
       return request<UsageWithQuota>(`/v1/quotas/${userId}/usage`);

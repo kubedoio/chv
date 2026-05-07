@@ -109,6 +109,9 @@ export async function bffFetch<T>(
 			} catch {
 				// ignore import failure
 			}
+			if (typeof window !== 'undefined') {
+				window.location.href = '/login';
+			}
 		}
 		
 		throw new BFFError(message, response.status, code);

@@ -7,6 +7,7 @@ SELECT
     job_id,
     vm_id,
     volume_id,
+    schedule_id,
     status,
     backup_type,
     target_path,
@@ -30,6 +31,7 @@ SELECT
     job_id,
     vm_id,
     volume_id,
+    schedule_id,
     status,
     backup_type,
     target_path,
@@ -50,6 +52,7 @@ INSERT INTO backup_jobs (
     job_id,
     vm_id,
     volume_id,
+    schedule_id,
     status,
     backup_type,
     target_path,
@@ -61,7 +64,7 @@ INSERT INTO backup_jobs (
     size_bytes
 )
 VALUES (
-    ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?,
     strftime('%Y-%m-%dT%H:%M:%SZ','now'),
     ?, ?, ?, ?
 )
@@ -98,6 +101,7 @@ SELECT
     job_id,
     vm_id,
     volume_id,
+    schedule_id,
     status,
     backup_type,
     target_path,
@@ -304,6 +308,7 @@ impl BackupRepository {
             .bind(&job_id)
             .bind(&input.vm_id)
             .bind(&input.volume_id)
+            .bind(&input.schedule_id)
             .bind(&input.status)
             .bind(&input.backup_type)
             .bind(&input.target_path)
@@ -321,7 +326,7 @@ impl BackupRepository {
         &self,
         input: &BackupJobStatusUpdateInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(UPDATE_JOB_STATUS_SQL)
+        let result = sqlx::query(UPDATE_JOB_STATUS_SQL)
             .bind(&input.status)
             .bind(&input.started_at)
             .bind(&input.completed_at)
@@ -330,11 +335,17 @@ impl BackupRepository {
             .bind(&input.job_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_job",
+                id: input.job_id.clone(),
+            });
+        }
         Ok(())
     }
 
     pub async fn update_job(&self, input: &BackupJobUpdateInput) -> Result<(), StoreError> {
-        sqlx::query(UPDATE_JOB_SQL)
+        let result = sqlx::query(UPDATE_JOB_SQL)
             .bind(&input.volume_id)
             .bind(&input.status)
             .bind(&input.backup_type)
@@ -347,14 +358,26 @@ impl BackupRepository {
             .bind(&input.job_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_job",
+                id: input.job_id.clone(),
+            });
+        }
         Ok(())
     }
 
     pub async fn delete_job(&self, job_id: &str) -> Result<(), StoreError> {
-        sqlx::query(DELETE_JOB_SQL)
+        let result = sqlx::query(DELETE_JOB_SQL)
             .bind(job_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_job",
+                id: job_id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -433,7 +456,7 @@ impl BackupRepository {
         &self,
         input: &BackupScheduleUpdateInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(UPDATE_SCHEDULE_SQL)
+        let result = sqlx::query(UPDATE_SCHEDULE_SQL)
             .bind(&input.vm_id)
             .bind(&input.volume_id)
             .bind(&input.name)
@@ -444,20 +467,34 @@ impl BackupRepository {
             .bind(&input.schedule_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_schedule",
+                id: input.schedule_id.clone(),
+            });
+        }
         Ok(())
     }
 
     pub async fn delete_schedule(&self, schedule_id: &str) -> Result<(), StoreError> {
-        sqlx::query(DELETE_SCHEDULE_SQL)
+        let result = sqlx::query(DELETE_SCHEDULE_SQL)
             .bind(schedule_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_schedule",
+                id: schedule_id.to_string(),
+            });
+        }
         Ok(())
     }
 
     pub async fn list_enabled_schedules(&self) -> Result<Vec<BackupScheduleRow>, StoreError> {
         sqlx::query_as::<_, BackupScheduleRow>(
-            "SELECT * FROM backup_schedules WHERE enabled = true ORDER BY created_at ASC LIMIT 100",
+            "SELECT schedule_id, vm_id, volume_id, name, cron_expression, retention_count, \
+             destination, enabled, created_at, updated_at, last_run_at \
+             FROM backup_schedules WHERE enabled = true ORDER BY created_at ASC LIMIT 100",
         )
         .fetch_all(&self.pool)
         .await
@@ -469,11 +506,18 @@ impl BackupRepository {
         schedule_id: &str,
         last_run_at: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query("UPDATE backup_schedules SET last_run_at = ? WHERE schedule_id = ?")
-            .bind(last_run_at)
-            .bind(schedule_id)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE backup_schedules SET last_run_at = ? WHERE schedule_id = ?")
+                .bind(last_run_at)
+                .bind(schedule_id)
+                .execute(&self.pool)
+                .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_schedule",
+                id: schedule_id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -486,20 +530,24 @@ impl BackupRepository {
         .map_err(StoreError::from)
     }
 
-    pub async fn prune_old_jobs_for_vm(
+    /// Prune completed backup jobs for a specific schedule, keeping only the most
+    /// recent `retention_count` successes/failures.  Scoping by `schedule_id`
+    /// prevents jobs from one schedule from consuming another schedule's retention
+    /// budget for the same VM.
+    pub async fn prune_old_jobs_for_schedule(
         &self,
-        vm_id: &str,
+        schedule_id: &str,
         retention_count: i64,
     ) -> Result<u64, StoreError> {
         let result = sqlx::query(
             "DELETE FROM backup_jobs WHERE job_id IN (\
                 SELECT job_id FROM backup_jobs \
-                WHERE vm_id = ? AND status IN ('Succeeded', 'Failed') \
+                WHERE schedule_id = ? AND status IN ('Succeeded', 'Failed') \
                 ORDER BY created_at DESC \
                 LIMIT -1 OFFSET ?\
             )",
         )
-        .bind(vm_id)
+        .bind(schedule_id)
         .bind(retention_count)
         .execute(&self.pool)
         .await?;
@@ -525,7 +573,7 @@ impl BackupRepository {
         next_retry_at: &str,
         error_message: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE backup_jobs SET \
              status = 'RetryPending', \
              retry_count = ?, \
@@ -539,6 +587,12 @@ impl BackupRepository {
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_job",
+                id: job_id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -596,7 +650,7 @@ impl BackupRepository {
         &self,
         input: &BackupRestoreStatusUpdateInput,
     ) -> Result<(), StoreError> {
-        sqlx::query(UPDATE_RESTORE_STATUS_SQL)
+        let result = sqlx::query(UPDATE_RESTORE_STATUS_SQL)
             .bind(&input.status)
             .bind(&input.started_at)
             .bind(&input.completed_at)
@@ -604,6 +658,12 @@ impl BackupRepository {
             .bind(&input.restore_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound {
+                entity: "backup_restore",
+                id: input.restore_id.clone(),
+            });
+        }
         Ok(())
     }
 }
@@ -615,6 +675,7 @@ pub struct BackupJobRow {
     pub job_id: String,
     pub vm_id: String,
     pub volume_id: Option<String>,
+    pub schedule_id: Option<String>,
     pub status: String,
     pub backup_type: String,
     pub target_path: Option<String>,
@@ -662,6 +723,7 @@ pub struct BackupRestoreRow {
 pub struct BackupJobCreateInput {
     pub vm_id: String,
     pub volume_id: Option<String>,
+    pub schedule_id: Option<String>,
     pub status: String,
     pub backup_type: String,
     pub target_path: Option<String>,

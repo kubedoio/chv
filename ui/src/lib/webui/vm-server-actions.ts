@@ -28,7 +28,7 @@ export async function handleVmMutation(
 			const result = await deleteVm({ vm_id, requested_by: 'webui' }, token);
 			return {
 				accepted: true,
-				task_id: result.operation_id,
+				task_id: result.task_id,
 				vm_id: result.vm_id,
 				summary: `Delete instance accepted`,
 				action: validAction

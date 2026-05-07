@@ -4,7 +4,7 @@
 	import Input from '$lib/components/primitives/TextInput.svelte';
 	import Select from '$lib/components/primitives/Select.svelte';
 	import { createAPIClient, getStoredToken } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import type { CreateStoragePoolInput } from '$lib/api/types';
 
 	interface Props {

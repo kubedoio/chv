@@ -1,6 +1,6 @@
 use crate::cache::{NodeCache, VmNicAttachment};
 use crate::control_plane::ControlPlaneClient;
-use crate::reconcile::{cleanup_vm_resources, vm_runtime_dir};
+use crate::reconcile::{bridge_name_for_network, cleanup_vm_resources, vm_runtime_dir};
 use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
 use chv_agent_runtime_ch::adapter::VmConfig;
@@ -265,33 +265,42 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let mut cache = self.cache.lock().await;
-        ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        if let Some(frag) = inner.fragment {
-            cache.observe_generation("network", &inner.network_id, &frag.generation);
-            cache.store_fragment(
-                "network",
-                &inner.network_id,
-                crate::cache::DesiredStateFragment {
-                    id: frag.id,
-                    kind: frag.kind,
-                    generation: frag.generation,
-                    spec_json: frag.spec_json.clone(),
-                    policy_json: frag.policy_json,
-                    updated_at: frag.updated_at,
-                    updated_by: frag.updated_by,
-                },
-            );
-            self.persist_cache(&cache).await;
 
-            let spec = match serde_json::from_slice::<serde_json::Value>(&frag.spec_json) {
+        let (spec_json_for_nwd, observed_generation) = {
+            let mut cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let mut spec_json_out = None;
+            if let Some(ref frag) = inner.fragment {
+                cache.observe_generation("network", &inner.network_id, &frag.generation);
+                cache.store_fragment(
+                    "network",
+                    &inner.network_id,
+                    crate::cache::DesiredStateFragment {
+                        id: frag.id.clone(),
+                        kind: frag.kind.clone(),
+                        generation: frag.generation.clone(),
+                        spec_json: frag.spec_json.clone(),
+                        policy_json: frag.policy_json.clone(),
+                        updated_at: frag.updated_at.clone(),
+                        updated_by: frag.updated_by.clone(),
+                    },
+                );
+                self.persist_cache(&cache).await;
+                spec_json_out = Some(frag.spec_json.clone());
+            }
+            (spec_json_out, cache.observed_generation.clone())
+            // lock dropped here
+        };
+
+        if let Some(spec_json) = spec_json_for_nwd {
+            let spec = match serde_json::from_slice::<serde_json::Value>(&spec_json) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
                         network_id = %inner.network_id,
                         error = %e,
-                        fragment = %String::from_utf8_lossy(&frag.spec_json),
+                        fragment = %String::from_utf8_lossy(&spec_json),
                         "failed to parse network spec_json, falling back to defaults (bridge=br0, cidr=10.0.0.0/24)"
                     );
                     serde_json::Value::default()
@@ -474,7 +483,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "network desired state accepted".to_string(),
             }),
@@ -594,11 +603,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     nic.cidr.clone()
                 };
                 let nic_gateway = nic.gateway.clone();
-                let bridge = if nic.network_id == "default" {
-                    "chvbr0".to_string()
-                } else {
-                    format!("br-{}", nic.network_id)
-                };
+                let bridge = bridge_name_for_network(&nic.network_id);
                 if let Err(e) = nwd
                     .ensure_network_topology(
                         &nic.network_id,
@@ -904,9 +909,16 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let mut cache = self.cache.lock().await;
-        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+        // Extract what we need from cache, then drop the lock before I/O
+        let (volume_handle, observed_generation) = {
+            let cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let handle = cache.volume_handles.get(&inner.volume_id).cloned();
+            let gen = cache.observed_generation.clone();
+            (handle, gen)
+        };
 
         let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
             .await
@@ -922,18 +934,31 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .await
             .map_err(|e| Status::internal(format!("detach_volume_from_vm failed: {}", e)))?;
 
-        if let Some(handle) = cache.volume_handles.remove(&inner.volume_id) {
-            let _ = stord
+        if let Some(handle) = volume_handle {
+            if let Err(e) = stord
                 .close_volume(&inner.volume_id, &handle, Some(&meta.operation_id))
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    volume_id = %inner.volume_id,
+                    error = %e,
+                    "close_volume failed after detach"
+                );
+            }
         }
-        self.persist_cache(&cache).await;
+
+        // Re-acquire lock only for cache mutation
+        {
+            let mut cache = self.cache.lock().await;
+            cache.volume_handles.remove(&inner.volume_id);
+            self.persist_cache(&cache).await;
+        }
 
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "volume detached".to_string(),
             }),
@@ -1760,6 +1785,241 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::PingVmmResponse { alive: result }))
     }
+
+    async fn migrate_vm(
+        &self,
+        req: Request<proto::MigrateVmRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+
+        let my_node_id = {
+            let cache = self.cache.lock().await;
+            cache.node_id.clone()
+        };
+
+        let role = crate::migration::determine_role(
+            &my_node_id,
+            &inner.source_node_id,
+            &inner.destination_node_id,
+        )
+        .ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "this node ({}) is neither source ({}) nor destination ({})",
+                my_node_id, inner.source_node_id, inner.destination_node_id
+            ))
+        })?;
+
+        let vm_id = inner.vm_id.clone();
+        let vm_runtime = self.vm_runtime.clone();
+
+        match role {
+            crate::migration::MigrationRole::Source => {
+                // Source agent: initiate send-migration to the destination.
+                let dest_host = crate::migration::extract_destination_host(&inner);
+                let dest_port = crate::migration::DEFAULT_MIGRATION_PORT;
+                let destination_url =
+                    crate::migration::build_destination_url(&dest_host, dest_port);
+
+                tracing::info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    destination_url = %destination_url,
+                    "source agent: ACKing migrate_vm, spawning send-migration task"
+                );
+
+                crate::migration::spawn_source_migration(
+                    vm_runtime,
+                    vm_id,
+                    operation_id.clone(),
+                    destination_url,
+                );
+            }
+            crate::migration::MigrationRole::Destination => {
+                // Destination agent: open receive-migration socket.
+                let port = crate::migration::allocate_migration_port().map_err(|e| {
+                    Status::resource_exhausted(format!("failed to allocate migration port: {}", e))
+                })?;
+                let receiver_url = crate::migration::build_receiver_url(port);
+
+                tracing::info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    receiver_url = %receiver_url,
+                    "destination agent: ACKing migrate_vm, spawning receive-migration task"
+                );
+
+                crate::migration::spawn_destination_migration(
+                    vm_runtime,
+                    vm_id,
+                    operation_id.clone(),
+                    receiver_url,
+                );
+            }
+        }
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: format!("migration accepted as {:?}", role),
+            }),
+        }))
+    }
+
+    async fn disable_dirty_tracking(
+        &self,
+        req: Request<proto::DisableDirtyTrackingRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+        let volume_id = inner.volume_id.clone();
+
+        tracing::info!(
+            volume_id = %volume_id,
+            operation_id = %operation_id,
+            "disable_dirty_tracking: forwarding to stord"
+        );
+
+        let stord_socket = self.stord_socket.clone();
+        match crate::daemon_clients::StordClient::connect(&stord_socket).await {
+            Ok(mut stord) => {
+                if let Err(e) = stord
+                    .disable_dirty_tracking(&volume_id, &operation_id)
+                    .await
+                {
+                    tracing::warn!(
+                        volume_id = %volume_id,
+                        operation_id = %operation_id,
+                        error = %e,
+                        "stord disable_dirty_tracking failed"
+                    );
+                    return Err(Status::internal(format!(
+                        "disable_dirty_tracking failed for volume {volume_id}: {e}"
+                    )));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    volume_id = %volume_id,
+                    operation_id = %operation_id,
+                    error = %e,
+                    "failed to connect to stord for disable_dirty_tracking"
+                );
+                return Err(Status::unavailable(format!("cannot connect to stord: {e}")));
+            }
+        }
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: format!("dirty tracking disabled for volume {}", volume_id),
+            }),
+        }))
+    }
+
+    async fn update_overlay(
+        &self,
+        req: Request<proto::UpdateOverlayRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+
+        let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+        nwd.update_overlay(
+            &inner.network_id,
+            inner.vni,
+            inner
+                .vtep_endpoints
+                .iter()
+                .map(|ep| chv_nwd_api::chv_nwd_api::VtepEndpoint {
+                    node_id: ep.node_id.clone(),
+                    vtep_ip: ep.vtep_ip.clone(),
+                    vtep_port: ep.vtep_port,
+                })
+                .collect(),
+            inner
+                .fdb_entries
+                .iter()
+                .map(|fdb| chv_nwd_api::chv_nwd_api::FdbEntry {
+                    mac_address: fdb.mac_address.clone(),
+                    vtep_ip: fdb.vtep_ip.clone(),
+                })
+                .collect(),
+            Some(&operation_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("update_overlay failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "overlay updated".to_string(),
+            }),
+        }))
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        req: Request<proto::SendGratuitousArpRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+
+        let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+        nwd.send_gratuitous_arp(
+            &inner.network_id,
+            &inner.vm_ip,
+            &inner.bridge_name,
+            Some(&operation_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("send_gratuitous_arp failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "gratuitous ARP sent".to_string(),
+            }),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -2092,6 +2352,17 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }
+
+        async fn disable_dirty_tracking(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
     }
 
     #[derive(Clone, Default)]
@@ -2212,6 +2483,17 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }
+
+        async fn disable_dirty_tracking(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
     }
 
     struct MockCleanupNwd {
@@ -2310,6 +2592,42 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::WithdrawServiceExposureRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_overlay(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::UpdateOverlayRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateOverlayResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_security_policy(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SecurityPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateSecurityPolicyResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn update_rate_limit(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::RateLimitPolicy>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateRateLimitResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn get_overlay_status(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::GetOverlayStatusRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::OverlayStatus>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::SendGratuitousArpResponse>, Status> {
             Err(Status::unimplemented(""))
         }
     }

@@ -21,6 +21,7 @@ export type NetworkListItem = {
 export type NetworksListModel = {
 	items: NetworkListItem[];
 	state: 'ready' | 'empty' | 'error';
+	errorMessage?: string;
 	filters: { current: Record<string, string>; applied: Record<string, string> };
 	page: { page: number; pageSize: number; totalItems: number };
 };
@@ -75,11 +76,13 @@ export const load: PageLoad = async ({ url }) => {
 
 		return { networks: model };
 	} catch (err) {
+		const message = err instanceof Error ? err.message : 'Failed to load networks';
 		// eslint-disable-next-line no-console
-		console.error('BFF listNetworks error:', err);
+		console.error('[networks-loader]', message, err);
 		const model: NetworksListModel = {
 			items: [],
 			state: 'error',
+			errorMessage: message,
 			filters: { current, applied: {} },
 			page: { page, pageSize, totalItems: 0 }
 		};

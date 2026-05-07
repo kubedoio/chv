@@ -1,3 +1,5 @@
+pub mod auth;
+pub mod bootstrap;
 pub mod health;
 pub mod nodes;
 pub mod operations;

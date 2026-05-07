@@ -6,7 +6,7 @@
 	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { listUsers, createUser, updateUser, deleteUser, type UserItem } from '$lib/bff/users';
 	import type { ShellTone } from '$lib/shell/app-shell';

@@ -1,4 +1,5 @@
 use crate::node_client_pool::NodeClientPool;
+use crate::overlay::OverlayManager;
 use chv_controlplane_store::{
     HypervisorSettingsRepository, HypervisorSettingsRow, OperationRepository,
     OperationStatusUpdateInput, StorePool,
@@ -12,6 +13,8 @@ use tracing::{error, info, warn};
 
 use chv_common::hypervisor::HypervisorOverrides;
 
+const MAX_DISPATCH_RETRIES: i32 = 3;
+
 /// Background task that polls for accepted operations and dispatches them to node agents.
 pub struct Orchestrator {
     pool: StorePool,
@@ -21,6 +24,7 @@ pub struct Orchestrator {
     firmware_path: String,
     tick_interval: Duration,
     node_client_pool: NodeClientPool,
+    overlay_manager: Option<OverlayManager>,
 }
 
 impl Orchestrator {
@@ -40,7 +44,14 @@ impl Orchestrator {
             firmware_path,
             tick_interval: Duration::from_secs(2),
             node_client_pool,
+            overlay_manager: None,
         }
+    }
+
+    /// Set the overlay manager for post-migration FDB updates and gratuitous ARP.
+    pub fn with_overlay_manager(mut self, overlay_manager: OverlayManager) -> Self {
+        self.overlay_manager = Some(overlay_manager);
+        self
     }
 
     pub async fn run(self, mut shutdown_rx: tokio::sync::watch::Receiver<()>) {
@@ -75,6 +86,9 @@ impl Orchestrator {
                 .unwrap_or(0);
         metrics::gauge!(CHV_NODES_READY).set(node_count as f64);
 
+        self.reap_stuck_operations().await?;
+        self.check_node_liveness().await?;
+
         // Atomically claim operations by marking them Running in the same query.
         // This prevents double-dispatch if tick overlaps (takes longer than interval).
         let claimed_rows = sqlx::query_as::<_, ClaimedOperationRow>(
@@ -102,9 +116,36 @@ impl Orchestrator {
             reason: format!("failed to claim accepted operations: {e}"),
         })?;
 
+        // Also claim operations that are pending retry and whose next_retry_at has passed
+        let retryable_rows = sqlx::query_as::<_, ClaimedOperationRow>(
+            r#"
+            UPDATE operations SET status = 'Running', updated_by = 'orchestrator'
+            WHERE operation_id IN (
+                SELECT o.operation_id
+                FROM operations o
+                WHERE o.status = 'RetryPending'
+                  AND o.next_retry_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                ORDER BY o.next_retry_at ASC
+                LIMIT 5
+            )
+            RETURNING
+                operation_id,
+                operation_type,
+                resource_kind,
+                resource_id,
+                desired_generation,
+                correlation_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to claim retryable operations: {e}"),
+        })?;
+
         // Resolve node_id for each claimed operation
-        let mut rows = Vec::with_capacity(claimed_rows.len());
-        for claimed in claimed_rows {
+        let mut rows = Vec::with_capacity(claimed_rows.len() + retryable_rows.len());
+        for claimed in claimed_rows.into_iter().chain(retryable_rows.into_iter()) {
             let node_id: Option<String> = sqlx::query_scalar(
                 r#"
                 SELECT COALESCE(vds.target_node_id, vol.node_id, net.node_id)
@@ -186,30 +227,149 @@ impl Orchestrator {
                     error = %e,
                     "dispatch failed"
                 );
-                if let Err(update_err) = self
-                    .operation_repo
-                    .update_status(&OperationStatusUpdateInput {
-                        operation_id: OperationId::new(row.operation_id.clone()).map_err(|e| {
-                            ChvError::Internal {
-                                reason: format!("invalid operation_id: {e}"),
-                            }
-                        })?,
-                        status: OperationStatus::Failed,
-                        error_code: Some("DISPATCH_FAILED".into()),
-                        error_message: Some(e.to_string()),
-                        observed_generation: None,
-                        updated_by: Some("orchestrator".into()),
-                        updated_unix_ms: now_unix_ms(),
-                    })
-                    .await
-                {
-                    error!(
-                        operation_id = %row.operation_id,
-                        error = %update_err,
-                        "failed to update operation status after dispatch failure"
-                    );
+
+                // Check current retry count
+                let retry_count: i32 =
+                    sqlx::query_scalar("SELECT retry_count FROM operations WHERE operation_id = ?")
+                        .bind(&row.operation_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .unwrap_or(0);
+
+                let new_retry_count = retry_count + 1;
+                if new_retry_count <= MAX_DISPATCH_RETRIES {
+                    // Schedule retry with exponential backoff: 10s, 20s, 40s
+                    let backoff_secs = 10i64 * (1 << (new_retry_count - 1));
+                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
+                    let op_id = OperationId::new(row.operation_id.clone()).map_err(|e| {
+                        ChvError::Internal {
+                            reason: format!("invalid operation_id: {e}"),
+                        }
+                    })?;
+                    if let Err(retry_err) = self
+                        .operation_repo
+                        .mark_for_retry(
+                            &op_id,
+                            new_retry_count,
+                            &next_retry.to_rfc3339(),
+                            &e.to_string(),
+                            now_unix_ms(),
+                        )
+                        .await
+                    {
+                        error!(
+                            operation_id = %row.operation_id,
+                            error = %retry_err,
+                            "failed to mark operation for retry"
+                        );
+                    } else {
+                        info!(
+                            operation_id = %row.operation_id,
+                            retry = new_retry_count,
+                            next_retry_at = %next_retry.to_rfc3339(),
+                            "operation scheduled for retry"
+                        );
+                    }
+                } else {
+                    // Permanently failed after exhausting retries
+                    if let Err(update_err) = self
+                        .operation_repo
+                        .update_status(&OperationStatusUpdateInput {
+                            operation_id: OperationId::new(row.operation_id.clone()).map_err(
+                                |e| ChvError::Internal {
+                                    reason: format!("invalid operation_id: {e}"),
+                                },
+                            )?,
+                            status: OperationStatus::Failed,
+                            error_code: Some("DISPATCH_FAILED".into()),
+                            error_message: Some(format!(
+                                "permanently failed after {} retries: {}",
+                                MAX_DISPATCH_RETRIES, e
+                            )),
+                            observed_generation: None,
+                            updated_by: Some("orchestrator".into()),
+                            updated_unix_ms: now_unix_ms(),
+                        })
+                        .await
+                    {
+                        error!(
+                            operation_id = %row.operation_id,
+                            error = %update_err,
+                            "failed to update operation status after exhausting retries"
+                        );
+                    }
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    async fn reap_stuck_operations(&self) -> Result<u64, ChvError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE operations SET status = 'Accepted', updated_by = 'reaper'
+            WHERE status = 'Running'
+              AND (
+                (operation_type = 'MigrateVm' AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7200 seconds'))
+                OR
+                (operation_type IN ('SnapshotVm', 'RestoreSnapshot', 'SnapshotVolume', 'RestoreVolume', 'CloneVolume') AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-600 seconds'))
+                OR
+                (operation_type = 'StartVm' AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-300 seconds'))
+                OR
+                (operation_type NOT IN ('MigrateVm', 'SnapshotVm', 'RestoreSnapshot', 'SnapshotVolume', 'RestoreVolume', 'CloneVolume', 'StartVm') AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-120 seconds'))
+              )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to reap stuck operations: {e}"),
+        })?;
+
+        let reaped = result.rows_affected();
+        if reaped > 0 {
+            warn!(
+                count = reaped,
+                "reaped stuck Running operations back to Accepted"
+            );
+        }
+        Ok(reaped)
+    }
+
+    /// Detect nodes that have not reported observed state within 60 seconds and mark
+    /// them as Unreachable so the scheduler will not place new VMs there.
+    async fn check_node_liveness(&self) -> Result<(), ChvError> {
+        let stale_nodes: Vec<(String,)> = sqlx::query_as(
+            r#"
+            SELECT node_id FROM node_observed_state
+            WHERE observed_state NOT IN ('Unreachable', 'Failed')
+              AND last_seen_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-60 seconds')
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to query stale nodes: {e}"),
+        })?;
+
+        for (node_id,) in &stale_nodes {
+            warn!(node_id = %node_id, "node has not reported in 60s, marking Unreachable");
+            sqlx::query(
+                r#"UPDATE node_observed_state
+                   SET observed_state = 'Unreachable',
+                       updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                   WHERE node_id = ?"#,
+            )
+            .bind(node_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to mark node {node_id} as Unreachable: {e}"),
+            })?;
+
+            // Evict from connection pool since the agent is likely dead
+            self.node_client_pool.evict(node_id);
         }
 
         Ok(())
@@ -559,6 +719,86 @@ impl Orchestrator {
                         None,
                     )
                     .await
+            }
+            "MigrateVm" => {
+                // MigrateVm is a long-running operation driven by the migration state machine.
+                // Parse correlation_id to extract source, dest, and config.
+                let corr = row.correlation_id.as_deref().unwrap_or("");
+                let (source_node_id, dest_node_id, config) =
+                    crate::migration::MigrationConfig::from_correlation_id(corr);
+
+                if source_node_id.is_empty() || dest_node_id.is_empty() {
+                    return Err(ChvError::InvalidArgument {
+                        field: "correlation_id".to_string(),
+                        reason: format!(
+                            "MigrateVm requires source= and dest= in correlation_id, got: {}",
+                            corr
+                        ),
+                    });
+                }
+
+                let migration_id = format!("mig-{}", &row.operation_id);
+                let mut state = crate::migration::MigrationState {
+                    migration_id: migration_id.clone(),
+                    operation_id: row.operation_id.clone(),
+                    vm_id: row.resource_id.clone(),
+                    source_node_id: source_node_id.clone(),
+                    dest_node_id: dest_node_id.clone(),
+                    phase: crate::migration::MigrationPhase::Pending,
+                    config,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    convergence_round: 0,
+                    dirty_blocks_remaining: 0,
+                };
+
+                // Create migration record in DB
+                crate::migration::create_migration_record(&self.pool, &state).await?;
+
+                // Execute the migration state machine
+                let result = crate::migration::execute_migration(
+                    &self.pool,
+                    &self.node_client_pool,
+                    &self.agent_socket_pattern,
+                    &mut state,
+                    self.overlay_manager.as_ref(),
+                )
+                .await;
+
+                // Mark the operation based on migration result
+                let (final_status, error_message) = match &result {
+                    Ok(()) => (OperationStatus::Succeeded, None),
+                    Err(e) => (OperationStatus::Failed, Some(e.to_string())),
+                };
+
+                self.operation_repo
+                    .update_status(&OperationStatusUpdateInput {
+                        operation_id: OperationId::new(row.operation_id.clone()).map_err(|e| {
+                            ChvError::Internal {
+                                reason: format!("invalid operation_id: {e}"),
+                            }
+                        })?,
+                        status: final_status,
+                        error_code: if result.is_err() {
+                            Some("MIGRATION_FAILED".into())
+                        } else {
+                            None
+                        },
+                        error_message,
+                        observed_generation: None,
+                        updated_by: Some("orchestrator".into()),
+                        updated_unix_ms: now_unix_ms(),
+                    })
+                    .await
+                    .map_err(|e| ChvError::Internal {
+                        reason: format!("failed to mark migration operation terminal: {e}"),
+                    })?;
+
+                // Return Ok since we handled the status update ourselves
+                return match result {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e),
+                };
             }
             other => {
                 return Err(ChvError::Internal {
@@ -978,13 +1218,31 @@ impl Orchestrator {
             });
         }
 
+        // Validate disk seed image path exists before dispatching to agent.
+        // NOTE: This validation only works in all-in-one deployments where controlplane
+        // and agent share a filesystem. In multi-node setups, the agent-side reconciler
+        // handles missing images via backoff retry.
+        let disk_seed_path = self.resolve_disk_seed_path(vm_row.image_ref.as_deref());
+        if let Some(ref seed_path) = disk_seed_path {
+            let path = std::path::Path::new(seed_path);
+            if !path.exists() {
+                return Err(ChvError::InvalidArgument {
+                    field: "image_ref".to_string(),
+                    reason: format!(
+                        "image file not found at resolved path: {}. Import the image first.",
+                        seed_path
+                    ),
+                });
+            }
+        }
+
         let spec = AgentVmSpec {
             name: vm_row.display_name.unwrap_or_else(|| vm_id.to_string()),
             cpus: vm_row.cpu_count.unwrap_or(1) as u32,
             memory_bytes: vm_row.memory_bytes.unwrap_or(512 * 1024 * 1024) as u64,
             kernel_path,
             firmware_path: Some(self.firmware_path.clone()),
-            disk_seed_path: self.resolve_disk_seed_path(vm_row.image_ref.as_deref()),
+            disk_seed_path,
             disks,
             nics,
             desired_state,

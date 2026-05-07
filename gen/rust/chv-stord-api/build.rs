@@ -5,6 +5,12 @@ fn main() {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&[proto_dir.join("node/chv-stord-api.proto")], &[proto_dir])
+        .compile_protos(
+            &[
+                proto_dir.join("node/chv-stord-api.proto"),
+                proto_dir.join("node/chv-stord-migration.proto"),
+            ],
+            &[&proto_dir],
+        )
         .expect("Failed to compile protos");
 }

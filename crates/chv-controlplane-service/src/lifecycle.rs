@@ -172,6 +172,26 @@ pub trait LifecycleService: Send + Sync {
         &self,
         request: proto::RestartNetworkRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn migrate_vm(
+        &self,
+        request: proto::MigrateVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn disable_dirty_tracking(
+        &self,
+        request: proto::DisableDirtyTrackingRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn update_overlay(
+        &self,
+        request: proto::UpdateOverlayRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn send_gratuitous_arp(
+        &self,
+        request: proto::SendGratuitousArpRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
 #[derive(Clone)]
@@ -297,7 +317,7 @@ impl LifecycleServiceImplementation {
         resource_id: Option<ResourceId>,
         meta: &proto::RequestMeta,
         idempotency_discriminator: Option<String>,
-    ) -> Result<OperationId, ControlPlaneServiceError> {
+    ) -> Result<(OperationId, Generation), ControlPlaneServiceError> {
         self.require_node_exists(&node_id).await?;
         let now = Self::now_ms();
         let desired_generation = Self::desired_generation_from_meta(meta)?;
@@ -369,7 +389,7 @@ impl LifecycleServiceImplementation {
             })
             .await?;
 
-        Ok(receipt.operation_id)
+        Ok((receipt.operation_id, desired_generation))
     }
 
     async fn accept_operation(
@@ -486,7 +506,7 @@ impl LifecycleService for LifecycleServiceImplementation {
             })?
         };
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "CreateVm",
                 node_id.clone(),
@@ -496,8 +516,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(String::from_utf8_lossy(&vm.vm_spec_json).into_owned()),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -534,7 +552,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "StartVm",
                 node_id.clone(),
@@ -544,8 +562,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 None,
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -579,7 +595,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         } else {
             "StopVm"
         };
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 operation_type,
                 node_id.clone(),
@@ -589,8 +605,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("force={}", request.force)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -619,7 +633,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "RebootVm",
                 node_id.clone(),
@@ -629,8 +643,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("force={}", request.force)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -659,7 +671,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "DeleteVm",
                 node_id.clone(),
@@ -669,8 +681,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("force={}", request.force)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -699,7 +709,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "ResizeVm",
                 node_id.clone(),
@@ -712,8 +722,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 )),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -745,7 +753,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let volume_id = Self::parse_volume_id(volume.volume_id)?;
         let vm_id = Self::parse_vm_id(volume.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "AttachVolume",
                 node_id.clone(),
@@ -755,8 +763,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("vm={}", vm_id)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -785,7 +791,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let attached_vm_id = Self::parse_vm_id(request.vm_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "DetachVolume",
                 node_id.clone(),
@@ -795,8 +801,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("vm={}:force={}", attached_vm_id, request.force)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -824,7 +828,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "ResizeVolume",
                 node_id.clone(),
@@ -834,8 +838,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("size={}", request.new_size_bytes)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -863,7 +865,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "SnapshotVolume",
                 node_id.clone(),
@@ -873,8 +875,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("snapshot_name={}", request.snapshot_name)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -903,7 +903,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "RestoreVolume",
                 node_id.clone(),
@@ -913,8 +913,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("snapshot_name={}", request.snapshot_name)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -943,7 +941,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let volume_id = Self::parse_volume_id(request.volume_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "DeleteVolumeSnapshot",
                 node_id.clone(),
@@ -953,8 +951,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("snapshot_name={}", request.snapshot_name)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -987,7 +983,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let source_volume_id = Self::parse_volume_id(request.source_volume_id)?;
         let target_volume_id = Self::parse_volume_id(request.target_volume_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "CloneVolume",
                 node_id.clone(),
@@ -997,8 +993,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("source={}", source_volume_id)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -1026,7 +1020,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "PauseNodeScheduling",
                 node_id.clone(),
@@ -1036,8 +1030,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some("paused=true".into()),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.node_repo
@@ -1067,7 +1059,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "ResumeNodeScheduling",
                 node_id.clone(),
@@ -1077,8 +1069,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some("paused=false".into()),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.node_repo
@@ -1108,7 +1098,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "DrainNode",
                 node_id.clone(),
@@ -1121,8 +1111,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 )),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.node_repo
@@ -1149,7 +1137,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "EnterMaintenance",
                 node_id.clone(),
@@ -1159,8 +1147,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(request.reason.clone()),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.node_repo
@@ -1188,7 +1174,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
 
         let resource_id = Self::resource_id_from_node_id(&node_id)?;
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "ExitMaintenance",
                 node_id.clone(),
@@ -1198,8 +1184,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 None,
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.node_repo
@@ -1227,7 +1211,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "PauseVm",
                 node_id.clone(),
@@ -1237,8 +1221,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 None,
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -1267,7 +1249,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "ResumeVm",
                 node_id.clone(),
@@ -1277,8 +1259,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 None,
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -1307,7 +1287,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "PowerButtonVm",
                 node_id.clone(),
@@ -1317,8 +1297,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 None,
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -1347,7 +1325,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, _) = self
             .create_operation_and_emit(
                 "AddDisk",
                 node_id.clone(),
@@ -1371,7 +1349,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, _) = self
             .create_operation_and_emit(
                 "RemoveDevice",
                 node_id.clone(),
@@ -1395,7 +1373,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, _) = self
             .create_operation_and_emit(
                 "AddNet",
                 node_id.clone(),
@@ -1419,7 +1397,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, _) = self
             .create_operation_and_emit(
                 "ResizeDisk",
                 node_id.clone(),
@@ -1446,7 +1424,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, _) = self
             .create_operation_and_emit(
                 "SnapshotVm",
                 node_id.clone(),
@@ -1486,7 +1464,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, _) = self
             .create_operation_and_emit(
                 "RestoreSnapshot",
                 node_id.clone(),
@@ -1526,7 +1504,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let vm_id = Self::parse_vm_id(request.vm_id)?;
 
-        let operation_id = self
+        let (operation_id, _) = self
             .create_operation_and_emit(
                 "CoredumpVm",
                 node_id.clone(),
@@ -1550,7 +1528,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let network_id = Self::parse_network_id(request.network_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "StartNetwork",
                 node_id.clone(),
@@ -1560,8 +1538,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 None,
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -1593,7 +1569,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         } else {
             "StopNetwork"
         };
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 operation_type,
                 node_id.clone(),
@@ -1603,8 +1579,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 Some(format!("force={}", request.force)),
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -1631,7 +1605,7 @@ impl LifecycleService for LifecycleServiceImplementation {
         let node_id = Self::parse_node_id(request.node_id)?;
         let network_id = Self::parse_network_id(request.network_id)?;
 
-        let operation_id = self
+        let (operation_id, desired_generation) = self
             .create_operation_and_emit(
                 "RestartNetwork",
                 node_id.clone(),
@@ -1641,8 +1615,6 @@ impl LifecycleService for LifecycleServiceImplementation {
                 None,
             )
             .await?;
-
-        let desired_generation = Self::desired_generation_from_meta(&meta)?;
 
         self.persist_intent_and_accept(&operation_id, || async {
             self.desired_state_repo
@@ -1659,5 +1631,112 @@ impl LifecycleService for LifecycleServiceImplementation {
         .await?;
 
         Ok(Self::ok_ack(&operation_id, "restart network accepted"))
+    }
+
+    async fn migrate_vm(
+        &self,
+        request: proto::MigrateVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let (operation_id, _) = self
+            .create_operation_and_emit(
+                "MigrateVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!(
+                    "source={}:dest={}",
+                    request.source_node_id, request.destination_node_id
+                )),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "migrate vm accepted"))
+    }
+
+    async fn disable_dirty_tracking(
+        &self,
+        request: proto::DisableDirtyTrackingRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+
+        let volume_id = ResourceId::new(request.volume_id.clone()).map_err(|e| {
+            ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e))
+        })?;
+
+        let (operation_id, _) = self
+            .create_operation_and_emit(
+                "DisableDirtyTracking",
+                node_id.clone(),
+                ResourceKind::Volume,
+                Some(volume_id),
+                &meta,
+                None,
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(
+            &operation_id,
+            "disable dirty tracking accepted",
+        ))
+    }
+
+    async fn update_overlay(
+        &self,
+        request: proto::UpdateOverlayRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+
+        let (operation_id, _) = self
+            .create_operation_and_emit(
+                "UpdateOverlay",
+                node_id.clone(),
+                ResourceKind::Network,
+                Some(ResourceId::new(request.network_id.clone()).map_err(|e| {
+                    ControlPlaneServiceError::InvalidArgument(format!("invalid network_id: {}", e))
+                })?),
+                &meta,
+                Some(format!("vni={}", request.vni)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "update overlay accepted"))
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        request: proto::SendGratuitousArpRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+
+        let (operation_id, _) = self
+            .create_operation_and_emit(
+                "SendGratuitousArp",
+                node_id.clone(),
+                ResourceKind::Network,
+                Some(ResourceId::new(request.network_id.clone()).map_err(|e| {
+                    ControlPlaneServiceError::InvalidArgument(format!("invalid network_id: {}", e))
+                })?),
+                &meta,
+                Some(format!("vm_ip={}", request.vm_ip)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "send gratuitous arp accepted"))
     }
 }

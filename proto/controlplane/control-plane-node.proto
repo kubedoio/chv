@@ -31,6 +31,7 @@ message NodeInventory {
   repeated string network_capabilities = 7;
   map<string, string> labels = 8;
   repeated string hypervisor_capabilities = 9;
+  string vtep_ip = 10; // VTEP IP address for overlay networking
 }
 
 message ServiceVersions {
@@ -483,6 +484,9 @@ service LifecycleService {
   rpc StartNetwork(StartNetworkRequest) returns (AckResponse);
   rpc StopNetwork(StopNetworkRequest) returns (AckResponse);
   rpc RestartNetwork(RestartNetworkRequest) returns (AckResponse);
+  rpc MigrateVm(MigrateVmRequest) returns (AckResponse);
+  rpc UpdateOverlay(UpdateOverlayRequest) returns (AckResponse);
+  rpc SendGratuitousArp(SendGratuitousArpRequest) returns (AckResponse);
 }
 
 service TelemetryService {
@@ -492,4 +496,76 @@ service TelemetryService {
   rpc ReportNetworkState(NetworkStateReport) returns (AckResponse);
   rpc PublishEvent(PublishEventRequest) returns (AckResponse);
   rpc PublishAlert(PublishAlertRequest) returns (AckResponse);
+  rpc ReportMigrationProgress(MigrationProgress) returns (AckResponse);
+}
+
+message MigrateVmRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string vm_id = 3;
+  string source_node_id = 4;
+  string destination_node_id = 5;
+  MigrationConfig config = 6;
+}
+
+message MigrationConfig {
+  uint32 dirty_threshold_blocks = 1;  // default: 1024
+  uint32 max_convergence_rounds = 2;  // default: 10
+  uint32 block_size_bytes = 3;        // default: 4194304 (4MB)
+  uint32 total_timeout_seconds = 4;   // 0 = use calculated default
+}
+
+message MigrationProgress {
+  string vm_id = 1;
+  string operation_id = 2;
+  MigrationPhase phase = 3;
+  uint64 bytes_transferred = 4;
+  uint64 total_bytes = 5;
+  uint32 convergence_round = 6;
+  uint64 dirty_blocks_remaining = 7;
+  float progress_percent = 8;
+}
+
+enum MigrationPhase {
+  MIGRATION_PHASE_UNSPECIFIED = 0;
+  MIGRATION_PHASE_PENDING = 1;
+  MIGRATION_PHASE_PRECOPY_DISK = 2;
+  MIGRATION_PHASE_CONVERGING_DISK = 3;
+  MIGRATION_PHASE_MEMORY_MIGRATION = 4;
+  MIGRATION_PHASE_PAUSED = 5;
+  MIGRATION_PHASE_COMPLETED = 6;
+  MIGRATION_PHASE_FAILED = 7;
+  MIGRATION_PHASE_ROLLED_BACK = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Overlay management (CP → Agent → NWD)
+// ---------------------------------------------------------------------------
+
+message VtepEndpoint {
+  string node_id = 1;
+  string vtep_ip = 2;
+  uint32 vtep_port = 3;
+}
+
+message FdbEntry {
+  string mac_address = 1;
+  string vtep_ip = 2;
+}
+
+message UpdateOverlayRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+  uint32 vni = 4;
+  repeated VtepEndpoint vtep_endpoints = 5;
+  repeated FdbEntry fdb_entries = 6;
+}
+
+message SendGratuitousArpRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+  string vm_ip = 4;
+  string bridge_name = 5;
 }

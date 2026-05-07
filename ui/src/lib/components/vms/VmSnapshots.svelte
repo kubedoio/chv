@@ -1,8 +1,7 @@
 <script lang="ts">
 import Button from '$lib/components/primitives/Button.svelte';
 	import type { VMSnapshot } from '$lib/api/types';
-	import { createAPIClient } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast';
+	import { toast } from '$lib/stores/toast.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
@@ -79,8 +78,8 @@ import Button from '$lib/components/primitives/Button.svelte';
 		localLoading = true;
 		localError = null;
 		try {
-			const client = createAPIClient();
-			snapshots = await client.listVMSnapshots(vmId);
+			// Snapshot endpoints not yet implemented on the server
+			snapshots = propSnapshots;
 		} catch (err) {
 			localError = err instanceof Error ? err.message : 'Failed to load snapshots';
 		} finally {
@@ -93,61 +92,20 @@ import Button from '$lib/components/primitives/Button.svelte';
 			toast.error('Snapshot name is required');
 			return;
 		}
-		createSubmitting = true;
-		try {
-			const client = createAPIClient();
-			await client.createVMSnapshot(vmId, {
-				name: createName.trim(),
-				description: createDescription.trim() || undefined,
-				includes_memory: createIncludesMemory
-			});
-			toast.success('Snapshot creation started');
-			createOpen = false;
-			createName = '';
-			createDescription = '';
-			createIncludesMemory = false;
-			await loadSnapshots();
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Failed to create snapshot';
-			toast.error(message);
-		} finally {
-			createSubmitting = false;
-		}
+		// Snapshot create endpoint not yet implemented on the server
+		toast.error('Snapshot creation is not yet available');
 	}
 
 	async function handleRestore() {
 		if (!restoreTarget) return;
-		restoreSubmitting = true;
-		try {
-			const client = createAPIClient();
-			await client.restoreVMSnapshot(vmId, restoreTarget.id);
-			toast.success('Snapshot restore started');
-			restoreOpen = false;
-			restoreTarget = null;
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Failed to restore snapshot';
-			toast.error(message);
-		} finally {
-			restoreSubmitting = false;
-		}
+		// Snapshot restore endpoint not yet implemented on the server
+		toast.error('Snapshot restore is not yet available');
 	}
 
 	async function handleDelete() {
 		if (!deleteTarget) return;
-		deleteSubmitting = true;
-		try {
-			const client = createAPIClient();
-			await client.deleteVMSnapshot(vmId, deleteTarget.id);
-			toast.success('Snapshot deleted');
-			deleteOpen = false;
-			deleteTarget = null;
-			await loadSnapshots();
-		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Failed to delete snapshot';
-			toast.error(message);
-		} finally {
-			deleteSubmitting = false;
-		}
+		// Snapshot delete endpoint not yet implemented on the server
+		toast.error('Snapshot deletion is not yet available');
 	}
 
 
