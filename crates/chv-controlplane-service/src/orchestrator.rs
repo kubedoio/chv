@@ -706,6 +706,85 @@ impl Orchestrator {
                     )
                     .await
             }
+            "MigrateVm" => {
+                // MigrateVm is a long-running operation driven by the migration state machine.
+                // Parse correlation_id to extract source, dest, and config.
+                let corr = row.correlation_id.as_deref().unwrap_or("");
+                let (source_node_id, dest_node_id, config) =
+                    crate::migration::MigrationConfig::from_correlation_id(corr);
+
+                if source_node_id.is_empty() || dest_node_id.is_empty() {
+                    return Err(ChvError::InvalidArgument {
+                        field: "correlation_id".to_string(),
+                        reason: format!(
+                            "MigrateVm requires source= and dest= in correlation_id, got: {}",
+                            corr
+                        ),
+                    });
+                }
+
+                let migration_id = format!("mig-{}", &row.operation_id);
+                let mut state = crate::migration::MigrationState {
+                    migration_id: migration_id.clone(),
+                    operation_id: row.operation_id.clone(),
+                    vm_id: row.resource_id.clone(),
+                    source_node_id: source_node_id.clone(),
+                    dest_node_id: dest_node_id.clone(),
+                    phase: crate::migration::MigrationPhase::Pending,
+                    config,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    convergence_round: 0,
+                    dirty_blocks_remaining: 0,
+                };
+
+                // Create migration record in DB
+                crate::migration::create_migration_record(&self.pool, &state).await?;
+
+                // Execute the migration state machine
+                let result = crate::migration::execute_migration(
+                    &self.pool,
+                    &self.node_client_pool,
+                    &self.agent_socket_pattern,
+                    &mut state,
+                )
+                .await;
+
+                // Mark the operation based on migration result
+                let (final_status, error_message) = match &result {
+                    Ok(()) => (OperationStatus::Succeeded, None),
+                    Err(e) => (OperationStatus::Failed, Some(e.to_string())),
+                };
+
+                self.operation_repo
+                    .update_status(&OperationStatusUpdateInput {
+                        operation_id: OperationId::new(row.operation_id.clone()).map_err(|e| {
+                            ChvError::Internal {
+                                reason: format!("invalid operation_id: {e}"),
+                            }
+                        })?,
+                        status: final_status,
+                        error_code: if result.is_err() {
+                            Some("MIGRATION_FAILED".into())
+                        } else {
+                            None
+                        },
+                        error_message,
+                        observed_generation: None,
+                        updated_by: Some("orchestrator".into()),
+                        updated_unix_ms: now_unix_ms(),
+                    })
+                    .await
+                    .map_err(|e| ChvError::Internal {
+                        reason: format!("failed to mark migration operation terminal: {e}"),
+                    })?;
+
+                // Return Ok since we handled the status update ourselves
+                return match result {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e),
+                };
+            }
             other => {
                 return Err(ChvError::Internal {
                     reason: format!("unsupported operation_type for dispatch: {other}"),
