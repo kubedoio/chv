@@ -1,6 +1,6 @@
 use crate::cache::{NodeCache, VmNicAttachment};
 use crate::control_plane::ControlPlaneClient;
-use crate::reconcile::{cleanup_vm_resources, vm_runtime_dir};
+use crate::reconcile::{bridge_name_for_network, cleanup_vm_resources, vm_runtime_dir};
 use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
 use chv_agent_runtime_ch::adapter::VmConfig;
@@ -265,33 +265,42 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let mut cache = self.cache.lock().await;
-        ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
-        if let Some(frag) = inner.fragment {
-            cache.observe_generation("network", &inner.network_id, &frag.generation);
-            cache.store_fragment(
-                "network",
-                &inner.network_id,
-                crate::cache::DesiredStateFragment {
-                    id: frag.id,
-                    kind: frag.kind,
-                    generation: frag.generation,
-                    spec_json: frag.spec_json.clone(),
-                    policy_json: frag.policy_json,
-                    updated_at: frag.updated_at,
-                    updated_by: frag.updated_by,
-                },
-            );
-            self.persist_cache(&cache).await;
 
-            let spec = match serde_json::from_slice::<serde_json::Value>(&frag.spec_json) {
+        let (spec_json_for_nwd, observed_generation) = {
+            let mut cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "network", &inner.network_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let mut spec_json_out = None;
+            if let Some(ref frag) = inner.fragment {
+                cache.observe_generation("network", &inner.network_id, &frag.generation);
+                cache.store_fragment(
+                    "network",
+                    &inner.network_id,
+                    crate::cache::DesiredStateFragment {
+                        id: frag.id.clone(),
+                        kind: frag.kind.clone(),
+                        generation: frag.generation.clone(),
+                        spec_json: frag.spec_json.clone(),
+                        policy_json: frag.policy_json.clone(),
+                        updated_at: frag.updated_at.clone(),
+                        updated_by: frag.updated_by.clone(),
+                    },
+                );
+                self.persist_cache(&cache).await;
+                spec_json_out = Some(frag.spec_json.clone());
+            }
+            (spec_json_out, cache.observed_generation.clone())
+            // lock dropped here
+        };
+
+        if let Some(spec_json) = spec_json_for_nwd {
+            let spec = match serde_json::from_slice::<serde_json::Value>(&spec_json) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
                         network_id = %inner.network_id,
                         error = %e,
-                        fragment = %String::from_utf8_lossy(&frag.spec_json),
+                        fragment = %String::from_utf8_lossy(&spec_json),
                         "failed to parse network spec_json, falling back to defaults (bridge=br0, cidr=10.0.0.0/24)"
                     );
                     serde_json::Value::default()
@@ -474,7 +483,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "network desired state accepted".to_string(),
             }),
@@ -594,11 +603,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     nic.cidr.clone()
                 };
                 let nic_gateway = nic.gateway.clone();
-                let bridge = if nic.network_id == "default" {
-                    "chvbr0".to_string()
-                } else {
-                    format!("br-{}", nic.network_id)
-                };
+                let bridge = bridge_name_for_network(&nic.network_id);
                 if let Err(e) = nwd
                     .ensure_network_topology(
                         &nic.network_id,
@@ -904,9 +909,16 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .meta
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let mut cache = self.cache.lock().await;
-        ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+        // Extract what we need from cache, then drop the lock before I/O
+        let (volume_handle, observed_generation) = {
+            let cache = self.cache.lock().await;
+            ControlPlaneClient::stale_generation_check(meta, &cache, "volume", &inner.volume_id)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let handle = cache.volume_handles.get(&inner.volume_id).cloned();
+            let gen = cache.observed_generation.clone();
+            (handle, gen)
+        };
 
         let mut stord = crate::daemon_clients::StordClient::connect(&self.stord_socket)
             .await
@@ -922,18 +934,31 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             .await
             .map_err(|e| Status::internal(format!("detach_volume_from_vm failed: {}", e)))?;
 
-        if let Some(handle) = cache.volume_handles.remove(&inner.volume_id) {
-            let _ = stord
+        if let Some(handle) = volume_handle {
+            if let Err(e) = stord
                 .close_volume(&inner.volume_id, &handle, Some(&meta.operation_id))
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    volume_id = %inner.volume_id,
+                    error = %e,
+                    "close_volume failed after detach"
+                );
+            }
         }
-        self.persist_cache(&cache).await;
+
+        // Re-acquire lock only for cache mutation
+        {
+            let mut cache = self.cache.lock().await;
+            cache.volume_handles.remove(&inner.volume_id);
+            self.persist_cache(&cache).await;
+        }
 
         Ok(Response::new(proto::AckResponse {
             result: Some(proto::ResultMeta {
                 operation_id: meta.operation_id.clone(),
                 status: "ok".to_string(),
-                node_observed_generation: cache.observed_generation.clone(),
+                node_observed_generation: observed_generation,
                 error_code: "".to_string(),
                 human_summary: "volume detached".to_string(),
             }),
@@ -1849,6 +1874,65 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }))
     }
 
+    async fn disable_dirty_tracking(
+        &self,
+        req: Request<proto::DisableDirtyTrackingRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+        let volume_id = inner.volume_id.clone();
+
+        tracing::info!(
+            volume_id = %volume_id,
+            operation_id = %operation_id,
+            "disable_dirty_tracking: forwarding to stord"
+        );
+
+        let stord_socket = self.stord_socket.clone();
+        match crate::daemon_clients::StordClient::connect(&stord_socket).await {
+            Ok(mut stord) => {
+                if let Err(e) = stord
+                    .disable_dirty_tracking(&volume_id, &operation_id)
+                    .await
+                {
+                    tracing::warn!(
+                        volume_id = %volume_id,
+                        operation_id = %operation_id,
+                        error = %e,
+                        "stord disable_dirty_tracking failed"
+                    );
+                    return Err(Status::internal(format!(
+                        "disable_dirty_tracking failed for volume {volume_id}: {e}"
+                    )));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    volume_id = %volume_id,
+                    operation_id = %operation_id,
+                    error = %e,
+                    "failed to connect to stord for disable_dirty_tracking"
+                );
+                return Err(Status::unavailable(format!("cannot connect to stord: {e}")));
+            }
+        }
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: format!("dirty tracking disabled for volume {}", volume_id),
+            }),
+        }))
+    }
+
     async fn update_overlay(
         &self,
         req: Request<proto::UpdateOverlayRequest>,
@@ -1867,19 +1951,23 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         nwd.update_overlay(
             &inner.network_id,
             inner.vni,
-            inner.vtep_endpoints.iter().map(|ep| {
-                chv_nwd_api::chv_nwd_api::VtepEndpoint {
+            inner
+                .vtep_endpoints
+                .iter()
+                .map(|ep| chv_nwd_api::chv_nwd_api::VtepEndpoint {
                     node_id: ep.node_id.clone(),
                     vtep_ip: ep.vtep_ip.clone(),
                     vtep_port: ep.vtep_port,
-                }
-            }).collect(),
-            inner.fdb_entries.iter().map(|fdb| {
-                chv_nwd_api::chv_nwd_api::FdbEntry {
+                })
+                .collect(),
+            inner
+                .fdb_entries
+                .iter()
+                .map(|fdb| chv_nwd_api::chv_nwd_api::FdbEntry {
                     mac_address: fdb.mac_address.clone(),
                     vtep_ip: fdb.vtep_ip.clone(),
-                }
-            }).collect(),
+                })
+                .collect(),
             Some(&operation_id),
         )
         .await
@@ -2264,6 +2352,17 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }
+
+        async fn disable_dirty_tracking(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
     }
 
     #[derive(Clone, Default)]
@@ -2383,6 +2482,17 @@ mod tests {
             _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
+        }
+
+        async fn disable_dirty_tracking(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
         }
     }
 

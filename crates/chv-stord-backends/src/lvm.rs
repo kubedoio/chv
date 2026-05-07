@@ -663,6 +663,78 @@ impl StorageBackend for LVMBackend {
 
     async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
         Self::sanitize_id(volume_id)?;
+
+        // Remove any snapshot and clone LVs that belong to this volume before
+        // removing the origin LV.  LVM will refuse to remove an origin that
+        // still has dependent snapshots, so we iterate over all LVs in the VG
+        // and remove those whose names start with `{volume_id}-snap-` or
+        // `{volume_id}-clone-`.  Failures are logged as warnings rather than
+        // aborting: the primary volume removal attempt that follows will still
+        // fail with a clear error if any dependent LV could not be removed.
+        let prefixes = [
+            format!("{}-snap-", volume_id),
+            format!("{}-clone-", volume_id),
+        ];
+        let list_out = Command::new("lvs")
+            .args([
+                "--noheadings",
+                "-o",
+                "lv_name",
+                "--select",
+                &format!("vg_name={}", self.vg_name),
+            ])
+            .output()
+            .await;
+        if let Ok(out) = list_out {
+            if !out.status.success() {
+                warn!(
+                    volume_id,
+                    stderr = %String::from_utf8_lossy(&out.stderr),
+                    "lvs command failed; snapshot inventory may be incomplete"
+                );
+                return Ok(());
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for lv_name in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
+                if !lv_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                    warn!(volume_id, lv = lv_name, "skipping lv with unexpected characters in name");
+                    continue;
+                }
+                if prefixes.iter().any(|p| lv_name.starts_with(p.as_str())) {
+                    let lv_path = format!("{}/{}", self.vg_name, lv_name);
+                    match Command::new("lvremove")
+                        .args(["-y", &lv_path])
+                        .output()
+                        .await
+                    {
+                        Ok(r) if r.status.success() => {
+                            info!(
+                                volume_id,
+                                lv = lv_name,
+                                "removed dependent LVM snapshot/clone LV"
+                            );
+                        }
+                        Ok(r) => {
+                            warn!(
+                                volume_id,
+                                lv = lv_name,
+                                stderr = %String::from_utf8_lossy(&r.stderr),
+                                "failed to remove dependent LVM snapshot/clone LV; continuing"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                volume_id,
+                                lv = lv_name,
+                                error = %e,
+                                "I/O error removing dependent LVM snapshot/clone LV; continuing"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let out = Command::new("lvremove")
             .args(["-y", &format!("{}/{}", self.vg_name, volume_id)])
             .output()

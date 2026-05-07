@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
+    http::{header, HeaderValue, Method},
     middleware,
     routing::{delete, get, patch, post},
     Router,
@@ -10,6 +11,7 @@ use chv_controlplane_store::{
     AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, NodeRepository,
     ObservedStateRepository, OperationRepository, StorePool,
 };
+use tower_http::cors::CorsLayer;
 
 use crate::cache::BffCache;
 use crate::mutations::MutationService;
@@ -391,4 +393,51 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .layer(axum::middleware::from_fn(
             crate::correlation_middleware::extract_correlation_id,
         ))
+}
+
+
+/// Build a CORS layer from the `CHV_ALLOWED_ORIGIN` environment variable.
+///
+/// - If the variable is set, only that origin is allowed (no wildcard).
+/// - If the variable is absent, CORS is disabled (no cross-origin requests
+///   are permitted), which is the safe default for production deployments
+///   where the BFF and frontend are served from the same origin.
+///
+/// Example: `CHV_ALLOWED_ORIGIN=https://console.example.com`
+pub fn build_cors_layer() -> CorsLayer {
+    match std::env::var("CHV_ALLOWED_ORIGIN") {
+        Ok(origin) if !origin.is_empty() => {
+            let header_value = match origin.parse::<HeaderValue>() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        origin = %origin,
+                        error = %e,
+                        "CHV_ALLOWED_ORIGIN is not a valid HTTP header value; denying all CORS"
+                    );
+                    return CorsLayer::new();
+                }
+            };
+            CorsLayer::new()
+                .allow_origin(header_value)
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PATCH,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
+                .allow_headers([
+                    header::AUTHORIZATION,
+                    header::CONTENT_TYPE,
+                    header::ACCEPT,
+                    header::HeaderName::from_static("x-correlation-id"),
+                    header::HeaderName::from_static("x-csrf-token"),
+                ])
+                .allow_credentials(true)
+        }
+        _ => {
+            CorsLayer::new()
+        }
+    }
 }

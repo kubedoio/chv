@@ -72,6 +72,9 @@ pub async fn ensure_dhcp_scope(
         });
     }
 
+    // Validate range ordering and subnet membership
+    validate_dhcp_range(cidr, range_start, range_end)?;
+
     let netmask = cidr_to_netmask(cidr)?;
 
     let conf = conf_path(network_id);
@@ -155,6 +158,100 @@ pub async fn ensure_dhcp_scope(
     Ok(())
 }
 
+fn validate_dhcp_range(cidr: &str, range_start: &str, range_end: &str) -> Result<(), ChvError> {
+    // Parse the subnet CIDR
+    let (ip_str, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| ChvError::InvalidArgument {
+            field: "cidr".to_string(),
+            reason: format!("invalid CIDR notation: '{}'", cidr),
+        })?;
+
+    let prefix: u8 = prefix_str.parse().map_err(|_| ChvError::InvalidArgument {
+        field: "cidr".to_string(),
+        reason: format!("invalid prefix in CIDR: '{}'", cidr),
+    })?;
+
+    if prefix > 32 {
+        return Err(ChvError::InvalidArgument {
+            field: "cidr".to_string(),
+            reason: format!("prefix {} exceeds 32", prefix),
+        });
+    }
+
+    let subnet_ip: std::net::Ipv4Addr = ip_str.parse().map_err(|_| ChvError::InvalidArgument {
+        field: "cidr".to_string(),
+        reason: format!("invalid IP in CIDR: '{}'", cidr),
+    })?;
+
+    let start: std::net::Ipv4Addr = range_start.parse().map_err(|_| ChvError::InvalidArgument {
+        field: "range_start".to_string(),
+        reason: format!("invalid IPv4 address: '{}'", range_start),
+    })?;
+    let end: std::net::Ipv4Addr = range_end.parse().map_err(|_| ChvError::InvalidArgument {
+        field: "range_end".to_string(),
+        reason: format!("invalid IPv4 address: '{}'", range_end),
+    })?;
+
+    let start_u32 = u32::from(start);
+    let end_u32 = u32::from(end);
+
+    // Range must not be empty (start must be strictly less than end)
+    if start_u32 >= end_u32 {
+        return Err(ChvError::InvalidArgument {
+            field: "dhcp_range".to_string(),
+            reason: format!(
+                "range_start '{}' must be less than range_end '{}'",
+                range_start, range_end
+            ),
+        });
+    }
+
+    // Compute network/broadcast from CIDR
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix)
+    };
+    let subnet_u32 = u32::from(subnet_ip);
+    let network = subnet_u32 & mask;
+    let broadcast = network | !mask;
+
+    // Both endpoints must be within the subnet (exclusive of network and broadcast addresses)
+    if start_u32 <= network {
+        return Err(ChvError::InvalidArgument {
+            field: "range_start".to_string(),
+            reason: format!(
+                "range_start '{}' is at or before the network address of '{}'",
+                range_start, cidr
+            ),
+        });
+    }
+    if end_u32 >= broadcast {
+        return Err(ChvError::InvalidArgument {
+            field: "range_end".to_string(),
+            reason: format!(
+                "range_end '{}' is at or beyond the broadcast address of '{}'",
+                range_end, cidr
+            ),
+        });
+    }
+
+    // Derive gateway (network + 1) and ensure range does not include it
+    let gateway_u32 = network + 1;
+    if start_u32 <= gateway_u32 && gateway_u32 <= end_u32 {
+        return Err(ChvError::InvalidArgument {
+            field: "dhcp_range".to_string(),
+            reason: format!(
+                "DHCP range '{}-{}' overlaps with the gateway address in subnet '{}'",
+                range_start, range_end, cidr
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 fn cidr_to_netmask(cidr: &str) -> Result<String, ChvError> {
     let prefix: u8 = cidr
         .split('/')
@@ -187,16 +284,13 @@ fn cidr_to_netmask(cidr: &str) -> Result<String, ChvError> {
 }
 
 fn derive_gateway(cidr: &str) -> Option<String> {
-    let ip_str = cidr.split('/').next()?;
+    let (ip_str, prefix_str) = cidr.split_once('/')?;
+    let prefix: u8 = prefix_str.parse().ok()?;
     let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;
-    let octets = ip.octets();
-    Some(format!(
-        "{}.{}.{}.{}",
-        octets[0],
-        octets[1],
-        octets[2],
-        octets[3].wrapping_add(1)
-    ))
+    let mask: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+    let network = u32::from(ip) & mask;
+    let gateway = std::net::Ipv4Addr::from(network + 1);
+    Some(gateway.to_string())
 }
 
 #[cfg(test)]
@@ -213,11 +307,46 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_gateway() {
+    fn test_validate_dhcp_range_valid() {
+        // Normal range well within a /24 subnet (skips .1 gateway)
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.0.10", "10.0.0.200").is_ok());
+    }
+
+    #[test]
+    fn test_validate_dhcp_range_start_not_less_than_end() {
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.0.100", "10.0.0.50").is_err());
+        // Equal start and end is also invalid
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.0.50", "10.0.0.50").is_err());
+    }
+
+    #[test]
+    fn test_validate_dhcp_range_outside_subnet() {
+        // range_start is in a different subnet
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.1.10", "10.0.1.200").is_err());
+        // range_end is at the broadcast address
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.0.10", "10.0.0.255").is_err());
+        // range_start is at/before the network address
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.0.0", "10.0.0.200").is_err());
+    }
+
+    #[test]
+    fn test_validate_dhcp_range_overlaps_gateway() {
+        // Gateway is 10.0.0.1 — range must not include it
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.0.1", "10.0.0.100").is_err());
+        // Range starts after gateway: OK
+        assert!(validate_dhcp_range("10.0.0.0/24", "10.0.0.2", "10.0.0.100").is_ok());
+    }
+
+    #[test]
+    fn test_derive_gateway_canonical_cidr() {
         assert_eq!(derive_gateway("10.0.0.0/24"), Some("10.0.0.1".to_string()));
-        assert_eq!(
-            derive_gateway("192.168.1.0/24"),
-            Some("192.168.1.1".to_string())
-        );
+        assert_eq!(derive_gateway("192.168.1.0/24"), Some("192.168.1.1".to_string()));
+    }
+
+    #[test]
+    fn test_derive_gateway_non_canonical_cidr() {
+        // Non-canonical: host bits set. Gateway should still be network+1.
+        assert_eq!(derive_gateway("10.0.0.5/24"), Some("10.0.0.1".to_string()));
+        assert_eq!(derive_gateway("172.16.3.200/16"), Some("172.16.0.1".to_string()));
     }
 }

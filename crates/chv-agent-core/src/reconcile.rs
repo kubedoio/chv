@@ -10,6 +10,31 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// Construct a bridge name for a network, guaranteed to be <= 15 chars (IFNAMSIZ limit).
+///
+/// For the "default" network, returns "chvbr0". For other networks, returns
+/// "br-{net_id}" if it fits in 15 chars, otherwise truncates net_id and appends
+/// a 4-hex-char hash suffix to avoid collisions: "br-{prefix}{hash}".
+pub(crate) fn bridge_name_for_network(net_id: &str) -> String {
+    if net_id == "default" {
+        return "chvbr0".to_string();
+    }
+    let candidate = format!("br-{}", net_id);
+    if candidate.len() <= 15 {
+        return candidate;
+    }
+    // "br-" (3) + up to 8 chars of net_id + 4-char hash = 15 chars total
+    let prefix: String = net_id.chars().take(8).collect();
+    let hash = {
+        let mut h: u32 = 0x811c9dc5;
+        for b in net_id.as_bytes() {
+            h = h.wrapping_mul(0x01000193) ^ (*b as u32);
+        }
+        format!("{:04x}", h & 0xffff)
+    };
+    format!("br-{}{}", prefix, hash)
+}
+
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
     pub vm_runtime: VmRuntime,
@@ -77,12 +102,15 @@ impl Reconciler {
 
     pub async fn run_once(&mut self) -> Result<(), ChvError> {
         self.reconcile_tick = self.reconcile_tick.wrapping_add(1);
+        // Read state once under the lock to avoid a TOCTOU race where the
+        // state could change between the debug-log read and the match read.
+        let state = self.current_state().await;
         debug!(
-            state = %self.current_state().await.as_str(),
+            state = %state.as_str(),
             "reconcile tick"
         );
 
-        match self.current_state().await {
+        match state {
             NodeState::Discovered => {
                 self.transition_state(NodeState::Bootstrapping).await?;
             }
@@ -275,15 +303,7 @@ impl Reconciler {
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string())
                     })
-                    .unwrap_or_else(|| {
-                        // Default to the platform bridge name for the "default" network
-                        // so that deployments using a manually configured chvbr0 work.
-                        if net_id == "default" {
-                            "chvbr0".to_string()
-                        } else {
-                            format!("br-{}", net_id)
-                        }
-                    });
+                    .unwrap_or_else(|| bridge_name_for_network(net_id));
                 if let Some(rules) = spec.as_ref().and_then(|v| v.get("firewall_rules").cloned()) {
                     network_firewall_rules.insert(net_id.clone(), rules);
                 }
@@ -340,13 +360,10 @@ impl Reconciler {
 
         let mut nwd = NwdClient::connect(&self.nwd_socket).await?;
         for net_id in &desired_networks {
-            let bridge = network_bridges.get(net_id).cloned().unwrap_or_else(|| {
-                if net_id == "default" {
-                    "chvbr0".to_string()
-                } else {
-                    format!("br-{}", net_id)
-                }
-            });
+            let bridge = network_bridges
+                .get(net_id)
+                .cloned()
+                .unwrap_or_else(|| bridge_name_for_network(net_id));
             let cidr = network_cidrs
                 .get(net_id)
                 .map(|s| s.as_str())
@@ -742,7 +759,7 @@ impl Reconciler {
             let bridge = if nic.network_id == "default" {
                 "chvbr0".to_string()
             } else {
-                format!("br-{}", nic.network_id)
+                bridge_name_for_network(&nic.network_id)
             };
             if let Err(e) = nwd
                 .ensure_network_topology(
@@ -976,6 +993,60 @@ impl Reconciler {
                 warn!(vm_id = %vm_id, "vm runtime record missing during reconcile");
                 continue;
             };
+            // Recovery path for VMs stuck in "Failed" state.
+            // After `should_skip_vm` has gated us here (meaning we are within retry
+            // window), attempt to recover by re-creating the VM from scratch.
+            if record.runtime_status == "Failed" {
+                warn!(vm_id = %vm_id, failures = failures, "VM in Failed state, attempting recovery via re-create");
+                if let Err(e) = self.vm_runtime.delete_vm(vm_id, None).await {
+                    warn!(vm_id = %vm_id, error = %e, "delete_vm failed during recovery cleanup");
+                }
+                let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+                let _ = tokio::fs::remove_file(vm_dir.join("vm.sock")).await;
+                let _ = tokio::fs::remove_file(vm_dir.join("console.log")).await;
+                let recover_op_id = format!("reconcile-vm-recover-{}", vm_id);
+                let config = match self
+                    .prepare_vm(&mut stord, &mut nwd, vm_id, &spec, &recover_op_id)
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(vm_id = %vm_id, error = %e, "failed to prepare vm for recovery");
+                        self.vm_runtime.record_failure(
+                            vm_id.to_string(),
+                            generation.clone(),
+                            e.to_string(),
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = self
+                    .vm_runtime
+                    .create_vm(vm_id, &generation, &config, Some(&recover_op_id))
+                    .await
+                {
+                    warn!(vm_id = %vm_id, error = %e, "failed to re-create vm during recovery");
+                    self.vm_runtime.record_failure(
+                        vm_id.to_string(),
+                        generation.clone(),
+                        e.to_string(),
+                    );
+                    continue;
+                }
+                if spec.desired_state == "Running" {
+                    let start_op_id = format!("{}-start", recover_op_id);
+                    if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&start_op_id)).await {
+                        warn!(vm_id = %vm_id, error = %e, "failed to start vm after recovery");
+                        self.vm_runtime.record_failure(
+                            vm_id.to_string(),
+                            generation.clone(),
+                            e.to_string(),
+                        );
+                    }
+                }
+                continue;
+            }
+
             if spec.desired_state == "Running" && record.runtime_status != "Running" {
                 let op_id = format!("reconcile-vm-start-{}", vm_id);
                 if let Err(e) = self.vm_runtime.start_vm(vm_id, Some(&op_id)).await {
@@ -1175,14 +1246,28 @@ pub(crate) async fn cleanup_vm_resources(
         (volumes, nics)
     };
 
+    let mut first_error: Option<ChvError> = None;
+
     if !volumes.is_empty() {
         let mut stord = StordClient::connect(stord_socket).await?;
         for (volume_id, handle) in &volumes {
-            stord
+            if let Err(e) = stord
                 .detach_volume_from_vm(volume_id, vm_id, false, operation_id)
-                .await?;
+                .await
+            {
+                tracing::warn!(volume_id = %volume_id, vm_id = %vm_id, error = %e, "cleanup: detach_volume failed, continuing");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+                continue;
+            }
             if let Some(handle) = handle {
-                stord.close_volume(volume_id, handle, operation_id).await?;
+                if let Err(e) = stord.close_volume(volume_id, handle, operation_id).await {
+                    tracing::warn!(volume_id = %volume_id, error = %e, "cleanup: close_volume failed, continuing");
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
             }
         }
     }
@@ -1190,8 +1275,15 @@ pub(crate) async fn cleanup_vm_resources(
     if !nics.is_empty() {
         let mut nwd = NwdClient::connect(nwd_socket).await?;
         for (nic_id, network_id) in &nics {
-            nwd.detach_vm_nic(nic_id, vm_id, network_id, operation_id)
-                .await?;
+            if let Err(e) = nwd
+                .detach_vm_nic(nic_id, vm_id, network_id, operation_id)
+                .await
+            {
+                tracing::warn!(nic_id = %nic_id, vm_id = %vm_id, error = %e, "cleanup: detach_nic failed, continuing");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
         }
     }
 
@@ -1200,7 +1292,11 @@ pub(crate) async fn cleanup_vm_resources(
         cache.volume_handles.remove(&volume_id);
     }
     cache.vm_attachments.remove(vm_id);
-    Ok(())
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -1475,6 +1571,16 @@ mod tests {
         async fn set_device_policy(
             &self,
             _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "".to_string(),
+                human_summary: "".to_string(),
+            }))
+        }
+        async fn disable_dirty_tracking(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Ok(Response::new(chv_stord_api::chv_stord_api::Result {
                 status: "ok".to_string(),
