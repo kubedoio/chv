@@ -145,6 +145,29 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError>;
 
+    // --- Migration ---
+    /// Initiate sending VM memory/state to a destination.
+    /// Calls PUT /api/v1/vm.send-migration with {"destination_url": "tcp://{host}:{port}"}
+    async fn send_migration(
+        &self,
+        vm_id: &str,
+        destination_url: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError>;
+
+    /// Open a migration receiving socket.
+    /// Calls PUT /api/v1/vm.receive-migration with {"receiver_url": "tcp://0.0.0.0:{port}"}
+    async fn receive_migration(
+        &self,
+        vm_id: &str,
+        receiver_url: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError>;
+
+    /// Check VM state (useful for monitoring migration progress).
+    /// Returns the current VM state string from GET /api/v1/vm.info.
+    async fn get_vm_state(&self, vm_id: &str) -> Result<String, ChvError>;
+
     // --- Diagnostics ---
     async fn coredump(
         &self,

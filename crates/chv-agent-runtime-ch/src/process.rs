@@ -1300,6 +1300,203 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
     }
 
+    async fn send_migration(
+        &self,
+        vm_id: &str,
+        destination_url: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = self.get_vm_socket(vm_id)?;
+
+        info!(
+            vm_id = %vm_id,
+            destination_url = %destination_url,
+            op = operation_id.unwrap_or("-"),
+            "initiating send-migration via ch api"
+        );
+
+        let body = serde_json::json!({"destination_url": destination_url}).to_string();
+        // send-migration is a long-running blocking call; use a custom long timeout.
+        let (status, response_body) = {
+            let mut stream = tokio::net::UnixStream::connect(&api_socket)
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: api_socket.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+
+            let request = format!(
+                "PUT /api/v1/vm.send-migration HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+                body.len(),
+                body
+            );
+
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: api_socket.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let read_fut = async {
+                loop {
+                    let n = stream.read(&mut tmp).await.map_err(|e| ChvError::Io {
+                        path: api_socket.to_string_lossy().to_string(),
+                        source: e,
+                    })?;
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header_bytes = &buf[..header_end];
+                        let headers = String::from_utf8_lossy(header_bytes);
+                        let content_length = headers
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                            .and_then(|l| l.split_once(':').map(|x| x.1))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let body_start = header_end + 4;
+                        if buf.len() >= body_start + content_length {
+                            break;
+                        }
+                    }
+                }
+                Ok::<(), ChvError>(())
+            };
+            // Migration can take minutes; allow up to 10 minutes for this blocking call.
+            tokio::time::timeout(std::time::Duration::from_secs(600), read_fut)
+                .await
+                .map_err(|_| ChvError::Internal {
+                    reason: format!("send-migration timed out for vm {}", vm_id),
+                })??;
+
+            let raw = String::from_utf8_lossy(&buf);
+            let status_code = parse_http_status(raw.as_bytes()).unwrap_or(0);
+            let resp_body = if let Some(idx) = raw.find("\r\n\r\n") {
+                raw[idx + 4..].to_string()
+            } else {
+                String::new()
+            };
+            (status_code, resp_body)
+        };
+
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "vm.send-migration returned status {} for vm {}: {}",
+                    status, vm_id, response_body
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    async fn receive_migration(
+        &self,
+        vm_id: &str,
+        receiver_url: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let api_socket = self.get_vm_socket(vm_id)?;
+
+        info!(
+            vm_id = %vm_id,
+            receiver_url = %receiver_url,
+            op = operation_id.unwrap_or("-"),
+            "initiating receive-migration via ch api"
+        );
+
+        let body = serde_json::json!({"receiver_url": receiver_url}).to_string();
+        // receive-migration is also a long-running blocking call.
+        let (status, response_body) = {
+            let mut stream = tokio::net::UnixStream::connect(&api_socket)
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: api_socket.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+
+            let request = format!(
+                "PUT /api/v1/vm.receive-migration HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+                body.len(),
+                body
+            );
+
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .map_err(|e| ChvError::Io {
+                    path: api_socket.to_string_lossy().to_string(),
+                    source: e,
+                })?;
+
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let read_fut = async {
+                loop {
+                    let n = stream.read(&mut tmp).await.map_err(|e| ChvError::Io {
+                        path: api_socket.to_string_lossy().to_string(),
+                        source: e,
+                    })?;
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header_bytes = &buf[..header_end];
+                        let headers = String::from_utf8_lossy(header_bytes);
+                        let content_length = headers
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                            .and_then(|l| l.split_once(':').map(|x| x.1))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let body_start = header_end + 4;
+                        if buf.len() >= body_start + content_length {
+                            break;
+                        }
+                    }
+                }
+                Ok::<(), ChvError>(())
+            };
+            // Migration can take minutes; allow up to 10 minutes.
+            tokio::time::timeout(std::time::Duration::from_secs(600), read_fut)
+                .await
+                .map_err(|_| ChvError::Internal {
+                    reason: format!("receive-migration timed out for vm {}", vm_id),
+                })??;
+
+            let raw = String::from_utf8_lossy(&buf);
+            let status_code = parse_http_status(raw.as_bytes()).unwrap_or(0);
+            let resp_body = if let Some(idx) = raw.find("\r\n\r\n") {
+                raw[idx + 4..].to_string()
+            } else {
+                String::new()
+            };
+            (status_code, resp_body)
+        };
+
+        if status != 200 && status != 204 {
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "vm.receive-migration returned status {} for vm {}: {}",
+                    status, vm_id, response_body
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    async fn get_vm_state(&self, vm_id: &str) -> Result<String, ChvError> {
+        let info = self.vm_info(vm_id).await?;
+        Ok(info.state)
+    }
+
     async fn coredump(
         &self,
         vm_id: &str,
