@@ -1,3 +1,4 @@
+use crate::ebpf::{self, EbpfManager};
 use crate::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
 use crate::state::{TopologyState, TopologyTable};
 use chv_errors::ChvError;
@@ -15,6 +16,7 @@ pub struct NetworkServiceImpl<E: NetworkExecutor> {
     store: Option<Arc<std::sync::Mutex<crate::store::TopologyStore>>>,
     security_policies: Arc<DashMap<String, proto::SecurityPolicy>>,
     rate_limit_policies: Arc<DashMap<String, proto::RateLimitPolicy>>,
+    ebpf: Arc<dyn EbpfManager>,
 }
 
 impl<E: NetworkExecutor> NetworkServiceImpl<E> {
@@ -26,7 +28,13 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             store: None,
             security_policies: Arc::new(DashMap::new()),
             rate_limit_policies: Arc::new(DashMap::new()),
+            ebpf: Arc::new(ebpf::NoopEbpfManager),
         }
+    }
+
+    pub fn with_ebpf(mut self, ebpf: Arc<dyn EbpfManager>) -> Self {
+        self.ebpf = ebpf;
+        self
     }
 
     pub fn topologies(&self) -> Arc<TopologyTable> {
@@ -610,13 +618,32 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         let policy = request.into_inner();
 
         let key = format!("{}:{}", policy.network_id, policy.vm_id);
+        let vm_id = policy.vm_id.clone();
+        let default_action = if policy.default_action == proto::PolicyAction::PolicyAllow as i32 {
+            1u8
+        } else {
+            0u8
+        };
+
+        // Convert proto rules to eBPF rules
+        let ebpf_rules = ebpf::proto_to_ebpf_rules(&vm_id, &policy);
+
         info!(
             vm_id = %policy.vm_id,
             network_id = %policy.network_id,
             rule_count = policy.rules.len(),
-            "security policy stored (eBPF enforcement deferred)"
+            ebpf_available = self.ebpf.is_available(),
+            "security policy stored"
         );
         self.security_policies.insert(key, policy);
+
+        // Push rules to eBPF maps
+        if let Err(e) = self.ebpf.update_rules(&vm_id, &ebpf_rules).await {
+            tracing::warn!(vm_id = %vm_id, error = %e, "failed to update eBPF rules");
+        }
+        if let Err(e) = self.ebpf.set_default_action(&vm_id, default_action).await {
+            tracing::warn!(vm_id = %vm_id, error = %e, "failed to set eBPF default action");
+        }
 
         Ok(Response::new(proto::UpdateSecurityPolicyResponse {
             result: Some(Self::ok_result()),
@@ -631,14 +658,23 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .increment_counter("nwd_update_rate_limit_total");
         let policy = request.into_inner();
 
+        let vm_id = policy.vm_id.clone();
+        let ebpf_rl = ebpf::proto_to_ebpf_rate_limit(&policy);
+
         info!(
             vm_id = %policy.vm_id,
             rate_bps = policy.rate_bps,
             burst_bytes = policy.burst_bytes,
-            "rate limit policy stored (tc/eBPF enforcement deferred)"
+            ebpf_available = self.ebpf.is_available(),
+            "rate limit policy stored"
         );
         self.rate_limit_policies
             .insert(policy.vm_id.clone(), policy);
+
+        // Push rate limit to eBPF maps
+        if let Err(e) = self.ebpf.update_rate_limit(&vm_id, &ebpf_rl).await {
+            tracing::warn!(vm_id = %vm_id, error = %e, "failed to update eBPF rate limit");
+        }
 
         Ok(Response::new(proto::UpdateRateLimitResponse {
             result: Some(Self::ok_result()),
