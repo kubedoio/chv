@@ -6,6 +6,7 @@ mod enrollment;
 mod error;
 mod inventory;
 mod lifecycle;
+pub mod migration;
 mod node_client;
 mod node_client_pool;
 mod orchestrator;

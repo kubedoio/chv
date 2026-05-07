@@ -401,6 +401,7 @@ async fn test_enrollment_extended_inventory_persistence() {
             network_capabilities: vec!["vxlan".into()],
             hypervisor_capabilities: vec![],
             labels,
+            vtep_ip: String::new(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-new-1".into(),
@@ -596,6 +597,7 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
             network_capabilities: vec![],
             hypervisor_capabilities: vec![],
             labels: Default::default(),
+            vtep_ip: String::new(),
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-invalid".into(),

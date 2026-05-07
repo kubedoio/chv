@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package chv.node.stord.v1;
+
+service StorageMigrationService {
+  // Bidirectional streaming for block transfer
+  rpc StreamBlocks(stream MigrationMessage) returns (stream MigrationMessage);
+}
+
+message MigrationMessage {
+  oneof payload {
+    InitMigration init = 1;
+    MigrationReady ready = 2;
+    BlockChunk chunk = 3;
+    Ack ack = 4;
+    Backpressure backpressure = 5;
+    RoundStart round_start = 6;
+    RoundComplete round_complete = 7;
+    FinalSync final_sync = 8;
+    FinalizeComplete finalize_complete = 9;
+    FinalizeAck finalize_ack = 10;
+    MigrationError error = 11;
+  }
+}
+
+message InitMigration {
+  string volume_id = 1;
+  uint64 size_bytes = 2;
+  uint32 block_size = 3;
+  string format = 4;           // "raw" or "qcow2"
+  string checksum_type = 5;    // "crc32"
+}
+
+message MigrationReady {
+  string dest_volume_id = 1;
+}
+
+message BlockChunk {
+  uint64 offset = 1;          // byte offset in volume
+  bytes data = 2;             // block data (up to block_size bytes)
+  uint32 crc32 = 3;           // CRC32 of data field
+  bool is_sparse = 4;         // if true, data is empty, block is all zeros
+  uint32 sequence_num = 5;    // monotonically increasing per stream
+}
+
+message Ack {
+  uint64 last_offset = 1;
+  uint32 last_sequence_num = 2;
+  AckStatus status = 3;
+}
+
+enum AckStatus {
+  ACK_OK = 0;
+  ACK_CRC_MISMATCH = 1;
+  ACK_WRITE_ERROR = 2;
+}
+
+message Backpressure {
+  float slow_down_factor = 1;  // 0.5 = halve send rate
+}
+
+message RoundStart {
+  uint32 round_num = 1;
+  uint64 dirty_block_count = 2;
+}
+
+message RoundComplete {
+  uint32 round_num = 1;
+  uint64 blocks_sent = 2;
+  uint64 bytes_sent = 3;
+}
+
+message FinalSync {
+  bool vm_paused = 1;
+}
+
+message FinalizeComplete {
+  uint64 total_bytes = 1;
+  uint64 total_chunks = 2;
+  bytes volume_checksum = 3;   // optional, for small volumes
+}
+
+message FinalizeAck {
+  bool verified = 1;
+  string error_message = 2;   // populated if verified=false
+}
+
+message MigrationError {
+  MigrationErrorCode code = 1;
+  string message = 2;
+}
+
+enum MigrationErrorCode {
+  MIGRATION_ERROR_UNSPECIFIED = 0;
+  MIGRATION_ERROR_DISK_FULL = 1;
+  MIGRATION_ERROR_IO_ERROR = 2;
+  MIGRATION_ERROR_VOLUME_NOT_FOUND = 3;
+  MIGRATION_ERROR_CHECKSUM_MISMATCH = 4;
+  MIGRATION_ERROR_TIMEOUT = 5;
+}

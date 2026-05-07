@@ -1,9 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    Json as AxumJson,
-};
+use axum::{extract::State, http::StatusCode, response::Json, Json as AxumJson};
 use chv_webui_bff::auth::Claims;
 use chv_webui_bff::AppState;
 use serde_json::Value;

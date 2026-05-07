@@ -60,6 +60,7 @@ impl InventoryReporter {
             network_capabilities: vec![],
             labels: std::collections::HashMap::new(),
             hypervisor_capabilities,
+            vtep_ip: "".to_string(),
         }
     }
 

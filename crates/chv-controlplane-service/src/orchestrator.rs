@@ -220,26 +220,23 @@ impl Orchestrator {
                 );
 
                 // Check current retry count
-                let retry_count: i32 = sqlx::query_scalar(
-                    "SELECT retry_count FROM operations WHERE operation_id = ?",
-                )
-                .bind(&row.operation_id)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or(0);
+                let retry_count: i32 =
+                    sqlx::query_scalar("SELECT retry_count FROM operations WHERE operation_id = ?")
+                        .bind(&row.operation_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .unwrap_or(0);
 
                 let new_retry_count = retry_count + 1;
                 if new_retry_count <= MAX_DISPATCH_RETRIES {
                     // Schedule retry with exponential backoff: 10s, 20s, 40s
                     let backoff_secs = 10i64 * (1 << (new_retry_count - 1));
-                    let next_retry =
-                        chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
-                    let op_id =
-                        OperationId::new(row.operation_id.clone()).map_err(|e| {
-                            ChvError::Internal {
-                                reason: format!("invalid operation_id: {e}"),
-                            }
-                        })?;
+                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
+                    let op_id = OperationId::new(row.operation_id.clone()).map_err(|e| {
+                        ChvError::Internal {
+                            reason: format!("invalid operation_id: {e}"),
+                        }
+                    })?;
                     if let Err(retry_err) = self
                         .operation_repo
                         .mark_for_retry(
@@ -269,10 +266,11 @@ impl Orchestrator {
                     if let Err(update_err) = self
                         .operation_repo
                         .update_status(&OperationStatusUpdateInput {
-                            operation_id: OperationId::new(row.operation_id.clone())
-                                .map_err(|e| ChvError::Internal {
+                            operation_id: OperationId::new(row.operation_id.clone()).map_err(
+                                |e| ChvError::Internal {
                                     reason: format!("invalid operation_id: {e}"),
-                                })?,
+                                },
+                            )?,
                             status: OperationStatus::Failed,
                             error_code: Some("DISPATCH_FAILED".into()),
                             error_message: Some(format!(
@@ -317,7 +315,10 @@ impl Orchestrator {
 
         let reaped = result.rows_affected();
         if reaped > 0 {
-            warn!(count = reaped, "reaped stuck Running operations back to Accepted");
+            warn!(
+                count = reaped,
+                "reaped stuck Running operations back to Accepted"
+            );
         }
         Ok(reaped)
     }
@@ -704,6 +705,85 @@ impl Orchestrator {
                         None,
                     )
                     .await
+            }
+            "MigrateVm" => {
+                // MigrateVm is a long-running operation driven by the migration state machine.
+                // Parse correlation_id to extract source, dest, and config.
+                let corr = row.correlation_id.as_deref().unwrap_or("");
+                let (source_node_id, dest_node_id, config) =
+                    crate::migration::MigrationConfig::from_correlation_id(corr);
+
+                if source_node_id.is_empty() || dest_node_id.is_empty() {
+                    return Err(ChvError::InvalidArgument {
+                        field: "correlation_id".to_string(),
+                        reason: format!(
+                            "MigrateVm requires source= and dest= in correlation_id, got: {}",
+                            corr
+                        ),
+                    });
+                }
+
+                let migration_id = format!("mig-{}", &row.operation_id);
+                let mut state = crate::migration::MigrationState {
+                    migration_id: migration_id.clone(),
+                    operation_id: row.operation_id.clone(),
+                    vm_id: row.resource_id.clone(),
+                    source_node_id: source_node_id.clone(),
+                    dest_node_id: dest_node_id.clone(),
+                    phase: crate::migration::MigrationPhase::Pending,
+                    config,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    convergence_round: 0,
+                    dirty_blocks_remaining: 0,
+                };
+
+                // Create migration record in DB
+                crate::migration::create_migration_record(&self.pool, &state).await?;
+
+                // Execute the migration state machine
+                let result = crate::migration::execute_migration(
+                    &self.pool,
+                    &self.node_client_pool,
+                    &self.agent_socket_pattern,
+                    &mut state,
+                )
+                .await;
+
+                // Mark the operation based on migration result
+                let (final_status, error_message) = match &result {
+                    Ok(()) => (OperationStatus::Succeeded, None),
+                    Err(e) => (OperationStatus::Failed, Some(e.to_string())),
+                };
+
+                self.operation_repo
+                    .update_status(&OperationStatusUpdateInput {
+                        operation_id: OperationId::new(row.operation_id.clone()).map_err(|e| {
+                            ChvError::Internal {
+                                reason: format!("invalid operation_id: {e}"),
+                            }
+                        })?,
+                        status: final_status,
+                        error_code: if result.is_err() {
+                            Some("MIGRATION_FAILED".into())
+                        } else {
+                            None
+                        },
+                        error_message,
+                        observed_generation: None,
+                        updated_by: Some("orchestrator".into()),
+                        updated_unix_ms: now_unix_ms(),
+                    })
+                    .await
+                    .map_err(|e| ChvError::Internal {
+                        reason: format!("failed to mark migration operation terminal: {e}"),
+                    })?;
+
+                // Return Ok since we handled the status update ourselves
+                return match result {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e),
+                };
             }
             other => {
                 return Err(ChvError::Internal {

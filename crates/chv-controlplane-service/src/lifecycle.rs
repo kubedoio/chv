@@ -172,6 +172,11 @@ pub trait LifecycleService: Send + Sync {
         &self,
         request: proto::RestartNetworkRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn migrate_vm(
+        &self,
+        request: proto::MigrateVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
 #[derive(Clone)]
@@ -1659,5 +1664,32 @@ impl LifecycleService for LifecycleServiceImplementation {
         .await?;
 
         Ok(Self::ok_ack(&operation_id, "restart network accepted"))
+    }
+
+    async fn migrate_vm(
+        &self,
+        request: proto::MigrateVmRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+        let vm_id = Self::parse_vm_id(request.vm_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "MigrateVm",
+                node_id.clone(),
+                ResourceKind::Vm,
+                Some(vm_id.clone()),
+                &meta,
+                Some(format!(
+                    "src={}:dst={}",
+                    request.source_node_id, request.destination_node_id
+                )),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "migrate vm accepted"))
     }
 }
