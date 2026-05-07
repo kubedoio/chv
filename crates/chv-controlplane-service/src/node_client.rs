@@ -1183,6 +1183,51 @@ impl NodeClient {
         };
         result
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn migrate_vm(
+        &mut self,
+        node_id: &str,
+        vm_id: &str,
+        generation: &str,
+        source_node_id: &str,
+        destination_node_id: &str,
+        config: proto::MigrationConfig,
+        operation_id: &str,
+        requested_by: Option<&str>,
+    ) -> Result<proto::AckResponse, ChvError> {
+        let req = proto::MigrateVmRequest {
+            meta: Some(proto::RequestMeta {
+                operation_id: operation_id.to_string(),
+                requested_by: requested_by.unwrap_or("control-plane").to_string(),
+                target_node_id: node_id.to_string(),
+                desired_state_version: generation.to_string(),
+                request_unix_ms: now_unix_ms(),
+            }),
+            node_id: node_id.to_string(),
+            vm_id: vm_id.to_string(),
+            source_node_id: source_node_id.to_string(),
+            destination_node_id: destination_node_id.to_string(),
+            config: Some(config),
+        };
+        let method = "migrate_vm";
+        let span = tracing::info_span!("migrate_vm", operation_id);
+        self.circuit_breaker.check(method)?;
+        let result = with_timeout(
+            self.lifecycle
+                .migrate_vm(with_operation_id_metadata(req, operation_id))
+                .instrument(span),
+            "agent",
+            method,
+        )
+        .await;
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success(method),
+            Err(ChvError::BackendUnavailable { .. }) => self.circuit_breaker.record_failure(method),
+            Err(_) => {}
+        };
+        result
+    }
 }
 
 fn with_operation_id_metadata<T>(req: T, operation_id: &str) -> tonic::Request<T> {

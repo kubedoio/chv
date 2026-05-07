@@ -48,8 +48,7 @@ impl ControlPlaneClient {
                 }
                 endpoint = endpoint.tls_config(tls).map_err(|e| {
                     let mut reason = e.to_string();
-                    let mut source: Option<&dyn std::error::Error> =
-                        std::error::Error::source(&e);
+                    let mut source: Option<&dyn std::error::Error> = std::error::Error::source(&e);
                     while let Some(s) = source {
                         reason.push_str(": ");
                         reason.push_str(&s.to_string());
@@ -440,6 +439,21 @@ mod tests {
             Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: "alert-report".to_string(),
+                    status: "ok".to_string(),
+                    node_observed_generation: String::new(),
+                    error_code: String::new(),
+                    human_summary: "ok".to_string(),
+                }),
+            }))
+        }
+
+        async fn report_migration_progress(
+            &self,
+            _request: Request<proto::MigrationProgress>,
+        ) -> Result<Response<proto::AckResponse>, Status> {
+            Ok(Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: "migration-progress".to_string(),
                     status: "ok".to_string(),
                     node_observed_generation: String::new(),
                     error_code: String::new(),

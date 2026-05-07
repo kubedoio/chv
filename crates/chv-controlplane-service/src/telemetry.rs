@@ -43,6 +43,11 @@ pub trait TelemetryService: Send + Sync {
         &self,
         request: proto::PublishAlertRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn report_migration_progress(
+        &self,
+        request: proto::MigrationProgress,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
 #[derive(Clone)]
@@ -467,6 +472,44 @@ impl TelemetryService for TelemetryServiceImplementation {
                 node_observed_generation: "".into(),
                 error_code: "".into(),
                 human_summary: SUMMARY_ALERT_PUBLISHED.into(),
+            }),
+        })
+    }
+
+    async fn report_migration_progress(
+        &self,
+        request: proto::MigrationProgress,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        // Update the migrations table with progress from the agent
+        let pool = self.observed_state_repo.pool();
+
+        if let Err(e) = crate::migration::update_migration_progress(
+            pool,
+            &request.vm_id,
+            &request.operation_id,
+            request.phase,
+            request.bytes_transferred,
+            request.total_bytes,
+            request.convergence_round,
+            request.dirty_blocks_remaining,
+        )
+        .await
+        {
+            warn!(
+                vm_id = %request.vm_id,
+                operation_id = %request.operation_id,
+                error = %e,
+                "failed to update migration progress"
+            );
+        }
+
+        Ok(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id: request.operation_id,
+                status: STATUS_OK.into(),
+                node_observed_generation: "".into(),
+                error_code: "".into(),
+                human_summary: "migration progress updated".into(),
             }),
         })
     }

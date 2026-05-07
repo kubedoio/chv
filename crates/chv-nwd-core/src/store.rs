@@ -21,30 +21,35 @@ impl TopologyStore {
                 namespace_name TEXT NOT NULL,
                 subnet_cidr TEXT NOT NULL,
                 gateway_ip TEXT NOT NULL,
-                runtime_status TEXT NOT NULL
+                runtime_status TEXT NOT NULL,
+                vni INTEGER
             )",
             [],
         )
         .map_err(|e| ChvError::Internal {
             reason: format!("sqlite init failed: {}", e),
         })?;
+        // Migration: add vni column if missing (existing databases)
+        let _ = conn.execute("ALTER TABLE topologies ADD COLUMN vni INTEGER", []);
         Ok(Self { conn })
     }
 
     pub fn upsert(&self, state: &TopologyState) -> Result<(), ChvError> {
         self.conn.execute(
-            "INSERT INTO topologies (network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO topologies (network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status, vni)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(network_id) DO UPDATE SET
                tenant_id = excluded.tenant_id,
                bridge_name = excluded.bridge_name,
                namespace_name = excluded.namespace_name,
                subnet_cidr = excluded.subnet_cidr,
                gateway_ip = excluded.gateway_ip,
-               runtime_status = excluded.runtime_status",
+               runtime_status = excluded.runtime_status,
+               vni = excluded.vni",
             params![
                 state.network_id, state.tenant_id, state.bridge_name,
                 state.namespace_name, state.subnet_cidr, state.gateway_ip, state.runtime_status,
+                state.vni.map(|v| v as i64),
             ],
         ).map_err(|e| ChvError::Internal { reason: format!("sqlite upsert failed: {}", e) })?;
         Ok(())
@@ -64,10 +69,11 @@ impl TopologyStore {
 
     pub fn list(&self) -> Result<Vec<TopologyState>, ChvError> {
         let mut stmt = self.conn.prepare(
-            "SELECT network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status FROM topologies"
+            "SELECT network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status, vni FROM topologies"
         ).map_err(|e| ChvError::Internal { reason: format!("sqlite prepare failed: {}", e) })?;
         let rows = stmt
             .query_map([], |row| {
+                let vni_raw: Option<i64> = row.get(7)?;
                 Ok(TopologyState {
                     network_id: row.get(0)?,
                     tenant_id: row.get(1)?,
@@ -76,6 +82,7 @@ impl TopologyStore {
                     subnet_cidr: row.get(4)?,
                     gateway_ip: row.get(5)?,
                     runtime_status: row.get(6)?,
+                    vni: vni_raw.map(|v| v as u32),
                 })
             })
             .map_err(|e| ChvError::Internal {
@@ -104,6 +111,7 @@ mod tests {
             subnet_cidr: "10.0.0.0/24".to_string(),
             gateway_ip: "10.0.0.1".to_string(),
             runtime_status: "ensured".to_string(),
+            vni: None,
         }
     }
 

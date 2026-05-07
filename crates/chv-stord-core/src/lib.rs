@@ -1,4 +1,5 @@
 pub mod handlers;
+pub mod migration;
 pub mod server;
 pub mod session;
 pub mod store;

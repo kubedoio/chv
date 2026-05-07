@@ -9,6 +9,7 @@ mod network_exposures;
 mod nodes;
 mod observed_state;
 mod operations;
+mod vtep;
 
 pub use alerts::{AlertCreateInput, AlertRepository};
 pub use backups::{
@@ -43,6 +44,7 @@ pub use observed_state::{
     VmObservedStateInput, VolumeObservedStateInput,
 };
 pub use operations::{OperationCreateInput, OperationRepository, OperationStatusUpdateInput};
+pub use vtep::{VniAllocation, VtepEntry, VtepRepository};
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;

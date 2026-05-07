@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
-use chv_nwd_api::chv_nwd_api::TopologySpec;
+use chv_nwd_api::chv_nwd_api::{OverlayType, TopologySpec};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -10,6 +10,12 @@ use tracing::{info, warn};
 pub struct TopologyApplyResult {
     pub namespace_handle: String,
     pub bridge_handle: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverlayStatusInfo {
+    pub vxlan_interface_up: bool,
+    pub fdb_entry_count: u32,
 }
 
 #[async_trait]
@@ -87,17 +93,81 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         network_id: &str,
         exposure_id: &str,
     ) -> Result<(), ChvError>;
+
+    // --- VXLAN overlay methods ---
+
+    async fn create_vxlan_interface(
+        &self,
+        namespace: &str,
+        bridge_name: &str,
+        vni: u32,
+        vtep_ip: &str,
+        vtep_port: u32,
+    ) -> Result<(), ChvError>;
+
+    async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError>;
+
+    async fn add_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        vtep_ip: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn delete_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        vtep_ip: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn replace_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        new_vtep_ip: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn send_gratuitous_arp(
+        &self,
+        namespace: &str,
+        bridge_name: &str,
+        vm_ip: &str,
+    ) -> Result<(), ChvError>;
+
+    async fn set_arp_suppression(
+        &self,
+        namespace: &str,
+        vni: u32,
+        enabled: bool,
+    ) -> Result<(), ChvError>;
+
+    async fn get_overlay_status(
+        &self,
+        namespace: &str,
+        vni: u32,
+    ) -> Result<OverlayStatusInfo, ChvError>;
 }
 
 pub struct LinuxExecutor {
     _runtime_dir: PathBuf,
+    vtep_ip: Option<String>,
 }
 
 impl LinuxExecutor {
     pub fn new(runtime_dir: PathBuf) -> Self {
         Self {
             _runtime_dir: runtime_dir,
+            vtep_ip: None,
         }
+    }
+
+    pub fn with_vtep_ip(mut self, vtep_ip: String) -> Self {
+        self.vtep_ip = Some(vtep_ip);
+        self
     }
 
     async fn run_ip(args: &[&str]) -> Result<(), ChvError> {
@@ -121,6 +191,55 @@ impl LinuxExecutor {
             });
         }
         Ok(())
+    }
+
+    async fn run_ip_netns(namespace: &str, args: &[&str]) -> Result<(), ChvError> {
+        let mut full_args = vec!["netns", "exec", namespace, "ip"];
+        full_args.extend_from_slice(args);
+        Self::run_ip(&full_args).await
+    }
+
+    async fn run_bridge_netns(namespace: &str, args: &[&str]) -> Result<(), ChvError> {
+        let out = Command::new("ip")
+            .args(["netns", "exec", namespace, "bridge"])
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "bridge".to_string(),
+                source: e,
+            })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("File exists") || stderr.contains("already exists") {
+                return Ok(());
+            }
+            return Err(ChvError::NetworkUnavailable {
+                resource: "bridge".to_string(),
+                reason: format!("bridge {} failed: {}", args.join(" "), stderr),
+            });
+        }
+        Ok(())
+    }
+
+    async fn run_cmd_netns_output(
+        namespace: &str,
+        cmd: &str,
+        args: &[&str],
+    ) -> Result<std::process::Output, ChvError> {
+        Command::new("ip")
+            .args(["netns", "exec", namespace, cmd])
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: cmd.to_string(),
+                source: e,
+            })
+    }
+
+    fn vxlan_interface_name(vni: u32) -> String {
+        format!("vxlan{}", vni)
     }
 
     async fn bridge_exists(name: &str) -> bool {
@@ -514,6 +633,51 @@ impl NetworkExecutor for LinuxExecutor {
         let _ = Self::run_nft_quiet(&["add", "table", "inet", &format!("chv-{}", spec.network_id)])
             .await;
 
+        // VXLAN overlay: create VXLAN interface if overlay_type is VXLAN and vni > 0
+        if spec.vni > 0 && spec.overlay_type == OverlayType::OverlayVxlan as i32 {
+            let vtep_ip = self
+                .vtep_ip
+                .as_deref()
+                .ok_or_else(|| ChvError::InvalidArgument {
+                    field: "vtep_ip".to_string(),
+                    reason: "VXLAN overlay requested but no local VTEP IP configured on executor"
+                        .to_string(),
+                })?;
+            let vtep_port = spec
+                .vtep_endpoints
+                .first()
+                .map(|e| if e.vtep_port == 0 { 4789 } else { e.vtep_port })
+                .unwrap_or(4789);
+
+            self.create_vxlan_interface(
+                &spec.namespace_name,
+                &spec.bridge_name,
+                spec.vni,
+                vtep_ip,
+                vtep_port,
+            )
+            .await?;
+
+            // Add FDB entries for peer VTEPs (use broadcast MAC for BUM traffic)
+            for vtep in &spec.vtep_endpoints {
+                self.add_fdb_entry(
+                    &spec.namespace_name,
+                    spec.vni,
+                    "00:00:00:00:00:00",
+                    &vtep.vtep_ip,
+                )
+                .await?;
+            }
+
+            info!(
+                network_id = %spec.network_id,
+                vni = spec.vni,
+                vtep_ip = %vtep_ip,
+                peer_count = spec.vtep_endpoints.len(),
+                "VXLAN overlay configured"
+            );
+        }
+
         Ok(TopologyApplyResult {
             namespace_handle: spec.namespace_name.clone(),
             bridge_handle: spec.bridge_name.clone(),
@@ -776,6 +940,179 @@ impl NetworkExecutor for LinuxExecutor {
         Self::delete_rules_by_comment(&table, "forward", &safe_exposure_id).await?;
         info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure withdrawn");
         Ok(())
+    }
+
+    // --- VXLAN overlay implementations ---
+
+    async fn create_vxlan_interface(
+        &self,
+        namespace: &str,
+        bridge_name: &str,
+        vni: u32,
+        vtep_ip: &str,
+        vtep_port: u32,
+    ) -> Result<(), ChvError> {
+        let iface = Self::vxlan_interface_name(vni);
+        let vni_str = vni.to_string();
+        let port_str = vtep_port.to_string();
+
+        // Create VXLAN interface in the default namespace first
+        Self::run_ip(&[
+            "link",
+            "add",
+            &iface,
+            "type",
+            "vxlan",
+            "id",
+            &vni_str,
+            "local",
+            vtep_ip,
+            "dstport",
+            &port_str,
+            "nolearning",
+        ])
+        .await?;
+
+        // Move interface to the namespace
+        Self::run_ip(&["link", "set", &iface, "netns", namespace]).await?;
+
+        // Attach to bridge inside the namespace
+        Self::run_ip_netns(namespace, &["link", "set", &iface, "master", bridge_name]).await?;
+
+        // Bring up the interface
+        Self::run_ip_netns(namespace, &["link", "set", &iface, "up"]).await?;
+
+        info!(namespace = %namespace, vni = vni, vtep_ip = %vtep_ip, "VXLAN interface created");
+        Ok(())
+    }
+
+    async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError> {
+        let iface = Self::vxlan_interface_name(vni);
+        Self::run_ip_netns(namespace, &["link", "del", &iface]).await?;
+        info!(namespace = %namespace, vni = vni, "VXLAN interface deleted");
+        Ok(())
+    }
+
+    async fn add_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        let iface = Self::vxlan_interface_name(vni);
+        Self::run_bridge_netns(
+            namespace,
+            &["fdb", "append", mac_address, "dev", &iface, "dst", vtep_ip],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        let iface = Self::vxlan_interface_name(vni);
+        Self::run_bridge_netns(
+            namespace,
+            &["fdb", "del", mac_address, "dev", &iface, "dst", vtep_ip],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn replace_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        new_vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        let iface = Self::vxlan_interface_name(vni);
+        Self::run_bridge_netns(
+            namespace,
+            &[
+                "fdb",
+                "replace",
+                mac_address,
+                "dev",
+                &iface,
+                "dst",
+                new_vtep_ip,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        namespace: &str,
+        bridge_name: &str,
+        vm_ip: &str,
+    ) -> Result<(), ChvError> {
+        let out = Self::run_cmd_netns_output(
+            namespace,
+            "arping",
+            &["-U", "-c", "3", "-I", bridge_name, vm_ip],
+        )
+        .await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(namespace = %namespace, vm_ip = %vm_ip, error = %stderr, "gratuitous ARP failed");
+        }
+        Ok(())
+    }
+
+    async fn set_arp_suppression(
+        &self,
+        namespace: &str,
+        vni: u32,
+        enabled: bool,
+    ) -> Result<(), ChvError> {
+        let iface = Self::vxlan_interface_name(vni);
+        let value = if enabled { "on" } else { "off" };
+        Self::run_bridge_netns(
+            namespace,
+            &["link", "set", "dev", &iface, "neigh_suppress", value],
+        )
+        .await?;
+        info!(namespace = %namespace, vni = vni, enabled = enabled, "ARP suppression set");
+        Ok(())
+    }
+
+    async fn get_overlay_status(
+        &self,
+        namespace: &str,
+        vni: u32,
+    ) -> Result<OverlayStatusInfo, ChvError> {
+        let iface = Self::vxlan_interface_name(vni);
+
+        // Check if VXLAN interface exists and is up
+        let link_out =
+            Self::run_cmd_netns_output(namespace, "ip", &["link", "show", &iface]).await?;
+        let link_stdout = String::from_utf8_lossy(&link_out.stdout);
+        let vxlan_interface_up = link_out.status.success() && link_stdout.contains("UP");
+
+        // Count FDB entries
+        let fdb_out =
+            Self::run_cmd_netns_output(namespace, "bridge", &["fdb", "show", "dev", &iface])
+                .await?;
+        let fdb_entry_count = if fdb_out.status.success() {
+            let stdout = String::from_utf8_lossy(&fdb_out.stdout);
+            stdout.lines().count() as u32
+        } else {
+            0
+        };
+
+        Ok(OverlayStatusInfo {
+            vxlan_interface_up,
+            fdb_entry_count,
+        })
     }
 }
 

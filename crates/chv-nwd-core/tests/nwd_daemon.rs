@@ -7,7 +7,7 @@ use chv_nwd_api::chv_nwd_api::{
     ListNamespaceStateRequest, NatPolicy, NetworkHealthRequest, NicSpec, SetFirewallPolicyRequest,
     TopologySpec, WithdrawServiceExposureRequest,
 };
-use chv_nwd_core::executor::{NetworkExecutor, TopologyApplyResult};
+use chv_nwd_core::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
 use chv_nwd_core::{NetworkServer, TopologyState};
 use chv_observability::Metrics;
 use std::path::PathBuf;
@@ -116,6 +116,80 @@ impl NetworkExecutor for MockExecutor {
     ) -> Result<(), ChvError> {
         Ok(())
     }
+
+    async fn create_vxlan_interface(
+        &self,
+        _namespace: &str,
+        _bridge_name: &str,
+        _vni: u32,
+        _vtep_ip: &str,
+        _vtep_port: u32,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn delete_vxlan_interface(&self, _namespace: &str, _vni: u32) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn add_fdb_entry(
+        &self,
+        _namespace: &str,
+        _vni: u32,
+        _mac_address: &str,
+        _vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn delete_fdb_entry(
+        &self,
+        _namespace: &str,
+        _vni: u32,
+        _mac_address: &str,
+        _vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn replace_fdb_entry(
+        &self,
+        _namespace: &str,
+        _vni: u32,
+        _mac_address: &str,
+        _new_vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        _namespace: &str,
+        _bridge_name: &str,
+        _vm_ip: &str,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn set_arp_suppression(
+        &self,
+        _namespace: &str,
+        _vni: u32,
+        _enabled: bool,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn get_overlay_status(
+        &self,
+        _namespace: &str,
+        _vni: u32,
+    ) -> Result<OverlayStatusInfo, ChvError> {
+        Ok(OverlayStatusInfo {
+            vxlan_interface_up: false,
+            fdb_entry_count: 0,
+        })
+    }
 }
 
 async fn make_client(socket: PathBuf) -> NetworkServiceClient<tonic::transport::Channel> {
@@ -157,6 +231,9 @@ async fn ensure_and_delete_topology_idempotent() {
             subnet_cidr: "10.0.1.0/24".to_string(),
             gateway_ip: "10.0.1.1".to_string(),
             options: Default::default(),
+            vni: 0,
+            vtep_endpoints: vec![],
+            overlay_type: 0,
         }),
     };
 
@@ -255,6 +332,9 @@ async fn all_network_handlers_smoke() {
                 subnet_cidr: "10.0.1.0/24".to_string(),
                 gateway_ip: "10.0.1.1".to_string(),
                 options: Default::default(),
+                vni: 0,
+                vtep_endpoints: vec![],
+                overlay_type: 0,
             }),
         })
         .await
@@ -459,6 +539,9 @@ async fn firewall_nat_and_exposure_smoke() {
                 subnet_cidr: "10.0.99.0/24".to_string(),
                 gateway_ip: "10.0.99.1".to_string(),
                 options: Default::default(),
+                vni: 0,
+                vtep_endpoints: vec![],
+                overlay_type: 0,
             }),
         })
         .await
