@@ -167,6 +167,7 @@ service NetworkService {
   rpc GetNetworkHealth(NetworkHealthRequest) returns (NetworkHealthResponse);
   rpc ListNamespaceState(ListNamespaceStateRequest) returns (ListNamespaceStateResponse);
   rpc UpdateOverlay(UpdateOverlayRequest) returns (UpdateOverlayResponse);
+  rpc SendGratuitousArp(SendGratuitousArpRequest) returns (SendGratuitousArpResponse);
   rpc UpdateSecurityPolicy(SecurityPolicy) returns (UpdateSecurityPolicyResponse);
   rpc UpdateRateLimit(RateLimitPolicy) returns (UpdateRateLimitResponse);
   rpc GetOverlayStatus(GetOverlayStatusRequest) returns (OverlayStatus);
@@ -255,6 +256,17 @@ message UpdateOverlayRequest {
 }
 
 message UpdateOverlayResponse {
+  Result result = 1;
+}
+
+message SendGratuitousArpRequest {
+  Meta meta = 1;
+  string network_id = 2;
+  string vm_ip = 3;
+  string bridge_name = 4;
+}
+
+message SendGratuitousArpResponse {
   Result result = 1;
 }
 

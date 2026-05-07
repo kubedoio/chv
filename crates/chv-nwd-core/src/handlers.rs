@@ -609,6 +609,49 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         }))
     }
 
+    async fn send_gratuitous_arp(
+        &self,
+        request: Request<proto::SendGratuitousArpRequest>,
+    ) -> Result<Response<proto::SendGratuitousArpResponse>, Status> {
+        self.metrics
+            .increment_counter("nwd_send_gratuitous_arp_total");
+        let req = request.into_inner();
+
+        let state = match self.topologies.get(&req.network_id) {
+            Some(s) => s,
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: req.network_id.clone(),
+                };
+                return Ok(Response::new(proto::SendGratuitousArpResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        };
+
+        if let Err(e) = self
+            .executor
+            .send_gratuitous_arp(&state.namespace_name, &req.bridge_name, &req.vm_ip)
+            .await
+        {
+            return Ok(Response::new(proto::SendGratuitousArpResponse {
+                result: Some(Self::err_result(&e)),
+            }));
+        }
+
+        info!(
+            network_id = %req.network_id,
+            vm_ip = %req.vm_ip,
+            bridge_name = %req.bridge_name,
+            "gratuitous ARP sent"
+        );
+
+        Ok(Response::new(proto::SendGratuitousArpResponse {
+            result: Some(Self::ok_result()),
+        }))
+    }
+
     async fn update_security_policy(
         &self,
         request: Request<proto::SecurityPolicy>,

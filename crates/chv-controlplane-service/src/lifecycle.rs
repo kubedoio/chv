@@ -177,6 +177,16 @@ pub trait LifecycleService: Send + Sync {
         &self,
         request: proto::MigrateVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn update_overlay(
+        &self,
+        request: proto::UpdateOverlayRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
+
+    async fn send_gratuitous_arp(
+        &self,
+        request: proto::SendGratuitousArpRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 }
 
 #[derive(Clone)]
@@ -1691,5 +1701,61 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.accept_operation(&operation_id).await?;
 
         Ok(Self::ok_ack(&operation_id, "migrate vm accepted"))
+    }
+
+    async fn update_overlay(
+        &self,
+        request: proto::UpdateOverlayRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "UpdateOverlay",
+                node_id.clone(),
+                ResourceKind::Network,
+                Some(ResourceId::new(request.network_id.clone()).map_err(|e| {
+                    ControlPlaneServiceError::InvalidArgument(format!(
+                        "invalid network_id: {}",
+                        e
+                    ))
+                })?),
+                &meta,
+                Some(format!("vni={}", request.vni)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "update overlay accepted"))
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        request: proto::SendGratuitousArpRequest,
+    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
+        let meta = self.meta_from_request(request.meta)?;
+        let node_id = Self::parse_node_id(request.node_id)?;
+
+        let operation_id = self
+            .create_operation_and_emit(
+                "SendGratuitousArp",
+                node_id.clone(),
+                ResourceKind::Network,
+                Some(ResourceId::new(request.network_id.clone()).map_err(|e| {
+                    ControlPlaneServiceError::InvalidArgument(format!(
+                        "invalid network_id: {}",
+                        e
+                    ))
+                })?),
+                &meta,
+                Some(format!("vm_ip={}", request.vm_ip)),
+            )
+            .await?;
+
+        self.accept_operation(&operation_id).await?;
+
+        Ok(Self::ok_ack(&operation_id, "send gratuitous arp accepted"))
     }
 }

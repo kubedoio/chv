@@ -3,8 +3,8 @@ use chv_nwd_api::chv_nwd_api::{
     network_service_client::NetworkServiceClient, AttachVmNicRequest, DeleteNetworkTopologyRequest,
     DetachVmNicRequest, DhcpScope, DnsScope, EnsureDhcpScopeRequest, EnsureDnsScopeRequest,
     EnsureNetworkTopologyRequest, ExposeServiceRequest, ListNamespaceStateRequest,
-    NetworkHealthRequest, SetFirewallPolicyRequest, SetNatPolicyRequest,
-    WithdrawServiceExposureRequest,
+    NetworkHealthRequest, SendGratuitousArpRequest, SetFirewallPolicyRequest, SetNatPolicyRequest,
+    UpdateOverlayRequest, WithdrawServiceExposureRequest,
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
@@ -907,6 +907,93 @@ impl NwdClient {
             })?;
         Ok(())
     }
+
+    pub async fn update_overlay(
+        &mut self,
+        network_id: &str,
+        vni: u32,
+        vtep_endpoints: Vec<chv_nwd_api::chv_nwd_api::VtepEndpoint>,
+        fdb_entries: Vec<chv_nwd_api::chv_nwd_api::FdbEntry>,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = UpdateOverlayRequest {
+            network_id: network_id.to_string(),
+            vni,
+            vtep_endpoints,
+            fdb_entries,
+        };
+        let span =
+            tracing::info_span!("update_overlay", operation_id = operation_id.unwrap_or(""));
+        let resp = self
+            .inner
+            .update_overlay(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        if let Some(ref result) = resp.result {
+            if !result.status.eq_ignore_ascii_case("ok") {
+                return Err(ChvError::NetworkUnavailable {
+                    resource: "nwd".to_string(),
+                    reason: format!(
+                        "update_overlay failed: {} ({})",
+                        result.human_summary, result.error_code
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn send_gratuitous_arp(
+        &mut self,
+        network_id: &str,
+        vm_ip: &str,
+        bridge_name: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        let req = SendGratuitousArpRequest {
+            meta: Some(chv_nwd_api::chv_nwd_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            network_id: network_id.to_string(),
+            vm_ip: vm_ip.to_string(),
+            bridge_name: bridge_name.to_string(),
+        };
+        let span = tracing::info_span!(
+            "send_gratuitous_arp",
+            operation_id = operation_id.unwrap_or("")
+        );
+        let resp = self
+            .inner
+            .send_gratuitous_arp(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::NetworkUnavailable {
+                resource: "nwd".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        if let Some(ref result) = resp.result {
+            if !result.status.eq_ignore_ascii_case("ok") {
+                return Err(ChvError::NetworkUnavailable {
+                    resource: "nwd".to_string(),
+                    reason: format!(
+                        "send_gratuitous_arp failed: {} ({})",
+                        result.human_summary, result.error_code
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1087,6 +1174,13 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::UpdateOverlayRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::UpdateOverlayResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::SendGratuitousArpResponse>, Status> {
             Err(Status::unimplemented(""))
         }
 

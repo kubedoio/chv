@@ -485,6 +485,8 @@ service LifecycleService {
   rpc StopNetwork(StopNetworkRequest) returns (AckResponse);
   rpc RestartNetwork(RestartNetworkRequest) returns (AckResponse);
   rpc MigrateVm(MigrateVmRequest) returns (AckResponse);
+  rpc UpdateOverlay(UpdateOverlayRequest) returns (AckResponse);
+  rpc SendGratuitousArp(SendGratuitousArpRequest) returns (AckResponse);
 }
 
 service TelemetryService {
@@ -534,4 +536,36 @@ enum MigrationPhase {
   MIGRATION_PHASE_COMPLETED = 6;
   MIGRATION_PHASE_FAILED = 7;
   MIGRATION_PHASE_ROLLED_BACK = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Overlay management (CP → Agent → NWD)
+// ---------------------------------------------------------------------------
+
+message VtepEndpoint {
+  string node_id = 1;
+  string vtep_ip = 2;
+  uint32 vtep_port = 3;
+}
+
+message FdbEntry {
+  string mac_address = 1;
+  string vtep_ip = 2;
+}
+
+message UpdateOverlayRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+  uint32 vni = 4;
+  repeated VtepEndpoint vtep_endpoints = 5;
+  repeated FdbEntry fdb_entries = 6;
+}
+
+message SendGratuitousArpRequest {
+  RequestMeta meta = 1;
+  string node_id = 2;
+  string network_id = 3;
+  string vm_ip = 4;
+  string bridge_name = 5;
 }

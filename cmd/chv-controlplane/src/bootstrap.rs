@@ -8,7 +8,7 @@ use chv_controlplane_service::{
 use chv_controlplane_store::{
     connect_pool, run_migrations, AlertRepository, BackupRepository, BootstrapTokenRepository,
     ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository,
+    ObservedStateRepository, OperationRepository, VtepRepository,
 };
 use std::sync::Arc;
 
@@ -73,6 +73,7 @@ pub async fn build_service(
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
     let operation_repo = OperationRepository::new(pool.clone());
     let backup_repo = BackupRepository::new(pool.clone());
+    let vtep_repo = VtepRepository::new(pool.clone());
 
     let lifecycle_service = Arc::new(LifecycleServiceImplementation::new(
         node_repo.clone(),
@@ -137,8 +138,12 @@ pub async fn build_service(
         None
     };
 
-    let enrollment_service =
-        EnrollmentServiceImplementation::new(node_repo.clone(), token_repo.clone(), cert_issuer);
+    let enrollment_service = EnrollmentServiceImplementation::new(
+        node_repo.clone(),
+        token_repo.clone(),
+        cert_issuer,
+        vtep_repo.clone(),
+    );
     let inventory_service = InventoryServiceImplementation::new(node_repo.clone());
     let telemetry_service = TelemetryServiceImplementation::new(
         node_repo.clone(),
