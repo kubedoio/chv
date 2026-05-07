@@ -136,7 +136,7 @@ impl Orchestrator {
 
         // Resolve node_id for each claimed operation
         let mut rows = Vec::with_capacity(claimed_rows.len() + retryable_rows.len());
-        for claimed in claimed_rows.into_iter().chain(retryable_rows.into_iter()) {
+        for claimed in claimed_rows.into_iter().chain(retryable_rows) {
             let node_id: Option<String> = sqlx::query_scalar(
                 r#"
                 SELECT COALESCE(vds.target_node_id, vol.node_id, net.node_id)
