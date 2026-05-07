@@ -215,6 +215,19 @@ impl ControlPlaneClient {
             })
     }
 
+    pub async fn report_migration_progress(
+        &mut self,
+        req: proto::MigrationProgress,
+    ) -> Result<proto::AckResponse, ChvError> {
+        self.telemetry
+            .report_migration_progress(req)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|e| ChvError::ControlPlaneUnavailable {
+                reason: e.to_string(),
+            })
+    }
+
     pub async fn dispatch_pending_message(
         &mut self,
         message: &PendingControlPlaneMessage,

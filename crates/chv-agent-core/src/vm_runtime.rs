@@ -277,6 +277,32 @@ impl VmRuntime {
             .await
     }
 
+    pub async fn send_migration(
+        &self,
+        vm_id: &str,
+        destination_url: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter
+            .send_migration(vm_id, destination_url, operation_id)
+            .await
+    }
+
+    pub async fn receive_migration(
+        &self,
+        vm_id: &str,
+        receiver_url: &str,
+        operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.adapter
+            .receive_migration(vm_id, receiver_url, operation_id)
+            .await
+    }
+
+    pub async fn get_vm_state(&self, vm_id: &str) -> Result<String, ChvError> {
+        self.adapter.get_vm_state(vm_id).await
+    }
+
     pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
         self.vms
             .lock()
