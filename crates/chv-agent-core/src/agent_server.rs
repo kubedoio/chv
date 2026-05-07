@@ -1848,6 +1848,90 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             }),
         }))
     }
+
+    async fn update_overlay(
+        &self,
+        req: Request<proto::UpdateOverlayRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+
+        let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+        nwd.update_overlay(
+            &inner.network_id,
+            inner.vni,
+            inner.vtep_endpoints.iter().map(|ep| {
+                chv_nwd_api::chv_nwd_api::VtepEndpoint {
+                    node_id: ep.node_id.clone(),
+                    vtep_ip: ep.vtep_ip.clone(),
+                    vtep_port: ep.vtep_port,
+                }
+            }).collect(),
+            inner.fdb_entries.iter().map(|fdb| {
+                chv_nwd_api::chv_nwd_api::FdbEntry {
+                    mac_address: fdb.mac_address.clone(),
+                    vtep_ip: fdb.vtep_ip.clone(),
+                }
+            }).collect(),
+            Some(&operation_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("update_overlay failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "overlay updated".to_string(),
+            }),
+        }))
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        req: Request<proto::SendGratuitousArpRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let inner = req.into_inner();
+        let meta = inner
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+        let operation_id = meta.operation_id.clone();
+
+        let mut nwd = crate::daemon_clients::NwdClient::connect(&self.nwd_socket)
+            .await
+            .map_err(|e| Status::unavailable(format!("nwd unavailable: {}", e)))?;
+
+        nwd.send_gratuitous_arp(
+            &inner.network_id,
+            &inner.vm_ip,
+            &inner.bridge_name,
+            Some(&operation_id),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("send_gratuitous_arp failed: {}", e)))?;
+
+        let observed_generation = self.cache.lock().await.observed_generation.clone();
+        Ok(Response::new(proto::AckResponse {
+            result: Some(proto::ResultMeta {
+                operation_id,
+                status: "ok".to_string(),
+                node_observed_generation: observed_generation,
+                error_code: "".to_string(),
+                human_summary: "gratuitous ARP sent".to_string(),
+            }),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -2427,6 +2511,13 @@ mod tests {
             &self,
             _req: Request<chv_nwd_api::chv_nwd_api::GetOverlayStatusRequest>,
         ) -> Result<Response<chv_nwd_api::chv_nwd_api::OverlayStatus>, Status> {
+            Err(Status::unimplemented(""))
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::SendGratuitousArpResponse>, Status> {
             Err(Status::unimplemented(""))
         }
     }

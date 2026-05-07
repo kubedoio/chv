@@ -10,6 +10,7 @@ pub mod migration;
 mod node_client;
 mod node_client_pool;
 mod orchestrator;
+pub mod overlay;
 mod reconcile;
 mod server;
 mod telemetry;
@@ -27,6 +28,7 @@ pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
 pub use node_client::NodeClient;
 pub use node_client_pool::NodeClientPool;
 pub use orchestrator::Orchestrator;
+pub use overlay::OverlayManager;
 pub use reconcile::{ReconcileService, ReconcileServiceImplementation};
 pub use server::{
     EnrollmentServer, InventoryServer, LifecycleServer, ReconcileServer, TelemetryServer,

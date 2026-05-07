@@ -376,7 +376,8 @@ async fn test_enrollment_extended_inventory_persistence() {
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
+    let vtep_repo = VtepRepository::new(pool.clone());
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
 
     // Seed a bootstrap token for enrollment (sha256("123"))
     let hash = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3";
@@ -451,7 +452,8 @@ async fn test_rotate_certificate_missing_node() {
     let node_repo = NodeRepository::new(pool);
     let token_repo = BootstrapTokenRepository::new(test_db.pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
+    let vtep_repo = VtepRepository::new(test_db.pool.clone());
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
 
     let request = proto::RotateNodeCertificateRequest {
         node_id: "non-existent-node".into(),
@@ -478,7 +480,8 @@ async fn test_report_bootstrap_result_persistence() {
     let node_repo = NodeRepository::new(pool.clone());
     let token_repo = BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
+    let vtep_repo = VtepRepository::new(pool.clone());
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
 
     // Node must exist
     sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-b1', 'host-b1', 'host-b1')")
@@ -581,9 +584,10 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     let node_repo = NodeRepository::new(pool.clone());
-    let token_repo = chv_controlplane_store::BootstrapTokenRepository::new(pool);
+    let token_repo = chv_controlplane_store::BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
+    let vtep_repo = VtepRepository::new(pool);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
 
     let request = proto::EnrollmentRequest {
         bootstrap_token: "invalid-token".into(),
@@ -1188,9 +1192,10 @@ async fn test_rotate_certificate_returns_not_found_status() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     let node_repo = NodeRepository::new(pool.clone());
-    let token_repo = BootstrapTokenRepository::new(pool);
+    let token_repo = BootstrapTokenRepository::new(pool.clone());
     let cert_issuer = Arc::new(MockCertIssuer);
-    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer));
+    let vtep_repo = VtepRepository::new(pool);
+    let service = EnrollmentServiceImplementation::new(node_repo, token_repo, Some(cert_issuer), vtep_repo);
     let server = crate::server::EnrollmentServer::new(Arc::new(service));
 
     let request = tonic::Request::new(proto::RotateNodeCertificateRequest {

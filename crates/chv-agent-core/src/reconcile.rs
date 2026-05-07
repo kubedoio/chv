@@ -1684,6 +1684,21 @@ mod tests {
                 ebpf_programs_loaded: 0,
             }))
         }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _req: Request<chv_nwd_api::chv_nwd_api::SendGratuitousArpRequest>,
+        ) -> Result<Response<chv_nwd_api::chv_nwd_api::SendGratuitousArpResponse>, Status> {
+            Ok(Response::new(
+                chv_nwd_api::chv_nwd_api::SendGratuitousArpResponse {
+                    result: Some(chv_nwd_api::chv_nwd_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                },
+            ))
+        }
     }
 
     async fn start_mock_stord(socket: &std::path::Path) {

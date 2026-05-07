@@ -762,6 +762,36 @@ impl proto::lifecycle_service_server::LifecycleService for LifecycleServer {
             .map_err(tonic::Status::from)?;
         Ok(Response::new(resp))
     }
+
+    async fn update_overlay(
+        &self,
+        request: Request<proto::UpdateOverlayRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        let _span = tracing::info_span!("update_overlay", %op_id);
+        let resp = self
+            .service
+            .update_overlay(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        request: Request<proto::SendGratuitousArpRequest>,
+    ) -> Result<Response<proto::AckResponse>, Status> {
+        let op_id = extract_op_id(&request).unwrap_or_default();
+        let _span = tracing::info_span!("send_gratuitous_arp", %op_id);
+        let resp = self
+            .service
+            .send_gratuitous_arp(request.into_inner())
+            .instrument(_span)
+            .await
+            .map_err(tonic::Status::from)?;
+        Ok(Response::new(resp))
+    }
 }
 
 pub struct ReconcileServer {
