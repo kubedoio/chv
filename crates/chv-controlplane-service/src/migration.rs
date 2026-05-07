@@ -223,6 +223,15 @@ impl PhaseTimeouts {
 /// 5. Paused -> Completed: Resume VM on destination
 ///
 /// Returns Ok(()) if migration completed successfully, Err if failed or rolled back.
+#[tracing::instrument(
+    skip(pool, node_client_pool, state),
+    fields(
+        migration_id = %state.migration_id,
+        vm_id = %state.vm_id,
+        source = %state.source_node_id,
+        dest = %state.dest_node_id,
+    )
+)]
 pub async fn execute_migration(
     pool: &StorePool,
     node_client_pool: &NodeClientPool,

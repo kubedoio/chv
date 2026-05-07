@@ -169,6 +169,116 @@ sudo tar czf /backup/chv-certs-$(date +%Y%m%d).tar.gz /etc/chv/certs/
 
 ---
 
+## Multi-Node Operations
+
+### Migration Monitoring
+
+Key Prometheus metrics to watch during live migration:
+
+| Metric | Type | What it tells you |
+|--------|------|-------------------|
+| `chv_migration_phase` | Gauge | Current phase (0=Pending, 1=PreCopyDisk, 2=ConvergingDisk, 3=MemoryMigration, 4=Paused, 5=Completed, 6=Failed, 7=RolledBack) |
+| `chv_migration_bytes_transferred` | Counter | Total bytes copied so far |
+| `chv_migration_duration_seconds` | Histogram | End-to-end migration time by outcome |
+| `chv_migration_dirty_blocks` | Gauge | Remaining dirty blocks during convergence |
+
+**Expected phase durations** (100GB disk, 16GB RAM):
+
+| Phase | Typical | Alarm threshold |
+|-------|---------|-----------------|
+| PreCopyDisk | 10-60 min | >90 min |
+| ConvergingDisk | 1-10 min per round | >30 min total |
+| MemoryMigration | 30s-5 min | >10 min |
+| Paused (final sync) | <5s | >30s |
+
+**When to intervene:**
+
+- `dirty_blocks` not converging after 5 rounds: check I/O write rate on source VM
+- Phase stuck in MemoryMigration >10 min: possible network partition between nodes
+- Migration rolled back repeatedly: check source/destination connectivity and disk I/O saturation
+
+```bash
+# Check active migrations
+sqlite3 /var/lib/chv/controlplane.db \
+  "SELECT migration_id, vm_id, phase, bytes_transferred, dirty_blocks_remaining \
+   FROM migrations WHERE completed_at IS NULL;"
+
+# Watch migration progress
+watch -n5 'curl -s http://127.0.0.1:9901/metrics | grep chv_migration'
+```
+
+### VXLAN Overlay Troubleshooting
+
+| Symptom | Diagnostic | Resolution |
+|---------|-----------|------------|
+| Stale FDB entries | `bridge fdb show dev vxlan<VNI>` | Trigger reconcile: restart chv-agent on affected node |
+| VXLAN interface down | `ip link show \| grep vxlan` | Check `chv-nwd` logs; verify VTEP registration in DB |
+| VNI exhaustion | `sqlite3 /var/lib/chv/controlplane.db "SELECT count(*) FROM vni_allocations WHERE released_at IS NULL;"` | Release unused VNIs or expand VNI range |
+| Cross-node VM unreachable | `tcpdump -i <vtep_interface> udp port 4789` | Verify UDP/4789 not blocked by firewall between nodes |
+| MTU issues / fragmentation | `ping -M do -s 1400 <remote_vm_ip>` | Check `[overlay] inner_mtu` in nwd.toml; ensure outer MTU >= inner + 50 |
+
+```bash
+# Verify VTEP registry
+sqlite3 /var/lib/chv/controlplane.db \
+  "SELECT node_id, vtep_ip, vtep_port FROM vtep_entries;"
+
+# Check VNI allocation for a network
+sqlite3 /var/lib/chv/controlplane.db \
+  "SELECT network_id, vni, allocated_at FROM vni_allocations WHERE network_id = '<ID>';"
+
+# Force overlay reconciliation on a node
+systemctl restart chv-nwd
+```
+
+### eBPF Policy Troubleshooting
+
+| Symptom | Diagnostic | Resolution |
+|---------|-----------|------------|
+| Program load failure | `journalctl -u chv-nwd \| grep "eBPF"` | Verify `/usr/lib/chv/ebpf/policy_tc.o` exists; check kernel version >= 5.10 |
+| Rules not applied | `tc filter show dev <tap> egress` | Check that clsact qdisc is attached; verify rule_map entries |
+| Stats all zeros | `journalctl -u chv-nwd \| grep "stats_map"` | eBPF programs may be in stub mode (libbpf-rs not available) |
+| VM traffic blocked unexpectedly | Check `chv_ebpf_packets_total{action="denied"}` metric | Review security rules via API; check default_action in `[ebpf]` config |
+| Rate limiting too aggressive | Check `chv_ebpf_bytes_total` vs configured rate | Adjust rate_bps in the VM's rate limit policy |
+
+```bash
+# Check if eBPF programs are loaded on a tap interface
+tc filter show dev tap-<vm_short_id> egress
+
+# View eBPF stats (via metrics endpoint)
+curl -s http://127.0.0.1:9901/metrics | grep chv_ebpf
+
+# Verify eBPF object files exist
+ls -la /usr/lib/chv/ebpf/policy_tc.o
+```
+
+### Backup & Recovery for Multi-Node State
+
+The SQLite backup (see above) automatically includes all multi-node state:
+
+- **VTEP registry**: `vtep_entries` table (node-to-VTEP-IP mapping)
+- **VNI allocations**: `vni_allocations` table (network-to-VNI mapping with cooldown)
+- **Migration records**: `migrations` table (active and completed migrations)
+- **FDB state**: Reconstructed at recovery time from VTEP registry + VM placement
+
+**Recovery procedure for overlay state:**
+
+1. Restore SQLite backup (standard procedure above)
+2. Restart control plane: `sudo systemctl restart chv-controlplane`
+3. Restart agents on all nodes: `sudo systemctl restart chv-agent`
+4. Agents will re-register VTEPs and control plane will reconcile overlay state
+5. Verify: `curl -s http://127.0.0.1:8080/v1/nodes | jq '.[].vtep_ip'`
+
+**If overlay state is corrupt but VMs are running:**
+
+```bash
+# VMs continue running with stale FDB — connectivity may be intermittent
+# Force full overlay rebuild:
+sqlite3 /var/lib/chv/controlplane.db "DELETE FROM vtep_entries;"
+# Then restart all agents to re-register
+```
+
+---
+
 ## Security Hardening
 
 - Replace self-signed CA with organization PKI
