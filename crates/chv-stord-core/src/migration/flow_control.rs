@@ -79,6 +79,16 @@ impl SendWindow {
     pub fn ack_interval(&self) -> u32 {
         self.ack_interval
     }
+
+    /// Returns the sequence number of the last received Ack.
+    pub fn last_ack_sequence(&self) -> u32 {
+        self.last_ack_sequence
+    }
+
+    /// Returns the current number of unacknowledged blocks.
+    pub fn unacked_count(&self) -> u32 {
+        self.unacked
+    }
 }
 
 impl Default for SendWindow {

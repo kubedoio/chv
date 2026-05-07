@@ -473,7 +473,6 @@ dependencies = [
  "tokio",
  "tonic",
  "tower 0.5.3",
- "tower-http",
  "tracing",
  "x509-parser",
 ]

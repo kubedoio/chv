@@ -1578,16 +1578,6 @@ mod tests {
                 human_summary: "".to_string(),
             }))
         }
-        async fn disable_dirty_tracking(
-            &self,
-            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
-        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
-                status: "ok".to_string(),
-                error_code: "".to_string(),
-                human_summary: "".to_string(),
-            }))
-        }
     }
 
     struct MockNwdOk;

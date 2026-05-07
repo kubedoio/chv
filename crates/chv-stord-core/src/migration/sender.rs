@@ -26,6 +26,7 @@ pub struct MigrationSender<B: StorageBackend> {
     handle: String,
     block_size: u64,
     send_window: SendWindow,
+    last_acknowledged_offset: u64,
 }
 
 impl<B: StorageBackend> MigrationSender<B> {
@@ -36,6 +37,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             handle,
             block_size: DEFAULT_BLOCK_SIZE,
             send_window: SendWindow::new(),
+            last_acknowledged_offset: 0,
         }
     }
 
@@ -44,14 +46,9 @@ impl<B: StorageBackend> MigrationSender<B> {
         self
     }
 
-    pub fn with_send_window_size(mut self, size: u32) -> Self {
-        self.send_window = SendWindow::with_window_size(size);
-        self
-    }
-
     /// Returns the last acknowledged offset, useful for resumability.
     pub fn last_acknowledged_offset(&self) -> u64 {
-        self.send_window.last_acknowledged_offset()
+        self.last_acknowledged_offset
     }
 
     /// Start a migration to a peer node at the given gRPC endpoint.
@@ -82,7 +79,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             .await
             .map_err(|e| tonic::Status::internal(format!("failed to get volume size: {e}")))?;
 
-        // Send InitMigration with send_window_size for negotiation
+        // Send InitMigration
         let init_msg = MigrationMessage {
             payload: Some(migration_message::Payload::Init(InitMigration {
                 volume_id: self.volume_id.clone(),
@@ -90,7 +87,6 @@ impl<B: StorageBackend> MigrationSender<B> {
                 block_size: self.block_size as u32,
                 format: "raw".to_string(),
                 checksum_type: "crc32".to_string(),
-                send_window_size: self.send_window.window_size(),
             })),
         };
         tx.send(init_msg)
@@ -101,7 +97,6 @@ impl<B: StorageBackend> MigrationSender<B> {
             volume_id = %self.volume_id,
             volume_size,
             block_size = self.block_size,
-            send_window_size = self.send_window.window_size(),
             "sent InitMigration to peer"
         );
 
@@ -137,7 +132,7 @@ impl<B: StorageBackend> MigrationSender<B> {
         info!(
             volume_id = %self.volume_id,
             total_chunks,
-            last_ack_offset = self.send_window.last_acknowledged_offset(),
+            last_ack_offset = self.last_acknowledged_offset,
             "bulk copy phase complete"
         );
 
@@ -250,7 +245,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             self.send_window.sent();
 
             // Non-blocking check for acks to keep the window sliding
-            if self.send_window.should_check_ack() {
+            if self.send_window.should_request_ack() {
                 self.try_receive_ack(inbound).await?;
             }
 
@@ -276,7 +271,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             .map_err(|_| {
                 tonic::Status::deadline_exceeded(format!(
                     "timed out waiting for Ack (last_ack_offset={})",
-                    self.send_window.last_acknowledged_offset()
+                    self.last_acknowledged_offset
                 ))
             })?
             .map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?
@@ -324,8 +319,8 @@ impl<B: StorageBackend> MigrationSender<B> {
                     );
                     return Err(tonic::Status::internal("write error reported by receiver"));
                 }
-                self.send_window
-                    .acked_with_offset(ack.last_sequence_num, ack.last_offset);
+                self.send_window.acked(ack.last_sequence_num);
+                self.last_acknowledged_offset = ack.last_offset;
                 debug!(
                     sequence = ack.last_sequence_num,
                     offset = ack.last_offset,

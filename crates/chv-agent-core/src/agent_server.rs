@@ -1874,65 +1874,6 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         }))
     }
 
-    async fn disable_dirty_tracking(
-        &self,
-        req: Request<proto::DisableDirtyTrackingRequest>,
-    ) -> Result<Response<proto::AckResponse>, Status> {
-        let inner = req.into_inner();
-        let meta = inner
-            .meta
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("missing meta"))?;
-        let operation_id = meta.operation_id.clone();
-        let volume_id = inner.volume_id.clone();
-
-        tracing::info!(
-            volume_id = %volume_id,
-            operation_id = %operation_id,
-            "disable_dirty_tracking: forwarding to stord"
-        );
-
-        let stord_socket = self.stord_socket.clone();
-        match crate::daemon_clients::StordClient::connect(&stord_socket).await {
-            Ok(mut stord) => {
-                if let Err(e) = stord
-                    .disable_dirty_tracking(&volume_id, &operation_id)
-                    .await
-                {
-                    tracing::warn!(
-                        volume_id = %volume_id,
-                        operation_id = %operation_id,
-                        error = %e,
-                        "stord disable_dirty_tracking failed"
-                    );
-                    return Err(Status::internal(format!(
-                        "disable_dirty_tracking failed for volume {volume_id}: {e}"
-                    )));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    volume_id = %volume_id,
-                    operation_id = %operation_id,
-                    error = %e,
-                    "failed to connect to stord for disable_dirty_tracking"
-                );
-                return Err(Status::unavailable(format!("cannot connect to stord: {e}")));
-            }
-        }
-
-        let observed_generation = self.cache.lock().await.observed_generation.clone();
-        Ok(Response::new(proto::AckResponse {
-            result: Some(proto::ResultMeta {
-                operation_id,
-                status: "ok".to_string(),
-                node_observed_generation: observed_generation,
-                error_code: "".to_string(),
-                human_summary: format!("dirty tracking disabled for volume {}", volume_id),
-            }),
-        }))
-    }
-
     async fn update_overlay(
         &self,
         req: Request<proto::UpdateOverlayRequest>,
@@ -2352,17 +2293,6 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }
-
-        async fn disable_dirty_tracking(
-            &self,
-            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
-        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
-                status: "ok".to_string(),
-                error_code: "".to_string(),
-                human_summary: "".to_string(),
-            }))
-        }
     }
 
     #[derive(Clone, Default)]
@@ -2482,17 +2412,6 @@ mod tests {
             _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
-        }
-
-        async fn disable_dirty_tracking(
-            &self,
-            _req: Request<chv_stord_api::chv_stord_api::DisableDirtyTrackingRequest>,
-        ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
-            Ok(Response::new(chv_stord_api::chv_stord_api::Result {
-                status: "ok".to_string(),
-                error_code: "".to_string(),
-                human_summary: "".to_string(),
-            }))
         }
     }
 

@@ -178,11 +178,6 @@ pub trait LifecycleService: Send + Sync {
         request: proto::MigrateVmRequest,
     ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
 
-    async fn disable_dirty_tracking(
-        &self,
-        request: proto::DisableDirtyTrackingRequest,
-    ) -> Result<proto::AckResponse, ControlPlaneServiceError>;
-
     async fn update_overlay(
         &self,
         request: proto::UpdateOverlayRequest,
@@ -1658,36 +1653,6 @@ impl LifecycleService for LifecycleServiceImplementation {
         self.accept_operation(&operation_id).await?;
 
         Ok(Self::ok_ack(&operation_id, "migrate vm accepted"))
-    }
-
-    async fn disable_dirty_tracking(
-        &self,
-        request: proto::DisableDirtyTrackingRequest,
-    ) -> Result<proto::AckResponse, ControlPlaneServiceError> {
-        let meta = self.meta_from_request(request.meta)?;
-        let node_id = Self::parse_node_id(request.node_id)?;
-
-        let volume_id = ResourceId::new(request.volume_id.clone()).map_err(|e| {
-            ControlPlaneServiceError::InvalidArgument(format!("invalid volume_id: {}", e))
-        })?;
-
-        let (operation_id, _) = self
-            .create_operation_and_emit(
-                "DisableDirtyTracking",
-                node_id.clone(),
-                ResourceKind::Volume,
-                Some(volume_id),
-                &meta,
-                None,
-            )
-            .await?;
-
-        self.accept_operation(&operation_id).await?;
-
-        Ok(Self::ok_ack(
-            &operation_id,
-            "disable dirty tracking accepted",
-        ))
     }
 
     async fn update_overlay(

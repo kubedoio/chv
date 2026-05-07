@@ -131,6 +131,7 @@ impl BackupWorker {
                 let input = BackupJobCreateInput {
                     vm_id: schedule.vm_id.clone(),
                     volume_id: schedule.volume_id.clone(),
+                    schedule_id: Some(schedule.schedule_id.clone()),
                     status: "Pending".into(),
                     backup_type: "full".into(),
                     target_path: schedule.destination.clone(),
@@ -168,7 +169,7 @@ impl BackupWorker {
                 if schedule.retention_count > 0 {
                     match self
                         .backup_repo
-                        .prune_old_jobs_for_vm(&schedule.vm_id, schedule.retention_count)
+                        .prune_old_jobs_for_schedule(&schedule.schedule_id, schedule.retention_count)
                         .await
                     {
                         Ok(pruned) if pruned > 0 => {

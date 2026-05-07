@@ -174,10 +174,15 @@ pub async fn create_backup_job(
         .get("storage_backend")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let schedule_id = payload
+        .get("schedule_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let input = BackupJobCreateInput {
         vm_id,
         volume_id,
+        schedule_id,
         status: "Pending".into(),
         backup_type,
         target_path,
@@ -387,6 +392,7 @@ pub async fn execute_backup_job(
     let input = BackupJobCreateInput {
         vm_id: row.vm_id,
         volume_id: row.volume_id,
+        schedule_id: row.schedule_id,
         status: "Pending".into(),
         backup_type: row.backup_type,
         target_path: row.target_path,
@@ -911,6 +917,7 @@ pub async fn run_backup_job_api(
     let input = BackupJobCreateInput {
         vm_id: schedule.vm_id.clone(),
         volume_id: schedule.volume_id.clone(),
+        schedule_id: Some(job_id),
         status: "Running".into(),
         backup_type: "full".into(),
         target_path: schedule.destination.clone(),

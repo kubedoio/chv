@@ -115,11 +115,7 @@ impl MigrationConfig {
                 defaults.block_size_bytes
             },
             total_timeout_seconds: proto.total_timeout_seconds,
-            timeout_multiplier: if proto.timeout_multiplier > 0.0 {
-                proto.timeout_multiplier
-            } else {
-                defaults.timeout_multiplier
-            },
+            timeout_multiplier: defaults.timeout_multiplier,
         }
     }
 
@@ -130,7 +126,6 @@ impl MigrationConfig {
             max_convergence_rounds: self.max_convergence_rounds,
             block_size_bytes: self.block_size_bytes,
             total_timeout_seconds: self.total_timeout_seconds,
-            timeout_multiplier: self.timeout_multiplier,
         }
     }
 
@@ -161,12 +156,6 @@ impl MigrationConfig {
             } else if let Some(val) = part.strip_prefix("timeout=") {
                 if let Ok(v) = val.parse::<u32>() {
                     config.total_timeout_seconds = v;
-                }
-            } else if let Some(val) = part.strip_prefix("timeout_multiplier=") {
-                if let Ok(v) = val.parse::<f64>() {
-                    if v > 0.0 {
-                        config.timeout_multiplier = v;
-                    }
                 }
             }
         }
@@ -266,7 +255,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
 
     match source_last_seen {
         None => {
-            return Err(ChvError::PreconditionFailed {
+            return Err(ChvError::BadRequest {
                 reason: format!(
                     "source node '{}' has no observed state record (never reported)",
                     state.source_node_id
@@ -274,7 +263,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
             });
         }
         Some((None,)) => {
-            return Err(ChvError::PreconditionFailed {
+            return Err(ChvError::BadRequest {
                 reason: format!(
                     "source node '{}' has no last_seen_at timestamp",
                     state.source_node_id
@@ -294,7 +283,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
             let age_secs = (now - last_seen).num_seconds();
 
             if age_secs > SOURCE_NODE_HEARTBEAT_MAX_AGE_SECS {
-                return Err(ChvError::PreconditionFailed {
+                return Err(ChvError::BadRequest {
                     reason: format!(
                         "source node '{}' last heartbeat was {}s ago (max {}s), node may be unhealthy",
                         state.source_node_id, age_secs, SOURCE_NODE_HEARTBEAT_MAX_AGE_SECS
@@ -318,7 +307,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
 
     match dest_state {
         None => {
-            return Err(ChvError::PreconditionFailed {
+            return Err(ChvError::BadRequest {
                 reason: format!(
                     "destination node '{}' has no desired state record",
                     state.dest_node_id
@@ -328,7 +317,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
         Some((state_str, scheduling_paused)) => {
             match state_str.as_str() {
                 "Maintenance" | "Draining" | "Failed" | "Unreachable" => {
-                    return Err(ChvError::PreconditionFailed {
+                    return Err(ChvError::BadRequest {
                         reason: format!(
                             "destination node '{}' is in state '{}', not eligible to receive migrations",
                             state.dest_node_id, state_str
@@ -339,7 +328,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
             }
 
             if scheduling_paused {
-                return Err(ChvError::PreconditionFailed {
+                return Err(ChvError::BadRequest {
                     reason: format!(
                         "destination node '{}' has scheduling paused",
                         state.dest_node_id
@@ -366,7 +355,7 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
     })?;
 
     if let Some((existing_id, existing_phase)) = active_migration {
-        return Err(ChvError::PreconditionFailed {
+        return Err(ChvError::BadRequest {
             reason: format!(
                 "VM '{}' already has an active migration '{}' in phase '{}'",
                 state.vm_id, existing_id, existing_phase
@@ -776,89 +765,16 @@ async fn rollback_paused(
 ///
 /// This is best-effort: failures are logged as warnings but do not fail the overall operation.
 async fn disable_source_dirty_tracking(
-    pool: &StorePool,
-    node_client_pool: &NodeClientPool,
-    agent_socket_pattern: &str,
-    state: &MigrationState,
+    _pool: &StorePool,
+    _node_client_pool: &NodeClientPool,
+    _agent_socket_pattern: &str,
+    _state: &MigrationState,
 ) {
-    let volume_ids = match get_vm_volume_ids(pool, &state.vm_id).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            warn!(
-                migration_id = %state.migration_id,
-                vm_id = %state.vm_id,
-                error = %e,
-                "failed to query volumes for dirty tracking cleanup; \
-                 source volumes may retain dirty tracking overhead"
-            );
-            return;
-        }
-    };
-
-    if volume_ids.is_empty() {
-        return;
-    }
-
-    let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
-    let source_client = match node_client_pool
-        .get_or_connect(&state.source_node_id, &source_socket)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(
-                migration_id = %state.migration_id,
-                source_node = %state.source_node_id,
-                error = %e,
-                "failed to connect to source agent for dirty tracking cleanup; \
-                 source volumes may retain dirty tracking overhead"
-            );
-            return;
-        }
-    };
-
-    for volume_id in &volume_ids {
-        let mut client = source_client.clone();
-        match client
-            .disable_dirty_tracking(&state.source_node_id, volume_id, &state.operation_id, None)
-            .await
-        {
-            Ok(_) => {
-                info!(
-                    migration_id = %state.migration_id,
-                    volume_id = %volume_id,
-                    source_node = %state.source_node_id,
-                    "disabled dirty tracking on source volume"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    migration_id = %state.migration_id,
-                    volume_id = %volume_id,
-                    source_node = %state.source_node_id,
-                    error = %e,
-                    "failed to disable dirty tracking on source volume; \
-                     volume may retain ~15-20%% I/O overhead until manually cleared"
-                );
-            }
-        }
-    }
+    // Dirty tracking RPC has been removed from the agent protocol.
+    // This is a no-op placeholder retained for migration cleanup flow.
 }
 
 /// Query the volume IDs attached to a VM.
-async fn get_vm_volume_ids(pool: &StorePool, vm_id: &str) -> Result<Vec<String>, ChvError> {
-    let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ?")
-            .bind(vm_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to query volumes for VM {vm_id}: {e}"),
-            })?;
-
-    Ok(rows.into_iter().map(|(id,)| id).collect())
-}
-
 /// Wait for disk convergence by polling the migration record.
 /// The agent reports progress via telemetry updates to `bytes_transferred` and `total_bytes`.
 /// Convergence is achieved when dirty_blocks_remaining (reported by agent) drops below threshold,
@@ -1493,7 +1409,6 @@ mod tests {
             max_convergence_rounds: 15,
             block_size_bytes: 8_388_608,
             total_timeout_seconds: 7200,
-            timeout_multiplier: 2.0,
         };
         let config = MigrationConfig::from_proto(&proto_config);
 
@@ -1510,7 +1425,6 @@ mod tests {
             max_convergence_rounds: 0,
             block_size_bytes: 0,
             total_timeout_seconds: 0,
-            timeout_multiplier: 0.0,
         };
         let config = MigrationConfig::from_proto(&proto_config);
         let defaults = MigrationConfig::default();
