@@ -58,10 +58,10 @@
 					<StatusBadge label={row.role.label} tone={row.role.tone} />
 				{:else if column.key === 'actions'}
 					<div class="action-strip">
-						<button type="button" class="btn-icon" onclick={() => onedit?.(row as unknown as UserItem)} title="MODIFY_ENTITY">
+						<button type="button" class="btn-icon" onclick={() => onedit?.(row as unknown as UserItem)} title="MODIFY_ENTITY" aria-label="Edit User">
 							<Pencil size={12} />
 						</button>
-						<button type="button" class="btn-icon danger" onclick={() => ondelete?.(row as unknown as UserItem)} title="PURGE_ENTITY">
+						<button type="button" class="btn-icon danger" onclick={() => ondelete?.(row as unknown as UserItem)} title="PURGE_ENTITY" aria-label="Delete User">
 							<Trash2 size={12} />
 						</button>
 					</div>

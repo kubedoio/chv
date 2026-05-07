@@ -188,6 +188,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 								disabled={deletingId === row.image_id}
 								onclick={(e) => { e.preventDefault(); e.stopPropagation(); handleDelete(row.image_id, row.name, row.usage_count); }}
 								title="Purge Image"
+								aria-label="Delete Image"
 							>
 								<Trash2 size={13} />
 							</button>
