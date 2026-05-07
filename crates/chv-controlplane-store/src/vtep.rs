@@ -95,8 +95,10 @@ impl VtepRepository {
     /// VNI range: 1 to 16777214. Skips VNIs released less than 24 hours ago.
     pub async fn allocate_vni(&self, network_id: &str) -> Result<i32, StoreError> {
         // Find the next available VNI that is not currently allocated
-        // and was not released within the last 24 hours
-        let next_vni: Option<i32> = sqlx::query_scalar(
+        // and was not released within the last 24 hours.
+        // Try generate_series first (available in SQLite >= 3.8.3 with ENABLE_SERIES),
+        // fall back to max+1 approach if not available.
+        let next_vni: Option<i32> = match sqlx::query_scalar(
             r#"SELECT MIN(candidate.vni) FROM (
                    SELECT value AS vni FROM generate_series(1, 16777214)
                    WHERE value NOT IN (
@@ -108,15 +110,16 @@ impl VtepRepository {
                ) candidate"#,
         )
         .fetch_optional(&self.pool)
-        .await?
-        .flatten();
+        .await
+        {
+            Ok(result) => result.flatten(),
+            Err(_) => None, // generate_series not available, use fallback
+        };
 
-        // SQLite may not have generate_series. Use a simpler approach:
-        // Find the max allocated VNI and use max+1, or scan for gaps.
+        // Fallback: find max current VNI and use max+1.
         let vni = match next_vni {
             Some(v) => v,
             None => {
-                // Fallback: find max current VNI and increment
                 let max_vni: Option<i32> = sqlx::query_scalar(
                     r#"SELECT MAX(vni) FROM vni_allocations
                        WHERE released_at IS NULL

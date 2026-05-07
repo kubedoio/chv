@@ -39,6 +39,7 @@ impl OverlayManager {
 
     /// Called when a network is created with overlay_type = "vxlan".
     /// Allocates VNI and sends UpdateOverlay to all nodes with VMs on this network.
+    #[tracing::instrument(skip(self), fields(network_id = %network_id, operation_id = %operation_id))]
     pub async fn on_network_created(
         &self,
         network_id: &str,
@@ -89,6 +90,7 @@ impl OverlayManager {
 
     /// Called when a VM is placed on a network with VNI > 0.
     /// Sends UpdateOverlay to dest node and updates FDB on all peers.
+    #[tracing::instrument(skip(self), fields(network_id = %network_id, vm_mac = %vm_mac, dest_node_id = %dest_node_id, vni = vni))]
     pub async fn on_vm_placed(
         &self,
         network_id: &str,
@@ -167,6 +169,7 @@ impl OverlayManager {
     }
 
     /// Called when a VM is destroyed. Removes FDB entries from all peers.
+    #[tracing::instrument(skip(self), fields(network_id = %network_id))]
     pub async fn on_vm_removed(
         &self,
         network_id: &str,
@@ -225,6 +228,7 @@ impl OverlayManager {
 
     /// Called after migration completes. Re-points FDB and sends gratuitous ARP.
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip(self), fields(network_id = %network_id, vm_mac = %vm_mac, new_node_id = %new_node_id, vni = vni))]
     pub async fn on_vm_migrated(
         &self,
         network_id: &str,
@@ -292,6 +296,7 @@ impl OverlayManager {
     }
 
     /// Called when a network is destroyed. Releases VNI.
+    #[tracing::instrument(skip(self), fields(network_id = %network_id))]
     pub async fn on_network_deleted(&self, network_id: &str) -> Result<(), ChvError> {
         // Release VNI (24h cooldown enforced by store layer)
         self.vtep_repo
