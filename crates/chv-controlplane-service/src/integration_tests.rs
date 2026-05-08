@@ -379,6 +379,7 @@ async fn test_disk_convergence_dirty_block_decrease() {
             max_convergence_rounds: 5,
             block_size_bytes: 4_194_304,
             total_timeout_seconds: 0,
+            timeout_multiplier: 1.0,
         },
         bytes_transferred: 0,
         total_bytes: 0,
@@ -828,6 +829,7 @@ async fn test_performance_baseline_block_streaming_throughput() {
             max_convergence_rounds: 10,
             block_size_bytes: 4_194_304, // 4MB blocks
             total_timeout_seconds: 0,
+            timeout_multiplier: 1.0,
         },
         bytes_transferred: 0,
         total_bytes: 0,
@@ -1002,7 +1004,7 @@ async fn test_performance_baseline_total_migration_time() {
     assert_eq!(row.1, 10_737_418_240);
 
     // Verify calculated timeouts are reasonable for 10GB disk / 8GB memory
-    let timeouts = PhaseTimeouts::calculate(10, 8);
+    let timeouts = PhaseTimeouts::calculate(10, 8, 1.0);
     assert_eq!(timeouts.precopy_disk_secs, 600); // 10 * 60
     assert_eq!(timeouts.memory_migration_secs, 360); // 8 * 30 + 120
     assert!(timeouts.total_secs > 0);
@@ -1108,6 +1110,7 @@ async fn test_migration_config_roundtrip_via_correlation_id() {
         max_convergence_rounds: 7,
         block_size_bytes: 8_388_608,
         total_timeout_seconds: 5400,
+        timeout_multiplier: 1.0,
     };
 
     let correlation_id = format!(

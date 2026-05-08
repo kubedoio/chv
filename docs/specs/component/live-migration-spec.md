@@ -180,6 +180,41 @@ enum MigrationPhase {
 | migration.memory_migration_port_range | 49152-49200 | TCP port pool for CH migration sockets |
 | migration.total_timeout_multiplier | 1.5 | Multiplier on calculated timeout |
 
+## Implementation Status
+
+| Component | File | Status |
+|---|---|---|
+| MigrateVm operation dispatch | orchestrator.rs | DONE |
+| Phase 1: PreCopyDisk orchestration | migration.rs | DONE |
+| Phase 2: ConvergingDisk monitoring | migration.rs `wait_for_convergence` | PARTIAL — CP waits but stord never reports rounds |
+| Phase 3: MemoryMigration via CH | migration.rs | DONE |
+| Phase 4: Paused / final sync | migration.rs | PARTIAL — final dirty flush not triggered |
+| Phase 5: Completed / cleanup | migration.rs | DONE |
+| Rollback per phase | migration.rs | DONE |
+| Migration reaper (stale ops) | migration_reaper.rs | DONE |
+| Phase timeouts | migration.rs `PhaseTimeouts` | DONE |
+| MigrationProgress proto | control-plane-node.proto | DONE |
+| Source stord: bulk copy | sender.rs `bulk_copy()` | DONE |
+| Source stord: dirty sync rounds | sender.rs | **MISSING** — jumps from bulk copy to FinalSync |
+| Source stord: flow control | flow_control.rs | DONE |
+| Source stord: CRC32 per chunk | sender.rs | DONE |
+| Source stord: sparse detection | sender.rs `is_all_zeros()` | DONE |
+| Dest stord: receiver | receiver.rs | DONE |
+| Dest stord: CRC validation | receiver.rs | DONE |
+| mTLS on migration channel | sender.rs | **MISSING** — plain channel, no TLS config |
+| Dirty block tracking trait methods | StorageBackend trait | DONE |
+| Migration port allocation | agent-core/migration.rs | DONE (TOCTOU race present) |
+| Post-migration gARP | overlay.rs + executor.rs | DONE |
+| FDB update after migration | overlay.rs | DONE |
+
+### Critical Implementation Gaps
+
+1. **Dirty sync rounds (Phase 3 of disk protocol)**: `MigrationSender.run()` calls `bulk_copy()` then immediately sends `FinalSync`. The `RoundStart`/`RoundComplete` proto messages exist but are never sent. Without dirty rounds, any writes to the source volume during bulk copy are lost on the destination.
+
+2. **mTLS on migration channel**: `MigrationSender.start_migration()` uses `Channel::from_shared` with no TLS configuration. The spec requires mTLS mandatory, validated against CP-issued CA.
+
+3. **Final dirty flush during Paused phase**: The FinalSync message is sent with `vm_paused: false` and no dirty blocks are re-read. The spec requires the VM to be paused and all remaining dirty blocks flushed before finalization.
+
 ## Non-goals
 - Automatic retry of failed migrations (operator must review)
 - Multi-VM batch migration (one at a time per orchestrator)

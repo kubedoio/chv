@@ -94,6 +94,8 @@ impl VtepRepository {
     /// Allocate the next free VNI for a network.
     /// VNI range: 1 to 16777214. Skips VNIs released less than 24 hours ago.
     pub async fn allocate_vni(&self, network_id: &str) -> Result<i32, StoreError> {
+        let mut tx = self.pool.begin().await?;
+
         // Find the next available VNI that is not currently allocated
         // and was not released within the last 24 hours.
         // Try generate_series first (available in SQLite >= 3.8.3 with ENABLE_SERIES),
@@ -109,7 +111,7 @@ impl VtepRepository {
                    LIMIT 1
                ) candidate"#,
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         {
             Ok(result) => result.flatten(),
@@ -125,7 +127,7 @@ impl VtepRepository {
                        WHERE released_at IS NULL
                           OR released_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')"#,
                 )
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await?
                 .flatten();
 
@@ -145,15 +147,17 @@ impl VtepRepository {
         )
         .bind(vni)
         .bind(network_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         // Also update the networks table
         sqlx::query("UPDATE networks SET vni = ? WHERE network_id = ?")
             .bind(vni)
             .bind(network_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
 
         Ok(vni)
     }

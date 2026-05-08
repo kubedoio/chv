@@ -1,6 +1,7 @@
 use chv_config::load_stord_config;
 use chv_observability::init_logger;
 use chv_stord_backends::LocalFileBackend;
+use chv_stord_core::store::SessionStore;
 use chv_stord_core::StorageServer;
 use std::path::PathBuf;
 use tokio::signal::unix::{signal, SignalKind};
@@ -15,12 +16,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("chv-stord starting");
 
+    let db_path = config.runtime_dir.join("stord.db");
+    let store = SessionStore::new(&db_path)?;
+
     let backend = LocalFileBackend::new(config.runtime_dir.clone());
     let server = StorageServer::new(
         backend,
         chv_observability::Metrics::new(),
         config.backend_allowlist,
-        None,
+        Some(store),
     );
 
     let socket_path = config.socket_path.clone();
@@ -28,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     tokio::select! {
-        result = server.serve(&config.socket_path, None) => {
+        result = server.serve(&config.socket_path, Some(&db_path)) => {
             result?;
         }
         _ = sigterm.recv() => {

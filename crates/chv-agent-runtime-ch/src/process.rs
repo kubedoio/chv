@@ -898,6 +898,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // Poll vm.info for up to 10s waiting for the VM to reach a
             // non-running terminal state (Shutdown or Created).
             let start = std::time::Instant::now();
+            let mut graceful_shutdown = false;
             while start.elapsed() < std::time::Duration::from_secs(10) {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if let Ok((200, body)) =
@@ -907,13 +908,38 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                         let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
                         if state == "Shutdown" || state == "Created" {
+                            graceful_shutdown = true;
                             break;
                         }
                     }
                 } else {
                     // CH process disappeared — treat as stopped
+                    graceful_shutdown = true;
                     break;
                 }
+            }
+
+            if !graceful_shutdown {
+                tracing::warn!(vm_id = %vm_id, "VM did not shut down gracefully within timeout, force-killing");
+                let log_path = {
+                    let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(mut proc) = map.remove(vm_id) {
+                        if let Ok(mut sb) = proc.pty_scrollback.lock() {
+                            sb.clear();
+                        }
+                        let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
+                        let _ = proc.child.start_kill();
+                        let _ = proc.child.try_wait();
+                        log_path
+                    } else {
+                        None
+                    }
+                };
+                if let Some(path) = log_path {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    info!(vm_id = %vm_id, path = %path.display(), "removed console.log on force stop after graceful timeout");
+                }
+                return Ok(());
             }
 
             // Clear console caches after graceful shutdown. The VmProcess stays

@@ -569,19 +569,27 @@ impl ReconcileService for ReconcileServiceImplementation {
         let firewall_rules_json = spec
             .firewall_rules
             .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_default());
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| ControlPlaneServiceError::Internal(format!("failed to serialize firewall_rules: {e}")))?;
         let nat_rules_json = spec
             .nat_rules
             .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_default());
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| ControlPlaneServiceError::Internal(format!("failed to serialize nat_rules: {e}")))?;
         let dhcp_scope_json = spec
             .dhcp_scope
             .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_default());
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| ControlPlaneServiceError::Internal(format!("failed to serialize dhcp_scope: {e}")))?;
         let dns_scope_json = spec
             .dns_scope
             .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_default());
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| ControlPlaneServiceError::Internal(format!("failed to serialize dns_scope: {e}")))?;
 
         if let Err(e) = self
             .desired_state_repo

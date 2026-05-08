@@ -1,7 +1,8 @@
 use crate::migration::flow_control::SendWindow;
 use chv_stord_api::chv_stord_api::{
     migration_message, storage_migration_service_client::StorageMigrationServiceClient, AckStatus,
-    BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage,
+    BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
+    RoundStart,
 };
 use chv_stord_backends::StorageBackend;
 use std::sync::Arc;
@@ -10,6 +11,8 @@ use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
 const DEFAULT_BLOCK_SIZE: u64 = 4_194_304; // 4 MB
+const DIRTY_THRESHOLD: u64 = 1024;
+const MAX_DIRTY_ROUNDS: u32 = 10;
 
 /// Drives the source side of a storage migration.
 ///
@@ -128,12 +131,23 @@ impl<B: StorageBackend> MigrationSender<B> {
 
         // Bulk copy phase
         info!(volume_id = %self.volume_id, "starting bulk copy phase");
-        let total_chunks = self.bulk_copy(&tx, &mut inbound, volume_size).await?;
+        let mut sequence_num = self.bulk_copy(&tx, &mut inbound, volume_size).await?;
         info!(
             volume_id = %self.volume_id,
-            total_chunks,
+            total_chunks = sequence_num,
             last_ack_offset = self.last_acknowledged_offset,
             "bulk copy phase complete"
+        );
+
+        // Iterative dirty sync rounds: re-send blocks that were written during bulk copy
+        info!(volume_id = %self.volume_id, "starting iterative dirty sync rounds");
+        let dirty_chunks = self
+            .dirty_sync_rounds(&tx, &mut inbound, &mut sequence_num)
+            .await?;
+        info!(
+            volume_id = %self.volume_id,
+            dirty_chunks,
+            "dirty sync rounds complete"
         );
 
         // Send FinalSync (VM is paused at this point)
@@ -151,7 +165,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             payload: Some(migration_message::Payload::FinalizeComplete(
                 FinalizeComplete {
                     total_bytes: volume_size,
-                    total_chunks: total_chunks as u64,
+                    total_chunks: sequence_num as u64,
                     volume_checksum: Vec::new(),
                 },
             )),
@@ -260,6 +274,164 @@ impl<B: StorageBackend> MigrationSender<B> {
         Ok(sequence_num)
     }
 
+    /// Perform iterative dirty sync rounds to transfer blocks written during bulk copy.
+    ///
+    /// Each round fetches the dirty bitmap, sends dirty blocks, waits for acknowledgment,
+    /// then clears the bitmap. Repeats until dirty count drops below DIRTY_THRESHOLD
+    /// or MAX_DIRTY_ROUNDS is reached.
+    async fn dirty_sync_rounds(
+        &mut self,
+        tx: &mpsc::Sender<MigrationMessage>,
+        inbound: &mut tonic::Streaming<MigrationMessage>,
+        sequence_num: &mut u32,
+    ) -> Result<u32, tonic::Status> {
+        let mut total_dirty_chunks: u32 = 0;
+
+        for round in 1..=MAX_DIRTY_ROUNDS {
+            // Step 1: Get the dirty bitmap
+            let bitmap = self
+                .backend
+                .get_dirty_bitmap(&self.volume_id, &self.handle)
+                .await
+                .map_err(|e| {
+                    tonic::Status::internal(format!("get_dirty_bitmap failed: {e}"))
+                })?;
+
+            // Convert bitmap to list of dirty block offsets
+            let dirty_offsets = bitmap_to_offsets(&bitmap, self.block_size);
+            let dirty_block_count = dirty_offsets.len() as u64;
+
+            info!(
+                volume_id = %self.volume_id,
+                round,
+                dirty_block_count,
+                "dirty sync round starting"
+            );
+
+            // Check termination condition: if below threshold, we're done
+            if dirty_block_count == 0 {
+                info!(
+                    volume_id = %self.volume_id,
+                    round,
+                    "no dirty blocks remaining, skipping final round"
+                );
+                break;
+            }
+
+            // Step 2: Send RoundStart
+            let round_start_msg = MigrationMessage {
+                payload: Some(migration_message::Payload::RoundStart(RoundStart {
+                    round_num: round,
+                    dirty_block_count,
+                })),
+            };
+            tx.send(round_start_msg).await.map_err(|_| {
+                tonic::Status::internal("failed to send RoundStart: channel closed")
+            })?;
+
+            // Step 3: Send each dirty block
+            let mut blocks_sent: u64 = 0;
+            let mut bytes_sent: u64 = 0;
+
+            for &offset in &dirty_offsets {
+                // Wait if send window is full
+                while !self.send_window.can_send() {
+                    self.wait_for_ack(inbound).await?;
+                }
+
+                let data = self
+                    .backend
+                    .read_block(&self.volume_id, &self.handle, offset, self.block_size)
+                    .await
+                    .map_err(|e| {
+                        tonic::Status::internal(format!(
+                            "read_block failed at offset {offset} during dirty sync: {e}"
+                        ))
+                    })?;
+
+                let is_sparse = is_all_zeros(&data);
+                let crc32 = if is_sparse { 0 } else { crc32fast::hash(&data) };
+                let chunk_data = if is_sparse { Vec::new() } else { data };
+
+                *sequence_num += 1;
+                bytes_sent += chunk_data.len() as u64;
+
+                let chunk_msg = MigrationMessage {
+                    payload: Some(migration_message::Payload::Chunk(BlockChunk {
+                        offset,
+                        data: chunk_data,
+                        crc32,
+                        is_sparse,
+                        sequence_num: *sequence_num,
+                    })),
+                };
+
+                tx.send(chunk_msg).await.map_err(|_| {
+                    tonic::Status::internal("failed to send dirty BlockChunk: channel closed")
+                })?;
+
+                self.send_window.sent();
+                blocks_sent += 1;
+
+                // Non-blocking check for acks to keep the window sliding
+                if self.send_window.should_request_ack() {
+                    self.try_receive_ack(inbound).await?;
+                }
+            }
+
+            // Drain all remaining in-flight acks for this round
+            while self.send_window.last_ack_sequence() < *sequence_num {
+                self.wait_for_ack(inbound).await?;
+            }
+
+            // Step 4: Send RoundComplete
+            let round_complete_msg = MigrationMessage {
+                payload: Some(migration_message::Payload::RoundComplete(RoundComplete {
+                    round_num: round,
+                    blocks_sent,
+                    bytes_sent,
+                })),
+            };
+            tx.send(round_complete_msg).await.map_err(|_| {
+                tonic::Status::internal("failed to send RoundComplete: channel closed")
+            })?;
+
+            // Step 5: Wait for round acknowledgment from the receiver
+            let round_ack_msg = inbound
+                .message()
+                .await?
+                .ok_or_else(|| {
+                    tonic::Status::internal("stream closed before round acknowledgment")
+                })?;
+            self.handle_inbound_message(round_ack_msg)?;
+
+            // Step 6: Clear the dirty bitmap for next round
+            self.backend
+                .clear_dirty_bitmap(&self.volume_id, &self.handle)
+                .await
+                .map_err(|e| {
+                    tonic::Status::internal(format!("clear_dirty_bitmap failed: {e}"))
+                })?;
+
+            total_dirty_chunks += blocks_sent as u32;
+
+            info!(
+                volume_id = %self.volume_id,
+                round,
+                blocks_sent,
+                bytes_sent,
+                "dirty sync round complete"
+            );
+
+            // Step 7: Check if we should stop
+            if dirty_block_count < DIRTY_THRESHOLD {
+                break;
+            }
+        }
+
+        Ok(total_dirty_chunks)
+    }
+
     /// Block until an Ack is received from the inbound stream.
     async fn wait_for_ack(
         &mut self,
@@ -365,4 +537,24 @@ pub async fn start_migration_to_peer<B: StorageBackend>(
 /// Check if a byte slice is all zeros (indicates a sparse block).
 fn is_all_zeros(data: &[u8]) -> bool {
     data.iter().all(|&b| b == 0)
+}
+
+/// Convert a dirty bitmap into a vec of block byte-offsets.
+///
+/// The bitmap uses one bit per block: bit N of byte M represents block index `M*8 + N`.
+/// Each block offset is computed as `block_index * block_size`.
+fn bitmap_to_offsets(bitmap: &[u8], block_size: u64) -> Vec<u64> {
+    let mut offsets = Vec::new();
+    for (byte_idx, &byte) in bitmap.iter().enumerate() {
+        if byte == 0 {
+            continue;
+        }
+        for bit in 0..8u32 {
+            if byte & (1 << bit) != 0 {
+                let block_index = (byte_idx as u64) * 8 + bit as u64;
+                offsets.push(block_index * block_size);
+            }
+        }
+    }
+    offsets
 }

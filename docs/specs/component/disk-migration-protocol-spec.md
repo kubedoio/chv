@@ -294,3 +294,34 @@ enum ErrorCode {
 - Stream break during dirty sync: restart current round
 - Stream break during finalize: CP decides — retry finalize or abort entire migration
 - stord crash during receive: on restart, delete incomplete dest volume, report to CP
+
+## Implementation Status
+
+| Protocol Phase | File | Status |
+|---|---|---|
+| Phase 1: Handshake (InitMigration/MigrationReady) | sender.rs, receiver.rs | DONE |
+| Phase 2: Bulk Copy (sequential block streaming) | sender.rs `bulk_copy()` | DONE |
+| Phase 2: Flow control (SendWindow, Ack) | flow_control.rs | DONE |
+| Phase 2: CRC32 per chunk | sender.rs, receiver.rs | DONE |
+| Phase 2: Sparse block detection | sender.rs `is_all_zeros()` | DONE |
+| Phase 2: Resumability from last Ack | sender.rs `last_acknowledged_offset` | DONE |
+| **Phase 3: Dirty sync rounds** | sender.rs | **MISSING** |
+| Phase 3: RoundStart/RoundComplete messages | proto defined, never sent | **MISSING** |
+| Phase 3: Bitmap read → send dirty → clear → repeat | not implemented | **MISSING** |
+| Phase 3: Convergence monitoring | CP `wait_for_convergence` exists, never receives data | **PARTIAL** |
+| Phase 4: FinalSync with vm_paused=true | sender.rs sends vm_paused=false | **INCORRECT** |
+| Phase 4: Final dirty block flush | not implemented | **MISSING** |
+| Phase 4: FinalizeComplete with checksum | sender.rs sends empty checksum | **PARTIAL** |
+| Phase 4: FinalizeAck verification | receiver.rs | DONE |
+| Backpressure handling | proto exists, sender ignores | **MISSING** |
+| mTLS on stream connection | sender.rs uses plain channel | **MISSING** |
+| Retransmit on CRC NACK | receiver NACKs, sender retransmits | DONE |
+
+### Implementation Priority
+
+The dirty sync rounds (Phase 3) are the highest priority gap. Without them:
+- All writes to the source volume during bulk copy are lost on the destination
+- The `wait_for_convergence` function in the CP never converges (no progress reported)
+- The FinalSync phase has nothing meaningful to flush (no bitmap tracking active writes)
+
+This is a **data loss bug** in production for any VM with active I/O during migration.
