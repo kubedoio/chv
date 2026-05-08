@@ -169,7 +169,10 @@ impl BackupWorker {
                 if schedule.retention_count > 0 {
                     match self
                         .backup_repo
-                        .prune_old_jobs_for_schedule(&schedule.schedule_id, schedule.retention_count)
+                        .prune_old_jobs_for_schedule(
+                            &schedule.schedule_id,
+                            schedule.retention_count,
+                        )
                         .await
                     {
                         Ok(pruned) if pruned > 0 => {

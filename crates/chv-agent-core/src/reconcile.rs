@@ -805,9 +805,8 @@ impl Reconciler {
                         );
                     }
                     if let Some(h) = handle {
-                        if let Err(cleanup_err) = stord
-                            .close_volume(vol_id, h, Some(&cleanup_op_id))
-                            .await
+                        if let Err(cleanup_err) =
+                            stord.close_volume(vol_id, h, Some(&cleanup_op_id)).await
                         {
                             tracing::warn!(
                                 volume_id = %vol_id,

@@ -55,10 +55,7 @@ impl BffClient {
         format!("{}{}", self.base_url, path)
     }
 
-    fn apply_auth(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder {
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(ref token) = self.token {
             builder.header("Authorization", format!("Bearer {token}"))
         } else {
@@ -66,12 +63,12 @@ impl BffClient {
         }
     }
 
-    async fn handle_response(
-        &self,
-        resp: reqwest::Response,
-    ) -> Result<Value, CliError> {
+    async fn handle_response(&self, resp: reqwest::Response) -> Result<Value, CliError> {
         let status = resp.status().as_u16();
-        let body = resp.text().await.map_err(|e| CliError::Http(e.to_string()))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| CliError::Http(e.to_string()))?;
 
         if status >= 400 {
             let message = serde_json::from_str::<Value>(&body)
@@ -91,28 +88,40 @@ impl BffClient {
     pub async fn get(&self, path: &str) -> Result<Value, CliError> {
         let req = self.http.get(self.url(path));
         let req = self.apply_auth(req);
-        let resp = req.send().await.map_err(|e| CliError::Http(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CliError::Http(e.to_string()))?;
         self.handle_response(resp).await
     }
 
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value, CliError> {
         let req = self.http.post(self.url(path)).json(body);
         let req = self.apply_auth(req);
-        let resp = req.send().await.map_err(|e| CliError::Http(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CliError::Http(e.to_string()))?;
         self.handle_response(resp).await
     }
 
     pub async fn patch(&self, path: &str, body: &Value) -> Result<Value, CliError> {
         let req = self.http.patch(self.url(path)).json(body);
         let req = self.apply_auth(req);
-        let resp = req.send().await.map_err(|e| CliError::Http(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CliError::Http(e.to_string()))?;
         self.handle_response(resp).await
     }
 
     pub async fn delete(&self, path: &str) -> Result<Value, CliError> {
         let req = self.http.delete(self.url(path));
         let req = self.apply_auth(req);
-        let resp = req.send().await.map_err(|e| CliError::Http(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CliError::Http(e.to_string()))?;
         self.handle_response(resp).await
     }
 }

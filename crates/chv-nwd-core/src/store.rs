@@ -83,6 +83,7 @@ impl TopologyStore {
                     gateway_ip: row.get(5)?,
                     runtime_status: row.get(6)?,
                     vni: vni_raw.map(|v| v as u32),
+                    peer_vteps: Vec::new(),
                 })
             })
             .map_err(|e| ChvError::Internal {
@@ -112,6 +113,7 @@ mod tests {
             gateway_ip: "10.0.0.1".to_string(),
             runtime_status: "ensured".to_string(),
             vni: None,
+            peer_vteps: Vec::new(),
         }
     }
 

@@ -361,9 +361,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                 .backend
                 .get_dirty_bitmap(&self.volume_id, &self.handle)
                 .await
-                .map_err(|e| {
-                    tonic::Status::internal(format!("get_dirty_bitmap failed: {e}"))
-                })?;
+                .map_err(|e| tonic::Status::internal(format!("get_dirty_bitmap failed: {e}")))?;
 
             // Convert bitmap to list of dirty block offsets
             let dirty_offsets = bitmap_to_offsets(&bitmap, self.block_size);
@@ -465,21 +463,16 @@ impl<B: StorageBackend> MigrationSender<B> {
             })?;
 
             // Step 5: Wait for round acknowledgment from the receiver
-            let round_ack_msg = inbound
-                .message()
-                .await?
-                .ok_or_else(|| {
-                    tonic::Status::internal("stream closed before round acknowledgment")
-                })?;
+            let round_ack_msg = inbound.message().await?.ok_or_else(|| {
+                tonic::Status::internal("stream closed before round acknowledgment")
+            })?;
             self.handle_inbound_message(round_ack_msg)?;
 
             // Step 6: Clear the dirty bitmap for next round
             self.backend
                 .clear_dirty_bitmap(&self.volume_id, &self.handle)
                 .await
-                .map_err(|e| {
-                    tonic::Status::internal(format!("clear_dirty_bitmap failed: {e}"))
-                })?;
+                .map_err(|e| tonic::Status::internal(format!("clear_dirty_bitmap failed: {e}")))?;
 
             total_dirty_chunks += blocks_sent as u32;
 

@@ -24,7 +24,10 @@ struct GenericRow {
 }
 
 pub fn print_json(value: &Value) {
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_default()
+    );
 }
 
 pub fn print_value(value: &Value, format: &OutputFormat) {
@@ -55,7 +58,10 @@ pub fn print_value(value: &Value, format: &OutputFormat) {
 pub fn print_list(items: &[Value], columns: &[&str], format: &OutputFormat) {
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(items).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(items).unwrap_or_default()
+            );
         }
         OutputFormat::Yaml => {
             for item in items {

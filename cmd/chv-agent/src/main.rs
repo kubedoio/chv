@@ -2,6 +2,7 @@ use chv_agent_core::{
     agent_server::AgentServer,
     cache::{NodeCache, PendingControlPlaneMessage},
     config::{load_agent_config, AgentConfig},
+    connectivity::ConnectivityTracker,
     console_server::ConsoleServer,
     control_plane::ControlPlaneClient,
     daemon_clients::{NwdClient, StordClient},
@@ -112,7 +113,9 @@ async fn enqueue_pending_message(
     cache: &Arc<tokio::sync::Mutex<NodeCache>>,
     cache_path: &Path,
     message: PendingControlPlaneMessage,
+    connectivity: &mut ConnectivityTracker,
 ) {
+    connectivity.record_message_deferred();
     let mut cache = cache.lock().await;
     cache.enqueue_pending_message(message);
     if let Err(e) = cache.save(cache_path).await {
@@ -145,7 +148,9 @@ async fn send_or_defer_control_plane_message(
     config: &AgentConfig,
     telemetry: &mut Option<ControlPlaneClient>,
     message: PendingControlPlaneMessage,
+    connectivity: &mut ConnectivityTracker,
 ) {
+    let now = now_unix_ms();
     if telemetry.is_none() {
         match connect_control_plane(cache, config).await {
             Ok(mut client) => {
@@ -153,28 +158,35 @@ async fn send_or_defer_control_plane_message(
                 if let Err(e) = flush_pending_messages(cache, cache_path, &mut client).await {
                     warn!(error = %e, "failed to flush deferred control-plane messages");
                     *telemetry = None;
-                    enqueue_pending_message(cache, cache_path, message).await;
+                    connectivity.record_failure(now);
+                    enqueue_pending_message(cache, cache_path, message, connectivity).await;
                     return;
                 }
+                connectivity.record_success(now);
                 *telemetry = Some(client);
             }
             Err(e) => {
                 warn!(error = %e, "control plane unavailable; deferring report");
-                enqueue_pending_message(cache, cache_path, message).await;
+                connectivity.record_failure(now);
+                enqueue_pending_message(cache, cache_path, message, connectivity).await;
                 return;
             }
         }
     }
 
     let Some(client) = telemetry.as_mut() else {
-        enqueue_pending_message(cache, cache_path, message).await;
+        connectivity.record_failure(now);
+        enqueue_pending_message(cache, cache_path, message, connectivity).await;
         return;
     };
 
     if let Err(e) = client.dispatch_pending_message(&message).await {
         warn!(error = %e, "failed to send control-plane message, deferring");
         *telemetry = None;
-        enqueue_pending_message(cache, cache_path, message).await;
+        connectivity.record_failure(now);
+        enqueue_pending_message(cache, cache_path, message, connectivity).await;
+    } else {
+        connectivity.record_success(now);
     }
 }
 
@@ -475,6 +487,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Connectivity tracker — makes partition-autonomous operation explicit and observable.
+    let mut connectivity = ConnectivityTracker::new();
+    if telemetry.is_some() {
+        connectivity.record_success(now_unix_ms());
+    }
+
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .unwrap_or_else(|_| "unknown".to_string())
         .trim()
@@ -643,6 +661,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &config,
                     &mut telemetry,
                     PendingControlPlaneMessage::event(event),
+                    &mut connectivity,
                 )
                 .await;
             }
@@ -682,6 +701,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &config,
                         &mut telemetry,
                         PendingControlPlaneMessage::event(event),
+                        &mut connectivity,
                     )
                     .await;
                 }
@@ -717,6 +737,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config,
             &mut telemetry,
             PendingControlPlaneMessage::node_state(report),
+            &mut connectivity,
         )
         .await;
 
@@ -756,6 +777,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config,
                 &mut telemetry,
                 PendingControlPlaneMessage::vm_state(counters),
+                &mut connectivity,
             )
             .await;
         }
@@ -774,14 +796,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect()
         };
         for (volume_id, observed_generation) in volume_generations {
-            let vol_report =
-                reporter.volume_state_report(&volume_id, "Attached", observed_generation.as_str(), "Healthy");
+            let vol_report = reporter.volume_state_report(
+                &volume_id,
+                "Attached",
+                observed_generation.as_str(),
+                "Healthy",
+            );
             send_or_defer_control_plane_message(
                 &cache,
                 &config.cache_path,
                 &config,
                 &mut telemetry,
                 PendingControlPlaneMessage::volume_state(vol_report),
+                &mut connectivity,
             )
             .await;
         }
@@ -795,13 +822,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect()
         };
         for (network_id, generation) in network_fragments {
-            let net_report = reporter.network_state_report(&network_id, "Ready", &generation, "Healthy");
+            let net_report =
+                reporter.network_state_report(&network_id, "Ready", &generation, "Healthy");
             send_or_defer_control_plane_message(
                 &cache,
                 &config.cache_path,
                 &config,
                 &mut telemetry,
                 PendingControlPlaneMessage::network_state(net_report),
+                &mut connectivity,
             )
             .await;
         }
@@ -830,6 +859,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config,
                 &mut telemetry,
                 PendingControlPlaneMessage::node_inventory(inv_req),
+                &mut connectivity,
             )
             .await;
 
@@ -852,6 +882,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config,
                 &mut telemetry,
                 PendingControlPlaneMessage::service_versions(ver_req),
+                &mut connectivity,
             )
             .await;
         }
@@ -882,6 +913,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ms.tick_count = tick_count;
             ms.reconcile_failures = consecutive_reconcile_failures;
             ms.health_failures = consecutive_health_failures;
+            let cp_snapshot = connectivity.metrics_snapshot(now_unix_ms());
+            ms.cp_connectivity_state = cp_snapshot.state;
+            ms.cp_disconnected_duration_ms = cp_snapshot.disconnected_duration_ms;
+            ms.cp_consecutive_failures = cp_snapshot.consecutive_failures;
+            ms.cp_total_deferred_messages = cp_snapshot.total_deferred_messages;
         }
     }
 

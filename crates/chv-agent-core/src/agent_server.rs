@@ -1851,9 +1851,13 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             }
             crate::migration::MigrationRole::Destination => {
                 // Destination agent: open receive-migration socket.
-                let (port, _listener) = crate::migration::allocate_migration_port().map_err(|e| {
-                    Status::resource_exhausted(format!("failed to allocate migration port: {}", e))
-                })?;
+                let (port, _listener) =
+                    crate::migration::allocate_migration_port().map_err(|e| {
+                        Status::resource_exhausted(format!(
+                            "failed to allocate migration port: {}",
+                            e
+                        ))
+                    })?;
                 let receiver_url = crate::migration::build_receiver_url(port);
 
                 tracing::info!(

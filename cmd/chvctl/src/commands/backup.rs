@@ -33,7 +33,14 @@ pub async fn execute(
                 .unwrap_or_default();
             output::print_list(
                 &items,
-                &["backup_id", "vm_id", "label", "size", "status", "created_at"],
+                &[
+                    "backup_id",
+                    "vm_id",
+                    "label",
+                    "size",
+                    "status",
+                    "created_at",
+                ],
                 format,
             );
         }

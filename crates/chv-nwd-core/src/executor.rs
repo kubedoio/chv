@@ -259,10 +259,7 @@ impl LinuxExecutor {
         };
 
         // Parse "default via X.X.X.X dev eth0" to get the device name
-        let dev = output
-            .split_whitespace()
-            .skip_while(|w| *w != "dev")
-            .nth(1);
+        let dev = output.split_whitespace().skip_while(|w| *w != "dev").nth(1);
 
         let dev = match dev {
             Some(d) => d.to_string(),
