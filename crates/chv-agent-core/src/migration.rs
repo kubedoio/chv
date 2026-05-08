@@ -38,11 +38,13 @@ pub fn determine_role(
 }
 
 /// Allocate a port from the migration port range (49152-49200).
-/// Tries each port in the range until one is available.
-pub fn allocate_migration_port() -> Result<u16, &'static str> {
+/// Returns the bound TcpListener which holds the port reservation.
+/// The caller should extract the port with `.local_addr()` and pass the
+/// listener or drop it only when ready to bind the actual migration socket.
+pub fn allocate_migration_port() -> Result<(u16, TcpListener), &'static str> {
     for port in MIGRATION_PORT_RANGE_START..=MIGRATION_PORT_RANGE_END {
-        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
-            return Ok(port);
+        if let Ok(listener) = TcpListener::bind(("0.0.0.0", port)) {
+            return Ok((port, listener));
         }
     }
     Err("no available migration port in range 49152-49200")
@@ -213,9 +215,11 @@ mod tests {
         // This test may fail if all ports in range are busy, but should work in CI.
         let result = allocate_migration_port();
         assert!(result.is_ok());
-        let port = result.unwrap();
+        let (port, listener) = result.unwrap();
         assert!(port >= MIGRATION_PORT_RANGE_START);
         assert!(port <= MIGRATION_PORT_RANGE_END);
+        // The listener holds the port open — verify it matches
+        assert_eq!(listener.local_addr().unwrap().port(), port);
     }
 
     #[test]

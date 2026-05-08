@@ -7,12 +7,29 @@ use chv_stord_api::chv_stord_api::{
 use chv_stord_backends::StorageBackend;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tonic::transport::Channel;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{debug, error, info, warn};
 
 const DEFAULT_BLOCK_SIZE: u64 = 4_194_304; // 4 MB
 const DIRTY_THRESHOLD: u64 = 1024;
 const MAX_DIRTY_ROUNDS: u32 = 10;
+
+/// TLS configuration for mTLS connections to the migration destination.
+///
+/// When provided, the sender will validate the destination's certificate against
+/// the CA and present its own node certificate, as required by the disk migration
+/// protocol spec.
+#[derive(Clone)]
+pub struct MigrationTlsConfig {
+    /// PEM-encoded client certificate (node cert issued by CP CA).
+    pub cert_pem: Vec<u8>,
+    /// PEM-encoded client private key.
+    pub key_pem: Vec<u8>,
+    /// PEM-encoded CA certificate to validate the destination.
+    pub ca_pem: Vec<u8>,
+    /// Expected domain name of the destination (for certificate validation).
+    pub dest_domain: String,
+}
 
 /// Drives the source side of a storage migration.
 ///
@@ -30,6 +47,7 @@ pub struct MigrationSender<B: StorageBackend> {
     block_size: u64,
     send_window: SendWindow,
     last_acknowledged_offset: u64,
+    tls_config: Option<MigrationTlsConfig>,
 }
 
 impl<B: StorageBackend> MigrationSender<B> {
@@ -41,11 +59,21 @@ impl<B: StorageBackend> MigrationSender<B> {
             block_size: DEFAULT_BLOCK_SIZE,
             send_window: SendWindow::new(),
             last_acknowledged_offset: 0,
+            tls_config: None,
         }
     }
 
     pub fn with_block_size(mut self, block_size: u64) -> Self {
         self.block_size = block_size;
+        self
+    }
+
+    /// Configure mTLS for the connection to the migration destination.
+    ///
+    /// When set, the sender uses `https://` and presents the node certificate
+    /// while validating the destination against the provided CA certificate.
+    pub fn with_tls(mut self, tls_config: MigrationTlsConfig) -> Self {
+        self.tls_config = Some(tls_config);
         self
     }
 
@@ -59,11 +87,51 @@ impl<B: StorageBackend> MigrationSender<B> {
     /// This opens a bidirectional stream, sends InitMigration, waits for
     /// MigrationReady, then performs bulk copy followed by dirty sync rounds.
     pub async fn start_migration(mut self, endpoint: String) -> Result<(), tonic::Status> {
-        let channel = Channel::from_shared(endpoint.clone())
-            .map_err(|e| tonic::Status::internal(format!("invalid endpoint: {e}")))?
-            .connect()
-            .await
-            .map_err(|e| tonic::Status::unavailable(format!("failed to connect to peer: {e}")))?;
+        let channel = if let Some(ref tls) = self.tls_config {
+            let identity = Identity::from_pem(&tls.cert_pem, &tls.key_pem);
+            let ca = Certificate::from_pem(&tls.ca_pem);
+            let tls_config = ClientTlsConfig::new()
+                .domain_name(&tls.dest_domain)
+                .identity(identity)
+                .ca_certificate(ca);
+
+            // Ensure the endpoint uses https
+            let secure_endpoint = if endpoint.starts_with("http://") {
+                endpoint.replacen("http://", "https://", 1)
+            } else if !endpoint.starts_with("https://") {
+                format!("https://{endpoint}")
+            } else {
+                endpoint.clone()
+            };
+
+            info!(
+                endpoint = %secure_endpoint,
+                dest_domain = %tls.dest_domain,
+                "connecting to migration peer with mTLS"
+            );
+
+            Channel::from_shared(secure_endpoint)
+                .map_err(|e| tonic::Status::internal(format!("invalid endpoint: {e}")))?
+                .tls_config(tls_config)
+                .map_err(|e| tonic::Status::internal(format!("TLS config error: {e}")))?
+                .connect()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unavailable(format!("failed to connect to peer with mTLS: {e}"))
+                })?
+        } else {
+            warn!(
+                endpoint = %endpoint,
+                "connecting to migration peer WITHOUT mTLS — this violates the migration protocol spec"
+            );
+            Channel::from_shared(endpoint.clone())
+                .map_err(|e| tonic::Status::internal(format!("invalid endpoint: {e}")))?
+                .connect()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unavailable(format!("failed to connect to peer: {e}"))
+                })?
+        };
 
         let mut client = StorageMigrationServiceClient::new(channel);
 
@@ -524,13 +592,20 @@ impl<B: StorageBackend> MigrationSender<B> {
 ///
 /// This is the top-level entry point called by the control plane / agent.
 /// It creates a MigrationSender and drives the full migration lifecycle.
+///
+/// When `tls_config` is `Some`, the connection uses mTLS as required by
+/// the disk migration protocol spec.
 pub async fn start_migration_to_peer<B: StorageBackend>(
     endpoint: String,
     volume_id: String,
     handle: String,
     backend: Arc<B>,
+    tls_config: Option<MigrationTlsConfig>,
 ) -> Result<(), tonic::Status> {
-    let sender = MigrationSender::new(backend, volume_id, handle);
+    let mut sender = MigrationSender::new(backend, volume_id, handle);
+    if let Some(tls) = tls_config {
+        sender = sender.with_tls(tls);
+    }
     sender.start_migration(endpoint).await
 }
 

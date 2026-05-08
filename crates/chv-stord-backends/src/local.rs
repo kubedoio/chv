@@ -163,18 +163,34 @@ impl LocalFileBackend {
             self.runtime_dir.join(path)
         };
 
-        if !path.exists() {
+        let path_clone = path.clone();
+        let qcow2_reason_owned = qcow2_reason.to_string();
+        let (exists, kind) = tokio::task::spawn_blocking(move || {
+            let exists = path_clone.exists();
+            let kind = if exists {
+                LocalFileBackend::detect_kind(&path_clone)
+            } else {
+                String::new()
+            };
+            (exists, kind)
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("spawn_blocking join error: {e}"),
+        })?;
+
+        if !exists {
             return Err(ChvError::NotFound {
                 resource: "path".to_string(),
                 id: path.to_string_lossy().to_string(),
             });
         }
 
-        let kind = Self::detect_kind(&path);
         if kind == "qcow2" {
             return Err(ChvError::InvalidArgument {
                 field: "format".to_string(),
-                reason: qcow2_reason.to_string(),
+                reason: qcow2_reason_owned,
             });
         }
 
@@ -220,89 +236,123 @@ impl StorageBackend for LocalFileBackend {
         let path = self.resolve_path(locator);
         info!(volume_id, path = %path.display(), "opening local volume");
 
-        if !path.exists() {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| ChvError::BackendUnavailable {
-                    backend: "local".to_string(),
-                    reason: format!("failed to create parent directory: {}", e),
-                })?;
-            }
+        let path_exists_check = path.clone();
+        let path_exists = tokio::task::spawn_blocking(move || path_exists_check.exists())
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("spawn_blocking join error: {e}"),
+            })?;
 
+        if !path_exists {
             let size_bytes = self.parse_size_bytes(locator)?;
             let seed_from = locator
                 .options
                 .get("seed_from")
-                .map(|s| s.trim())
+                .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
 
-            match seed_from {
-                Some(seed) => {
-                    let seed_path = self.resolve_optional_path(seed);
-                    if !seed_path.exists() {
-                        return Err(ChvError::NotFound {
-                            resource: "seed_source".to_string(),
-                            id: seed_path.to_string_lossy().to_string(),
-                        });
-                    }
-                    std::fs::copy(&seed_path, &path).map_err(|e| ChvError::BackendUnavailable {
+            let path_clone = path.clone();
+            let volume_id_owned = volume_id.to_string();
+
+            // Resolve seed path outside spawn_blocking (needs &self)
+            let seed_path = seed_from
+                .as_ref()
+                .map(|seed| self.resolve_optional_path(seed));
+
+            tokio::task::spawn_blocking(move || {
+                if let Some(parent) = path_clone.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| ChvError::BackendUnavailable {
                         backend: "local".to_string(),
-                        reason: format!("failed to seed volume from image: {}", e),
+                        reason: format!("failed to create parent directory: {}", e),
                     })?;
+                }
 
-                    if Self::detect_kind(&path) == "qcow2" {
-                        info!(
-                            volume_id,
-                            path = %path.display(),
-                            seed = %seed_path.display(),
-                            "seed image is qcow2, converting to raw"
-                        );
-                        Self::convert_qcow2_to_raw(&path)?;
-                    }
-
-                    let file = std::fs::File::options()
-                        .write(true)
-                        .open(&path)
-                        .map_err(|e| ChvError::BackendUnavailable {
-                            backend: "local".to_string(),
-                            reason: format!("failed to open seeded volume: {}", e),
+                match seed_path {
+                    Some(seed_path) => {
+                        if !seed_path.exists() {
+                            return Err(ChvError::NotFound {
+                                resource: "seed_source".to_string(),
+                                id: seed_path.to_string_lossy().to_string(),
+                            });
+                        }
+                        std::fs::copy(&seed_path, &path_clone).map_err(|e| {
+                            ChvError::BackendUnavailable {
+                                backend: "local".to_string(),
+                                reason: format!("failed to seed volume from image: {}", e),
+                            }
                         })?;
-                    if file.metadata().map(|m| m.len()).unwrap_or(0) < size_bytes {
+
+                        if LocalFileBackend::detect_kind(&path_clone) == "qcow2" {
+                            info!(
+                                volume_id = %volume_id_owned,
+                                path = %path_clone.display(),
+                                seed = %seed_path.display(),
+                                "seed image is qcow2, converting to raw"
+                            );
+                            LocalFileBackend::convert_qcow2_to_raw(&path_clone)?;
+                        }
+
+                        let file = std::fs::File::options()
+                            .write(true)
+                            .open(&path_clone)
+                            .map_err(|e| ChvError::BackendUnavailable {
+                                backend: "local".to_string(),
+                                reason: format!("failed to open seeded volume: {}", e),
+                            })?;
+                        if file.metadata().map(|m| m.len()).unwrap_or(0) < size_bytes {
+                            file.set_len(size_bytes)
+                                .map_err(|e| ChvError::BackendUnavailable {
+                                    backend: "local".to_string(),
+                                    reason: format!("failed to expand seeded volume: {}", e),
+                                })?;
+                        }
+                        info!(
+                            volume_id = %volume_id_owned,
+                            path = %path_clone.display(),
+                            seed = %seed_path.display(),
+                            size_bytes,
+                            "seeded local volume from image"
+                        );
+                    }
+                    None => {
+                        warn!(
+                            volume_id = %volume_id_owned,
+                            path = %path_clone.display(),
+                            size_bytes,
+                            "path does not exist yet; creating sparse raw volume"
+                        );
+                        let file = std::fs::File::create(&path_clone).map_err(|e| {
+                            ChvError::BackendUnavailable {
+                                backend: "local".to_string(),
+                                reason: format!("failed to create volume file: {}", e),
+                            }
+                        })?;
                         file.set_len(size_bytes)
                             .map_err(|e| ChvError::BackendUnavailable {
                                 backend: "local".to_string(),
-                                reason: format!("failed to expand seeded volume: {}", e),
+                                reason: format!("failed to set volume file size: {}", e),
                             })?;
                     }
-                    info!(
-                        volume_id,
-                        path = %path.display(),
-                        seed = %seed_path.display(),
-                        size_bytes,
-                        "seeded local volume from image"
-                    );
                 }
-                None => {
-                    warn!(
-                        volume_id,
-                        path = %path.display(),
-                        size_bytes,
-                        "path does not exist yet; creating sparse raw volume"
-                    );
-                    let file =
-                        std::fs::File::create(&path).map_err(|e| ChvError::BackendUnavailable {
-                            backend: "local".to_string(),
-                            reason: format!("failed to create volume file: {}", e),
-                        })?;
-                    file.set_len(size_bytes)
-                        .map_err(|e| ChvError::BackendUnavailable {
-                            backend: "local".to_string(),
-                            reason: format!("failed to set volume file size: {}", e),
-                        })?;
-                }
-            }
+                Ok::<(), ChvError>(())
+            })
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("spawn_blocking join error: {e}"),
+            })??;
         }
 
-        let export_kind = Self::detect_kind(&path);
+        let path_clone = path.clone();
+        let export_kind = tokio::task::spawn_blocking(move || {
+            LocalFileBackend::detect_kind(&path_clone)
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("spawn_blocking join error: {e}"),
+        })?;
         let attachment_handle = format!("local-{}-{}", volume_id, locator.locator);
 
         Ok(VolumeExport {
@@ -341,11 +391,21 @@ impl StorageBackend for LocalFileBackend {
 
         info!(volume_id, vm_id, handle, path = %path.display(), "attaching local volume");
 
-        if !path.exists() {
+        let path_clone = path.clone();
+        let (exists, export_kind) = tokio::task::spawn_blocking(move || {
+            let exists = path_clone.exists();
+            let kind = LocalFileBackend::detect_kind(&path_clone);
+            (exists, kind)
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("spawn_blocking join error: {e}"),
+        })?;
+
+        if !exists {
             warn!(volume_id, vm_id, handle, path = %path.display(), "path does not exist");
         }
-
-        let export_kind = Self::detect_kind(&path);
 
         Ok(VolumeExport {
             export_kind,
@@ -393,12 +453,16 @@ impl StorageBackend for LocalFileBackend {
             self.runtime_dir.join(path)
         };
 
-        let status = if path.exists() {
-            "healthy"
-        } else {
-            "unhealthy"
-        };
-        let last_error = if path.exists() {
+        let path_clone = path.clone();
+        let exists = tokio::task::spawn_blocking(move || path_clone.exists())
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("spawn_blocking join error: {e}"),
+            })?;
+
+        let status = if exists { "healthy" } else { "unhealthy" };
+        let last_error = if exists {
             String::new()
         } else {
             format!("path does not exist: {}", path.display())
@@ -432,81 +496,91 @@ impl StorageBackend for LocalFileBackend {
             self.runtime_dir.join(path)
         };
 
-        if !path.exists() {
-            warn!(
-                volume_id,
-                handle,
-                path = %path.display(),
-                "resize called but path does not exist"
-            );
-            return Err(ChvError::NotFound {
-                resource: "path".to_string(),
-                id: path.to_string_lossy().to_string(),
-            });
-        }
+        let path_clone = path.clone();
+        let volume_id_owned = volume_id.to_string();
+        let handle_owned = handle.to_string();
+        tokio::task::spawn_blocking(move || {
+            if !path_clone.exists() {
+                warn!(
+                    volume_id = %volume_id_owned,
+                    handle = %handle_owned,
+                    path = %path_clone.display(),
+                    "resize called but path does not exist"
+                );
+                return Err(ChvError::NotFound {
+                    resource: "path".to_string(),
+                    id: path_clone.to_string_lossy().to_string(),
+                });
+            }
 
-        let kind = Self::detect_kind(&path);
-        if kind == "qcow2" {
-            let status = std::process::Command::new("qemu-img")
-                .args(["resize", "-f", "qcow2"])
-                .arg(&path)
-                .arg(format!("{}", new_size_bytes))
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    info!(
-                        volume_id,
-                        handle,
-                        path = %path.display(),
-                        new_size_bytes,
-                        "resized qcow2 volume"
-                    );
-                    return Ok(());
-                }
-                Ok(s) => {
-                    return Err(ChvError::BackendUnavailable {
-                        backend: "local".to_string(),
-                        reason: format!("qemu-img resize failed with exit code {}", s),
-                    });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(ChvError::BackendUnavailable {
-                        backend: "local".to_string(),
-                        reason:
-                            "qemu-img is not installed; install qemu-utils to resize qcow2 volumes"
-                                .to_string(),
-                    });
-                }
-                Err(e) => {
-                    return Err(ChvError::BackendUnavailable {
-                        backend: "local".to_string(),
-                        reason: format!("failed to run qemu-img: {}", e),
-                    });
+            let kind = LocalFileBackend::detect_kind(&path_clone);
+            if kind == "qcow2" {
+                let status = std::process::Command::new("qemu-img")
+                    .args(["resize", "-f", "qcow2"])
+                    .arg(&path_clone)
+                    .arg(format!("{}", new_size_bytes))
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        info!(
+                            volume_id = %volume_id_owned,
+                            handle = %handle_owned,
+                            path = %path_clone.display(),
+                            new_size_bytes,
+                            "resized qcow2 volume"
+                        );
+                        return Ok(());
+                    }
+                    Ok(s) => {
+                        return Err(ChvError::BackendUnavailable {
+                            backend: "local".to_string(),
+                            reason: format!("qemu-img resize failed with exit code {}", s),
+                        });
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(ChvError::BackendUnavailable {
+                            backend: "local".to_string(),
+                            reason:
+                                "qemu-img is not installed; install qemu-utils to resize qcow2 volumes"
+                                    .to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        return Err(ChvError::BackendUnavailable {
+                            backend: "local".to_string(),
+                            reason: format!("failed to run qemu-img: {}", e),
+                        });
+                    }
                 }
             }
-        }
 
-        let file = std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "local".to_string(),
-                reason: format!("failed to open file for resize: {}", e),
-            })?;
-        file.set_len(new_size_bytes)
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "local".to_string(),
-                reason: format!("failed to resize file: {}", e),
-            })?;
+            let file = std::fs::File::options()
+                .write(true)
+                .open(&path_clone)
+                .map_err(|e| ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to open file for resize: {}", e),
+                })?;
+            file.set_len(new_size_bytes)
+                .map_err(|e| ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("failed to resize file: {}", e),
+                })?;
 
-        info!(
-            volume_id,
-            handle,
-            path = %path.display(),
-            new_size_bytes,
-            "resized local volume"
-        );
-        Ok(())
+            info!(
+                volume_id = %volume_id_owned,
+                handle = %handle_owned,
+                path = %path_clone.display(),
+                new_size_bytes,
+                "resized local volume"
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("spawn_blocking join error: {e}"),
+        })?
     }
 
     async fn prepare_snapshot(
@@ -566,7 +640,15 @@ impl StorageBackend for LocalFileBackend {
         let snap = self
             .runtime_dir
             .join(format!("{}-{}.img", volume_id, snapshot_name));
-        if !snap.exists() {
+
+        let snap_clone = snap.clone();
+        let snap_exists = tokio::task::spawn_blocking(move || snap_clone.exists())
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("spawn_blocking join error: {e}"),
+            })?;
+        if !snap_exists {
             return Err(ChvError::NotFound {
                 resource: "snapshot".to_string(),
                 id: snap.to_string_lossy().to_string(),
@@ -584,6 +666,8 @@ impl StorageBackend for LocalFileBackend {
             })?;
 
         tokio::fs::rename(&restore_tmp, &path).await.map_err(|e| {
+            // Best-effort cleanup of temp file on rename failure.
+            // This runs in the async context but is only the error path.
             let _ = std::fs::remove_file(&restore_tmp);
             ChvError::BackendUnavailable {
                 backend: "local".to_string(),
@@ -617,7 +701,15 @@ impl StorageBackend for LocalFileBackend {
         let snap = self
             .runtime_dir
             .join(format!("{}-{}.img", volume_id, snapshot_name));
-        if snap.exists() {
+
+        let snap_clone = snap.clone();
+        let snap_exists = tokio::task::spawn_blocking(move || snap_clone.exists())
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("spawn_blocking join error: {e}"),
+            })?;
+        if snap_exists {
             tokio::fs::remove_file(&snap)
                 .await
                 .map_err(|e| ChvError::BackendUnavailable {
@@ -671,7 +763,15 @@ impl StorageBackend for LocalFileBackend {
             });
         }
         let path = self.path_from_handle(volume_id, handle)?;
-        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let path_clone = path.clone();
+        let file_len = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&path_clone).map(|m| m.len()).unwrap_or(0)
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("spawn_blocking join error: {e}"),
+        })?;
         let num_blocks = file_len.div_ceil(block_size);
         let bitmap_bytes = num_blocks.div_ceil(8) as usize;
         let tracker = DirtyTracker {
@@ -806,12 +906,20 @@ impl StorageBackend for LocalFileBackend {
 
     async fn volume_size(&self, volume_id: &str, handle: &str) -> Result<u64, ChvError> {
         let path = self.path_from_handle(volume_id, handle)?;
-        std::fs::metadata(&path)
-            .map(|m| m.len())
-            .map_err(|e| ChvError::Io {
-                path: path.display().to_string(),
-                source: e,
-            })
+        let path_clone = path.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&path_clone)
+                .map(|m| m.len())
+                .map_err(|e| ChvError::Io {
+                    path: path_clone.display().to_string(),
+                    source: e,
+                })
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("spawn_blocking join error: {e}"),
+        })?
     }
 
     async fn create_receiving_volume(
@@ -828,14 +936,23 @@ impl StorageBackend for LocalFileBackend {
         }
         let filename = format!("{}.img", volume_id);
         let dest = self.runtime_dir.join(&filename);
-        let file = std::fs::File::create(&dest).map_err(|e| ChvError::Io {
-            path: dest.display().to_string(),
-            source: e,
-        })?;
-        file.set_len(size_bytes).map_err(|e| ChvError::Io {
-            path: dest.display().to_string(),
-            source: e,
-        })?;
+        let dest_clone = dest.clone();
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::create(&dest_clone).map_err(|e| ChvError::Io {
+                path: dest_clone.display().to_string(),
+                source: e,
+            })?;
+            file.set_len(size_bytes).map_err(|e| ChvError::Io {
+                path: dest_clone.display().to_string(),
+                source: e,
+            })?;
+            Ok::<(), ChvError>(())
+        })
+        .await
+        .map_err(|e| ChvError::BackendUnavailable {
+            backend: "local".to_string(),
+            reason: format!("spawn_blocking join error: {e}"),
+        })??;
         let handle = format!("local-{}-{}", volume_id, filename);
         info!(volume_id, size_bytes, format, path = %dest.display(), "created receiving volume");
         Ok(VolumeExport {
@@ -847,7 +964,14 @@ impl StorageBackend for LocalFileBackend {
 
     async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
         let primary = self.runtime_dir.join(format!("{}.img", volume_id));
-        if primary.exists() {
+        let primary_clone = primary.clone();
+        let primary_exists = tokio::task::spawn_blocking(move || primary_clone.exists())
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("spawn_blocking join error: {e}"),
+            })?;
+        if primary_exists {
             tokio::fs::remove_file(&primary)
                 .await
                 .map_err(|e| ChvError::Io {

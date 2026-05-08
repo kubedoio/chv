@@ -42,6 +42,8 @@ impl StordClient {
                 field: "stord_socket".to_string(),
                 reason: e.to_string(),
             })?
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
             .connect_with_connector(service_fn(move |_: Uri| {
                 let p = path.clone();
                 async move {
@@ -448,6 +450,8 @@ impl NwdClient {
                 field: "nwd_socket".to_string(),
                 reason: e.to_string(),
             })?
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
             .connect_with_connector(service_fn(move |_: Uri| {
                 let p = path.clone();
                 async move {

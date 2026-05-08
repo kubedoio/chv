@@ -1,39 +1,46 @@
-# Task Plan: P0 Critical Fixes — Data Loss and Correctness
+# Task Plan: Production Readiness Fixes
 
 ## Goal
-Fix all 6 CRITICAL production bugs identified in the product readiness gap analysis, bringing the system from "will lose data" to "safe for production use."
+Fix all CRITICAL and HIGH production bugs from the gap analysis, progressing through P0 (data loss) → P1 (security/reliability) → P2 (spec compliance).
 
 ## Phases
-- [x] Phase 1: Understand/research (gap analysis complete)
-- [x] Phase 2: Plan approach (this document)
-- [ ] Phase 3: Implement (6 P0 fixes via parallel subagents)
-- [ ] Phase 4: Verify (cargo check, clippy, tests)
+- [x] Phase 1: P0 Critical Fixes — Data Loss (6 bugs, DONE)
+- [ ] Phase 2: P1 Security/Reliability (8 items)
+- [ ] Phase 3: P2 Spec Compliance (6 items)
+- [ ] Phase 4: Final verification
 
-## P0 Items
+## P0 Items (COMPLETED — commit a3700393)
 
-| # | Bug | File | Fix Strategy |
-|---|-----|------|-------------|
-| P0-1 | Live migration skips dirty-block sync | stord-core/migration/sender.rs | Add dirty round loop between bulk_copy and FinalSync |
-| P0-2 | stord session persistence disabled | cmd/chv-stord/main.rs | Pass db_path to StorageServer, wire SessionStore |
-| P0-3 | stop_vm reports success without confirming | agent-runtime-ch/process.rs | Check process exit after timeout; force-kill if still running |
-| P0-4 | Volume resource leak on partial prep failure | agent-core/reconcile.rs | Add cleanup of opened volumes if NIC attach fails |
-| P0-5 | VNI allocation race condition | controlplane-store/vtep.rs | Wrap read+insert in BEGIN IMMEDIATE transaction |
-| P0-6 | Silent JSON serialization data loss | controlplane-service/reconcile.rs | Propagate error instead of unwrap_or_default |
+| # | Bug | Status |
+|---|-----|--------|
+| P0-1 | Live migration skips dirty-block sync | FIXED |
+| P0-2 | stord session persistence disabled | FIXED |
+| P0-3 | stop_vm reports success without confirming | FIXED |
+| P0-4 | Volume resource leak on partial prep failure | FIXED |
+| P0-5 | VNI allocation race condition | FIXED |
+| P0-6 | Silent JSON serialization data loss | FIXED |
 
-## Subagent Strategy
+## P1 Items (NEXT)
 
-- **Agent A**: P0-1 (dirty sync rounds) — largest change, ~150 lines
-- **Agent B**: P0-2 + P0-3 (stord persistence + stop_vm confirmation) — related daemon fixes
-- **Agent C**: P0-4 + P0-5 + P0-6 (volume leak + VNI race + JSON loss) — smaller fixes
+| # | Issue | Location | Effort |
+|---|-------|----------|--------|
+| 7 | No gRPC timeouts to stord/nwd | agent-core/daemon_clients.rs | 2h |
+| 8 | TLS domain hardcoded "localhost" | agent-core/control_plane.rs, enrollment.rs | 1h |
+| 9 | Blocking I/O on async executor | stord-backends/local.rs | 2h |
+| 10 | TOCTOU in migration port allocation | agent-core/migration.rs | 1h |
+| 11 | Non-atomic quota check | controlplane-service/lifecycle.rs | 1h |
+| 12 | Hot-plug ops not persisted | controlplane-service/lifecycle.rs | 3h |
+| 13 | Ready-node metric always 0 | controlplane-service/orchestrator.rs | 30min |
+| 14 | Migration mTLS missing | stord-core/migration/sender.rs | 2h |
 
 ## Key Decisions
-- Work on a feature branch: `fix/p0-critical-production-bugs`
+- Work on branch: `fix/p0-critical-production-bugs` (continuing)
 - All fixes must compile with `cargo check --workspace`
 - All existing tests must pass
 - No new features — only fix the bugs identified
 
 ## Errors Encountered
-- (none yet)
+- Pre-existing test failures (missing timeout_multiplier field) — fixed alongside P0
 
 ## Status
-**Currently in Phase 3** — Dispatching subagents
+**Currently in Phase 2** — Reviewing P1 items, reading source files to plan implementation

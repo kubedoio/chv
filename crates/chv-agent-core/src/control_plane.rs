@@ -18,6 +18,14 @@ impl ControlPlaneClient {
     ) -> Result<Self, ChvError> {
         let endpoint_str: String = endpoint.into();
         let is_https = endpoint_str.starts_with("https://");
+        // Extract hostname from endpoint for TLS SNI verification
+        let domain = endpoint_str
+            .strip_prefix("https://")
+            .or_else(|| endpoint_str.strip_prefix("http://"))
+            .and_then(|s| s.split(':').next())
+            .and_then(|s| s.split('/').next())
+            .unwrap_or("localhost")
+            .to_string();
         let mut endpoint = tonic::transport::Endpoint::try_from(endpoint_str).map_err(|e| {
             ChvError::InvalidArgument {
                 field: "control_plane_addr".to_string(),
@@ -37,7 +45,7 @@ impl ControlPlaneClient {
                 })?;
                 let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
                 let mut tls = tonic::transport::ClientTlsConfig::new()
-                    .domain_name("localhost")
+                    .domain_name(&domain)
                     .identity(identity);
                 if let Some(ca) = ca_cert_path {
                     let ca_pem = tokio::fs::read(ca).await.map_err(|e| ChvError::Io {
