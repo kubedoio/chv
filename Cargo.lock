@@ -397,6 +397,7 @@ dependencies = [
 name = "chv-agent"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chv-agent-core",
  "chv-agent-runtime-ch",
  "chv-common",
