@@ -15,6 +15,7 @@
 	import VmDetailSummaryTab from '$lib/components/vms/VmDetailSummaryTab.svelte';
 	import VmDetailSupportRail from '$lib/components/vms/VmDetailSupportRail.svelte';
 	import VmDetailActions from '$lib/components/vms/VmDetailActions.svelte';
+	import VmMigrateModal from '$lib/components/vms/VmMigrateModal.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
 	import { Terminal, FileText } from 'lucide-svelte';
 
@@ -31,6 +32,8 @@
 	let snapshotsLoading = $state(false);
 	let snapshotsError = $state<string | null>(null);
 	let supportRailOpen = $state(false);
+	let migrateModalOpen = $state(false);
+	let migrateSubmitting = $state(false);
 
 	async function ensureVmConsole() {
 		if (!browser || VmConsoleComponent) return;
@@ -114,6 +117,24 @@
 		}
 	}
 
+	async function executeMigrate(targetNodeId: string) {
+		migrateSubmitting = true;
+		const token = getStoredToken() ?? undefined;
+		const vm_id = detail.summary.vm_id;
+
+		try {
+			await mutateVm({ vm_id, action: 'migrate', force: false, target_node_id: targetNodeId }, token);
+			toast.success(`Migration of VM ${vm_id} accepted`);
+			migrateModalOpen = false;
+			invalidatePattern('vms:');
+			await invalidateAll();
+		} catch (err: any) {
+			toast.error(err.message || 'Migration failed');
+		} finally {
+			migrateSubmitting = false;
+		}
+	}
+
 	const configProps = $derived(detail.configuration.map(c => ({ label: c.label, value: c.value })));
 </script>
 
@@ -139,7 +160,7 @@
 			parentHref="/vms"
 		>
 			{#snippet actions()}
-				<VmDetailActions {pendingAction} powerState={detail.summary.power_state} onExecute={executeAction} />
+				<VmDetailActions {pendingAction} powerState={detail.summary.power_state} onExecute={executeAction} onMigrate={() => { migrateModalOpen = true; }} />
 			{/snippet}
 		</ResourceDetailHeader>
 
@@ -201,6 +222,15 @@
 		</main>
 	{/if}
 </div>
+
+<VmMigrateModal
+	bind:open={migrateModalOpen}
+	vmId={detail.summary.vm_id}
+	currentNodeId={detail.summary.node_id}
+	submitting={migrateSubmitting}
+	onmigrate={executeMigrate}
+	onclose={() => { migrateModalOpen = false; }}
+/>
 
 <style>
 	.inventory-page {

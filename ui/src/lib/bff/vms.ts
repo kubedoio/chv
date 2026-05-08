@@ -9,7 +9,9 @@ import type {
 	CreateVmResponse,
 	MutateVmRequest,
 	MutateVmResponse,
-	GetVmConsoleUrlResponse
+	GetVmConsoleUrlResponse,
+	ResizeVmRequest,
+	ResizeVmResponse
 } from './types';
 
 export async function listVms(req: ListVmsRequest, token?: string): Promise<ListVmsResponse> {
@@ -72,6 +74,17 @@ export async function getVmBootLog(
 	return bffFetch(`/v1/vms/console`, {
 		method: 'POST',
 		body: JSON.stringify({ vm_id }),
+		token
+	});
+}
+
+export async function resizeVm(
+	req: ResizeVmRequest,
+	token?: string
+): Promise<ResizeVmResponse> {
+	return bffFetch<ResizeVmResponse>(BFFEndpoints.resizeVm, {
+		method: 'POST',
+		body: JSON.stringify(req),
 		token
 	});
 }

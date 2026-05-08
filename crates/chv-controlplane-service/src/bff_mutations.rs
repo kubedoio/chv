@@ -202,6 +202,52 @@ impl MutationService for ControlPlaneMutationService {
         })
     }
 
+    async fn migrate_vm(
+        &self,
+        vm_id: String,
+        target_node_id: String,
+        requested_by: String,
+    ) -> Result<MutateVmResponse, BffError> {
+        let source_node_id =
+            sqlx::query_scalar::<_, Option<String>>("SELECT node_id FROM vms WHERE vm_id = ?")
+                .bind(&vm_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
+                .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
+
+        if source_node_id == target_node_id {
+            return Err(BffError::BadRequest(
+                "target_node_id must differ from current node".into(),
+            ));
+        }
+
+        let meta = self.build_meta(source_node_id.clone(), requested_by);
+        let ack = self
+            .lifecycle_service
+            .migrate_vm(proto::MigrateVmRequest {
+                meta,
+                node_id: source_node_id.clone(),
+                vm_id: vm_id.clone(),
+                source_node_id: source_node_id.clone(),
+                destination_node_id: target_node_id,
+                config: None,
+            })
+            .await;
+
+        let ack = self.map_ack(ack)?;
+        let result = ack
+            .result
+            .ok_or_else(|| BffError::Internal("missing ack result".into()))?;
+
+        Ok(MutateVmResponse {
+            accepted: result.status == "OK",
+            task_id: result.operation_id,
+            vm_id,
+            summary: result.human_summary,
+        })
+    }
+
     async fn snapshot_vm(
         &self,
         vm_id: String,

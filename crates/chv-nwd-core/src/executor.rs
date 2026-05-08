@@ -242,6 +242,54 @@ impl LinuxExecutor {
         format!("vxlan{}", vni)
     }
 
+    /// Detect the correct inner MTU for VXLAN tunnels.
+    /// VXLAN overhead is 50 bytes (14 outer Ethernet + 20 IP + 8 UDP + 8 VXLAN).
+    /// Reads the default route interface MTU and subtracts overhead.
+    async fn detect_inner_mtu() -> u32 {
+        const VXLAN_OVERHEAD: u32 = 50;
+        const DEFAULT_MTU: u32 = 1450;
+
+        let output = match Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return DEFAULT_MTU,
+        };
+
+        // Parse "default via X.X.X.X dev eth0" to get the device name
+        let dev = output
+            .split_whitespace()
+            .skip_while(|w| *w != "dev")
+            .nth(1);
+
+        let dev = match dev {
+            Some(d) => d.to_string(),
+            None => return DEFAULT_MTU,
+        };
+
+        // Get the outer interface MTU
+        let mtu_output = match Command::new("ip")
+            .args(["link", "show", "dev", &dev])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return DEFAULT_MTU,
+        };
+
+        // Parse "mtu NNNN" from output
+        let outer_mtu = mtu_output
+            .split_whitespace()
+            .skip_while(|w| *w != "mtu")
+            .nth(1)
+            .and_then(|m| m.parse::<u32>().ok())
+            .unwrap_or(1500);
+
+        outer_mtu.saturating_sub(VXLAN_OVERHEAD)
+    }
+
     async fn bridge_exists(name: &str) -> bool {
         Command::new("ip")
             .args(["link", "show", "dev", name])
@@ -976,13 +1024,21 @@ impl NetworkExecutor for LinuxExecutor {
         // Move interface to the namespace
         Self::run_ip(&["link", "set", &iface, "netns", namespace]).await?;
 
+        // Set MTU (VXLAN overhead = 50 bytes: 8 VXLAN + 8 UDP + 20 IP + 14 Ethernet)
+        let mtu = Self::detect_inner_mtu().await;
+        let mtu_str = mtu.to_string();
+        Self::run_ip_netns(namespace, &["link", "set", &iface, "mtu", &mtu_str]).await?;
+
         // Attach to bridge inside the namespace
         Self::run_ip_netns(namespace, &["link", "set", &iface, "master", bridge_name]).await?;
+
+        // Set bridge MTU to match
+        Self::run_ip_netns(namespace, &["link", "set", bridge_name, "mtu", &mtu_str]).await?;
 
         // Bring up the interface
         Self::run_ip_netns(namespace, &["link", "set", &iface, "up"]).await?;
 
-        info!(namespace = %namespace, vni = vni, vtep_ip = %vtep_ip, "VXLAN interface created");
+        info!(namespace = %namespace, vni = vni, vtep_ip = %vtep_ip, mtu = mtu, "VXLAN interface created");
         Ok(())
     }
 

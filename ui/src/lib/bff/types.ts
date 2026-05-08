@@ -291,6 +291,7 @@ export type MutateVmRequest = {
 	vm_id: string;
 	action: string;
 	force: boolean;
+	target_node_id?: string;
 };
 
 export type MutateVmResponse = {
@@ -528,6 +529,99 @@ export type MutationActionResult = {
 
 export type IpamMode = 'internal' | 'external' | 'none';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Backup types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface BackupJob {
+	job_id: string;
+	vm_id: string;
+	volume_id: string | null;
+	status: string;
+	backup_type: string;
+	target_path: string | null;
+	storage_backend: string | null;
+	created_at: string;
+	started_at: string | null;
+	completed_at: string | null;
+	error_message: string | null;
+	size_bytes: number | null;
+}
+
+export interface BackupHistory {
+	job_id: string;
+	vm_id: string;
+	volume_id: string | null;
+	started_at: string | null;
+	completed_at: string | null;
+	status: string;
+	size_bytes: number | null;
+	error_message: string | null;
+	created_at: string;
+}
+
+export interface BackupSchedule {
+	schedule_id: string;
+	vm_id: string;
+	volume_id: string | null;
+	name: string;
+	cron_expression: string;
+	retention_count: number;
+	backup_type: string;
+	target_path: string | null;
+	storage_backend: string | null;
+	enabled: boolean;
+	created_at: string;
+	last_run_at: string | null;
+	next_run_at: string | null;
+}
+
+export interface ListBackupJobsResponse {
+	items: BackupJob[];
+	total: number;
+}
+
+export interface ListBackupHistoryResponse {
+	items: BackupHistory[];
+	page: PageMeta;
+	filters: FilterMeta;
+}
+
+export interface CreateBackupJobRequest {
+	vm_id: string;
+	volume_id?: string;
+	backup_type?: string;
+	target_path?: string;
+	storage_backend?: string;
+	schedule_id?: string;
+}
+
+export interface CreateBackupJobResponse {
+	accepted: boolean;
+	task_id: string;
+	job_id: string;
+	summary: string;
+}
+
+export interface UpdateBackupJobRequest {
+	volume_id?: string;
+	status?: string;
+	backup_type?: string;
+	target_path?: string;
+	storage_backend?: string;
+	started_at?: string;
+	completed_at?: string;
+	error_message?: string;
+	size_bytes?: number;
+}
+
+export interface ExecuteBackupJobResponse {
+	accepted: boolean;
+	task_id: string;
+	job_id: string;
+	summary: string;
+}
+
 export interface CreateNetworkInput {
 	name: string;
 	cidr: string;
@@ -584,3 +678,78 @@ export interface NetworkDetailModel {
 	last_task: string;
 	alerts: number;
 }
+
+export type ResizeVmRequest = {
+	vm_id: string;
+	cpu_count?: number;
+	memory_bytes?: number;
+};
+
+export type ResizeVmResponse = {
+	accepted: boolean;
+	task_id: string;
+	vm_id: string;
+	summary: string;
+};
+
+export type DeleteImageRequest = {
+	image_id: string;
+};
+
+export type DeleteImageResponse = {
+	accepted: boolean;
+	image_id: string;
+	summary: string;
+};
+
+export type ListVmSnapshotsRequest = {
+	vm_id: string;
+};
+
+export type VmSnapshotItem = {
+	snapshot_id: string;
+	vm_id: string;
+	name: string;
+	created_at: string;
+	size_bytes: number;
+	status: string;
+};
+
+export type ListVmSnapshotsResponse = {
+	items: VmSnapshotItem[];
+	page: PageMeta;
+};
+
+export type CreateSnapshotRequest = {
+	vm_id: string;
+	name?: string;
+};
+
+export type CreateSnapshotResponse = {
+	accepted: boolean;
+	task_id: string;
+	snapshot_id: string;
+	summary: string;
+};
+
+export type DeleteSnapshotRequest = {
+	vm_id: string;
+	snapshot_id: string;
+};
+
+export type DeleteSnapshotResponse = {
+	accepted: boolean;
+	task_id: string;
+	summary: string;
+};
+
+export type RestoreSnapshotRequest = {
+	vm_id: string;
+	snapshot_id: string;
+};
+
+export type RestoreSnapshotResponse = {
+	accepted: boolean;
+	task_id: string;
+	summary: string;
+};

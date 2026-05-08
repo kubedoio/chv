@@ -750,7 +750,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         for (volume_id, observed_generation) in volume_generations {
             let vol_report =
-                reporter.volume_state_report(&volume_id, "Attached", observed_generation.as_str());
+                reporter.volume_state_report(&volume_id, "Attached", observed_generation.as_str(), "Healthy");
             send_or_defer_control_plane_message(
                 &cache,
                 &config.cache_path,
@@ -770,7 +770,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect()
         };
         for (network_id, generation) in network_fragments {
-            let net_report = reporter.network_state_report(&network_id, "Ready", &generation);
+            let net_report = reporter.network_state_report(&network_id, "Ready", &generation, "Healthy");
             send_or_defer_control_plane_message(
                 &cache,
                 &config.cache_path,

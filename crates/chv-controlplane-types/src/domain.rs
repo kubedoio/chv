@@ -275,6 +275,7 @@ pub enum OperationStatus {
     Succeeded,
     Failed,
     Rejected,
+    Cancelled,
     Stale,
     Conflict,
 }
@@ -289,6 +290,7 @@ impl OperationStatus {
             Self::Succeeded => "Succeeded",
             Self::Failed => "Failed",
             Self::Rejected => "Rejected",
+            Self::Cancelled => "Cancelled",
             Self::Stale => "Stale",
             Self::Conflict => "Conflict",
         }
@@ -297,7 +299,12 @@ impl OperationStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed | Self::Rejected | Self::Stale | Self::Conflict
+            Self::Succeeded
+                | Self::Failed
+                | Self::Rejected
+                | Self::Cancelled
+                | Self::Stale
+                | Self::Conflict
         )
     }
 }
@@ -331,6 +338,7 @@ impl FromStr for OperationStatus {
             "Succeeded" => Ok(Self::Succeeded),
             "Failed" => Ok(Self::Failed),
             "Rejected" => Ok(Self::Rejected),
+            "Cancelled" => Ok(Self::Cancelled),
             "Stale" => Ok(Self::Stale),
             "Conflict" => Ok(Self::Conflict),
             _ => Err(ParseOperationStatusError),
@@ -563,6 +571,7 @@ mod tests {
     fn operation_status_identifies_terminal_states() {
         assert!(!OperationStatus::Accepted.is_terminal());
         assert!(OperationStatus::Succeeded.is_terminal());
+        assert!(OperationStatus::Cancelled.is_terminal());
         assert!(OperationStatus::Conflict.is_terminal());
     }
 }

@@ -80,7 +80,7 @@ impl Orchestrator {
         metrics::gauge!(CHV_VMS_TOTAL).set(vm_count as f64);
 
         let node_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE status = 'ready'")
+            sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE status = 'TenantReady'")
                 .fetch_one(&self.pool)
                 .await
                 .unwrap_or(0);

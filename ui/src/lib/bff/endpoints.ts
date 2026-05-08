@@ -21,6 +21,7 @@ export const BFFEndpoints = {
 	createVm: '/v1/vms/create',
 	mutateVm: '/v1/vms/mutate',
 	deleteVm: '/v1/vms/delete',
+	resizeVm: '/v1/vms/resize',
 	listTasks: '/v1/tasks',
 	listClusters: '/v1/clusters',
 	listNetworks: '/v1/networks',
@@ -35,6 +36,11 @@ export const BFFEndpoints = {
 	listVmEvents: '/v1/vms/events',
 	listImages: '/v1/images',
 	importImage: '/v1/images/import',
+	deleteImage: '/v1/images/delete',
+	listVmSnapshots: '/v1/vms/snapshots',
+	createSnapshot: '/v1/vms/snapshots/create',
+	deleteSnapshot: '/v1/vms/snapshots/delete',
+	restoreSnapshot: '/v1/vms/snapshots/restore',
 	getMaintenance: '/v1/maintenance',
 	getSettings: '/v1/settings',
 	getHypervisorSettings: '/v1/settings/hypervisor',
@@ -43,5 +49,14 @@ export const BFFEndpoints = {
 	listHypervisorProfiles: '/v1/settings/hypervisor/profiles',
 	listFirewallRules: '/v1/firewall-rules',
 	createFirewallRule: '/v1/firewall-rules/create',
-	deleteFirewallRule: '/v1/firewall-rules/delete'
+	deleteFirewallRule: '/v1/firewall-rules/delete',
+
+	// Backup endpoints
+	listBackupJobs: '/v1/backups/jobs',
+	createBackupJob: '/v1/backups/jobs',
+	listBackupHistory: '/v1/backup-history',
+	listBackupSchedules: '/v1/backups/schedules',
+	createBackupSchedule: '/v1/backups/schedules',
+	listBackupRestores: '/v1/backups/restores',
+	createBackupRestore: '/v1/backups/restores'
 } as const;

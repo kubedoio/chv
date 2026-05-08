@@ -773,7 +773,7 @@ impl Reconciler {
             {
                 warn!(network_id = %nic.network_id, error = %e, "failed to ensure network topology");
             }
-            let (_namespace_handle, tap_handle) = nwd
+            let nic_result = nwd
                 .attach_vm_nic(
                     &nic_id,
                     vm_id,
@@ -782,7 +782,44 @@ impl Reconciler {
                     &nic.ip_address,
                     Some(&nic_op_id),
                 )
-                .await?;
+                .await;
+            if let Err(e) = nic_result {
+                // Clean up already-opened volumes before propagating the error
+                let cleanup_op_id = format!("{}-cleanup-nic-fail", operation_id);
+                let handles: Vec<(String, Option<String>)> = {
+                    let cache = self.cache.lock().await;
+                    volume_ids
+                        .iter()
+                        .map(|vid| (vid.clone(), cache.volume_handles.get(vid).cloned()))
+                        .collect()
+                };
+                for (vol_id, handle) in &handles {
+                    if let Err(cleanup_err) = stord
+                        .detach_volume_from_vm(vol_id, vm_id, false, Some(&cleanup_op_id))
+                        .await
+                    {
+                        tracing::warn!(
+                            volume_id = %vol_id,
+                            error = %cleanup_err,
+                            "failed to detach volume after NIC attach failure"
+                        );
+                    }
+                    if let Some(h) = handle {
+                        if let Err(cleanup_err) = stord
+                            .close_volume(vol_id, h, Some(&cleanup_op_id))
+                            .await
+                        {
+                            tracing::warn!(
+                                volume_id = %vol_id,
+                                error = %cleanup_err,
+                                "failed to close volume after NIC attach failure"
+                            );
+                        }
+                    }
+                }
+                return Err(e);
+            }
+            let (_namespace_handle, tap_handle) = nic_result.unwrap();
             nics.push(VmNicConfig {
                 network_id: nic.network_id.clone(),
                 mac_address: nic.mac_address.clone(),

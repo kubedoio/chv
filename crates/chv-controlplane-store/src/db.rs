@@ -85,6 +85,17 @@ pub async fn connect_pool(config: &ControlPlaneStoreConfig) -> Result<StorePool,
     let pool = build_pool_options(config)
         .connect_with(connect_options)
         .await?;
+
+    // Run a quick integrity check on startup to detect corruption early
+    let result: String = sqlx::query_scalar("PRAGMA integrity_check(1)")
+        .fetch_one(&pool)
+        .await?;
+    if result != "ok" {
+        return Err(StoreError::InvalidConfiguration {
+            reason: format!("database integrity check failed: {}", result),
+        });
+    }
+
     Ok(pool)
 }
 

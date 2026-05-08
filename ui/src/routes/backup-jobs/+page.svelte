@@ -1,11 +1,11 @@
 <script lang="ts">
 import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
-  import { 
-    Database, Plus, Trash2, Play, Pause, Clock, Calendar, 
-    ShieldCheck, Activity, Upload, Download, RefreshCcw, Search, ChevronRight
+  import {
+    Plus, Play, Pause, Calendar,
+    ShieldCheck, Activity, Upload, Download
   } from 'lucide-svelte';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
+  import { getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast.svelte';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
@@ -16,14 +16,23 @@ import Button from '$lib/components/primitives/Button.svelte';
   import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
   import Modal from '$lib/components/primitives/Modal.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
-  import type { BackupJobResponse, BackupHistory, VM } from '$lib/api/types';
+  import {
+    listBackupJobs,
+    listBackupHistory,
+    createBackupJob,
+    executeBackupJob,
+    updateBackupJob,
+    deleteBackupJob
+  } from '$lib/bff/backups';
+  import { listVms } from '$lib/bff/vms';
+  import type { BackupJob, BackupHistory } from '$lib/bff/types';
+  import type { VmListItem } from '$lib/bff/types';
 
-  const client = createAPIClient();
   const pageDef = getPageDefinition('/backups');
 
-  let backupJobs = $state<BackupJobResponse[]>([]);
+  let backupJobs = $state<BackupJob[]>([]);
   let backupHistory = $state<BackupHistory[]>([]);
-  let vms = $state<VM[]>([]);
+  let vms = $state<VmListItem[]>([]);
   let loading = $state(true);
   let error = $state('');
   let activeTab = $state<'jobs' | 'history'>('jobs');
@@ -33,10 +42,10 @@ import Button from '$lib/components/primitives/Button.svelte';
   let importVMOpen = $state(false);
 
   // Form states
-  let newJobName = $state('');
   let selectedVMId = $state('');
-  let newJobSchedule = $state('0 2 * * *');
-  let newJobRetention = $state(7);
+  let selectedBackupType = $state('full');
+  let selectedTargetPath = $state('');
+  let selectedStorageBackend = $state('');
   let creatingJob = $state(false);
 
   // Import states
@@ -45,16 +54,16 @@ import Button from '$lib/components/primitives/Button.svelte';
   let importing = $state(false);
 
   const jobColumns = [
-    { key: 'name', label: 'Identity / Schedule' },
-    { key: 'vm_name', label: 'Target Workload' },
-    { key: 'cadence', label: 'Cadence' },
+    { key: 'job_id', label: 'Identity' },
+    { key: 'vm_id', label: 'Target Workload' },
+    { key: 'backup_type', label: 'Type' },
     { key: 'status', label: 'Registry State' },
-    { key: 'next_run', label: 'Next Sequence', align: 'right' as const },
+    { key: 'created_at', label: 'Created', align: 'right' as const },
     { key: '_actions', label: '', align: 'center' as const }
   ];
 
   const historyColumns = [
-    { key: 'vm_name', label: 'Origin Workload' },
+    { key: 'vm_id', label: 'Origin Workload' },
     { key: 'status', label: 'Sequence State' },
     { key: 'size', label: 'Durable Size' },
     { key: 'started_at', label: 'Execution Time' },
@@ -69,21 +78,20 @@ import Button from '$lib/components/primitives/Button.svelte';
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  async function loadData() {
+  async function loadData(): Promise<void> {
     loading = true;
     try {
-      const token = getStoredToken();
-      const localClient = createAPIClient({ token: token ?? undefined });
-      const [jobs, history, vmList] = await Promise.all([
-        localClient.listBackupJobs(),
-        localClient.listBackupHistory(),
-        localClient.listVMs()
+      const token = getStoredToken() ?? undefined;
+      const [jobsResp, historyResp, vmResp] = await Promise.all([
+        listBackupJobs(token),
+        listBackupHistory(1, 50, token),
+        listVms({ page: 1, page_size: 200, filters: {} }, token)
       ]);
-      backupJobs = jobs ?? [];
-      backupHistory = history ?? [];
-      vms = vmList ?? [];
-    } catch (err: any) {
-      error = err.message || 'Data Protection registry unavailable';
+      backupJobs = jobsResp.items ?? [];
+      backupHistory = historyResp.items ?? [];
+      vms = vmResp.items ?? [];
+    } catch (err: unknown) {
+      error = err instanceof Error ? err.message : 'Data Protection registry unavailable';
     } finally {
       loading = false;
     }
@@ -91,50 +99,55 @@ import Button from '$lib/components/primitives/Button.svelte';
 
   onMount(loadData);
 
-  async function runJobNow(job: BackupJobResponse) {
+  async function runJobNow(job: BackupJob): Promise<void> {
     try {
-      await client.runBackupJob(job.id);
+      const token = getStoredToken() ?? undefined;
+      await executeBackupJob(job.job_id, token);
       toast.success('Sequence initiated');
       loadData();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to execute job');
     }
   }
 
-  async function toggleJob(job: BackupJobResponse) {
+  async function toggleJob(job: BackupJob): Promise<void> {
     try {
-      await client.toggleBackupJob(job.id);
-      toast.success(job.enabled ? 'Sequence suspended' : 'Sequence resumed');
+      const token = getStoredToken() ?? undefined;
+      const newStatus = job.status === 'Enabled' ? 'Disabled' : 'Enabled';
+      await updateBackupJob(job.job_id, { status: newStatus }, token);
+      toast.success(job.status === 'Enabled' ? 'Sequence suspended' : 'Sequence resumed');
       loadData();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to toggle job');
     }
   }
 
-  async function handleCreateJob() {
+  async function handleCreateJob(): Promise<void> {
     creatingJob = true;
     try {
-      await client.createBackupJob({
-        name: newJobName,
+      const token = getStoredToken() ?? undefined;
+      await createBackupJob({
         vm_id: selectedVMId,
-        schedule: newJobSchedule,
-        retention: newJobRetention
-      });
+        backup_type: selectedBackupType,
+        target_path: selectedTargetPath || undefined,
+        storage_backend: selectedStorageBackend || undefined
+      }, token);
       toast.success('Policy created');
       createJobOpen = false;
       loadData();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create job');
     } finally {
       creatingJob = false;
     }
   }
 
-  function handleFileSelect(e: any) {
-    importFile = e.target.files[0] || null;
+  function handleFileSelect(e: Event): void {
+    const target = e.target as HTMLInputElement;
+    importFile = target.files?.[0] ?? null;
   }
 
-  async function handleImportVM() {
+  async function handleImportVM(): Promise<void> {
     if (!importFile) return;
     importing = true;
     try {
@@ -164,7 +177,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 
   <div class="inventory-metrics">
     <CompactMetricCard label="Defined Policies" value={backupJobs.length} color="neutral" />
-    <CompactMetricCard label="Active Protection" value={backupJobs.filter(j => j.enabled).length} color="primary" />
+    <CompactMetricCard label="Active Protection" value={backupJobs.filter(j => j.status === 'Enabled').length} color="primary" />
     <CompactMetricCard label="Recovery Library" value={backupHistory.length} color="neutral" />
     <CompactMetricCard label="Data Durability" value="VERIFIED_100%" color="primary" />
   </div>
@@ -189,51 +202,49 @@ import Button from '$lib/components/primitives/Button.svelte';
       {:else if error}
         <ErrorState description={error} />
       {:else if activeTab === 'jobs'}
-        <InventoryTable 
-          columns={jobColumns} 
+        <InventoryTable
+          columns={jobColumns}
           rows={backupJobs.map(j => ({
             ...j,
-            next_run: (j as any).next_run_formatted || '—'
+            created_at: j.created_at ? new Date(j.created_at).toLocaleDateString() : '—'
           }))}
         >
           {#snippet cell({ column, row })}
-             {#if column.key === 'name'}
+             {#if column.key === 'job_id'}
                <div class="registry-identity">
-                 <span class="p-name">{row.name}</span>
-                 <span class="p-id">ID // {row.id.slice(0,8)}</span>
+                 <span class="p-name">{row.backup_type}</span>
+                 <span class="p-id">ID // {row.job_id.slice(0,8)}</span>
                </div>
              {:else if column.key === 'status'}
-               <StatusBadge label={row.enabled ? 'ACTIVE' : 'SUSPENDED'} tone={row.enabled ? 'healthy' : 'warning'} />
-             {:else if column.key === 'cadence'}
-               <span class="cell-mono">{row.schedule} ({row.retention} ROT)</span>
+               <StatusBadge label={row.status.toUpperCase()} tone={row.status === 'Enabled' || row.status === 'Completed' ? 'healthy' : row.status === 'Pending' ? 'warning' : 'degraded'} />
              {:else if column.key === '_actions'}
                 <div class="op-cluster">
                    <button type="button" class="op-ctrl" onclick={() => runJobNow(row)} title="FORCE_EXECUTE"><Play size={12} /></button>
                    <button type="button" class="op-ctrl" onclick={() => toggleJob(row)} title="TOGGLE_STATUS">
-                      {#if row.enabled}<Pause size={12} />{:else}<Play size={12} />{/if}
+                      {#if row.status === 'Enabled'}<Pause size={12} />{:else}<Play size={12} />{/if}
                    </button>
                 </div>
              {:else}
-               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
+               <span class="cell-text">{(row as Record<string, unknown>)[column.key] ?? '—'}</span>
              {/if}
           {/snippet}
         </InventoryTable>
       {:else}
         <InventoryTable columns={historyColumns} rows={backupHistory.map(h => ({
           ...h,
-          size: formatBytes(h.size_bytes),
-          started_at: new Date(String(h.started_at)).toLocaleString()
+          size: formatBytes(h.size_bytes ?? 0),
+          started_at: h.started_at ? new Date(h.started_at).toLocaleString() : '—'
         }))}>
           {#snippet cell({ column, row })}
              {#if column.key === 'status'}
-               <StatusBadge label={row.status.toUpperCase()} tone={row.status === 'completed' ? 'healthy' : row.status === 'running' ? 'warning' : 'failed'} />
+               <StatusBadge label={row.status.toUpperCase()} tone={row.status === 'Completed' ? 'healthy' : row.status === 'Pending' ? 'warning' : 'failed'} />
              {:else if column.key === 'completed_at'}
                <div class="trace-end">
-                 <span class="timestamp">{new Date(String(row.completed_at)).toLocaleTimeString()}</span>
+                 <span class="timestamp">{row.completed_at ? new Date(String(row.completed_at)).toLocaleTimeString() : '—'}</span>
                  <button type="button" class="trace-dl" title="DOWNLOAD_ARTIFACT"><Download size={12} /></button>
                </div>
              {:else}
-               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
+               <span class="cell-text">{(row as Record<string, unknown>)[column.key] ?? '—'}</span>
              {/if}
           {/snippet}
         </InventoryTable>
@@ -262,8 +273,8 @@ import Button from '$lib/components/primitives/Button.svelte';
         <div class="micro-trace-list">
           {#each backupHistory.slice(0, 3) as trace}
             <div class="trace-card">
-              <span class="trace-vm">{trace.vm_name}</span>
-              <span class="trace-meta">{trace.status} · {formatBytes(trace.size_bytes)}</span>
+              <span class="trace-vm">{trace.vm_id}</span>
+              <span class="trace-meta">{trace.status} · {formatBytes(trace.size_bytes ?? 0)}</span>
             </div>
           {:else}
              <p class="empty-hint">No operational traces found.</p>
@@ -278,39 +289,43 @@ import Button from '$lib/components/primitives/Button.svelte';
 <Modal bind:open={createJobOpen} title="DEFINE_PROTECTION_POLICY">
   <div class="registry-form">
     <div class="form-group">
-      <label for="job-name">POLICY_IDENTIFIER</label>
-      <input id="job-name" type="text" bind:value={newJobName} placeholder="e.g. CRITICAL_DAILY_ROTATION" />
-    </div>
-
-    <div class="form-group">
       <label for="vm-select">TARGET_COMPUTE_NODE</label>
       <select id="vm-select" bind:value={selectedVMId}>
         <option value="">SELECT_WORKLOAD...</option>
         {#each vms as vm}
-          <option value={vm.id}>{vm.name} // {vm.vcpu}c {vm.memory_mb}m</option>
+          <option value={vm.vm_id}>{vm.name} // {vm.cpu} {vm.memory}</option>
         {/each}
       </select>
     </div>
 
     <div class="form-group">
-      <label for="schedule">CADENCE_EXPRESSION (CRON)</label>
-      <select id="schedule" bind:value={newJobSchedule}>
-        <option value="0 2 * * *">DAILY_AT_0200</option>
-        <option value="0 */6 * * *">EVERY_6_HOURS</option>
-        <option value="0 * * * *">HOURLY_PULSE</option>
-        <option value="0 0 * * 0">WEEKLY_EPOCH</option>
+      <label for="backup-type">BACKUP_TYPE</label>
+      <select id="backup-type" bind:value={selectedBackupType}>
+        <option value="full">FULL</option>
+        <option value="incremental">INCREMENTAL</option>
+        <option value="snapshot">SNAPSHOT</option>
       </select>
     </div>
 
     <div class="form-group">
-      <label for="retention">RETENTION_DEPTH (OBJECTS)</label>
-      <input id="retention" type="number" bind:value={newJobRetention} min="1" max="100" />
+      <label for="target-path">TARGET_PATH (optional)</label>
+      <input id="target-path" type="text" bind:value={selectedTargetPath} placeholder="e.g. /backups/vm-daily" />
+    </div>
+
+    <div class="form-group">
+      <label for="storage-backend">STORAGE_BACKEND (optional)</label>
+      <select id="storage-backend" bind:value={selectedStorageBackend}>
+        <option value="">DEFAULT</option>
+        <option value="local">LOCAL</option>
+        <option value="s3">S3</option>
+        <option value="nfs">NFS</option>
+      </select>
     </div>
   </div>
 
   {#snippet footer()}
     <Button variant="secondary" onclick={() => createJobOpen = false}>CANCEL</Button>
-    <Button variant="primary" onclick={handleCreateJob} disabled={creatingJob || !newJobName || !selectedVMId}>
+    <Button variant="primary" onclick={handleCreateJob} disabled={creatingJob || !selectedVMId}>
       {creatingJob ? 'COMMITTING...' : 'COMMIT_POLICY'}
     </Button>
   {/snippet}

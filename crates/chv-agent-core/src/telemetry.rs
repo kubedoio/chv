@@ -64,13 +64,14 @@ impl TelemetryReporter {
         volume_id: &str,
         runtime_status: &str,
         observed_generation: &str,
+        health_status: &str,
     ) -> proto::VolumeStateReport {
         proto::VolumeStateReport {
             node_id: self.node_id.clone(),
             volume_id: volume_id.to_string(),
             runtime_status: runtime_status.to_string(),
             observed_generation: observed_generation.to_string(),
-            health_status: "Healthy".to_string(),
+            health_status: health_status.to_string(),
             last_error: "".to_string(),
             reported_unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -84,13 +85,14 @@ impl TelemetryReporter {
         network_id: &str,
         runtime_status: &str,
         observed_generation: &str,
+        health_status: &str,
     ) -> proto::NetworkStateReport {
         proto::NetworkStateReport {
             node_id: self.node_id.clone(),
             network_id: network_id.to_string(),
             runtime_status: runtime_status.to_string(),
             observed_generation: observed_generation.to_string(),
-            health_status: "Healthy".to_string(),
+            health_status: health_status.to_string(),
             last_error: "".to_string(),
             reported_unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -132,7 +134,7 @@ mod tests {
     #[test]
     fn volume_report_has_volume_id() {
         let rep = TelemetryReporter::new("node-1");
-        let report = rep.volume_state_report("vol-1", "Attached", "5");
+        let report = rep.volume_state_report("vol-1", "Attached", "5", "Healthy");
         assert_eq!(report.node_id, "node-1");
         assert_eq!(report.volume_id, "vol-1");
         assert_eq!(report.runtime_status, "Attached");
@@ -141,7 +143,7 @@ mod tests {
     #[test]
     fn network_report_has_network_id() {
         let rep = TelemetryReporter::new("node-1");
-        let report = rep.network_state_report("net-1", "Ready", "3");
+        let report = rep.network_state_report("net-1", "Ready", "3", "Healthy");
         assert_eq!(report.node_id, "node-1");
         assert_eq!(report.network_id, "net-1");
         assert_eq!(report.runtime_status, "Ready");

@@ -892,10 +892,22 @@ pub async fn mutate_vm(
 
     crate::audit::log_mutation(&claims.sub, &action, "vm", &vm_id);
 
-    let response = state
-        .mutations
-        .mutate_vm(vm_id, action, force, claims.sub)
-        .await?;
+    let response = if action == "migrate" {
+        let target_node_id = payload
+            .get("target_node_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| BffError::BadRequest("missing target_node_id for migrate action".into()))?
+            .to_string();
+        state
+            .mutations
+            .migrate_vm(vm_id, target_node_id, claims.sub)
+            .await?
+    } else {
+        state
+            .mutations
+            .mutate_vm(vm_id, action, force, claims.sub)
+            .await?
+    };
 
     state.cache.invalidate("vms:").await;
     state.cache.invalidate("overview").await;
