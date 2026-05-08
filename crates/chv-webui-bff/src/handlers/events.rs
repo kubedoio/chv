@@ -9,16 +9,123 @@ pub async fn list_events(
     State(state): State<AppState>,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    let page = payload
-        .get("page")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1)
-        .max(1);
     let page_size = payload
         .get("page_size")
         .and_then(|v| v.as_u64())
         .unwrap_or(50)
         .clamp(1, 200);
+
+    let cursor_after = payload.get("cursor_after").and_then(|v| v.as_str());
+
+    if let Some(cursor) = cursor_after {
+        // Cursor-based pagination: fetch items older than the cursor event
+        let cursor_timestamp: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT occurred_at FROM (
+                SELECT event_id, occurred_at FROM events
+                UNION ALL
+                SELECT alert_id AS event_id, opened_at AS occurred_at FROM alerts
+            ) WHERE event_id = $1
+            "#,
+        )
+        .bind(cursor)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to resolve cursor: {}", e)))?;
+
+        let cursor_ts = cursor_timestamp
+            .ok_or_else(|| BffError::BadRequest("invalid cursor_after: event not found".into()))?;
+
+        let items_raw = sqlx::query_as::<_, UnifiedEventRow>(
+            r#"
+            SELECT event_id, severity, type, resource_kind, resource_id, resource_name, summary, occurred_at, state
+            FROM (
+                SELECT
+                    event_id,
+                    severity,
+                    event_type AS type,
+                    COALESCE(resource_kind, '') AS resource_kind,
+                    COALESCE(resource_id, '') AS resource_id,
+                    COALESCE(n.display_name, e.resource_id, '') AS resource_name,
+                    message AS summary,
+                    occurred_at,
+                    'open' AS state
+                FROM events e
+                LEFT JOIN nodes n ON e.node_id = n.node_id
+                UNION ALL
+                SELECT
+                    alert_id AS event_id,
+                    severity,
+                    alert_type AS type,
+                    COALESCE(resource_kind, '') AS resource_kind,
+                    COALESCE(resource_id, '') AS resource_id,
+                    COALESCE(n.display_name, a.resource_id, '') AS resource_name,
+                    message AS summary,
+                    opened_at AS occurred_at,
+                    CASE
+                        WHEN acknowledged_at IS NOT NULL THEN 'acknowledged'
+                        WHEN resolved_at IS NOT NULL THEN 'resolved'
+                        ELSE 'open'
+                    END AS state
+                FROM alerts a
+                LEFT JOIN nodes n ON a.node_id = n.node_id
+            ) combined
+            WHERE occurred_at < $1 OR (occurred_at = $1 AND event_id < $2)
+            ORDER BY occurred_at DESC, event_id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(&cursor_ts)
+        .bind(cursor)
+        .bind((page_size + 1) as i64)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| BffError::Internal(format!("failed to list events: {}", e)))?;
+
+        let has_more = items_raw.len() > page_size as usize;
+        let items_raw: Vec<_> = items_raw.into_iter().take(page_size as usize).collect();
+
+        let next_cursor = if has_more {
+            items_raw.last().map(|r| r.event_id.clone())
+        } else {
+            None
+        };
+
+        let items: Vec<Value> = items_raw
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "event_id": r.event_id,
+                    "severity": r.severity.to_lowercase(),
+                    "type": r.r#type,
+                    "resource_kind": r.resource_kind,
+                    "resource_id": r.resource_id,
+                    "resource_name": r.resource_name,
+                    "summary": r.summary,
+                    "state": r.state,
+                    "occurred_at": r.occurred_at,
+                })
+            })
+            .collect();
+
+        return Ok(Json(json!({
+            "items": items,
+            "cursor": {
+                "has_more": has_more,
+                "next_cursor": next_cursor,
+            },
+            "filters": {
+                "applied": {}
+            },
+        })));
+    }
+
+    // Offset-based pagination (legacy)
+    let page = payload
+        .get("page")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1);
     let offset = (page - 1) * page_size;
 
     let total_count: i64 =
@@ -73,6 +180,8 @@ pub async fn list_events(
     .await
     .map_err(|e| BffError::Internal(format!("failed to list events: {}", e)))?;
 
+    let next_cursor = items_raw.last().map(|r| r.event_id.clone());
+
     let items: Vec<Value> = items_raw
         .into_iter()
         .map(|r| {
@@ -97,6 +206,10 @@ pub async fn list_events(
             "page_size": page_size,
             "total_items": total_count,
             "total_pages": total_pages,
+        },
+        "cursor": {
+            "has_more": (page * page_size) < total_count as u64,
+            "next_cursor": next_cursor,
         },
         "filters": {
             "applied": {}

@@ -5,9 +5,9 @@ Fix all CRITICAL and HIGH production bugs from the gap analysis, progressing thr
 
 ## Phases
 - [x] Phase 1: P0 Critical Fixes — Data Loss (6 bugs, DONE)
-- [ ] Phase 2: P1 Security/Reliability (8 items)
-- [ ] Phase 3: P2 Spec Compliance (6 items)
-- [ ] Phase 4: Final verification
+- [x] Phase 2: P1 Security/Reliability (8 items, DONE)
+- [x] Phase 3: P2 Spec Compliance (6 items, DONE)
+- [x] Phase 4: Final verification
 
 ## P0 Items (COMPLETED — commit a3700393)
 
@@ -43,4 +43,15 @@ Fix all CRITICAL and HIGH production bugs from the gap analysis, progressing thr
 - Pre-existing test failures (missing timeout_multiplier field) — fixed alongside P0
 
 ## Status
-**Currently in Phase 2** — Reviewing P1 items, reading source files to plan implementation
+**All phases complete.** P0, P1, and P2 fixes implemented and verified.
+
+## P2 Items (COMPLETED)
+
+| # | Issue | Location | Status |
+|---|-------|----------|--------|
+| 15 | SQLite startup integrity check | controlplane-store/db.rs | FIXED |
+| 16 | MTU auto-detection + bridge MTU | nwd-core/executor.rs | FIXED |
+| 17 | OperationStatus::Cancelled variant | controlplane-types/domain.rs | FIXED |
+| 18 | Agent-side StartVm denial when not TenantReady | agent-core/agent_server.rs | FIXED |
+| 19 | Telemetry health not hardcoded | agent-core/telemetry.rs | FIXED |
+| 20 | Cursor-based pagination in BFF | webui-bff/handlers/events.rs | FIXED |

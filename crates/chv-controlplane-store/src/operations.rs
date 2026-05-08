@@ -55,7 +55,7 @@ SET
     updated_by = $6,
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch'),
     completed_at = CASE
-        WHEN $2 IN ('Succeeded', 'Failed', 'Rejected', 'Stale', 'Conflict')
+        WHEN $2 IN ('Succeeded', 'Failed', 'Rejected', 'Cancelled', 'Stale', 'Conflict')
         THEN strftime('%Y-%m-%dT%H:%M:%SZ', $7 / 1000.0, 'unixepoch')
         ELSE completed_at
     END

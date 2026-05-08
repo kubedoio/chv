@@ -699,6 +699,16 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         let mut cache = self.cache.lock().await;
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let node_state = cache
+            .node_state
+            .parse::<crate::state_machine::NodeState>()
+            .unwrap_or(crate::state_machine::NodeState::Bootstrapping);
+        if node_state != crate::state_machine::NodeState::TenantReady {
+            return Err(Status::failed_precondition(format!(
+                "node not schedulable: {}",
+                cache.node_state
+            )));
+        }
         cache.update_vm_desired_state(&inner.vm_id, "Running");
         self.persist_cache(&cache).await;
         drop(cache);
