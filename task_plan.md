@@ -1,69 +1,133 @@
-# Task Plan: Production Readiness Fixes
+# Task Plan: WebUI Completion + CLI Tool
 
 ## Goal
-Fix all CRITICAL and HIGH production bugs from the gap analysis, progressing through P0 (data loss) → P1 (security/reliability) → P2 (spec compliance), then implement ship-blocking feature gaps.
+1. Fix all broken/stub WebUI functionality (backup page broken endpoints, missing live migration UI, dual API client mess)
+2. Implement `chvctl` CLI tool for managing the CHV environment from the command line
 
-## Phases
-- [x] Phase 1: P0 Critical Fixes — Data Loss (6 bugs, DONE)
-- [x] Phase 2: P1 Security/Reliability (8 items, DONE)
-- [x] Phase 3: P2 Spec Compliance (6 items, DONE)
-- [x] Phase 4: Final verification
-- [x] Phase 5: Ship-blocking feature gaps (3 items — all already implemented)
+---
 
-## P0 Items (COMPLETED — commit a3700393)
+## Phase 1: WebUI — Fix Broken Backup Page
 
-| # | Bug | Status |
-|---|-----|--------|
-| P0-1 | Live migration skips dirty-block sync | FIXED |
-| P0-2 | stord session persistence disabled | FIXED |
-| P0-3 | stop_vm reports success without confirming | FIXED |
-| P0-4 | Volume resource leak on partial prep failure | FIXED |
-| P0-5 | VNI allocation race condition | FIXED |
-| P0-6 | Silent JSON serialization data loss | FIXED |
+The backup-jobs page (`ui/src/routes/backup-jobs/+page.svelte`) uses the **old** `$lib/api/client.ts` which calls non-existent endpoints:
+- `client.runBackupJob(id)` → calls `/api/v1/backup-jobs/${id}/run` (DOES NOT EXIST)
+- `client.toggleBackupJob(id)` → calls `/api/v1/backup-jobs/${id}/toggle` (DOES NOT EXIST)
+- `client.createBackupJob(...)` → calls `/api/v1/backup-jobs` POST (WRONG: actual is `/v1/backups/jobs`)
+- `client.deleteBackupJob(id)` → calls `/api/v1/backup-jobs/${id}` DELETE (WRONG path)
 
-## P1 Items (COMPLETED — commit 176eec71)
+**Actual BFF endpoints (in router.rs):**
+- `POST /v1/backup-jobs` — legacy list (page payload)
+- `GET /v1/backups/jobs` — RESTful list
+- `POST /v1/backups/jobs` — create
+- `PATCH /v1/backups/jobs/:job_id` — update
+- `DELETE /v1/backups/jobs/:job_id` — delete
+- `POST /v1/backups/jobs/:job_id/execute` — run now
 
-| # | Issue | Location | Status |
-|---|-------|----------|--------|
-| 7 | No gRPC timeouts to stord/nwd | agent-core/daemon_clients.rs | FIXED |
-| 8 | TLS domain hardcoded "localhost" | agent-core/control_plane.rs | FIXED |
-| 9 | Blocking I/O on async executor | stord-backends/local.rs | FIXED |
-| 10 | TOCTOU in migration port allocation | agent-core/migration.rs | FIXED |
-| 11 | Non-atomic quota check | controlplane-service/lifecycle.rs | N/A (stub only) |
-| 12 | Hot-plug ops not persisted | controlplane-service/lifecycle.rs | N/A (already persisted) |
-| 13 | Ready-node metric always 0 | controlplane-service/orchestrator.rs | FIXED |
-| 14 | Migration mTLS missing | stord-core/migration/sender.rs | FIXED |
+**Fix:** Migrate backup page from old `createAPIClient()` to new `$lib/bff/` module. Create `$lib/bff/backups.ts` with proper endpoint mappings.
 
-## P2 Items (COMPLETED — commit 2e9e7114)
+- [ ] 1.1: Create `ui/src/lib/bff/backups.ts` with functions: listBackupJobs, createBackupJob, deleteBackupJob, executeBackupJob, updateBackupJob, listBackupSchedules, listBackupHistory
+- [ ] 1.2: Add backup endpoints to `ui/src/lib/bff/endpoints.ts`
+- [ ] 1.3: Rewrite `backup-jobs/+page.svelte` to use new BFF client
+- [ ] 1.4: Add missing "toggle" functionality (enable/disable via `updateBackupJob` with `enabled: true/false`)
 
-| # | Issue | Location | Status |
-|---|-------|----------|--------|
-| 15 | SQLite startup integrity check | controlplane-store/db.rs | FIXED |
-| 16 | MTU auto-detection + bridge MTU | nwd-core/executor.rs | FIXED |
-| 17 | OperationStatus::Cancelled variant | controlplane-types/domain.rs | FIXED |
-| 18 | Agent-side StartVm denial when not TenantReady | agent-core/agent_server.rs | FIXED |
-| 19 | Telemetry health not hardcoded | agent-core/telemetry.rs | FIXED |
-| 20 | Cursor-based pagination in BFF | webui-bff/handlers/events.rs | FIXED |
+---
 
-## Phase 5: Ship-blocking Features (COMPLETED — already implemented in prior work)
+## Phase 2: WebUI — Add Live Migration UI
 
-From gap analysis P0 items (must-have for first deployment):
+The VM detail page has actions (start, shutdown, poweroff, reboot, delete) but **no migrate button**. The backend has `MigrateVm` RPC fully implemented (control plane orchestrator, migration state machine, agent-side live migration). Missing: UI trigger.
 
-| # | Feature | Scope | Status |
-|---|---------|-------|--------|
-| F1 | User Management (CRUD) | Backend handlers + UI page | DONE (handlers/users.rs, /settings/users UI) |
-| F2 | Image Delete | Backend handler + UI button | DONE (handlers/images.rs::delete_image, /v1/images/delete) |
-| F3 | Cloud-init Support | DB + Backend + Wire existing UI | DONE (migration 0012, templates CRUD, VM create wiring, UI components) |
+**Fix:** Add a "Migrate" action to the VM detail page that:
+1. Shows a modal to select the target node
+2. Calls `mutateVm({ vm_id, action: 'migrate', target_node_id })` via BFF
+3. Shows migration progress via the tasks/operations stream
+
+- [ ] 2.1: Add `migrate` to allowed actions in BFF `mutate_vm` handler (verify it flows to orchestrator's MigrateVm)
+- [ ] 2.2: Add Migrate button to `VmDetailActions.svelte`
+- [ ] 2.3: Create `VmMigrateModal.svelte` — node selector + confirmation
+- [ ] 2.4: Wire modal into VM detail page, call mutateVm with target_node_id
+- [ ] 2.5: Add BFF endpoint for listing eligible migration targets (nodes with TenantReady state)
+
+---
+
+## Phase 3: WebUI — Additional Missing Functionality
+
+Other stubs and gaps identified:
+
+- [ ] 3.1: Add `deleteImage` to BFF endpoints.ts and wire delete button on images page
+- [ ] 3.2: Add snapshot management to BFF client (listVmSnapshots, createSnapshot, deleteSnapshot, restoreSnapshot already exist in router but no `$lib/bff/snapshots.ts`)
+- [ ] 3.3: Wire VmSnapshots component to use new BFF functions (currently uses old client)
+- [ ] 3.4: Add resize VM flow (backend exists: `POST /v1/vms/resize`)
+
+---
+
+## Phase 4: CLI Tool — `chvctl`
+
+No CLI tool exists. All management is through the BFF/WebUI. Need a `chvctl` command that talks to the BFF HTTP API (authenticated with JWT).
+
+### Architecture
+- New crate: `cmd/chvctl/` 
+- Dependencies: `clap` (CLI framework), `reqwest` (HTTP client), `serde_json`, `tokio`
+- Auth: stores JWT in `~/.config/chvctl/credentials` after `chvctl login`
+- Talks to: BFF HTTP API (same endpoints the WebUI uses)
+
+### Subcommands
+
+```
+chvctl login                        # Authenticate, store token
+chvctl vm list                      # List VMs
+chvctl vm get <vm_id>               # Get VM details
+chvctl vm create <name> [flags]     # Create VM
+chvctl vm start <vm_id>             # Start VM
+chvctl vm stop <vm_id>              # Graceful shutdown
+chvctl vm reboot <vm_id>            # Reboot
+chvctl vm delete <vm_id>            # Delete
+chvctl vm migrate <vm_id> --to <node_id>  # Live migrate
+chvctl vm resize <vm_id> --cpu N --memory N  # Resize
+chvctl node list                    # List nodes
+chvctl node get <node_id>           # Get node details
+chvctl node drain <node_id>         # Drain node
+chvctl node maintenance enter <node_id>  # Enter maintenance
+chvctl node maintenance exit <node_id>   # Exit maintenance
+chvctl image list                   # List images
+chvctl image import <name> --url <url>   # Import image
+chvctl image delete <image_id>      # Delete image
+chvctl volume list                  # List volumes
+chvctl volume snapshot <vol_id>     # Snapshot volume
+chvctl volume clone <vol_id>        # Clone volume
+chvctl network list                 # List networks
+chvctl network create <name> [flags]  # Create network
+chvctl task list                    # List operations/tasks
+chvctl task watch                   # Stream task updates (SSE)
+chvctl backup list                  # List backup jobs
+chvctl backup run <job_id>          # Execute backup
+chvctl user list                    # List users (admin)
+chvctl user create <username> [flags]  # Create user (admin)
+```
+
+- [ ] 4.1: Scaffold `cmd/chvctl/` crate with Cargo.toml, main.rs, clap derive structure
+- [ ] 4.2: Implement auth module (login, token storage, auto-refresh)
+- [ ] 4.3: Implement HTTP client wrapper (base URL config, auth header injection, error handling)
+- [ ] 4.4: Implement `vm` subcommands (list, get, create, start, stop, reboot, delete, migrate, resize)
+- [ ] 4.5: Implement `node` subcommands (list, get, drain, maintenance)
+- [ ] 4.6: Implement `image` subcommands (list, import, delete)
+- [ ] 4.7: Implement `volume` subcommands (list, snapshot, clone)
+- [ ] 4.8: Implement `network` subcommands (list, create, delete)
+- [ ] 4.9: Implement `task` subcommands (list, watch via SSE)
+- [ ] 4.10: Implement `backup` subcommands (list, run)
+- [ ] 4.11: Implement `user` subcommands (list, create, delete)
+- [ ] 4.12: Add output formatters (table, json, yaml)
+- [ ] 4.13: Add to workspace Cargo.toml, verify `cargo check --workspace`
+
+---
 
 ## Key Decisions
-- Work on branch: `fix/p0-critical-production-bugs` (continuing)
-- All fixes must compile with `cargo check --workspace`
-- All existing tests must pass
-- No new features — only fix the bugs identified (Phases 1-4)
-- Phase 5: Ship-blocking features from gap analysis
+- CLI talks to BFF HTTP API (not directly to gRPC control plane) — same auth, same permissions model
+- Use `clap` derive macros for ergonomic CLI definition
+- Use `reqwest` for HTTP (not tonic gRPC) — simpler, no proto dependency in CLI
+- Output defaults to table format, `--output json` for scripting
+- Branch: `feat/webui-completion-and-cli`
 
 ## Errors Encountered
-- Pre-existing test failures (missing timeout_multiplier field) — fixed alongside P0
+- (none yet)
 
 ## Status
-**All phases complete.** P0-P2 bug fixes committed. Phase 5 ship-blocking features verified as already implemented from prior work. The production readiness task plan is done.
+**Currently in Phase 1** — Fixing broken backup page

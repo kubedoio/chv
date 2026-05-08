@@ -1,0 +1,9 @@
+pub mod auth;
+pub mod backup;
+pub mod image;
+pub mod network;
+pub mod node;
+pub mod task;
+pub mod user;
+pub mod vm;
+pub mod volume;

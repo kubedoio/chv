@@ -1,17 +1,19 @@
 <script lang="ts">
 	import Button from '$lib/components/primitives/Button.svelte';
-	import { Play, Square, RotateCcw, Trash2, Power } from 'lucide-svelte';
+	import { Play, Square, RotateCcw, Trash2, Power, ArrowRightLeft } from 'lucide-svelte';
 
 	interface Props {
 		pendingAction?: string | null;
 		powerState?: string;
 		onExecute?: (action: string) => void;
+		onMigrate?: () => void;
 	}
 
 	let {
 		pendingAction = null,
 		powerState = '',
-		onExecute = () => {}
+		onExecute = () => {},
+		onMigrate
 	}: Props = $props();
 
 	let confirmingAction = $state<string | null>(null);
@@ -38,6 +40,9 @@
 		</button>
 		<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => confirmingAction = 'restart'} title={pendingAction === 'restart' ? 'Rebooting' : 'Reboot VM'} aria-label={pendingAction === 'restart' ? 'Rebooting VM' : 'Reboot VM'}>
 			<RotateCcw size={13} />
+		</button>
+		<button class="vm-action" type="button" disabled={ps !== 'running' || pendingAction !== null} onclick={() => onMigrate?.()} title="Migrate VM" aria-label="Migrate VM to another node">
+			<ArrowRightLeft size={13} />
 		</button>
 		<button class="vm-action vm-action--danger" type="button" disabled={pendingAction !== null} onclick={() => confirmingAction = 'delete'} title={pendingAction === 'delete' ? 'Deleting' : 'Delete VM'} aria-label={pendingAction === 'delete' ? 'Deleting VM' : 'Delete VM'}>
 			<Trash2 size={13} />
