@@ -345,14 +345,13 @@ impl StorageBackend for LocalFileBackend {
         }
 
         let path_clone = path.clone();
-        let export_kind = tokio::task::spawn_blocking(move || {
-            LocalFileBackend::detect_kind(&path_clone)
-        })
-        .await
-        .map_err(|e| ChvError::BackendUnavailable {
-            backend: "local".to_string(),
-            reason: format!("spawn_blocking join error: {e}"),
-        })?;
+        let export_kind =
+            tokio::task::spawn_blocking(move || LocalFileBackend::detect_kind(&path_clone))
+                .await
+                .map_err(|e| ChvError::BackendUnavailable {
+                    backend: "local".to_string(),
+                    reason: format!("spawn_blocking join error: {e}"),
+                })?;
         let attachment_handle = format!("local-{}-{}", volume_id, locator.locator);
 
         Ok(VolumeExport {

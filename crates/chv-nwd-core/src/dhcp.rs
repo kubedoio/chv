@@ -287,7 +287,11 @@ fn derive_gateway(cidr: &str) -> Option<String> {
     let (ip_str, prefix_str) = cidr.split_once('/')?;
     let prefix: u8 = prefix_str.parse().ok()?;
     let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;
-    let mask: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix)
+    };
     let network = u32::from(ip) & mask;
     let gateway = std::net::Ipv4Addr::from(network + 1);
     Some(gateway.to_string())
@@ -340,13 +344,19 @@ mod tests {
     #[test]
     fn test_derive_gateway_canonical_cidr() {
         assert_eq!(derive_gateway("10.0.0.0/24"), Some("10.0.0.1".to_string()));
-        assert_eq!(derive_gateway("192.168.1.0/24"), Some("192.168.1.1".to_string()));
+        assert_eq!(
+            derive_gateway("192.168.1.0/24"),
+            Some("192.168.1.1".to_string())
+        );
     }
 
     #[test]
     fn test_derive_gateway_non_canonical_cidr() {
         // Non-canonical: host bits set. Gateway should still be network+1.
         assert_eq!(derive_gateway("10.0.0.5/24"), Some("10.0.0.1".to_string()));
-        assert_eq!(derive_gateway("172.16.3.200/16"), Some("172.16.0.1".to_string()));
+        assert_eq!(
+            derive_gateway("172.16.3.200/16"),
+            Some("172.16.0.1".to_string())
+        );
     }
 }

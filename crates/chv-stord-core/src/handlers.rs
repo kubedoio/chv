@@ -691,5 +691,4 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
 
         Ok(Response::new(Self::ok_result()))
     }
-
 }

@@ -8,8 +8,8 @@ use crate::migration::{
     create_migration_record, update_migration_progress, MigrationConfig, MigrationPhase,
     MigrationState, PhaseTimeouts,
 };
-use crate::overlay::OverlayManager;
 use crate::node_client_pool::NodeClientPool;
+use crate::overlay::OverlayManager;
 use chv_controlplane_store::{
     test_util::create_test_pool, DesiredStateRepository, NodeRepository, NodeUpsertInput,
     OperationCreateInput, OperationRepository, StorePool, VtepRepository,
@@ -212,7 +212,13 @@ async fn test_happy_path_migration_state_progression() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-001", "node-a", "net-overlay", "aa:bb:cc:dd:ee:01", 4_294_967_296)
+        .create_vm_on_node(
+            "vm-001",
+            "node-a",
+            "net-overlay",
+            "aa:bb:cc:dd:ee:01",
+            4_294_967_296,
+        )
         .await;
     cluster.create_operation("op-mig-001").await;
 
@@ -334,12 +340,11 @@ async fn test_happy_path_migration_state_progression() {
     .await
     .unwrap();
 
-    let row: (String, Option<String>) = sqlx::query_as(
-        "SELECT phase, completed_at FROM migrations WHERE migration_id = 'mig-001'",
-    )
-    .fetch_one(&cluster.pool)
-    .await
-    .unwrap();
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT phase, completed_at FROM migrations WHERE migration_id = 'mig-001'")
+            .fetch_one(&cluster.pool)
+            .await
+            .unwrap();
     assert_eq!(row.0, "Completed");
     assert!(row.1.is_some(), "completed_at should be set");
 
@@ -363,7 +368,13 @@ async fn test_disk_convergence_dirty_block_decrease() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-conv", "node-a", "net-001", "aa:bb:cc:dd:ee:02", 2_147_483_648)
+        .create_vm_on_node(
+            "vm-conv",
+            "node-a",
+            "net-001",
+            "aa:bb:cc:dd:ee:02",
+            2_147_483_648,
+        )
         .await;
     cluster.create_operation("op-conv-001").await;
 
@@ -387,7 +398,9 @@ async fn test_disk_convergence_dirty_block_decrease() {
         dirty_blocks_remaining: 0,
     };
 
-    create_migration_record(&cluster.pool, &state).await.unwrap();
+    create_migration_record(&cluster.pool, &state)
+        .await
+        .unwrap();
 
     // Simulate multiple convergence rounds with decreasing dirty blocks
     let dirty_sequence: Vec<(u32, u64)> = vec![
@@ -437,7 +450,13 @@ async fn test_failure_in_precopy_disk_rollback() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-fail-pre", "node-a", "net-001", "aa:bb:cc:dd:ee:03", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-fail-pre",
+            "node-a",
+            "net-001",
+            "aa:bb:cc:dd:ee:03",
+            1_073_741_824,
+        )
         .await;
     cluster.create_operation("op-fail-pre").await;
 
@@ -455,7 +474,9 @@ async fn test_failure_in_precopy_disk_rollback() {
         dirty_blocks_remaining: 0,
     };
 
-    create_migration_record(&cluster.pool, &state).await.unwrap();
+    create_migration_record(&cluster.pool, &state)
+        .await
+        .unwrap();
 
     // Simulate agent reporting RolledBack during PreCopyDisk
     // (e.g., dest stord killed mid-stream)
@@ -502,7 +523,10 @@ async fn test_failure_in_precopy_disk_rollback() {
             .fetch_one(&cluster.pool)
             .await
             .unwrap();
-    assert_eq!(target.0, "node-a", "VM should remain on source node after rollback");
+    assert_eq!(
+        target.0, "node-a",
+        "VM should remain on source node after rollback"
+    );
 }
 
 // Scenario 4: Failure in MemoryMigration — marked Failed (no clean rollback)
@@ -511,7 +535,13 @@ async fn test_failure_in_memory_migration_marked_failed() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-fail-mem", "node-a", "net-001", "aa:bb:cc:dd:ee:04", 2_147_483_648)
+        .create_vm_on_node(
+            "vm-fail-mem",
+            "node-a",
+            "net-001",
+            "aa:bb:cc:dd:ee:04",
+            2_147_483_648,
+        )
         .await;
     cluster.create_operation("op-fail-mem").await;
 
@@ -529,7 +559,9 @@ async fn test_failure_in_memory_migration_marked_failed() {
         dirty_blocks_remaining: 0,
     };
 
-    create_migration_record(&cluster.pool, &state).await.unwrap();
+    create_migration_record(&cluster.pool, &state)
+        .await
+        .unwrap();
 
     // Progress through precopy and convergence
     update_migration_progress(
@@ -605,10 +637,22 @@ async fn test_network_continuity_vni_allocation_and_vtep_lookup() {
 
     // Create overlay network and two VMs on different nodes
     cluster
-        .create_vm_on_node("vm-net-a", "node-a", "net-vxlan", "aa:bb:cc:00:00:01", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-net-a",
+            "node-a",
+            "net-vxlan",
+            "aa:bb:cc:00:00:01",
+            1_073_741_824,
+        )
         .await;
     cluster
-        .create_vm_on_node("vm-net-b", "node-b", "net-vxlan", "aa:bb:cc:00:00:02", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-net-b",
+            "node-b",
+            "net-vxlan",
+            "aa:bb:cc:00:00:02",
+            1_073_741_824,
+        )
         .await;
 
     // Allocate VNI for the network
@@ -634,11 +678,21 @@ async fn test_network_continuity_vni_allocation_and_vtep_lookup() {
         .get_vteps_for_network("net-vxlan")
         .await
         .expect("failed to get VTEPs for network");
-    assert_eq!(vteps.len(), 2, "both nodes should have VTEPs for this network");
+    assert_eq!(
+        vteps.len(),
+        2,
+        "both nodes should have VTEPs for this network"
+    );
 
     let vtep_ips: Vec<&str> = vteps.iter().map(|v| v.vtep_ip.as_str()).collect();
-    assert!(vtep_ips.contains(&"10.0.0.1"), "node-a VTEP should be present");
-    assert!(vtep_ips.contains(&"10.0.0.2"), "node-b VTEP should be present");
+    assert!(
+        vtep_ips.contains(&"10.0.0.1"),
+        "node-a VTEP should be present"
+    );
+    assert!(
+        vtep_ips.contains(&"10.0.0.2"),
+        "node-b VTEP should be present"
+    );
 }
 
 // Scenario 6: Security policy — store and retrieve deny rules
@@ -647,7 +701,13 @@ async fn test_security_policy_store_deny_rule() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-sec", "node-a", "net-sec", "aa:bb:cc:dd:ee:06", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-sec",
+            "node-a",
+            "net-sec",
+            "aa:bb:cc:dd:ee:06",
+            1_073_741_824,
+        )
         .await;
 
     // Insert a security policy with a deny rule
@@ -709,17 +769,33 @@ async fn test_vni_allocation_and_release_lifecycle() {
 
     // Create a network record
     cluster
-        .create_vm_on_node("vm-vni", "node-a", "net-vni-test", "aa:bb:cc:00:01:01", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-vni",
+            "node-a",
+            "net-vni-test",
+            "aa:bb:cc:00:01:01",
+            1_073_741_824,
+        )
         .await;
 
     // Allocate VNI
-    let vni1 = cluster.vtep_repo.allocate_vni("net-vni-test").await.unwrap();
+    let vni1 = cluster
+        .vtep_repo
+        .allocate_vni("net-vni-test")
+        .await
+        .unwrap();
     assert!(vni1 >= 1);
 
     // Allocate a second VNI for a different network
     // Need to create second network first
     cluster
-        .create_vm_on_node("vm-vni2", "node-b", "net-vni-test2", "aa:bb:cc:00:01:02", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-vni2",
+            "node-b",
+            "net-vni-test2",
+            "aa:bb:cc:00:01:02",
+            1_073_741_824,
+        )
         .await;
     let vni2 = cluster
         .vtep_repo
@@ -813,7 +889,13 @@ async fn test_performance_baseline_block_streaming_throughput() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-perf-blk", "node-a", "net-001", "aa:bb:cc:dd:ee:10", 4_294_967_296)
+        .create_vm_on_node(
+            "vm-perf-blk",
+            "node-a",
+            "net-001",
+            "aa:bb:cc:dd:ee:10",
+            4_294_967_296,
+        )
         .await;
     cluster.create_operation("op-perf-blk").await;
 
@@ -837,7 +919,9 @@ async fn test_performance_baseline_block_streaming_throughput() {
         dirty_blocks_remaining: 0,
     };
 
-    create_migration_record(&cluster.pool, &state).await.unwrap();
+    create_migration_record(&cluster.pool, &state)
+        .await
+        .unwrap();
 
     // Simulate block streaming: record timestamps and bytes for throughput calculation
     let start = std::time::Instant::now();
@@ -894,7 +978,13 @@ async fn test_performance_baseline_total_migration_time() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-perf-tot", "node-a", "net-001", "aa:bb:cc:dd:ee:11", 8_589_934_592)
+        .create_vm_on_node(
+            "vm-perf-tot",
+            "node-a",
+            "net-001",
+            "aa:bb:cc:dd:ee:11",
+            8_589_934_592,
+        )
         .await;
     cluster.create_operation("op-perf-tot").await;
 
@@ -912,7 +1002,9 @@ async fn test_performance_baseline_total_migration_time() {
         dirty_blocks_remaining: 0,
     };
 
-    create_migration_record(&cluster.pool, &state).await.unwrap();
+    create_migration_record(&cluster.pool, &state)
+        .await
+        .unwrap();
 
     let migration_start = std::time::Instant::now();
 
@@ -1020,10 +1112,22 @@ async fn test_concurrent_migrations_tracked_independently() {
     let cluster = TestCluster::new().await;
     cluster.setup_two_nodes().await;
     cluster
-        .create_vm_on_node("vm-conc-1", "node-a", "net-001", "aa:bb:cc:dd:ee:20", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-conc-1",
+            "node-a",
+            "net-001",
+            "aa:bb:cc:dd:ee:20",
+            1_073_741_824,
+        )
         .await;
     cluster
-        .create_vm_on_node("vm-conc-2", "node-a", "net-001", "aa:bb:cc:dd:ee:21", 1_073_741_824)
+        .create_vm_on_node(
+            "vm-conc-2",
+            "node-a",
+            "net-001",
+            "aa:bb:cc:dd:ee:21",
+            1_073_741_824,
+        )
         .await;
     cluster.create_operation("op-conc-1").await;
     cluster.create_operation("op-conc-2").await;
@@ -1056,8 +1160,12 @@ async fn test_concurrent_migrations_tracked_independently() {
         dirty_blocks_remaining: 0,
     };
 
-    create_migration_record(&cluster.pool, &state1).await.unwrap();
-    create_migration_record(&cluster.pool, &state2).await.unwrap();
+    create_migration_record(&cluster.pool, &state1)
+        .await
+        .unwrap();
+    create_migration_record(&cluster.pool, &state2)
+        .await
+        .unwrap();
 
     // Progress migration 1 to Completed
     update_migration_progress(

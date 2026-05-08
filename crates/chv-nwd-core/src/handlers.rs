@@ -1,5 +1,6 @@
 use crate::ebpf::{self, EbpfManager};
 use crate::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
+use crate::reconcile;
 use crate::state::{TopologyState, TopologyTable};
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
@@ -164,6 +165,11 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 bridge_handle: _,
             }) => {
                 let vni = if spec.vni > 0 { Some(spec.vni) } else { None };
+                let peer_vteps: Vec<String> = spec
+                    .vtep_endpoints
+                    .iter()
+                    .map(|e| e.vtep_ip.clone())
+                    .collect();
                 let state = TopologyState {
                     network_id: spec.network_id.clone(),
                     tenant_id: spec.tenant_id.clone(),
@@ -173,6 +179,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     gateway_ip: spec.gateway_ip.clone(),
                     runtime_status: "ensured".to_string(),
                     vni,
+                    peer_vteps,
                 };
                 self.topologies.upsert(state.clone());
                 self.persist_upsert(&state).await;
@@ -560,7 +567,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }));
         }
 
-        // Sync FDB entries for peer VTEPs
+        // Sync explicit FDB entries for peer VTEPs (unicast MAC-to-VTEP mappings)
         for fdb in &req.fdb_entries {
             if let Err(e) = self
                 .executor
@@ -578,30 +585,42 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }
         }
 
-        // Add broadcast FDB entries for VTEP endpoints (BUM traffic)
-        for vtep in &req.vtep_endpoints {
-            if let Err(e) = self
-                .executor
-                .add_fdb_entry(
-                    &state.namespace_name,
-                    req.vni,
-                    "00:00:00:00:00:00",
-                    &vtep.vtep_ip,
-                )
-                .await
-            {
-                return Ok(Response::new(proto::UpdateOverlayResponse {
-                    result: Some(Self::err_result(&e)),
-                }));
-            }
+        // Reconcile BUM traffic FDB entries: compute delta against previously known VTEPs
+        let new_vteps: Vec<String> = req
+            .vtep_endpoints
+            .iter()
+            .map(|e| e.vtep_ip.clone())
+            .collect();
+        let old_vteps = &state.peer_vteps;
+
+        if let Err(e) = reconcile::reconcile_fdb_entries(
+            self.executor.as_ref(),
+            &state.namespace_name,
+            req.vni,
+            old_vteps,
+            &new_vteps,
+        )
+        .await
+        {
+            return Ok(Response::new(proto::UpdateOverlayResponse {
+                result: Some(Self::err_result(&e)),
+            }));
         }
+
+        // Update tracked peer VTEPs in topology state
+        let updated_state = TopologyState {
+            peer_vteps: new_vteps,
+            ..state.clone()
+        };
+        self.topologies.upsert(updated_state.clone());
+        self.persist_upsert(&updated_state).await;
 
         info!(
             network_id = %req.network_id,
             vni = req.vni,
             fdb_count = req.fdb_entries.len(),
             vtep_count = req.vtep_endpoints.len(),
-            "overlay updated"
+            "overlay updated with FDB reconciliation"
         );
 
         Ok(Response::new(proto::UpdateOverlayResponse {

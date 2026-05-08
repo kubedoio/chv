@@ -10,7 +10,11 @@ use commands::{auth, backup, image, network, node, task, user, vm, volume};
 use output::OutputFormat;
 
 #[derive(Parser)]
-#[command(name = "chvctl", version, about = "CLI for managing the CHV hypervisor platform")]
+#[command(
+    name = "chvctl",
+    version,
+    about = "CLI for managing the CHV hypervisor platform"
+)]
 struct Cli {
     /// BFF server URL (default: http://localhost:8080 or from config)
     #[arg(long, global = true)]

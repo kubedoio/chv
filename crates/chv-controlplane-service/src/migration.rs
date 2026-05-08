@@ -296,14 +296,15 @@ async fn validate_preconditions(pool: &StorePool, state: &MigrationState) -> Res
     // Check 2: Destination node is in a schedulable state.
     // We check node_desired_state.desired_state — nodes in Maintenance, Draining, or Failed
     // states should not receive new workloads.
-    let dest_state: Option<(String, bool)> =
-        sqlx::query_as("SELECT desired_state, scheduling_paused FROM node_desired_state WHERE node_id = ?")
-            .bind(&state.dest_node_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to query destination node state: {e}"),
-            })?;
+    let dest_state: Option<(String, bool)> = sqlx::query_as(
+        "SELECT desired_state, scheduling_paused FROM node_desired_state WHERE node_id = ?",
+    )
+    .bind(&state.dest_node_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ChvError::Internal {
+        reason: format!("failed to query destination node state: {e}"),
+    })?;
 
     match dest_state {
         None => {

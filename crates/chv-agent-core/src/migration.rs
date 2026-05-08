@@ -6,10 +6,12 @@
 //! `destination_node_id` in the request and executes the appropriate Cloud Hypervisor
 //! REST API calls.
 
+use crate::daemon_clients::StordClient;
 use crate::vm_runtime::VmRuntime;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::net::TcpListener;
-use tracing::{error, info};
+use std::path::Path;
+use tracing::{error, info, warn};
 
 /// Port range for migration receiver sockets.
 const MIGRATION_PORT_RANGE_START: u16 = 49152;
@@ -160,6 +162,306 @@ pub fn spawn_destination_migration(
     })
 }
 
+/// A volume descriptor for disk pre-copy migration.
+///
+/// Each volume attached to a VM needs its data migrated to the destination node
+/// before the memory migration can begin. This struct identifies a volume and its
+/// attachment handle so the stord can locate and stream the correct data.
+#[derive(Debug, Clone)]
+pub struct MigrationVolume {
+    /// The unique volume identifier (e.g., "vol-abc123").
+    pub volume_id: String,
+    /// The attachment handle returned when the volume was opened/attached.
+    pub attachment_handle: String,
+}
+
+/// Configuration for disk pre-copy migration phase.
+///
+/// Encapsulates the stord connection details and volume list needed to coordinate
+/// disk migration before memory migration begins.
+#[derive(Debug, Clone)]
+pub struct DiskPrecopyConfig {
+    /// Path to the local stord Unix socket.
+    pub stord_socket: std::path::PathBuf,
+    /// The gRPC endpoint of the destination stord's migration service
+    /// (e.g., `http://dest-host:50052`).
+    pub dest_stord_endpoint: String,
+    /// Volumes to migrate.
+    pub volumes: Vec<MigrationVolume>,
+}
+
+/// Execute migration as the source agent with disk pre-copy.
+///
+/// This orchestrates the full live migration sequence:
+/// 1. **Disk pre-copy**: For each volume, triggers the local stord to stream blocks
+///    to the destination stord. This runs while the VM is still executing.
+/// 2. **Memory migration**: Once disk pre-copy completes (or converges), calls
+///    Cloud Hypervisor's send-migration which handles iterative memory copy and
+///    final VM pause/transfer.
+///
+/// If disk pre-copy fails for any volume, the migration is aborted before memory
+/// transfer begins. The original `spawn_source_migration` function remains available
+/// for memory-only migration scenarios (e.g., VMs with no local disk).
+pub fn spawn_source_migration_with_disk_precopy(
+    vm_runtime: VmRuntime,
+    vm_id: String,
+    operation_id: String,
+    destination_url: String,
+    disk_config: DiskPrecopyConfig,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    tokio::spawn(async move {
+        info!(
+            vm_id = %vm_id,
+            destination_url = %destination_url,
+            operation_id = %operation_id,
+            volume_count = disk_config.volumes.len(),
+            dest_stord_endpoint = %disk_config.dest_stord_endpoint,
+            "source agent: starting migration with disk pre-copy"
+        );
+
+        // Phase 1: Disk pre-copy
+        if !disk_config.volumes.is_empty() {
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "source agent: beginning disk pre-copy phase"
+            );
+
+            let mut stord_client =
+                match StordClient::connect(Path::new(&disk_config.stord_socket)).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        error!(
+                            vm_id = %vm_id,
+                            operation_id = %operation_id,
+                            error = %e,
+                            "source agent: failed to connect to local stord for disk pre-copy"
+                        );
+                        return Err(format!(
+                            "disk pre-copy failed: cannot connect to stord: {e}"
+                        ));
+                    }
+                };
+
+            for volume in &disk_config.volumes {
+                info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    volume_id = %volume.volume_id,
+                    attachment_handle = %volume.attachment_handle,
+                    "source agent: triggering disk pre-copy for volume"
+                );
+
+                if let Err(e) = stord_client
+                    .trigger_disk_migration(
+                        &volume.volume_id,
+                        &volume.attachment_handle,
+                        &disk_config.dest_stord_endpoint,
+                        Some(&operation_id),
+                    )
+                    .await
+                {
+                    error!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        volume_id = %volume.volume_id,
+                        error = %e,
+                        "source agent: disk pre-copy failed for volume"
+                    );
+                    return Err(format!(
+                        "disk pre-copy failed for volume {}: {e}",
+                        volume.volume_id
+                    ));
+                }
+
+                info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    volume_id = %volume.volume_id,
+                    "source agent: disk pre-copy triggered successfully for volume"
+                );
+            }
+
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "source agent: disk pre-copy phase complete for all volumes"
+            );
+        } else {
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "source agent: no volumes to migrate, skipping disk pre-copy"
+            );
+        }
+
+        // Phase 2: Memory migration (same as spawn_source_migration)
+        info!(
+            vm_id = %vm_id,
+            destination_url = %destination_url,
+            operation_id = %operation_id,
+            "source agent: starting memory migration (send-migration)"
+        );
+
+        match vm_runtime
+            .send_migration(&vm_id, &destination_url, Some(&operation_id))
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    "source agent: send-migration completed successfully (disk + memory)"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    error = %e,
+                    "source agent: memory migration (send-migration) failed"
+                );
+                Err(format!("memory migration failed: {e}"))
+            }
+        }
+    })
+}
+
+/// Execute migration as the destination agent with disk pre-copy acceptance.
+///
+/// This orchestrates the destination side of a full live migration:
+/// 1. **Disk pre-copy acceptance**: Prepares the local stord to receive incoming
+///    block streams from the source stord. The actual block reception is handled
+///    by stord's `StorageMigrationService`.
+/// 2. **Memory migration**: Starts Cloud Hypervisor's receive-migration which
+///    listens for the incoming VM memory state.
+///
+/// If disk acceptance preparation fails, the migration is aborted before memory
+/// receive begins.
+pub fn spawn_destination_migration_with_disk_precopy(
+    vm_runtime: VmRuntime,
+    vm_id: String,
+    operation_id: String,
+    receiver_url: String,
+    disk_config: DiskPrecopyConfig,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    tokio::spawn(async move {
+        info!(
+            vm_id = %vm_id,
+            receiver_url = %receiver_url,
+            operation_id = %operation_id,
+            volume_count = disk_config.volumes.len(),
+            "destination agent: starting migration with disk pre-copy acceptance"
+        );
+
+        // Phase 1: Prepare to accept disk migration
+        if !disk_config.volumes.is_empty() {
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "destination agent: preparing to accept disk pre-copy"
+            );
+
+            let mut stord_client =
+                match StordClient::connect(Path::new(&disk_config.stord_socket)).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        error!(
+                            vm_id = %vm_id,
+                            operation_id = %operation_id,
+                            error = %e,
+                            "destination agent: failed to connect to local stord"
+                        );
+                        return Err(format!(
+                            "disk migration acceptance failed: cannot connect to stord: {e}"
+                        ));
+                    }
+                };
+
+            for volume in &disk_config.volumes {
+                info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    volume_id = %volume.volume_id,
+                    "destination agent: accepting disk migration for volume"
+                );
+
+                if let Err(e) = stord_client
+                    .accept_disk_migration(
+                        &volume.volume_id,
+                        0, // Size will be communicated via InitMigration in the stream
+                        Some(&operation_id),
+                    )
+                    .await
+                {
+                    error!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        volume_id = %volume.volume_id,
+                        error = %e,
+                        "destination agent: disk migration acceptance failed for volume"
+                    );
+                    return Err(format!(
+                        "disk migration acceptance failed for volume {}: {e}",
+                        volume.volume_id
+                    ));
+                }
+
+                info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    volume_id = %volume.volume_id,
+                    "destination agent: disk migration acceptance ready for volume"
+                );
+            }
+
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "destination agent: disk pre-copy acceptance prepared for all volumes"
+            );
+        } else {
+            warn!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "destination agent: no volumes to receive, skipping disk acceptance"
+            );
+        }
+
+        // Phase 2: Memory migration (same as spawn_destination_migration)
+        info!(
+            vm_id = %vm_id,
+            receiver_url = %receiver_url,
+            operation_id = %operation_id,
+            "destination agent: starting memory migration (receive-migration)"
+        );
+
+        match vm_runtime
+            .receive_migration(&vm_id, &receiver_url, Some(&operation_id))
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    "destination agent: receive-migration completed (disk + memory)"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    error = %e,
+                    "destination agent: memory migration (receive-migration) failed"
+                );
+                Err(format!("memory receive-migration failed: {e}"))
+            }
+        }
+    })
+}
+
 /// Build a MigrationProgress proto message.
 #[allow(clippy::too_many_arguments)]
 pub fn build_progress(
@@ -257,5 +559,49 @@ mod tests {
         assert_eq!(progress.convergence_round, 2);
         assert_eq!(progress.dirty_blocks_remaining, 10);
         assert_eq!(progress.progress_percent, 25.0);
+    }
+
+    #[test]
+    fn migration_volume_struct() {
+        let vol = MigrationVolume {
+            volume_id: "vol-abc".to_string(),
+            attachment_handle: "handle-1".to_string(),
+        };
+        assert_eq!(vol.volume_id, "vol-abc");
+        assert_eq!(vol.attachment_handle, "handle-1");
+    }
+
+    #[test]
+    fn disk_precopy_config_construction() {
+        let config = DiskPrecopyConfig {
+            stord_socket: std::path::PathBuf::from("/run/chv/stord.sock"),
+            dest_stord_endpoint: "http://10.0.0.5:50052".to_string(),
+            volumes: vec![
+                MigrationVolume {
+                    volume_id: "vol-1".to_string(),
+                    attachment_handle: "h-1".to_string(),
+                },
+                MigrationVolume {
+                    volume_id: "vol-2".to_string(),
+                    attachment_handle: "h-2".to_string(),
+                },
+            ],
+        };
+        assert_eq!(config.volumes.len(), 2);
+        assert_eq!(
+            config.stord_socket,
+            std::path::PathBuf::from("/run/chv/stord.sock")
+        );
+        assert_eq!(config.dest_stord_endpoint, "http://10.0.0.5:50052");
+    }
+
+    #[test]
+    fn disk_precopy_config_empty_volumes() {
+        let config = DiskPrecopyConfig {
+            stord_socket: std::path::PathBuf::from("/run/chv/stord.sock"),
+            dest_stord_endpoint: "http://10.0.0.5:50052".to_string(),
+            volumes: vec![],
+        };
+        assert!(config.volumes.is_empty());
     }
 }

@@ -43,12 +43,21 @@ pub async fn execute(
                 .unwrap_or_default();
             output::print_list(
                 &items,
-                &["node_id", "hostname", "status", "cpu_total", "memory_total", "vm_count"],
+                &[
+                    "node_id",
+                    "hostname",
+                    "status",
+                    "cpu_total",
+                    "memory_total",
+                    "vm_count",
+                ],
                 format,
             );
         }
         NodeCommands::Get { node_id } => {
-            let resp = client.post("/v1/nodes", &json!({ "node_id": node_id })).await?;
+            let resp = client
+                .post("/v1/nodes", &json!({ "node_id": node_id }))
+                .await?;
             output::print_value(&resp, format);
         }
         NodeCommands::Drain { node_id } => {

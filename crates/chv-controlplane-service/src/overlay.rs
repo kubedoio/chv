@@ -6,9 +6,9 @@
 //! - VM destruction -> FDB cleanup across peers
 //! - Migration completion -> gratuitous ARP + FDB re-pointing
 
+use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::VtepRepository;
 use chv_errors::ChvError;
-use crate::node_client_pool::NodeClientPool;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -46,13 +46,13 @@ impl OverlayManager {
         operation_id: &str,
     ) -> Result<i32, ChvError> {
         // 1. Allocate VNI
-        let vni = self
-            .vtep_repo
-            .allocate_vni(network_id)
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!("failed to allocate VNI for network {network_id}: {e}"),
-            })?;
+        let vni =
+            self.vtep_repo
+                .allocate_vni(network_id)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("failed to allocate VNI for network {network_id}: {e}"),
+                })?;
 
         info!(
             network_id = %network_id,

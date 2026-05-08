@@ -1,14 +1,91 @@
-//! Startup reconciliation of local VXLAN/FDB state against known topologies.
+//! Reconciliation of VXLAN/FDB state.
 //!
-//! On NWD restart, this module compares the system's existing VXLAN interfaces
-//! against the set of networks tracked in local state (the TopologyTable). Any
-//! VXLAN interface that has no corresponding active network is logged as orphaned.
-//! Reconciliation is best-effort and does not block startup.
+//! This module provides:
+//! - **Startup reconciliation**: On NWD restart, compares the system's existing
+//!   VXLAN interfaces against known topologies and logs orphans.
+//! - **FDB reconciliation**: When overlay topology changes at runtime (new peer
+//!   joins or leaves), computes the delta of VTEP endpoints and issues the
+//!   corresponding add/delete FDB entry calls.
 
+use crate::executor::NetworkExecutor;
 use crate::state::TopologyTable;
+use chv_errors::ChvError;
 use std::collections::HashSet;
 use tokio::process::Command;
 use tracing::{info, warn};
+
+/// Result of an FDB reconciliation pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdbReconcileResult {
+    /// Number of FDB entries added for newly discovered peer VTEPs.
+    pub added: usize,
+    /// Number of FDB entries removed for departed peer VTEPs.
+    pub removed: usize,
+}
+
+/// Reconcile FDB entries for a network's overlay when VTEP endpoints change.
+///
+/// This function computes the delta between the previously known peer VTEPs
+/// (`old_vteps`) and the current set (`new_vteps`), then:
+/// - Calls `add_fdb_entry` for each VTEP in `new_vteps` that was not in `old_vteps`.
+/// - Calls `delete_fdb_entry` for each VTEP in `old_vteps` that is not in `new_vteps`.
+///
+/// Uses the broadcast MAC address `00:00:00:00:00:00` for BUM traffic FDB entries,
+/// matching the convention used by `ensure_topology`.
+///
+/// Returns `Ok(FdbReconcileResult)` with counts, or the first error encountered.
+pub async fn reconcile_fdb_entries<E: NetworkExecutor>(
+    executor: &E,
+    namespace: &str,
+    vni: u32,
+    old_vteps: &[String],
+    new_vteps: &[String],
+) -> Result<FdbReconcileResult, ChvError> {
+    let old_set: HashSet<&str> = old_vteps.iter().map(|s| s.as_str()).collect();
+    let new_set: HashSet<&str> = new_vteps.iter().map(|s| s.as_str()).collect();
+
+    let to_add: Vec<&str> = new_set.difference(&old_set).copied().collect();
+    let to_remove: Vec<&str> = old_set.difference(&new_set).copied().collect();
+
+    if to_add.is_empty() && to_remove.is_empty() {
+        info!(
+            namespace = %namespace,
+            vni = vni,
+            "FDB reconciliation: no changes needed"
+        );
+        return Ok(FdbReconcileResult {
+            added: 0,
+            removed: 0,
+        });
+    }
+
+    // Add FDB entries for new peer VTEPs
+    for vtep_ip in &to_add {
+        executor
+            .add_fdb_entry(namespace, vni, "00:00:00:00:00:00", vtep_ip)
+            .await?;
+    }
+
+    // Remove FDB entries for departed peer VTEPs
+    for vtep_ip in &to_remove {
+        executor
+            .delete_fdb_entry(namespace, vni, "00:00:00:00:00:00", vtep_ip)
+            .await?;
+    }
+
+    info!(
+        namespace = %namespace,
+        vni = vni,
+        added = to_add.len(),
+        removed = to_remove.len(),
+        "FDB reconciliation complete"
+    );
+
+    Ok(FdbReconcileResult {
+        added: to_add.len(),
+        removed: to_remove.len(),
+    })
+}
 
 /// Reconcile local VXLAN interface state against known topologies.
 ///
@@ -142,6 +219,350 @@ fn extract_vni_from_interface_name(name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use chv_nwd_api::chv_nwd_api::TopologySpec;
+    use std::sync::Mutex;
+
+    /// A mock executor that records FDB calls for verification.
+    struct MockExecutor {
+        fdb_adds: Mutex<Vec<(String, u32, String, String)>>,
+        fdb_deletes: Mutex<Vec<(String, u32, String, String)>>,
+    }
+
+    impl MockExecutor {
+        fn new() -> Self {
+            Self {
+                fdb_adds: Mutex::new(Vec::new()),
+                fdb_deletes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn added_entries(&self) -> Vec<(String, u32, String, String)> {
+            self.fdb_adds.lock().unwrap().clone()
+        }
+
+        fn deleted_entries(&self) -> Vec<(String, u32, String, String)> {
+            self.fdb_deletes.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl NetworkExecutor for MockExecutor {
+        async fn ensure_topology(
+            &self,
+            _spec: &TopologySpec,
+        ) -> Result<crate::executor::TopologyApplyResult, ChvError> {
+            unimplemented!()
+        }
+
+        async fn delete_topology(
+            &self,
+            _network_id: &str,
+            _state: &crate::state::TopologyState,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn health(
+            &self,
+            _network_id: &str,
+            _state: &crate::state::TopologyState,
+        ) -> Result<String, ChvError> {
+            unimplemented!()
+        }
+
+        async fn attach_vm_nic(
+            &self,
+            _network_id: &str,
+            _nic_id: &str,
+            _vm_id: &str,
+            _bridge_name: &str,
+            _mac_address: &str,
+            _ip_address: &str,
+        ) -> Result<(String, String), ChvError> {
+            unimplemented!()
+        }
+
+        async fn detach_vm_nic(&self, _nic_id: &str) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn set_firewall_policy(
+            &self,
+            _network_id: &str,
+            _policy_version: &str,
+            _policy_json: &[u8],
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn set_nat_policy(
+            &self,
+            _network_id: &str,
+            _policy_version: &str,
+            _policy_json: &[u8],
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn ensure_dhcp_scope(
+            &self,
+            _network_id: &str,
+            _cidr: &str,
+            _range_start: &str,
+            _range_end: &str,
+            _dns_servers: &[String],
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn ensure_dns_scope(
+            &self,
+            _network_id: &str,
+            _forwarders: &[&str],
+            _static_records: &std::collections::HashMap<String, String>,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn expose_service(
+            &self,
+            _network_id: &str,
+            _exposure_id: &str,
+            _protocol: &str,
+            _external_port: u32,
+            _target_ip: &str,
+            _target_port: u32,
+            _mode: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn withdraw_service_exposure(
+            &self,
+            _network_id: &str,
+            _exposure_id: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn create_vxlan_interface(
+            &self,
+            _namespace: &str,
+            _bridge_name: &str,
+            _vni: u32,
+            _vtep_ip: &str,
+            _vtep_port: u32,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn delete_vxlan_interface(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn add_fdb_entry(
+            &self,
+            namespace: &str,
+            vni: u32,
+            mac_address: &str,
+            vtep_ip: &str,
+        ) -> Result<(), ChvError> {
+            self.fdb_adds.lock().unwrap().push((
+                namespace.to_string(),
+                vni,
+                mac_address.to_string(),
+                vtep_ip.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn delete_fdb_entry(
+            &self,
+            namespace: &str,
+            vni: u32,
+            mac_address: &str,
+            vtep_ip: &str,
+        ) -> Result<(), ChvError> {
+            self.fdb_deletes.lock().unwrap().push((
+                namespace.to_string(),
+                vni,
+                mac_address.to_string(),
+                vtep_ip.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn replace_fdb_entry(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+            _mac_address: &str,
+            _new_vtep_ip: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _namespace: &str,
+            _bridge_name: &str,
+            _vm_ip: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn set_arp_suppression(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+            _enabled: bool,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn get_overlay_status(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+        ) -> Result<crate::executor::OverlayStatusInfo, ChvError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_no_changes() {
+        let executor = MockExecutor::new();
+        let old = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
+        let new = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
+
+        let result = reconcile_fdb_entries(&executor, "ns-test", 100, &old, &new)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            FdbReconcileResult {
+                added: 0,
+                removed: 0
+            }
+        );
+        assert!(executor.added_entries().is_empty());
+        assert!(executor.deleted_entries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_add_new_vteps() {
+        let executor = MockExecutor::new();
+        let old = vec!["10.0.0.1".to_string()];
+        let new = vec![
+            "10.0.0.1".to_string(),
+            "10.0.0.2".to_string(),
+            "10.0.0.3".to_string(),
+        ];
+
+        let result = reconcile_fdb_entries(&executor, "ns-net1", 200, &old, &new)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added, 2);
+        assert_eq!(result.removed, 0);
+
+        let adds = executor.added_entries();
+        assert_eq!(adds.len(), 2);
+        // All entries should use broadcast MAC and correct namespace/vni
+        for (ns, vni, mac, _ip) in &adds {
+            assert_eq!(ns, "ns-net1");
+            assert_eq!(*vni, 200);
+            assert_eq!(mac, "00:00:00:00:00:00");
+        }
+        let added_ips: HashSet<&str> = adds.iter().map(|(_, _, _, ip)| ip.as_str()).collect();
+        assert!(added_ips.contains("10.0.0.2"));
+        assert!(added_ips.contains("10.0.0.3"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_remove_departed_vteps() {
+        let executor = MockExecutor::new();
+        let old = vec![
+            "10.0.0.1".to_string(),
+            "10.0.0.2".to_string(),
+            "10.0.0.3".to_string(),
+        ];
+        let new = vec!["10.0.0.1".to_string()];
+
+        let result = reconcile_fdb_entries(&executor, "ns-net1", 300, &old, &new)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 2);
+
+        let deletes = executor.deleted_entries();
+        assert_eq!(deletes.len(), 2);
+        for (ns, vni, mac, _ip) in &deletes {
+            assert_eq!(ns, "ns-net1");
+            assert_eq!(*vni, 300);
+            assert_eq!(mac, "00:00:00:00:00:00");
+        }
+        let removed_ips: HashSet<&str> = deletes.iter().map(|(_, _, _, ip)| ip.as_str()).collect();
+        assert!(removed_ips.contains("10.0.0.2"));
+        assert!(removed_ips.contains("10.0.0.3"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_add_and_remove() {
+        let executor = MockExecutor::new();
+        let old = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
+        let new = vec!["10.0.0.2".to_string(), "10.0.0.3".to_string()];
+
+        let result = reconcile_fdb_entries(&executor, "ns-net1", 100, &old, &new)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added, 1);
+        assert_eq!(result.removed, 1);
+
+        let adds = executor.added_entries();
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].3, "10.0.0.3");
+
+        let deletes = executor.deleted_entries();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].3, "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn reconcile_from_empty() {
+        let executor = MockExecutor::new();
+        let old: Vec<String> = Vec::new();
+        let new = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
+
+        let result = reconcile_fdb_entries(&executor, "ns-net1", 100, &old, &new)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added, 2);
+        assert_eq!(result.removed, 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_to_empty() {
+        let executor = MockExecutor::new();
+        let old = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
+        let new: Vec<String> = Vec::new();
+
+        let result = reconcile_fdb_entries(&executor, "ns-net1", 100, &old, &new)
+            .await
+            .unwrap();
+
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 2);
+    }
 
     #[test]
     fn parse_ip_link_output_extracts_interfaces() {

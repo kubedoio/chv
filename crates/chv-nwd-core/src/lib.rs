@@ -6,6 +6,7 @@ pub mod ebpf_stub;
 pub mod executor;
 pub mod firewall;
 pub mod handlers;
+pub mod reconcile;
 pub mod server;
 pub mod state;
 pub mod store;

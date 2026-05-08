@@ -696,8 +696,15 @@ impl StorageBackend for LVMBackend {
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             for lv_name in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
-                if !lv_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
-                    warn!(volume_id, lv = lv_name, "skipping lv with unexpected characters in name");
+                if !lv_name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+                {
+                    warn!(
+                        volume_id,
+                        lv = lv_name,
+                        "skipping lv with unexpected characters in name"
+                    );
                     continue;
                 }
                 if prefixes.iter().any(|p| lv_name.starts_with(p.as_str())) {
