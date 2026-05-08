@@ -262,6 +262,12 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
+            tracing::warn!(
+                resource_kind = "node",
+                resource_id = %node_id.as_str(),
+                error = %e,
+                "desired state application failed — divergence detected"
+            );
             return Err(ControlPlaneServiceError::Internal(format!(
                 "persistence error: {e}"
             )));
@@ -281,6 +287,13 @@ impl ReconcileService for ReconcileServiceImplementation {
             requested_by: Self::normalize_requested_by(&meta),
         })
         .await?;
+
+        tracing::info!(
+            resource_kind = "node",
+            resource_id = %node_id.as_str(),
+            generation = %generation,
+            "desired state applied — awaiting convergence"
+        );
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -361,6 +374,12 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
+            tracing::warn!(
+                resource_kind = "vm",
+                resource_id = %vm_id.as_str(),
+                error = %e,
+                "desired state application failed — divergence detected"
+            );
             return Err(ControlPlaneServiceError::Internal(format!(
                 "persistence error: {e}"
             )));
@@ -380,6 +399,13 @@ impl ReconcileService for ReconcileServiceImplementation {
             requested_by: Self::normalize_requested_by(&meta),
         })
         .await?;
+
+        tracing::info!(
+            resource_kind = "vm",
+            resource_id = %vm_id.as_str(),
+            generation = %generation,
+            "desired state applied — awaiting convergence"
+        );
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -484,6 +510,12 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
+            tracing::warn!(
+                resource_kind = "volume",
+                resource_id = %volume_id.as_str(),
+                error = %e,
+                "desired state application failed — divergence detected"
+            );
             return Err(ControlPlaneServiceError::Internal(format!(
                 "persistence error: {e}"
             )));
@@ -503,6 +535,13 @@ impl ReconcileService for ReconcileServiceImplementation {
             requested_by: Self::normalize_requested_by(&meta),
         })
         .await?;
+
+        tracing::info!(
+            resource_kind = "volume",
+            resource_id = %volume_id.as_str(),
+            generation = %generation,
+            "desired state applied — awaiting convergence"
+        );
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -632,6 +671,12 @@ impl ReconcileService for ReconcileServiceImplementation {
                 requested_by: Self::normalize_requested_by(&meta),
             })
             .await?;
+            tracing::warn!(
+                resource_kind = "network",
+                resource_id = %network_id.as_str(),
+                error = %e,
+                "desired state application failed — divergence detected"
+            );
             return Err(ControlPlaneServiceError::Internal(format!(
                 "persistence error: {e}"
             )));
@@ -651,6 +696,13 @@ impl ReconcileService for ReconcileServiceImplementation {
             requested_by: Self::normalize_requested_by(&meta),
         })
         .await?;
+
+        tracing::info!(
+            resource_kind = "network",
+            resource_id = %network_id.as_str(),
+            generation = %generation,
+            "desired state applied — awaiting convergence"
+        );
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {
@@ -746,6 +798,12 @@ impl ReconcileService for ReconcileServiceImplementation {
             requested_by: Self::normalize_requested_by(&meta),
         })
         .await?;
+
+        tracing::info!(
+            node_id = %node_id.as_str(),
+            generation = %observed_generation,
+            "convergence confirmed — node acknowledged desired state version"
+        );
 
         Ok(proto::AckResponse {
             result: Some(proto::ResultMeta {

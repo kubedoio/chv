@@ -8,6 +8,7 @@ use chv_agent_core::{
     enrollment::EnrollmentClient,
     health::HealthAggregator,
     inventory::InventoryReporter,
+    metrics_server::{metrics_router, MetricsState},
     reconcile::Reconciler,
     state_machine::NodeState,
     supervisor::DaemonSupervisor,
@@ -415,6 +416,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         if let Err(e) = console_server.run(console_listener).await {
             warn!(error = %e, bind = %console_bind, "console server exited");
+        }
+    });
+
+    // Metrics HTTP server for Prometheus scraping
+    let metrics_bind_addr = config
+        .metrics_bind
+        .clone()
+        .unwrap_or_else(|| "0.0.0.0:9100".to_string());
+    let metrics_state = Arc::new(tokio::sync::Mutex::new(MetricsState::new(
+        cache.lock().await.node_id.clone(),
+    )));
+    let metrics_state_clone = metrics_state.clone();
+    tokio::spawn(async move {
+        let app = metrics_router(metrics_state_clone);
+        let listener = match tokio::net::TcpListener::bind(&metrics_bind_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(bind = %metrics_bind_addr, error = %e, "metrics server cannot bind");
+                return;
+            }
+        };
+        info!(bind = %metrics_bind_addr, "metrics server listening");
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(error = %e, "metrics server exited with error");
         }
     });
 
@@ -846,6 +871,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = cache.save(&config.cache_path).await {
                 warn!(error = %e, "failed to save cache");
             }
+        }
+
+        // Update metrics state for Prometheus scraping
+        {
+            let mut ms = metrics_state.lock().await;
+            ms.node_id = cache.lock().await.node_id.clone();
+            ms.node_state = reconciler.current_state().await.as_str().to_string();
+            ms.vm_count = reconciler.vm_runtime.list().len();
+            ms.tick_count = tick_count;
+            ms.reconcile_failures = consecutive_reconcile_failures;
+            ms.health_failures = consecutive_health_failures;
         }
     }
 

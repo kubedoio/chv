@@ -3,6 +3,8 @@
 	import type { PageData } from './$types';
 	import { getStoredToken } from '$lib/api/client';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
+	import { listVmSnapshots } from '$lib/bff/snapshots';
+	import type { VmSnapshotItem } from '$lib/bff/types';
 	import { toast } from '$lib/stores/toast.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
@@ -28,7 +30,7 @@
 	let consoleLoading = $state(false);
 	let bootLog = $state<string>('');
 	let bootLogLoading = $state(false);
-	let snapshots = $state<import('$lib/api/types').VMSnapshot[]>([]);
+	let snapshots = $state<VmSnapshotItem[]>([]);
 	let snapshotsLoading = $state(false);
 	let snapshotsError = $state<string | null>(null);
 	let supportRailOpen = $state(false);
@@ -65,11 +67,13 @@
 	async function loadSnapshots() {
 		if (!detail.summary.vm_id) return;
 		snapshotsLoading = true;
+		snapshotsError = null;
 		try {
-			// Snapshot list endpoint not yet implemented on the server
-			snapshots = [];
-		} catch (err: any) {
-			snapshotsError = err.message || 'Snapshot registry inaccessible';
+			const token = getStoredToken() ?? undefined;
+			const res = await listVmSnapshots({ vm_id: detail.summary.vm_id }, token);
+			snapshots = res.items;
+		} catch (err: unknown) {
+			snapshotsError = err instanceof Error ? err.message : 'Snapshot registry inaccessible';
 		} finally {
 			snapshotsLoading = false;
 		}
@@ -100,18 +104,22 @@
 
 		try {
 			if (action === 'delete') {
-				await deleteVm({ vm_id, requested_by: 'webui' }, token);
-				toast.success(`VM ${vm_id} delete accepted`);
+				const result = await deleteVm({ vm_id, requested_by: 'webui' }, token);
+				toast.success(`VM ${vm_id} delete accepted — tracking task ${result.task_id}`);
 			} else {
 				const apiAction = action === 'shutdown' ? 'stop' : action;
 				const isForce = action === 'poweroff';
-				await mutateVm({ vm_id, action: apiAction, force: isForce }, token);
-				toast.success(`Workload ${action} accepted`);
+				const result = await mutateVm({ vm_id, action: apiAction, force: isForce }, token);
+				toast.success(`Workload ${action} accepted — tracking task ${result.task_id}`);
 			}
 			invalidatePattern('vms:');
 			await invalidateAll();
-		} catch (err: any) {
-			toast.error(err.message || 'Mutation failed');
+			setTimeout(() => {
+				invalidatePattern('vms:');
+				invalidateAll();
+			}, 2000);
+		} catch (err: unknown) {
+			toast.error(err instanceof Error ? err.message : 'Mutation failed');
 		} finally {
 			pendingAction = null;
 		}

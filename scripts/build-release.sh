@@ -67,6 +67,7 @@ cp target/release/chv-controlplane "${RELEASE_DIR}/bin/"
 cp target/release/chv-agent       "${RELEASE_DIR}/bin/"
 cp target/release/chv-stord       "${RELEASE_DIR}/bin/"
 cp target/release/chv-nwd         "${RELEASE_DIR}/bin/"
+cp target/release/chvctl          "${RELEASE_DIR}/bin/"
 
 cp -r ui/build/* "${RELEASE_DIR}/ui/"
 cp -r cmd/chv-controlplane/migrations/* "${RELEASE_DIR}/migrations/"

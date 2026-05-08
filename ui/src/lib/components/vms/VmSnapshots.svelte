@@ -1,6 +1,8 @@
 <script lang="ts">
 import Button from '$lib/components/primitives/Button.svelte';
-	import type { VMSnapshot } from '$lib/api/types';
+	import type { VmSnapshotItem } from '$lib/bff/types';
+	import { listVmSnapshots, createSnapshot, deleteSnapshot, restoreSnapshot } from '$lib/bff/snapshots';
+	import { getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
@@ -15,7 +17,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 	interface Props {
 		vmId: string;
-		snapshots?: VMSnapshot[];
+		snapshots?: VmSnapshotItem[];
 		loading?: boolean;
 		error?: string | null;
 	}
@@ -27,7 +29,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		error: propError = null
 	}: Props = $props();
 
-	let snapshots = $state<VMSnapshot[]>([]);
+	let snapshots = $state<VmSnapshotItem[]>([]);
 	let localLoading = $state(false);
 	let localError = $state<string | null>(null);
 
@@ -45,11 +47,11 @@ import Button from '$lib/components/primitives/Button.svelte';
 	let createSubmitting = $state(false);
 
 	let restoreOpen = $state(false);
-	let restoreTarget = $state<VMSnapshot | null>(null);
+	let restoreTarget = $state<VmSnapshotItem | null>(null);
 	let restoreSubmitting = $state(false);
 
 	let deleteOpen = $state(false);
-	let deleteTarget = $state<VMSnapshot | null>(null);
+	let deleteTarget = $state<VmSnapshotItem | null>(null);
 	let deleteSubmitting = $state(false);
 
 	const columns = [
@@ -78,8 +80,9 @@ import Button from '$lib/components/primitives/Button.svelte';
 		localLoading = true;
 		localError = null;
 		try {
-			// Snapshot endpoints not yet implemented on the server
-			snapshots = propSnapshots;
+			const token = getStoredToken() ?? undefined;
+			const res = await listVmSnapshots({ vm_id: vmId }, token);
+			snapshots = res.items;
 		} catch (err) {
 			localError = err instanceof Error ? err.message : 'Failed to load snapshots';
 		} finally {
@@ -92,20 +95,55 @@ import Button from '$lib/components/primitives/Button.svelte';
 			toast.error('Snapshot name is required');
 			return;
 		}
-		// Snapshot create endpoint not yet implemented on the server
-		toast.error('Snapshot creation is not yet available');
+		createSubmitting = true;
+		try {
+			const token = getStoredToken() ?? undefined;
+			const result = await createSnapshot({ vm_id: vmId, name: createName.trim() }, token);
+			toast.success(`Snapshot creation accepted — tracking task ${result.task_id}`);
+			createOpen = false;
+			createName = '';
+			createDescription = '';
+			createIncludesMemory = false;
+			await loadSnapshots();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : 'Snapshot creation failed');
+		} finally {
+			createSubmitting = false;
+		}
 	}
 
 	async function handleRestore() {
 		if (!restoreTarget) return;
-		// Snapshot restore endpoint not yet implemented on the server
-		toast.error('Snapshot restore is not yet available');
+		restoreSubmitting = true;
+		try {
+			const token = getStoredToken() ?? undefined;
+			const result = await restoreSnapshot({ vm_id: vmId, snapshot_id: restoreTarget.snapshot_id }, token);
+			toast.success(`Snapshot restore accepted — tracking task ${result.task_id}`);
+			restoreOpen = false;
+			restoreTarget = null;
+			await loadSnapshots();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : 'Snapshot restore failed');
+		} finally {
+			restoreSubmitting = false;
+		}
 	}
 
 	async function handleDelete() {
 		if (!deleteTarget) return;
-		// Snapshot delete endpoint not yet implemented on the server
-		toast.error('Snapshot deletion is not yet available');
+		deleteSubmitting = true;
+		try {
+			const token = getStoredToken() ?? undefined;
+			const result = await deleteSnapshot({ vm_id: vmId, snapshot_id: deleteTarget.snapshot_id }, token);
+			toast.success(`Snapshot deletion accepted — tracking task ${result.task_id}`);
+			deleteOpen = false;
+			deleteTarget = null;
+			await loadSnapshots();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : 'Snapshot deletion failed');
+		} finally {
+			deleteSubmitting = false;
+		}
 	}
 
 
@@ -141,7 +179,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 							class="btn-icon btn-icon-sm"
 							aria-label="Restore snapshot"
 							title="Restore snapshot"
-							onclick={() => { restoreTarget = row as unknown as VMSnapshot; restoreOpen = true; }}
+							onclick={() => { restoreTarget = row as unknown as VmSnapshotItem; restoreOpen = true; }}
 						>
 							<RotateCcw size={14} />
 						</button>
@@ -150,7 +188,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 							class="btn-icon btn-icon-danger btn-icon-sm"
 							aria-label="Delete snapshot"
 							title="Delete snapshot"
-							onclick={() => { deleteTarget = row as unknown as VMSnapshot; deleteOpen = true; }}
+							onclick={() => { deleteTarget = row as unknown as VmSnapshotItem; deleteOpen = true; }}
 						>
 							<Trash2 size={14} />
 						</button>
