@@ -218,10 +218,12 @@
         {@const isExpanded = expandedEvents.has(event.id)}
         <div class="event-item">
           <button
+            id="event-trigger-{event.id}"
             type="button"
             class="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors text-left"
             onclick={() => toggleExpand(event.id)}
             aria-expanded={isExpanded}
+            aria-controls="event-content-{event.id}"
           >
             <div class="flex items-center gap-3 min-w-0 flex-1">
               <div class="p-1.5 bg-slate-100 rounded-md flex-shrink-0">
@@ -250,7 +252,12 @@
           </button>
           
           {#if isExpanded}
-            <div class="px-5 pb-3 pl-14 bg-slate-50/50">
+            <div
+              id="event-content-{event.id}"
+              role="region"
+              aria-labelledby="event-trigger-{event.id}"
+              class="px-5 pb-3 pl-14 bg-slate-50/50"
+            >
               <div class="space-y-2">
                 {#if event.message}
                   <p class="text-sm text-slate-600">{event.message}</p>
