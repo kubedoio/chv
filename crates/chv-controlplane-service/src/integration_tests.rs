@@ -941,7 +941,7 @@ async fn test_performance_baseline_block_streaming_throughput() {
         bytes_per_update,
         total_disk_bytes,
         0,
-        (total_blocks - simulated_blocks) as u64,
+        total_blocks - simulated_blocks,
     )
     .await
     .unwrap();

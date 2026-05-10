@@ -437,7 +437,7 @@ mod tests {
         let token = encode_claims("test-vm", "admin", future_exp(), &test_secret());
         let response = app
             .oneshot(
-                axum::http::Request::get(&format!("/vms/test-vm/console?token={}", token))
+                axum::http::Request::get(format!("/vms/test-vm/console?token={}", token))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

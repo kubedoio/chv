@@ -2,15 +2,13 @@ use clap::ValueEnum;
 use serde_json::Value;
 use tabled::{settings::Style, Table, Tabled};
 
-#[derive(Debug, Clone, ValueEnum)]
-#[derive(Default)]
+#[derive(Debug, Clone, ValueEnum, Default)]
 pub enum OutputFormat {
     #[default]
     Table,
     Json,
     Yaml,
 }
-
 
 #[derive(Tabled)]
 struct GenericRow {
