@@ -3,17 +3,14 @@ use serde_json::Value;
 use tabled::{settings::Style, Table, Tabled};
 
 #[derive(Debug, Clone, ValueEnum)]
+#[derive(Default)]
 pub enum OutputFormat {
+    #[default]
     Table,
     Json,
     Yaml,
 }
 
-impl Default for OutputFormat {
-    fn default() -> Self {
-        Self::Table
-    }
-}
 
 #[derive(Tabled)]
 struct GenericRow {
@@ -91,7 +88,7 @@ fn print_table(items: &[Value], columns: &[&str]) {
             .iter()
             .map(|col| {
                 item.get(*col)
-                    .map(|v| format_value(v))
+                    .map(format_value)
                     .unwrap_or_else(|| "-".to_string())
             })
             .collect();

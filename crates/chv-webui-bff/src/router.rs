@@ -395,7 +395,6 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         ))
 }
 
-
 /// Build a CORS layer from the `CHV_ALLOWED_ORIGIN` environment variable.
 ///
 /// - If the variable is set, only that origin is allowed (no wildcard).
@@ -436,8 +435,6 @@ pub fn build_cors_layer() -> CorsLayer {
                 ])
                 .allow_credentials(true)
         }
-        _ => {
-            CorsLayer::new()
-        }
+        _ => CorsLayer::new(),
     }
 }

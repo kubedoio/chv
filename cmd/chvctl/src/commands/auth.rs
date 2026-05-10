@@ -28,7 +28,7 @@ pub async fn execute(client: &BffClient, args: LoginArgs) -> Result<(), CliError
         .and_then(|t| t.as_str())
         .ok_or_else(|| CliError::Parse("no token in response".to_string()))?;
 
-    config::save_credentials(token).map_err(|e| CliError::Parse(e))?;
+    config::save_credentials(token).map_err(CliError::Parse)?;
 
     println!("Login successful. Token saved to ~/.config/chvctl/credentials");
     Ok(())

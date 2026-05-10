@@ -91,7 +91,7 @@ async fn main() {
         .or(cfg.server_url.clone())
         .unwrap_or_else(|| "http://localhost:8080".to_string());
 
-    let token = cli.token.or_else(|| config::load_credentials());
+    let token = cli.token.or_else(config::load_credentials);
 
     let client = client::BffClient::new(server_url, token);
 
