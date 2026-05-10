@@ -104,7 +104,7 @@
 		class:opacity-0={!isVisible || isClosing}
 		class:opacity-100={isVisible && !isClosing}
 		onclick={handleBackdropClick}
-		aria-hidden="true"
+		role="presentation"
 	>
 		<!-- Modal Container with Focus Trap -->
 		<FocusTrap active={isVisible && !isClosing} onEscape={closeOnEscape ? handleClose : undefined}>

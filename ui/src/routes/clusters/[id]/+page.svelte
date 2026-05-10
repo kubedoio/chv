@@ -138,7 +138,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 					{:else}
 						<div class="mini-activity">
 							<p>Multiple concurrent operations detected.</p>
-							<a href="/tasks?query={summary.clusterId}" class="view-link">OPEN_TASK_AUDIT</a>
+							<a href={`/tasks?query=${encodeURIComponent(summary.clusterId)}`} class="view-link">OPEN_TASK_AUDIT</a>
 						</div>
 					{/if}
 				</SectionCard>
@@ -152,7 +152,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 					{:else}
 						<div class="mini-activity">
 							<p>{summary.alerts} active anomalies requiring inspection.</p>
-							<a href="/events?query={summary.clusterId}" class="view-link">OPEN_INCIDENT_LOG</a>
+							<a href={`/events?query=${encodeURIComponent(summary.clusterId)}`} class="view-link">OPEN_INCIDENT_LOG</a>
 						</div>
 					{/if}
 				</SectionCard>

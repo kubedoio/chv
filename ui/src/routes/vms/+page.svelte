@@ -145,7 +145,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 				<ul class="attention-list">
 					{#each attentionVms as vm}
 						<li>
-							<a href="/vms/{vm.vm_id}" class="attention-card">
+							<a href={`/vms/${vm.vm_id}`} class="attention-card">
 								<div class="attention-card__main">
 									<span class="res-name">{vm.name}</span>
 									<span class="res-issue">{vm.alerts || 0} signals / {vm.health}</span>

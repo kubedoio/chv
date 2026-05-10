@@ -8,7 +8,6 @@ import {
 	Network,
 	Server,
 	Settings,
-	Users,
 	Wrench
 } from 'lucide-svelte';
 
@@ -67,24 +66,24 @@ export interface NavGroup {
 
 export const navigationGroups: NavGroup[] = [
 	{
-		label: 'Compute',
-		items: [
-			{ href: '/vms', label: 'Instances', shortLabel: 'Instances', icon: Box },
-			{ href: '/images', label: 'Images', shortLabel: 'Images', icon: Image }
-		]
-	},
-	{
 		label: 'Infrastructure',
 		items: [
-			{ href: '/nodes', label: 'Hosts', shortLabel: 'Hosts', icon: Server },
 			{
 				href: '/clusters',
 				label: 'Clouds',
 				shortLabel: 'Clouds',
 				icon: Blocks
 			},
+			{ href: '/nodes', label: 'Hosts', shortLabel: 'Hosts', icon: Server }
+		]
+	},
+	{
+		label: 'Compute',
+		items: [
+			{ href: '/vms', label: 'Instances', shortLabel: 'Instances', icon: Box },
+			{ href: '/volumes', label: 'Storage Pools', shortLabel: 'Storage', icon: HardDrive },
 			{ href: '/networks', label: 'Networks', shortLabel: 'Networks', icon: Network },
-			{ href: '/volumes', label: 'Storage Pools', shortLabel: 'Storage', icon: HardDrive }
+			{ href: '/images', label: 'Images', shortLabel: 'Images', icon: Image }
 		]
 	},
 	{
@@ -103,8 +102,7 @@ export const navigationGroups: NavGroup[] = [
 	{
 		label: 'Administration',
 		items: [
-			{ href: '/settings', label: 'Settings', shortLabel: 'Settings', icon: Settings },
-			{ href: '/settings/users', label: 'Users', shortLabel: 'Users', icon: Users }
+			{ href: '/settings', label: 'Settings', shortLabel: 'Settings', icon: Settings }
 		]
 	}
 ];
@@ -489,9 +487,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/images',
-		navLabel: 'Images / Templates',
+		navLabel: 'Images',
 		shortLabel: 'Images',
-		title: 'Images / Templates',
+		title: 'Images',
 		eyebrow: 'Provisioning inputs',
 		description:
 			'Manage reusable images and templates that feed VM creation without mixing them into runtime inventory.',
@@ -672,7 +670,7 @@ const pageDefinitions: PageDefinition[] = [
 		}
 	},
 	{
-		href: '/maintenance',
+		href: '/backup-jobs',
 		navLabel: 'Backups',
 		shortLabel: 'Backups',
 		title: 'Backups',
@@ -680,7 +678,7 @@ const pageDefinitions: PageDefinition[] = [
 		description:
 			'Coordinate maintenance windows, draining, and upgrade visibility without hiding the related tasks and alerts.',
 		icon: Wrench,
-		aliases: ['/backup-jobs'],
+		aliases: ['/maintenance'],
 		badges: [
 			{ label: 'Change-aware', tone: 'warning' },
 			{ label: 'Operational', tone: 'healthy' }
@@ -735,9 +733,9 @@ const pageDefinitions: PageDefinition[] = [
 	},
 	{
 		href: '/settings',
-		navLabel: 'Settings / Access',
+		navLabel: 'Settings',
 		shortLabel: 'Settings',
-		title: 'Settings / Access',
+		title: 'Settings',
 		eyebrow: 'Operator controls',
 		description:
 			'Keep settings narrow, auditable, and aligned to the control-plane boundary rather than exposing backend internals.',

@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { load } from '../../routes/nodes/[id]/+page';
+import { clearCache } from '$lib/stores/api-cache.svelte';
 
 vi.mock('$lib/bff/nodes', () => ({
 	getNode: vi.fn()
@@ -18,6 +19,11 @@ function createUrl(tab?: string) {
 }
 
 describe('node detail page server load', () => {
+	beforeEach(() => {
+		clearCache();
+		vi.mocked(getNode).mockReset();
+	});
+
 	it('returns ready state when getNode succeeds', async () => {
 		const mockedGetNode = vi.mocked(getNode);
 		mockedGetNode.mockResolvedValue({
@@ -73,8 +79,8 @@ describe('node detail page server load', () => {
 		expect(mockedGetNode).toHaveBeenCalledWith({ node_id: 'node-1' }, 'token-123');
 		expect(result.detail.state).toBe('ready');
 		expect(result.detail.currentTab).toBe('vms');
-		expect(result.detail.summary.nodeId).toBe('node-1');
-		expect(result.detail.hostedVms).toHaveLength(1);
+		expect(result.detail.summary.node_id).toBe('node-1');
+		expect(result.detail.hosted_vms).toHaveLength(1);
 		expect(result.requestedNodeId).toBe('node-1');
 	});
 
@@ -88,7 +94,7 @@ describe('node detail page server load', () => {
 		} as Parameters<typeof load>[0])) as any;
 
 		expect(result.detail.state).toBe('error');
-		expect(result.detail.summary.nodeId).toBe('node-1');
+		expect(result.detail.summary.node_id).toBe('node-1');
 		expect(result.requestedNodeId).toBe('node-1');
 	});
 

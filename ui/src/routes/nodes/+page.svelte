@@ -115,7 +115,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 				<ul class="attention-list">
 					{#each attentionNodes as node}
 						<li>
-							<a href="/nodes/{node.node_id}" class="attention-card">
+							<a href={`/nodes/${node.node_id}`} class="attention-card">
 								<div class="attention-card__main">
 									<span class="res-name">{node.name}</span>
 									<span class="res-issue">{node.alerts} alerts / {node.health}</span>

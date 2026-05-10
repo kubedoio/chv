@@ -115,7 +115,7 @@
 						<MutationControls />
 					</div>
 
-					<a href="/{active.type}s/{active.id}" class="flex items-center justify-between p-3 bg-[rgba(var(--color-primary-rgb),0.1)] text-[var(--color-primary)] no-underline text-[10px] font-extrabold rounded-[var(--radius-xs)] mt-2 hover:bg-[rgba(var(--color-primary-rgb),0.15)]">
+					<a href={`/${active.type}s/${active.id}`} class="flex items-center justify-between p-3 bg-[rgba(var(--color-primary-rgb),0.1)] text-[var(--color-primary)] no-underline text-[10px] font-extrabold rounded-[var(--radius-xs)] mt-2 hover:bg-[rgba(var(--color-primary-rgb),0.15)]">
 						<span>FULL_INSPECTION_DETAIL</span>
 						<ChevronRight size={14} />
 					</a>

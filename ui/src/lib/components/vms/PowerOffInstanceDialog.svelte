@@ -57,7 +57,7 @@
 				<p class="text-sm font-medium text-[var(--shell-text)]">Immediate hard stop</p>
 				<p class="text-sm text-[var(--shell-text-secondary)] mt-1">
 					This does not gracefully shut down the guest operating system and may cause data loss.
-					Use <strong>Shutdown</strong> for a graceful stop.
+					Use Shutdown for a graceful stop.
 				</p>
 			</div>
 		</div>

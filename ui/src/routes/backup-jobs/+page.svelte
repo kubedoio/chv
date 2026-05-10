@@ -431,7 +431,6 @@ import Button from '$lib/components/primitives/Button.svelte';
   .p-name { font-weight: 800; color: var(--color-neutral-900); font-size: 11px; }
   .p-id { font-size: 9px; font-weight: 700; color: var(--color-neutral-400); font-family: var(--font-mono); }
 
-  .cell-mono { font-family: var(--font-mono); font-size: 10px; color: var(--color-neutral-600); }
   .cell-text { font-size: 11px; color: var(--color-neutral-600); }
 
   .op-cluster {

@@ -233,7 +233,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 						{:else}
 							<div class="attachment-info">
 								<p>Attached to <strong>{detail.summary.attached_vm_name}</strong> as <code>{detail.summary.device_name}</code>.</p>
-								<a href="/vms/{detail.summary.attached_vm_id}" class="btn-secondary btn-sm">View VM</a>
+								<a href={`/vms/${detail.summary.attached_vm_id}`} class="btn-secondary btn-sm">View VM</a>
 							</div>
 						{/if}
 					</SectionCard>

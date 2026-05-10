@@ -41,43 +41,43 @@ describe('DeleteInstanceDialog', () => {
 		expect((deleteButton as HTMLButtonElement).disabled).toBe(true);
 	});
 
-	it('disables delete button when confirmation text does not match instance name', () => {
+	it('disables delete button when confirmation text does not match instance name', async () => {
 		renderDialog({ instanceName: 'web-server-01' });
 		const input = screen.getByLabelText(/Type instance name to confirm deletion/i);
-		fireEvent.input(input, { target: { value: 'wrong-name' } });
+		await fireEvent.input(input, { target: { value: 'wrong-name' } });
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
 		expect((deleteButton as HTMLButtonElement).disabled).toBe(true);
 	});
 
-	it('enables delete button when confirmation text exactly matches instance name', () => {
+	it('enables delete button when confirmation text exactly matches instance name', async () => {
 		renderDialog({ instanceName: 'web-server-01' });
 		const input = screen.getByLabelText(/Type instance name to confirm deletion/i);
-		fireEvent.input(input, { target: { value: 'web-server-01' } });
+		await fireEvent.input(input, { target: { value: 'web-server-01' } });
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
 		expect((deleteButton as HTMLButtonElement).disabled).toBe(false);
 	});
 
-	it('trims accidental spaces before comparing confirmation text', () => {
+	it('trims accidental spaces before comparing confirmation text', async () => {
 		renderDialog({ instanceName: 'web-server-01' });
 		const input = screen.getByLabelText(/Type instance name to confirm deletion/i);
-		fireEvent.input(input, { target: { value: '  web-server-01  ' } });
+		await fireEvent.input(input, { target: { value: '  web-server-01  ' } });
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
 		expect((deleteButton as HTMLButtonElement).disabled).toBe(false);
 	});
 
-	it('calls onConfirm when delete is clicked with matching text', () => {
+	it('calls onConfirm when delete is clicked with matching text', async () => {
 		const { onConfirm } = renderDialog({ instanceName: 'web-server-01' });
 		const input = screen.getByLabelText(/Type instance name to confirm deletion/i);
-		fireEvent.input(input, { target: { value: 'web-server-01' } });
+		await fireEvent.input(input, { target: { value: 'web-server-01' } });
 		const deleteButton = screen.getByRole('button', { name: /Delete Instance/i });
-		fireEvent.click(deleteButton);
+		await fireEvent.click(deleteButton);
 		expect(onConfirm).toHaveBeenCalledTimes(1);
 	});
 
-	it('calls onCancel when cancel is clicked', () => {
+	it('calls onCancel when cancel is clicked', async () => {
 		const { onCancel } = renderDialog({});
 		const cancelButton = screen.getByRole('button', { name: /Cancel/i });
-		fireEvent.click(cancelButton);
+		await fireEvent.click(cancelButton);
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
 });

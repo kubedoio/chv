@@ -39,7 +39,7 @@
 						{/if}
 					</div>
 				</div>
-				<a href="/tasks?query={task.task_id}" class="text-[var(--shell-text-muted)] transition-colors duration-150 ease-in-out flex p-1 hover:text-[var(--shell-accent)]" title="View detail">
+				<a href={`/tasks?query=${encodeURIComponent(task.task_id)}`} class="text-[var(--shell-text-muted)] transition-colors duration-150 ease-in-out flex p-1 hover:text-[var(--shell-accent)]" title="View detail">
 					<ExternalLink size={14} />
 				</a>
 			</div>

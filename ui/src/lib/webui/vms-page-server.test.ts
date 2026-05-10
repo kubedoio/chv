@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildVmsLoad } from './vms-load';
+import { clearCache } from '$lib/stores/api-cache.svelte';
 
 vi.mock('$lib/bff/vms', () => ({
 	listVms: vi.fn()
@@ -8,6 +9,11 @@ vi.mock('$lib/bff/vms', () => ({
 import { listVms } from '$lib/bff/vms';
 
 describe('buildVmsLoad', () => {
+	beforeEach(() => {
+		clearCache();
+		vi.mocked(listVms).mockReset();
+	});
+
 	it('returns ready state with VMs', async () => {
 		const mockedListVms = vi.mocked(listVms);
 		mockedListVms.mockResolvedValue({
