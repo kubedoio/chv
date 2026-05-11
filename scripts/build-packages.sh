@@ -1,5 +1,9 @@
 #!/bin/bash
 # Build CHV .deb and .rpm packages using nFPM.
+#
+# Pipeline role: The main package builder. Compiles Rust binaries + Web UI,
+# then calls nfpm for each packaging/nfpm/*.yaml config. Produces .deb and
+# .rpm files in dist/packages/. Called by: Makefile, CI workflows.
 # Usage: ./scripts/build-packages.sh [--skip-build] [--format deb|rpm]
 #
 # Environment:

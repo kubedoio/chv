@@ -37,6 +37,17 @@ make check-release-local  # Run all local release checks
 make dev-install
 ```
 
+## Release Engineering
+
+**If you are working on releases, packaging, CI/CD, or versioning, read [`docs/release/PIPELINE.md`](docs/release/PIPELINE.md) first.**
+
+Quick reference:
+- Version source of truth: [`VERSION`](VERSION)
+- Version derivation: [`scripts/version.sh`](scripts/version.sh)
+- Package builder: [`scripts/build-packages.sh`](scripts/build-packages.sh)
+- CI workflows: [`.github/workflows/`](.github/workflows/)
+- Release process: [`docs/release/release-process.md`](docs/release/release-process.md)
+
 ## Proto Generation
 
 If you change `.proto` files:
@@ -70,21 +81,3 @@ The workspace `build.rs` files use `tonic-build` to regenerate code in `/gen/rus
 | [`docs/release/PIPELINE.md`](docs/release/PIPELINE.md) | **Release engineering: read this first for any packaging/CI/CD/versioning work** |
 | [`VERSION`](VERSION) | Single source of truth for release version |
 | [`Makefile`](Makefile) | Packaging, testing, signing, and integration targets |
-
-## Skill Routing
-
-When the user's request matches an available skill, ALWAYS invoke it using the Skill tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke context-save / context-restore
-- Code quality, health check → invoke health

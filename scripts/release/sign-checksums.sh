@@ -1,6 +1,10 @@
 #!/bin/bash
 # Sign SHA256SUMS with GPG or cosign if signing secrets are configured.
 #
+# Pipeline role: Called by CI release workflow after package generation.
+# Reads CHV_RELEASE_GPG_KEY and CHV_RELEASE_COSIGN_KEY env vars.
+# Gracefully exits 0 if no secrets are configured.
+#
 # Usage:
 #   ./scripts/release/sign-checksums.sh [SHA256SUMS-file]
 #

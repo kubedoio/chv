@@ -4,6 +4,9 @@
 # Generates apt and yum repository metadata from built packages and uploads
 # to a configured repository target.
 #
+# Pipeline role: Optional final step in release.yml. Creates signed apt/yum
+# repos and uploads via S3 or rsync. Dry-runs by default if no credentials.
+#
 # Usage:
 #   ./scripts/publish/publish-repo.sh --packages DIR --channel nightly --version VERSION
 #

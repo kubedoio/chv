@@ -1,5 +1,9 @@
 #!/bin/bash
 # Derive package versions for different release channels.
+#
+# Pipeline role: Called by build-packages.sh and CI workflows to generate
+# Debian (~suffix) and RPM (-suffix) version strings from the VERSION file.
+# Environment override: CHV_PKG_PRERELEASE
 # Usage: ./scripts/version.sh [--rpm|--deb] [stable|rc N|nightly|pr N]
 #
 # Environment:
