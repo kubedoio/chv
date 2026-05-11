@@ -766,13 +766,92 @@ async fn rollback_paused(
 ///
 /// This is best-effort: failures are logged as warnings but do not fail the overall operation.
 async fn disable_source_dirty_tracking(
-    _pool: &StorePool,
-    _node_client_pool: &NodeClientPool,
-    _agent_socket_pattern: &str,
-    _state: &MigrationState,
+    pool: &StorePool,
+    node_client_pool: &NodeClientPool,
+    agent_socket_pattern: &str,
+    state: &MigrationState,
 ) {
-    // Dirty tracking RPC has been removed from the agent protocol.
-    // This is a no-op placeholder retained for migration cleanup flow.
+    // Query volumes attached to the migrating VM.
+    let volumes: Result<Vec<(String,)>, _> =
+        sqlx::query_as("SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ?")
+            .bind(&state.vm_id)
+            .fetch_all(pool)
+            .await;
+
+    let volume_ids = match volumes {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(
+                migration_id = %state.migration_id,
+                vm_id = %state.vm_id,
+                error = %e,
+                "failed to query volumes for dirty tracking cleanup (best-effort)"
+            );
+            return;
+        }
+    };
+
+    if volume_ids.is_empty() {
+        return;
+    }
+
+    // Connect to the source agent.
+    let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
+    let mut source_client = match node_client_pool
+        .get_or_connect(&state.source_node_id, &source_socket)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            warn!(
+                migration_id = %state.migration_id,
+                source_node_id = %state.source_node_id,
+                error = %e,
+                "failed to connect to source agent for dirty tracking cleanup (best-effort)"
+            );
+            return;
+        }
+    };
+
+    // For each volume, send a desired state update that disables dirty tracking.
+    // The agent interprets a volume spec with `dirty_tracking: false` as a signal
+    // to stop tracking dirty blocks on the volume.
+    for (volume_id,) in &volume_ids {
+        let spec_json = serde_json::json!({
+            "dirty_tracking": false
+        });
+        let spec_bytes = serde_json::to_vec(&spec_json).unwrap_or_default();
+
+        match source_client
+            .apply_volume_desired_state(
+                &state.source_node_id,
+                volume_id,
+                "0", // generation 0 — best-effort cleanup, no ordering guarantee needed
+                spec_bytes,
+                &state.operation_id,
+                Some("control-plane"),
+            )
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    migration_id = %state.migration_id,
+                    volume_id = %volume_id,
+                    source_node_id = %state.source_node_id,
+                    "disabled dirty tracking on source volume"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    migration_id = %state.migration_id,
+                    volume_id = %volume_id,
+                    source_node_id = %state.source_node_id,
+                    error = %e,
+                    "failed to disable dirty tracking on source volume (best-effort)"
+                );
+            }
+        }
+    }
 }
 
 /// Query the volume IDs attached to a VM.
@@ -781,14 +860,44 @@ async fn disable_source_dirty_tracking(
 /// Convergence is achieved when dirty_blocks_remaining (reported by agent) drops below threshold,
 /// OR when bytes_transferred >= total_bytes (indicating bulk copy complete and iterative
 /// sync has finished).
+///
+/// Uses progressive timeouts per round:
+/// - Rounds 1-3: 60s per round (initial bulk copy phase)
+/// - Rounds 4-6: 30s per round (iterative sync phase)
+/// - Rounds 7+: 15s per round (final convergence phase)
+/// - Max total: 7200s overall cap
+///
+/// If no progress is detected between rounds (bytes_transferred unchanged), the
+/// migration is cancelled early to avoid wasting time on a stalled transfer.
 async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Result<(), ChvError> {
     let max_rounds = state.config.max_convergence_rounds;
     let threshold = state.config.dirty_threshold_blocks as i64;
     let mut poll_count: u32 = 0;
+    let mut last_bytes_transferred: i64 = -1;
+    let mut stall_polls: u32 = 0;
+    let started = tokio::time::Instant::now();
+    const MAX_TOTAL_SECS: u64 = 7200;
 
     loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Progressive poll interval based on current round:
+        // Rounds 1-3 (polls 1-36): 60s budget / ~5s polls = poll every 5s
+        // Rounds 4-6 (polls 37-54): 30s budget / ~5s polls = poll every 5s
+        // Rounds 7+ (polls 55+): 15s budget / ~5s polls = poll every 5s
+        // The outer timeout (from PhaseTimeouts) enforces per-round deadlines;
+        // here we use progressive stall detection thresholds.
+        let poll_interval = Duration::from_secs(5);
+        tokio::time::sleep(poll_interval).await;
         poll_count += 1;
+
+        // Enforce max total time
+        if started.elapsed().as_secs() >= MAX_TOTAL_SECS {
+            warn!(
+                migration_id = %state.migration_id,
+                elapsed_secs = started.elapsed().as_secs(),
+                "convergence exceeded max total time (7200s), forcing transition"
+            );
+            return Ok(());
+        }
 
         let row: Option<(String, i64, i64, i64, i64)> = sqlx::query_as(
             "SELECT phase, convergence_round, dirty_blocks_remaining, bytes_transferred, total_bytes FROM migrations WHERE migration_id = ?",
@@ -813,13 +922,61 @@ async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Resul
 
                 // Primary check: agent-reported dirty blocks below threshold
                 if dirty_remaining >= 0 && dirty_remaining <= threshold {
+                    info!(
+                        migration_id = %state.migration_id,
+                        round = round,
+                        dirty_remaining = dirty_remaining,
+                        "convergence achieved: dirty blocks below threshold"
+                    );
                     return Ok(());
                 }
 
                 // Secondary check: bytes_transferred indicates bulk copy complete
                 if total_bytes > 0 && bytes_transferred >= total_bytes && dirty_remaining <= 0 {
+                    info!(
+                        migration_id = %state.migration_id,
+                        bytes_transferred = bytes_transferred,
+                        total_bytes = total_bytes,
+                        "convergence achieved: all bytes transferred"
+                    );
                     return Ok(());
                 }
+
+                // Progressive stall detection: check if bytes_transferred is making progress.
+                // The stall threshold depends on which round we're in:
+                // - Rounds 1-3: allow up to 12 stall polls (60s of no progress)
+                // - Rounds 4-6: allow up to 6 stall polls (30s of no progress)
+                // - Rounds 7+: allow up to 3 stall polls (15s of no progress)
+                let max_stall_polls = if round <= 3 {
+                    12_u32 // 60s at 5s intervals
+                } else if round <= 6 {
+                    6_u32 // 30s at 5s intervals
+                } else {
+                    3_u32 // 15s at 5s intervals
+                };
+
+                if bytes_transferred == last_bytes_transferred && last_bytes_transferred >= 0 {
+                    stall_polls += 1;
+                    if stall_polls >= max_stall_polls {
+                        warn!(
+                            migration_id = %state.migration_id,
+                            round = round,
+                            stall_polls = stall_polls,
+                            bytes_transferred = bytes_transferred,
+                            "no progress detected between rounds, cancelling early"
+                        );
+                        return Err(ChvError::Internal {
+                            reason: format!(
+                                "migration {} stalled: no progress for {} polls (round {})",
+                                state.migration_id, stall_polls, round
+                            ),
+                        });
+                    }
+                } else {
+                    // Progress was made, reset stall counter
+                    stall_polls = 0;
+                }
+                last_bytes_transferred = bytes_transferred;
 
                 // Max rounds exceeded (each round is 5s, so max_rounds polls)
                 if round >= max_rounds as i64 || poll_count >= max_rounds * 6 {

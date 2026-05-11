@@ -753,3 +753,24 @@ export type RestoreSnapshotResponse = {
 	task_id: string;
 	summary: string;
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Storage Pool types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type StoragePoolItem = {
+	pool_id: string;
+	name: string;
+	pool_type: string;
+	path: string;
+	is_default: boolean;
+	status: string;
+	capacity_bytes?: number;
+	allocatable_bytes?: number;
+	created_at: string;
+};
+
+export type ListStoragePoolsResponse = {
+	items: StoragePoolItem[];
+	page: PageMeta;
+};

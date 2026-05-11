@@ -11,11 +11,12 @@ use tracing::{debug, info};
 const DISCONNECT_THRESHOLD: u32 = 3;
 
 /// Connectivity state of the control plane link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConnectivityState {
     /// Active, healthy connection to the control plane.
     Connected,
     /// Control plane is unreachable; agent operates autonomously.
+    #[default]
     Disconnected,
     /// Attempting to re-establish connection after a disconnect.
     Reconnecting,

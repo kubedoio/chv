@@ -1,3 +1,4 @@
+use crate::connectivity::ConnectivityState;
 use crate::state_machine::{NodeState, StateMachine};
 use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
@@ -164,6 +165,8 @@ pub struct NodeCache {
     pub pending_control_plane: Vec<PendingControlPlaneMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(skip)]
+    pub connectivity_state: ConnectivityState,
 }
 
 impl NodeCache {
@@ -188,6 +191,7 @@ impl NodeCache {
             volume_handles: HashMap::new(),
             pending_control_plane: Vec::new(),
             last_error: None,
+            connectivity_state: ConnectivityState::Disconnected,
         }
     }
 

@@ -1,9 +1,30 @@
 use axum::{extract::State, response::IntoResponse, routing::get, Router};
 use std::sync::Arc;
 use std::time::Instant;
+use sysinfo::{Disks, System};
 use tokio::sync::Mutex;
 
 use crate::connectivity::ConnectivityState;
+
+pub struct HostResources {
+    pub cpu_usage_percent: f32,
+    pub memory_total_bytes: u64,
+    pub memory_used_bytes: u64,
+    pub disk_total_bytes: u64,
+    pub disk_available_bytes: u64,
+}
+
+impl Default for HostResources {
+    fn default() -> Self {
+        Self {
+            cpu_usage_percent: 0.0,
+            memory_total_bytes: 0,
+            memory_used_bytes: 0,
+            disk_total_bytes: 0,
+            disk_available_bytes: 0,
+        }
+    }
+}
 
 /// Shared state exposed via the Prometheus metrics endpoint.
 pub struct MetricsState {
@@ -19,6 +40,8 @@ pub struct MetricsState {
     pub cp_disconnected_duration_ms: i64,
     pub cp_consecutive_failures: u32,
     pub cp_total_deferred_messages: u64,
+    // Host resources
+    pub host: HostResources,
 }
 
 impl MetricsState {
@@ -35,12 +58,39 @@ impl MetricsState {
             cp_disconnected_duration_ms: 0,
             cp_consecutive_failures: 0,
             cp_total_deferred_messages: 0,
+            host: HostResources::default(),
         }
+    }
+}
+
+/// Collect current host resource metrics using sysinfo.
+fn collect_host_resources() -> HostResources {
+    let mut sys = System::new();
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+    let cpu_usage = sys.global_cpu_info().cpu_usage();
+    let memory_total = sys.total_memory();
+    let memory_used = sys.used_memory();
+
+    let disks = Disks::new_with_refreshed_list();
+    let (disk_total, disk_available) = disks
+        .iter()
+        .find(|d| d.mount_point() == std::path::Path::new("/"))
+        .map(|d| (d.total_space(), d.available_space()))
+        .unwrap_or((0, 0));
+
+    HostResources {
+        cpu_usage_percent: cpu_usage,
+        memory_total_bytes: memory_total,
+        memory_used_bytes: memory_used,
+        disk_total_bytes: disk_total,
+        disk_available_bytes: disk_available,
     }
 }
 
 /// Handler that renders metrics in Prometheus text exposition format.
 async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl IntoResponse {
+    let host = collect_host_resources();
     let s = state.lock().await;
     let uptime = s.start_time.elapsed().as_secs();
     let body = format!(
@@ -73,7 +123,22 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
          chv_agent_cp_consecutive_failures{{node_id=\"{node_id}\"}} {cp_failures}\n\
          # HELP chv_agent_cp_deferred_messages_total Total messages deferred due to control plane unavailability\n\
          # TYPE chv_agent_cp_deferred_messages_total counter\n\
-         chv_agent_cp_deferred_messages_total{{node_id=\"{node_id}\"}} {cp_deferred}\n",
+         chv_agent_cp_deferred_messages_total{{node_id=\"{node_id}\"}} {cp_deferred}\n\
+         # HELP chv_agent_cpu_usage_percent Overall CPU utilization percentage\n\
+         # TYPE chv_agent_cpu_usage_percent gauge\n\
+         chv_agent_cpu_usage_percent{{node_id=\"{node_id}\"}} {cpu_usage}\n\
+         # HELP chv_agent_memory_total_bytes Total system RAM in bytes\n\
+         # TYPE chv_agent_memory_total_bytes gauge\n\
+         chv_agent_memory_total_bytes{{node_id=\"{node_id}\"}} {mem_total}\n\
+         # HELP chv_agent_memory_used_bytes Used system RAM in bytes\n\
+         # TYPE chv_agent_memory_used_bytes gauge\n\
+         chv_agent_memory_used_bytes{{node_id=\"{node_id}\"}} {mem_used}\n\
+         # HELP chv_agent_disk_total_bytes Total disk space on root mount in bytes\n\
+         # TYPE chv_agent_disk_total_bytes gauge\n\
+         chv_agent_disk_total_bytes{{node_id=\"{node_id}\"}} {disk_total}\n\
+         # HELP chv_agent_disk_available_bytes Available disk space on root mount in bytes\n\
+         # TYPE chv_agent_disk_available_bytes gauge\n\
+         chv_agent_disk_available_bytes{{node_id=\"{node_id}\"}} {disk_avail}\n",
         node_id = s.node_id,
         state = s.node_state,
         vms = s.vm_count,
@@ -86,6 +151,11 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
         cp_disconnect_ms = s.cp_disconnected_duration_ms,
         cp_failures = s.cp_consecutive_failures,
         cp_deferred = s.cp_total_deferred_messages,
+        cpu_usage = host.cpu_usage_percent,
+        mem_total = host.memory_total_bytes,
+        mem_used = host.memory_used_bytes,
+        disk_total = host.disk_total_bytes,
+        disk_avail = host.disk_available_bytes,
     );
     (
         axum::http::StatusCode::OK,

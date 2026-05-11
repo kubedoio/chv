@@ -1,3 +1,5 @@
+pub mod cert_watcher;
+
 use rand::Rng;
 use serde::Deserialize;
 use std::net::SocketAddr;

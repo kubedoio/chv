@@ -40,6 +40,14 @@ function filterEvents(items: EventListItem[], current: Record<string, string>): 
 	if (state && state !== 'all') {
 		result = result.filter((e) => e.state === state);
 	}
+	const type = current.type;
+	if (type && type !== 'all') {
+		result = result.filter((e) => e.type === type);
+	}
+	const resourceKind = current.resource_kind;
+	if (resourceKind && resourceKind !== 'all') {
+		result = result.filter((e) => e.resource_kind === resourceKind);
+	}
 	return result;
 }
 
@@ -52,10 +60,14 @@ export const load: PageLoad = async ({ url }) => {
 	const query = url.searchParams.get('query');
 	const severity = url.searchParams.get('severity');
 	const state = url.searchParams.get('state');
+	const type = url.searchParams.get('type');
+	const resourceKind = url.searchParams.get('resource_kind');
 
 	if (query) current.query = query;
 	if (severity) current.severity = severity;
 	if (state) current.state = state;
+	if (type) current.type = type;
+	if (resourceKind) current.resource_kind = resourceKind;
 
 	try {
 		const res = await listEvents(token);

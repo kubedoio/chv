@@ -12,6 +12,233 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
+// BPF map pinned-file operations (Linux only)
+// ---------------------------------------------------------------------------
+
+/// Default base path for pinned BPF maps created by TC-attached programs.
+pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/tc/globals/";
+
+/// Update a BPF map element via the pinned map file and bpf() syscall.
+///
+/// Opens the pinned map at `pin_path`, then calls BPF_MAP_UPDATE_ELEM.
+/// This is Linux-only and requires the process to have CAP_SYS_ADMIN or
+/// CAP_BPF capability.
+#[cfg(target_os = "linux")]
+fn bpf_map_update(pin_path: &str, key: &[u8], value: &[u8]) -> Result<(), ChvError> {
+    use std::os::unix::io::AsRawFd;
+
+    // BPF syscall constants
+    const BPF_MAP_UPDATE_ELEM: u32 = 2;
+    const BPF_ANY: u64 = 0; // create or update
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pin_path)
+        .map_err(|e| ChvError::Io {
+            path: pin_path.to_string(),
+            source: e,
+        })?;
+
+    let fd = file.as_raw_fd();
+
+    // bpf_attr for BPF_MAP_UPDATE_ELEM (subset of the union)
+    #[repr(C)]
+    struct BpfMapUpdateAttr {
+        map_fd: u32,
+        _pad0: u32,
+        key: u64,
+        value_or_next_key: u64,
+        flags: u64,
+    }
+
+    let attr = BpfMapUpdateAttr {
+        map_fd: fd as u32,
+        _pad0: 0,
+        key: key.as_ptr() as u64,
+        value_or_next_key: value.as_ptr() as u64,
+        flags: BPF_ANY,
+    };
+
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_MAP_UPDATE_ELEM as libc::c_long,
+            &attr as *const BpfMapUpdateAttr as *const libc::c_void,
+            std::mem::size_of::<BpfMapUpdateAttr>() as libc::c_long,
+        )
+    };
+
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(ChvError::Internal {
+            reason: format!("bpf(BPF_MAP_UPDATE_ELEM) on {} failed: {}", pin_path, err),
+        });
+    }
+
+    Ok(())
+}
+
+/// Lookup a BPF map element via the pinned map file and bpf() syscall.
+///
+/// Opens the pinned map at `pin_path`, then calls BPF_MAP_LOOKUP_ELEM.
+/// Returns the value bytes of `value_size` length.
+#[cfg(target_os = "linux")]
+fn bpf_map_lookup(pin_path: &str, key: &[u8], value_size: usize) -> Result<Vec<u8>, ChvError> {
+    use std::os::unix::io::AsRawFd;
+
+    const BPF_MAP_LOOKUP_ELEM: u32 = 1;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(pin_path)
+        .map_err(|e| ChvError::Io {
+            path: pin_path.to_string(),
+            source: e,
+        })?;
+
+    let fd = file.as_raw_fd();
+
+    let mut value_buf = vec![0u8; value_size];
+
+    #[repr(C)]
+    struct BpfMapLookupAttr {
+        map_fd: u32,
+        _pad0: u32,
+        key: u64,
+        value_or_next_key: u64,
+        flags: u64,
+    }
+
+    let attr = BpfMapLookupAttr {
+        map_fd: fd as u32,
+        _pad0: 0,
+        key: key.as_ptr() as u64,
+        value_or_next_key: value_buf.as_mut_ptr() as u64,
+        flags: 0,
+    };
+
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_MAP_LOOKUP_ELEM as libc::c_long,
+            &attr as *const BpfMapLookupAttr as *const libc::c_void,
+            std::mem::size_of::<BpfMapLookupAttr>() as libc::c_long,
+        )
+    };
+
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(ChvError::Internal {
+            reason: format!("bpf(BPF_MAP_LOOKUP_ELEM) on {} failed: {}", pin_path, err),
+        });
+    }
+
+    Ok(value_buf)
+}
+
+/// Stub for non-Linux platforms — always returns an error.
+#[cfg(not(target_os = "linux"))]
+fn bpf_map_update(pin_path: &str, _key: &[u8], _value: &[u8]) -> Result<(), ChvError> {
+    Err(ChvError::Internal {
+        reason: format!(
+            "BPF map operations are only supported on Linux (attempted: {})",
+            pin_path
+        ),
+    })
+}
+
+/// Stub for non-Linux platforms — always returns an error.
+#[cfg(not(target_os = "linux"))]
+fn bpf_map_lookup(pin_path: &str, _key: &[u8], _value_size: usize) -> Result<Vec<u8>, ChvError> {
+    Err(ChvError::Internal {
+        reason: format!(
+            "BPF map operations are only supported on Linux (attempted: {})",
+            pin_path
+        ),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// BPF map value serialization helpers
+// ---------------------------------------------------------------------------
+
+/// Packed rule entry as stored in the BPF rule_map.
+/// Each VM can have up to MAX_RULES_PER_VM entries stored as a flat array.
+const MAX_RULES_PER_VM: usize = 64;
+
+/// Size of a single packed rule entry in the BPF map (bytes).
+/// Layout: src_ip(4) + src_mask(4) + dst_ip(4) + dst_mask(4) + src_port_min(2)
+///       + src_port_max(2) + dst_port_min(2) + dst_port_max(2) + protocol(1)
+///       + direction(1) + action(1) + _pad(1) + priority(4) = 32 bytes
+const BPF_RULE_ENTRY_SIZE: usize = 32;
+
+/// Serialize a single EbpfRule into a fixed-size byte array for the BPF map.
+fn serialize_rule(rule: &EbpfRule) -> [u8; BPF_RULE_ENTRY_SIZE] {
+    let mut buf = [0u8; BPF_RULE_ENTRY_SIZE];
+    buf[0..4].copy_from_slice(&rule.src_ip.to_ne_bytes());
+    buf[4..8].copy_from_slice(&rule.src_mask.to_ne_bytes());
+    buf[8..12].copy_from_slice(&rule.dst_ip.to_ne_bytes());
+    buf[12..16].copy_from_slice(&rule.dst_mask.to_ne_bytes());
+    buf[16..18].copy_from_slice(&rule.src_port_min.to_ne_bytes());
+    buf[18..20].copy_from_slice(&rule.src_port_max.to_ne_bytes());
+    buf[20..22].copy_from_slice(&rule.dst_port_min.to_ne_bytes());
+    buf[22..24].copy_from_slice(&rule.dst_port_max.to_ne_bytes());
+    buf[24] = rule.protocol;
+    buf[25] = rule.direction;
+    buf[26] = rule.action;
+    buf[27] = 0; // padding
+    buf[28..32].copy_from_slice(&rule.priority.to_ne_bytes());
+    buf
+}
+
+/// Serialize a rule set into the BPF map value format.
+/// Format: rule_count(u32) + rules[MAX_RULES_PER_VM] packed entries.
+fn serialize_rules_value(rules: &[EbpfRule]) -> Vec<u8> {
+    let count = rules.len().min(MAX_RULES_PER_VM) as u32;
+    // Value layout: 4 bytes count + MAX_RULES_PER_VM * BPF_RULE_ENTRY_SIZE
+    let value_size = 4 + MAX_RULES_PER_VM * BPF_RULE_ENTRY_SIZE;
+    let mut buf = vec![0u8; value_size];
+    buf[0..4].copy_from_slice(&count.to_ne_bytes());
+    for (i, rule) in rules.iter().take(MAX_RULES_PER_VM).enumerate() {
+        let offset = 4 + i * BPF_RULE_ENTRY_SIZE;
+        let serialized = serialize_rule(rule);
+        buf[offset..offset + BPF_RULE_ENTRY_SIZE].copy_from_slice(&serialized);
+    }
+    buf
+}
+
+/// Serialize a rate limit entry for the BPF rate_map.
+/// Layout: rate_bps(u64) + burst_bytes(u64) + tokens(u64) + last_refill_ns(u64) = 32 bytes
+fn serialize_rate_limit_value(rate_limit: &EbpfRateLimit) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[0..8].copy_from_slice(&rate_limit.rate_bps.to_ne_bytes());
+    buf[8..16].copy_from_slice(&rate_limit.burst_bytes.to_ne_bytes());
+    // tokens: initialize to burst_bytes (full bucket)
+    buf[16..24].copy_from_slice(&rate_limit.burst_bytes.to_ne_bytes());
+    // last_refill_ns: 0 (kernel will set on first packet)
+    buf[24..32].copy_from_slice(&0u64.to_ne_bytes());
+    buf
+}
+
+/// Size of the stats_map value: packets_allowed(8) + packets_denied(8) +
+/// bytes_allowed(8) + bytes_denied(8) = 32 bytes
+const BPF_STATS_VALUE_SIZE: usize = 32;
+
+/// Deserialize stats from the BPF stats_map value.
+fn deserialize_stats(buf: &[u8]) -> EbpfStats {
+    if buf.len() < BPF_STATS_VALUE_SIZE {
+        return EbpfStats::default();
+    }
+    EbpfStats {
+        packets_allowed: u64::from_ne_bytes(buf[0..8].try_into().unwrap_or([0; 8])),
+        packets_denied: u64::from_ne_bytes(buf[8..16].try_into().unwrap_or([0; 8])),
+        bytes_allowed: u64::from_ne_bytes(buf[16..24].try_into().unwrap_or([0; 8])),
+        bytes_denied: u64::from_ne_bytes(buf[24..32].try_into().unwrap_or([0; 8])),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Data structures for eBPF map entries
 // ---------------------------------------------------------------------------
 
@@ -236,20 +463,37 @@ pub fn proto_to_ebpf_rate_limit(policy: &proto::RateLimitPolicy) -> EbpfRateLimi
 }
 
 // ---------------------------------------------------------------------------
-// LinuxEbpfManager — real implementation (stubs BPF map operations)
+// LinuxEbpfManager — real implementation using TC + pinned BPF maps
 // ---------------------------------------------------------------------------
 
-/// Real eBPF manager that uses `tc` commands to attach/detach programs.
-/// BPF map operations are logged but not executed (requires libbpf-rs and
-/// compiled .o programs that are not available in CI).
+/// Real eBPF manager that uses `tc` commands to attach/detach programs and
+/// the `bpf()` syscall to manipulate pinned BPF maps.
 pub struct LinuxEbpfManager {
     /// Path to directory containing compiled eBPF programs (e.g. policy_tc.o).
     program_path: String,
+    /// Base path for pinned BPF maps (e.g. `/sys/fs/bpf/tc/globals/`).
+    bpf_pin_base: String,
 }
 
 impl LinuxEbpfManager {
     pub fn new(program_path: String) -> Self {
-        Self { program_path }
+        Self {
+            program_path,
+            bpf_pin_base: DEFAULT_BPF_PIN_PATH.to_string(),
+        }
+    }
+
+    /// Create a manager with a custom BPF pin base path.
+    pub fn with_pin_path(program_path: String, bpf_pin_base: String) -> Self {
+        Self {
+            program_path,
+            bpf_pin_base,
+        }
+    }
+
+    /// Get the full path for a pinned BPF map.
+    fn map_path(&self, map_name: &str) -> String {
+        format!("{}{}", self.bpf_pin_base, map_name)
     }
 
     async fn run_tc(args: &[&str]) -> Result<(), ChvError> {
@@ -319,23 +563,38 @@ impl EbpfManager for LinuxEbpfManager {
     }
 
     async fn update_rules(&self, vm_id: &str, rules: &[EbpfRule]) -> Result<(), ChvError> {
-        // In a full implementation, this would write to BPF maps via libbpf-rs.
-        // For now, log the operation.
+        let vm_hash = hash_vm_id(vm_id);
+        let key = vm_hash.to_ne_bytes();
+        let value = serialize_rules_value(rules);
+        let pin_path = self.map_path("rule_map");
+
+        bpf_map_update(&pin_path, &key, &value)?;
+
         info!(
             vm_id = %vm_id,
-            vm_id_hash = hash_vm_id(vm_id),
+            vm_id_hash = vm_hash,
             rule_count = rules.len(),
-            "eBPF rule_map update (libbpf-rs stub)"
+            pin_path = %pin_path,
+            "eBPF rule_map updated"
         );
         Ok(())
     }
 
     async fn set_default_action(&self, vm_id: &str, action: u8) -> Result<(), ChvError> {
+        let vm_hash = hash_vm_id(vm_id);
+        let key = vm_hash.to_ne_bytes();
+        // Value is action as u32 (u8 padded to u32 for BPF map alignment)
+        let value = (action as u32).to_ne_bytes();
+        let pin_path = self.map_path("defaults_map");
+
+        bpf_map_update(&pin_path, &key, &value)?;
+
         info!(
             vm_id = %vm_id,
-            vm_id_hash = hash_vm_id(vm_id),
+            vm_id_hash = vm_hash,
             action = action,
-            "eBPF defaults_map update (libbpf-rs stub)"
+            pin_path = %pin_path,
+            "eBPF defaults_map updated"
         );
         Ok(())
     }
@@ -345,19 +604,40 @@ impl EbpfManager for LinuxEbpfManager {
         vm_id: &str,
         rate_limit: &EbpfRateLimit,
     ) -> Result<(), ChvError> {
+        let vm_hash = hash_vm_id(vm_id);
+        let key = vm_hash.to_ne_bytes();
+        let value = serialize_rate_limit_value(rate_limit);
+        let pin_path = self.map_path("rate_map");
+
+        bpf_map_update(&pin_path, &key, &value)?;
+
         info!(
             vm_id = %vm_id,
-            vm_id_hash = rate_limit.vm_id_hash,
+            vm_id_hash = vm_hash,
             rate_bps = rate_limit.rate_bps,
             burst_bytes = rate_limit.burst_bytes,
-            "eBPF rate_map update (libbpf-rs stub)"
+            pin_path = %pin_path,
+            "eBPF rate_map updated"
         );
         Ok(())
     }
 
     async fn read_stats(&self, vm_id: &str) -> Result<EbpfStats, ChvError> {
-        debug!(vm_id = %vm_id, "eBPF stats_map read (libbpf-rs stub — returning zeros)");
-        Ok(EbpfStats::default())
+        let vm_hash = hash_vm_id(vm_id);
+        let key = vm_hash.to_ne_bytes();
+        let pin_path = self.map_path("stats_map");
+
+        let value = bpf_map_lookup(&pin_path, &key, BPF_STATS_VALUE_SIZE)?;
+        let stats = deserialize_stats(&value);
+
+        debug!(
+            vm_id = %vm_id,
+            vm_id_hash = vm_hash,
+            packets_allowed = stats.packets_allowed,
+            packets_denied = stats.packets_denied,
+            "eBPF stats_map read"
+        );
+        Ok(stats)
     }
 
     async fn detach_program(&self, interface: &str) -> Result<(), ChvError> {

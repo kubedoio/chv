@@ -100,7 +100,10 @@ pub async fn build_service(
         cache: chv_webui_bff::BffCache::new(5),
     };
 
-    let router = chv_controlplane_service::api::router::admin_router(bff_state);
+    let convergence_metrics = chv_controlplane_service::convergence_metrics::new_shared();
+
+    let router =
+        chv_controlplane_service::api::router::admin_router(bff_state, convergence_metrics.clone());
     let http_listener = tokio::net::TcpListener::bind(config.http_bind)
         .await
         .map_err(|e| {
@@ -204,6 +207,7 @@ pub async fn build_service(
         config.kernel_path.clone(),
         config.firmware_path.clone(),
         node_client_pool.clone(),
+        convergence_metrics,
     );
     let orchestrator_handle = tokio::spawn(orchestrator.run(shutdown_rx.clone()));
 

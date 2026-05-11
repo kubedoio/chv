@@ -1,6 +1,7 @@
 <script lang="ts">
 import Button from '$lib/components/primitives/Button.svelte';
 	import { getStoredToken } from '$lib/api/client';
+	import { deleteImage } from '$lib/bff/images';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/shared/FilterBar.svelte';
@@ -94,20 +95,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 		try {
 			const token = getStoredToken() ?? undefined;
-			const res = await fetch('/v1/images/delete', {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					...(token ? { 'Authorization': `Bearer ${token}` } : {})
-				},
-				body: JSON.stringify({ image_id: imageId })
-			});
-
-			if (!res.ok) {
-				const body = await res.json().catch(() => ({}));
-				throw new Error(body.error ?? `HTTP ${res.status}`);
-			}
-
+			await deleteImage({ image_id: imageId }, token);
 			await invalidateAll();
 		} catch (err: any) {
 			deleteError = err.message ?? 'Failed to delete image';

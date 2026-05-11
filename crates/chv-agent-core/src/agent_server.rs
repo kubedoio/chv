@@ -551,6 +551,11 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     cache.node_state
                 )));
             }
+            if cache.connectivity_state == crate::connectivity::ConnectivityState::Disconnected {
+                return Err(Status::failed_precondition(
+                    "control plane unreachable — VM creation denied to prevent split-brain",
+                ));
+            }
         }
         let vm_spec =
             crate::spec::VmSpec::from_json(std::str::from_utf8(&vm.vm_spec_json).unwrap_or(""))
@@ -1809,6 +1814,11 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
 
         let my_node_id = {
             let cache = self.cache.lock().await;
+            if cache.connectivity_state == crate::connectivity::ConnectivityState::Disconnected {
+                return Err(Status::failed_precondition(
+                    "control plane unreachable — VM migration denied to prevent split-brain",
+                ));
+            }
             cache.node_id.clone()
         };
 
@@ -1988,6 +1998,7 @@ mod tests {
         cache.node_state = crate::state_machine::NodeState::TenantReady
             .as_str()
             .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
         AgentServer::new(
             Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
@@ -2610,6 +2621,7 @@ mod tests {
         cache.node_state = crate::state_machine::NodeState::TenantReady
             .as_str()
             .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
         cache.observe_generation("vm", "vm-1", "1");
         cache.observe_vm_attachment(
             "vm-1",
@@ -2763,6 +2775,7 @@ mod tests {
         cache.node_state = crate::state_machine::NodeState::TenantReady
             .as_str()
             .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
         let server = AgentServer::new(
             Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),

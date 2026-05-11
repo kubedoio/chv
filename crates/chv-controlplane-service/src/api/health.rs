@@ -1,8 +1,10 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
 use chv_webui_bff::AppState;
 use serde_json::json;
 use std::time::Instant;
 use tokio::time::Duration;
+
+use crate::convergence_metrics::{ConvergenceSnapshot, SharedConvergenceMetrics};
 
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     match sqlx::query("SELECT 1").fetch_one(&state.pool).await {
@@ -183,4 +185,16 @@ async fn find_first_socket(dir: &std::path::Path) -> Option<std::path::PathBuf> 
     }
 
     None
+}
+
+/// Returns convergence metrics for the control plane reconciler.
+///
+/// This endpoint is unauthenticated (same as /health) so monitoring
+/// systems can scrape it without credentials.
+pub async fn convergence_handler(
+    Extension(metrics): Extension<SharedConvergenceMetrics>,
+) -> impl IntoResponse {
+    let cm = metrics.read().await;
+    let snapshot = ConvergenceSnapshot::from(&*cm);
+    (StatusCode::OK, Json(json!({ "convergence": snapshot })))
 }
