@@ -309,11 +309,22 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             )
             .await
         {
-            Ok((namespace_handle, tap_handle)) => Ok(Response::new(proto::AttachVmNicResponse {
-                result: Some(Self::ok_result()),
-                namespace_handle,
-                tap_handle,
-            })),
+            Ok((namespace_handle, tap_handle)) => {
+                // Auto-load eBPF programs on the new tap interface
+                let bridge_name = format!("br-{}", &nic.network_id[..nic.network_id.len().min(8)]);
+                if let Err(e) = self.ebpf.load_policy_program(&tap_handle).await {
+                    tracing::warn!(tap = %tap_handle, error = %e, "failed to load eBPF policy program on tap");
+                }
+                if let Err(e) = self.ebpf.load_ingress_program(&bridge_name).await {
+                    tracing::warn!(bridge = %bridge_name, error = %e, "failed to load eBPF ingress program on bridge");
+                }
+
+                Ok(Response::new(proto::AttachVmNicResponse {
+                    result: Some(Self::ok_result()),
+                    namespace_handle,
+                    tap_handle,
+                }))
+            }
             Err(e) => Ok(Response::new(proto::AttachVmNicResponse {
                 result: Some(Self::err_result(&e)),
                 namespace_handle: String::new(),
@@ -335,7 +346,35 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .unwrap_or_else(|| operation_span(""));
 
         match self.executor.detach_vm_nic(&req.nic_id).await {
-            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Ok(()) => {
+                // Clean up FDB entries for this VM's MAC across peer VTEPs
+                if !req.network_id.is_empty() && !req.vm_mac.is_empty() {
+                    if let Some(state) = self.topologies.get(&req.network_id) {
+                        if let Some(vni) = state.vni {
+                            for vtep_ip in &state.peer_vteps {
+                                if let Err(e) = self
+                                    .executor
+                                    .delete_fdb_entry(
+                                        &state.namespace_name,
+                                        vni,
+                                        &req.vm_mac,
+                                        vtep_ip,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        vm_mac = %req.vm_mac,
+                                        vtep_ip = %vtep_ip,
+                                        error = %e,
+                                        "failed to delete FDB entry on detach"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Response::new(Self::ok_result()))
+            }
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }
     }
@@ -793,7 +832,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             vni,
             vxlan_interface_up: status_info.vxlan_interface_up,
             fdb_entry_count: status_info.fdb_entry_count,
-            ebpf_programs_loaded: 0,
+            ebpf_programs_loaded: self.ebpf.loaded_program_count(),
         }))
     }
 }

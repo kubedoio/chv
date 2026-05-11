@@ -314,6 +314,9 @@ pub trait EbpfManager: Send + Sync + 'static {
 
     /// Check if eBPF programs are available (compiled .o files exist).
     fn is_available(&self) -> bool;
+
+    /// Return the number of interfaces with loaded eBPF programs.
+    fn loaded_program_count(&self) -> u32;
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +476,8 @@ pub struct LinuxEbpfManager {
     program_path: String,
     /// Base path for pinned BPF maps (e.g. `/sys/fs/bpf/tc/globals/`).
     bpf_pin_base: String,
+    /// Interfaces with successfully loaded eBPF programs.
+    loaded_interfaces: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl LinuxEbpfManager {
@@ -480,6 +485,7 @@ impl LinuxEbpfManager {
         Self {
             program_path,
             bpf_pin_base: DEFAULT_BPF_PIN_PATH.to_string(),
+            loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -488,6 +494,7 @@ impl LinuxEbpfManager {
         Self {
             program_path,
             bpf_pin_base,
+            loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -534,6 +541,10 @@ impl EbpfManager for LinuxEbpfManager {
         ])
         .await?;
 
+        if let Ok(mut loaded) = self.loaded_interfaces.lock() {
+            loaded.insert(tap_name.to_string());
+        }
+
         info!(tap = %tap_name, obj = %obj_path, "loaded eBPF policy program (egress)");
         Ok(())
     }
@@ -557,6 +568,10 @@ impl EbpfManager for LinuxEbpfManager {
             "tc",
         ])
         .await?;
+
+        if let Ok(mut loaded) = self.loaded_interfaces.lock() {
+            loaded.insert(bridge_name.to_string());
+        }
 
         info!(bridge = %bridge_name, obj = %obj_path, "loaded eBPF policy program (ingress)");
         Ok(())
@@ -651,6 +666,13 @@ impl EbpfManager for LinuxEbpfManager {
         let obj_path = format!("{}/policy_tc.o", self.program_path);
         std::path::Path::new(&obj_path).exists()
     }
+
+    fn loaded_program_count(&self) -> u32 {
+        self.loaded_interfaces
+            .lock()
+            .map(|s| s.len() as u32)
+            .unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +725,10 @@ impl EbpfManager for NoopEbpfManager {
 
     fn is_available(&self) -> bool {
         false
+    }
+
+    fn loaded_program_count(&self) -> u32 {
+        0
     }
 }
 
@@ -800,6 +826,10 @@ impl EbpfManager for MockEbpfManager {
 
     fn is_available(&self) -> bool {
         self.available
+    }
+
+    fn loaded_program_count(&self) -> u32 {
+        0
     }
 }
 

@@ -17,6 +17,7 @@ pub mod overlay;
 mod reconcile;
 mod server;
 mod telemetry;
+pub mod systemd_upgrader;
 pub mod upgrade;
 
 pub use backup_worker::BackupWorker;

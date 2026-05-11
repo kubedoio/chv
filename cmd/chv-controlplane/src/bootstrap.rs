@@ -1,5 +1,6 @@
 use chv_config::ControlPlaneConfig;
 use chv_controlplane_service::{
+    compat::{CompatibilityMatrix, Component},
     ControlPlaneComponents, ControlPlaneMutationService, ControlPlaneRuntime, ControlPlaneService,
     ControlPlaneServiceError, EnrollmentServiceImplementation, InventoryServiceImplementation,
     LifecycleServiceImplementation, NodeClientPool, Orchestrator, ReconcileServiceImplementation,
@@ -10,6 +11,8 @@ use chv_controlplane_store::{
     ControlPlaneStoreConfig, DesiredStateRepository, EventRepository, NodeRepository,
     ObservedStateRepository, OperationRepository, VtepRepository,
 };
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 pub async fn build_service(
@@ -49,6 +52,79 @@ pub async fn build_service(
 
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
+
+    // --- Compatibility matrix check (warn mode) ---
+    if let Ok(matrix_path) = std::env::var("CHV_COMPAT_MATRIX_PATH") {
+        let path = Path::new(&matrix_path);
+        if path.exists() {
+            match CompatibilityMatrix::load_from_file(path) {
+                Ok(matrix) => {
+                    // Query enrolled nodes for their component versions
+                    let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+                        "SELECT node_id, chv_agent_version, chv_stord_version, chv_nwd_version \
+                         FROM node_inventory \
+                         WHERE chv_agent_version IS NOT NULL \
+                            OR chv_stord_version IS NOT NULL \
+                            OR chv_nwd_version IS NOT NULL"
+                    )
+                    .fetch_all(&pool)
+                    .await;
+
+                    match rows {
+                        Ok(rows) => {
+                            for (node_id, agent_ver, stord_ver, nwd_ver) in &rows {
+                                let mut versions: HashMap<Component, String> = HashMap::new();
+                                if let Some(v) = agent_ver {
+                                    versions.insert(Component::Agent, v.clone());
+                                }
+                                if let Some(v) = stord_ver {
+                                    versions.insert(Component::Stord, v.clone());
+                                }
+                                if let Some(v) = nwd_ver {
+                                    versions.insert(Component::Nwd, v.clone());
+                                }
+
+                                let reports = matrix.check_all(&versions);
+                                for report in &reports {
+                                    tracing::error!(
+                                        node_id = %node_id,
+                                        component = %report.component,
+                                        current_version = %report.current_version,
+                                        min_allowed = %report.min_allowed,
+                                        max_allowed = %report.max_allowed,
+                                        "version incompatibility detected: {}",
+                                        report.message
+                                    );
+                                }
+                            }
+                            tracing::info!(
+                                nodes_checked = rows.len(),
+                                "compatibility matrix check complete"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to query node versions for compatibility check"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %matrix_path,
+                        error = %e,
+                        "failed to load compatibility matrix file"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                path = %matrix_path,
+                "CHV_COMPAT_MATRIX_PATH set but file does not exist, skipping compatibility check"
+            );
+        }
+    }
 
     // Warn if the bootstrap admin password has not been changed
     let default_hash = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m";

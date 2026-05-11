@@ -368,6 +368,8 @@ async fn all_network_handlers_smoke() {
             meta: None,
             vm_id: "vm-1".to_string(),
             nic_id: "nic-1".to_string(),
+            network_id: "net-1".to_string(),
+            vm_mac: "02:00:00:00:00:01".to_string(),
         })
         .await
         .unwrap()

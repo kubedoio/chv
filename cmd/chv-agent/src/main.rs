@@ -2,7 +2,7 @@ use chv_agent_core::{
     agent_server::AgentServer,
     cache::{NodeCache, PendingControlPlaneMessage},
     config::{load_agent_config, AgentConfig},
-    connectivity::ConnectivityTracker,
+    connectivity::{ConnectivityState, ConnectivityTracker},
     console_server::ConsoleServer,
     control_plane::ControlPlaneClient,
     daemon_clients::{NwdClient, StordClient},
@@ -521,6 +521,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tick_count = 0u64;
     let mut consecutive_health_failures = 0u32;
     let mut consecutive_reconcile_failures: u32 = 0;
+    let mut prev_connectivity = connectivity.state();
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -549,6 +550,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = supervisor.restart_if_needed().await {
             warn!(error = %e, "supervisor restart failed");
         }
+
+        // Detect connectivity transition: Disconnected/Reconnecting -> Connected
+        // and flush pending messages immediately on reconnect.
+        let current_connectivity = connectivity.state();
+        if current_connectivity == ConnectivityState::Connected
+            && prev_connectivity != ConnectivityState::Connected
+        {
+            info!("connectivity restored, flushing pending messages");
+            if let Some(client) = telemetry.as_mut() {
+                if let Err(e) = flush_pending_messages(&cache, &config.cache_path, client).await {
+                    warn!(error = %e, "failed to flush pending messages on reconnect");
+                }
+            }
+        }
+        prev_connectivity = current_connectivity;
 
         let now = now_unix_ms();
         let rotate_due = {
