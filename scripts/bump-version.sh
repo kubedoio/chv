@@ -1,7 +1,7 @@
 #!/bin/bash
 # Bump the project version across all relevant files.
-# Usage: ./scripts/bump-version.sh [major|minor|patch|build]
-# Default bump type is "build".
+# Usage: ./scripts/bump-version.sh [major|minor|patch]
+# Default bump type is "patch".
 # Pass --dry-run as a second argument to preview changes without writing files.
 
 set -euo pipefail
@@ -10,18 +10,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-BUMP_TYPE="${1:-build}"
+BUMP_TYPE="${1:-patch}"
 DRY_RUN="${2:-}"
 
 # ---------------------------------------------------------------------------
 # Validate bump type
 # ---------------------------------------------------------------------------
 case "$BUMP_TYPE" in
-  major|minor|patch|build)
+  major|minor|patch)
     ;;
   *)
     echo "Unknown bump type: $BUMP_TYPE" >&2
-    echo "Usage: $0 [major|minor|patch|build] [--dry-run]" >&2
+    echo "Usage: $0 [major|minor|patch] [--dry-run]" >&2
     exit 1
     ;;
 esac
@@ -30,7 +30,7 @@ esac
 # Read current version
 # ---------------------------------------------------------------------------
 OLD_VERSION=$(cat VERSION)
-IFS='.' read -r MAJOR MINOR PATCH BUILD <<< "$OLD_VERSION"
+IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VERSION"
 
 # ---------------------------------------------------------------------------
 # Compute new version
@@ -40,23 +40,17 @@ case "$BUMP_TYPE" in
     MAJOR=$((MAJOR + 1))
     MINOR=0
     PATCH=0
-    BUILD=0
     ;;
   minor)
     MINOR=$((MINOR + 1))
     PATCH=0
-    BUILD=0
     ;;
   patch)
     PATCH=$((PATCH + 1))
-    BUILD=0
-    ;;
-  build)
-    BUILD=$((BUILD + 1))
     ;;
 esac
 
-NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}.${BUILD}"
+NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
 if [ "$DRY_RUN" = "--dry-run" ]; then
   echo "[DRY RUN] Would bump: ${OLD_VERSION} -> ${NEW_VERSION}"
@@ -71,9 +65,9 @@ echo "Bumping version: ${OLD_VERSION} -> ${NEW_VERSION}"
 echo "$NEW_VERSION" > VERSION
 
 # ---------------------------------------------------------------------------
-# 2. Cargo.toml workspace version
+# 2. All Cargo.toml files (workspace + crates)
 # ---------------------------------------------------------------------------
-sed -i "s/^version = \"${OLD_VERSION}\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+find . -name 'Cargo.toml' -not -path './target/*' -exec sed -i "s/^version = \"${OLD_VERSION}\"/version = \"${NEW_VERSION}\"/" {} +
 
 # ---------------------------------------------------------------------------
 # 3. UI package.json + package-lock.json (via npm, with sed fallback)

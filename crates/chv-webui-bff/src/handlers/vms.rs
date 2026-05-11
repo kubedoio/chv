@@ -896,7 +896,9 @@ pub async fn mutate_vm(
         let target_node_id = payload
             .get("target_node_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| BffError::BadRequest("missing target_node_id for migrate action".into()))?
+            .ok_or_else(|| {
+                BffError::BadRequest("missing target_node_id for migrate action".into())
+            })?
             .to_string();
         state
             .mutations

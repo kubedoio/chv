@@ -7,6 +7,18 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!(
+            "{} {} (commit {}, build {}, channel {})",
+            env!("CARGO_PKG_NAME"),
+            env!("CHV_VERSION"),
+            env!("CHV_GIT_SHA"),
+            env!("CHV_BUILD_DATE"),
+            env!("CHV_RELEASE_CHANNEL"),
+        );
+        return Ok(());
+    }
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls ring crypto provider");
@@ -15,7 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config(config_path.as_deref())?;
     init_logger(&config.log_level)?;
 
-    info!("chv-controlplane starting");
+    info!(
+        "{} starting (version {}, commit {}, channel {})",
+        env!("CARGO_PKG_NAME"),
+        env!("CHV_VERSION"),
+        env!("CHV_GIT_SHA"),
+        env!("CHV_RELEASE_CHANNEL"),
+    );
 
     let service = bootstrap::build_service(&config).await?;
     let shutdown_tx = service.shutdown_tx();

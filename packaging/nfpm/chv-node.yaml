@@ -1,0 +1,41 @@
+name: chv-node
+arch: ${ARCH}
+platform: linux
+version: "${PACKAGE_VERSION}"
+section: default
+priority: optional
+maintainer: Kubedo <engineering@kubedo.io>
+description: CHV node services (agent, storage, network)
+homepage: https://github.com/chv-project/chv
+license: MIT
+depends:
+  - chv-controlplane
+contents:
+  - src: target/release/chv-agent
+    dst: /usr/bin/chv-agent
+  - src: target/release/chv-stord
+    dst: /usr/bin/chv-stord
+  - src: target/release/chv-nwd
+    dst: /usr/bin/chv-nwd
+  - src: packaging/systemd/chv-agent.service
+    dst: /lib/systemd/system/chv-agent.service
+  - src: packaging/systemd/chv-stord.service
+    dst: /lib/systemd/system/chv-stord.service
+  - src: packaging/systemd/chv-nwd.service
+    dst: /lib/systemd/system/chv-nwd.service
+  - src: ${TMPDIR}/configs/agent.toml
+    dst: /etc/chv/agent.toml
+    type: config|noreplace
+  - src: ${TMPDIR}/configs/stord.toml
+    dst: /etc/chv/stord.toml
+    type: config|noreplace
+  - src: ${TMPDIR}/configs/nwd.toml
+    dst: /etc/chv/nwd.toml
+    type: config|noreplace
+  - src: packaging/config/chv.yaml
+    dst: /etc/chv/chv.yaml
+    type: config|noreplace
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh

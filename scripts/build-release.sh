@@ -4,7 +4,7 @@
 # Output: dist/chv-<VERSION>-linux-amd64.tar.gz
 #
 # To bump the version before building, run:
-#   ./scripts/bump-version.sh [major|minor|patch|build]
+#   ./scripts/bump-version.sh [major|minor|patch]
 
 set -euo pipefail
 
@@ -12,8 +12,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Read current version from VERSION (source of truth)
-VERSION=$(cat VERSION)
+CHANNEL="${CHV_RELEASE_CHANNEL:-stable}"
+
+# Derive extra args for version.sh based on channel
+EXTRA_ARGS=""
+case "$CHANNEL" in
+    rc)
+        EXTRA_ARGS="${CHV_RC_NUMBER:-1}"
+        ;;
+    pr)
+        EXTRA_ARGS="${CHV_PR_NUMBER:-0}"
+        ;;
+esac
+
+VERSION=$("${PROJECT_ROOT}/scripts/version.sh" "${CHANNEL}" ${EXTRA_ARGS})
 ARCH="linux-amd64"
 RELEASE_NAME="chv-${VERSION}-${ARCH}"
 RELEASE_DIR="dist/${RELEASE_NAME}"

@@ -1,0 +1,13 @@
+name: chvctl
+arch: ${ARCH}
+platform: linux
+version: "${PACKAGE_VERSION}"
+section: default
+priority: optional
+maintainer: Kubedo <engineering@kubedo.io>
+description: CHV command-line client
+homepage: https://github.com/chv-project/chv
+license: MIT
+contents:
+  - src: target/release/chvctl
+    dst: /usr/bin/chvctl

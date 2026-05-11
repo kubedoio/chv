@@ -4,9 +4,9 @@ bin/
 *.dll
 *.so
 *.dylib
-chv-controller
-chv-agent
-chv-bootstrap
+/chv-controller
+/chv-agent
+/chv-bootstrap
 
 # Test artifacts
 *.test

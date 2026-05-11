@@ -91,7 +91,7 @@ async fn main() {
         .or(cfg.server_url.clone())
         .unwrap_or_else(|| "http://localhost:8080".to_string());
 
-    let token = cli.token.or_else(|| config::load_credentials());
+    let token = cli.token.or_else(config::load_credentials);
 
     let client = client::BffClient::new(server_url, token);
 
@@ -106,7 +106,13 @@ async fn main() {
         Commands::Backup { command } => backup::execute(&client, command, &cli.output).await,
         Commands::User { command } => user::execute(&client, command, &cli.output).await,
         Commands::Version => {
-            println!("chvctl {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "chvctl {} (commit {}, build {}, channel {})",
+                env!("CHV_VERSION"),
+                env!("CHV_GIT_SHA"),
+                env!("CHV_BUILD_DATE"),
+                env!("CHV_RELEASE_CHANNEL"),
+            );
             Ok(())
         }
     };

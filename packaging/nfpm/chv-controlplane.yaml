@@ -1,0 +1,28 @@
+name: chv-controlplane
+arch: ${ARCH}
+platform: linux
+version: "${PACKAGE_VERSION}"
+section: default
+priority: optional
+maintainer: Kubedo <engineering@kubedo.io>
+description: CHV control plane service
+homepage: https://github.com/chv-project/chv
+license: MIT
+contents:
+  - src: target/release/chv-controlplane
+    dst: /usr/bin/chv-controlplane
+  - src: ui/build/
+    dst: /usr/share/chv/ui
+    type: tree
+  - src: cmd/chv-controlplane/migrations/
+    dst: /usr/share/chv/migrations
+    type: tree
+  - src: packaging/systemd/chv-controlplane.service
+    dst: /lib/systemd/system/chv-controlplane.service
+  - src: ${TMPDIR}/configs/controlplane.toml
+    dst: /etc/chv/controlplane.toml
+    type: config|noreplace
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh

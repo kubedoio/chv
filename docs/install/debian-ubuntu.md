@@ -1,0 +1,197 @@
+# Install CHV on Debian / Ubuntu
+
+This guide covers installing CHV packages on Debian and Ubuntu systems.
+
+## Supported versions
+
+| OS | Minimum version |
+|----|-----------------|
+| Debian | 12 (Bookworm) |
+| Ubuntu | 22.04 LTS (Jammy) |
+
+CHV binaries are compiled for `amd64` (x86_64). Other architectures are not yet supported.
+
+## Prerequisites
+
+- Root or `sudo` access
+- `cloud-hypervisor` installed at `/usr/bin/cloud-hypervisor` (or let the agent download it automatically)
+- KVM access (`/dev/kvm` readable)
+
+## Option 1 — Package repository (future)
+
+> **Not yet available.** Once the CHV apt repository is configured, you will be able to install directly:
+>
+> ```bash
+> # Add the repository (future)
+> echo "deb [trusted=yes] https://repo.example.com/chv stable main" | \
+>   sudo tee /etc/apt/sources.list.d/chv.list
+> sudo apt update
+>
+> # Install
+> sudo apt install chv-controlplane chv-node chvctl
+> ```
+>
+> See [Channels](channels.md) for stable, RC, and nightly repository options.
+
+## Option 2 — Manual `.deb` install (current)
+
+Download the `.deb` packages from the [GitHub Releases](https://github.com/chv-project/chv/releases) page and install them manually.
+
+### 1. Download packages
+
+Replace `VERSION` with the release you want (e.g., `0.1.0`):
+
+```bash
+VERSION="0.1.0"
+BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+
+curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
+curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
+curl -sLO "${BASE_URL}/chvctl_${VERSION}_amd64.deb"
+```
+
+### 2. Verify checksums (recommended)
+
+```bash
+curl -sLO "${BASE_URL}/SHA256SUMS"
+sha256sum -c SHA256SUMS
+```
+
+### 3. Install packages
+
+```bash
+sudo dpkg -i chv-controlplane_${VERSION}_amd64.deb \
+             chv-node_${VERSION}_amd64.deb \
+             chvctl_${VERSION}_amd64.deb
+
+# Fix any missing dependencies
+sudo apt-get install -f
+```
+
+### 4. Verify installation
+
+```bash
+# Check CLI version
+chvctl --version
+
+# Check daemon versions
+chv-controlplane --version
+chv-agent --version
+chv-stord --version
+chv-nwd --version
+```
+
+### 5. Configure services
+
+Before starting services, edit the configuration files:
+
+```bash
+sudo editor /etc/chv/controlplane.toml
+sudo editor /etc/chv/agent.toml
+sudo editor /etc/chv/stord.toml
+sudo editor /etc/chv/nwd.toml
+```
+
+Key settings to review:
+- `jwt_secret` in `controlplane.toml` — must be ≥ 32 characters
+- `control_plane_addr` in `agent.toml` — must point to a reachable control plane
+- TLS certificate paths — generate or provision certs before enabling mTLS
+
+> **Do not start services with default/example configs in production.** The default `jwt_secret` is insecure and will be regenerated automatically, but you should set an explicit secret.
+
+### 6. Start services
+
+Services are installed but **not automatically started or enabled**:
+
+```bash
+# Reload systemd to recognize new units
+sudo systemctl daemon-reload
+
+# Enable and start control plane
+sudo systemctl enable --now chv-controlplane
+
+# Enable and start node services
+sudo systemctl enable --now chv-agent chv-stord chv-nwd
+
+# Check status
+sudo systemctl status chv-agent
+```
+
+## Upgrade
+
+To upgrade to a newer version, download the new packages and install them over the old ones:
+
+```bash
+# Download new packages
+VERSION="0.1.1"
+BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
+curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
+curl -sLO "${BASE_URL}/chvctl_${VERSION}_amd64.deb"
+
+# Upgrade (config files are preserved)
+sudo dpkg -i chv-controlplane_${VERSION}_amd64.deb \
+             chv-node_${VERSION}_amd64.deb \
+             chvctl_${VERSION}_amd64.deb
+
+# Fix dependencies if needed
+sudo apt-get install -f
+
+# Restart services to pick up new binaries
+sudo systemctl restart chv-controlplane chv-agent chv-stord chv-nwd
+```
+
+Your existing data in `/var/lib/chv` and config modifications in `/etc/chv` are preserved during upgrade.
+
+## Remove
+
+```bash
+# Remove packages (data is preserved)
+sudo dpkg -r chv-node chv-controlplane chvctl
+sudo apt-get autoremove
+```
+
+> **Data safety:** `/var/lib/chv`, `/etc/chv`, and `/var/log/chv` are intentionally preserved on removal. This prevents accidental data loss.
+>
+> To completely erase all CHV data after backing up:
+> ```bash
+> sudo rm -rf /var/lib/chv /etc/chv /var/log/chv
+> sudo userdel chv
+> sudo groupdel chv
+> ```
+
+## Troubleshooting
+
+### `dpkg` fails with dependency errors
+
+```bash
+sudo apt-get install -f
+```
+
+### Services fail to start
+
+Check logs and config:
+
+```bash
+sudo journalctl -u chv-controlplane -n 50
+sudo journalctl -u chv-agent -n 50
+```
+
+Common issues:
+- Missing `jwt_secret` or too short
+- TLS certificates not found at configured paths
+- `control_plane_addr` unreachable from the agent host
+
+### `/dev/kvm` not accessible
+
+```bash
+# Add your user to the kvm group
+sudo usermod -aG kvm $USER
+# Log out and back in for group change to take effect
+```
+
+## See also
+
+- [Channels](channels.md) — stable, RC, nightly, and PR artifacts
+- [Uninstall](uninstall.md) — complete removal and data cleanup
+- [Verify Release Artifacts](../release/verify-release-artifacts.md) — checksum and signature verification

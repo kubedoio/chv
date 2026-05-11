@@ -1,5 +1,4 @@
 [workspace]
-version = "0.0.0.4"
 members = [
     "cmd/chv-stord",
     "crates/chv-common",

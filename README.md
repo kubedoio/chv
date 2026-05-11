@@ -4,7 +4,7 @@ CHV is a Linux-first, cloud-image-first virtualization platform for sovereign pr
 
 ## Current Phase
 
-**Version:** `0.0.0.2`  
+**Version:** `0.1.0`  
 **Phase:** Early-to-MVP transitioning to stability  
 
 The project has a solid Phase 1 foundation (Rust control plane, SQLite store, certificate enrollment, gRPC services) and a functional SvelteKit Web UI. Active work is tracked in the [Phased Implementation Plan](./PHASED_IMPLEMENTATION_PLAN.md) covering stability hardening, feature completion, and production readiness.
@@ -73,6 +73,31 @@ The project has a solid Phase 1 foundation (Rust control plane, SQLite store, ce
     └── examples/           # Example configs (TOML, nginx, systemd)
 ```
 
+## Install
+
+CHV is distributed as `.deb` and `.rpm` packages. Choose the guide for your distribution:
+
+| Distribution | Guide |
+|--------------|-------|
+| Debian, Ubuntu | [`docs/install/debian-ubuntu.md`](./docs/install/debian-ubuntu.md) |
+| RHEL, Rocky Linux, AlmaLinux | [`docs/install/rhel-rocky-alma.md`](./docs/install/rhel-rocky-alma.md) |
+| Other / Tarball | [`docs/install/from-github-release.md`](./docs/install/from-github-release.md) |
+
+Quick install (Debian/Ubuntu):
+
+```bash
+VERSION="0.1.0"
+BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
+curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
+curl -sLO "${BASE_URL}/chvctl_${VERSION}_amd64.deb"
+sudo dpkg -i chv-controlplane_${VERSION}_amd64.deb chv-node_${VERSION}_amd64.deb chvctl_${VERSION}_amd64.deb
+sudo systemctl daemon-reload
+sudo systemctl enable --now chv-controlplane chv-agent chv-stord chv-nwd
+```
+
+See [`docs/install/channels.md`](./docs/install/channels.md) for stable, RC, nightly, and PR artifact channels.
+
 ## Development
 
 ### Prerequisites
@@ -128,6 +153,8 @@ cargo build --workspace
 | [`docs/specs/component/`](./docs/specs/component) | Component specs (agent, stord, nwd) |
 | [`PHASED_IMPLEMENTATION_PLAN.md`](./PHASED_IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
 | [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) | Day-2 operations, monitoring, and troubleshooting |
+| [`docs/install/`](./docs/install) | Installation guides (Debian, RHEL, channels, uninstall) |
+| [`docs/release/`](./docs/release) | Release process, versioning, and artifact verification |
 | [`DESIGN.md`](./DESIGN.md) | Design system (typography, color, spacing, dark mode) |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release history |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development workflow, code style, and PR process |
@@ -143,7 +170,7 @@ See [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ## Version
 
-Current version: `0.0.0.2` (see [`VERSION`](./VERSION))
+Current version: `0.1.0` (see [`VERSION`](./VERSION))
 
 ## Direction
 

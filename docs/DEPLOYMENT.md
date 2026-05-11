@@ -2,7 +2,7 @@
 
 This guide explains how to deploy CHV on a single Linux host that acts as both the **control plane** (orchestration, API, Web UI) and the **hypervisor** (VM runtime via Cloud Hypervisor).
 
-> **Version:** 0.0.0.2  
+> **Version:** 0.1.0  
 > **Target:** Ubuntu 22.04/24.04 LTS or equivalent Linux with KVM support  
 > **Database:** SQLite (no external database service required)
 
@@ -30,7 +30,7 @@ curl -sfL https://get.cellhv.com/ | sh -
 Or install a specific version:
 
 ```bash
-curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.0.0.2 sh -
+curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.1.0 sh -
 ```
 
 **Network defaults** (override with environment variables):
@@ -181,7 +181,7 @@ Or manually:
 
 ```bash
 ./scripts/build-release.sh
-sudo INSTALL_CHV_TARBALL_PATH=dist/chv-0.0.0.2-linux-amd64.tar.gz ./scripts/install.sh
+sudo INSTALL_CHV_TARBALL_PATH=dist/chv-0.1.0-linux-amd64.tar.gz ./scripts/install.sh
 ```
 
 ---

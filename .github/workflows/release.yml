@@ -1,0 +1,494 @@
+name: Release
+
+# Build, test, and publish CHV releases from git tags.
+#
+# Supports two release types:
+#   - Stable:  vX.Y.Z        (e.g., v0.1.0)
+#   - RC:      vX.Y.Z-rc.N   (e.g., v0.1.0-rc.1)
+#
+# Trigger:
+#   - push tags matching v*.*.* or v*.*.*-rc.*
+#   - workflow_dispatch for dry-run builds
+#
+# Safety:
+#   - Only tags create releases. Branch pushes do not trigger this workflow.
+#   - Publishing uses protected GitHub environments.
+#   - Package smoke tests must pass before any publishing.
+#   - Changelog entry is required for stable releases.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g., v0.1.0 or v0.1.0-rc.1). Leave empty for dry-run.'
+        required: false
+        type: string
+      skip_changelog_check:
+        description: 'Skip changelog validation (use with caution)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build release binaries and tarball
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      pkg_version: ${{ steps.version.outputs.pkg_version }}
+      tarball_name: ${{ steps.version.outputs.tarball_name }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      channel: ${{ steps.version.outputs.channel }}
+      should_release: ${{ steps.version.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+            SHOULD_RELEASE="true"
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+            SHOULD_RELEASE="true"
+          else
+            VERSION="v$(cat VERSION)"
+            SHOULD_RELEASE="false"
+          fi
+
+          PKG_VERSION="${VERSION#v}"
+          TARBALL_NAME="chv-${PKG_VERSION}-linux-amd64.tar.gz"
+
+          # Detect RC vs stable
+          IS_PRERELEASE="false"
+          CHANNEL="stable"
+          CHV_PKG_PRERELEASE=""
+
+          if [[ "$PKG_VERSION" =~ -rc\.([0-9]+)$ ]]; then
+            RC_NUM="${BASH_REMATCH[1]}"
+            IS_PRERELEASE="true"
+            CHANNEL="rc"
+            CHV_PKG_PRERELEASE="rc.${RC_NUM}"
+            echo "Detected RC release: rc.${RC_NUM}"
+          else
+            echo "Detected stable release"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "pkg_version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tarball_name=${TARBALL_NAME}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+          echo "should_release=${SHOULD_RELEASE}" >> "$GITHUB_OUTPUT"
+
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "PKG_VERSION=${PKG_VERSION}" >> "$GITHUB_ENV"
+          echo "TARBALL_NAME=${TARBALL_NAME}" >> "$GITHUB_ENV"
+          echo "IS_PRERELEASE=${IS_PRERELEASE}" >> "$GITHUB_ENV"
+          echo "CHANNEL=${CHANNEL}" >> "$GITHUB_ENV"
+          echo "CHV_PKG_PRERELEASE=${CHV_PKG_PRERELEASE}" >> "$GITHUB_ENV"
+
+      - name: Validate changelog
+        if: |
+          steps.version.outputs.should_release == 'true' &&
+          steps.version.outputs.is_prerelease == 'false' &&
+          inputs.skip_changelog_check != true
+        run: |
+          echo "Validating CHANGELOG.md entry for ${{ steps.version.outputs.pkg_version }}..."
+          ./scripts/release/extract-changelog.sh "${{ steps.version.outputs.pkg_version }}" > /tmp/changelog-section.md
+          echo "Changelog section found:"
+          head -5 /tmp/changelog-section.md
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Build Rust workspace (release)
+        run: cargo build --workspace --release
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        run: cd ui && npm ci && npm run build
+
+      - name: Assemble release tarball
+        run: |
+          RELEASE_NAME="chv-${PKG_VERSION}-linux-amd64"
+          RELEASE_DIR="dist/${RELEASE_NAME}"
+
+          mkdir -p "${RELEASE_DIR}/bin"
+          mkdir -p "${RELEASE_DIR}/ui"
+          mkdir -p "${RELEASE_DIR}/migrations"
+          mkdir -p "${RELEASE_DIR}/systemd"
+          mkdir -p "${RELEASE_DIR}/nginx"
+
+          cp target/release/chv-controlplane target/release/chv-agent \
+             target/release/chv-stord target/release/chv-nwd target/release/chvctl \
+             "${RELEASE_DIR}/bin/"
+
+          cp -r ui/build/* "${RELEASE_DIR}/ui/"
+          cp -r cmd/chv-controlplane/migrations/* "${RELEASE_DIR}/migrations/" 2>/dev/null || true
+          cp docs/examples/systemd/*.service "${RELEASE_DIR}/systemd/" 2>/dev/null || true
+          cp docs/examples/nginx/chv-ui.conf "${RELEASE_DIR}/nginx/" 2>/dev/null || true
+          cp docs/examples/*.toml "${RELEASE_DIR}/" 2>/dev/null || true
+          cp scripts/install.sh "${RELEASE_DIR}/" 2>/dev/null || true
+
+          tar -czf "dist/${TARBALL_NAME}" -C dist "${RELEASE_NAME}"
+
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: |
+            target/release/chvctl
+            target/release/chv-agent
+            target/release/chv-controlplane
+            target/release/chv-nwd
+            target/release/chv-stord
+
+      - name: Upload UI build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-build
+          path: ui/build/**
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tarball
+          path: dist/${{ env.TARBALL_NAME }}
+
+  # ---------------------------------------------------------------------------
+  # Build packages and run smoke tests
+  # ---------------------------------------------------------------------------
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    needs: build
+    outputs:
+      pkg_version_deb: ${{ steps.pkg.outputs.pkg_version_deb }}
+      pkg_version_rpm: ${{ steps.pkg.outputs.pkg_version_rpm }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: target/release/
+
+      - name: Download UI build
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-build
+          path: ui/build/
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y gettext-base
+          curl -sL "https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_Linux_x86_64.tar.gz" | tar -xz -C /tmp nfpm
+          sudo mv /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+
+      - name: Build packages
+        id: pkg
+        run: |
+          export CHV_PKG_PRERELEASE="${{ needs.build.outputs.channel == 'rc' && needs.build.outputs.pkg_version || '' }}"
+          # For RC, extract the rc.N suffix from the version
+          if [[ "${{ needs.build.outputs.channel }}" == "rc" ]]; then
+            RC_SUFFIX="${{ needs.build.outputs.pkg_version }}"
+            RC_SUFFIX="${RC_SUFFIX##*-rc.}"
+            export CHV_PKG_PRERELEASE="rc.${RC_SUFFIX}"
+          fi
+
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/build-packages.sh --skip-build
+
+          echo "pkg_version_deb=$(./scripts/version.sh --deb)" >> "$GITHUB_OUTPUT"
+          echo "pkg_version_rpm=$(./scripts/version.sh --rpm)" >> "$GITHUB_OUTPUT"
+
+      - name: Check packages
+        run: |
+          if [[ "${{ needs.build.outputs.channel }}" == "rc" ]]; then
+            RC_SUFFIX="${{ needs.build.outputs.pkg_version }}"
+            RC_SUFFIX="${RC_SUFFIX##*-rc.}"
+            export CHV_PKG_PRERELEASE="rc.${RC_SUFFIX}"
+          fi
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/package/check-package-files.sh
+          ./scripts/package/check-safety.sh
+
+      - name: Smoke test .deb packages
+        run: |
+          if [[ "${{ needs.build.outputs.channel }}" == "rc" ]]; then
+            RC_SUFFIX="${{ needs.build.outputs.pkg_version }}"
+            RC_SUFFIX="${RC_SUFFIX##*-rc.}"
+            export CHV_PKG_PRERELEASE="rc.${RC_SUFFIX}"
+          fi
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/package/smoke-deb.sh dist/packages
+
+      - name: Smoke test .rpm packages
+        run: |
+          if [[ "${{ needs.build.outputs.channel }}" == "rc" ]]; then
+            RC_SUFFIX="${{ needs.build.outputs.pkg_version }}"
+            RC_SUFFIX="${RC_SUFFIX##*-rc.}"
+            export CHV_PKG_PRERELEASE="rc.${RC_SUFFIX}"
+          fi
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/package/smoke-rpm.sh dist/packages
+
+      - name: Build old version packages for lifecycle test
+        run: |
+          if [[ "${{ needs.build.outputs.channel }}" == "rc" ]]; then
+            RC_SUFFIX="${{ needs.build.outputs.pkg_version }}"
+            RC_SUFFIX="${RC_SUFFIX##*-rc.}"
+            export CHV_PKG_PRERELEASE="rc.${RC_SUFFIX}"
+          fi
+          export PACKAGE_VERSION="0.0.1"
+          ./scripts/build-packages.sh --skip-build
+          mkdir -p dist/packages-old
+          cp dist/packages/* dist/packages-old/
+
+      - name: Build new version packages
+        run: |
+          if [[ "${{ needs.build.outputs.channel }}" == "rc" ]]; then
+            RC_SUFFIX="${{ needs.build.outputs.pkg_version }}"
+            RC_SUFFIX="${RC_SUFFIX##*-rc.}"
+            export CHV_PKG_PRERELEASE="rc.${RC_SUFFIX}"
+          fi
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/build-packages.sh --skip-build
+
+      - name: Lifecycle test .deb packages
+        run: |
+          ./scripts/package/lifecycle-deb.sh --new-packages dist/packages --old-packages dist/packages-old
+
+      - name: Lifecycle test .rpm packages
+        run: |
+          ./scripts/package/lifecycle-rpm.sh --new-packages dist/packages --old-packages dist/packages-old
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist/packages
+          sha256sum *.deb *.rpm > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Sign checksums
+        run: |
+          ./scripts/release/sign-checksums.sh dist/packages/SHA256SUMS
+        env:
+          CHV_RELEASE_GPG_KEY: ${{ secrets.CHV_RELEASE_GPG_KEY }}
+          CHV_RELEASE_GPG_PASSPHRASE: ${{ secrets.CHV_RELEASE_GPG_PASSPHRASE }}
+          CHV_RELEASE_COSIGN_KEY: ${{ secrets.CHV_RELEASE_COSIGN_KEY }}
+          CHV_RELEASE_COSIGN_PASSWORD: ${{ secrets.CHV_RELEASE_COSIGN_PASSWORD }}
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: |
+            dist/packages/*.deb
+            dist/packages/*.rpm
+            dist/packages/SHA256SUMS*
+
+  # ---------------------------------------------------------------------------
+  # Create GitHub Release and publish artifacts
+  # ---------------------------------------------------------------------------
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [build, package]
+    if: needs.build.outputs.should_release == 'true'
+    environment: ${{ needs.build.outputs.is_prerelease == 'true' && 'rc' || 'production' }}
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarball
+          path: dist/
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: dist/packages/
+
+      - name: Stage artifacts
+        run: |
+          ls -la dist/
+          ls -la dist/packages/
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./dist
+          format: spdx-json
+          output-file: ./dist/sbom.spdx.json
+          upload-release-assets: false
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./dist
+          format: cyclonedx-json
+          output-file: ./dist/sbom.cyclonedx.json
+          upload-release-assets: false
+
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/chv-*.tar.gz
+            dist/packages/*.deb
+            dist/packages/*.rpm
+
+      - name: Prepare release notes
+        run: |
+          VERSION="${{ needs.build.outputs.pkg_version }}"
+          IS_PRERELEASE="${{ needs.build.outputs.is_prerelease }}"
+
+          # Try to extract changelog section
+          if ./scripts/release/extract-changelog.sh "$VERSION" > /tmp/changelog-body.md 2>/dev/null; then
+            echo "Using CHANGELOG.md section for release notes"
+            cp /tmp/changelog-body.md /tmp/release-notes.md
+          else
+            echo "No changelog entry found for ${VERSION} — using generic release notes"
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              cat > /tmp/release-notes.md <<EOF
+          ## CHV ${VERSION} (Release Candidate)
+
+          > ⚠️ This is a release candidate. It has passed automated tests but may still contain issues.
+          > Do not use in production without additional validation.
+
+          ### Install
+
+          **Debian / Ubuntu**
+          \`\`\`bash
+          sudo dpkg -i chv-controlplane_${{ needs.build.outputs.pkg_version }}_amd64.deb
+          sudo dpkg -i chv-node_${{ needs.build.outputs.pkg_version }}_amd64.deb
+          sudo dpkg -i chvctl_${{ needs.build.outputs.pkg_version }}_amd64.deb
+          \`\`\`
+
+          **RHEL / CentOS / Fedora**
+          \`\`\`bash
+          sudo rpm -i chv-controlplane-${{ needs.build.outputs.pkg_version }}-1.x86_64.rpm
+          sudo rpm -i chv-node-${{ needs.build.outputs.pkg_version }}-1.x86_64.rpm
+          sudo rpm -i chvctl-${{ needs.build.outputs.pkg_version }}-1.x86_64.rpm
+          \`\`\`
+          EOF
+            else
+              cat > /tmp/release-notes.md <<EOF
+          ## CHV ${VERSION}
+
+          ### Install
+
+          **Debian / Ubuntu**
+          \`\`\`bash
+          sudo dpkg -i chv-controlplane_${{ needs.build.outputs.pkg_version }}_amd64.deb
+          sudo dpkg -i chv-node_${{ needs.build.outputs.pkg_version }}_amd64.deb
+          sudo dpkg -i chvctl_${{ needs.build.outputs.pkg_version }}_amd64.deb
+          \`\`\`
+
+          **RHEL / CentOS / Fedora**
+          \`\`\`bash
+          sudo rpm -i chv-controlplane-${{ needs.build.outputs.pkg_version }}-1.x86_64.rpm
+          sudo rpm -i chv-node-${{ needs.build.outputs.pkg_version }}-1.x86_64.rpm
+          sudo rpm -i chvctl-${{ needs.build.outputs.pkg_version }}-1.x86_64.rpm
+          \`\`\`
+          EOF
+            fi
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.version }}
+          name: CHV ${{ needs.build.outputs.version }}
+          body_path: /tmp/release-notes.md
+          prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
+          files: |
+            dist/${{ needs.build.outputs.tarball_name }}
+            dist/packages/*.deb
+            dist/packages/*.rpm
+            dist/packages/SHA256SUMS*
+            dist/sbom.spdx.json
+            dist/sbom.cyclonedx.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Publish to package repository (optional)
+  # ---------------------------------------------------------------------------
+  publish-repo:
+    name: Publish to Package Repository
+    runs-on: ubuntu-latest
+    needs: [build, package]
+    if: |
+      needs.build.outputs.should_release == 'true' &&
+      needs.build.outputs.channel != ''
+    environment: ${{ needs.build.outputs.is_prerelease == 'true' && 'rc-repo' || 'production-repo' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: dist/packages/
+
+      - name: Install repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev createrepo-c curl gnupg
+
+      - name: Publish to repository
+        run: |
+          if [[ "${{ needs.build.outputs.channel }}" == "rc" ]]; then
+            RC_SUFFIX="${{ needs.build.outputs.pkg_version }}"
+            RC_SUFFIX="${RC_SUFFIX##*-rc.}"
+            export CHV_PKG_PRERELEASE="rc.${RC_SUFFIX}"
+          fi
+          PKG_VERSION="$(./scripts/version.sh --deb)"
+
+          ./scripts/publish/publish-repo.sh \
+            --packages dist/packages \
+            --channel "${{ needs.build.outputs.channel }}" \
+            --version "$PKG_VERSION"
+        env:
+          CHV_REPO_URL: ${{ secrets.CHV_REPO_URL }}
+          CHV_REPO_S3_BUCKET: ${{ secrets.CHV_REPO_S3_BUCKET }}
+          CHV_REPO_S3_PREFIX: ${{ secrets.CHV_REPO_S3_PREFIX }}
+          CHV_REPO_RSYNC_TARGET: ${{ secrets.CHV_REPO_RSYNC_TARGET }}
+          CHV_REPO_GPG_KEY: ${{ secrets.CHV_REPO_GPG_KEY }}
+          CHV_REPO_GPG_PASSPHRASE: ${{ secrets.CHV_REPO_GPG_PASSPHRASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CHV_REPO_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CHV_REPO_AWS_SECRET_ACCESS_KEY }}

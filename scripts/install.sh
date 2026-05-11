@@ -2,7 +2,7 @@
 # CHV All-in-One Installer
 # Usage:
 #   curl -sfL https://get.cellhv.com/ | sh -
-#   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.0.0.2 sh -
+#   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.1.0 sh -
 #   ./scripts/install.sh --wipe    # Full teardown before clean install
 #
 # Environment variables:
@@ -229,11 +229,11 @@ resolve_version() {
             if [ -n "$latest" ]; then
                 INSTALL_CHV_VERSION="$latest"
             else
-                warn "Could not determine latest version from GitHub API, falling back to 0.0.0.2"
-                INSTALL_CHV_VERSION="0.0.0.2"
+                warn "Could not determine latest version from GitHub API, falling back to 0.1.0"
+                INSTALL_CHV_VERSION="0.1.0"
             fi
         else
-            INSTALL_CHV_VERSION="0.0.0.2"
+            INSTALL_CHV_VERSION="0.1.0"
         fi
     fi
     info "Installing CHV version: $INSTALL_CHV_VERSION"
@@ -277,10 +277,10 @@ download_release() {
 install_binaries_and_assets() {
     info "Installing CHV binaries..."
 
-    install -m 755 "${EXTRACT_DIR}/bin/chv-controlplane" /usr/local/bin/
-    install -m 755 "${EXTRACT_DIR}/bin/chv-agent"        /usr/local/bin/
-    install -m 755 "${EXTRACT_DIR}/bin/chv-stord"        /usr/local/bin/
-    install -m 755 "${EXTRACT_DIR}/bin/chv-nwd"          /usr/local/bin/
+    install -m 755 "${EXTRACT_DIR}/bin/chv-controlplane" /usr/bin/
+    install -m 755 "${EXTRACT_DIR}/bin/chv-agent"        /usr/bin/
+    install -m 755 "${EXTRACT_DIR}/bin/chv-stord"        /usr/bin/
+    install -m 755 "${EXTRACT_DIR}/bin/chv-nwd"          /usr/bin/
 
     info "Installing Web UI assets..."
     rm -rf "$CHV_UI_DIR"/*
@@ -836,8 +836,8 @@ control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"
-stord_binary_path = "/usr/local/bin/chv-stord"
-nwd_binary_path = "/usr/local/bin/chv-nwd"
+stord_binary_path = "/usr/bin/chv-stord"
+nwd_binary_path = "/usr/bin/chv-nwd"
 cache_path = "${CHV_DATA_DIR}/cache/agent-cache.json"
 node_id = "${CHV_NODE_ID}"
 metrics_bind = "127.0.0.1:9901"
@@ -899,7 +899,7 @@ After=network.target
 Type=simple
 User=chv
 Group=chv
-ExecStart=/usr/local/bin/chv-controlplane /etc/chv/controlplane.toml
+ExecStart=/usr/bin/chv-controlplane /etc/chv/controlplane.toml
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
@@ -922,7 +922,7 @@ Type=simple
 User=chv
 Group=chv
 ExecStartPre=/bin/mkdir -p /run/chv/stord
-ExecStart=/usr/local/bin/chv-stord /etc/chv/stord.toml
+ExecStart=/usr/bin/chv-stord /etc/chv/stord.toml
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
@@ -943,7 +943,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStartPre=/bin/mkdir -p /run/chv/nwd
-ExecStart=/usr/local/bin/chv-nwd /etc/chv/nwd.toml
+ExecStart=/usr/bin/chv-nwd /etc/chv/nwd.toml
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
@@ -968,7 +968,7 @@ UMask=002
 ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
 ExecStartPre=/bin/chown -R root:chv /run/chv
 ExecStartPre=/bin/chmod -R 775 /run/chv
-ExecStart=/usr/local/bin/chv-agent /etc/chv/agent.toml
+ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
@@ -1108,21 +1108,18 @@ start_services() {
         if ! cmd_exists sqlite3; then
             fatal "sqlite3 is required to seed bootstrap tokens. Install sqlite3 or rerun without INSTALL_CHV_SKIP_DEPS=1."
         fi
-        local expires_sql="NULL"
-        if [ -n "$expires" ]; then
-            expires_sql="'${expires}'"
-        fi
         sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
             "INSERT OR REPLACE INTO bootstrap_tokens
              (token_hash, description, one_time_use, used_at, expires_at, created_at, updated_at)
-             VALUES ('${token_hash}', 'All-in-one installer', 1, NULL,
-                     ${expires_sql},
+             VALUES (?, 'All-in-one installer', 1, NULL,
+                     NULLIF(?, ''),
                      strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                     strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'));" \
+            "${token_hash}" "${expires}"
 
         local seeded_tokens
         seeded_tokens=$(sudo -u "${CHV_USER}" sqlite3 "${CHV_DB_PATH}" \
-            "SELECT COUNT(*) FROM bootstrap_tokens WHERE token_hash='${token_hash}';" 2>/dev/null || echo "0")
+            "SELECT COUNT(*) FROM bootstrap_tokens WHERE token_hash=?;" "${token_hash}" 2>/dev/null || echo "0")
         if [ "${seeded_tokens}" -lt 1 ] 2>/dev/null; then
             fatal "Failed to seed bootstrap token in ${CHV_DB_PATH}."
         fi
@@ -1210,8 +1207,8 @@ wipe_deployment() {
     rm -rf "${CHV_UI_DIR}"
     rm -rf "${CHV_MIGRATIONS_DIR}"
     # Remove binaries
-    rm -f /usr/local/bin/chv-controlplane /usr/local/bin/chv-agent \
-          /usr/local/bin/chv-stord /usr/local/bin/chv-nwd
+    rm -f /usr/bin/chv-controlplane /usr/bin/chv-agent \
+          /usr/bin/chv-stord /usr/bin/chv-nwd
     # Remove nginx config
     rm -f /etc/nginx/sites-available/chv /etc/nginx/sites-enabled/chv
     # Remove bridge network

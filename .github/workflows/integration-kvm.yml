@@ -1,0 +1,164 @@
+name: KVM Integration Tests
+
+# Host-level integration tests that require KVM, cloud-hypervisor, root
+# privileges, and real networking. These tests run on self-hosted runners
+# with the `chv-kvm` label.
+#
+# IMPORTANT: Do not run these tests on standard GitHub-hosted runners.
+# They require /dev/kvm and may create transient network bridges.
+#
+# Trigger policy:
+#   - workflow_dispatch: manual trigger with configurable options
+#   - push to main: optional continuous validation (disabled by default)
+#   - pull_request labeled 'kvm-test': gated PR testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: 'Test level'
+        required: true
+        default: 'basic'
+        type: choice
+        options:
+          - basic
+          - full
+      package_source:
+        description: 'How to obtain CHV binaries'
+        required: true
+        default: 'build'
+        type: choice
+        options:
+          - build      # Build from source on the self-hosted runner
+          - artifacts  # Download pre-built packages from CI artifacts
+      skip_cleanup:
+        description: 'Skip cleanup for debugging'
+        required: false
+        default: false
+        type: boolean
+
+  # Uncomment to enable automatic runs on every push to main.
+  # Only do this once runner isolation and stability are proven.
+  # push:
+  #   branches: [main]
+
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  kvm-integration:
+    name: KVM Integration Smoke Test
+    runs-on: [self-hosted, linux, x64, chv-kvm]
+
+    # Gate PR triggers behind the 'kvm-test' label.
+    # Always run for workflow_dispatch and push events.
+    if: |
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'kvm-test')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: |
+          if ! command -v protoc >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          fi
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ui/package-lock.json
+
+      # -------------------------------------------------------------------
+      # Build packages from source on the runner (default)
+      # -------------------------------------------------------------------
+      - name: Build release binaries and packages
+        if: |
+          github.event_name != 'workflow_dispatch' ||
+          inputs.package_source == 'build'
+        run: |
+          make build-release
+          make package-deb
+
+      # -------------------------------------------------------------------
+      # Or download pre-built packages from artifacts
+      # -------------------------------------------------------------------
+      - name: Download packages from artifacts
+        if: |
+          github.event_name == 'workflow_dispatch' &&
+          inputs.package_source == 'artifacts'
+        uses: actions/download-artifact@v4
+        with:
+          # Try to find packages from the current PR or branch workflow run.
+          # This requires the package-pr workflow to have already uploaded artifacts.
+          name: chv-packages-pr-${{ github.event.pull_request.number }}
+          path: dist/packages/
+        continue-on-error: true
+
+      - name: Verify artifacts downloaded
+        if: |
+          github.event_name == 'workflow_dispatch' &&
+          inputs.package_source == 'artifacts'
+        run: |
+          if [[ ! -f dist/packages/chv-node_*.deb && ! -f dist/packages/chv-node-*.rpm ]]; then
+            echo "::warning::No pre-built packages found in artifacts. Falling back to build."
+            make build-release
+            make package-deb
+          fi
+
+      # -------------------------------------------------------------------
+      # Run KVM smoke test
+      # -------------------------------------------------------------------
+      - name: Run KVM integration smoke test
+        run: |
+          SKIP_FLAG=""
+          if [[ "${{ inputs.skip_cleanup }}" == "true" ]]; then
+            SKIP_FLAG="--skip-cleanup"
+          fi
+          sudo ./scripts/integration/kvm-smoke.sh --packages dist/packages $SKIP_FLAG
+
+      # -------------------------------------------------------------------
+      # Upload logs on failure
+      # -------------------------------------------------------------------
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kvm-integration-logs-${{ github.run_id }}
+          path: /tmp/chv-kvm-test-*/logs/
+          retention-days: 7
+
+      # -------------------------------------------------------------------
+      # Step summary
+      # -------------------------------------------------------------------
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## CHV KVM Integration Test"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Trigger | ${{ github.event_name }} |"
+            echo "| Runner | ${{ runner.name }} |"
+            echo "| Test level | ${{ inputs.test_level || 'basic' }} |"
+            echo "| Package source | ${{ inputs.package_source || 'build' }} |"
+            echo "| Result | ${{ job.status }} |"
+            echo ""
+            if [[ "${{ job.status }}" == "failure" ]]; then
+              echo "⚠️ Test failed. Logs uploaded as artifact: \`kvm-integration-logs-${{ github.run_id }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

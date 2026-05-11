@@ -1,7 +1,7 @@
 # CHV Specification vs Implementation Gap Analysis
 
 **Date:** 2026-04-26  
-**Version:** 0.0.0.2  
+**Version:** 0.1.0  
 **Scope:** Backend (Rust), Agent, UI (SvelteKit), Infrastructure  
 **Method:** Cross-reference of ADRs 001–010, component specs, ARCHITECTURE.md, DESIGN.md, and PHASED_IMPLEMENTATION_PLAN.md against the actual codebase.
 

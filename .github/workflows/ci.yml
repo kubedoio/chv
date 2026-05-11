@@ -1,7 +1,7 @@
 name: CI
 
 # Version bumps are handled manually via:
-#   make bump-version BUMP_TYPE=build
+#   make bump-version BUMP_TYPE=patch
 # See scripts/bump-version.sh for details.
 
 on:
@@ -37,6 +37,65 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+      - name: Validate VERSION format
+        run: |
+          VERSION=$(cat VERSION)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION '$VERSION' does not match SemVer (MAJOR.MINOR.PATCH)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION is valid"
+
+      - name: Validate crate versions match VERSION
+        run: |
+          VERSION=$(cat VERSION)
+          MISMATCH=0
+          for crate_toml in cmd/*/Cargo.toml; do
+            CRATE_VERSION=$(grep '^version = ' "$crate_toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            if [ "$VERSION" != "$CRATE_VERSION" ]; then
+              echo "VERSION file ($VERSION) does not match $crate_toml ($CRATE_VERSION)"
+              MISMATCH=1
+            fi
+          done
+          if [ "$MISMATCH" -eq 1 ]; then
+            exit 1
+          fi
+          echo "All crate versions match VERSION"
+
+      - name: Build chvctl
+        run: cargo build --package chvctl
+
+      - name: Smoke test chvctl version output
+        run: |
+          set -e
+          VERSION=$(cat VERSION)
+          OUTPUT=$(./target/debug/chvctl version)
+          echo "chvctl version output: $OUTPUT"
+          if ! echo "$OUTPUT" | grep -q "$VERSION"; then
+            echo "Expected version $VERSION in output"
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q "commit"; then
+            echo "Expected 'commit' in version output"
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q "build"; then
+            echo "Expected 'build' in version output"
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q "channel"; then
+            echo "Expected 'channel' in version output"
+            exit 1
+          fi
+
+      - name: Run smoke-version.sh if present
+        run: |
+          if [ -x ./scripts/smoke-version.sh ]; then
+            ./scripts/smoke-version.sh
+          else
+            echo "scripts/smoke-version.sh not found, skipping"
+          fi
 
   ui:
     name: UI checks

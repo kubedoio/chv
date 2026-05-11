@@ -1,0 +1,137 @@
+name: PR Packages
+
+# Build installable .deb and .rpm packages for every PR and branch push.
+# Artifacts are uploaded for manual testing but never published.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-package:
+    name: Build and Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get install -y gettext-base
+          # Pin nfpm version for reproducible builds
+          curl -sL "https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_Linux_x86_64.tar.gz" | tar -xz -C /tmp nfpm
+          sudo mv /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build release binaries and UI
+        run: make build-release
+
+      - name: Derive PR package version
+        id: version
+        run: |
+          DATE=$(date +%Y%m%d)
+          SHA=$(git rev-parse --short HEAD)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUM="${{ github.event.pull_request.number }}"
+            CHV_PKG_PRERELEASE="pr${PR_NUM}.${DATE}.g${SHA}"
+            ARTIFACT_NAME="chv-packages-pr-${PR_NUM}"
+          else
+            RUN_NUM="${{ github.run_number }}"
+            CHV_PKG_PRERELEASE="branch.${RUN_NUM}.${DATE}.g${SHA}"
+            # Sanitize branch name for artifact naming
+            SAFE_REF="${{ github.ref_name }}"
+            SAFE_REF="${SAFE_REF//\//-}"
+            SAFE_REF="${SAFE_REF//[^a-zA-Z0-9_.-]/-}"
+            ARTIFACT_NAME="chv-packages-branch-${SAFE_REF}-${RUN_NUM}"
+          fi
+          export CHV_PKG_PRERELEASE
+          echo "pkg_version_deb=$(./scripts/version.sh --deb)" >> "$GITHUB_OUTPUT"
+          echo "pkg_version_rpm=$(./scripts/version.sh --rpm)" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "CHV_PKG_PRERELEASE=${CHV_PKG_PRERELEASE}" >> "$GITHUB_ENV"
+
+      - name: Build packages
+        run: |
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/build-packages.sh --skip-build
+
+      - name: Check packages
+        run: |
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/package/check-package-files.sh
+          ./scripts/package/check-safety.sh
+
+      - name: Smoke test .deb packages
+        run: |
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/package/smoke-deb.sh dist/packages
+
+      - name: Smoke test .rpm packages
+        run: |
+          export PACKAGE_VERSION="$(./scripts/version.sh --deb)"
+          ./scripts/package/smoke-rpm.sh dist/packages
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: |
+            dist/packages/*.deb
+            dist/packages/*.rpm
+            dist/packages/SHA256SUMS
+          retention-days: 7
+
+      - name: Summary
+        run: |
+          {
+            echo "## CHV PR Packages"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Debian version | ${{ steps.version.outputs.pkg_version_deb }} |"
+            echo "| RPM version | ${{ steps.version.outputs.pkg_version_rpm }} |"
+            echo "| Artifact | ${{ steps.version.outputs.artifact_name }} |"
+            echo ""
+            echo "### Built packages"
+            echo ""
+            echo "| Package | Size |"
+            echo "|---------|------|"
+            for f in dist/packages/*.deb dist/packages/*.rpm; do
+              [ -e "$f" ] || continue
+              size=$(du -h "$f" | cut -f1)
+              echo "| $(basename "$f") | ${size} |"
+            done
+            echo ""
+            echo "Download from the **Artifacts** section above."
+            echo ""
+            echo "### Install (Debian/Ubuntu)"
+            echo '```bash'
+            echo 'sudo dpkg -i chv-controlplane_*.deb chv-node_*.deb chvctl_*.deb'
+            echo '```'
+            echo ""
+            echo "### Install (RHEL/CentOS/Fedora)"
+            echo '```bash'
+            echo 'sudo rpm -i chv-controlplane-*.rpm chv-node-*.rpm chvctl-*.rpm'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
