@@ -1,3 +1,4 @@
+use crate::convergence_metrics::SharedConvergenceMetrics;
 use crate::node_client_pool::NodeClientPool;
 use crate::overlay::OverlayManager;
 use chv_controlplane_store::{
@@ -25,6 +26,7 @@ pub struct Orchestrator {
     tick_interval: Duration,
     node_client_pool: NodeClientPool,
     overlay_manager: Option<OverlayManager>,
+    convergence_metrics: SharedConvergenceMetrics,
 }
 
 impl Orchestrator {
@@ -35,6 +37,7 @@ impl Orchestrator {
         kernel_path: String,
         firmware_path: String,
         node_client_pool: NodeClientPool,
+        convergence_metrics: SharedConvergenceMetrics,
     ) -> Self {
         Self {
             pool,
@@ -45,6 +48,7 @@ impl Orchestrator {
             tick_interval: Duration::from_secs(2),
             node_client_pool,
             overlay_manager: None,
+            convergence_metrics,
         }
     }
 
@@ -72,6 +76,14 @@ impl Orchestrator {
     }
 
     async fn tick(&self) -> Result<(), ChvError> {
+        let tick_start = std::time::Instant::now();
+
+        // Record tick start in convergence metrics
+        {
+            let mut cm = self.convergence_metrics.write().await;
+            cm.tick_start();
+        }
+
         // Update ADR-009 gauges
         let vm_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms")
             .fetch_one(&self.pool)
@@ -85,6 +97,57 @@ impl Orchestrator {
                 .await
                 .unwrap_or(0);
         metrics::gauge!(CHV_NODES_READY).set(node_count as f64);
+
+        // Compute drift: count resources where desired_generation != observed_generation
+        let vm_drift: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM vm_desired_state vds
+            LEFT JOIN vm_observed_state vos ON vds.vm_id = vos.vm_id
+            WHERE vds.desired_generation != COALESCE(vos.observed_generation, -1)
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        let volume_drift: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM volume_desired_state vds
+            LEFT JOIN volume_observed_state vos ON vds.volume_id = vos.volume_id
+            WHERE vds.desired_generation != COALESCE(vos.observed_generation, -1)
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        let network_drift: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM network_desired_state nds
+            LEFT JOIN network_observed_state nos ON nds.network_id = nos.network_id
+            WHERE nds.desired_generation != COALESCE(nos.observed_generation, -1)
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        let total_drift = (vm_drift + volume_drift + network_drift) as u32;
+
+        // Count pending operations (Accepted + RetryPending)
+        let pending_ops: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operations WHERE status IN ('Accepted', 'RetryPending')",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        // Update drift in convergence metrics
+        {
+            let mut cm = self.convergence_metrics.write().await;
+            cm.record_drift(total_drift);
+            cm.record_pending_operations(pending_ops as u32);
+        }
 
         self.reap_stuck_operations().await?;
         self.check_node_liveness().await?;
@@ -300,6 +363,15 @@ impl Orchestrator {
                     }
                 }
             }
+        }
+
+        // Record dispatch metrics and emit prometheus convergence gauges
+        let dispatched_count = rows.len() as u64;
+        let elapsed_ms = tick_start.elapsed().as_secs_f64() * 1000.0;
+        {
+            let mut cm = self.convergence_metrics.write().await;
+            cm.record_dispatch(dispatched_count, elapsed_ms);
+            cm.emit_prometheus();
         }
 
         Ok(())

@@ -58,5 +58,8 @@ export const BFFEndpoints = {
 	listBackupSchedules: '/v1/backups/schedules',
 	createBackupSchedule: '/v1/backups/schedules',
 	listBackupRestores: '/v1/backups/restores',
-	createBackupRestore: '/v1/backups/restores'
+	createBackupRestore: '/v1/backups/restores',
+
+	// Storage pool endpoints
+	listStoragePools: '/v1/storage-pools'
 } as const;

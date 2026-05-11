@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libbpf-rs = { version = "0.23", optional = true }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

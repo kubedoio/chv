@@ -36,6 +36,7 @@ function buildSections(summary: VmSummary | null): { id: string; label: string; 
 		{ id: 'networks', label: 'Networks' },
 		{ id: 'tasks', label: 'Tasks', count: taskCount },
 		{ id: 'events', label: 'Events' },
+		{ id: 'metrics', label: 'Metrics' },
 		{ id: 'snapshots', label: 'Snapshots', count: summary?.snapshot_count ?? 0 },
 		{ id: 'configuration', label: 'Configuration' }
 	];

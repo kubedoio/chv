@@ -85,7 +85,10 @@ async fn test_health_endpoint() {
     use tower::ServiceExt;
 
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
-    let app = crate::api::router::admin_router(test_app_state(test_db.pool.clone()));
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+    );
 
     let response = app
         .oneshot(
@@ -104,7 +107,10 @@ async fn test_ready_endpoint() {
     use tower::ServiceExt;
 
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
-    let app = crate::api::router::admin_router(test_app_state(test_db.pool.clone()));
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+    );
 
     let response = app
         .oneshot(
@@ -128,7 +134,7 @@ async fn test_deep_health_endpoint() {
     let mut app_state = test_app_state(test_db.pool.clone());
     let temp_dir = tempfile::tempdir().unwrap();
     app_state.agent_runtime_dir = temp_dir.path().to_path_buf();
-    let app = crate::api::router::admin_router(app_state);
+    let app = crate::api::router::admin_router(app_state, crate::convergence_metrics::new_shared());
 
     let response = app
         .oneshot(
@@ -158,7 +164,8 @@ async fn test_deep_health_endpoint() {
     // Scenario 2: directory does not exist -> degraded
     let mut app_state2 = test_app_state(test_db.pool.clone());
     app_state2.agent_runtime_dir = std::path::PathBuf::from("/nonexistent/chv/agent/dir");
-    let app2 = crate::api::router::admin_router(app_state2);
+    let app2 =
+        crate::api::router::admin_router(app_state2, crate::convergence_metrics::new_shared());
 
     let response2 = app2
         .oneshot(
@@ -200,7 +207,10 @@ async fn test_admin_nodes_endpoint() {
     .await
     .unwrap();
 
-    let app = crate::api::router::admin_router(test_app_state(pool));
+    let app = crate::api::router::admin_router(
+        test_app_state(pool),
+        crate::convergence_metrics::new_shared(),
+    );
 
     let token = test_admin_token();
     let response = app
@@ -226,7 +236,10 @@ async fn test_admin_node_not_found() {
     use tower::ServiceExt;
 
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
-    let app = crate::api::router::admin_router(test_app_state(test_db.pool.clone()));
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+    );
 
     let token = test_admin_token();
     let response = app
@@ -2815,6 +2828,7 @@ async fn test_vm_override_takes_precedence_over_global() {
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
         crate::NodeClientPool::new(),
+        crate::convergence_metrics::new_shared(),
     );
 
     let spec_json = orchestrator
@@ -2860,6 +2874,7 @@ async fn test_global_setting_takes_precedence_over_default() {
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
         crate::NodeClientPool::new(),
+        crate::convergence_metrics::new_shared(),
     );
 
     let spec_json = orchestrator
@@ -2902,6 +2917,7 @@ async fn test_null_vm_overrides_use_global_settings() {
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
         crate::NodeClientPool::new(),
+        crate::convergence_metrics::new_shared(),
     );
 
     let spec_json = orchestrator
@@ -2950,6 +2966,7 @@ async fn test_defaults_used_when_settings_query_fails() {
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
         crate::NodeClientPool::new(),
+        crate::convergence_metrics::new_shared(),
     );
 
     let spec_json = orchestrator
@@ -2997,6 +3014,7 @@ async fn test_post_merge_validation_rejects_iommu_without_memory_shared() {
         "/var/lib/chv/vmlinux".to_string(),
         "/var/lib/chv/CLOUDHV.fd".to_string(),
         crate::NodeClientPool::new(),
+        crate::convergence_metrics::new_shared(),
     );
 
     let result = orchestrator.build_agent_vm_spec("vm-merge-5").await;

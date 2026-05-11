@@ -4,7 +4,8 @@
 	import { getStoredToken } from '$lib/api/client';
 	import { getVmConsoleUrl, getVmBootLog, mutateVm, deleteVm } from '$lib/bff/vms';
 	import { listVmSnapshots } from '$lib/bff/snapshots';
-	import type { VmSnapshotItem } from '$lib/bff/types';
+	import { listVmEvents } from '$lib/bff/events';
+	import type { VmSnapshotItem, InfrastructureEvent } from '$lib/bff/types';
 	import { toast } from '$lib/stores/toast.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
@@ -19,7 +20,7 @@
 	import VmDetailActions from '$lib/components/vms/VmDetailActions.svelte';
 	import VmMigrateModal from '$lib/components/vms/VmMigrateModal.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
-	import { Terminal, FileText } from 'lucide-svelte';
+	import { Terminal, FileText, Activity, BarChart3 } from 'lucide-svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -33,6 +34,9 @@
 	let snapshots = $state<VmSnapshotItem[]>([]);
 	let snapshotsLoading = $state(false);
 	let snapshotsError = $state<string | null>(null);
+	let events = $state<InfrastructureEvent[]>([]);
+	let eventsLoading = $state(false);
+	let eventsError = $state<string | null>(null);
 	let supportRailOpen = $state(false);
 	let migrateModalOpen = $state(false);
 	let migrateSubmitting = $state(false);
@@ -82,6 +86,18 @@
 	$effect(() => {
 		if (detail.currentTab === 'snapshots' && detail.summary.vm_id) {
 			loadSnapshots();
+		}
+	});
+
+	$effect(() => {
+		if (detail.currentTab === 'events' && detail.summary.vm_id) {
+			eventsLoading = true;
+			eventsError = null;
+			const token = getStoredToken() ?? undefined;
+			listVmEvents(detail.summary.vm_id, token)
+				.then(res => { events = res.items ?? []; })
+				.catch(err => { eventsError = err instanceof Error ? err.message : 'Failed to load events'; })
+				.finally(() => { eventsLoading = false; });
 		}
 	});
 
@@ -208,6 +224,68 @@
 					</SectionCard>
 				{:else if detail.currentTab === 'snapshots'}
 					<VmSnapshots vmId={detail.summary.vm_id} {snapshots} loading={snapshotsLoading} error={snapshotsError} />
+				{:else if detail.currentTab === 'events'}
+					<SectionCard title="VM Events" icon={Activity}>
+						{#if eventsLoading}
+							<p class="empty-hint">Loading event stream...</p>
+						{:else if eventsError}
+							<p class="empty-hint">Event registry inaccessible: {eventsError}</p>
+						{:else if events.length === 0}
+							<p class="empty-hint">No events recorded for this workload.</p>
+						{:else}
+							<div class="events-table-wrap">
+								<table class="events-table">
+									<thead>
+										<tr>
+											<th>Timestamp</th>
+											<th>Type</th>
+											<th>Severity</th>
+											<th>Message</th>
+										</tr>
+									</thead>
+									<tbody>
+										{#each events as event}
+											<tr>
+												<td class="events-ts">{new Date(event.occurred_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</td>
+												<td>{event.type}</td>
+												<td><span class="severity-badge severity-badge--{event.severity}">{event.severity}</span></td>
+												<td>{event.summary}</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+						{/if}
+					</SectionCard>
+				{:else if detail.currentTab === 'metrics'}
+					<SectionCard title="VM Metrics" icon={BarChart3}>
+						<div class="metrics-grid">
+							<div class="metric-card">
+								<span class="metric-label">CPU Assigned</span>
+								<span class="metric-value">{detail.summary.cpu || '—'}</span>
+							</div>
+							<div class="metric-card">
+								<span class="metric-label">Memory Assigned</span>
+								<span class="metric-value">{detail.summary.memory || '—'}</span>
+							</div>
+							<div class="metric-card">
+								<span class="metric-label">Power State</span>
+								<span class="metric-value">{detail.summary.power_state || '—'}</span>
+							</div>
+							<div class="metric-card">
+								<span class="metric-label">Health</span>
+								<span class="metric-value">{detail.summary.health || '—'}</span>
+							</div>
+							<div class="metric-card">
+								<span class="metric-label">Attached Volumes</span>
+								<span class="metric-value">{detail.summary.attached_volumes?.length ?? 0}</span>
+							</div>
+							<div class="metric-card">
+								<span class="metric-label">Attached NICs</span>
+								<span class="metric-value">{detail.summary.attached_nics?.length ?? 0}</span>
+							</div>
+						</div>
+					</SectionCard>
 				{:else}
 					<VmDetailSummaryTab
 						powerState={detail.summary.power_state}
@@ -303,5 +381,87 @@
 			margin-top: 0;
 		}
 
+	}
+
+	.events-table-wrap {
+		overflow-x: auto;
+	}
+
+	.events-table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: var(--text-xs);
+	}
+
+	.events-table th {
+		text-align: left;
+		font-weight: 700;
+		color: var(--shell-text-muted);
+		padding: 0.5rem 0.75rem;
+		border-bottom: 1px solid var(--shell-line);
+		white-space: nowrap;
+	}
+
+	.events-table td {
+		padding: 0.5rem 0.75rem;
+		border-bottom: 1px solid var(--shell-line);
+		color: var(--shell-text);
+	}
+
+	.events-ts {
+		white-space: nowrap;
+		color: var(--shell-text-muted);
+	}
+
+	.severity-badge {
+		display: inline-block;
+		font-size: 9px;
+		font-weight: 700;
+		text-transform: uppercase;
+		padding: 2px 6px;
+		border-radius: 3px;
+	}
+
+	.severity-badge--critical {
+		background: var(--color-danger-light, #fee2e2);
+		color: var(--color-danger, #dc2626);
+	}
+
+	.severity-badge--warning {
+		background: var(--color-warning-light, #fef3c7);
+		color: var(--color-warning-dark, #92400e);
+	}
+
+	.severity-badge--info {
+		background: var(--color-neutral-100, #f3f4f6);
+		color: var(--color-neutral-600, #4b5563);
+	}
+
+	.metrics-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		gap: 0.75rem;
+	}
+
+	.metric-card {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		padding: 1rem;
+		background: var(--color-neutral-50, #f9fafb);
+		border: 1px solid var(--shell-line);
+		border-radius: var(--radius-md);
+	}
+
+	.metric-label {
+		font-size: var(--text-xs);
+		color: var(--shell-text-muted);
+		font-weight: 600;
+	}
+
+	.metric-value {
+		font-size: var(--text-lg, 1.125rem);
+		font-weight: 800;
+		color: var(--shell-text);
 	}
 </style>

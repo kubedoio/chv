@@ -35,6 +35,33 @@
 			]
 		},
 		{
+			key: 'type',
+			label: 'Type',
+			type: 'select' as const,
+			options: [
+				{ value: 'all', label: 'All types' },
+				{ value: 'vm_lifecycle', label: 'VM Lifecycle' },
+				{ value: 'storage', label: 'Storage' },
+				{ value: 'network', label: 'Network' },
+				{ value: 'security', label: 'Security' },
+				{ value: 'system', label: 'System' },
+				{ value: 'migration', label: 'Migration' }
+			]
+		},
+		{
+			key: 'resource_kind',
+			label: 'Resource',
+			type: 'select' as const,
+			options: [
+				{ value: 'all', label: 'All resources' },
+				{ value: 'vm', label: 'VM' },
+				{ value: 'node', label: 'Node' },
+				{ value: 'volume', label: 'Volume' },
+				{ value: 'network', label: 'Network' },
+				{ value: 'image', label: 'Image' }
+			]
+		},
+		{
 			key: 'state',
 			label: 'State',
 			type: 'select' as const,

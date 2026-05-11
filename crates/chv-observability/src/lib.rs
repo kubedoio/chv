@@ -24,6 +24,16 @@ pub const CHV_VXLAN_FDB_ENTRIES: &str = "chv_vxlan_fdb_entries";
 pub const CHV_EBPF_PACKETS_TOTAL: &str = "chv_ebpf_packets_total";
 pub const CHV_EBPF_BYTES_TOTAL: &str = "chv_ebpf_bytes_total";
 
+// ---------------------------------------------------------------------------
+// Control plane convergence metrics (M2 gap analysis)
+// ---------------------------------------------------------------------------
+pub const CHV_CP_DRIFT_COUNT: &str = "chv_cp_drift_count";
+pub const CHV_CP_PENDING_OPERATIONS: &str = "chv_cp_pending_operations";
+pub const CHV_CP_CONVERGENCE_AVG_MS: &str = "chv_cp_convergence_avg_ms";
+pub const CHV_CP_CONSECUTIVE_DRIFT_TICKS: &str = "chv_cp_consecutive_drift_ticks";
+pub const CHV_CP_RECONCILE_TICKS_TOTAL: &str = "chv_cp_reconcile_ticks_total";
+pub const CHV_CP_OPERATIONS_DISPATCHED_TOTAL: &str = "chv_cp_operations_dispatched_total";
+
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 /// Returns the globally installed Prometheus metrics handle, if one exists.

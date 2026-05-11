@@ -1,11 +1,12 @@
 use crate::api::{auth, bootstrap, health, nodes, operations, stub};
+use crate::convergence_metrics::SharedConvergenceMetrics;
 use axum::{
     extract::Request,
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Json},
     routing::{delete, get, post},
-    Router,
+    Extension, Router,
 };
 use chv_webui_bff::AppState;
 
@@ -41,7 +42,7 @@ async fn security_headers(req: Request, next: Next) -> impl IntoResponse {
     response
 }
 
-pub fn admin_router(bff_state: AppState) -> Router {
+pub fn admin_router(bff_state: AppState, convergence_metrics: SharedConvergenceMetrics) -> Router {
     let bff_router = chv_webui_bff::bff_router(bff_state.clone());
 
     let admin_routes = Router::new()
@@ -66,6 +67,7 @@ pub fn admin_router(bff_state: AppState) -> Router {
         // Health (unauthenticated — needed for load balancer probes)
         .route("/health", get(health::health_handler))
         .route("/health/deep", get(health::deep_health_handler))
+        .route("/health/convergence", get(health::convergence_handler))
         .route("/ready", get(health::ready_handler))
         // Internal management (unauthenticated — protected by localhost-only check in handler)
         .route(
@@ -122,6 +124,7 @@ pub fn admin_router(bff_state: AppState) -> Router {
         .route("/api/v1/quotas", get(stub::list_quotas_stub))
         .route("/api/v1/usage", get(stub::get_usage_stub))
         .fallback(not_found_handler)
+        .layer(Extension(convergence_metrics))
         .layer(middleware::from_fn(security_headers))
         .with_state(bff_state)
 }

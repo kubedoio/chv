@@ -1,7 +1,10 @@
 pub mod api;
 mod backup_worker;
 mod bff_mutations;
+pub mod circuit_breaker;
+pub mod compat;
 mod container;
+pub mod convergence_metrics;
 mod enrollment;
 mod error;
 mod inventory;
@@ -14,10 +17,12 @@ pub mod overlay;
 mod reconcile;
 mod server;
 mod telemetry;
+pub mod upgrade;
 
 pub use backup_worker::BackupWorker;
 pub use bff_mutations::ControlPlaneMutationService;
 pub use container::{ControlPlaneComponents, ControlPlaneRuntime, ControlPlaneService};
+pub use convergence_metrics::{ConvergenceMetrics, SharedConvergenceMetrics};
 pub use enrollment::{
     CaBackedCertificateIssuer, CertificateIssuer, EnrollmentService,
     EnrollmentServiceImplementation, IssuedCertificate,
