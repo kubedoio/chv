@@ -1,0 +1,3 @@
+## 2024-05-11 - Adding ARIA Labels to Icon-Only Buttons
+**Learning:** Found multiple instances where buttons used only icons with `title` attributes but no explicit `aria-label`. While `title` can act as a fallback, explicitly providing `aria-label` ensures screen readers consistently announce the button's purpose without ambiguity. Also learned to be careful about not committing auto-generated `pnpm-lock.yaml` and Playwright test artifacts after running verifications.
+**Action:** When creating icon-only buttons (like those using Lucide icons), always pair them with an explicit `aria-label`, even if a `title` tooltip is already provided.
