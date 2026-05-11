@@ -743,6 +743,29 @@ impl NetworkExecutor for LinuxExecutor {
 
         Self::stop_dnsmasq(network_id).await;
 
+        // Tear down VXLAN interface and FDB entries before removing namespace
+        if let Some(vni) = state.vni {
+            // Delete FDB entries for all peer VTEPs
+            for vtep_ip in &state.peer_vteps {
+                if let Err(e) = self
+                    .delete_fdb_entry(
+                        &state.namespace_name,
+                        vni,
+                        "00:00:00:00:00:00",
+                        vtep_ip,
+                    )
+                    .await
+                {
+                    warn!(vtep_ip = %vtep_ip, error = %e, "failed to delete FDB entry during topology teardown");
+                }
+            }
+
+            // Delete the VXLAN interface
+            if let Err(e) = self.delete_vxlan_interface(&state.namespace_name, vni).await {
+                warn!(vni = vni, error = %e, "failed to delete VXLAN interface during topology teardown");
+            }
+        }
+
         if Self::namespace_exists(&state.namespace_name).await {
             if let Err(e) = Self::run_ip(&["netns", "del", &state.namespace_name]).await {
                 warn!(error = %e, "failed to delete namespace");

@@ -48,6 +48,9 @@ pub struct MigrationSender<B: StorageBackend> {
     send_window: SendWindow,
     last_acknowledged_offset: u64,
     tls_config: Option<MigrationTlsConfig>,
+    /// Backpressure factor received from the destination. Values > 1.0 cause
+    /// the sender to insert a throttle sleep between chunk sends.
+    backpressure_factor: f32,
 }
 
 impl<B: StorageBackend> MigrationSender<B> {
@@ -60,6 +63,7 @@ impl<B: StorageBackend> MigrationSender<B> {
             send_window: SendWindow::new(),
             last_acknowledged_offset: 0,
             tls_config: None,
+            backpressure_factor: 1.0,
         }
     }
 
@@ -120,17 +124,10 @@ impl<B: StorageBackend> MigrationSender<B> {
                     tonic::Status::unavailable(format!("failed to connect to peer with mTLS: {e}"))
                 })?
         } else {
-            warn!(
-                endpoint = %endpoint,
-                "connecting to migration peer WITHOUT mTLS — this violates the migration protocol spec"
-            );
-            Channel::from_shared(endpoint.clone())
-                .map_err(|e| tonic::Status::internal(format!("invalid endpoint: {e}")))?
-                .connect()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unavailable(format!("failed to connect to peer: {e}"))
-                })?
+            return Err(tonic::Status::failed_precondition(
+                "mTLS is required for storage migration — tls_config must be provided. \
+                 Set migration.tls.cert_path, migration.tls.key_path, and migration.tls.ca_path in stord config.",
+            ));
         };
 
         let mut client = StorageMigrationServiceClient::new(channel);
@@ -326,6 +323,14 @@ impl<B: StorageBackend> MigrationSender<B> {
 
             self.send_window.sent();
 
+            // Apply backpressure throttle if the receiver requested slow-down
+            if self.backpressure_factor > 1.0 {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    (10.0 * self.backpressure_factor) as u64,
+                ))
+                .await;
+            }
+
             // Non-blocking check for acks to keep the window sliding
             if self.send_window.should_request_ack() {
                 self.try_receive_ack(inbound).await?;
@@ -438,6 +443,14 @@ impl<B: StorageBackend> MigrationSender<B> {
 
                 self.send_window.sent();
                 blocks_sent += 1;
+
+                // Apply backpressure throttle if the receiver requested slow-down
+                if self.backpressure_factor > 1.0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        (10.0 * self.backpressure_factor) as u64,
+                    ))
+                    .await;
+                }
 
                 // Non-blocking check for acks to keep the window sliding
                 if self.send_window.should_request_ack() {
@@ -563,11 +576,11 @@ impl<B: StorageBackend> MigrationSender<B> {
                 Ok(())
             }
             Some(migration_message::Payload::Backpressure(ref bp)) => {
-                debug!(
+                info!(
                     slow_down_factor = bp.slow_down_factor,
-                    "backpressure received"
+                    "backpressure received, adjusting send rate"
                 );
-                // For now just log; future: adjust send rate
+                self.backpressure_factor = bp.slow_down_factor.max(1.0);
                 Ok(())
             }
             Some(migration_message::Payload::Error(ref err)) => Err(tonic::Status::internal(

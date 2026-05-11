@@ -913,6 +913,8 @@ impl NwdClient {
             }),
             nic_id: nic_id.to_string(),
             vm_id: vm_id.to_string(),
+            network_id: _network_id.to_string(),
+            vm_mac: String::new(),
         };
         let span = tracing::info_span!("detach_vm_nic", operation_id = operation_id.unwrap_or(""));
         self.inner

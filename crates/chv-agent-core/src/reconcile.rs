@@ -217,7 +217,71 @@ impl Reconciler {
                     );
                 }
             }
-            NodeState::Draining | NodeState::Maintenance => {}
+            NodeState::Draining => {
+                // Evacuate running VMs by requesting migration to the control plane.
+                let running_vms: Vec<String> = self
+                    .vm_runtime
+                    .list()
+                    .into_iter()
+                    .filter(|r| r.runtime_status == "Running" || r.runtime_status == "Created")
+                    .map(|r| r.vm_id)
+                    .collect();
+
+                if running_vms.is_empty() {
+                    // All VMs evacuated — transition to Maintenance
+                    info!(
+                        "drain complete, all VMs evacuated — transitioning to Maintenance"
+                    );
+                    self.transition_state(NodeState::Maintenance).await?;
+                } else {
+                    // Request migration for each running VM via control plane event
+                    let node_id = {
+                        let cache = self.cache.lock().await;
+                        cache.node_id.clone()
+                    };
+                    for vm_id in &running_vms {
+                        info!(vm_id = %vm_id, "requesting evacuation migration for drain");
+                        let event =
+                            control_plane_node_api::control_plane_node_api::PublishEventRequest {
+                                meta: Some(
+                                    control_plane_node_api::control_plane_node_api::RequestMeta {
+                                        operation_id: format!(
+                                            "drain-migrate-{}-{}",
+                                            vm_id, self.reconcile_tick
+                                        ),
+                                        requested_by: "agent".to_string(),
+                                        target_node_id: node_id.clone(),
+                                        desired_state_version: String::new(),
+                                        request_unix_ms: chv_common::now_unix_ms(),
+                                    },
+                                ),
+                                node_id: node_id.clone(),
+                                severity: "Warning".to_string(),
+                                event_type: "DrainMigrateRequest".to_string(),
+                                summary: format!(
+                                    "node drain: requesting migration for VM {}",
+                                    vm_id
+                                ),
+                                details_json: serde_json::to_vec(
+                                    &serde_json::json!({
+                                        "vm_id": vm_id,
+                                        "reason": "node_drain"
+                                    }),
+                                )
+                                .unwrap_or_default(),
+                            };
+                        let mut cache = self.cache.lock().await;
+                        cache.enqueue_pending_message(
+                            crate::cache::PendingControlPlaneMessage::event(event),
+                        );
+                    }
+                    debug!(
+                        remaining_vms = running_vms.len(),
+                        "drain in progress — waiting for VM evacuation"
+                    );
+                }
+            }
+            NodeState::Maintenance => {}
         }
 
         Ok(())
