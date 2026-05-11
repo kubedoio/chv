@@ -31,7 +31,7 @@ test.describe('Navigation & Auth', () => {
 			document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
 		});
 		await expect(page.locator('.fixed.inset-0')).toBeVisible();
-		await expect(page.getByPlaceholder(/type a command or search/i)).toBeVisible();
+		await expect(page.locator('#command-results')).toBeVisible();
 	});
 
 	test('command palette opens via top bar click', async ({ page }) => {
