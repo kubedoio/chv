@@ -80,7 +80,7 @@
 			<!-- Input -->
 			<div class="flex items-center gap-3 px-4 py-3 border-b border-[var(--border-subtle)]">
 				<Search size={18} class="shrink-0 text-[var(--shell-text-muted)]" />
-				<input bind:this={inputRef} type="text" value={query} oninput={handleInput} placeholder="Type a command or search..." class="flex-1 bg-transparent text-[length:var(--text-base)] text-[var(--shell-text)] placeholder:text-[var(--shell-text-muted)] outline-none" aria-label="Command search" aria-autocomplete="list" aria-controls="command-results" aria-activedescendant={filtered.length>0?`cmd-item-${selectedIndex}`:undefined} />
+				<input bind:this={inputRef} type="text" value={query} oninput={handleInput} placeholder="Search commands or jump to a resource" class="flex-1 bg-transparent text-[length:var(--text-base)] text-[var(--shell-text)] placeholder:text-[var(--shell-text-muted)] outline-none" aria-label="Command search" aria-autocomplete="list" aria-controls="command-results" aria-activedescendant={filtered.length>0?`cmd-item-${selectedIndex}`:undefined} />
 				<kbd class="hidden sm:inline-flex items-center px-2 py-1 text-[length:var(--text-xs)] font-mono text-[var(--shell-text-muted)] bg-[var(--shell-surface-muted)] rounded-[var(--radius-xs)] border border-[var(--border-subtle)]">ESC</kbd>
 			</div>
 			<!-- Results -->

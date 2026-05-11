@@ -241,7 +241,7 @@
           value={query}
           oninput={handleInput}
           onkeydown={handleKeyDown}
-          placeholder="Search VMs, images, networks..."
+          placeholder="Search commands or jump to a resource"
           class="flex-1 bg-transparent text-base outline-none placeholder:text-[var(--shell-text-muted)]"
           aria-label="Search"
           aria-autocomplete="list"
