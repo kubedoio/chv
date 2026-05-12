@@ -1,5 +1,6 @@
 use crate::executor::NetworkExecutor;
 use crate::handlers::NetworkServiceImpl;
+use crate::link_monitor::{link_health_loop, LinkHealthSnapshot};
 use crate::state::TopologyTable;
 use crate::store::TopologyStore;
 use chv_errors::ChvError;
@@ -15,6 +16,8 @@ use tracing::info;
 
 pub struct NetworkServer<E: NetworkExecutor> {
     inner: NetworkServiceImpl<E>,
+    /// Interfaces to monitor for link health. Defaults to ["eth0"].
+    monitor_interfaces: Vec<String>,
 }
 
 impl<E: NetworkExecutor> NetworkServer<E> {
@@ -25,7 +28,16 @@ impl<E: NetworkExecutor> NetworkServer<E> {
         if let Some(store) = store {
             inner.set_store(store);
         }
-        Self { inner }
+        Self {
+            inner,
+            monitor_interfaces: vec!["eth0".to_string()],
+        }
+    }
+
+    /// Set the interfaces to monitor for link health.
+    pub fn with_monitor_interfaces(mut self, interfaces: Vec<String>) -> Self {
+        self.monitor_interfaces = interfaces;
+        self
     }
 
     pub async fn serve(self, socket_path: &Path, db_path: Option<&Path>) -> Result<(), ChvError> {
@@ -95,13 +107,42 @@ impl<E: NetworkExecutor> NetworkServer<E> {
 
         info!(socket = %socket_path.display(), "starting chv-nwd server");
 
-        Server::builder()
+        // Spawn link health monitoring
+        let (link_shutdown_tx, link_shutdown_rx) = tokio::sync::watch::channel(());
+        let monitor_interfaces = self.monitor_interfaces.clone();
+        tokio::spawn(async move {
+            link_health_loop(
+                monitor_interfaces,
+                30, // check every 30 seconds
+                link_shutdown_rx,
+                |snapshots: &[LinkHealthSnapshot]| {
+                    for snap in snapshots {
+                        if !snap.is_up {
+                            tracing::warn!(
+                                interface = %snap.iface,
+                                carrier = snap.carrier,
+                                flap_count = snap.flap_count,
+                                "link status change detected: interface down"
+                            );
+                        }
+                    }
+                },
+            )
+            .await;
+        });
+
+        let result = Server::builder()
             .add_service(health_service)
             .add_service(NetworkServiceServer::new(self.inner))
             .serve_with_incoming(uds_stream)
             .await
             .map_err(|e| ChvError::Internal {
                 reason: format!("server error: {e}"),
-            })
+            });
+
+        // Signal link monitor shutdown
+        let _ = link_shutdown_tx.send(());
+
+        result
     }
 }

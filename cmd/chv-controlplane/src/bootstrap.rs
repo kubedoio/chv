@@ -53,25 +53,29 @@ pub async fn build_service(
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
 
-    // --- Compatibility matrix check (warn mode) ---
+    // --- Compatibility matrix check (hard gate on incompatibilities) ---
     if let Ok(matrix_path) = std::env::var("CHV_COMPAT_MATRIX_PATH") {
         let path = Path::new(&matrix_path);
         if path.exists() {
             match CompatibilityMatrix::load_from_file(path) {
                 Ok(matrix) => {
                     // Query enrolled nodes for their component versions
-                    let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+                    let rows = sqlx::query_as::<
+                        _,
+                        (String, Option<String>, Option<String>, Option<String>),
+                    >(
                         "SELECT node_id, chv_agent_version, chv_stord_version, chv_nwd_version \
                          FROM node_inventory \
                          WHERE chv_agent_version IS NOT NULL \
                             OR chv_stord_version IS NOT NULL \
-                            OR chv_nwd_version IS NOT NULL"
+                            OR chv_nwd_version IS NOT NULL",
                     )
                     .fetch_all(&pool)
                     .await;
 
                     match rows {
                         Ok(rows) => {
+                            let mut all_reports = Vec::new();
                             for (node_id, agent_ver, stord_ver, nwd_ver) in &rows {
                                 let mut versions: HashMap<Component, String> = HashMap::new();
                                 if let Some(v) = agent_ver {
@@ -96,10 +100,24 @@ pub async fn build_service(
                                         report.message
                                     );
                                 }
+                                all_reports.extend(reports);
                             }
+
+                            if !all_reports.is_empty() {
+                                let summary: Vec<String> =
+                                    all_reports.iter().map(|r| r.message.clone()).collect();
+                                return Err(ControlPlaneServiceError::Internal(
+                                    format!(
+                                        "boot blocked: {} incompatible component version(s) detected: {}",
+                                        all_reports.len(),
+                                        summary.join("; ")
+                                    )
+                                ));
+                            }
+
                             tracing::info!(
                                 nodes_checked = rows.len(),
-                                "compatibility matrix check complete"
+                                "compatibility matrix check passed — all versions compatible"
                             );
                         }
                         Err(e) => {

@@ -6,7 +6,9 @@ mod commands;
 mod config;
 mod output;
 
-use commands::{auth, backup, image, network, node, task, user, vm, volume};
+use commands::{
+    auth, backup, health, image, migrate, network, node, storage, task, upgrade, user, vm, volume,
+};
 use output::OutputFormat;
 
 #[derive(Parser)]
@@ -19,6 +21,10 @@ struct Cli {
     /// BFF server URL (default: http://localhost:8080 or from config)
     #[arg(long, global = true)]
     server: Option<String>,
+
+    /// Connect via Unix socket instead of TCP
+    #[arg(long, global = true)]
+    socket: Option<String>,
 
     /// Auth token (overrides stored credential)
     #[arg(long, global = true)]
@@ -76,6 +82,26 @@ enum Commands {
         #[command(subcommand)]
         command: user::UserCommands,
     },
+    /// Manage storage pools
+    Storage {
+        #[command(subcommand)]
+        command: storage::StorageCommands,
+    },
+    /// Manage live migrations
+    Migrate {
+        #[command(subcommand)]
+        command: migrate::MigrateCommands,
+    },
+    /// Manage node upgrades
+    Upgrade {
+        #[command(subcommand)]
+        command: upgrade::UpgradeCommands,
+    },
+    /// Health checks
+    Health {
+        #[command(subcommand)]
+        command: health::HealthCommands,
+    },
     /// Show version info
     Version,
 }
@@ -85,6 +111,16 @@ async fn main() {
     let cli = Cli::parse();
 
     let cfg = config::load();
+
+    if let Some(ref socket_path) = cli.socket {
+        eprintln!(
+            "Error: Unix socket mode (--socket {}) is not yet supported. \
+             Use --server to specify a TCP URL instead.\n\
+             Tracking: requires hyper-util unix-connector integration.",
+            socket_path
+        );
+        std::process::exit(1);
+    }
 
     let server_url = cli
         .server
@@ -105,6 +141,10 @@ async fn main() {
         Commands::Task { command } => task::execute(&client, command, &cli.output).await,
         Commands::Backup { command } => backup::execute(&client, command, &cli.output).await,
         Commands::User { command } => user::execute(&client, command, &cli.output).await,
+        Commands::Storage { command } => storage::execute(&client, command, &cli.output).await,
+        Commands::Migrate { command } => migrate::execute(&client, command, &cli.output).await,
+        Commands::Upgrade { command } => upgrade::execute(&client, command, &cli.output).await,
+        Commands::Health { command } => health::execute(&client, command, &cli.output).await,
         Commands::Version => {
             println!(
                 "chvctl {} (commit {}, build {}, channel {})",

@@ -94,6 +94,7 @@ cp docs/examples/controlplane.toml "${RELEASE_DIR}/controlplane.toml.example"
 cp docs/examples/agent.toml        "${RELEASE_DIR}/agent.toml.example"
 cp docs/examples/stord.toml        "${RELEASE_DIR}/stord.toml.example"
 cp docs/examples/nwd.toml          "${RELEASE_DIR}/nwd.toml.example"
+cp docs/examples/compat.toml       "${RELEASE_DIR}/compat.toml"
 cp scripts/install.sh              "${RELEASE_DIR}/install.sh"
 
 # -----------------------------------------------------------------------------

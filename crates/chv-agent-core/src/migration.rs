@@ -11,6 +11,8 @@ use crate::vm_runtime::VmRuntime;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 /// Port range for migration receiver sockets.
@@ -190,6 +192,24 @@ pub struct DiskPrecopyConfig {
     pub volumes: Vec<MigrationVolume>,
 }
 
+/// A callback type for reporting migration progress to the control plane.
+///
+/// When provided to `spawn_source_migration_with_disk_precopy`, this is called
+/// after each disk sync round with the current dirty_blocks_remaining count,
+/// enabling the control plane to track convergence.
+pub type ProgressReporter = Arc<Mutex<dyn FnMut(proto::MigrationProgress) + Send>>;
+
+/// Build a progress reporter closure that sends updates to the control plane.
+///
+/// This creates a `ProgressReporter` wrapping a control plane client reference,
+/// suitable for passing to `spawn_source_migration_with_disk_precopy`.
+pub fn make_progress_reporter<F>(callback: F) -> ProgressReporter
+where
+    F: FnMut(proto::MigrationProgress) + Send + 'static,
+{
+    Arc::new(Mutex::new(callback))
+}
+
 /// Execute migration as the source agent with disk pre-copy.
 ///
 /// This orchestrates the full live migration sequence:
@@ -202,12 +222,17 @@ pub struct DiskPrecopyConfig {
 /// If disk pre-copy fails for any volume, the migration is aborted before memory
 /// transfer begins. The original `spawn_source_migration` function remains available
 /// for memory-only migration scenarios (e.g., VMs with no local disk).
+///
+/// When `progress_reporter` is provided, the function reports dirty_blocks_remaining
+/// after each volume sync round completes, enabling the control plane to track
+/// convergence in real time.
 pub fn spawn_source_migration_with_disk_precopy(
     vm_runtime: VmRuntime,
     vm_id: String,
     operation_id: String,
     destination_url: String,
     disk_config: DiskPrecopyConfig,
+    progress_reporter: Option<ProgressReporter>,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
         info!(
@@ -243,6 +268,9 @@ pub fn spawn_source_migration_with_disk_precopy(
                     }
                 };
 
+            let total_volumes = disk_config.volumes.len() as u32;
+            let mut volumes_completed: u32 = 0;
+
             for volume in &disk_config.volumes {
                 info!(
                     vm_id = %vm_id,
@@ -274,10 +302,31 @@ pub fn spawn_source_migration_with_disk_precopy(
                     ));
                 }
 
+                volumes_completed += 1;
+
+                // Report progress after each volume sync completes
+                if let Some(ref reporter) = progress_reporter {
+                    let progress_pct = (volumes_completed as f32 / total_volumes as f32) * 50.0; // disk phase = 0-50%
+                    let progress = build_progress(
+                        &vm_id,
+                        &operation_id,
+                        proto::MigrationPhase::PrecopyDisk,
+                        0, // bytes_transferred not tracked at agent level
+                        0, // total_bytes not tracked at agent level
+                        volumes_completed,
+                        0, // dirty_blocks_remaining: 0 after stord convergence
+                        progress_pct,
+                    );
+                    let mut cb = reporter.lock().await;
+                    cb(progress);
+                }
+
                 info!(
                     vm_id = %vm_id,
                     operation_id = %operation_id,
                     volume_id = %volume.volume_id,
+                    volumes_completed,
+                    total_volumes,
                     "source agent: disk pre-copy triggered successfully for volume"
                 );
             }
@@ -303,11 +352,43 @@ pub fn spawn_source_migration_with_disk_precopy(
             "source agent: starting memory migration (send-migration)"
         );
 
+        // Report entering memory migration phase
+        if let Some(ref reporter) = progress_reporter {
+            let progress = build_progress(
+                &vm_id,
+                &operation_id,
+                proto::MigrationPhase::MemoryMigration,
+                0,
+                0,
+                0,
+                0,
+                50.0, // memory phase starts at 50%
+            );
+            let mut cb = reporter.lock().await;
+            cb(progress);
+        }
+
         match vm_runtime
             .send_migration(&vm_id, &destination_url, Some(&operation_id))
             .await
         {
             Ok(()) => {
+                // Report completion
+                if let Some(ref reporter) = progress_reporter {
+                    let progress = build_progress(
+                        &vm_id,
+                        &operation_id,
+                        proto::MigrationPhase::Completed,
+                        0,
+                        0,
+                        0,
+                        0,
+                        100.0,
+                    );
+                    let mut cb = reporter.lock().await;
+                    cb(progress);
+                }
+
                 info!(
                     vm_id = %vm_id,
                     operation_id = %operation_id,

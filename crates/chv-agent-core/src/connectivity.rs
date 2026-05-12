@@ -89,7 +89,11 @@ impl ConnectivityTracker {
     ///
     /// Transitions to Connected, resets consecutive failure counter.
     /// Emits an INFO log if transitioning from Disconnected/Reconnecting.
-    pub fn record_success(&mut self, now_ms: i64) {
+    ///
+    /// Returns `true` if the state transitioned from Disconnected or Reconnecting
+    /// to Connected (i.e., connectivity was just restored), signalling that pending
+    /// messages should be flushed.
+    pub fn record_success(&mut self, now_ms: i64) -> bool {
         let previous = self.state;
         self.last_successful_contact = Some(now_ms);
         self.consecutive_failures = 0;
@@ -106,8 +110,10 @@ impl ConnectivityTracker {
                 "control plane connectivity restored — exiting autonomous mode"
             );
             self.disconnected_since = None;
+            true
         } else {
             debug!("control plane contact successful");
+            false
         }
     }
 

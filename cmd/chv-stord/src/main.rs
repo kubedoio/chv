@@ -1,6 +1,8 @@
 use chv_config::load_stord_config;
 use chv_observability::init_logger;
-use chv_stord_backends::LocalFileBackend;
+use chv_stord_backends::{
+    CephRbdBackend, IscsiBackend, LVMBackend, LocalFileBackend, StorageBackend,
+};
 use chv_stord_core::store::SessionStore;
 use chv_stord_core::StorageServer;
 use std::path::PathBuf;
@@ -37,7 +39,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = config.runtime_dir.join("stord.db");
     let store = SessionStore::new(&db_path)?;
 
-    let backend = LocalFileBackend::new(config.runtime_dir.clone());
+    // Select backend based on configuration
+    let backend: Box<dyn StorageBackend> = match config.backend_type.as_deref().unwrap_or("local") {
+        "iscsi" => {
+            let iscsi_cfg = config
+                .iscsi
+                .as_ref()
+                .ok_or("backend_type is 'iscsi' but [iscsi] config section is missing")?;
+            let backend_cfg = chv_stord_backends::iscsi::IscsiConfig {
+                portal: iscsi_cfg.portal.clone(),
+                target_iqn: iscsi_cfg.target_iqn.clone(),
+                initiator_name: iscsi_cfg.initiator_name.clone(),
+                chap_username: iscsi_cfg.chap_username.clone(),
+                chap_secret: iscsi_cfg.chap_secret.clone(),
+            };
+            Box::new(IscsiBackend::new(backend_cfg)?)
+        }
+        "ceph" => {
+            let ceph_cfg = config
+                .ceph
+                .as_ref()
+                .ok_or("backend_type is 'ceph' but [ceph] config section is missing")?;
+            let backend_cfg = chv_stord_backends::ceph::CephRbdConfig {
+                cluster_name: ceph_cfg.cluster_name.clone(),
+                pool_name: ceph_cfg.pool_name.clone(),
+                user: ceph_cfg.user.clone(),
+                keyring_path: ceph_cfg.keyring_path.clone(),
+                monitors: ceph_cfg.monitors.clone(),
+            };
+            Box::new(CephRbdBackend::new(backend_cfg)?)
+        }
+        "lvm" => {
+            let vg_name = config.lvm_volume_group.as_deref().unwrap_or("chv-vg");
+            Box::new(LVMBackend::new(vg_name.to_string())?)
+        }
+        _ => Box::new(LocalFileBackend::new(config.runtime_dir.clone())),
+    };
+
+    info!(
+        backend_type = config.backend_type.as_deref().unwrap_or("local"),
+        "storage backend initialized"
+    );
+
     let server = StorageServer::new(
         backend,
         chv_observability::Metrics::new(),

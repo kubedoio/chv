@@ -1,9 +1,13 @@
 pub mod auth;
 pub mod backup;
+pub mod health;
 pub mod image;
+pub mod migrate;
 pub mod network;
 pub mod node;
+pub mod storage;
 pub mod task;
+pub mod upgrade;
 pub mod user;
 pub mod vm;
 pub mod volume;

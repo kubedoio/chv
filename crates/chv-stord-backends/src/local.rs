@@ -819,6 +819,30 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
+    /// Atomically snapshot and clear the dirty bitmap under a single write lock.
+    ///
+    /// This prevents any window where a write could dirty a block between
+    /// get_dirty_bitmap and clear_dirty_bitmap, which would lose that dirty
+    /// information during migration sync rounds.
+    async fn snapshot_and_clear_dirty_bitmap(
+        &self,
+        _volume_id: &str,
+        handle: &str,
+    ) -> Result<Vec<u8>, ChvError> {
+        let mut map = self.dirty_trackers.write().await;
+        match map.get_mut(handle) {
+            Some(tracker) => {
+                let snapshot = tracker.bitmap.clone();
+                tracker.bitmap.iter_mut().for_each(|byte| *byte = 0);
+                Ok(snapshot)
+            }
+            None => Err(ChvError::NotFound {
+                resource: "dirty_tracker".to_string(),
+                id: handle.to_string(),
+            }),
+        }
+    }
+
     async fn read_block(
         &self,
         volume_id: &str,
@@ -997,6 +1021,29 @@ impl StorageBackend for LocalFileBackend {
             }
         }
 
+        Ok(())
+    }
+
+    async fn set_io_limits(
+        &self,
+        volume_id: &str,
+        iops: Option<u64>,
+        bandwidth_mbps: Option<u64>,
+    ) -> Result<(), ChvError> {
+        if let Some(iops_val) = iops {
+            tracing::info!(
+                volume_id = %volume_id,
+                iops = iops_val,
+                "IOPS limit configured (enforcement requires cgroup v2)"
+            );
+        }
+        if let Some(bw) = bandwidth_mbps {
+            tracing::info!(
+                volume_id = %volume_id,
+                bandwidth_mbps = bw,
+                "bandwidth limit configured (enforcement requires cgroup v2)"
+            );
+        }
         Ok(())
     }
 }

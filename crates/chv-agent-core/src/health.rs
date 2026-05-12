@@ -1,9 +1,74 @@
 use crate::state_machine::NodeState;
 
+/// Minimum free disk space before declaring disk pressure (5 GB).
+const MIN_DISK_AVAILABLE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// Maximum memory usage percentage before declaring memory pressure.
+const MAX_MEMORY_USAGE_PERCENT: f64 = 90.0;
+/// Maximum disk usage percentage before declaring disk pressure.
+#[allow(dead_code)]
+const MAX_DISK_USAGE_PERCENT: f64 = 95.0;
+
+/// Indicates whether the host is under resource pressure.
+#[derive(Debug, Clone)]
+pub struct ResourcePressure {
+    pub disk_pressure: bool,
+    pub memory_pressure: bool,
+    pub disk_available_bytes: u64,
+    pub memory_usage_percent: f64,
+}
+
+/// Check host resources for disk and memory pressure using sysinfo.
+pub fn check_host_resources() -> ResourcePressure {
+    use sysinfo::{Disks, System};
+
+    let mut sys = System::new();
+    sys.refresh_memory();
+    let memory_total = sys.total_memory();
+    let memory_used = sys.used_memory();
+    let memory_pct = if memory_total > 0 {
+        (memory_used as f64 / memory_total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let disks = Disks::new_with_refreshed_list();
+    let disk_available = disks
+        .iter()
+        .find(|d| d.mount_point() == std::path::Path::new("/"))
+        .map(|d| d.available_space())
+        .unwrap_or(u64::MAX);
+
+    let disk_pressure = disk_available < MIN_DISK_AVAILABLE_BYTES;
+    let memory_pressure = memory_pct > MAX_MEMORY_USAGE_PERCENT;
+
+    if disk_pressure {
+        tracing::warn!(
+            disk_available_bytes = disk_available,
+            threshold_bytes = MIN_DISK_AVAILABLE_BYTES,
+            "disk pressure detected: available space below threshold"
+        );
+    }
+    if memory_pressure {
+        tracing::warn!(
+            memory_usage_percent = memory_pct,
+            threshold_percent = MAX_MEMORY_USAGE_PERCENT,
+            "memory pressure detected: usage above threshold"
+        );
+    }
+
+    ResourcePressure {
+        disk_pressure,
+        memory_pressure,
+        disk_available_bytes: disk_available,
+        memory_usage_percent: memory_pct,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct HealthAggregator {
     stord: Option<bool>,
     nwd: Option<bool>,
+    resource_pressure: Option<ResourcePressure>,
 }
 
 impl HealthAggregator {
@@ -11,6 +76,7 @@ impl HealthAggregator {
         Self {
             stord: None,
             nwd: None,
+            resource_pressure: None,
         }
     }
 
@@ -20,6 +86,24 @@ impl HealthAggregator {
 
     pub fn update_nwd(&mut self, healthy: bool) {
         self.nwd = Some(healthy);
+    }
+
+    /// Update the cached resource pressure state.
+    pub fn update_resource_pressure(&mut self, pressure: ResourcePressure) {
+        self.resource_pressure = Some(pressure);
+    }
+
+    /// Returns whether the host is currently under resource pressure.
+    pub fn has_resource_pressure(&self) -> bool {
+        self.resource_pressure
+            .as_ref()
+            .map(|p| p.disk_pressure || p.memory_pressure)
+            .unwrap_or(false)
+    }
+
+    /// Returns the current resource pressure state, if available.
+    pub fn resource_pressure(&self) -> Option<&ResourcePressure> {
+        self.resource_pressure.as_ref()
     }
 
     pub fn derive_node_state(&self, current: NodeState) -> NodeState {
@@ -52,14 +136,14 @@ impl HealthAggregator {
                 }
             }
             NodeState::TenantReady => {
-                if stord_ok && nwd_ok {
+                if stord_ok && nwd_ok && !self.has_resource_pressure() {
                     NodeState::TenantReady
                 } else {
                     NodeState::Degraded
                 }
             }
             NodeState::Degraded => {
-                if stord_ok && nwd_ok {
+                if stord_ok && nwd_ok && !self.has_resource_pressure() {
                     NodeState::TenantReady
                 } else {
                     NodeState::Degraded

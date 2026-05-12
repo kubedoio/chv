@@ -1,5 +1,5 @@
 use crate::connectivity::ConnectivityState;
-use crate::state_machine::{NodeState, StateMachine};
+use crate::state_machine::{guard_transition, NodeState, StateMachine};
 use chv_errors::ChvError;
 use control_plane_node_api::control_plane_node_api as proto;
 use prost::Message;
@@ -274,7 +274,9 @@ impl NodeCache {
     }
 
     pub fn transition_node_state(&mut self, to: NodeState) -> Result<NodeState, ChvError> {
-        let mut state_machine = StateMachine::new(self.current_node_state());
+        let from = self.current_node_state();
+        guard_transition(from, to);
+        let mut state_machine = StateMachine::new(from);
         state_machine.transition(to)?;
         let current = state_machine.current();
         self.node_state = current.as_str().to_string();

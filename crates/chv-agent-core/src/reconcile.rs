@@ -43,6 +43,9 @@ pub struct Reconciler {
     pub runtime_dir: PathBuf,
     reconcile_tick: u64,
     degraded_ticks: u32,
+    /// Tracks VMs that have already been requested for drain migration
+    /// to avoid re-requesting on every tick.
+    drain_requested_vms: HashSet<String>,
 }
 
 /// Returns the per-VM runtime directory for the given VM.
@@ -67,6 +70,7 @@ impl Reconciler {
             runtime_dir,
             reconcile_tick: 0,
             degraded_ticks: 0,
+            drain_requested_vms: HashSet::new(),
         }
     }
 
@@ -102,6 +106,15 @@ impl Reconciler {
 
     pub async fn run_once(&mut self) -> Result<(), ChvError> {
         self.reconcile_tick = self.reconcile_tick.wrapping_add(1);
+
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let span = tracing::info_span!(
+            "reconcile_tick",
+            operation_id = %operation_id,
+            tick = self.reconcile_tick,
+        );
+        let _guard = span.enter();
+
         // Read state once under the lock to avoid a TOCTOU race where the
         // state could change between the debug-log read and the match read.
         let state = self.current_state().await;
@@ -158,7 +171,26 @@ impl Reconciler {
                 }
             }
             NodeState::NetworkReady => {
-                self.transition_state(NodeState::TenantReady).await?;
+                // Compound readiness: verify both storage and network daemons are
+                // healthy before advancing to TenantReady. This prevents entering
+                // the fully-operational state when one subsystem has regressed.
+                let stord_ok = match StordClient::connect(&self.stord_socket).await {
+                    Ok(mut c) => c.health_probe().await.unwrap_or(false),
+                    Err(_) => false,
+                };
+                let nwd_ok = match NwdClient::connect(&self.nwd_socket).await {
+                    Ok(mut c) => c.health_probe().await.unwrap_or(false),
+                    Err(_) => false,
+                };
+                if stord_ok && nwd_ok {
+                    self.transition_state(NodeState::TenantReady).await?;
+                } else {
+                    warn!(
+                        stord_ok = stord_ok,
+                        nwd_ok = nwd_ok,
+                        "compound readiness check failed, staying in NetworkReady"
+                    );
+                }
             }
             NodeState::TenantReady => {
                 self.degraded_ticks = 0;
@@ -230,17 +262,24 @@ impl Reconciler {
                 if running_vms.is_empty() {
                     // All VMs evacuated — transition to Maintenance
                     info!(
+                        operation_id = %operation_id,
                         "drain complete, all VMs evacuated — transitioning to Maintenance"
                     );
+                    self.drain_requested_vms.clear();
                     self.transition_state(NodeState::Maintenance).await?;
                 } else {
-                    // Request migration for each running VM via control plane event
+                    // Request migration for each running VM via control plane event,
+                    // but only if we haven't already requested it.
                     let node_id = {
                         let cache = self.cache.lock().await;
                         cache.node_id.clone()
                     };
                     for vm_id in &running_vms {
-                        info!(vm_id = %vm_id, "requesting evacuation migration for drain");
+                        if self.drain_requested_vms.contains(vm_id) {
+                            debug!(vm_id = %vm_id, "drain migration already requested, skipping");
+                            continue;
+                        }
+                        info!(vm_id = %vm_id, operation_id = %operation_id, "requesting evacuation migration for drain");
                         let event =
                             control_plane_node_api::control_plane_node_api::PublishEventRequest {
                                 meta: Some(
@@ -262,21 +301,22 @@ impl Reconciler {
                                     "node drain: requesting migration for VM {}",
                                     vm_id
                                 ),
-                                details_json: serde_json::to_vec(
-                                    &serde_json::json!({
-                                        "vm_id": vm_id,
-                                        "reason": "node_drain"
-                                    }),
-                                )
+                                details_json: serde_json::to_vec(&serde_json::json!({
+                                    "vm_id": vm_id,
+                                    "reason": "node_drain"
+                                }))
                                 .unwrap_or_default(),
                             };
                         let mut cache = self.cache.lock().await;
                         cache.enqueue_pending_message(
                             crate::cache::PendingControlPlaneMessage::event(event),
                         );
+                        drop(cache);
+                        self.drain_requested_vms.insert(vm_id.clone());
                     }
                     debug!(
                         remaining_vms = running_vms.len(),
+                        operation_id = %operation_id,
                         "drain in progress — waiting for VM evacuation"
                     );
                 }

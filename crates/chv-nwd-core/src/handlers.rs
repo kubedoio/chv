@@ -6,6 +6,7 @@ use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
 use chv_observability::{operation_span, Metrics};
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -18,6 +19,8 @@ pub struct NetworkServiceImpl<E: NetworkExecutor> {
     security_policies: Arc<DashMap<String, proto::SecurityPolicy>>,
     rate_limit_policies: Arc<DashMap<String, proto::RateLimitPolicy>>,
     ebpf: Arc<dyn EbpfManager>,
+    /// Counter tracking eBPF program load failures.
+    ebpf_load_failures: Arc<AtomicU32>,
 }
 
 impl<E: NetworkExecutor> NetworkServiceImpl<E> {
@@ -30,6 +33,7 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             security_policies: Arc::new(DashMap::new()),
             rate_limit_policies: Arc::new(DashMap::new()),
             ebpf: Arc::new(ebpf::NoopEbpfManager),
+            ebpf_load_failures: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -147,6 +151,15 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             return Ok(Response::new(Self::err_result(&e)));
         }
 
+        // VNI range validation: VXLAN VNI is a 24-bit field (max 16777215)
+        if spec.vni > 16_777_215 {
+            let e = ChvError::InvalidArgument {
+                field: "vni".to_string(),
+                reason: format!("VNI {} exceeds maximum 16777215", spec.vni),
+            };
+            return Ok(Response::new(Self::err_result(&e)));
+        }
+
         // Idempotency: if already ensured with same network_id, return OK
         if let Some(existing) = self.topologies.get(&spec.network_id) {
             if existing.bridge_name == spec.bridge_name
@@ -221,7 +234,21 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
 
         let (status, last_error) = if let Some(state) = self.topologies.get(&req.network_id) {
             match self.executor.health(&req.network_id, &state).await {
-                Ok(s) => (s, String::new()),
+                Ok(s) => {
+                    // Downgrade health if eBPF has load failures
+                    let ebpf_failures = self.ebpf_load_failures.load(Ordering::Relaxed);
+                    if ebpf_failures > 0 && s == "healthy" {
+                        (
+                            "degraded".to_string(),
+                            format!(
+                                "eBPF load failures: {}; traffic may pass unfiltered",
+                                ebpf_failures
+                            ),
+                        )
+                    } else {
+                        (s, String::new())
+                    }
+                }
                 Err(e) => ("unhealthy".to_string(), e.to_string()),
             }
         } else {
@@ -313,10 +340,12 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 // Auto-load eBPF programs on the new tap interface
                 let bridge_name = format!("br-{}", &nic.network_id[..nic.network_id.len().min(8)]);
                 if let Err(e) = self.ebpf.load_policy_program(&tap_handle).await {
-                    tracing::warn!(tap = %tap_handle, error = %e, "failed to load eBPF policy program on tap");
+                    tracing::error!(tap = %tap_handle, error = %e, "failed to load eBPF policy program — traffic will pass UNFILTERED");
+                    self.ebpf_load_failures.fetch_add(1, Ordering::Relaxed);
                 }
                 if let Err(e) = self.ebpf.load_ingress_program(&bridge_name).await {
-                    tracing::warn!(bridge = %bridge_name, error = %e, "failed to load eBPF ingress program on bridge");
+                    tracing::error!(bridge = %bridge_name, error = %e, "failed to load eBPF ingress program — traffic will pass UNFILTERED");
+                    self.ebpf_load_failures.fetch_add(1, Ordering::Relaxed);
                 }
 
                 Ok(Response::new(proto::AttachVmNicResponse {
@@ -600,6 +629,17 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             let e = ChvError::InvalidArgument {
                 field: "vni".to_string(),
                 reason: "VNI must be > 0 for overlay update".to_string(),
+            };
+            return Ok(Response::new(proto::UpdateOverlayResponse {
+                result: Some(Self::err_result(&e)),
+            }));
+        }
+
+        // VNI range validation: VXLAN VNI is a 24-bit field (max 16777215)
+        if req.vni > 16_777_215 {
+            let e = ChvError::InvalidArgument {
+                field: "vni".to_string(),
+                reason: format!("VNI {} exceeds maximum 16777215", req.vni),
             };
             return Ok(Response::new(proto::UpdateOverlayResponse {
                 result: Some(Self::err_result(&e)),
