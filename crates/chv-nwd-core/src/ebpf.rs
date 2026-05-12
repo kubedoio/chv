@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -317,6 +318,9 @@ pub trait EbpfManager: Send + Sync + 'static {
 
     /// Return the number of interfaces with loaded eBPF programs.
     fn loaded_program_count(&self) -> u32;
+
+    /// Return the total number of denied packets observed across all VMs.
+    fn denied_packets_total(&self) -> u64;
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +482,8 @@ pub struct LinuxEbpfManager {
     bpf_pin_base: String,
     /// Interfaces with successfully loaded eBPF programs.
     loaded_interfaces: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Counter tracking total denied packets observed from stats reads.
+    denied_packets: Arc<AtomicU64>,
 }
 
 impl LinuxEbpfManager {
@@ -486,6 +492,7 @@ impl LinuxEbpfManager {
             program_path,
             bpf_pin_base: DEFAULT_BPF_PIN_PATH.to_string(),
             loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
+            denied_packets: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -495,6 +502,7 @@ impl LinuxEbpfManager {
             program_path,
             bpf_pin_base,
             loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
+            denied_packets: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -645,6 +653,12 @@ impl EbpfManager for LinuxEbpfManager {
         let value = bpf_map_lookup(&pin_path, &key, BPF_STATS_VALUE_SIZE)?;
         let stats = deserialize_stats(&value);
 
+        // Track denied packets
+        if stats.packets_denied > 0 {
+            self.denied_packets
+                .fetch_add(stats.packets_denied, Ordering::Relaxed);
+        }
+
         debug!(
             vm_id = %vm_id,
             vm_id_hash = vm_hash,
@@ -672,6 +686,10 @@ impl EbpfManager for LinuxEbpfManager {
             .lock()
             .map(|s| s.len() as u32)
             .unwrap_or(0)
+    }
+
+    fn denied_packets_total(&self) -> u64 {
+        self.denied_packets.load(Ordering::Relaxed)
     }
 }
 
@@ -728,6 +746,10 @@ impl EbpfManager for NoopEbpfManager {
     }
 
     fn loaded_program_count(&self) -> u32 {
+        0
+    }
+
+    fn denied_packets_total(&self) -> u64 {
         0
     }
 }
@@ -829,6 +851,10 @@ impl EbpfManager for MockEbpfManager {
     }
 
     fn loaded_program_count(&self) -> u32 {
+        0
+    }
+
+    fn denied_packets_total(&self) -> u64 {
         0
     }
 }

@@ -1,4 +1,5 @@
 use chv_errors::ChvError;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeState {
@@ -120,6 +121,63 @@ impl StateMachine {
 
     pub fn is_schedulable(&self) -> bool {
         self.current == NodeState::TenantReady
+    }
+}
+
+/// Check whether a node state transition is valid according to the expected
+/// lifecycle progression. This is a stricter check than `StateMachine::is_valid_transition`
+/// and is used for observability — invalid transitions are logged as warnings but
+/// not blocked (to avoid breaking existing behavior).
+pub fn valid_transition(from: &str, to: &str) -> bool {
+    matches!(
+        (from, to),
+        // Boot sequence
+        ("Discovered", "Bootstrapping")
+        | ("Bootstrapping", "HostReady")
+        | ("Bootstrapping", "Failed")
+        | ("HostReady", "StorageReady")
+        | ("HostReady", "Failed")
+        | ("HostReady", "Maintenance")
+        | ("StorageReady", "NetworkReady")
+        | ("StorageReady", "Failed")
+        | ("StorageReady", "Maintenance")
+        | ("NetworkReady", "TenantReady")
+        | ("NetworkReady", "Failed")
+        | ("NetworkReady", "Maintenance")
+        // Operational states
+        | ("TenantReady", "Degraded")
+        | ("TenantReady", "Draining")
+        | ("TenantReady", "Failed")
+        | ("TenantReady", "Maintenance")
+        | ("Degraded", "TenantReady")
+        | ("Degraded", "Draining")
+        | ("Degraded", "Failed")
+        | ("Degraded", "Maintenance")
+        | ("Draining", "Maintenance")
+        | ("Draining", "Failed")
+        // Recovery
+        | ("Maintenance", "Bootstrapping")
+        | ("Maintenance", "Failed")
+        | ("Failed", "Bootstrapping")
+        | ("Failed", "Maintenance")
+    )
+}
+
+/// Guard a node state transition: logs a warning if the transition is not in
+/// the expected lifecycle graph, but does NOT prevent it.
+pub fn guard_transition(from: NodeState, to: NodeState) {
+    let from_str = from.as_str();
+    let to_str = to.as_str();
+    // Self-transitions are always fine, no need to warn.
+    if from_str == to_str {
+        return;
+    }
+    if !valid_transition(from_str, to_str) {
+        warn!(
+            from = from_str,
+            to = to_str,
+            "unexpected node state transition (not in canonical lifecycle graph)"
+        );
     }
 }
 

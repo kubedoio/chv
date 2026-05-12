@@ -136,6 +136,17 @@ impl UpgradeOrchestrator {
         }
     }
 
+    /// Create a production orchestrator backed by the `SystemdNodeUpgrader`.
+    ///
+    /// This is the recommended constructor for production use. Tests should
+    /// continue using `new()` with a `DummyUpgrader` or other mock.
+    pub fn new_production(
+        pool: chv_controlplane_store::StorePool,
+        node_client_pool: crate::node_client_pool::NodeClientPool,
+    ) -> Self {
+        Self::with_systemd_upgrader(pool, node_client_pool)
+    }
+
     /// Get the current state of the upgrade operation.
     pub fn state(&self) -> &UpgradeState {
         &self.state

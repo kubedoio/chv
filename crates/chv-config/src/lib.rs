@@ -224,6 +224,44 @@ pub struct StordConfig {
     #[serde(default)]
     pub backend_allowlist: Vec<String>,
     pub metrics_bind: Option<String>,
+    /// Storage backend type: "local" (default), "iscsi", "ceph", or "lvm".
+    #[serde(default)]
+    pub backend_type: Option<String>,
+    /// iSCSI backend configuration (required when backend_type = "iscsi").
+    #[serde(default)]
+    pub iscsi: Option<StordIscsiConfig>,
+    /// Ceph RBD backend configuration (required when backend_type = "ceph").
+    #[serde(default)]
+    pub ceph: Option<StordCephConfig>,
+    /// LVM backend configuration (required when backend_type = "lvm").
+    /// The value is the volume group name.
+    #[serde(default)]
+    pub lvm_volume_group: Option<String>,
+}
+
+/// iSCSI backend configuration embedded in StordConfig.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StordIscsiConfig {
+    pub portal: String,
+    pub target_iqn: String,
+    pub initiator_name: String,
+    pub chap_username: Option<String>,
+    pub chap_secret: Option<String>,
+}
+
+/// Ceph RBD backend configuration embedded in StordConfig.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StordCephConfig {
+    #[serde(default = "default_ceph_cluster_name")]
+    pub cluster_name: String,
+    pub pool_name: String,
+    pub user: String,
+    pub keyring_path: String,
+    pub monitors: String,
+}
+
+fn default_ceph_cluster_name() -> String {
+    "ceph".to_string()
 }
 
 impl Default for StordConfig {
@@ -234,6 +272,10 @@ impl Default for StordConfig {
             log_level: "info".to_string(),
             backend_allowlist: vec![],
             metrics_bind: None,
+            backend_type: None,
+            iscsi: None,
+            ceph: None,
+            lvm_volume_group: None,
         }
     }
 }

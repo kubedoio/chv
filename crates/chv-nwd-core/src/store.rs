@@ -22,7 +22,8 @@ impl TopologyStore {
                 subnet_cidr TEXT NOT NULL,
                 gateway_ip TEXT NOT NULL,
                 runtime_status TEXT NOT NULL,
-                vni INTEGER
+                vni INTEGER,
+                peer_vteps TEXT DEFAULT '[]'
             )",
             [],
         )
@@ -31,13 +32,20 @@ impl TopologyStore {
         })?;
         // Migration: add vni column if missing (existing databases)
         let _ = conn.execute("ALTER TABLE topologies ADD COLUMN vni INTEGER", []);
+        // Migration: add peer_vteps column if missing (existing databases)
+        let _ = conn.execute(
+            "ALTER TABLE topologies ADD COLUMN peer_vteps TEXT DEFAULT '[]'",
+            [],
+        );
         Ok(Self { conn })
     }
 
     pub fn upsert(&self, state: &TopologyState) -> Result<(), ChvError> {
+        let peer_vteps_json =
+            serde_json::to_string(&state.peer_vteps).unwrap_or_else(|_| "[]".to_string());
         self.conn.execute(
-            "INSERT INTO topologies (network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status, vni)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO topologies (network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status, vni, peer_vteps)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(network_id) DO UPDATE SET
                tenant_id = excluded.tenant_id,
                bridge_name = excluded.bridge_name,
@@ -45,11 +53,13 @@ impl TopologyStore {
                subnet_cidr = excluded.subnet_cidr,
                gateway_ip = excluded.gateway_ip,
                runtime_status = excluded.runtime_status,
-               vni = excluded.vni",
+               vni = excluded.vni,
+               peer_vteps = excluded.peer_vteps",
             params![
                 state.network_id, state.tenant_id, state.bridge_name,
                 state.namespace_name, state.subnet_cidr, state.gateway_ip, state.runtime_status,
                 state.vni.map(|v| v as i64),
+                peer_vteps_json,
             ],
         ).map_err(|e| ChvError::Internal { reason: format!("sqlite upsert failed: {}", e) })?;
         Ok(())
@@ -69,11 +79,15 @@ impl TopologyStore {
 
     pub fn list(&self) -> Result<Vec<TopologyState>, ChvError> {
         let mut stmt = self.conn.prepare(
-            "SELECT network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status, vni FROM topologies"
+            "SELECT network_id, tenant_id, bridge_name, namespace_name, subnet_cidr, gateway_ip, runtime_status, vni, peer_vteps FROM topologies"
         ).map_err(|e| ChvError::Internal { reason: format!("sqlite prepare failed: {}", e) })?;
         let rows = stmt
             .query_map([], |row| {
                 let vni_raw: Option<i64> = row.get(7)?;
+                let peer_vteps_raw: Option<String> = row.get(8)?;
+                let peer_vteps: Vec<String> = peer_vteps_raw
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
                 Ok(TopologyState {
                     network_id: row.get(0)?,
                     tenant_id: row.get(1)?,
@@ -83,7 +97,7 @@ impl TopologyStore {
                     gateway_ip: row.get(5)?,
                     runtime_status: row.get(6)?,
                     vni: vni_raw.map(|v| v as u32),
-                    peer_vteps: Vec::new(),
+                    peer_vteps,
                 })
             })
             .map_err(|e| ChvError::Internal {
@@ -128,5 +142,21 @@ mod tests {
         assert_eq!(list[0].network_id, "net-1");
         store.remove("net-1").unwrap();
         assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn store_roundtrip_with_peer_vteps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TopologyStore::new(&dir.path().join("nwd.db")).unwrap();
+        let s = TopologyState {
+            peer_vteps: vec!["10.0.1.1".to_string(), "10.0.1.2".to_string()],
+            vni: Some(100),
+            ..dummy_state("net-vtep")
+        };
+        store.upsert(&s).unwrap();
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].peer_vteps, vec!["10.0.1.1", "10.0.1.2"]);
+        assert_eq!(list[0].vni, Some(100));
     }
 }

@@ -1,0 +1,35 @@
+# CHV Component Compatibility Matrix
+#
+# This file defines the allowed version ranges for each component in the cluster.
+# The control plane loads this at boot (via CHV_COMPAT_MATRIX_PATH env var) and
+# refuses to start if any enrolled node reports a component version outside its
+# allowed range.
+#
+# Version ranges use inclusive semver bounds: [min_version, max_version].
+
+[compatibility]
+
+[[compatibility.entry]]
+component = "controlplane"
+min_version = "0.0.1"
+max_version = "1.0.0"
+
+[[compatibility.entry]]
+component = "agent"
+min_version = "0.0.1"
+max_version = "1.0.0"
+
+[[compatibility.entry]]
+component = "stord"
+min_version = "0.0.1"
+max_version = "1.0.0"
+
+[[compatibility.entry]]
+component = "nwd"
+min_version = "0.0.1"
+max_version = "1.0.0"
+
+[[compatibility.entry]]
+component = "chvctl"
+min_version = "0.0.1"
+max_version = "1.0.0"

@@ -361,12 +361,15 @@ impl<B: StorageBackend> MigrationSender<B> {
         let mut total_dirty_chunks: u32 = 0;
 
         for round in 1..=MAX_DIRTY_ROUNDS {
-            // Step 1: Get the dirty bitmap
+            // Step 1: Atomically snapshot and clear the dirty bitmap.
+            // This ensures no writes are lost between reading the bitmap and clearing it.
             let bitmap = self
                 .backend
-                .get_dirty_bitmap(&self.volume_id, &self.handle)
+                .snapshot_and_clear_dirty_bitmap(&self.volume_id, &self.handle)
                 .await
-                .map_err(|e| tonic::Status::internal(format!("get_dirty_bitmap failed: {e}")))?;
+                .map_err(|e| {
+                    tonic::Status::internal(format!("snapshot_and_clear_dirty_bitmap failed: {e}"))
+                })?;
 
             // Convert bitmap to list of dirty block offsets
             let dirty_offsets = bitmap_to_offsets(&bitmap, self.block_size);
@@ -481,11 +484,8 @@ impl<B: StorageBackend> MigrationSender<B> {
             })?;
             self.handle_inbound_message(round_ack_msg)?;
 
-            // Step 6: Clear the dirty bitmap for next round
-            self.backend
-                .clear_dirty_bitmap(&self.volume_id, &self.handle)
-                .await
-                .map_err(|e| tonic::Status::internal(format!("clear_dirty_bitmap failed: {e}")))?;
+            // Note: dirty bitmap was already cleared atomically in step 1 via
+            // snapshot_and_clear_dirty_bitmap, so no separate clear needed here.
 
             total_dirty_chunks += blocks_sent as u32;
 

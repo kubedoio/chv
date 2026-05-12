@@ -25,7 +25,7 @@ pub use console_server::ConsoleServer;
 pub use control_plane::ControlPlaneClient;
 pub use daemon_clients::{NwdClient, StordClient};
 pub use enrollment::{BootstrapResponse, EnrollmentClient};
-pub use health::HealthAggregator;
+pub use health::{check_host_resources, HealthAggregator, ResourcePressure};
 pub use inventory::InventoryReporter;
 pub use metrics_server::{metrics_router, MetricsState};
 pub use reconcile::Reconciler;

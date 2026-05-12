@@ -748,12 +748,7 @@ impl NetworkExecutor for LinuxExecutor {
             // Delete FDB entries for all peer VTEPs
             for vtep_ip in &state.peer_vteps {
                 if let Err(e) = self
-                    .delete_fdb_entry(
-                        &state.namespace_name,
-                        vni,
-                        "00:00:00:00:00:00",
-                        vtep_ip,
-                    )
+                    .delete_fdb_entry(&state.namespace_name, vni, "00:00:00:00:00:00", vtep_ip)
                     .await
                 {
                     warn!(vtep_ip = %vtep_ip, error = %e, "failed to delete FDB entry during topology teardown");
@@ -761,7 +756,10 @@ impl NetworkExecutor for LinuxExecutor {
             }
 
             // Delete the VXLAN interface
-            if let Err(e) = self.delete_vxlan_interface(&state.namespace_name, vni).await {
+            if let Err(e) = self
+                .delete_vxlan_interface(&state.namespace_name, vni)
+                .await
+            {
                 warn!(vni = vni, error = %e, "failed to delete VXLAN interface during topology teardown");
             }
         }
@@ -1020,6 +1018,14 @@ impl NetworkExecutor for LinuxExecutor {
         vtep_ip: &str,
         vtep_port: u32,
     ) -> Result<(), ChvError> {
+        // Defense-in-depth: VNI is a 24-bit field
+        if vni > 16_777_215 {
+            return Err(ChvError::InvalidArgument {
+                field: "vni".to_string(),
+                reason: format!("VNI {} exceeds maximum 16777215", vni),
+            });
+        }
+
         let iface = Self::vxlan_interface_name(vni);
         let vni_str = vni.to_string();
         let port_str = vtep_port.to_string();

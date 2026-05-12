@@ -183,15 +183,13 @@ impl NodeUpgrader for SystemdNodeUpgrader {
         info!(node_id = %node_id, "draining node: pausing scheduling");
 
         // Pause scheduling on the node.
-        sqlx::query(
-            "UPDATE node_desired_state SET scheduling_paused = 1 WHERE node_id = $1",
-        )
-        .bind(node_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ChvError::Internal {
-            reason: format!("failed to pause scheduling on node {node_id}: {e}"),
-        })?;
+        sqlx::query("UPDATE node_desired_state SET scheduling_paused = 1 WHERE node_id = $1")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to pause scheduling on node {node_id}: {e}"),
+            })?;
 
         // Poll until no running VMs remain on the node (or timeout).
         let deadline = tokio::time::Instant::now() + self.drain_timeout;
@@ -276,15 +274,14 @@ impl NodeUpgrader for SystemdNodeUpgrader {
     }
 
     async fn health_check(&self, node_id: &str) -> Result<bool, ChvError> {
-        let state: Option<String> = sqlx::query_scalar(
-            "SELECT observed_state FROM node_observed_state WHERE node_id = $1",
-        )
-        .bind(node_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| ChvError::Internal {
-            reason: format!("failed to query node observed state: {e}"),
-        })?;
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT observed_state FROM node_observed_state WHERE node_id = $1")
+                .bind(node_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("failed to query node observed state: {e}"),
+                })?;
 
         match state.as_deref() {
             Some("TenantReady") => {
@@ -371,15 +368,13 @@ impl NodeUpgrader for SystemdNodeUpgrader {
     async fn undrain_node(&self, node_id: &str) -> Result<(), ChvError> {
         info!(node_id = %node_id, "un-draining node: resuming scheduling");
 
-        sqlx::query(
-            "UPDATE node_desired_state SET scheduling_paused = 0 WHERE node_id = $1",
-        )
-        .bind(node_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ChvError::Internal {
-            reason: format!("failed to resume scheduling on node {node_id}: {e}"),
-        })?;
+        sqlx::query("UPDATE node_desired_state SET scheduling_paused = 0 WHERE node_id = $1")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to resume scheduling on node {node_id}: {e}"),
+            })?;
 
         Ok(())
     }
@@ -399,8 +394,8 @@ impl UpgradeOrchestrator {
         node_client_pool: NodeClientPool,
         compat_matrix: CompatibilityMatrix,
     ) -> Self {
-        let upgrader = SystemdNodeUpgrader::new(pool, node_client_pool)
-            .with_compat_matrix(compat_matrix);
+        let upgrader =
+            SystemdNodeUpgrader::new(pool, node_client_pool).with_compat_matrix(compat_matrix);
         Self::new(Box::new(upgrader))
     }
 }

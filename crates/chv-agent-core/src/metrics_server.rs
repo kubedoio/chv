@@ -6,6 +6,17 @@ use tokio::sync::Mutex;
 
 use crate::connectivity::ConnectivityState;
 
+// Metric name constants for external consumers and consistency.
+pub const METRIC_NODE_STATE: &str = "chv_agent_node_state";
+pub const METRIC_VMS_TOTAL: &str = "chv_agent_vms_total";
+pub const METRIC_RECONCILE_TICKS: &str = "chv_agent_reconcile_ticks_total";
+pub const METRIC_RECONCILE_FAILURES: &str = "chv_agent_reconcile_failures_total";
+pub const METRIC_HEALTH_FAILURES: &str = "chv_agent_health_failures_total";
+pub const METRIC_UPTIME: &str = "chv_agent_uptime_seconds";
+pub const METRIC_CP_CONNECTED: &str = "chv_agent_cp_connected";
+pub const METRIC_RECONCILE_DRIFT_EMA: &str = "chv_agent_reconcile_drift_ema";
+pub const METRIC_RECONCILE_DURATION: &str = "chv_agent_reconcile_duration_seconds";
+
 pub struct HostResources {
     pub cpu_usage_percent: f32,
     pub memory_total_bytes: u64,
@@ -42,6 +53,12 @@ pub struct MetricsState {
     pub cp_total_deferred_messages: u64,
     // Host resources
     pub host: HostResources,
+    // Reconcile performance metrics
+    pub reconcile_drift_ema: f64,
+    pub last_reconcile_duration_ms: u64,
+    // Resource pressure indicators
+    pub disk_pressure: bool,
+    pub memory_pressure: bool,
 }
 
 impl MetricsState {
@@ -59,6 +76,10 @@ impl MetricsState {
             cp_consecutive_failures: 0,
             cp_total_deferred_messages: 0,
             host: HostResources::default(),
+            reconcile_drift_ema: 0.0,
+            last_reconcile_duration_ms: 0,
+            disk_pressure: false,
+            memory_pressure: false,
         }
     }
 }
@@ -93,6 +114,7 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
     let host = collect_host_resources();
     let s = state.lock().await;
     let uptime = s.start_time.elapsed().as_secs();
+    let reconcile_duration_secs = s.last_reconcile_duration_ms as f64 / 1000.0;
     let body = format!(
         "# HELP chv_agent_node_state Current node state (1=active)\n\
          # TYPE chv_agent_node_state gauge\n\
@@ -138,7 +160,19 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
          chv_agent_disk_total_bytes{{node_id=\"{node_id}\"}} {disk_total}\n\
          # HELP chv_agent_disk_available_bytes Available disk space on root mount in bytes\n\
          # TYPE chv_agent_disk_available_bytes gauge\n\
-         chv_agent_disk_available_bytes{{node_id=\"{node_id}\"}} {disk_avail}\n",
+         chv_agent_disk_available_bytes{{node_id=\"{node_id}\"}} {disk_avail}\n\
+         # HELP chv_agent_reconcile_drift_ema Exponential moving average of reconcile drift\n\
+         # TYPE chv_agent_reconcile_drift_ema gauge\n\
+         chv_agent_reconcile_drift_ema{{node_id=\"{node_id}\"}} {drift_ema}\n\
+         # HELP chv_agent_reconcile_duration_seconds Last reconcile tick duration\n\
+         # TYPE chv_agent_reconcile_duration_seconds gauge\n\
+         chv_agent_reconcile_duration_seconds{{node_id=\"{node_id}\"}} {reconcile_dur}\n\
+         # HELP chv_agent_disk_pressure Whether disk is under pressure (1=yes, 0=no)\n\
+         # TYPE chv_agent_disk_pressure gauge\n\
+         chv_agent_disk_pressure{{node_id=\"{node_id}\"}} {disk_pressure}\n\
+         # HELP chv_agent_memory_pressure Whether memory is under pressure (1=yes, 0=no)\n\
+         # TYPE chv_agent_memory_pressure gauge\n\
+         chv_agent_memory_pressure{{node_id=\"{node_id}\"}} {mem_pressure}\n",
         node_id = s.node_id,
         state = s.node_state,
         vms = s.vm_count,
@@ -156,6 +190,10 @@ async fn metrics_handler(State(state): State<Arc<Mutex<MetricsState>>>) -> impl 
         mem_used = host.memory_used_bytes,
         disk_total = host.disk_total_bytes,
         disk_avail = host.disk_available_bytes,
+        drift_ema = s.reconcile_drift_ema,
+        reconcile_dur = reconcile_duration_secs,
+        disk_pressure = if s.disk_pressure { 1 } else { 0 },
+        mem_pressure = if s.memory_pressure { 1 } else { 0 },
     );
     (
         axum::http::StatusCode::OK,

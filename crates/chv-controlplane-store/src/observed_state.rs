@@ -176,7 +176,7 @@ UPDATE node_observed_state SET
     observed_generation = $2,
     observed_at = strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch'),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', $3 / 1000.0, 'unixepoch')
-WHERE node_id = $1
+WHERE node_id = $1 AND observed_generation <= $2
 "#;
 
 const ACK_VM_OBSERVED_GENERATION_SQL: &str = r#"
@@ -198,6 +198,7 @@ ON CONFLICT (vm_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
     observed_at = EXCLUDED.observed_at,
     updated_at = EXCLUDED.updated_at
+WHERE vm_observed_state.observed_generation <= EXCLUDED.observed_generation
 "#;
 
 const ACK_VOLUME_OBSERVED_GENERATION_SQL: &str = r#"
@@ -219,6 +220,7 @@ ON CONFLICT (volume_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
     observed_at = EXCLUDED.observed_at,
     updated_at = EXCLUDED.updated_at
+WHERE volume_observed_state.observed_generation <= EXCLUDED.observed_generation
 "#;
 
 const ACK_NETWORK_OBSERVED_GENERATION_SQL: &str = r#"
@@ -240,6 +242,7 @@ ON CONFLICT (network_id) DO UPDATE SET
     observed_generation = EXCLUDED.observed_generation,
     observed_at = EXCLUDED.observed_at,
     updated_at = EXCLUDED.updated_at
+WHERE network_observed_state.observed_generation <= EXCLUDED.observed_generation
 "#;
 
 #[derive(Clone)]

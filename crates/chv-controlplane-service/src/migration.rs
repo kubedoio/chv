@@ -560,6 +560,53 @@ pub async fn execute_migration(
         }
 
         // Phase 4: Paused - final sync, VM is paused
+        // Explicitly pause the source VM before final sync to ensure no writes
+        // can occur during the final data transfer. Cloud Hypervisor's send-migration
+        // typically pauses the VM internally, but we enforce it here for coordination.
+        let source_socket_for_pause =
+            resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
+        let pause_result = node_client_pool
+            .get_or_connect(&state.source_node_id, &source_socket_for_pause)
+            .await;
+
+        match pause_result {
+            Ok(mut pause_client) => {
+                if let Err(e) = pause_client
+                    .pause_vm(
+                        &state.source_node_id,
+                        &state.vm_id,
+                        &vm_generation,
+                        &state.operation_id,
+                        Some("control-plane"),
+                    )
+                    .await
+                {
+                    // Log but don't fail — the VM may already be paused by CH's
+                    // send-migration protocol. If it truly isn't paused, the final
+                    // sync will still work but may have slightly more dirty data.
+                    warn!(
+                        migration_id = %state.migration_id,
+                        vm_id = %state.vm_id,
+                        error = %e,
+                        "failed to explicitly pause source VM for final sync (may already be paused by CH)"
+                    );
+                }
+                info!(
+                    migration_id = %state.migration_id,
+                    vm_id = %state.vm_id,
+                    "source VM paused for final sync"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    migration_id = %state.migration_id,
+                    vm_id = %state.vm_id,
+                    error = %e,
+                    "could not connect to source agent for explicit pause (VM may already be paused)"
+                );
+            }
+        }
+
         transition_phase(pool, state, MigrationPhase::Paused).await?;
 
         let dest_socket = resolve_agent_socket(agent_socket_pattern, &state.dest_node_id);

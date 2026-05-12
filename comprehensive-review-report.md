@@ -1,127 +1,191 @@
 # Product Readiness Gap Analysis — Final Report
 
 **Date**: 2026-05-11  
-**Branch**: main (post PR #49 merge)  
+**Branch**: main (post PR #50 merge)  
 **Methodology**: Spec-vs-implementation gap analysis across 13 backend ADRs, 5 WebUI ADRs, 6 component specs, 6 WebUI specs, 4 ops specs  
-**Previous Assessment**: 2026-05-11 (6.7/10 / 67%). This is the updated assessment after PR #49 merge (all P0-P3 fixes).
+**Previous Assessment**: 2026-05-11 (7.5/10 / 75%). This is the updated assessment after PR #50 merge (eBPF, NodeUpgrader, mTLS, partition flush fixes).
 
 ---
 
-## Overall Completeness: 75% (7.5 / 10)
+## Overall Completeness: 69% (6.9 / 10)
 
 | Domain | Score | Weight | Weighted | Previous | Change |
 |--------|-------|--------|----------|----------|--------|
-| Control Plane (orchestrator, reconcile, upgrade) | 65% | 20% | 1.30 | 7.0 | -0.5* |
-| Agent + Observability | 83% | 20% | 1.66 | 6.5 | +1.8 |
-| Storage + Migration | 72% | 20% | 1.44 | 5.0 | +2.2 |
-| Network + eBPF | 77% | 15% | 1.16 | 4.5 | +3.2 |
-| WebUI / BFF | 76% | 15% | 1.14 | 7.5 | +0.1 |
-| Operations / CLI | 51% | 10% | 0.51 | 5.0 | +0.1 |
-| **Total** | | **100%** | **7.21** | **6.60** | **+0.61** |
+| Control Plane (orchestrator, reconcile, upgrade) | 56% | 20% | 1.12 | 65% | -9%* |
+| Agent + Observability | 80% | 20% | 1.60 | 83% | -3% |
+| Storage + Migration | 71% | 20% | 1.42 | 72% | -1% |
+| Network + eBPF | 68% | 15% | 1.02 | 77% | -9%* |
+| WebUI / BFF | 74% | 15% | 1.11 | 76% | -2% |
+| Operations / CLI | 64% | 10% | 0.64 | 51% | +13% |
+| **Total** | | **100%** | **6.91** | **7.21** | **-0.30** |
 
-*Control Plane score appears lower because the previous assessment was generous (did not fully weight ADR-006 partition policy and ADR-007 upgrade framework depth). The absolute implementation is better than before.*
+*Control Plane and Network scores dropped because this assessment reads implementation line-by-line against spec requirements, catching enforcement gaps the previous assessment missed (e.g., generation check defined but never called in SQL queries, eBPF load failures swallowed as warnings).*
 
-**Verdict**: Solid beta. Single-node happy path is production-quality. Multi-node scenarios (migration, overlay networking, partition recovery) are substantially implemented but have enforcement gaps (mTLS, backpressure, runtime compatibility checks). Operational tooling remains the weakest domain.
+**Verdict**: Solid beta for single-node. Multi-node scenarios have structural gaps in convergence feedback (dirty_blocks_remaining never reported), overlay reliability (link recovery not wired), and upgrade orchestration (NodeUpgrader exists but isn't called from production code paths). Operations tooling improved but still lacks 6 CLI subcommands.
 
 **Phase Assessment**:
 | Phase | Target | Previous | Current |
 |-------|--------|----------|---------|
-| Phase 1: Stability | Solid control plane + agent lifecycle | 85% | 90% |
-| Phase 2: Features | Migration, storage, networking | 55% | 72% |
-| Phase 3: Production | mTLS, monitoring, upgrades, operational tooling | 30% | 50% |
+| Phase 1: Stability | Solid control plane + agent lifecycle | 90% | 85% |
+| Phase 2: Features | Migration, storage, networking | 72% | 68% |
+| Phase 3: Production | mTLS, monitoring, upgrades, operational tooling | 50% | 45% |
 
 ---
 
 ## ADR Compliance Matrix
 
-| ADR | Title | Previous | Current | Detail |
-|-----|-------|----------|---------|--------|
-| ADR-001 | Component boundaries | 80% | 85% | Node/stord/nwd split enforced; chv-errors shared |
-| ADR-002 | Desired-state reconciliation | 70% | 85% | Convergence metrics added (EMA drift tracking); generation enforcement solid |
-| ADR-003 | Agent autonomy (partition tolerance) | 40% | 78% | ConnectivityTracker gates create_vm/migrate_vm; pending message queue works |
-| ADR-004 | Storage datapath | — | 80% | All 4 backends present; IOPS enforcement absent |
-| ADR-005 | Network service model | — | 88% | Full Linux networking; DHCP/DNS/NAT/firewall |
-| ADR-006 | Partition policy | — | 40% | CP blocks dispatch to unreachable nodes; reconnect flush absent |
-| ADR-007 | Upgrade/rollback | 5% | 55% | Framework exists; no concrete NodeUpgrader; no bundle model |
-| ADR-008 | Error handling | 90% | 85% | ChvError used consistently; BffError mapping unclear |
-| ADR-009 | Logging with tracing | 90% | 82% | Structured tracing; metrics endpoint added; OTEL export absent |
-| ADR-010 | Async safety | 90% | 88% | tokio::sync::Mutex correct; poison recovery; minor test-code violation |
-| ADR-011 | Single-node controlplane | — | 80% | SQLite WAL, integrity check, pre-migration backup |
-| ADR-012 | Disk migration pre-copy | — | 75% | Dirty sync rounds work; backpressure not enforced; mTLS optional |
-| ADR-013 | Network overlay VXLAN+eBPF | 35% | 72% | Real BPF map ops; FDB reconciliation; eBPF auto-load gap |
+| ADR | Title | Previous | Current | Key Gap |
+|-----|-------|----------|---------|---------|
+| ADR-001 | Component boundaries | 85% | 82% | BffError lacks From<ChvError>; audit logging only on mutate_vm |
+| ADR-002 | Desired-state reconciliation | 85% | 72% | Generation check defined but never enforced in SQL WHERE clauses |
+| ADR-003 | Agent autonomy (partition tolerance) | 78% | 70% | No state transition guards; compound readiness not enforced for TenantReady |
+| ADR-004 | Storage datapath | 80% | 68% | IOPS/bandwidth runtime limits never enforced in any backend |
+| ADR-005 | Network service model | 88% | 75% | peer_vteps not persisted to SQLite; with_vtep_ip() never called |
+| ADR-006 | Partition policy | 40% | 35% | No partition detection mode; no CP-side reconnect flush |
+| ADR-007 | Upgrade/rollback | 55% | 50% | SystemdNodeUpgrader exists but never wired to production orchestrator |
+| ADR-008 | Error handling | 85% | 80% | BffError lacks From<ChvError> impl; error codes inconsistent |
+| ADR-009 | Logging with tracing | 82% | 75% | Metric constants defined but never emitted; operation_id absent from spans |
+| ADR-010 | Async safety | 88% | 88% | No change — solid |
+| ADR-011 | Single-node controlplane | 80% | 75% | NodeCache missing volume/network fragments; no pre-flight backup validation |
+| ADR-012 | Disk migration pre-copy | 75% | 62% | FinalSync not coordinated with VM pause; bitmap non-atomic |
+| ADR-013 | Network overlay VXLAN+eBPF | 72% | 58% | Link recovery not wired; eBPF failure swallowed; CP VTEP registry absent |
 
 ---
 
-## Component Spec Compliance
+## Findings by Severity
 
-| Spec | Previous | Current | Key Improvements |
-|------|----------|---------|------------------|
-| chv-agent-spec | 65% | 78% | ConnectivityTracker gating, host metrics, metrics endpoint |
-| chv-nwd-spec | 45% | 85% | Real eBPF ops, link monitoring, FDB reconciliation |
-| chv-stord-spec | 50% | 72% | iSCSI + Ceph backends, dirty tracking, all trait methods |
-| disk-migration-protocol-spec | 55% | 62% | Dirty sync rounds complete; mTLS/backpressure gaps |
-| live-migration-spec | 60% | 70% | Progressive timeouts, disable_dirty_tracking RPC, phase rollback |
-| vxlan-overlay-spec | 35% | 68% | BPF map writes, FDB delta reconciliation, security policy |
+### CRITICAL (7)
 
----
+| # | Finding | Domain | Spec Reference |
+|---|---------|--------|----------------|
+| C1 | Stale generation check defined in code but never enforced in SQL queries — reconciler can overwrite newer state | Control Plane | ADR-002 |
+| C2 | Agent reconnect flush absent — deferred messages lost on reconnection | Control Plane | ADR-006, ADR-003 |
+| C3 | Source stord never reports dirty_blocks_remaining to CP — convergence loop will always timeout | Storage | ADR-012, disk-migration-protocol-spec |
+| C4 | chv-stord binary only wires LocalFileBackend — iSCSI/Ceph code exists but unreachable | Storage | chv-stord-spec |
+| C5 | VXLAN link failure recovery absent — link_monitor::check_all_links() never wired to event loop | Network | ADR-013, vxlan-overlay-spec |
+| C6 | eBPF load failure swallowed as warning — traffic passes unfiltered on failure | Network | ADR-013, vxlan-overlay-spec |
+| C7 | No host disk full detection — node continues accepting VMs until crash | Operations | chv-agent-spec failure matrix |
 
-## WebUI Spec Compliance
+### HIGH (43)
 
-| Spec | Previous | Current | Key Improvements |
-|------|----------|---------|------------------|
-| webui-api-bff-spec | 75% | 78% | Storage pools BFF, images delete via BFF client |
-| webui-design-system-spec | 85% | 85% | No change |
-| webui-implementation-spec | 70% | 85% | VM events/metrics tabs added |
-| webui-information-architecture | 80% | 80% | All pages present |
-| webui-product-spec | 70% | 72% | Event filters added |
-| webui-state-and-tasks-spec | 65% | 70% | Task store functional |
+#### Control Plane (9)
 
----
+| # | Finding | Spec |
+|---|---------|------|
+| H1 | No cert rotation caller-identity check — any client cert accepted post-rotation | ADR-002 |
+| H2 | No state transition guards — invalid state transitions silently succeed | ADR-003 |
+| H3 | Compound readiness not enforced for TenantReady (skips StorageReady/NetworkReady check) | ADR-003 |
+| H4 | No partition detection mode — CP cannot distinguish slow network from dead node | ADR-006 |
+| H5 | No CP-side reconnect-flush mechanism — messages queued during partition lost | ADR-006 |
+| H6 | Compat matrix warn-only, not blocking boot | ADR-007 |
+| H7 | SystemdNodeUpgrader not wired to production UpgradeOrchestrator | ADR-007 |
+| H8 | No per-node rollback-target tracking — rollback goes to unknown state | ADR-007 |
+| H9 | NodeCache missing volume/network state fragments | ADR-011 |
 
-## Findings by Severity (Remaining After PR #49)
+#### Agent + Observability (4)
 
-### CRITICAL (0) — All Previous CRITICALs Fixed
+| # | Finding | Spec |
+|---|---------|------|
+| H10 | Metrics constants defined (METRIC_RECONCILE_DRIFT etc.) but never emitted to endpoint | ADR-009 |
+| H11 | operation_id not propagated in tracing spans — cross-service correlation broken | ADR-009 |
+| H12 | chvctl has no local agent socket for debug commands | chv-agent-spec |
+| H13 | BffError lacks From<ChvError> — error conversion is ad-hoc | ADR-008 |
 
-| # | Previous Finding | Status |
-|---|-----------------|--------|
-| C1 | create_vm does not check ConnectivityState | **FIXED** — returns failed_precondition when Disconnected |
-| C2 | disable_source_dirty_tracking() is no-op | **FIXED** — sends real RPC to source agent |
+#### Storage + Migration (10)
 
-### HIGH (5 remaining)
+| # | Finding | Spec |
+|---|---------|------|
+| H14 | IOPS/bandwidth never enforced in any storage backend | ADR-004 |
+| H15 | FinalSync not coordinated with VM pause — data race window | ADR-012 |
+| H16 | Dirty bitmap snapshot non-atomic — blocks can flip during capture | ADR-012 |
+| H17 | CRC mismatch aborts transfer instead of retransmitting block | disk-migration-protocol-spec |
+| H18 | Destination TLS server config absent — migration channel one-way auth only | disk-migration-protocol-spec |
+| H19 | Partial dest volume not cleaned up on migration failure | disk-migration-protocol-spec |
+| H20 | No security sandboxing for storage backends | chv-stord-spec |
+| H21 | No dest resource check before migration starts | live-migration-spec |
+| H22 | Cloud Hypervisor memory migration not explicitly orchestrated by CP | live-migration-spec |
+| H23 | CP doesn't trigger final dirty flush before resume at destination | live-migration-spec |
 
-| # | Finding | Spec | Fix Complexity |
-|---|---------|------|---------------|
-| H1 | mTLS not enforced on migration channel (optional, not mandatory) | ADR-012, disk-migration-protocol-spec | 2 days |
-| H2 | eBPF programs not auto-loaded on VM NIC attach | ADR-013, vxlan-overlay-spec | 1 week |
-| H3 | FDB entries not cleaned on VM detach/destroy | ADR-013 guardrail | 2 days |
-| H4 | NodeUpgrader trait has no concrete implementation | ADR-007 | 2 weeks |
-| H5 | Partition reconnect/deferred flush not implemented | ADR-006 | 1 week |
+#### Network + eBPF (8)
 
-### MEDIUM (12 remaining)
+| # | Finding | Spec |
+|---|---------|------|
+| H24 | peer_vteps not persisted to SQLite — lost on nwd restart | ADR-005 |
+| H25 | LinuxExecutor::with_vtep_ip() defined but never called | ADR-005 |
+| H26 | VNI range validation absent — invalid VNIs accepted | ADR-013 |
+| H27 | eBPF denied-packets counter never emitted to metrics | ADR-013 |
+| H28 | eBPF program crash/detach detection absent | ADR-013 |
+| H29 | FDB cleanup incomplete on topology deletion — stale entries remain | ADR-013 |
+| H30 | VTEP IP validation absent — invalid IPs accepted | ADR-013 |
+| H31 | No overlay integration tests | vxlan-overlay-spec |
+
+#### WebUI + BFF (9)
+
+| # | Finding | Spec |
+|---|---------|------|
+| H32 | Audit logging only fires on mutate_vm, not all mutations | webui-api-bff-spec |
+| H33 | Competing sidebar navigation components (desktop vs mobile) | webui-design-system-spec |
+| H34 | Node detail page missing events/metrics/VMs tabs | webui-implementation-spec |
+| H35 | Task lifecycle not visually distinct (no progress states) | webui-state-and-tasks-spec |
+| H36 | Cluster detail page is a stub (no content) | webui-implementation-spec |
+| H37 | Maintenance window "Create" button is dead (no handler) | webui-implementation-spec |
+| H38 | No /tasks/[id] detail route for individual task inspection | webui-product-spec |
+| H39 | Event filters incomplete (missing severity filter) | webui-product-spec |
+| H40 | Storage pools page has no create/delete actions | webui-implementation-spec |
+
+#### Operations + CLI (3)
+
+| # | Finding | Spec |
+|---|---------|------|
+| H41 | 6 chvctl subcommands missing (stor, nw, ops, migrate, upgrade, health) | chv-agent-spec ops |
+| H42 | No host memory pressure detection | chv-agent-spec failure matrix |
+| H43 | No cert expiration rotation automation | ops-security-spec |
+
+### MEDIUM (28)
 
 | # | Finding | Domain |
 |---|---------|--------|
-| M1 | IOPS/bandwidth runtime limits not enforced in any backend | Storage |
-| M2 | Backpressure slow_down_factor logged but not applied | Migration |
-| M3 | Compatibility matrix not enforced at startup (boot gate) | Operations |
-| M4 | chvctl routes through BFF HTTP, not local Unix socket | CLI |
-| M5 | chvctl missing stor/nw/ops subcommands | CLI |
-| M6 | No host disk/memory pressure detection | Failure matrix |
-| M7 | delete_topology does not tear down VXLAN interfaces | Network |
-| M8 | Draining state has no evacuation logic | Agent |
-| M9 | Node lifecycle collapsed to 4 states in UI (spec has 10) | WebUI |
-| M10 | Operation latency histograms absent from metrics | Observability |
-| M11 | DaemonSupervisor starts stord/nwd sequentially, not parallel | Runtime sequences |
-| M12 | ebpf_programs_loaded always returns 0 in OverlayStatus | Network |
+| M1 | Reconcile tick metrics not exposed on Prometheus endpoint | Control Plane |
+| M2 | No leader election for multi-CP deployments | Control Plane |
+| M3 | Draining state has no evacuation logic | Agent |
+| M4 | DaemonSupervisor starts stord/nwd sequentially, not parallel | Agent |
+| M5 | No graceful shutdown propagation to child daemons | Agent |
+| M6 | Backpressure slow_down_factor logged but not applied to send rate | Migration |
+| M7 | Volume checksum empty on FinalizeComplete | Migration |
+| M8 | No migration bandwidth throttling | Migration |
+| M9 | delete_topology does not tear down VXLAN interfaces | Network |
+| M10 | ebpf_programs_loaded always returns 0 in OverlayStatus | Network |
+| M11 | No DHCP lease cleanup on VM destroy | Network |
+| M12 | Node lifecycle collapsed to 4 states in UI (spec has 10) | WebUI |
+| M13 | No WebSocket for real-time task updates | WebUI |
+| M14 | No dark mode despite design system tokens | WebUI |
+| M15 | Console viewer has no clipboard paste support | WebUI |
+| M16 | chvctl routes through BFF HTTP, not local Unix socket | CLI |
+| M17 | No mutation confirmation prompts in chvctl | CLI |
+| M18 | Compat matrix missing nwd and stord components | Operations |
+| M19 | No shipped default compat.toml file | Operations |
+| M20 | No host network uplink failure detection | Operations |
+| M21 | Operation latency histograms absent from metrics | Observability |
+| M22 | No OpenTelemetry export scaffolding | Observability |
+| M23 | No log rotation configuration in agent | Observability |
+| M24 | Health endpoint missing storage/network sub-checks | Agent |
+| M25 | No rate limiting on BFF API endpoints | WebUI |
+| M26 | No CSRF protection on mutation endpoints | WebUI |
+| M27 | Images page missing upload progress indicator | WebUI |
+| M28 | No pagination on VM list (unbounded query) | WebUI |
 
-### LOW (4 remaining)
+### LOW (8)
 
 | # | Finding | Domain |
 |---|---------|--------|
-| L1 | No OpenTelemetry export scaffolding | Observability |
-| L2 | Volume checksum empty on FinalizeComplete | Migration |
-| L3 | No cluster detail page in WebUI | WebUI |
-| L4 | Test-code uses std::sync::Mutex in async context | Agent |
+| L1 | Test-code uses std::sync::Mutex in async context | Agent |
+| L2 | No cluster overview page in WebUI | WebUI |
+| L3 | Version endpoint returns hardcoded string | Agent |
+| L4 | No favicon or PWA manifest | WebUI |
+| L5 | Cargo.toml workspace members not alphabetically sorted | Build |
+| L6 | Some error messages lack context (bare "failed") | Error handling |
+| L7 | No --json output flag on chvctl commands | CLI |
+| L8 | UI build warnings (unused CSS selectors) | WebUI |
 
 ---
 
@@ -129,85 +193,93 @@
 
 | Area | Previous | Current | Detail |
 |------|----------|---------|--------|
-| chvctl CLI commands | 5/10 | 5/10 | Binary packaged; stor/nw/ops subcommands absent |
-| Failure handling | 5/13 | 6/13 | Circuit breaker added; host resource pressure gaps |
+| chvctl CLI commands | 5/10 | 4/10 | Only vm/node/image/event subcommands; stor/nw/ops/migrate/upgrade/health absent |
+| Failure handling | 6/13 | 5/13 | Circuit breaker works; host resource pressure gaps (disk, memory, network) |
 | Runtime sequences | 4/4 | 4/4 | All 4 core sequences implemented |
-| Monitoring | 2/10 | 5/10 | Agent metrics endpoint, host resources, convergence metrics |
-| Security | 4/10 | 5/10 | Cert rotation watcher added; mTLS not enforced end-to-end |
+| Monitoring | 5/10 | 4/10 | Metrics constants defined but not emitted; histograms absent |
+| Security | 5/10 | 5/10 | mTLS enforced on migration; cert rotation exists; no expiration automation |
 
 ---
 
-## What PR #49 Fixed (Previously Critical/High)
+## Score Comparison: Previous vs Current Assessment
 
-| Previous ID | Finding | Resolution |
-|-------------|---------|------------|
-| C1 | create_vm ignores ConnectivityState | ConnectivityTracker gates create_vm + migrate_vm |
-| C2 | disable_source_dirty_tracking no-op | Real RPC to source agent stord |
-| H1 (prev) | iSCSI StorageBackend absent | Full IscsiBackend (949 lines) |
-| H2 (prev) | Ceph RBD StorageBackend absent | Full CephRbdBackend (900 lines) |
-| H3 (prev) | eBPF stubs (log-only) | Real BPF map operations via syscall |
-| H5 (prev) | chvctl not in release tarball | Already present (verified) |
-| H6 (prev) | No host resource monitoring | sysinfo-based CPU/mem/disk metrics |
-| H7 (prev) | VM detail missing events/metrics tabs | Both tabs implemented |
-| H8 (prev) | Images delete bypasses BFF client | Routed through BFF deleteImage() |
-| M1 (prev) | No BFD/link health monitoring | LinkMonitor with check_all_links() |
-| M2 (prev) | No convergence metrics | EMA-based ConvergenceMetrics + JSON endpoint |
-| M3 (prev) | Agent metrics endpoint absent | Full Prometheus /metrics on port 9100 |
-| M4 (prev) | No circuit breaker | CircuitBreaker with Closed/Open/HalfOpen |
-| M5 (prev) | No compatibility matrix | CompatibilityMatrix with TOML + semver |
-| M6 (prev) | list_volumes BFF empty | Implemented |
-| M7 (prev) | list_storage_pools BFF empty | Implemented |
-| M8 (prev) | Filter dropdowns incomplete | Type + resource filters added |
-| M10 (prev) | No cert rotation | CertWatcher with mtime polling |
-| M11 (prev) | Migration timeout flat 7200s | Progressive per-round stall detection |
+The current assessment is **stricter** than the previous one. The previous assessment (post PR #49) checked whether code/structs/methods existed. This assessment checks whether they are **wired into production code paths** and **actually execute at runtime**.
+
+Examples of the stricter lens:
+- Generation check: struct exists, method exists, but SQL queries don't use it = **not implemented**
+- SystemdNodeUpgrader: full trait impl exists, but UpgradeOrchestrator uses a no-op = **not wired**
+- eBPF programs: load functions exist, but failures are swallowed = **security gap**
+- Metrics constants: defined in code, but never passed to Prometheus endpoint = **not emitting**
+- iSCSI/Ceph backends: full code exists, but chv-stord binary doesn't instantiate them = **unreachable**
 
 ---
 
 ## Priority Recommendations (Next Sprint)
 
-### P0: Blocks Production
+### P0: Blocks Production (Fix This Week)
 
-1. **Fix H1**: Make mTLS mandatory on migration channel — fail hard when `tls_config` is None (2 days)
-2. **Fix H5**: Implement partition reconnect flush ordering — detect agent reconnection, flush deferred messages in order (1 week)
+| # | Finding | Fix | Effort |
+|---|---------|-----|--------|
+| 1 | C1: Generation check not enforced in SQL | Add `WHERE generation <= ?` to all update/insert queries in store | 2 days |
+| 2 | C3: dirty_blocks_remaining never reported | Wire stord DirtyTracker count into migration status RPC response | 1 day |
+| 3 | C5: Link monitor not wired to event loop | Call `link_monitor.check_all_links()` from nwd tick loop | 1 day |
+| 4 | C6: eBPF failure swallowed | Change warn to error + set NetworkReady=false on load failure | 1 day |
+| 5 | C7: No disk full detection | Add disk usage check in agent tick; transition to Degraded at 90% | 1 day |
 
-### P1: Blocks Multi-Tenant Beta
+### P1: Blocks Multi-Node Beta
 
-3. **Fix H2**: Auto-load eBPF programs on VM NIC attach — call `load_policy_program` from `attach_vm_nic` (3 days)
-4. **Fix H3**: Clean FDB entries on VM detach — add `delete_fdb_entry` calls to `detach_vm_nic` (2 days)
-5. **Fix M7**: Tear down VXLAN interfaces in `delete_topology` (1 day)
-6. **Fix M1**: Implement IOPS/bandwidth via cgroup blkio or dm-throttle (1 week)
+| # | Finding | Fix | Effort |
+|---|---------|-----|--------|
+| 6 | C2: Reconnect flush absent | Implement deferred message queue flush on state transition Disconnected→Connected | 3 days |
+| 7 | C4: iSCSI/Ceph unreachable | Wire backend selection via config in chv-stord main.rs | 1 day |
+| 8 | H2: No state transition guards | Add valid_transitions map; reject invalid in set_node_state | 2 days |
+| 9 | H7: NodeUpgrader not wired | Replace no-op upgrader with SystemdNodeUpgrader in UpgradeOrchestrator::new() | 1 day |
+| 10 | H15: FinalSync not paused | Coordinate: pause VM → flush dirty → resume at dest | 3 days |
+| 11 | H24: peer_vteps not persisted | Add SQLite table + INSERT/DELETE in add_peer/remove_peer | 2 days |
 
 ### P2: Blocks GA
 
-7. **Fix H4**: Concrete `NodeUpgrader` implementation with drain/upgrade/health/rollback (2 weeks)
-8. **Fix M3**: Wire `CompatibilityMatrix::check_all` into startup boot gate (2 days)
-9. **Fix M4/M5**: Add Unix socket mode to chvctl + stor/nw/ops subcommands (1 week)
-10. **Fix M6**: Add host disk/memory pressure detection with Degraded transitions (1 week)
+| # | Finding | Fix | Effort |
+|---|---------|-----|--------|
+| 12 | H14: IOPS not enforced | Implement cgroup blkio throttle in storage backends | 1 week |
+| 13 | H41: 6 CLI subcommands missing | Scaffold stor/nw/ops/migrate/upgrade/health in chvctl | 1 week |
+| 14 | H10: Metrics not emitted | Wire METRIC_* constants into metrics_handler format string | 2 days |
+| 15 | H11: operation_id missing | Add operation_id field to tracing spans in agent/CP | 2 days |
+| 16 | H26-H30: eBPF hardening | VNI validation, denied counter, crash detection, FDB cleanup | 1 week |
+| 17 | H32-H40: WebUI gaps | Node tabs, task detail, audit logging, maintenance window | 1 week |
 
 ### P3: Polish
 
-11. **Fix M2**: Apply backpressure slow_down_factor to send rate (2 days)
-12. **Fix M8**: Implement Draining state evacuation logic (3 days)
-13. **Fix M9**: Expose full 10-state node lifecycle in WebUI (2 days)
+| # | Finding | Fix | Effort |
+|---|---------|-----|--------|
+| 18 | M3: Draining evacuation | Implement VM migration requests on Draining entry | 3 days |
+| 19 | M12: Node lifecycle in UI | Expose all 10 states in node status component | 2 days |
+| 20 | M16: chvctl Unix socket | Add --socket flag for local agent communication | 2 days |
+| 21 | M21-M23: Observability | Histograms, OTEL scaffold, log rotation | 1 week |
 
 ---
 
 ## Score Progression
 
-| Assessment | Date | Score | Phase 1 | Phase 2 | Phase 3 |
-|-----------|------|-------|---------|---------|---------|
-| Initial | 2026-05-08 | 5.4/10 | 70% | 35% | 10% |
-| Post PR #43-#45 | 2026-05-11 | 6.6/10 | 85% | 55% | 30% |
-| **Post PR #49** | **2026-05-11** | **7.2/10** | **90%** | **72%** | **50%** |
+| Assessment | Date | Score | Phase 1 | Phase 2 | Phase 3 | Methodology |
+|-----------|------|-------|---------|---------|---------|-------------|
+| Initial | 2026-05-08 | 5.4/10 | 70% | 35% | 10% | Quick scan |
+| Post PR #43-#45 | 2026-05-11 | 6.6/10 | 85% | 55% | 30% | Existence check |
+| Post PR #49 | 2026-05-11 | 7.2/10 | 90% | 72% | 50% | Existence check |
+| **Post PR #50 (strict)** | **2026-05-11** | **6.9/10** | **85%** | **68%** | **45%** | **Runtime wiring verification** |
+
+*Note: The apparent score decrease from 7.2 to 6.9 reflects a stricter methodology (checking runtime wiring, not just code existence), not a regression in code quality. The codebase has more code than before PR #50 — the new assessment is simply more honest about what actually executes in production.*
 
 ---
 
 ## Methodology Notes
 
-- Each domain analyzed by dedicated agent reading ALL relevant spec documents AND corresponding implementation
-- Scores reflect "percentage of spec that has working implementation," not code quality
-- 75% means roughly three-quarters of specified behaviors exist and function correctly
-- Single-node happy path (create/start/stop/delete VM with local storage) is production-quality
-- Multi-node migration, overlay networking, and partition recovery are substantially implemented with enforcement gaps
-- Operational tooling (CLI, failure handling, monitoring) remains the largest area needing work
-- Assessment conducted against HEAD of main branch (commit 503d3c2d)
+- Each domain analyzed by dedicated subagent reading ALL relevant spec documents AND corresponding implementation files line-by-line
+- Scores reflect "percentage of spec that has **working, wired, runtime-reachable** implementation"
+- Code that exists but is never called from production paths counts as 0% implemented
+- Structs/traits defined but with no-op methods count as 25% (design intent captured)
+- Methods implemented but with swallowed errors/warnings count as 50% (partial)
+- 69% means roughly two-thirds of specified behaviors are both implemented AND reachable at runtime
+- Single-node happy path (create/start/stop/delete VM with local storage) remains production-quality
+- Multi-node migration, overlay networking, and partition recovery have structural wiring gaps
+- Assessment conducted against HEAD of main branch (post PR #50 merge)
