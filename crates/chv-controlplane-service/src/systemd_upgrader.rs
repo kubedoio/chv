@@ -147,7 +147,7 @@ impl NodeUpgrader for SystemdNodeUpgrader {
 
             PreCheck::NoActiveMigrations => {
                 let count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM migrations WHERE (source_node_id = $1 OR destination_node_id = $1) AND phase IN ('Pending', 'InProgress')",
+                    "SELECT COUNT(*) FROM migrations WHERE (source_node_id = $1 OR destination_node_id = $1) AND phase NOT IN ('Completed', 'Failed', 'RolledBack')",
                 )
                 .bind(node_id)
                 .fetch_one(&self.pool)

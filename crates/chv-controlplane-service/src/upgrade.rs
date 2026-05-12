@@ -321,13 +321,15 @@ impl UpgradeOrchestrator {
     /// Rollback all upgraded nodes to their previous version.
     pub async fn rollback(&mut self, plan: &UpgradePlan, reason: &str) -> Result<(), ChvError> {
         info!(reason = %reason, "initiating full rollback");
-        self.state = UpgradeState::RollingBack {
-            reason: reason.to_string(),
-        };
 
+        // Capture nodes to rollback BEFORE overwriting state
         let nodes_to_rollback = match &self.state {
             UpgradeState::Upgrading { completed, .. } => completed.clone(),
             _ => plan.nodes.clone(),
+        };
+
+        self.state = UpgradeState::RollingBack {
+            reason: reason.to_string(),
         };
 
         let mut failures = Vec::new();
