@@ -82,6 +82,18 @@ Nodes progress through explicit states before they are schedulable:
 
 Only `TenantReady` nodes receive new VMs. Nodes may also enter `Degraded`, `Draining`, `Maintenance`, or `Failed`.
 
+#### Drain Evacuation Flow
+
+When a node enters `Draining` (via `chvctl node drain` or the BFF API):
+
+1. Scheduling is paused on the node (no new VMs placed).
+2. The agent reconcile loop detects `Draining` state and iterates running VMs.
+3. For each VM, a migration request is issued to the control plane (tracked in `drain_requested_vms` to avoid duplicates).
+4. When `vm_count` reaches 0 (all VMs evacuated or stopped), the node transitions to `Maintenance`.
+5. After maintenance, an operator marks the node `TenantReady` to resume scheduling.
+
+Implementation: `ReconcileEngine` in `crates/chv-agent-core/src/reconcile.rs` handles the `NodeState::Draining` arm.
+
 See ADR-003: [Node State Machine](./specs/adr/003-node-state-machine.md)
 
 ### Task State
@@ -103,21 +115,39 @@ MVP-1 uses a host-side `chv-stord` daemon. Supported storage classes:
 
 The storage-VM / NBD model was explicitly rejected for MVP-1.
 
+### Migration Security Model
+
+Storage migration between nodes is secured with mandatory mTLS:
+
+- **mTLS enforcement**: `MigrationSender` rejects plaintext connections. If `tls_config` is not provided, `start_migration()` returns `FAILED_PRECONDITION`. There is no fallback to `http://`.
+- **Certificate validation**: The sender presents the node certificate issued by the CP CA and validates the destination's certificate against the same CA.
+- **Backpressure**: The receiver can send `Backpressure` messages with a `slow_down_factor`. The sender inserts throttle sleeps proportional to this factor between chunk sends.
+- **Flow control**: A sliding send window (default 16 in-flight chunks) prevents memory exhaustion on either side.
+- **MigrationReaper**: A background task (`crates/chv-controlplane-service/src/migration_reaper.rs`) scans every 60s for migrations stuck beyond 2 hours and force-transitions them to `Failed`.
+
+Implementation: `crates/chv-stord-core/src/migration/sender.rs`
+
 See ADR-004: [Storage Datapath Model](./specs/adr/004-storage-datapath.md)
 
 ## Network Service Model
 
-MVP-1 uses Linux bridge + netns + veth + nftables via a host-side `chv-nwd` daemon. Advanced features deferred:
+MVP-1 uses Linux bridge + netns + veth + nftables via a host-side `chv-nwd` daemon. Advanced features:
 
-- eBPF-based data plane
-- Distributed overlay networking
-- Full flow-state replication
+- eBPF-based data plane (policy + ingress programs auto-loaded on NIC attach)
+- VXLAN overlay networking with FDB cleanup on VM detach
+- VXLAN teardown via `delete_topology` (cleans up VXLAN interfaces)
 
 See ADR-005: [Network Service Model](./specs/adr/005-network-service-model.md)
 
 ## Partition and Autonomy
 
 During control-plane outages, nodes preserve runtime state and allow limited local operations (self-heal, VM stop/reboot). They deny new VM creation, migrations, and destructive topology mutations. Upon reconnection, nodes converge back to the control-plane desired state.
+
+### Partition Reconnect Flush
+
+When an agent detects that it has reconnected to the control plane after a partition (state transitions from `Disconnected` to `Connected`), it flushes all pending messages queued during the outage. The flush is ordered and atomic per-message: if a dispatch fails, remaining messages stay queued for the next attempt.
+
+Implementation: `ControlPlaneClient::flush_pending_messages()` in `crates/chv-agent-core/src/control_plane.rs`. Pending messages are stored in `NodeCache::pending_control_plane_messages`.
 
 See ADR-006: [Partition and Autonomy Policy](./specs/adr/006-partition-policy.md)
 
@@ -130,7 +160,49 @@ The default upgrade path is a bundle-tested node release. One-step rollback to t
 - Cloud Hypervisor
 - Host helper tools
 
+### Upgrade Orchestration Flow
+
+Rolling upgrades are driven by `UpgradeOrchestrator` (trait-based, strategy pattern):
+
+```
+UpgradeOrchestrator
+    │ plan(target_version, strategy, nodes)
+    ▼
+For each node (rolling, one-at-a-time):
+    1. Run pre-checks (VersionCompatible, DiskSpace, NoActiveMigrations, HealthCheck)
+    2. Drain node (pause scheduling, wait for VMs to evacuate)
+    3. Write upgrade intent to node_desired_state (Maintenance + target_version)
+    4. Agent observes desired state → performs binary swap + systemd restart
+    5. Poll node_observed_state for TenantReady (health check)
+    6. If health check fails → rollback_node (restore previous binary)
+    7. Un-drain node (resume scheduling)
+```
+
+The concrete implementation is `SystemdNodeUpgrader` (`crates/chv-controlplane-service/src/systemd_upgrader.rs`), which interacts with the SQLite state store and the node gRPC client pool.
+
+### Compatibility Matrix Boot Gate
+
+Before any upgrade proceeds, the `CompatibilityMatrix` (`crates/chv-controlplane-service/src/compat.rs`) validates that the target version falls within the allowed range for each component. Incompatible versions are rejected before draining begins. The matrix is loaded from `/etc/chv/compat-matrix.toml`.
+
 See ADR-007: [Upgrade and Rollback Policy](./specs/adr/007-upgrade-rollback.md)
+
+## Resilience
+
+### Circuit Breaker
+
+Node communication from the control plane is protected by a circuit breaker (`crates/chv-controlplane-service/src/circuit_breaker.rs`). States: `Closed` (normal) → `Open` (reject immediately after N failures) → `HalfOpen` (probe). Defaults: 5 failures to trip, 30s recovery timeout, 3 successful probes to close.
+
+The `with_circuit_breaker()` helper wraps any async operation and automatically records success/failure. When open, calls return `ChvError::BackendUnavailable` without attempting the RPC.
+
+### Deep Health Checks
+
+The `/health/deep` endpoint (`GET /health/deep`) reports component-level health:
+
+- **database**: SQLite connectivity with latency measurement
+- **agent_socket_dir**: Agent runtime directory exists and is readable
+- **agent_connectivity**: Can establish a Unix socket connection to at least one agent
+
+Status values: `healthy` (all pass), `degraded` (DB pass but agent issues), `unhealthy` (DB fail). Degraded returns HTTP 200 (still serving); unhealthy returns 503.
 
 ## Current Implementation Phase
 
@@ -149,20 +221,24 @@ See ADR-007: [Upgrade and Rollback Policy](./specs/adr/007-upgrade-rollback.md)
 - Serial console backend (WebSocket → PTY → CHV)
 - Hypervisor settings DB + BFF (orchestrator merge partially wired)
 - Basic CI (GitHub Actions)
+- Rolling upgrade orchestration with `SystemdNodeUpgrader` and compatibility matrix
+- Storage migration with mTLS enforcement, backpressure, and flow control
+- Circuit breaker on node communication
+- Deep health checks (database, agent socket, agent connectivity)
+- Migration reaper (auto-fails stuck migrations after 2h)
+- Drain evacuation (automatic VM migration on node drain)
+- Partition reconnect flush (pending messages delivered on reconnect)
+- eBPF policy auto-load on NIC attach
+- FDB cleanup on VM detach
+- VXLAN teardown on topology delete
 
-### Active Gaps (Sprints 11–15)
+### Remaining Gaps
 
 | Area | Gap | Priority |
 |------|-----|----------|
-| Backend | Network mutations (`mutate_network` returns `NotImplemented`) | P1 |
-| Backend | Quota enforcement at VM-create time | P1 |
 | Backend | Backup jobs & history stubbed | P2 |
-| Agent | Stord/NWD mock stubs cover many RPCs; real clients incomplete | P1 |
-| Agent | Console token replay prevention hardening | P1 |
-| UI | Production-readiness Tailwind-first refactor not started | P1 |
+| UI | Production-readiness Tailwind-first refactor not started | P2 |
 | UI | Command palette TODO | P2 |
-| Infra | DB ownership on deploy; agent console port collision | P0 |
-| Infra | Nginx WebSocket proxy partially missing | P1 |
 
 ## Technology Choices
 
