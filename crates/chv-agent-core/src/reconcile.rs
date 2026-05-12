@@ -193,13 +193,23 @@ impl Reconciler {
                 }
             }
             NodeState::TenantReady => {
-                self.degraded_ticks = 0;
                 let net_ok = self.reconcile_networks().await.is_ok();
                 let vol_ok = self.reconcile_volumes().await.is_ok();
                 let vm_ok = self.reconcile_vms().await.is_ok();
-                if !net_ok && !vol_ok && !vm_ok {
-                    warn!("all reconcile operations failed, transitioning to Degraded");
-                    self.transition_state(NodeState::Degraded).await?;
+                if net_ok && vol_ok && vm_ok {
+                    self.degraded_ticks = 0;
+                } else {
+                    self.degraded_ticks += 1;
+                    warn!(
+                        net_ok = net_ok,
+                        vol_ok = vol_ok,
+                        vm_ok = vm_ok,
+                        degraded_ticks = self.degraded_ticks,
+                        "reconcile failure detected"
+                    );
+                    if self.degraded_ticks >= 3 {
+                        self.transition_state(NodeState::Degraded).await?;
+                    }
                 }
             }
             NodeState::Failed => {
@@ -499,26 +509,40 @@ impl Reconciler {
                 // Firewall policy
                 if let Some(rules) = network_firewall_rules.get(net_id) {
                     let fw_op_id = format!("{}-firewall", op_id);
-                    let policy_json = serde_json::to_vec(rules).unwrap_or_default();
-                    if let Err(e) = nwd
-                        .set_firewall_policy(net_id, "v1", policy_json, Some(&fw_op_id))
-                        .await
-                    {
-                        warn!(network_id = %net_id, error = %e, "failed to set firewall policy");
+                    match serde_json::to_vec(rules) {
+                        Ok(policy_json) => {
+                            if let Err(e) = nwd
+                                .set_firewall_policy(net_id, "v1", policy_json, Some(&fw_op_id))
+                                .await
+                            {
+                                warn!(network_id = %net_id, error = %e, "failed to set firewall policy");
+                            }
+                        }
+                        Err(e) => {
+                            warn!(network_id = %net_id, error = %e, "failed to serialize firewall rules, skipping policy update");
+                        }
                     }
                 }
                 // NAT policy
                 if network_nat_enabled.get(net_id).copied().unwrap_or(false) {
                     let nat_op_id = format!("{}-nat", op_id);
-                    let policy_json = network_nat_rules
-                        .get(net_id)
-                        .map(|v| serde_json::to_vec(v).unwrap_or_default())
-                        .unwrap_or_default();
-                    if let Err(e) = nwd
-                        .set_nat_policy(net_id, "v1", policy_json, Some(&nat_op_id))
-                        .await
-                    {
-                        warn!(network_id = %net_id, error = %e, "failed to set nat policy");
+                    let policy_json = match network_nat_rules.get(net_id) {
+                        Some(v) => match serde_json::to_vec(v) {
+                            Ok(json) => Some(json),
+                            Err(e) => {
+                                warn!(network_id = %net_id, error = %e, "failed to serialize NAT rules, skipping policy update");
+                                None
+                            }
+                        },
+                        None => Some(Vec::new()),
+                    };
+                    if let Some(policy_json) = policy_json {
+                        if let Err(e) = nwd
+                            .set_nat_policy(net_id, "v1", policy_json, Some(&nat_op_id))
+                            .await
+                        {
+                            warn!(network_id = %net_id, error = %e, "failed to set nat policy");
+                        }
                     }
                 }
                 // DHCP scope

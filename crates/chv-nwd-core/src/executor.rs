@@ -385,8 +385,18 @@ impl LinuxExecutor {
     }
 
     async fn run_nft_quiet(args: &[&str]) -> Result<(), ()> {
-        let _ = Command::new("nft").args(args).output().await;
-        Ok(())
+        match Command::new("nft").args(args).output().await {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::debug!(args = ?args, stderr = %stderr, "nft command failed (non-fatal)");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::debug!(args = ?args, error = %e, "nft command execution failed (non-fatal)");
+                Ok(())
+            }
+            Ok(_) => Ok(()),
+        }
     }
 
     async fn run_nft_idempotent(args: &[&str]) -> Result<(), ChvError> {
@@ -646,14 +656,25 @@ impl NetworkExecutor for LinuxExecutor {
         // Assign gateway IP to bridge
         if !spec.gateway_ip.is_empty() && !spec.subnet_cidr.is_empty() {
             let prefix = spec.subnet_cidr.split('/').nth(1).unwrap_or("24");
-            let _ = Self::run_ip(&[
+            if let Err(e) = Self::run_ip(&[
                 "addr",
                 "add",
                 &format!("{}/{}", spec.gateway_ip, prefix),
                 "dev",
                 &spec.bridge_name,
             ])
-            .await;
+            .await
+            {
+                let reason = e.to_string();
+                if !reason.contains("File exists") && !reason.contains("RTNETLINK answers: File exists") {
+                    tracing::warn!(
+                        bridge = %spec.bridge_name,
+                        gateway = %spec.gateway_ip,
+                        error = %e,
+                        "failed to assign gateway IP to bridge"
+                    );
+                }
+            }
         }
 
         // Start dnsmasq for DHCP
