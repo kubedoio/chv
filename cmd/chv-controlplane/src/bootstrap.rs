@@ -294,6 +294,12 @@ pub async fn build_service(
 
     let node_client_pool = NodeClientPool::new();
 
+    let overlay_manager = chv_controlplane_service::OverlayManager::new(
+        vtep_repo.clone(),
+        node_client_pool.clone(),
+        config.agent_socket_pattern.clone(),
+    );
+
     let orchestrator = Orchestrator::new(
         pool.clone(),
         operation_repo.clone(),
@@ -302,7 +308,8 @@ pub async fn build_service(
         config.firmware_path.clone(),
         node_client_pool.clone(),
         convergence_metrics,
-    );
+    )
+    .with_overlay_manager(overlay_manager);
     let orchestrator_handle = tokio::spawn(orchestrator.run(shutdown_rx.clone()));
 
     let backup_worker = chv_controlplane_service::BackupWorker::new(
@@ -311,7 +318,10 @@ pub async fn build_service(
         config.agent_socket_pattern.clone(),
         node_client_pool.clone(),
     );
-    let backup_worker_handle = tokio::spawn(backup_worker.run(shutdown_rx));
+    let backup_worker_handle = tokio::spawn(backup_worker.run(shutdown_rx.clone()));
+
+    let migration_reaper = chv_controlplane_service::MigrationReaper::new(pool.clone());
+    let reaper_handle = tokio::spawn(migration_reaper.run(shutdown_rx));
 
     Ok(ControlPlaneService::new(
         runtime,
@@ -324,6 +334,6 @@ pub async fn build_service(
             (*lifecycle_service).clone(),
         ),
         shutdown_tx,
-        vec![orchestrator_handle, backup_worker_handle],
+        vec![orchestrator_handle, backup_worker_handle, reaper_handle],
     ))
 }

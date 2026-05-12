@@ -337,15 +337,35 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .await
         {
             Ok((namespace_handle, tap_handle)) => {
-                // Auto-load eBPF programs on the new tap interface
+                // Auto-load eBPF programs on the new tap interface — MANDATORY for tenant isolation
                 let bridge_name = format!("br-{}", &nic.network_id[..nic.network_id.len().min(8)]);
                 if let Err(e) = self.ebpf.load_policy_program(&tap_handle).await {
-                    tracing::error!(tap = %tap_handle, error = %e, "failed to load eBPF policy program — traffic will pass UNFILTERED");
+                    tracing::error!(tap = %tap_handle, error = %e, "eBPF policy load failed — refusing NIC attach (default-deny)");
                     self.ebpf_load_failures.fetch_add(1, Ordering::Relaxed);
+                    // Detach the NIC we just attached to avoid dangling resources
+                    let _ = self.executor.detach_vm_nic(&nic.nic_id).await;
+                    let err = ChvError::Internal {
+                        reason: format!("eBPF policy program failed to load on tap {tap_handle}: {e}"),
+                    };
+                    return Ok(Response::new(proto::AttachVmNicResponse {
+                        result: Some(Self::err_result(&err)),
+                        namespace_handle: String::new(),
+                        tap_handle: String::new(),
+                    }));
                 }
                 if let Err(e) = self.ebpf.load_ingress_program(&bridge_name).await {
-                    tracing::error!(bridge = %bridge_name, error = %e, "failed to load eBPF ingress program — traffic will pass UNFILTERED");
+                    tracing::error!(bridge = %bridge_name, error = %e, "eBPF ingress load failed — refusing NIC attach (default-deny)");
                     self.ebpf_load_failures.fetch_add(1, Ordering::Relaxed);
+                    // Detach the NIC we just attached to avoid dangling resources
+                    let _ = self.executor.detach_vm_nic(&nic.nic_id).await;
+                    let err = ChvError::Internal {
+                        reason: format!("eBPF ingress program failed to load on bridge {bridge_name}: {e}"),
+                    };
+                    return Ok(Response::new(proto::AttachVmNicResponse {
+                        result: Some(Self::err_result(&err)),
+                        namespace_handle: String::new(),
+                        tap_handle: String::new(),
+                    }));
                 }
 
                 Ok(Response::new(proto::AttachVmNicResponse {

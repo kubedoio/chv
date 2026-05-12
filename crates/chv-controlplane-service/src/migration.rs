@@ -943,7 +943,12 @@ async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Resul
                 elapsed_secs = started.elapsed().as_secs(),
                 "convergence exceeded max total time (7200s), forcing transition"
             );
-            return Ok(());
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "migration {} convergence timeout: exceeded max total time ({}s)",
+                    state.migration_id, MAX_TOTAL_SECS
+                ),
+            });
         }
 
         let row: Option<(String, i64, i64, i64, i64)> = sqlx::query_as(
@@ -1037,7 +1042,12 @@ async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Resul
                         dirty_remaining = dirty_remaining,
                         "convergence round limit reached, forcing transition to memory migration"
                     );
-                    return Ok(());
+                    return Err(ChvError::Internal {
+                        reason: format!(
+                            "migration {} convergence failed: round limit reached (round={}, dirty_remaining={})",
+                            state.migration_id, round, dirty_remaining
+                        ),
+                    });
                 }
             }
             None => {

@@ -10,6 +10,7 @@ mod error;
 mod inventory;
 mod lifecycle;
 pub mod migration;
+mod migration_reaper;
 mod node_client;
 mod node_client_pool;
 mod orchestrator;
@@ -31,6 +32,7 @@ pub use enrollment::{
 pub use error::ControlPlaneServiceError;
 pub use inventory::{InventoryService, InventoryServiceImplementation};
 pub use lifecycle::{LifecycleService, LifecycleServiceImplementation};
+pub use migration_reaper::MigrationReaper;
 pub use node_client::NodeClient;
 pub use node_client_pool::NodeClientPool;
 pub use orchestrator::Orchestrator;
