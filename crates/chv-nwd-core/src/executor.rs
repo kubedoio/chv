@@ -1224,6 +1224,7 @@ impl NetworkExecutor for LinuxExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn linux_executor_implements_network_executor() {
@@ -1297,6 +1298,290 @@ mod tests {
                 "--conf-file=/run/chv/nwd/dnsmasq-net.conf".to_string(),
                 "--pid-file=/run/chv/nwd/dnsmasq-net.pid".to_string(),
             ]
+        );
+    }
+
+    /// Mock executor that tracks VXLAN-related calls for verifying delete_topology behavior.
+    struct VxlanTrackingExecutor {
+        delete_vxlan_calls: Mutex<Vec<(String, u32)>>,
+        delete_fdb_calls: Mutex<Vec<(String, u32, String, String)>>,
+    }
+
+    impl VxlanTrackingExecutor {
+        fn new() -> Self {
+            Self {
+                delete_vxlan_calls: Mutex::new(Vec::new()),
+                delete_fdb_calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NetworkExecutor for VxlanTrackingExecutor {
+        async fn ensure_topology(
+            &self,
+            _spec: &TopologySpec,
+        ) -> Result<TopologyApplyResult, ChvError> {
+            unimplemented!()
+        }
+
+        async fn delete_topology(
+            &self,
+            _network_id: &str,
+            state: &crate::state::TopologyState,
+        ) -> Result<(), ChvError> {
+            // Replicate the VXLAN teardown logic from LinuxExecutor
+            if let Some(vni) = state.vni {
+                for vtep_ip in &state.peer_vteps {
+                    self.delete_fdb_entry(&state.namespace_name, vni, "00:00:00:00:00:00", vtep_ip)
+                        .await?;
+                }
+                self.delete_vxlan_interface(&state.namespace_name, vni)
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn health(
+            &self,
+            _network_id: &str,
+            _state: &crate::state::TopologyState,
+        ) -> Result<String, ChvError> {
+            unimplemented!()
+        }
+
+        async fn attach_vm_nic(
+            &self,
+            _network_id: &str,
+            _nic_id: &str,
+            _vm_id: &str,
+            _bridge_name: &str,
+            _mac_address: &str,
+            _ip_address: &str,
+        ) -> Result<(String, String), ChvError> {
+            unimplemented!()
+        }
+
+        async fn detach_vm_nic(&self, _nic_id: &str) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn set_firewall_policy(
+            &self,
+            _network_id: &str,
+            _policy_version: &str,
+            _policy_json: &[u8],
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn set_nat_policy(
+            &self,
+            _network_id: &str,
+            _policy_version: &str,
+            _policy_json: &[u8],
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn ensure_dhcp_scope(
+            &self,
+            _network_id: &str,
+            _cidr: &str,
+            _range_start: &str,
+            _range_end: &str,
+            _dns_servers: &[String],
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn ensure_dns_scope(
+            &self,
+            _network_id: &str,
+            _forwarders: &[&str],
+            _static_records: &std::collections::HashMap<String, String>,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn expose_service(
+            &self,
+            _network_id: &str,
+            _exposure_id: &str,
+            _protocol: &str,
+            _external_port: u32,
+            _target_ip: &str,
+            _target_port: u32,
+            _mode: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn withdraw_service_exposure(
+            &self,
+            _network_id: &str,
+            _exposure_id: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn create_vxlan_interface(
+            &self,
+            _namespace: &str,
+            _bridge_name: &str,
+            _vni: u32,
+            _vtep_ip: &str,
+            _vtep_port: u32,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError> {
+            self.delete_vxlan_calls
+                .lock()
+                .unwrap()
+                .push((namespace.to_string(), vni));
+            Ok(())
+        }
+
+        async fn add_fdb_entry(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+            _mac_address: &str,
+            _vtep_ip: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn delete_fdb_entry(
+            &self,
+            namespace: &str,
+            vni: u32,
+            mac_address: &str,
+            vtep_ip: &str,
+        ) -> Result<(), ChvError> {
+            self.delete_fdb_calls.lock().unwrap().push((
+                namespace.to_string(),
+                vni,
+                mac_address.to_string(),
+                vtep_ip.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn replace_fdb_entry(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+            _mac_address: &str,
+            _new_vtep_ip: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn send_gratuitous_arp(
+            &self,
+            _namespace: &str,
+            _bridge_name: &str,
+            _vm_ip: &str,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn set_arp_suppression(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+            _enabled: bool,
+        ) -> Result<(), ChvError> {
+            unimplemented!()
+        }
+
+        async fn get_overlay_status(
+            &self,
+            _namespace: &str,
+            _vni: u32,
+        ) -> Result<OverlayStatusInfo, ChvError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_topology_with_vni_cleans_up_vxlan() {
+        let executor = VxlanTrackingExecutor::new();
+        let state = crate::state::TopologyState {
+            network_id: "net-vxlan".to_string(),
+            tenant_id: "t1".to_string(),
+            bridge_name: "br-net-vxlan".to_string(),
+            namespace_name: "ns-net-vxlan".to_string(),
+            subnet_cidr: "10.0.0.0/24".to_string(),
+            gateway_ip: "10.0.0.1".to_string(),
+            runtime_status: "ensured".to_string(),
+            vni: Some(100),
+            peer_vteps: vec!["192.168.1.10".to_string(), "192.168.1.11".to_string()],
+        };
+
+        executor.delete_topology("net-vxlan", &state).await.unwrap();
+
+        // Should have deleted FDB entries for each peer VTEP
+        let fdb_deletes = executor.delete_fdb_calls.lock().unwrap();
+        assert_eq!(fdb_deletes.len(), 2);
+        assert_eq!(
+            fdb_deletes[0],
+            (
+                "ns-net-vxlan".to_string(),
+                100,
+                "00:00:00:00:00:00".to_string(),
+                "192.168.1.10".to_string()
+            )
+        );
+        assert_eq!(
+            fdb_deletes[1],
+            (
+                "ns-net-vxlan".to_string(),
+                100,
+                "00:00:00:00:00:00".to_string(),
+                "192.168.1.11".to_string()
+            )
+        );
+
+        // Should have deleted the VXLAN interface
+        let vxlan_deletes = executor.delete_vxlan_calls.lock().unwrap();
+        assert_eq!(vxlan_deletes.len(), 1);
+        assert_eq!(vxlan_deletes[0], ("ns-net-vxlan".to_string(), 100));
+    }
+
+    #[tokio::test]
+    async fn delete_topology_without_vni_skips_vxlan() {
+        let executor = VxlanTrackingExecutor::new();
+        let state = crate::state::TopologyState {
+            network_id: "net-plain".to_string(),
+            tenant_id: "t1".to_string(),
+            bridge_name: "br-net-plain".to_string(),
+            namespace_name: "ns-net-plain".to_string(),
+            subnet_cidr: "10.0.0.0/24".to_string(),
+            gateway_ip: "10.0.0.1".to_string(),
+            runtime_status: "ensured".to_string(),
+            vni: None,
+            peer_vteps: Vec::new(),
+        };
+
+        executor.delete_topology("net-plain", &state).await.unwrap();
+
+        // No VXLAN cleanup should occur
+        let fdb_deletes = executor.delete_fdb_calls.lock().unwrap();
+        assert_eq!(
+            fdb_deletes.len(),
+            0,
+            "no FDB deletes expected when vni is None"
+        );
+
+        let vxlan_deletes = executor.delete_vxlan_calls.lock().unwrap();
+        assert_eq!(
+            vxlan_deletes.len(),
+            0,
+            "no VXLAN delete expected when vni is None"
         );
     }
 }

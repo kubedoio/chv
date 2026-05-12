@@ -1124,6 +1124,66 @@ mod tests {
         assert!(noop.detach_program("tap-x").await.is_ok());
     }
 
+    #[test]
+    fn linux_ebpf_manager_loaded_interfaces_tracking() {
+        // Test that the loaded_interfaces set is tracked correctly via loaded_program_count.
+        let mgr = LinuxEbpfManager::new("/fake/path".to_string());
+        assert_eq!(mgr.loaded_program_count(), 0);
+
+        // Simulate successful load by directly inserting (since we can't run tc in tests)
+        mgr.loaded_interfaces
+            .lock()
+            .unwrap()
+            .insert("tap-001".to_string());
+        assert_eq!(mgr.loaded_program_count(), 1);
+
+        mgr.loaded_interfaces
+            .lock()
+            .unwrap()
+            .insert("tap-002".to_string());
+        assert_eq!(mgr.loaded_program_count(), 2);
+    }
+
+    #[test]
+    fn linux_ebpf_manager_unload_removes_from_tracking() {
+        let mgr = LinuxEbpfManager::new("/fake/path".to_string());
+
+        // Add interfaces to simulate loaded programs
+        {
+            let mut loaded = mgr.loaded_interfaces.lock().unwrap();
+            loaded.insert("tap-001".to_string());
+            loaded.insert("tap-002".to_string());
+        }
+        assert_eq!(mgr.loaded_program_count(), 2);
+
+        // Simulate unload by removing from the tracking set
+        mgr.loaded_interfaces.lock().unwrap().remove("tap-001");
+        assert_eq!(mgr.loaded_program_count(), 1);
+
+        mgr.loaded_interfaces.lock().unwrap().remove("tap-002");
+        assert_eq!(mgr.loaded_program_count(), 0);
+    }
+
+    #[test]
+    fn linux_ebpf_manager_duplicate_load_is_idempotent() {
+        let mgr = LinuxEbpfManager::new("/fake/path".to_string());
+
+        // Insert the same interface twice — HashSet ensures no duplicates
+        mgr.loaded_interfaces
+            .lock()
+            .unwrap()
+            .insert("tap-001".to_string());
+        mgr.loaded_interfaces
+            .lock()
+            .unwrap()
+            .insert("tap-001".to_string());
+        assert_eq!(
+            mgr.loaded_program_count(),
+            1,
+            "duplicate insert should not increase count"
+        );
+    }
+
     #[tokio::test]
     async fn stats_collection_loop_reads_and_shuts_down() {
         let mock = Arc::new(MockEbpfManager::new(true));

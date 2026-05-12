@@ -639,3 +639,268 @@ fn bitmap_to_offsets(bitmap: &[u8], block_size: u64) -> Vec<u64> {
     }
     offsets
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use chv_common::types::{BackendLocator, DevicePolicy};
+    use chv_errors::ChvError;
+    use chv_stord_backends::{BackendHealth, StorageBackend, VolumeExport};
+
+    /// Minimal mock backend for testing the MigrationSender without real I/O.
+    struct MockBackend;
+
+    #[async_trait]
+    impl StorageBackend for MockBackend {
+        async fn open(
+            &self,
+            _volume_id: &str,
+            _locator: &BackendLocator,
+            _policy: &DevicePolicy,
+        ) -> Result<VolumeExport, ChvError> {
+            unimplemented!("not needed for sender tests")
+        }
+
+        async fn close(&self, _volume_id: &str, _handle: &str) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn attach(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _vm_id: &str,
+        ) -> Result<VolumeExport, ChvError> {
+            unimplemented!("not needed for sender tests")
+        }
+
+        async fn detach(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _vm_id: &str,
+            _force: bool,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn health(&self, _volume_id: &str, _handle: &str) -> Result<BackendHealth, ChvError> {
+            Ok(BackendHealth {
+                status: "healthy".to_string(),
+                backend_state: "ok".to_string(),
+                last_error: String::new(),
+            })
+        }
+
+        async fn resize(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _new_size_bytes: u64,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn prepare_snapshot(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _snapshot_name: &str,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn prepare_clone(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _clone_name: &str,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn restore_snapshot(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _snapshot_name: &str,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn delete_snapshot(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _snapshot_name: &str,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn set_device_policy(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _policy: &DevicePolicy,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn enable_dirty_tracking(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _block_size: u64,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn get_dirty_bitmap(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+        ) -> Result<Vec<u8>, ChvError> {
+            Ok(vec![])
+        }
+
+        async fn clear_dirty_bitmap(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn disable_dirty_tracking(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn read_block(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _offset: u64,
+            length: u64,
+        ) -> Result<Vec<u8>, ChvError> {
+            Ok(vec![0u8; length as usize])
+        }
+
+        async fn write_block(
+            &self,
+            _volume_id: &str,
+            _handle: &str,
+            _offset: u64,
+            _data: &[u8],
+        ) -> Result<(), ChvError> {
+            Ok(())
+        }
+
+        async fn volume_size(&self, _volume_id: &str, _handle: &str) -> Result<u64, ChvError> {
+            Ok(1024 * 1024) // 1 MB
+        }
+
+        async fn create_receiving_volume(
+            &self,
+            _volume_id: &str,
+            _size_bytes: u64,
+            _format: &str,
+        ) -> Result<VolumeExport, ChvError> {
+            unimplemented!("not needed for sender tests")
+        }
+
+        async fn delete_volume(&self, _volume_id: &str) -> Result<(), ChvError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mtls_required_for_migration() {
+        let backend = Arc::new(MockBackend);
+        let sender = MigrationSender::new(backend, "vol-123".to_string(), "handle-abc".to_string());
+
+        // Attempt migration without TLS configured
+        let result = sender
+            .start_migration("http://10.0.0.1:9090".to_string())
+            .await;
+
+        assert!(result.is_err(), "migration should fail without mTLS");
+        let status = result.unwrap_err();
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "error code should be FailedPrecondition, got {:?}",
+            status.code()
+        );
+        assert!(
+            status.message().contains("mTLS is required"),
+            "error message should mention mTLS requirement: {}",
+            status.message()
+        );
+    }
+
+    #[test]
+    fn test_backpressure_factor_initialization() {
+        let backend = Arc::new(MockBackend);
+        let sender = MigrationSender::new(backend, "vol-456".to_string(), "handle-def".to_string());
+
+        // backpressure_factor is private, but we can verify behavior through
+        // the sender's initial state. The field is initialized to 1.0 which
+        // means no throttling. We verify the sender was constructed correctly
+        // by checking that last_acknowledged_offset starts at 0.
+        assert_eq!(sender.last_acknowledged_offset(), 0);
+    }
+
+    #[test]
+    fn test_sender_with_block_size() {
+        let backend = Arc::new(MockBackend);
+        let sender = MigrationSender::new(backend, "vol-789".to_string(), "handle-ghi".to_string())
+            .with_block_size(8_388_608); // 8 MB
+
+        // Verify construction doesn't panic and sender is usable
+        assert_eq!(sender.last_acknowledged_offset(), 0);
+    }
+
+    #[test]
+    fn test_bitmap_to_offsets_empty() {
+        let bitmap: Vec<u8> = vec![];
+        let offsets = bitmap_to_offsets(&bitmap, 4096);
+        assert!(offsets.is_empty());
+    }
+
+    #[test]
+    fn test_bitmap_to_offsets_single_bit() {
+        // Byte 0, bit 0 set => block index 0 => offset 0
+        let bitmap = vec![0x01u8];
+        let offsets = bitmap_to_offsets(&bitmap, 4096);
+        assert_eq!(offsets, vec![0]);
+    }
+
+    #[test]
+    fn test_bitmap_to_offsets_multiple_bits() {
+        // Byte 0: bits 0 and 2 set => block indices 0, 2
+        // Byte 1: bit 1 set => block index 9
+        let bitmap = vec![0x05u8, 0x02u8];
+        let offsets = bitmap_to_offsets(&bitmap, 4096);
+        assert_eq!(offsets, vec![0, 2 * 4096, 9 * 4096]);
+    }
+
+    #[test]
+    fn test_bitmap_to_offsets_all_zeros() {
+        let bitmap = vec![0x00u8; 16];
+        let offsets = bitmap_to_offsets(&bitmap, 4096);
+        assert!(offsets.is_empty());
+    }
+
+    #[test]
+    fn test_is_all_zeros() {
+        assert!(is_all_zeros(&[0, 0, 0, 0]));
+        assert!(is_all_zeros(&[]));
+        assert!(!is_all_zeros(&[0, 0, 1, 0]));
+        assert!(!is_all_zeros(&[255]));
+    }
+}

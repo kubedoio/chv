@@ -142,21 +142,163 @@ sudo tar czf /backup/chv-certs-$(date +%Y%m%d).tar.gz /etc/chv/certs/
 | Config syntax | `cat /etc/chv/stord.toml` / `cat /etc/chv/nwd.toml` |
 | Daemon logs | `journalctl -u chv-stord -f` / `journalctl -u chv-nwd -f` |
 
+### Upgrade Failures
+
+When an upgrade fails, the `UpgradeOrchestrator` records the failure state with a reason.
+
+| Symptom | Diagnostic | Resolution |
+|---------|-----------|------------|
+| State shows `Failed` | `chvctl upgrade status <NODE_ID>` | Check reason field; fix the issue and retry or rollback |
+| Pre-check rejected | Check logs: `journalctl -u chv-controlplane \| grep "pre-check"` | Fix the blocking condition (incompatible version, active migrations, unhealthy node) |
+| Health check timeout | Node didn't reach `TenantReady` within 120s | Check agent logs: `journalctl -u chv-agent -n 100`; verify binary was installed correctly |
+| Drain timeout | VMs didn't evacuate within 300s | Check migration status; ensure target nodes have capacity |
+| Rollback triggered | Automatic on health-check failure | Verify node is back to previous version: `chv-agent --version` |
+
+**Recovery steps:**
+```bash
+# Check upgrade state
+chvctl upgrade status <NODE_ID>
+
+# Manual rollback if automated rollback failed
+chvctl upgrade rollback <NODE_ID>
+
+# Force node back to healthy state
+curl -X POST http://127.0.0.1:8080/v1/nodes/mutate \
+  -d '{"node_id": "<NODE_ID>", "action": "exit_maintenance"}'
+```
+
+### Migration Failures
+
+| Symptom | Diagnostic | Resolution |
+|---------|-----------|------------|
+| `FAILED_PRECONDITION: mTLS is required` | TLS not configured on sender | Set `migration.tls.cert_path`, `migration.tls.key_path`, `migration.tls.ca_path` in `/etc/chv/stord.toml` |
+| `failed to connect to peer with mTLS` | Certificate mismatch or network issue | Verify CA cert matches on both nodes; check firewall rules |
+| `CRC mismatch reported by receiver` | Data corruption in transit | Check network for packet corruption; retry migration |
+| `deadline_exceeded waiting for Ack` | Receiver not acknowledging | Check receiver node health; disk I/O saturation on destination |
+| Migration stuck (reaper will clean up) | `chv_migration_phase` gauge stuck | Wait for reaper (2h timeout) or manually fail: update `migrations` table |
+| Backpressure throttling | `slow_down_factor` in logs | Receiver is overwhelmed; reduce concurrent migrations or add I/O capacity |
+
+**Check active migrations:**
+```bash
+sqlite3 /var/lib/chv/controlplane.db \
+  "SELECT migration_id, vm_id, phase, started_at FROM migrations \
+   WHERE phase NOT IN ('Completed', 'Failed', 'RolledBack');"
+```
+
+**Verify mTLS configuration:**
+```bash
+# Check cert files exist and are readable
+ls -la /etc/chv/certs/node.pem /etc/chv/certs/node-key.pem /etc/chv/certs/ca.pem
+
+# Test TLS handshake to a peer
+openssl s_client -connect <PEER_IP>:8444 \
+  -cert /etc/chv/certs/node.pem \
+  -key /etc/chv/certs/node-key.pem \
+  -CAfile /etc/chv/certs/ca.pem
+```
+
 ---
 
 ## Maintenance Windows
 
 ### Graceful Node Drain
 
-1. Mark node as `Draining` in the Web UI or API
-2. VMs will be migrated or stopped per the drain policy
-3. Wait for `vm_count` to reach 0
-4. Stop agent: `sudo systemctl stop chv-agent`
-5. Perform maintenance
-6. Restart agent: `sudo systemctl start chv-agent`
-7. Mark node as `TenantReady`
+Draining a node evacuates all VMs via live migration before allowing maintenance.
 
-### Upgrade Procedure
+**Via CLI:**
+```bash
+chvctl node drain <NODE_ID>
+```
+
+**Via API:**
+```bash
+curl -X POST http://127.0.0.1:8080/v1/nodes/mutate \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": "<NODE_ID>", "action": "drain"}'
+```
+
+**What happens:**
+1. Node transitions to `Draining` — scheduling is paused immediately
+2. Agent reconcile loop issues migration requests for each running VM
+3. VMs are live-migrated to other `TenantReady` nodes
+4. When all VMs are evacuated, node transitions to `Maintenance` automatically
+5. Perform maintenance (kernel update, hardware swap, etc.)
+6. Restart agent: `sudo systemctl start chv-agent`
+7. Mark node ready: set desired state to `TenantReady` via API or Web UI
+
+**Monitor drain progress:**
+```bash
+# Check remaining VMs
+sqlite3 /var/lib/chv/controlplane.db \
+  "SELECT count(*) FROM vms v JOIN vm_observed_state o ON v.vm_id = o.vm_id \
+   WHERE v.node_id = '<NODE_ID>' AND o.runtime_status NOT IN ('Stopped', 'Deleted');"
+
+# Watch via metrics
+watch -n5 'curl -s http://127.0.0.1:9901/metrics | grep chv_node_vm_count'
+```
+
+### Rolling Upgrade
+
+**Via CLI:**
+```bash
+# Start upgrade on a specific node
+chvctl upgrade start <NODE_ID> --version 0.5.0
+
+# Check upgrade status
+chvctl upgrade status <NODE_ID>
+
+# List all upgrades
+chvctl upgrade list
+
+# Rollback if upgrade failed
+chvctl upgrade rollback <NODE_ID>
+```
+
+**Via API:**
+```bash
+# Initiate upgrade
+curl -X POST http://127.0.0.1:8080/v1/upgrades \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": "<NODE_ID>", "version": "0.5.0"}'
+
+# Check status
+curl http://127.0.0.1:8080/v1/upgrades/<NODE_ID>
+```
+
+**Upgrade flow (automated per node):**
+1. Pre-checks: version compatibility, disk space, no active migrations, node health
+2. Drain node (evacuate VMs)
+3. Record upgrade intent in `node_desired_state`
+4. Agent performs binary swap + systemd restart
+5. Control plane polls for health (up to 120s timeout)
+6. If healthy → un-drain and proceed to next node
+7. If unhealthy → automatic rollback to previous version
+
+### Compatibility Matrix
+
+The compatibility matrix defines allowed version ranges per component. Located at `/etc/chv/compat-matrix.toml`:
+
+```toml
+[compatibility]
+[[compatibility.entry]]
+component = "agent"
+min_version = "0.1.0"
+max_version = "1.0.0"
+
+[[compatibility.entry]]
+component = "stord"
+min_version = "0.2.0"
+max_version = "1.0.0"
+```
+
+**Check compatibility via API:**
+```bash
+chvctl health cluster
+```
+
+The control plane validates the matrix at upgrade time. If the target version falls outside the allowed range, the upgrade is rejected before any drain begins.
+
+### Upgrade Procedure (Manual)
 
 1. Back up database and certificates
 2. Build or download new release tarball

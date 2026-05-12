@@ -363,4 +363,55 @@ mod tests {
         tracker.record_failure(4000);
         assert_eq!(tracker.state(), ConnectivityState::Disconnected);
     }
+
+    #[test]
+    fn reconnect_from_disconnected_triggers_flush() {
+        let mut tracker = ConnectivityTracker::with_threshold(2);
+
+        // Start in Disconnected (default), record success → flush should trigger
+        assert_eq!(tracker.state(), ConnectivityState::Disconnected);
+        let flush = tracker.record_success(1000);
+        assert!(
+            flush,
+            "record_success should return true when transitioning Disconnected→Connected"
+        );
+        assert_eq!(tracker.state(), ConnectivityState::Connected);
+
+        // Subsequent success while already Connected should NOT trigger flush
+        let flush = tracker.record_success(2000);
+        assert!(
+            !flush,
+            "record_success should return false when already Connected"
+        );
+
+        // Now go through Reconnecting → Disconnected → Connected cycle
+        tracker.record_failure(3000); // → Reconnecting
+        tracker.record_failure(4000); // → Disconnected
+        assert_eq!(tracker.state(), ConnectivityState::Disconnected);
+
+        let flush = tracker.record_success(5000);
+        assert!(
+            flush,
+            "record_success should return true when transitioning Disconnected→Connected after partition"
+        );
+        assert_eq!(tracker.state(), ConnectivityState::Connected);
+    }
+
+    #[test]
+    fn reconnect_from_reconnecting_triggers_flush() {
+        let mut tracker = ConnectivityTracker::with_threshold(3);
+        tracker.record_success(1000);
+
+        // Single failure → Reconnecting
+        tracker.record_failure(2000);
+        assert_eq!(tracker.state(), ConnectivityState::Reconnecting);
+
+        // Success from Reconnecting should also trigger flush
+        let flush = tracker.record_success(3000);
+        assert!(
+            flush,
+            "record_success should return true when transitioning Reconnecting→Connected"
+        );
+        assert_eq!(tracker.state(), ConnectivityState::Connected);
+    }
 }

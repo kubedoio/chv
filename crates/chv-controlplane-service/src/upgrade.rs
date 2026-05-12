@@ -383,6 +383,7 @@ impl UpgradeOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_plan_creation() {
@@ -444,5 +445,360 @@ mod tests {
 
         let orchestrator = UpgradeOrchestrator::new(Box::new(DummyUpgrader));
         assert_eq!(*orchestrator.state(), UpgradeState::Planning);
+    }
+
+    /// Tracks calls made to each method and allows conditional failure behavior.
+    #[derive(Debug, Clone, Default)]
+    struct MockState {
+        drained: Vec<String>,
+        upgraded: Vec<String>,
+        health_checked: Vec<String>,
+        rolled_back: Vec<String>,
+        undrained: Vec<String>,
+        pre_checked: Vec<(String, String)>, // (node_id, check_debug)
+    }
+
+    /// A configurable mock that tracks calls and can fail on specific nodes.
+    struct ConfigurableMockUpgrader {
+        state: Arc<Mutex<MockState>>,
+        /// Node IDs that should fail on `upgrade_node`.
+        fail_upgrade_on: Vec<String>,
+        /// Node IDs that should return `false` from `health_check`.
+        fail_health_on: Vec<String>,
+        /// Pre-check types that should fail (as debug strings).
+        fail_pre_check: Vec<(String, String)>, // (node_id, check_debug)
+    }
+
+    impl ConfigurableMockUpgrader {
+        fn new(state: Arc<Mutex<MockState>>) -> Self {
+            Self {
+                state,
+                fail_upgrade_on: Vec::new(),
+                fail_health_on: Vec::new(),
+                fail_pre_check: Vec::new(),
+            }
+        }
+
+        fn fail_upgrade_on(mut self, node_ids: Vec<String>) -> Self {
+            self.fail_upgrade_on = node_ids;
+            self
+        }
+
+        fn fail_health_on(mut self, node_ids: Vec<String>) -> Self {
+            self.fail_health_on = node_ids;
+            self
+        }
+
+        fn fail_pre_check_on(mut self, entries: Vec<(String, String)>) -> Self {
+            self.fail_pre_check = entries;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NodeUpgrader for ConfigurableMockUpgrader {
+        async fn drain_node(&self, node_id: &str) -> Result<(), ChvError> {
+            self.state.lock().unwrap().drained.push(node_id.to_string());
+            Ok(())
+        }
+
+        async fn upgrade_node(&self, node_id: &str, _target_version: &str) -> Result<(), ChvError> {
+            self.state
+                .lock()
+                .unwrap()
+                .upgraded
+                .push(node_id.to_string());
+            if self.fail_upgrade_on.contains(&node_id.to_string()) {
+                return Err(ChvError::Internal {
+                    reason: format!("simulated upgrade failure on {}", node_id),
+                });
+            }
+            Ok(())
+        }
+
+        async fn health_check(&self, node_id: &str) -> Result<bool, ChvError> {
+            self.state
+                .lock()
+                .unwrap()
+                .health_checked
+                .push(node_id.to_string());
+            if self.fail_health_on.contains(&node_id.to_string()) {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+
+        async fn rollback_node(&self, node_id: &str) -> Result<(), ChvError> {
+            self.state
+                .lock()
+                .unwrap()
+                .rolled_back
+                .push(node_id.to_string());
+            Ok(())
+        }
+
+        async fn undrain_node(&self, node_id: &str) -> Result<(), ChvError> {
+            self.state
+                .lock()
+                .unwrap()
+                .undrained
+                .push(node_id.to_string());
+            Ok(())
+        }
+
+        async fn run_pre_check(
+            &self,
+            node_id: &str,
+            check: &PreCheck,
+            _target_version: &str,
+        ) -> Result<bool, ChvError> {
+            let check_debug = format!("{:?}", check);
+            self.state
+                .lock()
+                .unwrap()
+                .pre_checked
+                .push((node_id.to_string(), check_debug.clone()));
+            for (fail_node, fail_check) in &self.fail_pre_check {
+                if fail_node == node_id && *fail_check == check_debug {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_success_with_dummy_upgrader() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let upgrader = ConfigurableMockUpgrader::new(Arc::clone(&state));
+        let mut orchestrator = UpgradeOrchestrator::new(Box::new(upgrader));
+
+        let plan = UpgradeOrchestrator::plan(
+            "2.0.0".to_string(),
+            UpgradeStrategy::Rolling,
+            vec!["node-1".to_string(), "node-2".to_string()],
+            1,
+        );
+
+        let result = orchestrator.execute(&plan).await;
+        assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
+        assert_eq!(*orchestrator.state(), UpgradeState::Completed);
+
+        let mock_state = state.lock().unwrap();
+        // Each node should have been drained, upgraded, health-checked, and undrained
+        assert_eq!(mock_state.drained, vec!["node-1", "node-2"]);
+        assert_eq!(mock_state.upgraded, vec!["node-1", "node-2"]);
+        assert!(mock_state.health_checked.contains(&"node-1".to_string()));
+        assert!(mock_state.health_checked.contains(&"node-2".to_string()));
+        assert_eq!(mock_state.undrained, vec!["node-1", "node-2"]);
+        // No rollbacks should have occurred
+        assert!(mock_state.rolled_back.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_failure_triggers_rollback() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let upgrader = ConfigurableMockUpgrader::new(Arc::clone(&state))
+            .fail_upgrade_on(vec!["node-2".to_string()]);
+        let mut orchestrator = UpgradeOrchestrator::new(Box::new(upgrader));
+
+        let plan = UpgradeOrchestrator::plan(
+            "2.0.0".to_string(),
+            UpgradeStrategy::Rolling,
+            vec![
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+            ],
+            1,
+        );
+
+        let result = orchestrator.execute(&plan).await;
+        assert!(result.is_err(), "execute should fail due to node-2 failure");
+
+        // State should be Failed
+        match orchestrator.state() {
+            UpgradeState::Failed { reason } => {
+                assert!(
+                    reason.contains("node-2"),
+                    "failure reason should mention node-2: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Failed state, got {:?}", other),
+        }
+
+        let mock_state = state.lock().unwrap();
+        // node-1 should have been fully upgraded
+        assert!(mock_state.upgraded.contains(&"node-1".to_string()));
+        // node-2 upgrade was attempted but failed
+        assert!(mock_state.upgraded.contains(&"node-2".to_string()));
+        // node-2 should have been rolled back
+        assert!(mock_state.rolled_back.contains(&"node-2".to_string()));
+        // node-3 should never have been touched
+        assert!(!mock_state.drained.contains(&"node-3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_health_check_failure_triggers_rollback() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let upgrader = ConfigurableMockUpgrader::new(Arc::clone(&state))
+            .fail_health_on(vec!["node-1".to_string()]);
+        let mut orchestrator = UpgradeOrchestrator::new(Box::new(upgrader));
+
+        let plan = UpgradePlan {
+            target_version: "2.0.0".to_string(),
+            strategy: UpgradeStrategy::Rolling,
+            nodes: vec!["node-1".to_string(), "node-2".to_string()],
+            max_unavailable: 1,
+            pre_checks: vec![],
+            drain_timeout: Duration::from_secs(5),
+            // Short health check timeout to avoid waiting in tests
+            health_check_timeout: Duration::from_millis(100),
+        };
+
+        let result = orchestrator.execute(&plan).await;
+        assert!(
+            result.is_err(),
+            "execute should fail due to health check failure"
+        );
+
+        match orchestrator.state() {
+            UpgradeState::Failed { reason } => {
+                assert!(
+                    reason.contains("health check failed"),
+                    "reason should mention health check: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("node-1"),
+                    "reason should mention node-1: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Failed state, got {:?}", other),
+        }
+
+        let mock_state = state.lock().unwrap();
+        // node-1 was drained and upgraded, but health failed
+        assert!(mock_state.drained.contains(&"node-1".to_string()));
+        assert!(mock_state.upgraded.contains(&"node-1".to_string()));
+        // node-1 should have been rolled back after health failure
+        assert!(mock_state.rolled_back.contains(&"node-1".to_string()));
+        // node-1 should have been undrained after rollback
+        assert!(mock_state.undrained.contains(&"node-1".to_string()));
+        // node-2 should never have been started
+        assert!(!mock_state.drained.contains(&"node-2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_pre_check_failure_prevents_upgrade() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let upgrader = ConfigurableMockUpgrader::new(Arc::clone(&state))
+            .fail_pre_check_on(vec![("node-1".to_string(), "DiskSpace".to_string())]);
+        let mut orchestrator = UpgradeOrchestrator::new(Box::new(upgrader));
+
+        let plan = UpgradePlan {
+            target_version: "2.0.0".to_string(),
+            strategy: UpgradeStrategy::Rolling,
+            nodes: vec!["node-1".to_string(), "node-2".to_string()],
+            max_unavailable: 1,
+            pre_checks: vec![PreCheck::VersionCompatible, PreCheck::DiskSpace],
+            drain_timeout: Duration::from_secs(5),
+            health_check_timeout: Duration::from_secs(5),
+        };
+
+        let result = orchestrator.execute(&plan).await;
+        assert!(result.is_err(), "execute should fail due to pre-check");
+
+        match orchestrator.state() {
+            UpgradeState::Failed { reason } => {
+                assert!(
+                    reason.contains("pre-check"),
+                    "reason should mention pre-check: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("node-1"),
+                    "reason should mention node-1: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Failed state, got {:?}", other),
+        }
+
+        let mock_state = state.lock().unwrap();
+        // No nodes should have been drained or upgraded since pre-checks failed
+        assert!(
+            mock_state.drained.is_empty(),
+            "no draining should have happened"
+        );
+        assert!(
+            mock_state.upgraded.is_empty(),
+            "no upgrading should have happened"
+        );
+        assert!(
+            mock_state.rolled_back.is_empty(),
+            "no rollback should have happened"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rollback_method() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let upgrader = ConfigurableMockUpgrader::new(Arc::clone(&state));
+        let mut orchestrator = UpgradeOrchestrator::new(Box::new(upgrader));
+
+        // Simulate that we're in an upgrading state with some completed nodes
+        orchestrator.state = UpgradeState::Upgrading {
+            completed: vec!["node-1".to_string(), "node-2".to_string()],
+            in_progress: Some("node-3".to_string()),
+            remaining: vec!["node-4".to_string()],
+        };
+
+        let plan = UpgradeOrchestrator::plan(
+            "2.0.0".to_string(),
+            UpgradeStrategy::Rolling,
+            vec![
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string(),
+                "node-4".to_string(),
+            ],
+            1,
+        );
+
+        let result = orchestrator.rollback(&plan, "test failure").await;
+        assert!(
+            result.is_ok(),
+            "rollback should succeed: {:?}",
+            result.err()
+        );
+
+        // State should be Failed with rolled-back reason
+        match orchestrator.state() {
+            UpgradeState::Failed { reason } => {
+                assert!(
+                    reason.contains("rolled back"),
+                    "reason should mention rolled back: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("test failure"),
+                    "reason should contain original reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Failed state, got {:?}", other),
+        }
+
+        let mock_state = state.lock().unwrap();
+        // Only completed nodes should have been rolled back (node-1, node-2)
+        assert_eq!(mock_state.rolled_back.len(), 2);
+        assert!(mock_state.rolled_back.contains(&"node-1".to_string()));
+        assert!(mock_state.rolled_back.contains(&"node-2".to_string()));
+        // Rolled-back nodes should also have been undrained
+        assert!(mock_state.undrained.contains(&"node-1".to_string()));
+        assert!(mock_state.undrained.contains(&"node-2".to_string()));
     }
 }
