@@ -79,7 +79,7 @@ case "$CHANNEL" in
             SUFFIX="nightly.${DATE}"
         fi
         if [ "$FORMAT" = "rpm" ]; then
-            echo "${BASE_VERSION}~${SUFFIX}"
+            echo "${BASE_VERSION}^${SUFFIX}"
         else
             echo "${BASE_VERSION}~${SUFFIX}"
         fi
@@ -94,7 +94,7 @@ case "$CHANNEL" in
             SUFFIX="pr${N}.${DATE}"
         fi
         if [ "$FORMAT" = "rpm" ]; then
-            echo "${BASE_VERSION}~${SUFFIX}"
+            echo "${BASE_VERSION}^${SUFFIX}"
         else
             echo "${BASE_VERSION}~${SUFFIX}"
         fi

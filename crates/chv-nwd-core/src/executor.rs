@@ -666,7 +666,9 @@ impl NetworkExecutor for LinuxExecutor {
             .await
             {
                 let reason = e.to_string();
-                if !reason.contains("File exists") && !reason.contains("RTNETLINK answers: File exists") {
+                if !reason.contains("File exists")
+                    && !reason.contains("RTNETLINK answers: File exists")
+                {
                     tracing::warn!(
                         bridge = %spec.bridge_name,
                         gateway = %spec.gateway_ip,
