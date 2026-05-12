@@ -399,3 +399,42 @@ impl UpgradeOrchestrator {
         Self::new(Box::new(upgrader))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compat::CompatEntry;
+    use crate::upgrade::UpgradeState;
+
+    #[tokio::test]
+    async fn test_with_systemd_upgrader_constructor() {
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        let node_client_pool = NodeClientPool::new();
+
+        let orchestrator = UpgradeOrchestrator::with_systemd_upgrader(pool, node_client_pool);
+
+        // Verify initial state is Planning
+        assert_eq!(*orchestrator.state(), UpgradeState::Planning);
+    }
+
+    #[tokio::test]
+    async fn test_with_systemd_upgrader_and_compat_constructor() {
+        let pool = chv_controlplane_store::test_util::create_test_pool().await;
+        let node_client_pool = NodeClientPool::new();
+
+        let compat_matrix = CompatibilityMatrix::new(vec![CompatEntry {
+            component: Component::Agent,
+            min_version: semver::Version::new(0, 1, 0),
+            max_version: semver::Version::new(1, 0, 0),
+        }]);
+
+        let orchestrator = UpgradeOrchestrator::with_systemd_upgrader_and_compat(
+            pool,
+            node_client_pool,
+            compat_matrix,
+        );
+
+        // Verify initial state is Planning
+        assert_eq!(*orchestrator.state(), UpgradeState::Planning);
+    }
+}

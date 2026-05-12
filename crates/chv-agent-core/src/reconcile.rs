@@ -2072,6 +2072,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draining_with_running_vms_requests_migrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let runtime = VmRuntime::new(mock.clone());
+
+        // Create two VMs in "Running" and "Created" states
+        let config1 = VmConfig {
+            vm_id: "vm-drain-1".to_string(),
+            cpus: 1,
+            memory_bytes: 512,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-drain-1/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        runtime
+            .create_vm("vm-drain-1", "1", &config1, None)
+            .await
+            .unwrap();
+        runtime.start_vm("vm-drain-1", None).await.unwrap();
+
+        let config2 = VmConfig {
+            vm_id: "vm-drain-2".to_string(),
+            cpus: 1,
+            memory_bytes: 512,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-drain-2/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        runtime
+            .create_vm("vm-drain-2", "1", &config2, None)
+            .await
+            .unwrap();
+        // vm-drain-2 stays in "Created" status (also eligible for drain)
+
+        let mut cache = NodeCache {
+            node_state: "Draining".to_string(),
+            node_id: "test-node".to_string(),
+            ..Default::default()
+        };
+        // Transition to Draining via valid path
+        cache.node_state = NodeState::Draining.as_str().to_string();
+
+        let cache = Arc::new(tokio::sync::Mutex::new(cache));
+        let mut rec = Reconciler::new(
+            cache.clone(),
+            runtime,
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+
+        rec.run_once().await.unwrap();
+
+        // Both VMs should be in drain_requested_vms
+        assert!(rec.drain_requested_vms.contains("vm-drain-1"));
+        assert!(rec.drain_requested_vms.contains("vm-drain-2"));
+
+        // Pending messages should have been enqueued for both VMs
+        let c = cache.lock().await;
+        let pending = c.pending_control_plane_messages();
+        assert!(
+            pending.len() >= 2,
+            "expected at least 2 pending messages, got {}",
+            pending.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_with_no_vms_transitions_to_maintenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let runtime = VmRuntime::new(mock.clone());
+
+        // No VMs in the runtime
+
+        let cache = NodeCache {
+            node_state: NodeState::Draining.as_str().to_string(),
+            node_id: "test-node".to_string(),
+            ..Default::default()
+        };
+
+        let cache = Arc::new(tokio::sync::Mutex::new(cache));
+        let mut rec = Reconciler::new(
+            cache.clone(),
+            runtime,
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+
+        rec.run_once().await.unwrap();
+
+        // Should transition to Maintenance
+        assert_eq!(rec.current_state().await, NodeState::Maintenance);
+        // drain_requested_vms should be cleared
+        assert!(rec.drain_requested_vms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn draining_skips_already_requested_vms() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let runtime = VmRuntime::new(mock.clone());
+
+        // Create a running VM
+        let config = VmConfig {
+            vm_id: "vm-already".to_string(),
+            cpus: 1,
+            memory_bytes: 512,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-already/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        runtime
+            .create_vm("vm-already", "1", &config, None)
+            .await
+            .unwrap();
+        runtime.start_vm("vm-already", None).await.unwrap();
+
+        let cache = NodeCache {
+            node_state: NodeState::Draining.as_str().to_string(),
+            node_id: "test-node".to_string(),
+            ..Default::default()
+        };
+
+        let cache = Arc::new(tokio::sync::Mutex::new(cache));
+        let mut rec = Reconciler::new(
+            cache.clone(),
+            runtime,
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+
+        // Pre-populate drain_requested_vms — as if we already requested this VM
+        rec.drain_requested_vms.insert("vm-already".to_string());
+
+        rec.run_once().await.unwrap();
+
+        // Should still contain the VM (not removed)
+        assert!(rec.drain_requested_vms.contains("vm-already"));
+
+        // No NEW pending messages should be enqueued (since it was already requested)
+        let c = cache.lock().await;
+        let pending = c.pending_control_plane_messages();
+        assert_eq!(
+            pending.len(),
+            0,
+            "expected 0 pending messages for already-requested VM, got {}",
+            pending.len()
+        );
+    }
+
+    #[tokio::test]
     async fn reconciler_starts_stopped_vm() {
         let dir = tempfile::tempdir().unwrap();
         let stord_socket = dir.path().join("stord.sock");
