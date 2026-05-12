@@ -345,7 +345,9 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     // Detach the NIC we just attached to avoid dangling resources
                     let _ = self.executor.detach_vm_nic(&nic.nic_id).await;
                     let err = ChvError::Internal {
-                        reason: format!("eBPF policy program failed to load on tap {tap_handle}: {e}"),
+                        reason: format!(
+                            "eBPF policy program failed to load on tap {tap_handle}: {e}"
+                        ),
                     };
                     return Ok(Response::new(proto::AttachVmNicResponse {
                         result: Some(Self::err_result(&err)),
@@ -359,7 +361,9 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     // Detach the NIC we just attached to avoid dangling resources
                     let _ = self.executor.detach_vm_nic(&nic.nic_id).await;
                     let err = ChvError::Internal {
-                        reason: format!("eBPF ingress program failed to load on bridge {bridge_name}: {e}"),
+                        reason: format!(
+                            "eBPF ingress program failed to load on bridge {bridge_name}: {e}"
+                        ),
                     };
                     return Ok(Response::new(proto::AttachVmNicResponse {
                         result: Some(Self::err_result(&err)),

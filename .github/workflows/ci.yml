@@ -149,5 +149,8 @@ jobs:
       - name: Build UI
         run: cd ui && npm run build
 
+      - name: Start mock BFF server
+        run: node ui/tests/e2e/mock-bff.mjs &
+
       - name: Run Playwright tests
         run: cd ui && npm run test:e2e
