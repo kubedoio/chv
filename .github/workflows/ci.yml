@@ -151,6 +151,10 @@ jobs:
 
       - name: Start mock BFF server
         run: node ui/tests/e2e/mock-bff.mjs &
+        env:
+          MOCK_BFF_PORT: 8888
 
       - name: Run Playwright tests
         run: cd ui && npm run test:e2e
+        env:
+          BFF_BASE_URL: http://localhost:8888
