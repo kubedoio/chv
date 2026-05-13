@@ -179,10 +179,12 @@
       <li class="select-none mt-2">
         <div class="mx-2 rounded-md hover:bg-white/5">
           <button
+            id="nodes-btn"
             type="button"
             class="flex items-center gap-2 w-full px-3 py-2 text-sm text-left"
             onclick={(e) => toggleNode('nodes', e)}
             aria-expanded={isExpanded('nodes')}
+            aria-controls="nodes-tree"
           >
             {#if isExpanded('nodes')}
               <ChevronDown size={14} class="text-[var(--color-neutral-400)]" />
@@ -195,7 +197,7 @@
         </div>
         
         {#if isExpanded('nodes')}
-          <ul class="mt-0.5" transition:slide={{ duration: 150 }}>
+          <ul id="nodes-tree" role="region" aria-labelledby="nodes-btn" class="mt-0.5" transition:slide={{ duration: 150 }}>
             {#each nodes as node}
               <li class="select-none">
                 <!-- Node -->
@@ -204,10 +206,12 @@
                   style="margin-left: 1.25rem;"
                 >
                   <button
+                    id="node-{node.id}-btn"
                     type="button"
                     class="flex items-center gap-2 w-full px-3 py-2 text-sm text-left"
                     onclick={(e) => toggleNode(node.id, e)}
                     aria-expanded={isExpanded(node.id)}
+                    aria-controls="node-{node.id}-tree"
                   >
                     {#if isExpanded(node.id)}
                       <ChevronDown size={14} class="text-[var(--color-neutral-400)]" />
@@ -220,7 +224,7 @@
                 </div>
                 
                 {#if isExpanded(node.id)}
-                  <ul class="mt-0.5" transition:slide={{ duration: 150 }}>
+                  <ul id="node-{node.id}-tree" role="region" aria-labelledby="node-{node.id}-btn" class="mt-0.5" transition:slide={{ duration: 150 }}>
                     <!-- Virtual Machines -->
                     <li class="select-none">
                       <div 
@@ -228,10 +232,12 @@
                         style="margin-left: 2rem;"
                       >
                         <button
+                          id="vms-{node.id}-btn"
                           type="button"
                           class="flex items-center gap-2 w-full px-3 py-2 text-sm text-left"
                           onclick={(e) => toggleNode(`${node.id}-vms`, e)}
                           aria-expanded={isExpanded(`${node.id}-vms`)}
+                          aria-controls="vms-{node.id}-tree"
                         >
                           {#if isExpanded(`${node.id}-vms`)}
                             <ChevronDown size={14} class="text-[var(--color-neutral-400)]" />
@@ -249,7 +255,7 @@
                       </div>
                       
                       {#if isExpanded(`${node.id}-vms`)}
-                        <ul class="mt-0.5" transition:slide={{ duration: 150 }}>
+                        <ul id="vms-{node.id}-tree" role="region" aria-labelledby="vms-{node.id}-btn" class="mt-0.5" transition:slide={{ duration: 150 }}>
                           {#each vms as vm}
                             <li class="select-none">
                               <div 
