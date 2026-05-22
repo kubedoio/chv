@@ -174,7 +174,7 @@
 					{#if panelVisible.briefing}
 						<SectionCard title="Fleet Briefing" icon={ShieldCheck} badgeLabel="Shift View" collapsed={panelCollapsed.briefing}>
 							{#snippet actions()}
-								<button class="panel-icon-button" type="button" aria-label={panelCollapsed.briefing ? 'Expand Fleet Briefing' : 'Minimize Fleet Briefing'} aria-controls="fleet-briefing-content" aria-expanded={!panelCollapsed.briefing} onclick={() => togglePanelCollapsed('briefing')}>
+								<button class="panel-icon-button" type="button" aria-label={panelCollapsed.briefing ? 'Expand Fleet Briefing' : 'Minimize Fleet Briefing'} onclick={() => togglePanelCollapsed('briefing')}>
 									{#if panelCollapsed.briefing}<Plus size={12} />{:else}<Minus size={12} />{/if}
 								</button>
 								<button class="panel-icon-button" type="button" aria-label="Remove Fleet Briefing from dashboard" onclick={() => hidePanel('briefing')}>
@@ -202,7 +202,7 @@
 							collapsed={panelCollapsed.attention}
 						>
 							{#snippet actions()}
-								<button class="panel-icon-button" type="button" aria-label={panelCollapsed.attention ? 'Expand Immediate Attention' : 'Minimize Immediate Attention'} aria-controls="immediate-attention-content" aria-expanded={!panelCollapsed.attention} onclick={() => togglePanelCollapsed('attention')}>
+								<button class="panel-icon-button" type="button" aria-label={panelCollapsed.attention ? 'Expand Immediate Attention' : 'Minimize Immediate Attention'} onclick={() => togglePanelCollapsed('attention')}>
 									{#if panelCollapsed.attention}<Plus size={12} />{:else}<Minus size={12} />{/if}
 								</button>
 								<button class="panel-icon-button" type="button" aria-label="Remove Immediate Attention from dashboard" onclick={() => hidePanel('attention')}>
@@ -244,7 +244,7 @@
 						{#if panelVisible.pipeline}
 							<SectionCard title="Operation Pipeline" icon={Activity} badgeLabel="Live" collapsed={panelCollapsed.pipeline}>
 								{#snippet actions()}
-									<button class="panel-icon-button" type="button" aria-label={panelCollapsed.pipeline ? 'Expand Operation Pipeline' : 'Minimize Operation Pipeline'} aria-controls="operation-pipeline-content" aria-expanded={!panelCollapsed.pipeline} onclick={() => togglePanelCollapsed('pipeline')}>
+									<button class="panel-icon-button" type="button" aria-label={panelCollapsed.pipeline ? 'Expand Operation Pipeline' : 'Minimize Operation Pipeline'} onclick={() => togglePanelCollapsed('pipeline')}>
 										{#if panelCollapsed.pipeline}<Plus size={12} />{:else}<Minus size={12} />{/if}
 									</button>
 									<button class="panel-icon-button" type="button" aria-label="Remove Operation Pipeline from dashboard" onclick={() => hidePanel('pipeline')}>
@@ -258,7 +258,7 @@
 						{#if panelVisible.capacity}
 							<SectionCard title="Capacity Pressure" icon={Zap} collapsed={panelCollapsed.capacity}>
 								{#snippet actions()}
-									<button class="panel-icon-button" type="button" aria-label={panelCollapsed.capacity ? 'Expand Capacity Pressure' : 'Minimize Capacity Pressure'} aria-controls="capacity-pressure-content" aria-expanded={!panelCollapsed.capacity} onclick={() => togglePanelCollapsed('capacity')}>
+									<button class="panel-icon-button" type="button" aria-label={panelCollapsed.capacity ? 'Expand Capacity Pressure' : 'Minimize Capacity Pressure'} onclick={() => togglePanelCollapsed('capacity')}>
 										{#if panelCollapsed.capacity}<Plus size={12} />{:else}<Minus size={12} />{/if}
 									</button>
 									<button class="panel-icon-button" type="button" aria-label="Remove Capacity Pressure from dashboard" onclick={() => hidePanel('capacity')}>
