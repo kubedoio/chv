@@ -5,7 +5,13 @@ import Button from '$lib/components/primitives/Button.svelte';
     Server, Copy, Trash2, Plus, FileCode, Box, LayoutTemplate, 
     ArrowRight, Activity, ShieldCheck, Search
   } from 'lucide-svelte';
-  import { createAPIClient } from '$lib/api/client';
+  import { createAPIClient, getStoredToken } from '$lib/api/client';
+  import {
+    loadImagesFromBff,
+    loadNetworksFromBff,
+    loadVmsFromBff
+  } from '$lib/webui/bff-resources';
+  import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
   import { toast } from '$lib/stores/toast.svelte';
   import SectionCard from '$lib/components/shell/SectionCard.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
@@ -95,10 +101,10 @@ import Button from '$lib/components/primitives/Button.svelte';
       const [vmTemps, cloudTemps, imgs, nets, ps, vmList] = await Promise.all([
         client.listVMTemplates(),
         client.listCloudInitTemplates(),
-        client.listImages(),
-        client.listNetworks(),
-        client.listStoragePools(),
-        client.listVMs()
+        loadImagesFromBff(getStoredToken() ?? undefined),
+        loadNetworksFromBff(getStoredToken() ?? undefined),
+        loadStoragePoolsFromBff(getStoredToken() ?? undefined),
+        loadVmsFromBff(getStoredToken() ?? undefined)
       ]);
       vmTemplates = vmTemps ?? [];
       cloudInitTemplates = cloudTemps ?? [];

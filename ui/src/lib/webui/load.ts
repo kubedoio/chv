@@ -1,7 +1,14 @@
 import { browser } from '$app/environment';
 import type { Event, NodeWithResources, Operation, StoragePool, VM } from '$lib/api/types';
 import { getStoredToken } from '$lib/api/client';
+import {
+	loadEventsFromBff,
+	loadNodesFromBff,
+	loadOperationsFromBff,
+	loadVmsFromBff
+} from '$lib/webui/bff-resources';
 import { buildOverviewModel, type OverviewModel } from '$lib/webui/overview';
+import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
 import { buildTaskList, type TaskFilters, type TaskListModel } from '$lib/webui/tasks';
 
 interface SnapshotLoadMeta {
@@ -67,6 +74,8 @@ let cachedSnapshot: any = null;
 let lastSnapshotFetch = 0;
 
 async function loadDashboardSnapshot(fetcher: Fetcher) {
+	void fetcher;
+
 	if (!browser) {
 		return {
 			snapshot: {
@@ -109,11 +118,11 @@ async function loadDashboardSnapshot(fetcher: Fetcher) {
 
 	const token = browser ? getStoredToken() : null;
 	const requests = await Promise.all([
-		loadJson<NodeWithResources[]>(fetcher, '/api/v1/nodes', token),
-		loadJson<VM[]>(fetcher, '/api/v1/vms', token),
-		loadJson<StoragePool[]>(fetcher, '/api/v1/storage-pools', token),
-		loadJson<Operation[]>(fetcher, '/api/v1/operations', token),
-		loadJson<Event[]>(fetcher, '/api/v1/events', token)
+		loadBffNodes(token),
+		loadBffVms(token),
+		loadBffStoragePools(token),
+		loadBffOperations(token),
+		loadBffEvents(token)
 	]);
 	const failures = {
 		nodes: requests[0] === null,
@@ -152,28 +161,41 @@ async function loadDashboardSnapshot(fetcher: Fetcher) {
 	return result;
 }
 
-async function loadJson<T>(
-	fetcher: Fetcher,
-	path: string,
-	token: string | null
-): Promise<T | null> {
+async function loadBffStoragePools(token: string | null): Promise<StoragePool[] | null> {
 	try {
-		const headers = new Headers();
+		return await loadStoragePoolsFromBff(token ?? undefined);
+	} catch {
+		return null;
+	}
+}
 
-		if (token) {
-			headers.set('Authorization', `Bearer ${token}`);
-		}
+async function loadBffNodes(token: string | null): Promise<NodeWithResources[] | null> {
+	try {
+		return await loadNodesFromBff(token ?? undefined);
+	} catch {
+		return null;
+	}
+}
 
-		const response = await fetcher(path, {
-			headers,
-			cache: 'no-store'
-		});
+async function loadBffVms(token: string | null): Promise<VM[] | null> {
+	try {
+		return await loadVmsFromBff(token ?? undefined);
+	} catch {
+		return null;
+	}
+}
 
-		if (!response.ok) {
-			return null;
-		}
+async function loadBffOperations(token: string | null): Promise<Operation[] | null> {
+	try {
+		return await loadOperationsFromBff(token ?? undefined);
+	} catch {
+		return null;
+	}
+}
 
-		return (await response.json()) as T;
+async function loadBffEvents(token: string | null): Promise<Event[] | null> {
+	try {
+		return await loadEventsFromBff(token ?? undefined);
 	} catch {
 		return null;
 	}

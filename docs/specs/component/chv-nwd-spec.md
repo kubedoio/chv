@@ -16,7 +16,7 @@
 
 ## Non-goals
 - no network VM in MVP-1
-- no eBPF datapath
+- no eBPF VXLAN datapath; kernel VXLAN owns encapsulation/decapsulation
 - no distributed overlay control plane
 - no full flow-state replication guarantee during upgrades
 
@@ -38,3 +38,7 @@
 ## Recovery model
 - prefer deterministic reconstruction from desired state plus local cache
 - allow brief active-flow disturbance if exact flow preservation is not implemented
+
+## Multi-node Overlay Status
+
+`chv-nwd` owns kernel VXLAN interface lifecycle and explicit FDB management for multi-node L2 overlays. eBPF scope is policy enforcement, rate limiting, and counters at TC hooks; it must not be treated as the overlay datapath. Control-plane VNI/VTEP coordination is still required for new joins, migrations, and FDB updates.

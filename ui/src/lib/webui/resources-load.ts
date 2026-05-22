@@ -2,6 +2,15 @@ import { browser } from '$app/environment';
 import type { Event, Network, NodeWithResources, Operation, StoragePool, VM } from '$lib/api/types';
 import { getStoredToken } from '$lib/api/client';
 import {
+	loadEventsFromBff,
+	loadNetworksFromBff,
+	loadNodesFromBff,
+	loadOperationsFromBff,
+	loadVmFromBff,
+	loadVmsFromBff
+} from '$lib/webui/bff-resources';
+import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
+import {
 	buildNodeDetail,
 	buildNodesList,
 	buildVmDetail,
@@ -42,6 +51,8 @@ export interface VmDetailPageData {
 type Fetcher = typeof fetch;
 
 export async function loadNodesPageData(fetcher: Fetcher, url: URL): Promise<NodesPageData> {
+	void fetcher;
+
 	if (!browser) {
 		return {
 			nodes: buildNodesList({ nodes: [], operations: [], events: [] }),
@@ -50,9 +61,9 @@ export async function loadNodesPageData(fetcher: Fetcher, url: URL): Promise<Nod
 	}
 
 	const [nodes, operations, events] = await Promise.all([
-		loadJson<NodeWithResources[]>(fetcher, '/api/v1/nodes'),
-		loadJson<Operation[]>(fetcher, '/api/v1/operations'),
-		loadJson<Event[]>(fetcher, '/api/v1/events')
+		loadBffNodes(),
+		loadBffOperations(),
+		loadBffEvents()
 	]);
 
 	return {
@@ -82,6 +93,8 @@ export async function loadNodeDetailPageData(
 	nodeId: string,
 	url: URL
 ): Promise<NodeDetailPageData> {
+	void fetcher;
+
 	if (!browser) {
 		return {
 			detail: buildNodeDetail(
@@ -101,21 +114,21 @@ export async function loadNodeDetailPageData(
 	}
 
 	const [nodes, nodeVms, nodeStoragePools, nodeNetworks, operations, events] = await Promise.all([
-		loadJson<NodeWithResources[]>(fetcher, '/api/v1/nodes'),
-		loadJson<{ resources: VM[] }>(fetcher, `/api/v1/nodes/${nodeId}/vms`),
-		loadJson<{ resources: StoragePool[] }>(fetcher, `/api/v1/nodes/${nodeId}/storage`),
-		loadJson<{ resources: Network[] }>(fetcher, `/api/v1/nodes/${nodeId}/networks`),
-		loadJson<Operation[]>(fetcher, '/api/v1/operations'),
-		loadJson<Event[]>(fetcher, '/api/v1/events')
+		loadBffNodes(),
+		loadBffVmsForNode(nodeId),
+		loadBffStoragePoolsForNode(nodeId),
+		loadBffNetworksForNode(nodeId),
+		loadBffOperations(),
+		loadBffEvents()
 	]);
 
 	return {
 		detail: buildNodeDetail(
 			{
 				nodes: nodes.value ?? [],
-				nodeVms: nodeVms.value?.resources ?? [],
-				nodeStoragePools: nodeStoragePools.value?.resources ?? [],
-				nodeNetworks: nodeNetworks.value?.resources ?? [],
+				nodeVms: nodeVms.value ?? [],
+				nodeStoragePools: nodeStoragePools.value ?? [],
+				nodeNetworks: nodeNetworks.value ?? [],
 				operations: operations.value ?? [],
 				events: events.value ?? []
 			},
@@ -134,6 +147,8 @@ export async function loadNodeDetailPageData(
 }
 
 export async function loadVmsPageData(fetcher: Fetcher, url: URL): Promise<VmsPageData> {
+	void fetcher;
+
 	if (!browser) {
 		return {
 			vms: buildVmsList({ vms: [], nodes: [], vmPlacements: {}, operations: [], events: [] }),
@@ -142,10 +157,10 @@ export async function loadVmsPageData(fetcher: Fetcher, url: URL): Promise<VmsPa
 	}
 
 	const [nodes, vms, operations, events] = await Promise.all([
-		loadJson<NodeWithResources[]>(fetcher, '/api/v1/nodes'),
-		loadJson<VM[]>(fetcher, '/api/v1/vms'),
-		loadJson<Operation[]>(fetcher, '/api/v1/operations'),
-		loadJson<Event[]>(fetcher, '/api/v1/events')
+		loadBffNodes(),
+		loadBffVms(),
+		loadBffOperations(),
+		loadBffEvents()
 	]);
 
 	return {
@@ -180,6 +195,8 @@ export async function loadVmDetailPageData(
 	vmId: string,
 	url: URL
 ): Promise<VmDetailPageData> {
+	void fetcher;
+
 	if (!browser) {
 		return {
 			detail: buildVmDetail(
@@ -200,12 +217,12 @@ export async function loadVmDetailPageData(
 	}
 
 	const [vm, nodes, storagePools, networks, operations, events] = await Promise.all([
-		loadJson<VM>(fetcher, `/api/v1/vms/${vmId}`),
-		loadJson<NodeWithResources[]>(fetcher, '/api/v1/nodes'),
-		loadJson<StoragePool[]>(fetcher, '/api/v1/storage-pools'),
-		loadJson<Network[]>(fetcher, '/api/v1/networks'),
-		loadJson<Operation[]>(fetcher, '/api/v1/operations'),
-		loadJson<Event[]>(fetcher, '/api/v1/events')
+		loadBffVm(vmId),
+		loadBffNodes(),
+		loadBffStoragePools(),
+		loadBffNetworks(),
+		loadBffOperations(),
+		loadBffEvents()
 	]);
 
 	return {
@@ -233,35 +250,75 @@ export async function loadVmDetailPageData(
 	};
 }
 
-const RESOURCE_CACHE_TTL = 30000;
-const requestCache = new Map<string, { value: any; failed: boolean; timestamp: number }>();
-
-async function loadJson<T>(fetcher: Fetcher, path: string, explicitToken?: string | null) {
-	const now = Date.now();
-	const cached = requestCache.get(path);
-	if (cached && now - cached.timestamp < RESOURCE_CACHE_TTL) {
-		return { value: cached.value as T, failed: cached.failed };
-	}
-
-	const token = explicitToken === undefined ? getStoredToken() : explicitToken;
+async function loadBffStoragePools() {
 	try {
-		const headers = new Headers();
-		if (token) {
-			headers.set('Authorization', `Bearer ${token}`);
-		}
-
-		const response = await fetcher(path, { headers, cache: 'no-store' });
-		if (!response.ok) {
-			const failedResult = { value: null as T | null, failed: true };
-			// We only want to cache successful requests really, but let's cache failures for a short duration too to prevent hammering
-			return failedResult;
-		}
-
-		const value = (await response.json()) as T;
-		requestCache.set(path, { value, failed: false, timestamp: now });
-		return { value, failed: false };
+		return { value: await loadStoragePoolsFromBff(getStoredToken() ?? undefined), failed: false };
 	} catch {
-		return { value: null as T | null, failed: true };
+		return { value: null as StoragePool[] | null, failed: true };
+	}
+}
+
+async function loadBffNodes() {
+	try {
+		return { value: await loadNodesFromBff(getStoredToken() ?? undefined), failed: false };
+	} catch {
+		return { value: null as NodeWithResources[] | null, failed: true };
+	}
+}
+
+async function loadBffVms() {
+	try {
+		return { value: await loadVmsFromBff(getStoredToken() ?? undefined), failed: false };
+	} catch {
+		return { value: null as VM[] | null, failed: true };
+	}
+}
+
+async function loadBffVm(vmId: string) {
+	try {
+		return { value: await loadVmFromBff(vmId, getStoredToken() ?? undefined), failed: false };
+	} catch {
+		return { value: null as VM | null, failed: true };
+	}
+}
+
+async function loadBffVmsForNode(nodeId: string) {
+	const result = await loadBffVms();
+	return {
+		value: result.value?.filter((vm) => vm.node_id === nodeId) ?? null,
+		failed: result.failed
+	};
+}
+
+async function loadBffStoragePoolsForNode(_nodeId: string) {
+	return loadBffStoragePools();
+}
+
+async function loadBffNetworks() {
+	try {
+		return { value: await loadNetworksFromBff(getStoredToken() ?? undefined), failed: false };
+	} catch {
+		return { value: null as Network[] | null, failed: true };
+	}
+}
+
+async function loadBffNetworksForNode(_nodeId: string) {
+	return loadBffNetworks();
+}
+
+async function loadBffOperations() {
+	try {
+		return { value: await loadOperationsFromBff(getStoredToken() ?? undefined), failed: false };
+	} catch {
+		return { value: null as Operation[] | null, failed: true };
+	}
+}
+
+async function loadBffEvents() {
+	try {
+		return { value: await loadEventsFromBff(getStoredToken() ?? undefined), failed: false };
+	} catch {
+		return { value: null as Event[] | null, failed: true };
 	}
 }
 

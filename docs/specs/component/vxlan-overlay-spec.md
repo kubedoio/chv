@@ -3,6 +3,10 @@
 ## Purpose
 Defines the L2 overlay network architecture for cross-node VM connectivity using kernel VXLAN with eBPF-based security policy enforcement.
 
+## Implementation Status
+
+Kernel VXLAN is the overlay datapath. `chv-nwd` is responsible for VXLAN interface lifecycle, explicit FDB entries, teardown, and post-migration ARP handling. eBPF is scoped to policy enforcement, rate limiting, and counters at TC hooks; it is not used for VXLAN encapsulation/decapsulation. Control-plane VNI/VTEP coordination remains required for new joins, migrations, and FDB updates.
+
 ## Owner
 - **chv-nwd**: VXLAN interface lifecycle, FDB management, eBPF program loading
 - **Control plane**: VNI assignment, VTEP registry, topology coordination

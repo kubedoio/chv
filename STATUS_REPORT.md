@@ -62,8 +62,8 @@
 | 001 | Node Runtime Split | Accepted | **PASS** |
 | 002 | Control Plane to Node Boundary | Accepted | PARTIAL — mTLS optional; generation not enforced at store |
 | 003 | Node State Machine | Accepted | PARTIAL — Missing Discovered/Failed states; no schedulability check |
-| 004 | Storage Datapath Model | Accepted | **FAIL** — iSCSI + Ceph RBD backends not implemented |
-| 005 | Network Service Model | Accepted | PARTIAL — 5 nwd daemon stubs unimplemented |
+| 004 | Storage Datapath Model | Accepted | PARTIAL — local/LVM active; iSCSI + Ceph RBD adapters exist but are not production-complete |
+| 005 | Network Service Model | Accepted | PARTIAL — bridge/netns/VXLAN/FDB implemented; DHCP/DNS/firewall enforcement still incomplete |
 | 006 | Partition and Autonomy Policy | Accepted | **FAIL** — No partition policy gate at store layer |
 | 007 | Upgrade and Rollback Policy | Accepted | PARTIAL — Bundle-tested concept defined, not fully automated |
 | 008 | Error Handling Patterns | Accepted | **PASS** — Single crate, `Into<tonic::Status>`, sanitized boundaries |
@@ -105,8 +105,8 @@
 |---------|--------|-------|
 | Local raw/qcow2 volumes | Done | Create, resize, delete |
 | LVM backend | Done | Thin provisioning |
-| iSCSI backend | **Missing** | ADR-004 MVP-1 mandatory |
-| Ceph RBD backend | **Missing** | ADR-004 MVP-1 mandatory |
+| iSCSI backend | Partial | Adapter code exists; host-session integration and production hardening remain |
+| Ceph RBD backend | Partial | Adapter code exists; host prerequisite integration and production hardening remain |
 | Snapshots (volume-level) | Done | Copy-on-write for qcow2 |
 | Pool management | Done | Discover, report capacity |
 
@@ -116,8 +116,8 @@
 | Linux bridge creation | Done | Per-network isolation |
 | Namespace + veth/tap | Done | VM network plumbing |
 | NAT/masquerade | Partial | Policy logged, not fully enforced |
-| Firewall (nftables) | **Stub** | Logs only, no rule enforcement |
-| DHCP scope | **Stub** | Logs only, no dnsmasq integration |
+| Firewall (nftables) | Partial | Policy path exists; full enforcement and validation remain |
+| DHCP scope | Partial | Scope path exists; service integration and validation remain |
 | DNS scope | **Stub** | Logs only, no resolver integration |
 | Service exposure (port forward) | Done | iptables DNAT rules |
 
@@ -159,8 +159,8 @@
 |---|-----|--------|--------|-----------|
 | 1 | Generation monotonicity not enforced at store | Stale writes can overwrite current state (split-brain) | Medium | controlplane-store |
 | 2 | mTLS optional at runtime | Node communication unencrypted in some configs | Medium | controlplane, agent |
-| 3 | iSCSI + Ceph RBD backends missing | Limited to local storage only | High | stord-backends |
-| 4 | Network daemon stubs (DHCP, DNS, firewall) | VMs lack network services; firewall not enforced | High | nwd-core |
+| 3 | iSCSI + Ceph RBD backends not production-complete | Non-local backends need hardening and host integration | High | stord-backends |
+| 4 | Network service enforcement incomplete (DHCP, DNS, firewall) | VMs may lack managed network services; firewall guarantees incomplete | High | nwd-core |
 | 5 | Partition policy gate missing | No protection against stale scheduling during CP outage | Medium | controlplane-store |
 | 6 | Quota enforcement not wired | Resource limits defined but not checked at create-time | Low | orchestrator, BFF |
 

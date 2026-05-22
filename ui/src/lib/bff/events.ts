@@ -1,12 +1,8 @@
 import { bffFetch } from './client';
 import { BFFEndpoints } from './endpoints';
-import type { InfrastructureEvent } from './types';
+import type { InfrastructureEvent, ListEventsResponse } from './types';
 
-export async function listEvents(token?: string): Promise<{
-	items: Record<string, unknown>[];
-	page: { page: number; page_size: number; total_items: number };
-	filters: { applied: Record<string, string> } | null;
-}> {
+export async function listEvents(token?: string): Promise<ListEventsResponse> {
 	return bffFetch(BFFEndpoints.listEvents, {
 		method: 'POST',
 		body: JSON.stringify({}),

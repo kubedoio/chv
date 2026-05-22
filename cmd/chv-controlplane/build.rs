@@ -28,6 +28,9 @@ fn main() {
 
     let channel = std::env::var("CHV_RELEASE_CHANNEL").unwrap_or_else(|_| "stable".to_string());
 
+    println!("cargo:rerun-if-changed=../../VERSION");
+    println!("cargo:rerun-if-env-changed=CHV_RELEASE_CHANNEL");
+
     println!("cargo:rustc-env=CHV_VERSION={}", version);
     println!("cargo:rustc-env=CHV_GIT_SHA={}", git_sha);
     println!("cargo:rustc-env=CHV_BUILD_DATE={}", build_date);

@@ -6,8 +6,8 @@
 ## MVP-1 storage classes
 - local qcow2/raw file
 - local block/LVM
-- iSCSI block
-- Ceph RBD
+- iSCSI block (planned adapter; not production-complete)
+- Ceph RBD (planned adapter; not production-complete)
 
 ## Responsibilities
 - open and close volumes
@@ -44,3 +44,15 @@
 ## Recovery model
 - existing VMs should continue where safe if service restarts
 - session/runtime state should be rebuilt from durable metadata plus local cache
+
+## Implementation Status
+
+| Area | Status |
+|---|---|
+| Local qcow2/raw file backend | Active implementation path |
+| Local block/LVM backend | Active implementation path |
+| iSCSI backend | Planned; host-session and attach/open adapter work remains |
+| Ceph RBD backend | Planned; librbd/host prerequisite integration and attach/open adapter work remains |
+| Disk migration bulk copy, flow control, CRC, resumability | Implemented |
+| Disk migration dirty sync rounds and convergence reporting | Partial/missing; stord does not yet send round progress to control plane |
+| Paused final dirty flush | Missing; required before production live migration |

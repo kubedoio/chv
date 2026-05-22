@@ -4,21 +4,27 @@ Based on the comprehensive repository review and existing roadmap, the following
 
 ## Current Status Summary
 
-As of Sprint 15 (PRs 49-52), all P0 (CRITICAL) and P1 (HIGH) items are complete. Most P2 (MEDIUM) items are done. The platform has transitioned from early-MVP to stability phase.
+As of Sprint 15 (PRs 49-52), the platform has transitioned from early-MVP toward stability, but several production-readiness areas remain partial. The high-level VM lifecycle, node enrollment, desired-state reconciliation, and base storage/network daemons are usable; live migration, overlay policy enforcement, storage backends, and Backup/DR still have important gaps.
 
 **Delivered in recent sprints:**
 - Rolling upgrade orchestration (`UpgradeOrchestrator` + `SystemdNodeUpgrader`)
 - Compatibility matrix boot gate (version validation before upgrade)
 - mTLS enforcement on storage migration (plaintext rejected)
 - Backpressure handling in migration sender
-- Drain evacuation (automatic VM migration on node drain)
+- Drain evacuation path (node drain issues migration requests; full safety still depends on migration gaps below)
 - Partition reconnect flush (pending messages flushed on reconnect)
-- eBPF auto-load on NIC attach (policy + ingress programs)
+- `chv-nwd` kernel VXLAN/FDB lifecycle work (policy eBPF remains enforcement scope only, not a VXLAN datapath)
 - FDB cleanup on VM detach
 - VXLAN teardown on topology delete
 - MigrationReaper (auto-fails stuck migrations after 2h)
 - Circuit breaker on node communication
 - Deep health checks (database, agent socket, agent connectivity)
+
+**Known partials that remain production-relevant:**
+- Disk migration orchestration is partial: control-plane phases, reaper, flow control, and mTLS exist, but dirty sync rounds, convergence reporting from stord, and paused final dirty flush remain incomplete.
+- `chv-nwd` scope is kernel VXLAN plus explicit FDB management; eBPF is for policy/rate limiting only and is not the overlay datapath.
+- `chv-stord` local file and local block/LVM paths are the active backend focus. iSCSI and Ceph RBD remain planned backend adapters, not complete production backends.
+- Backup/DR has SQLite pre-migration backup and schema/API surfaces, but still lacks the VM/volume backup execution engine, off-host shipping, restore validation, and operator-run DR automation.
 
 ---
 
@@ -48,10 +54,11 @@ As of Sprint 15 (PRs 49-52), all P0 (CRITICAL) and P1 (HIGH) items are complete.
 *   ~~Agent API Token Auth (`B10`)~~
 *   ~~Metadata Propagation (`A6`)~~
 
-### 2.2 Storage & Network Daemons [COMPLETE]
+### 2.2 Storage & Network Daemons [PARTIAL]
 *   ~~`chv-nwd` Linux Executor (`A8`)~~
 *   ~~Storage Pool Provisioning (`B7`)~~
 *   ~~Image Import Validation (`B8`)~~
+*   **iSCSI and Ceph RBD backends**: planned by the storage datapath ADR/component spec, but not complete production adapters.
 
 ---
 
@@ -66,7 +73,7 @@ As of Sprint 15 (PRs 49-52), all P0 (CRITICAL) and P1 (HIGH) items are complete.
 *   **Overview Logic Extraction**: Extract logic from the overview page (526 lines) into dedicated helpers.
 
 ### 3.2 Backups & Role-Based Access [PARTIAL]
-*   **Backup/DR (`B2`)**: Remove the backup job and history stubs in `api/stub.rs`. Design the backup schema and implement the backend orchestration for taking VM snapshots and shipping them.
+*   **Backup/DR (`B2`)**: Implement the backup execution worker, VM/volume snapshot orchestration, off-host artifact shipping, restore validation, retention enforcement, and documented DR automation. SQLite pre-migration backup exists, but it is not a full Backup/DR system.
 *   ~~RBAC Middleware (`B6`)~~: Role-based access on BFF routes implemented.
 
 ### 3.3 CI/CD & Deployments (`I3`, `I4`, `I5`, `I6`) [COMPLETE]
@@ -75,12 +82,13 @@ As of Sprint 15 (PRs 49-52), all P0 (CRITICAL) and P1 (HIGH) items are complete.
 *   ~~Nginx Routing~~: WebSocket routing configured.
 *   ~~Versioning~~: Release versioning automated via `VERSION` file + Makefile.
 
-### 3.4 Production Gaps (Sprints 11-15) [COMPLETE]
+### 3.4 Production Gaps (Sprints 11-15) [PARTIAL]
 *   ~~Rolling upgrade orchestration~~ (UpgradeOrchestrator, SystemdNodeUpgrader)
 *   ~~Compatibility matrix enforcement~~ (boot gate rejects incompatible versions)
 *   ~~mTLS on storage migration~~ (plaintext connections rejected)
 *   ~~Backpressure handling~~ (sender throttles based on receiver feedback)
-*   ~~eBPF auto-load on NIC attach~~ (policy + ingress programs)
+*   **Disk migration dirty sync/final flush**: partial; protocol messages and orchestration exist, but stord does not yet perform dirty rounds or paused final dirty flush.
+*   **eBPF policy enforcement**: scoped to policy/rate limiting. Kernel VXLAN remains the overlay datapath.
 *   ~~FDB cleanup on VM detach~~ (forwarding database entries cleaned)
 *   ~~Drain evacuation~~ (Draining state triggers VM migration requests)
 *   ~~Partition reconnect flush~~ (agent flushes pending messages on reconnect)
@@ -96,8 +104,8 @@ As of Sprint 15 (PRs 49-52), all P0 (CRITICAL) and P1 (HIGH) items are complete.
 2.  `svelte-check` reports 0 errors and 0 warnings.
 3.  ~~All `unimplemented!()` stubs in the agent `reconcile.rs` are replaced with real daemon clients.~~
 4.  ~~No `BffError::NotImplemented` returned from any frontend API call.~~
-5.  ~~CI pipeline is green and automated backups are working.~~
-6.  All production-gap items (P0, P1) resolved — **DONE**
+5.  CI pipeline is green; automated Backup/DR execution is **PARTIAL** and limited to SQLite pre-migration backup today.
+6.  All production-gap items (P0, P1) resolved — **PARTIAL** until disk migration dirty sync/final flush is complete.
 
 ## Remaining Work
 
@@ -106,4 +114,6 @@ As of Sprint 15 (PRs 49-52), all P0 (CRITICAL) and P1 (HIGH) items are complete.
 | UI | Tailwind-first migration | P2 |
 | UI | Command palette | P2 |
 | Backend | Backup/DR job implementation | P2 |
+| Backend | Disk migration dirty sync rounds, convergence reporting, and paused final dirty flush | P1 |
+| Backend | iSCSI and Ceph RBD backend adapters | P2 |
 | UI | DataTable / Overview refactor | P3 |

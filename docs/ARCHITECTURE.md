@@ -110,8 +110,8 @@ MVP-1 uses a host-side `chv-stord` daemon. Supported storage classes:
 
 - Local raw / qcow2 files
 - LVM thin pools
-- iSCSI (planned)
-- Ceph RBD (planned)
+- iSCSI (planned adapter; not a complete production backend)
+- Ceph RBD (planned adapter; not a complete production backend)
 
 The storage-VM / NBD model was explicitly rejected for MVP-1.
 
@@ -125,6 +125,8 @@ Storage migration between nodes is secured with mandatory mTLS:
 - **Flow control**: A sliding send window (default 16 in-flight chunks) prevents memory exhaustion on either side.
 - **MigrationReaper**: A background task (`crates/chv-controlplane-service/src/migration_reaper.rs`) scans every 60s for migrations stuck beyond 2 hours and force-transitions them to `Failed`.
 
+Current status: migration orchestration is partial. Control-plane phases, mTLS, flow control, backpressure, rollback paths, and stale-operation reaping exist, but dirty sync rounds, stord-to-control-plane convergence reporting, and paused final dirty flush remain incomplete.
+
 Implementation: `crates/chv-stord-core/src/migration/sender.rs`
 
 See ADR-004: [Storage Datapath Model](./specs/adr/004-storage-datapath.md)
@@ -133,8 +135,8 @@ See ADR-004: [Storage Datapath Model](./specs/adr/004-storage-datapath.md)
 
 MVP-1 uses Linux bridge + netns + veth + nftables via a host-side `chv-nwd` daemon. Advanced features:
 
-- eBPF-based data plane (policy + ingress programs auto-loaded on NIC attach)
-- VXLAN overlay networking with FDB cleanup on VM detach
+- Kernel VXLAN overlay networking with explicit FDB cleanup on VM detach
+- eBPF policy and rate-limit enforcement only; eBPF is not the VXLAN datapath
 - VXLAN teardown via `delete_topology` (cleans up VXLAN interfaces)
 
 See ADR-005: [Network Service Model](./specs/adr/005-network-service-model.md)
@@ -222,13 +224,13 @@ Status values: `healthy` (all pass), `degraded` (DB pass but agent issues), `unh
 - Hypervisor settings DB + BFF (orchestrator merge partially wired)
 - Basic CI (GitHub Actions)
 - Rolling upgrade orchestration with `SystemdNodeUpgrader` and compatibility matrix
-- Storage migration with mTLS enforcement, backpressure, and flow control
+- Storage migration with mTLS enforcement, backpressure, and flow control; dirty sync rounds and paused final dirty flush remain incomplete
 - Circuit breaker on node communication
 - Deep health checks (database, agent socket, agent connectivity)
 - Migration reaper (auto-fails stuck migrations after 2h)
 - Drain evacuation (automatic VM migration on node drain)
 - Partition reconnect flush (pending messages delivered on reconnect)
-- eBPF policy auto-load on NIC attach
+- eBPF policy scope defined for policy/rate limiting; kernel VXLAN remains the overlay datapath
 - FDB cleanup on VM detach
 - VXLAN teardown on topology delete
 
@@ -236,7 +238,9 @@ Status values: `healthy` (all pass), `degraded` (DB pass but agent issues), `unh
 
 | Area | Gap | Priority |
 |------|-----|----------|
-| Backend | Backup jobs & history stubbed | P2 |
+| Backend | Backup/DR execution engine, off-host shipping, restore validation, and runbook automation incomplete | P2 |
+| Backend | Disk migration dirty sync rounds, convergence reporting, and paused final dirty flush incomplete | P1 |
+| Backend | iSCSI and Ceph RBD storage backend adapters planned, not production-complete | P2 |
 | UI | Production-readiness Tailwind-first refactor not started | P2 |
 | UI | Command palette TODO | P2 |
 

@@ -4,6 +4,7 @@ import Button from '$lib/components/primitives/Button.svelte';
   import { goto } from '$app/navigation';
   import { HardDrive, Plus, Database, ShieldCheck } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
+  import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
   import { toast } from '$lib/stores/toast.svelte';
   import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
   import FilterBar from '$lib/components/shared/FilterBar.svelte';
@@ -65,7 +66,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     loading = true;
     error = false;
     try {
-      items = (await client.listStoragePools()) ?? [];
+      items = await loadStoragePoolsFromBff(token ?? undefined);
     } catch (err) {
       toast.error('Failed to load storage pools');
       error = true;

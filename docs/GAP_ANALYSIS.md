@@ -40,11 +40,11 @@
 - **Evidence:** `crates/chv-controlplane-service/src/lifecycle.rs:687-712`
 - **Priority:** P1
 
-### 1.2 Backup Jobs: Database + API Only, No Execution Engine
+### 1.2 Backup Jobs: Partial Execution Engine, DR Semantics Incomplete
 - **Spec:** ARCHITECTURE.md ("Backup jobs & history stubbed"), PHASED_IMPLEMENTATION_PLAN.md Phase 3
-- **Gap:** Backup tables (`backup_jobs`, `backup_schedules`, `backup_restores`), repositories (`BackupRepository`), and BFF REST handlers all exist. However, there is **no backup execution engine** — no worker that actually takes VM snapshots, ships them to target storage, or validates restoration. The handlers return DB rows, but no backup ever progresses past `queued` status.
-- **Status:** Stubbed (data layer complete, execution layer missing)
-- **Evidence:** `crates/chv-webui-bff/src/handlers/backups.rs` (read-only handlers), no backup worker found in `crates/chv-controlplane-service/src/`
+- **Gap:** Backup tables (`backup_jobs`, `backup_schedules`, `backup_restores`), repositories (`BackupRepository`), BFF REST handlers, and a control-plane `BackupWorker` now exist. The remaining gap is production Backup/DR semantics: off-host artifact shipping, restore execution/validation, retention enforcement, integrity checks, and documented DR runbooks are not complete.
+- **Status:** Partial (scheduler/executor exists; DR workflow incomplete)
+- **Evidence:** `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-webui-bff/src/handlers/backups.rs`
 - **Priority:** P2
 
 ### 1.3 Network Mutation End-to-End Incomplete
