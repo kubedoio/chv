@@ -26,8 +26,9 @@ test.describe('Navigation & Auth', () => {
 		}
 	});
 
-	test('command palette opens with Ctrl+K keyboard shortcut', async ({ page }) => {
-		await page.keyboard.press('Control+k');
+	test('command palette opens with Ctrl+K keyboard shortcut', async ({ page, browserName }) => {
+		const modifier = browserName === 'webkit' ? 'Meta' : 'Control';
+		await page.keyboard.press(`${modifier}+k`);
 		await expect(page.locator('.fixed.inset-0')).toBeVisible();
 		await expect(page.getByPlaceholder(/type a command or search/i)).toBeVisible();
 	});
