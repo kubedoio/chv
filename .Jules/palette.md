@@ -1,0 +1,3 @@
+## 2025-01-20 - Ensure Complete ARIA Linkage for Accordion/Expandable Components
+**Learning:** Expanding/collapsing panels, such as those in `EventList.svelte`, require strong accessibility linkage. Screen readers cannot properly understand the relationship between a trigger button and its subsequent content panel if only `aria-expanded` is used on the button.
+**Action:** Always ensure that an accordion/expandable trigger button includes an explicit `id` and an `aria-controls` attribute pointing to its content block. The content block must then include an `id` that matches `aria-controls`, along with `role="region"` and `aria-labelledby` pointing back to the trigger button's `id`.
