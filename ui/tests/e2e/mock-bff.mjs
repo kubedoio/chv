@@ -15,6 +15,10 @@ const server = http.createServer((req, res) => {
 
 	if (req.url === '/v1/overview') {
 		res.end(EMPTY_OVERVIEW);
+	} else if (req.url === '/v1/settings') {
+		res.end(JSON.stringify({ users: [] }));
+	} else if (req.url === '/v1/settings/hypervisor') {
+		res.end(JSON.stringify({ settings: {}, profiles: [] }));
 	} else {
 		res.end(EMPTY_LIST);
 	}
