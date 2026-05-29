@@ -270,6 +270,7 @@
                   onclick={() => deleteRule(rule.id)} 
                   class="p-2 hover:bg-rose-50 rounded text-rose-600 border border-transparent hover:border-rose-200 transition-all"
                   title="Delete Rule"
+                  aria-label="Delete Rule"
                 >
                   <Trash2 size={16} />
                 </button>
