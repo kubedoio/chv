@@ -219,8 +219,8 @@ import Button from '$lib/components/primitives/Button.svelte';
                <StatusBadge label={row.status.toUpperCase()} tone={row.status === 'Enabled' || row.status === 'Completed' ? 'healthy' : row.status === 'Pending' ? 'warning' : 'degraded'} />
              {:else if column.key === '_actions'}
                 <div class="op-cluster">
-                   <button type="button" class="op-ctrl" onclick={() => runJobNow(row)} title="FORCE_EXECUTE"><Play size={12} /></button>
-                   <button type="button" class="op-ctrl" onclick={() => toggleJob(row)} title="TOGGLE_STATUS">
+                   <button type="button" class="op-ctrl" onclick={() => runJobNow(row)} title="FORCE_EXECUTE" aria-label="Force execute job {row.job_id}"><Play size={12} /></button>
+                   <button type="button" class="op-ctrl" onclick={() => toggleJob(row)} title="TOGGLE_STATUS" aria-label="Toggle status for job {row.job_id}">
                       {#if row.status === 'Enabled'}<Pause size={12} />{:else}<Play size={12} />{/if}
                    </button>
                 </div>
@@ -241,7 +241,7 @@ import Button from '$lib/components/primitives/Button.svelte';
              {:else if column.key === 'completed_at'}
                <div class="trace-end">
                  <span class="timestamp">{row.completed_at ? new Date(String(row.completed_at)).toLocaleTimeString() : '—'}</span>
-                 <button type="button" class="trace-dl" title="DOWNLOAD_ARTIFACT"><Download size={12} /></button>
+                 <button type="button" class="trace-dl" title="DOWNLOAD_ARTIFACT" aria-label="Download artifact for job {row.job_id}"><Download size={12} /></button>
                </div>
              {:else}
                <span class="cell-text">{(row as Record<string, unknown>)[column.key] ?? '—'}</span>

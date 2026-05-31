@@ -200,7 +200,7 @@ import Button from '$lib/components/primitives/Button.svelte';
                <StatusBadge label={row.status.label} tone={row.status.tone as ShellTone} />
              {:else if column.key === '_actions'}
                <div class="row-ops">
-                  <button type="button" class="op-btn" onclick={() => cloneTemplate(row)} title="Orchestrate Workload"><Copy size={12} /></button>
+                  <button type="button" class="op-btn" onclick={() => cloneTemplate(row)} title="Orchestrate Workload" aria-label="Orchestrate Workload for template {row.name}"><Copy size={12} /></button>
                </div>
              {:else}
                <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
@@ -217,7 +217,7 @@ import Button from '$lib/components/primitives/Button.svelte';
                <span class="blueprint-name">{row.name}</span>
              {:else if column.key === '_actions'}
                <div class="row-ops">
-                  <button type="button" class="op-btn" title="View Registry"><FileCode size={12} /></button>
+                  <button type="button" class="op-btn" title="View Registry" aria-label="View registry for template {row.name}"><FileCode size={12} /></button>
                </div>
              {:else}
                <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
