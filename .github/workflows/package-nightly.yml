@@ -38,7 +38,7 @@ permissions:
 jobs:
   build-and-package:
     name: Build and Package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       pkg_version_deb: ${{ steps.version.outputs.pkg_version_deb }}
       pkg_version_rpm: ${{ steps.version.outputs.pkg_version_rpm }}
@@ -182,7 +182,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-github:
     name: Publish GitHub Nightly Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: build-and-package
     if: |
       needs.build-and-package.outputs.should_publish == 'true' &&
@@ -280,7 +280,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-repo:
     name: Publish to Package Repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: build-and-package
     environment: nightly-repo
     if: |

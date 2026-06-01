@@ -43,7 +43,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
       pkg_version: ${{ steps.version.outputs.pkg_version }}
@@ -185,7 +185,7 @@ jobs:
   # ---------------------------------------------------------------------------
   package:
     name: Package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: build
     outputs:
       pkg_version_deb: ${{ steps.pkg.outputs.pkg_version_deb }}
@@ -319,7 +319,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [build, package]
     if: needs.build.outputs.should_release == 'true'
     environment: ${{ needs.build.outputs.is_prerelease == 'true' && 'rc' || 'production' }}
@@ -450,7 +450,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-repo:
     name: Publish to Package Repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [build, package]
     if: |
       needs.build.outputs.should_release == 'true' &&
