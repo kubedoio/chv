@@ -5,6 +5,7 @@ fn main() {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
+        .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&[proto_dir.join("node/chv-nwd-api.proto")], &[proto_dir])
         .expect("Failed to compile protos");
 }
