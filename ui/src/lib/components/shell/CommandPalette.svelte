@@ -75,7 +75,7 @@
 
 {#if open}
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div class="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50 transition-opacity duration-150" class:opacity-0={!isVisible||isClosing} class:opacity-100={isVisible&&!isClosing} onclick={handleBackdropClick} aria-hidden="true">
+	<div class="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50 transition-opacity duration-150" class:opacity-0={!isVisible||isClosing} class:opacity-100={isVisible&&!isClosing} onclick={handleBackdropClick}>
 		<div role="dialog" aria-modal="true" tabindex="-1" aria-label="Command palette" class="w-full max-w-xl mx-4 overflow-hidden rounded-[var(--radius-md)] bg-[var(--shell-surface)] shadow-[0_4px_16px_rgba(0,0,0,0.15)] transition-all duration-150" class:scale-95={!isVisible||isClosing} class:scale-100={isVisible&&!isClosing} class:opacity-0={!isVisible||isClosing} class:opacity-100={isVisible&&!isClosing} onclick={(e)=>e.stopPropagation()}>
 			<!-- Input -->
 			<div class="flex items-center gap-3 px-4 py-3 border-b border-[var(--border-subtle)]">

@@ -27,16 +27,14 @@ test.describe('Navigation & Auth', () => {
 	});
 
 	test('command palette opens with Ctrl+K keyboard shortcut', async ({ page }) => {
-		await page.evaluate(() => {
-			document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
-		});
-		await expect(page.locator('.fixed.inset-0')).toBeVisible();
+		await page.locator('body').press('Control+k');
+		await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible();
 		await expect(page.getByPlaceholder(/type a command or search/i)).toBeVisible();
 	});
 
 	test('command palette opens via top bar click', async ({ page }) => {
 		await page.getByRole('button', { name: /open command palette/i }).click();
-		await expect(page.locator('.fixed.inset-0')).toBeVisible();
+		await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible();
 	});
 
 	test('logout clears token and redirects to login', async ({ page }) => {
