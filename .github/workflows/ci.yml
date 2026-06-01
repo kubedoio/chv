@@ -22,6 +22,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
