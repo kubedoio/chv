@@ -87,6 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.backend_allowlist,
         config.path_allowlist,
         config.device_allowlist,
+        config.migration_dest_allowlist,
+        None, // TODO: wire migration TLS config from stord config
         Some(store),
     );
 

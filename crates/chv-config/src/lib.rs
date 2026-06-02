@@ -231,6 +231,9 @@ pub struct StordConfig {
     /// Storage backend type: "local" (default), "iscsi", "ceph", or "lvm".
     #[serde(default)]
     pub backend_type: Option<String>,
+    /// Allowed migration destination hosts. Empty = allow all.
+    #[serde(default)]
+    pub migration_dest_allowlist: Vec<String>,
     /// iSCSI backend configuration (required when backend_type = "iscsi").
     #[serde(default)]
     pub iscsi: Option<StordIscsiConfig>,
@@ -282,6 +285,7 @@ impl Default for StordConfig {
             device_allowlist: vec!["/dev/dm-*".to_string(), "/dev/mapper/*".to_string()],
             metrics_bind: None,
             backend_type: None,
+            migration_dest_allowlist: vec![],
             iscsi: None,
             ceph: None,
             lvm_volume_group: None,

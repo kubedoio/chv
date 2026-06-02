@@ -1,3 +1,5 @@
+use crate::migration::sender::{start_migration_to_peer, MigrationTlsConfig};
+use crate::migration::task::{MigrationPhase, MigrationTask, MigrationTaskTable};
 use crate::session::{Session, SessionTable};
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::{ChvError, ErrorCode};
@@ -30,9 +32,13 @@ pub struct StorageServiceImpl<B: StorageBackend> {
     path_allowlist: Vec<std::path::PathBuf>,
     device_allowlist: Vec<String>,
     store: Option<Arc<crate::store::SessionStore>>,
+    migration_tasks: Arc<MigrationTaskTable>,
+    migration_dest_allowlist: Vec<String>,
+    migration_tls: Option<MigrationTlsConfig>,
 }
 
 impl<B: StorageBackend> StorageServiceImpl<B> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: Arc<B>,
         sessions: Arc<SessionTable>,
@@ -40,6 +46,8 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         backend_allowlist: Vec<String>,
         path_allowlist: Vec<std::path::PathBuf>,
         device_allowlist: Vec<String>,
+        migration_dest_allowlist: Vec<String>,
+        migration_tls: Option<MigrationTlsConfig>,
     ) -> Self {
         Self {
             backend,
@@ -49,6 +57,9 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             path_allowlist,
             device_allowlist,
             store: None,
+            migration_tasks: Arc::new(MigrationTaskTable::new()),
+            migration_dest_allowlist,
+            migration_tls,
         }
     }
 
@@ -121,6 +132,26 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         Err(ChvError::BackendUnavailable {
             backend: backend_class.to_string(),
             reason: format!("backend class '{}' not in allowlist", backend_class),
+        })
+    }
+
+    fn check_migration_dest_allowlist(&self, dest_endpoint: &str) -> Result<(), ChvError> {
+        if self.migration_dest_allowlist.is_empty() {
+            return Ok(());
+        }
+        // Extract host from endpoint, e.g. "https://host:50052" -> "host"
+        let host = dest_endpoint
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .split(':')
+            .next()
+            .unwrap_or(dest_endpoint);
+        if self.migration_dest_allowlist.iter().any(|h| h == host) {
+            return Ok(());
+        }
+        Err(ChvError::BackendUnavailable {
+            backend: "migration".to_string(),
+            reason: format!("migration destination '{}' not in allowlist", dest_endpoint),
         })
     }
 
@@ -806,5 +837,275 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         }
 
         Ok(Response::new(Self::ok_result()))
+    }
+
+    async fn trigger_disk_migration(
+        &self,
+        request: Request<proto::TriggerDiskMigrationRequest>,
+    ) -> Result<Response<proto::TriggerDiskMigrationResponse>, Status> {
+        self.metrics
+            .increment_counter("stord_trigger_disk_migration_total");
+        let req = request.into_inner();
+        let _span = req
+            .meta
+            .as_ref()
+            .map(|m| operation_span(&m.operation_id))
+            .unwrap_or_else(|| operation_span(""));
+
+        if req.volume_id.is_empty() {
+            return Ok(Response::new(proto::TriggerDiskMigrationResponse {
+                result: Some(
+                    ChvError::InvalidArgument {
+                        field: "volume_id".to_string(),
+                        reason: "volume_id must not be empty".to_string(),
+                    }
+                    .to_proto_result(),
+                ),
+                migration_id: String::new(),
+            }));
+        }
+
+        if let Err(e) = self.check_migration_dest_allowlist(&req.dest_endpoint) {
+            return Ok(Response::new(proto::TriggerDiskMigrationResponse {
+                result: Some(e.to_proto_result()),
+                migration_id: String::new(),
+            }));
+        }
+
+        // Find the session for this volume+handle
+        let session = self.sessions.get(&req.volume_id, &req.attachment_handle);
+        let Some(session) = session else {
+            return Ok(Response::new(proto::TriggerDiskMigrationResponse {
+                result: Some(
+                    ChvError::NotFound {
+                        resource: "session".to_string(),
+                        id: format!("{}/{}", req.volume_id, req.attachment_handle),
+                    }
+                    .to_proto_result(),
+                ),
+                migration_id: String::new(),
+            }));
+        };
+
+        // Verify volume health before starting migration
+        match self
+            .backend
+            .health(&session.volume_id, &session.attachment_handle)
+            .await
+        {
+            Ok(h) if h.status == "error" => {
+                return Ok(Response::new(proto::TriggerDiskMigrationResponse {
+                    result: Some(
+                        ChvError::BackendUnavailable {
+                            backend: "stord".to_string(),
+                            reason: format!(
+                                "volume {} is unhealthy: {}",
+                                req.volume_id, h.last_error
+                            ),
+                        }
+                        .to_proto_result(),
+                    ),
+                    migration_id: String::new(),
+                }));
+            }
+            Err(e) => {
+                return Ok(Response::new(proto::TriggerDiskMigrationResponse {
+                    result: Some(e.to_proto_result()),
+                    migration_id: String::new(),
+                }));
+            }
+            _ => {}
+        }
+
+        let migration_id = format!(
+            "dm-{}-{}",
+            req.volume_id,
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("x")
+        );
+
+        let (task, _pause_rx) = MigrationTask::new(
+            req.volume_id.clone(),
+            req.attachment_handle.clone(),
+            req.dest_endpoint.clone(),
+        );
+
+        // Update initial total_bytes from volume size
+        let volume_size = match self
+            .backend
+            .volume_size(&req.volume_id, &req.attachment_handle)
+            .await
+        {
+            Ok(size) => size,
+            Err(e) => {
+                return Ok(Response::new(proto::TriggerDiskMigrationResponse {
+                    result: Some(e.to_proto_result()),
+                    migration_id: String::new(),
+                }));
+            }
+        };
+        {
+            let mut state = task.state.write().await;
+            state.total_bytes = volume_size;
+        }
+
+        self.migration_tasks
+            .insert(migration_id.clone(), task.clone());
+
+        let backend = self.backend.clone();
+        let tls_config = self.migration_tls.clone();
+        let endpoint = req.dest_endpoint.clone();
+        let volume_id = req.volume_id.clone();
+        let handle = req.attachment_handle.clone();
+        let tasks = self.migration_tasks.clone();
+        let mig_id = migration_id.clone();
+
+        tokio::spawn(async move {
+            tracing::info!(
+                migration_id = %mig_id,
+                volume_id = %volume_id,
+                dest_endpoint = %endpoint,
+                "starting disk migration background task"
+            );
+
+            let task_clone = task.clone();
+            let result = start_migration_to_peer(
+                endpoint,
+                volume_id.clone(),
+                handle,
+                backend,
+                tls_config,
+                Some(task_clone),
+            )
+            .await;
+
+            if let Err(ref e) = result {
+                tracing::error!(
+                    migration_id = %mig_id,
+                    volume_id = %volume_id,
+                    error = %e,
+                    "disk migration background task failed"
+                );
+                task.mark_failed(e.to_string());
+            } else {
+                tracing::info!(
+                    migration_id = %mig_id,
+                    volume_id = %volume_id,
+                    "disk migration background task completed"
+                );
+            }
+
+            // Keep the task record for a short while so status queries can read it.
+            // A future enhancement could expire old entries.
+            let _ = tasks;
+        });
+
+        Ok(Response::new(proto::TriggerDiskMigrationResponse {
+            result: Some(Self::ok_result()),
+            migration_id,
+        }))
+    }
+
+    async fn get_disk_migration_status(
+        &self,
+        request: Request<proto::GetDiskMigrationStatusRequest>,
+    ) -> Result<Response<proto::GetDiskMigrationStatusResponse>, Status> {
+        let req = request.into_inner();
+        let task = self.migration_tasks.get(&req.migration_id);
+
+        let Some(task) = task else {
+            return Ok(Response::new(proto::GetDiskMigrationStatusResponse {
+                result: Some(
+                    ChvError::NotFound {
+                        resource: "migration".to_string(),
+                        id: req.migration_id.clone(),
+                    }
+                    .to_proto_result(),
+                ),
+                phase: proto::get_disk_migration_status_response::Phase::Pending as i32,
+                convergence_round: 0,
+                dirty_blocks_remaining: 0,
+                bytes_transferred: 0,
+                total_bytes: 0,
+                needs_vm_pause: false,
+                error_message: "migration not found".to_string(),
+            }));
+        };
+
+        let state = task.state.read().await;
+        let phase = match state.phase {
+            MigrationPhase::Pending => proto::get_disk_migration_status_response::Phase::Pending,
+            MigrationPhase::BulkCopy => proto::get_disk_migration_status_response::Phase::BulkCopy,
+            MigrationPhase::DirtySync => {
+                proto::get_disk_migration_status_response::Phase::DirtySync
+            }
+            MigrationPhase::PausedFinalSync => {
+                proto::get_disk_migration_status_response::Phase::PausedFinalSync
+            }
+            MigrationPhase::Completed => {
+                proto::get_disk_migration_status_response::Phase::Completed
+            }
+            MigrationPhase::Failed => proto::get_disk_migration_status_response::Phase::Failed,
+        };
+
+        Ok(Response::new(proto::GetDiskMigrationStatusResponse {
+            result: Some(Self::ok_result()),
+            phase: phase as i32,
+            convergence_round: state.convergence_round,
+            dirty_blocks_remaining: state.dirty_blocks_remaining,
+            bytes_transferred: state.bytes_transferred,
+            total_bytes: state.total_bytes,
+            needs_vm_pause: state.needs_vm_pause,
+            error_message: state.error_message.clone(),
+        }))
+    }
+
+    async fn resume_disk_migration(
+        &self,
+        request: Request<proto::ResumeDiskMigrationRequest>,
+    ) -> Result<Response<proto::ResumeDiskMigrationResponse>, Status> {
+        let req = request.into_inner();
+        let task = self.migration_tasks.get(&req.migration_id);
+
+        let Some(task) = task else {
+            return Ok(Response::new(proto::ResumeDiskMigrationResponse {
+                result: Some(
+                    ChvError::NotFound {
+                        resource: "migration".to_string(),
+                        id: req.migration_id.clone(),
+                    }
+                    .to_proto_result(),
+                ),
+            }));
+        };
+
+        if req.vm_paused {
+            if let Err(e) = task.pause_tx.send(true) {
+                tracing::warn!(
+                    migration_id = %req.migration_id,
+                    error = %e,
+                    "failed to send vm_paused signal to migration task"
+                );
+                return Ok(Response::new(proto::ResumeDiskMigrationResponse {
+                    result: Some(
+                        ChvError::Internal {
+                            reason: format!("failed to resume migration: {e}"),
+                        }
+                        .to_proto_result(),
+                    ),
+                }));
+            }
+            tracing::info!(
+                migration_id = %req.migration_id,
+                "sent vm_paused signal to migration task"
+            );
+        }
+
+        Ok(Response::new(proto::ResumeDiskMigrationResponse {
+            result: Some(Self::ok_result()),
+        }))
     }
 }

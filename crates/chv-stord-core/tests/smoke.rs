@@ -45,6 +45,8 @@ async fn setup_server() -> (
         vec!["local".to_string()],
         vec![],
         vec![],
+        vec![],
+        None,
         None,
     );
 
@@ -581,6 +583,8 @@ async fn sqlite_persistence_roundtrip() {
         vec!["local".to_string()],
         vec![],
         vec![],
+        vec![],
+        None,
         Some(store),
     );
     let socket_clone = socket.clone();

@@ -1,4 +1,5 @@
 use crate::migration::flow_control::SendWindow;
+use crate::migration::task::{MigrationPhase, MigrationTask};
 use chv_stord_api::chv_stord_api::{
     migration_message, storage_migration_service_client::StorageMigrationServiceClient, AckStatus,
     BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
@@ -51,6 +52,8 @@ pub struct MigrationSender<B: StorageBackend> {
     /// Backpressure factor received from the destination. Values > 1.0 cause
     /// the sender to insert a throttle sleep between chunk sends.
     backpressure_factor: f32,
+    /// Optional shared task state for progress reporting and VM-pause coordination.
+    task: Option<Arc<MigrationTask>>,
 }
 
 impl<B: StorageBackend> MigrationSender<B> {
@@ -64,7 +67,14 @@ impl<B: StorageBackend> MigrationSender<B> {
             last_acknowledged_offset: 0,
             tls_config: None,
             backpressure_factor: 1.0,
+            task: None,
         }
+    }
+
+    /// Attach a shared migration task for progress reporting and pause coordination.
+    pub fn with_task(mut self, task: Arc<MigrationTask>) -> Self {
+        self.task = Some(task);
+        self
     }
 
     pub fn with_block_size(mut self, block_size: u64) -> Self {
@@ -195,6 +205,10 @@ impl<B: StorageBackend> MigrationSender<B> {
         }
 
         // Bulk copy phase
+        if let Some(ref task) = self.task {
+            let mut state = task.state.write().await;
+            state.phase = MigrationPhase::BulkCopy;
+        }
         info!(volume_id = %self.volume_id, "starting bulk copy phase");
         let mut sequence_num = self.bulk_copy(&tx, &mut inbound, volume_size).await?;
         info!(
@@ -205,6 +219,10 @@ impl<B: StorageBackend> MigrationSender<B> {
         );
 
         // Iterative dirty sync rounds: re-send blocks that were written during bulk copy
+        if let Some(ref task) = self.task {
+            let mut state = task.state.write().await;
+            state.phase = MigrationPhase::DirtySync;
+        }
         info!(volume_id = %self.volume_id, "starting iterative dirty sync rounds");
         let dirty_chunks = self
             .dirty_sync_rounds(&tx, &mut inbound, &mut sequence_num)
@@ -214,6 +232,35 @@ impl<B: StorageBackend> MigrationSender<B> {
             dirty_chunks,
             "dirty sync rounds complete"
         );
+
+        // If a task is attached, we coordinate with the agent: wait for VM pause
+        // before sending FinalSync.
+        if let Some(ref task) = self.task {
+            let mut state = task.state.write().await;
+            state.phase = MigrationPhase::PausedFinalSync;
+            state.needs_vm_pause = true;
+            drop(state);
+
+            info!(
+                volume_id = %self.volume_id,
+                "waiting for VM pause before final sync"
+            );
+
+            let mut pause_rx = task.pause_tx.subscribe();
+            while !*pause_rx.borrow() {
+                if pause_rx.changed().await.is_err() {
+                    let mut state = task.state.write().await;
+                    state.phase = MigrationPhase::Failed;
+                    state.error_message = "pause channel closed".to_string();
+                    return Err(tonic::Status::cancelled("pause channel closed"));
+                }
+            }
+
+            info!(
+                volume_id = %self.volume_id,
+                "VM pause signaled, proceeding with final sync"
+            );
+        }
 
         // Send FinalSync (VM is paused at this point)
         let final_sync_msg = MigrationMessage {
@@ -248,6 +295,10 @@ impl<B: StorageBackend> MigrationSender<B> {
         match ack_msg.payload {
             Some(migration_message::Payload::FinalizeAck(ref ack)) => {
                 if ack.verified {
+                    if let Some(ref task) = self.task {
+                        let mut state = task.state.write().await;
+                        state.phase = MigrationPhase::Completed;
+                    }
                     info!(volume_id = %self.volume_id, "migration finalized successfully");
                 } else {
                     error!(
@@ -361,6 +412,10 @@ impl<B: StorageBackend> MigrationSender<B> {
         let mut total_dirty_chunks: u32 = 0;
 
         for round in 1..=MAX_DIRTY_ROUNDS {
+            if let Some(ref task) = self.task {
+                let mut state = task.state.write().await;
+                state.convergence_round = round;
+            }
             // Step 1: Atomically snapshot and clear the dirty bitmap.
             // This ensures no writes are lost between reading the bitmap and clearing it.
             let bitmap = self
@@ -381,6 +436,11 @@ impl<B: StorageBackend> MigrationSender<B> {
                 dirty_block_count,
                 "dirty sync round starting"
             );
+
+            if let Some(ref task) = self.task {
+                let mut state = task.state.write().await;
+                state.dirty_blocks_remaining = dirty_block_count;
+            }
 
             // Check termination condition: if below threshold, we're done
             if dirty_block_count == 0 {
@@ -488,6 +548,11 @@ impl<B: StorageBackend> MigrationSender<B> {
             // snapshot_and_clear_dirty_bitmap, so no separate clear needed here.
 
             total_dirty_chunks += blocks_sent as u32;
+
+            if let Some(ref task) = self.task {
+                let mut state = task.state.write().await;
+                state.bytes_transferred = state.bytes_transferred.saturating_add(bytes_sent);
+            }
 
             info!(
                 volume_id = %self.volume_id,
@@ -607,10 +672,14 @@ pub async fn start_migration_to_peer<B: StorageBackend>(
     handle: String,
     backend: Arc<B>,
     tls_config: Option<MigrationTlsConfig>,
+    task: Option<Arc<MigrationTask>>,
 ) -> Result<(), tonic::Status> {
     let mut sender = MigrationSender::new(backend, volume_id, handle);
     if let Some(tls) = tls_config {
         sender = sender.with_tls(tls);
+    }
+    if let Some(t) = task {
+        sender = sender.with_task(t);
     }
     sender.start_migration(endpoint).await
 }

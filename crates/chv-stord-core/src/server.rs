@@ -1,4 +1,5 @@
 use crate::handlers::StorageServiceImpl;
+use crate::migration::sender::MigrationTlsConfig;
 use crate::migration::service::StorageMigrationServiceImpl;
 use crate::session::SessionTable;
 use crate::store::SessionStore;
@@ -22,12 +23,15 @@ pub struct StorageServer<B: StorageBackend> {
 }
 
 impl<B: StorageBackend> StorageServer<B> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: B,
         metrics: Metrics,
         backend_allowlist: Vec<String>,
         path_allowlist: Vec<std::path::PathBuf>,
         device_allowlist: Vec<String>,
+        migration_dest_allowlist: Vec<String>,
+        migration_tls: Option<MigrationTlsConfig>,
         store: Option<SessionStore>,
     ) -> Self {
         let backend = Arc::new(backend);
@@ -39,6 +43,8 @@ impl<B: StorageBackend> StorageServer<B> {
             backend_allowlist,
             path_allowlist,
             device_allowlist,
+            migration_dest_allowlist,
+            migration_tls,
         );
         if let Some(store) = store {
             inner.set_store(store);
