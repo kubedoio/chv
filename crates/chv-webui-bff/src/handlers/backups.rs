@@ -59,7 +59,6 @@ pub async fn list_backup_jobs(
                 "size_bytes": r.size_bytes,
                 "checksum": r.checksum,
                 "checksum_algorithm": r.checksum_algorithm,
-                "storage_backend": r.storage_backend,
             })
         })
         .collect();
@@ -191,7 +190,7 @@ pub async fn create_backup_job(
         schedule_id,
         status: "Pending".into(),
         backup_type,
-        target_path,
+        target_path: target_path.clone(),
         storage_backend,
         started_at: None,
         completed_at: None,
@@ -199,7 +198,7 @@ pub async fn create_backup_job(
         size_bytes: None,
         checksum: None,
         checksum_algorithm: None,
-        destination: None,
+        destination: target_path.clone(),
     };
 
     let job_id = state
@@ -246,7 +245,6 @@ pub async fn list_backup_jobs_rest(
                 "size_bytes": r.size_bytes,
                 "checksum": r.checksum,
                 "checksum_algorithm": r.checksum_algorithm,
-                "storage_backend": r.storage_backend,
             })
         })
         .collect();
@@ -284,7 +282,6 @@ pub async fn get_backup_job(
             "size_bytes": r.size_bytes,
             "checksum": r.checksum,
             "checksum_algorithm": r.checksum_algorithm,
-            "storage_backend": r.storage_backend,
         }))),
         None => Err(BffError::NotFound(format!(
             "backup job {} not found",
@@ -413,7 +410,7 @@ pub async fn execute_backup_job(
         schedule_id: row.schedule_id,
         status: "Pending".into(),
         backup_type: row.backup_type,
-        target_path: row.target_path,
+        target_path: row.target_path.clone(),
         storage_backend: row.storage_backend,
         started_at: None,
         completed_at: None,
@@ -421,7 +418,7 @@ pub async fn execute_backup_job(
         size_bytes: None,
         checksum: None,
         checksum_algorithm: None,
-        destination: None,
+        destination: row.destination.clone(),
     };
 
     let execution_id = state
@@ -988,7 +985,7 @@ pub async fn run_backup_job_api(
         size_bytes: None,
         checksum: None,
         checksum_algorithm: None,
-        destination: None,
+        destination: schedule.destination.clone(),
     };
 
     let execution_id = state
