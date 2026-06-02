@@ -1,5 +1,3 @@
-version: "3.8"
-
 # CHV Production Docker Compose Stack
 # =====================================
 # This file deploys CHV as a multi-service production stack on a single host.
