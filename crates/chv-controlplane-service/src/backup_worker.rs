@@ -146,6 +146,7 @@ impl BackupWorker {
                     size_bytes: None,
                     checksum: None,
                     checksum_algorithm: None,
+                    destination: schedule.destination.clone(),
                 };
 
                 let job_id =
@@ -213,13 +214,18 @@ impl BackupWorker {
                     {
                         Ok(old_jobs) if !old_jobs.is_empty() => {
                             for old_job in &old_jobs {
-                                // Attempt to delete remote artifact if shipping was used
-                                if let (Some(remote_path), Some(_storage_backend)) =
-                                    (old_job.target_path.as_deref(), old_job.storage_backend.as_deref())
+                                // Attempt to delete remote artifact if shipping was used.
+                                // Use `destination` (the original destination URL) to build the
+                                // shipper, and `target_path` (the shipped artifact path/key) as
+                                // the argument to delete().
+                                if let (Some(dest), Some(remote_path)) =
+                                    (old_job.destination.as_deref(), old_job.target_path.as_deref())
                                 {
-                                    if Self::is_remote_destination(remote_path) {
+                                    if Self::is_remote_destination(dest) {
+                                        let ak = schedule.s3_access_key.clone();
+                                        let sk = schedule.s3_secret_key.clone();
                                         if let Ok(shipper) =
-                                            shipper_from_destination(remote_path, None, None)
+                                            shipper_from_destination(dest, ak, sk)
                                         {
                                             if let Err(del_err) =
                                                 shipper.delete(remote_path).await
@@ -362,6 +368,7 @@ impl BackupWorker {
                             storage_backend: None,
                             checksum: None,
                             checksum_algorithm: None,
+                            destination: None,
                         })
                         .await
                     {
@@ -479,6 +486,7 @@ impl BackupWorker {
                 let mut checksum_algorithm = None;
                 let mut target_path = job.target_path.clone();
                 let mut storage_backend = job.storage_backend.clone();
+                let destination = job.destination.clone();
 
                 // Ship the artifact for VM-level backups when destination is remote.
                 if accepted && job.volume_id.is_none() {
@@ -486,7 +494,16 @@ impl BackupWorker {
                         if Self::is_remote_destination(target) {
                             let staging =
                                 self.backup_staging_dir.join(format!("{}.backup", job.job_id));
-                            match shipper_from_destination(target, None, None) {
+                            // Fetch schedule credentials if this is a scheduled job.
+                            let (ak, sk) = if let Some(ref sid) = job.schedule_id {
+                                match self.backup_repo.get_schedule(sid).await {
+                                    Ok(Some(sched)) => (sched.s3_access_key, sched.s3_secret_key),
+                                    _ => (None, None),
+                                }
+                            } else {
+                                (None, None)
+                            };
+                            match shipper_from_destination(target, ak, sk) {
                                 Ok(shipper) => {
                                     match shipper.ship(&staging, &job.job_id).await {
                                         Ok(ship_result) => {
@@ -548,6 +565,7 @@ impl BackupWorker {
                         storage_backend,
                         checksum,
                         checksum_algorithm,
+                        destination,
                     })
                     .await
                     .map_err(|e| ChvError::Internal {

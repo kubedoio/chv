@@ -200,13 +200,17 @@ impl BackupShipper for S3Shipper {
             format!("{}/{job_id}.backup", self.prefix.trim_end_matches('/'))
         };
 
-        let data = tokio::fs::read(source_path).await.map_err(|e| ChvError::Internal {
-            reason: format!("S3 shipper failed to read source file: {e}"),
-        })?;
-
+        // Stream the file to S3 instead of loading it entirely into memory.
+        // On retry we reopen the file so the stream starts from the beginning.
         let mut retry = 0;
         loop {
-            match self.bucket.put_object(&key, &data).await {
+            let mut file = tokio::fs::File::open(source_path).await.map_err(|e| {
+                ChvError::Internal {
+                    reason: format!("S3 shipper failed to open source file: {e}"),
+                }
+            })?;
+
+            match self.bucket.put_object_stream(&mut file, &key).await {
                 Ok(_) => break,
                 Err(e) => {
                     retry += 1;
@@ -360,4 +364,114 @@ pub fn shipper_from_destination(
             destination
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_null_shipper_computes_checksum_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let shipper = NullShipper;
+        let result = shipper.ship(&path, "job-001").await.unwrap();
+
+        assert_eq!(result.size_bytes, 11);
+        assert_eq!(result.checksum_algorithm, "SHA256");
+        // SHA256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        assert_eq!(
+            result.checksum,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        assert_eq!(result.remote_path, path.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn test_nfs_shipper_copies_file() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().join("source.bin");
+        std::fs::write(&src_path, b"nfs test data").unwrap();
+
+        let shipper = NfsShipper::new(dst_dir.path().to_path_buf());
+        let result = shipper.ship(&src_path, "job-002").await.unwrap();
+
+        let expected_dest = dst_dir.path().join("job-002.backup");
+        assert!(expected_dest.exists());
+        assert_eq!(std::fs::read(&expected_dest).unwrap(), b"nfs test data");
+        assert_eq!(result.size_bytes, 13);
+        assert_eq!(result.remote_path, expected_dest.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn test_nfs_shipper_delete_handles_not_found() {
+        let dst_dir = tempfile::tempdir().unwrap();
+        let shipper = NfsShipper::new(dst_dir.path().to_path_buf());
+
+        let missing = dst_dir.path().join("does-not-exist.backup");
+        // Should not error when file is already gone
+        shipper.delete(missing.to_str().unwrap()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nfs_shipper_delete_removes_file() {
+        let dst_dir = tempfile::tempdir().unwrap();
+        let shipper = NfsShipper::new(dst_dir.path().to_path_buf());
+
+        let file = dst_dir.path().join("to-delete.backup");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(file.exists());
+
+        shipper.delete(file.to_str().unwrap()).await.unwrap();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn test_shipper_from_destination_null() {
+        let shipper = shipper_from_destination("null", None, None).unwrap();
+        // Type erasure means we can only verify it doesn't panic and implements BackupShipper
+        // by calling ship on a temp file.
+        let _ = shipper; // compilation check
+    }
+
+    #[test]
+    fn test_shipper_from_destination_nfs() {
+        let shipper = shipper_from_destination("nfs:///mnt/backups", None, None).unwrap();
+        let _ = shipper;
+    }
+
+    #[test]
+    fn test_shipper_from_destination_s3_parses_bucket_and_prefix() {
+        // We can't actually construct S3Shipper without valid credentials/network,
+        // but we can verify the parser by checking it returns Ok for well-formed URLs.
+        let result = shipper_from_destination(
+            "s3://my-bucket/backups?region=us-west-2&endpoint=http://localhost:9000",
+            Some("ak".into()),
+            Some("sk".into()),
+        );
+        assert!(result.is_ok(), "S3 shipper construction failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_shipper_from_destination_rejects_invalid() {
+        let result = shipper_from_destination("ftp://host/path", None, None);
+        assert!(matches!(result, Err(ChvError::InvalidArgument { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_compute_checksum_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("check.bin");
+        std::fs::write(&path, b"abc").unwrap();
+
+        let (checksum, size) = compute_checksum_and_size(&path).await.unwrap();
+        assert_eq!(size, 3);
+        assert_eq!(
+            checksum,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 }

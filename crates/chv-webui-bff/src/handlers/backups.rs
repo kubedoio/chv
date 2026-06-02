@@ -57,6 +57,9 @@ pub async fn list_backup_jobs(
                 "completed_at": r.completed_at,
                 "error_message": r.error_message,
                 "size_bytes": r.size_bytes,
+                "checksum": r.checksum,
+                "checksum_algorithm": r.checksum_algorithm,
+                "storage_backend": r.storage_backend,
             })
         })
         .collect();
@@ -122,6 +125,9 @@ pub async fn list_backup_history(
                 "status": r.status,
                 "size_bytes": r.size_bytes,
                 "error_message": r.error_message,
+                "checksum": r.checksum,
+                "checksum_algorithm": r.checksum_algorithm,
+                "storage_backend": r.storage_backend,
                 "created_at": r.created_at,
             })
         })
@@ -193,6 +199,7 @@ pub async fn create_backup_job(
         size_bytes: None,
         checksum: None,
         checksum_algorithm: None,
+        destination: None,
     };
 
     let job_id = state
@@ -237,6 +244,9 @@ pub async fn list_backup_jobs_rest(
                 "completed_at": r.completed_at,
                 "error_message": r.error_message,
                 "size_bytes": r.size_bytes,
+                "checksum": r.checksum,
+                "checksum_algorithm": r.checksum_algorithm,
+                "storage_backend": r.storage_backend,
             })
         })
         .collect();
@@ -272,6 +282,9 @@ pub async fn get_backup_job(
             "completed_at": r.completed_at,
             "error_message": r.error_message,
             "size_bytes": r.size_bytes,
+            "checksum": r.checksum,
+            "checksum_algorithm": r.checksum_algorithm,
+            "storage_backend": r.storage_backend,
         }))),
         None => Err(BffError::NotFound(format!(
             "backup job {} not found",
@@ -368,6 +381,7 @@ pub async fn update_backup_job(
         size_bytes,
         checksum: None,
         checksum_algorithm: None,
+        destination: None,
     };
 
     state
@@ -407,6 +421,7 @@ pub async fn execute_backup_job(
         size_bytes: None,
         checksum: None,
         checksum_algorithm: None,
+        destination: None,
     };
 
     let execution_id = state
@@ -463,6 +478,18 @@ pub async fn create_backup_schedule(
         .get("destination")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let retention_days = payload
+        .get("retention_days")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let s3_access_key = payload
+        .get("s3_access_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let s3_secret_key = payload
+        .get("s3_secret_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let enabled = payload
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -474,9 +501,11 @@ pub async fn create_backup_schedule(
         name,
         cron_expression,
         retention_count,
-        retention_days: 0,
+        retention_days,
         destination,
         enabled,
+        s3_access_key,
+        s3_secret_key,
     };
 
     let schedule_id = state
@@ -514,6 +543,7 @@ pub async fn list_backup_schedules(
                 "name": r.name,
                 "cron_expression": r.cron_expression,
                 "retention_count": r.retention_count,
+                "retention_days": r.retention_days,
                 "destination": r.destination,
                 "enabled": r.enabled,
                 "created_at": r.created_at,
@@ -547,6 +577,7 @@ pub async fn get_backup_schedule(
             "name": r.name,
             "cron_expression": r.cron_expression,
             "retention_count": r.retention_count,
+            "retention_days": r.retention_days,
             "destination": r.destination,
             "enabled": r.enabled,
             "created_at": r.created_at,
@@ -603,6 +634,20 @@ pub async fn update_backup_schedule(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or(existing.destination);
+    let retention_days = payload
+        .get("retention_days")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(existing.retention_days);
+    let s3_access_key = payload
+        .get("s3_access_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(existing.s3_access_key);
+    let s3_secret_key = payload
+        .get("s3_secret_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(existing.s3_secret_key);
     let enabled = payload
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -615,9 +660,11 @@ pub async fn update_backup_schedule(
         name,
         cron_expression,
         retention_count,
-        retention_days: existing.retention_days,
+        retention_days,
         destination,
         enabled,
+        s3_access_key,
+        s3_secret_key,
     };
 
     state
@@ -838,6 +885,8 @@ pub async fn create_backup_job_api(
         retention_days: 0,
         destination,
         enabled: true,
+        s3_access_key: None,
+        s3_secret_key: None,
     };
 
     let schedule_id = state
@@ -929,7 +978,7 @@ pub async fn run_backup_job_api(
         vm_id: schedule.vm_id.clone(),
         volume_id: schedule.volume_id.clone(),
         schedule_id: Some(job_id),
-        status: "Running".into(),
+        status: "Pending".into(),
         backup_type: "full".into(),
         target_path: schedule.destination.clone(),
         storage_backend: None,
@@ -939,6 +988,7 @@ pub async fn run_backup_job_api(
         size_bytes: None,
         checksum: None,
         checksum_algorithm: None,
+        destination: None,
     };
 
     let execution_id = state
@@ -980,6 +1030,8 @@ pub async fn toggle_backup_job_api(
         retention_days: schedule.retention_days,
         destination: schedule.destination,
         enabled: new_enabled,
+        s3_access_key: schedule.s3_access_key,
+        s3_secret_key: schedule.s3_secret_key,
     };
 
     state

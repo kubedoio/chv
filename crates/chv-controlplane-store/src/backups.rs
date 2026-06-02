@@ -20,7 +20,8 @@ SELECT
     retry_count,
     next_retry_at,
     checksum,
-    checksum_algorithm
+    checksum_algorithm,
+    destination
 FROM backup_jobs
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?
@@ -46,7 +47,8 @@ SELECT
     retry_count,
     next_retry_at,
     checksum,
-    checksum_algorithm
+    checksum_algorithm,
+    destination
 FROM backup_jobs
 WHERE job_id = ?
 "#;
@@ -67,12 +69,13 @@ INSERT INTO backup_jobs (
     error_message,
     size_bytes,
     checksum,
-    checksum_algorithm
+    checksum_algorithm,
+    destination
 )
 VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?,
     strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?
 )
 "#;
 
@@ -86,7 +89,8 @@ UPDATE backup_jobs SET
     target_path = ?,
     storage_backend = ?,
     checksum = ?,
-    checksum_algorithm = ?
+    checksum_algorithm = ?,
+    destination = ?
 WHERE job_id = ?
 "#;
 
@@ -102,7 +106,8 @@ UPDATE backup_jobs SET
     error_message = ?,
     size_bytes = ?,
     checksum = ?,
-    checksum_algorithm = ?
+    checksum_algorithm = ?,
+    destination = ?
 WHERE job_id = ?
 "#;
 
@@ -126,7 +131,8 @@ SELECT
     retry_count,
     next_retry_at,
     checksum,
-    checksum_algorithm
+    checksum_algorithm,
+    destination
 FROM backup_jobs
 WHERE vm_id = ?
 ORDER BY created_at DESC
@@ -150,7 +156,9 @@ SELECT
     enabled,
     created_at,
     updated_at,
-    last_run_at
+    last_run_at,
+    s3_access_key,
+    s3_secret_key
 FROM backup_schedules
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?
@@ -171,7 +179,9 @@ SELECT
     enabled,
     created_at,
     updated_at,
-    last_run_at
+    last_run_at,
+    s3_access_key,
+    s3_secret_key
 FROM backup_schedules
 WHERE schedule_id = ?
 "#;
@@ -187,11 +197,13 @@ INSERT INTO backup_schedules (
     retention_days,
     destination,
     enabled,
+    s3_access_key,
+    s3_secret_key,
     created_at,
     updated_at
 )
 VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     strftime('%Y-%m-%dT%H:%M:%SZ','now'),
     strftime('%Y-%m-%dT%H:%M:%SZ','now')
 )
@@ -207,6 +219,8 @@ UPDATE backup_schedules SET
     retention_days = ?,
     destination = ?,
     enabled = ?,
+    s3_access_key = ?,
+    s3_secret_key = ?,
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 WHERE schedule_id = ?
 "#;
@@ -345,6 +359,7 @@ impl BackupRepository {
             .bind(input.size_bytes)
             .bind(&input.checksum)
             .bind(&input.checksum_algorithm)
+            .bind(&input.destination)
             .execute(&self.pool)
             .await?;
         Ok(job_id)
@@ -364,6 +379,7 @@ impl BackupRepository {
             .bind(&input.storage_backend)
             .bind(&input.checksum)
             .bind(&input.checksum_algorithm)
+            .bind(&input.destination)
             .bind(&input.job_id)
             .execute(&self.pool)
             .await?;
@@ -389,6 +405,7 @@ impl BackupRepository {
             .bind(input.size_bytes)
             .bind(&input.checksum)
             .bind(&input.checksum_algorithm)
+            .bind(&input.destination)
             .bind(&input.job_id)
             .execute(&self.pool)
             .await?;
@@ -482,6 +499,8 @@ impl BackupRepository {
             .bind(input.retention_days)
             .bind(&input.destination)
             .bind(input.enabled)
+            .bind(&input.s3_access_key)
+            .bind(&input.s3_secret_key)
             .execute(&self.pool)
             .await?;
         Ok(schedule_id)
@@ -500,6 +519,8 @@ impl BackupRepository {
             .bind(input.retention_days)
             .bind(&input.destination)
             .bind(input.enabled)
+            .bind(&input.s3_access_key)
+            .bind(&input.s3_secret_key)
             .bind(&input.schedule_id)
             .execute(&self.pool)
             .await?;
@@ -529,7 +550,7 @@ impl BackupRepository {
     pub async fn list_enabled_schedules(&self) -> Result<Vec<BackupScheduleRow>, StoreError> {
         sqlx::query_as::<_, BackupScheduleRow>(
             "SELECT schedule_id, vm_id, volume_id, name, cron_expression, retention_count, \
-             retention_days, destination, enabled, created_at, updated_at, last_run_at \
+             retention_days, destination, enabled, created_at, updated_at, last_run_at, s3_access_key, s3_secret_key \
              FROM backup_schedules WHERE enabled = true ORDER BY created_at ASC LIMIT 100",
         )
         .fetch_all(&self.pool)
@@ -729,7 +750,7 @@ impl BackupRepository {
         sqlx::query_as::<_, BackupJobRow>(
             "SELECT job_id, vm_id, volume_id, schedule_id, status, backup_type, \
              target_path, storage_backend, created_at, started_at, completed_at, \
-             error_message, size_bytes, retry_count, next_retry_at, checksum, checksum_algorithm \
+             error_message, size_bytes, retry_count, next_retry_at, checksum, checksum_algorithm, destination \
              FROM backup_jobs \
              WHERE schedule_id = ? AND status IN ('Succeeded', 'Failed') \
              AND created_at < ? \
@@ -773,7 +794,9 @@ pub struct BackupJobRow {
     pub next_retry_at: Option<String>,
     pub checksum: Option<String>,
     pub checksum_algorithm: Option<String>,
+    pub destination: Option<String>,
 }
+
 
 #[derive(sqlx::FromRow)]
 pub struct BackupScheduleRow {
@@ -789,7 +812,10 @@ pub struct BackupScheduleRow {
     pub created_at: String,
     pub updated_at: String,
     pub last_run_at: Option<String>,
+    pub s3_access_key: Option<String>,
+    pub s3_secret_key: Option<String>,
 }
+
 
 #[derive(sqlx::FromRow)]
 pub struct BackupRestoreRow {
@@ -823,7 +849,9 @@ pub struct BackupJobCreateInput {
     pub size_bytes: Option<i64>,
     pub checksum: Option<String>,
     pub checksum_algorithm: Option<String>,
+    pub destination: Option<String>,
 }
+
 
 #[derive(Clone)]
 pub struct BackupJobStatusUpdateInput {
@@ -837,7 +865,9 @@ pub struct BackupJobStatusUpdateInput {
     pub storage_backend: Option<String>,
     pub checksum: Option<String>,
     pub checksum_algorithm: Option<String>,
+    pub destination: Option<String>,
 }
+
 
 #[derive(Clone)]
 pub struct BackupJobUpdateInput {
@@ -853,7 +883,9 @@ pub struct BackupJobUpdateInput {
     pub size_bytes: Option<i64>,
     pub checksum: Option<String>,
     pub checksum_algorithm: Option<String>,
+    pub destination: Option<String>,
 }
+
 
 #[derive(Clone)]
 pub struct BackupScheduleCreateInput {
@@ -865,7 +897,10 @@ pub struct BackupScheduleCreateInput {
     pub retention_days: i64,
     pub destination: Option<String>,
     pub enabled: bool,
+    pub s3_access_key: Option<String>,
+    pub s3_secret_key: Option<String>,
 }
+
 
 #[derive(Clone)]
 pub struct BackupScheduleUpdateInput {
@@ -878,7 +913,10 @@ pub struct BackupScheduleUpdateInput {
     pub retention_days: i64,
     pub destination: Option<String>,
     pub enabled: bool,
+    pub s3_access_key: Option<String>,
+    pub s3_secret_key: Option<String>,
 }
+
 
 #[derive(Clone)]
 pub struct BackupRestoreCreateInput {
