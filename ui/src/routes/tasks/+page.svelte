@@ -98,8 +98,13 @@
 		/>
 		<CompactMetricCard 
 			label="Active Ops" 
-			value={items.filter(t => t.status === 'running').length} 
+			value={items.filter(t => t.status === 'running' || t.status === 'awaiting-operator-input').length} 
 			color="primary"
+		/>
+		<CompactMetricCard 
+			label="Awaiting Input" 
+			value={items.filter(t => t.status === 'awaiting-operator-input').length} 
+			color={items.filter(t => t.status === 'awaiting-operator-input').length > 0 ? 'warning' : 'neutral'}
 		/>
 		<CompactMetricCard 
 			label="Failed" 

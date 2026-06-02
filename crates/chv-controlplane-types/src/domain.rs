@@ -278,6 +278,7 @@ pub enum OperationStatus {
     Cancelled,
     Stale,
     Conflict,
+    AwaitingOperatorInput,
 }
 
 impl OperationStatus {
@@ -293,6 +294,7 @@ impl OperationStatus {
             Self::Cancelled => "Cancelled",
             Self::Stale => "Stale",
             Self::Conflict => "Conflict",
+            Self::AwaitingOperatorInput => "AwaitingOperatorInput",
         }
     }
 
@@ -305,6 +307,17 @@ impl OperationStatus {
                 | Self::Cancelled
                 | Self::Stale
                 | Self::Conflict
+        )
+    }
+
+    pub const fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Pending
+                | Self::Accepted
+                | Self::Running
+                | Self::RetryPending
+                | Self::AwaitingOperatorInput
         )
     }
 }
@@ -341,6 +354,7 @@ impl FromStr for OperationStatus {
             "Cancelled" => Ok(Self::Cancelled),
             "Stale" => Ok(Self::Stale),
             "Conflict" => Ok(Self::Conflict),
+            "AwaitingOperatorInput" => Ok(Self::AwaitingOperatorInput),
             _ => Err(ParseOperationStatusError),
         }
     }
@@ -573,5 +587,7 @@ mod tests {
         assert!(OperationStatus::Succeeded.is_terminal());
         assert!(OperationStatus::Cancelled.is_terminal());
         assert!(OperationStatus::Conflict.is_terminal());
+        assert!(!OperationStatus::AwaitingOperatorInput.is_terminal());
+        assert!(OperationStatus::AwaitingOperatorInput.is_active());
     }
 }

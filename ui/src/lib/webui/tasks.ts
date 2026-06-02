@@ -26,6 +26,7 @@ export type TaskStatusKey =
 	| 'succeeded'
 	| 'failed'
 	| 'cancelled'
+	| 'awaiting-operator-input'
 	| 'unknown';
 export type TaskWindowKey = 'active' | '24h' | '7d' | '30d' | 'all';
 export type TaskPageState = 'ready' | 'empty' | 'error';
@@ -133,6 +134,12 @@ const TASK_STATUS_META: Record<TaskStatusKey, TaskStatusMeta> = {
 		detail: 'Stopped before completion',
 		tone: 'unknown'
 	},
+	'awaiting-operator-input': {
+		key: 'awaiting-operator-input',
+		label: 'Awaiting Input',
+		detail: 'Paused for operator decision',
+		tone: 'warning'
+	},
 	unknown: {
 		key: 'unknown',
 		label: 'Unknown',
@@ -165,6 +172,9 @@ export function normalizeTaskStatus(state: string | undefined): TaskStatusKey {
 		case 'cancelled':
 		case 'canceled':
 			return 'cancelled';
+		case 'awaitingoperatorinput':
+		case 'awaiting-operator-input':
+			return 'awaiting-operator-input';
 		default:
 			return 'unknown';
 	}
@@ -270,7 +280,10 @@ function mapOperationToTask(
 		timelineTitle: `${statusMeta.label}: ${operationLabel}`,
 		timelineDetail: `${resourceKind} ${operation.resource_id}`,
 		failureReason,
-		isActive: statusMeta.key === 'queued' || statusMeta.key === 'running',
+		isActive:
+		statusMeta.key === 'queued' ||
+		statusMeta.key === 'running' ||
+		statusMeta.key === 'awaiting-operator-input',
 		isTerminal:
 			statusMeta.key === 'succeeded' ||
 			statusMeta.key === 'failed' ||

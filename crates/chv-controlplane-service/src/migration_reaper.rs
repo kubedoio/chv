@@ -164,7 +164,7 @@ impl MigrationReaper {
                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                    completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                WHERE operation_id = ?
-                 AND status NOT IN ('Succeeded', 'Failed', 'Rejected', 'Stale', 'Conflict')"#,
+                 AND status NOT IN ('Succeeded', 'Failed', 'Rejected', 'Stale', 'Conflict', 'AwaitingOperatorInput')"#,
         )
         .bind(operation_id)
         .execute(&self.pool)

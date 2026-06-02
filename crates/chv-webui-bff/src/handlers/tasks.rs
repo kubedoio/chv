@@ -69,7 +69,7 @@ pub async fn list_tasks(
                 .push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')"),
             "30d" => query_sql
                 .push_str(" AND requested_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 days')"),
-            "active" => query_sql.push_str(" AND status IN ('Pending', 'Accepted', 'Running')"),
+            "active" => query_sql.push_str(" AND status IN ('Pending', 'Accepted', 'Running', 'AwaitingOperatorInput')"),
             _ => {}
         }
     }
