@@ -674,6 +674,45 @@ impl BackupRepository {
         Ok(result.rows_affected())
     }
 
+    /// List completed backup jobs for a specific schedule that exceed the
+    /// retention count, ordered oldest first.  Used by the worker to clean up
+    /// remote artifacts before deleting the DB rows.
+    pub async fn list_old_jobs_for_count_retention(
+        &self,
+        schedule_id: &str,
+        retention_count: i64,
+    ) -> Result<Vec<BackupJobRow>, StoreError> {
+        sqlx::query_as::<_, BackupJobRow>(
+            "SELECT job_id, vm_id, volume_id, schedule_id, status, backup_type, \
+             target_path, storage_backend, created_at, started_at, completed_at, \
+             error_message, size_bytes, retry_count, next_retry_at, checksum, checksum_algorithm, destination \
+             FROM backup_jobs \
+             WHERE schedule_id = ? AND status IN ('Succeeded', 'Failed') \
+             ORDER BY created_at DESC \
+             LIMIT -1 OFFSET ?",
+        )
+        .bind(schedule_id)
+        .bind(retention_count)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    /// Batch-delete backup jobs by ID.
+    pub async fn delete_jobs_by_ids(&self, job_ids: &[&str]) -> Result<u64, StoreError> {
+        if job_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = job_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM backup_jobs WHERE job_id IN ({})", placeholders);
+        let mut query = sqlx::query(&sql);
+        for id in job_ids {
+            query = query.bind(id);
+        }
+        let result = query.execute(&self.pool).await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn list_retryable_jobs(&self, now: &str) -> Result<Vec<BackupJobRow>, StoreError> {
         sqlx::query_as::<_, BackupJobRow>(
             "SELECT * FROM backup_jobs \

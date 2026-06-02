@@ -186,30 +186,69 @@ impl BackupWorker {
                     "created scheduled backup job"
                 );
 
-                // Enforce retention: prune old completed jobs beyond retention_count
+                // Enforce retention: prune old completed jobs beyond retention_count.
+                // List the jobs first, clean up remote artifacts, then batch-delete DB rows.
                 if schedule.retention_count > 0 {
                     match self
                         .backup_repo
-                        .prune_old_jobs_for_schedule(
+                        .list_old_jobs_for_count_retention(
                             &schedule.schedule_id,
                             schedule.retention_count,
                         )
                         .await
                     {
-                        Ok(pruned) if pruned > 0 => {
-                            info!(
-                                schedule_id = %schedule.schedule_id,
-                                vm_id = %schedule.vm_id,
-                                pruned_count = pruned,
-                                retention_count = schedule.retention_count,
-                                "pruned old backup jobs by count"
-                            );
+                        Ok(old_jobs) if !old_jobs.is_empty() => {
+                            for old_job in &old_jobs {
+                                if let (Some(dest), Some(remote_path)) =
+                                    (old_job.destination.as_deref(), old_job.target_path.as_deref())
+                                {
+                                    if Self::is_remote_destination(dest) {
+                                        let ak = schedule.s3_access_key.clone();
+                                        let sk = schedule.s3_secret_key.clone();
+                                        if let Ok(shipper) =
+                                            shipper_from_destination(dest, ak, sk)
+                                        {
+                                            if let Err(del_err) =
+                                                shipper.delete(remote_path).await
+                                            {
+                                                warn!(
+                                                    job_id = %old_job.job_id,
+                                                    error = %del_err,
+                                                    "failed to delete remote backup artifact during count retention cleanup"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            let job_ids: Vec<&str> =
+                                old_jobs.iter().map(|j| j.job_id.as_str()).collect();
+                            match self.backup_repo.delete_jobs_by_ids(&job_ids).await {
+                                Ok(deleted) if deleted > 0 => {
+                                    info!(
+                                        schedule_id = %schedule.schedule_id,
+                                        vm_id = %schedule.vm_id,
+                                        pruned_count = deleted,
+                                        retention_count = schedule.retention_count,
+                                        "pruned old backup jobs by count"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        schedule_id = %schedule.schedule_id,
+                                        error = %e,
+                                        "failed to delete old backup jobs by count"
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                         Err(e) => {
                             warn!(
                                 schedule_id = %schedule.schedule_id,
                                 error = %e,
-                                "failed to prune old backup jobs by count"
+                                "failed to list old backup jobs for count retention"
                             );
                         }
                         _ => {}
