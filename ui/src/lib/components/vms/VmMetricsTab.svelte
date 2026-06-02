@@ -7,8 +7,8 @@
 		memory: string;
 		powerState: string;
 		health: string;
-		attachedVolumes?: any[];
-		attachedNics?: any[];
+		attachedVolumes?: Record<string, unknown>[];
+		attachedNics?: Record<string, unknown>[];
 	}
 
 	let {

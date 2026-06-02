@@ -77,7 +77,7 @@
 				label={m.label}
 				value={m.value}
 				trend={m.trend ?? 0}
-				color={m.color as any}
+				color={m.color as 'primary' | 'accent' | 'success' | 'danger' | 'neutral' | 'warning' | undefined}
 			/>
 		{/each}
 	</div>

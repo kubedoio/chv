@@ -16,11 +16,11 @@
 	import VmDetailSupportRail from '$lib/components/vms/VmDetailSupportRail.svelte';
 	import VmMigrateModal from '$lib/components/vms/VmMigrateModal.svelte';
 	import VmDetailHeader from '$lib/components/vms/VmDetailHeader.svelte';
-	import VmOverviewTab from '$lib/components/vms/VmOverviewTab.svelte';
+	import VmDetailSummaryTab from '$lib/components/vms/VmDetailSummaryTab.svelte';
 	import VmConsoleTab from '$lib/components/vms/VmConsoleTab.svelte';
 	import VmMetricsTab from '$lib/components/vms/VmMetricsTab.svelte';
 	import VmTasksTab from '$lib/components/vms/VmTasksTab.svelte';
-	import VmSettingsTab from '$lib/components/vms/VmSettingsTab.svelte';
+	import VmBootLogTab from '$lib/components/vms/VmBootLogTab.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
 
 	let { data }: { data: PageData } = $props();
@@ -212,7 +212,7 @@
 						}}
 					/>
 				{:else if detail.currentTab === 'boot-log'}
-					<VmSettingsTab {bootLogLoading} {bootLog} />
+					<VmBootLogTab {bootLogLoading} {bootLog} />
 				{:else if detail.currentTab === 'snapshots'}
 					<VmSnapshots
 						vmId={detail.summary.vm_id}
@@ -232,7 +232,7 @@
 						attachedNics={detail.summary.attached_nics ?? []}
 					/>
 				{:else}
-					<VmOverviewTab
+					<VmDetailSummaryTab
 						powerState={detail.summary.power_state}
 						health={detail.summary.health}
 						cpu={detail.summary.cpu}
