@@ -191,6 +191,8 @@ pub async fn create_backup_job(
         completed_at: None,
         error_message: None,
         size_bytes: None,
+        checksum: None,
+        checksum_algorithm: None,
     };
 
     let job_id = state
@@ -364,6 +366,8 @@ pub async fn update_backup_job(
         completed_at,
         error_message,
         size_bytes,
+        checksum: None,
+        checksum_algorithm: None,
     };
 
     state
@@ -401,6 +405,8 @@ pub async fn execute_backup_job(
         completed_at: None,
         error_message: None,
         size_bytes: None,
+        checksum: None,
+        checksum_algorithm: None,
     };
 
     let execution_id = state
@@ -468,6 +474,7 @@ pub async fn create_backup_schedule(
         name,
         cron_expression,
         retention_count,
+        retention_days: 0,
         destination,
         enabled,
     };
@@ -608,6 +615,7 @@ pub async fn update_backup_schedule(
         name,
         cron_expression,
         retention_count,
+        retention_days: existing.retention_days,
         destination,
         enabled,
     };
@@ -671,6 +679,8 @@ pub async fn create_backup_restore(
         started_at: None,
         completed_at: None,
         error_message: None,
+        source_path: None,
+        storage_backend: None,
     };
 
     let restore_id = state
@@ -825,6 +835,7 @@ pub async fn create_backup_job_api(
         name,
         cron_expression: schedule,
         retention_count: retention,
+        retention_days: 0,
         destination,
         enabled: true,
     };
@@ -926,6 +937,8 @@ pub async fn run_backup_job_api(
         completed_at: None,
         error_message: None,
         size_bytes: None,
+        checksum: None,
+        checksum_algorithm: None,
     };
 
     let execution_id = state
@@ -964,6 +977,7 @@ pub async fn toggle_backup_job_api(
         name: schedule.name,
         cron_expression: schedule.cron_expression,
         retention_count: schedule.retention_count,
+        retention_days: schedule.retention_days,
         destination: schedule.destination,
         enabled: new_enabled,
     };

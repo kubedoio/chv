@@ -1,0 +1,330 @@
+version: "3.8"
+
+# CHV Production Docker Compose Stack
+# =====================================
+# This file deploys CHV as a multi-service production stack on a single host.
+#
+# Prerequisites:
+#   - Docker 24+ with Compose v2
+#   - /dev/kvm available on the host
+#   - Linux bridge (e.g. chvbr0) pre-created on the host
+#   - Cloud Hypervisor binary installed on the host
+#
+# Before first start:
+#   1. Create the Linux bridge on the host (see docs/DEPLOYMENT-DOCKER.md)
+#   2. Install Cloud Hypervisor to /usr/bin/cloud-hypervisor
+#   3. Generate a bootstrap token: openssl rand -hex 32 > bootstrap.token
+#   4. Set CHV_JWT_SECRET in your environment (or a .env file)
+#
+# Start:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Health checks:
+#   docker compose -f docker-compose.prod.yml ps
+#   curl http://localhost:8080/health
+#
+# Security notes:
+#   - chv-nwd uses host networking (required for netns / VXLAN / bridge ops)
+#   - chv-agent has KVM device passthrough and elevated capabilities
+#   - Read-only root filesystems are used where possible
+
+services:
+  chv-controlplane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      sh -c '
+        mkdir -p /run/chv/controlplane /var/lib/chv /tmp;
+        JWT_FILE="/var/lib/chv/.jwt_secret";
+        if [ -f "$${JWT_FILE}" ]; then
+          JWT_SEC=$$(cat "$${JWT_FILE}");
+        else
+          JWT_SEC=$${CHV_JWT_SECRET:-$$(openssl rand -base64 32)};
+          printf "%s" "$${JWT_SEC}" > "$${JWT_FILE}";
+        fi;
+        cat > /tmp/controlplane.toml <<EOF
+      grpc_bind = "0.0.0.0:8443"
+      http_bind = "0.0.0.0:8080"
+      log_level = "info"
+      runtime_dir = "/run/chv/controlplane"
+      agent_runtime_dir = "/run/chv/agent"
+      jwt_secret = "$${JWT_SEC}"
+
+      [database]
+      url = "sqlite:///var/lib/chv/controlplane.db"
+      migrations_dir = "/usr/local/share/chv/migrations"
+      max_connections = 4
+      min_connections = 1
+      acquire_timeout_secs = 5
+      EOF
+        exec chv-controlplane /tmp/controlplane.toml
+      '
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      - chv-controlplane-data:/var/lib/chv
+      - chv-run:/run/chv
+    networks:
+      - chv
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    environment:
+      CHV_JWT_SECRET: "${CHV_JWT_SECRET:-}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  chv-stord:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "chv-stord:chv-stord"
+    command: >
+      sh -c '
+        mkdir -p /run/chv/stord /tmp;
+        cat > /tmp/stord.toml <<EOF
+      socket_path = "/run/chv/stord/api.sock"
+      runtime_dir = "/var/lib/chv/storage/localdisk"
+      log_level = "info"
+      path_allowlist = ["/var/lib/chv/storage/localdisk", "/var/lib/chv/storage/lvm"]
+      device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
+      EOF
+        exec chv-stord /tmp/stord.toml
+      '
+    volumes:
+      - chv-stord-data:/var/lib/chv/storage
+      - chv-run:/run/chv
+    networks:
+      - chv
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=10m
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/chv/stord/api.sock"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      chv-controlplane:
+        condition: service_healthy
+
+  chv-nwd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    network_mode: host
+    command: >
+      sh -c '
+        mkdir -p /run/chv/nwd /tmp;
+        cat > /tmp/nwd.toml <<EOF
+      socket_path = "/run/chv/nwd/api.sock"
+      runtime_dir = "/run/chv/nwd"
+      log_level = "info"
+      bridge_name = "${CHV_BRIDGE_NAME:-chvbr0}"
+      bridge_cidr = "${CHV_BRIDGE_CIDR:-10.200.0.1/24}"
+      upstream_iface = "${CHV_BRIDGE_IFACE:-ens19}"
+      EOF
+        exec chv-nwd /tmp/nwd.toml
+      '
+    volumes:
+      - chv-run:/run/chv
+    restart: unless-stopped
+    init: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    environment:
+      CHV_BRIDGE_NAME: "${CHV_BRIDGE_NAME:-chvbr0}"
+      CHV_BRIDGE_CIDR: "${CHV_BRIDGE_CIDR:-10.200.0.1/24}"
+      CHV_BRIDGE_IFACE: "${CHV_BRIDGE_IFACE:-ens19}"
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/chv/nwd/api.sock"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      chv-controlplane:
+        condition: service_healthy
+
+  chv-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "chv:chv"
+    group_add:
+      - kvm
+    devices:
+      - /dev/kvm:/dev/kvm
+    command: >
+      sh -c '
+        mkdir -p /var/lib/chv/agent /run/chv/agent /var/lib/chv/cache /etc/chv/certs /tmp;
+        JWT_FILE="/var/lib/chv/.jwt_secret";
+        if [ -f "$${JWT_FILE}" ]; then
+          JWT_SEC=$$(cat "$${JWT_FILE}");
+        else
+          JWT_SEC=$${CHV_JWT_SECRET:-$$(openssl rand -base64 32)};
+          printf "%s" "$${JWT_SEC}" > "$${JWT_FILE}";
+        fi;
+        if [ ! -f /etc/chv/certs/ca.crt ]; then
+          openssl genrsa -out /etc/chv/certs/ca.key 4096 2>/dev/null;
+          openssl req -x509 -new -nodes -key /etc/chv/certs/ca.key -sha256 -days 3650 -out /etc/chv/certs/ca.crt -subj "/O=CHV/CN=chv-ca" 2>/dev/null;
+          openssl genrsa -out /run/chv/agent/agent.key 2048 2>/dev/null;
+          openssl req -new -key /run/chv/agent/agent.key -out /tmp/agent.csr -subj "/O=CHV/CN=chv-agent" 2>/dev/null;
+          openssl x509 -req -in /tmp/agent.csr -CA /etc/chv/certs/ca.crt -CAkey /etc/chv/certs/ca.key -CAcreateserial -out /run/chv/agent/agent.crt -days 825 -sha256 2>/dev/null;
+          rm -f /tmp/agent.csr;
+        fi;
+        cat > /tmp/agent.toml <<EOF
+      socket_path = "/run/chv/agent/api.sock"
+      runtime_dir = "/var/lib/chv/agent"
+      log_level = "info"
+      control_plane_addr = "http://chv-controlplane:8443"
+      stord_socket = "/run/chv/stord/api.sock"
+      nwd_socket = "/run/chv/nwd/api.sock"
+      chv_binary_path = "/usr/local/bin/cloud-hypervisor"
+      stord_binary_path = "/dev/null"
+      nwd_binary_path = "/dev/null"
+      cache_path = "/var/lib/chv/cache/agent-cache.json"
+      node_id = ""
+      metrics_bind = "0.0.0.0:9901"
+      storage_base_dir = "/var/lib/chv/storage"
+      bootstrap_token_path = "/etc/chv/bootstrap.token"
+      tls_cert_path = "/run/chv/agent/agent.crt"
+      tls_key_path = "/run/chv/agent/agent.key"
+      ca_cert_path = "/etc/chv/certs/ca.crt"
+      console_bind = "0.0.0.0:8444"
+      jwt_secret = "$${JWT_SEC}"
+      EOF
+        exec chv-agent /tmp/agent.toml
+      '
+    ports:
+      - "8444:8444"
+      - "9901:9901"
+    volumes:
+      - chv-agent-data:/var/lib/chv/agent
+      - chv-controlplane-data:/var/lib/chv
+      - chv-stord-data:/var/lib/chv/storage
+      - chv-run:/run/chv
+      - chv-certs:/etc/chv/certs
+      - ./bootstrap.token:/etc/chv/bootstrap.token:ro
+      - /usr/bin/cloud-hypervisor:/usr/local/bin/cloud-hypervisor:ro
+    networks:
+      - chv
+    restart: unless-stopped
+    init: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_PTRACE
+      - MKNOD
+      - DAC_OVERRIDE
+    environment:
+      CHV_JWT_SECRET: "${CHV_JWT_SECRET:-}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9901/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      chv-controlplane:
+        condition: service_healthy
+      chv-stord:
+        condition: service_healthy
+      chv-nwd:
+        condition: service_healthy
+
+  chv-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      sh -c '
+        cat > /tmp/nginx.conf <<EOF
+      server {
+        listen 80;
+        server_name _;
+        root /opt/chv/ui;
+        index index.html;
+        location / {
+          try_files $$uri $$uri/ /index.html;
+        }
+        location = /index.html {
+          add_header Cache-Control "no-cache, no-store, must-revalidate";
+        }
+        location /_app/immutable/ {
+          add_header Cache-Control "public, max-age=31536000, immutable";
+        }
+        location /api/ {
+          proxy_pass http://chv-controlplane:8080;
+          proxy_http_version 1.1;
+          proxy_set_header Host $$host;
+          proxy_set_header X-Real-IP $$remote_addr;
+          proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $$scheme;
+          proxy_intercept_errors off;
+        }
+        location /v1/ {
+          proxy_pass http://chv-controlplane:8080;
+          proxy_http_version 1.1;
+          proxy_set_header Host $$host;
+          proxy_set_header X-Real-IP $$remote_addr;
+          proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $$scheme;
+          proxy_intercept_errors off;
+        }
+        location /ws/vms/ {
+          proxy_pass http://chv-agent:8444/vms/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $$http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $$host;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        }
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml+rss text/javascript;
+      }
+      EOF
+        cp /tmp/nginx.conf /etc/nginx/sites-enabled/default &&
+        nginx -g "daemon off;"
+      '
+    ports:
+      - "80:80"
+    depends_on:
+      chv-controlplane:
+        condition: service_healthy
+      chv-agent:
+        condition: service_healthy
+    networks:
+      - chv
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  chv-controlplane-data:
+  chv-stord-data:
+  chv-agent-data:
+  chv-run:
+  chv-certs:
+
+networks:
+  chv:
+    driver: bridge

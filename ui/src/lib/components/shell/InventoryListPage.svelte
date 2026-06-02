@@ -1,4 +1,4 @@
-<script lang="ts">
+<script lang="ts" generics="T extends Record<string, unknown>">
 	import type { Snippet } from 'svelte';
 	import PageHeaderWithAction from './PageHeaderWithAction.svelte';
 	import InventoryTable from './InventoryTable.svelte';
@@ -17,6 +17,12 @@
 		options?: { value: string; label: string }[];
 	}
 
+	interface ColumnDef<T = unknown> {
+		key: string;
+		label: string;
+		align?: 'left' | 'right' | 'center';
+	}
+
 	interface Props {
 		page: PageDefinition;
 		headerActions?: Snippet;
@@ -29,10 +35,10 @@
 		emptyTitle: string;
 		emptyDescription: string;
 		emptyHint: string;
-		columns: any[];
-		rows: any[];
-		rowHref: (row: any) => string;
-		cell?: Snippet<[{ column: any, row: any }]>
+		columns: ColumnDef<T>[];
+		rows: T[];
+		rowHref: (row: T) => string;
+		cell?: Snippet<[{ column: ColumnDef<T>, row: T }]>;
 		sidebar: Snippet;
 	}
 

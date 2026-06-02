@@ -140,6 +140,8 @@ impl BackupWorker {
                     completed_at: None,
                     error_message: None,
                     size_bytes: None,
+                    checksum: None,
+                    checksum_algorithm: None,
                 };
 
                 let job_id =
@@ -289,6 +291,10 @@ impl BackupWorker {
                                 MAX_RETRIES, e
                             )),
                             size_bytes: None,
+                            target_path: None,
+                            storage_backend: None,
+                            checksum: None,
+                            checksum_algorithm: None,
                         })
                         .await
                     {
@@ -387,6 +393,10 @@ impl BackupWorker {
                         completed_at: Some(now),
                         error_message,
                         size_bytes: None,
+                        target_path: None,
+                        storage_backend: None,
+                        checksum: None,
+                        checksum_algorithm: None,
                     })
                     .await
                     .map_err(|e| ChvError::Internal {

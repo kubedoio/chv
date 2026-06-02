@@ -9,18 +9,19 @@
 	import { toast } from '$lib/stores/toast.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
-	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import DetailTabs from '$lib/components/shared/DetailTabs.svelte';
 	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
 	import VmDetailErrorState from '$lib/components/vms/VmDetailErrorState.svelte';
-	import VmDetailSummaryTab from '$lib/components/vms/VmDetailSummaryTab.svelte';
 	import VmDetailSupportRail from '$lib/components/vms/VmDetailSupportRail.svelte';
-	import VmDetailActions from '$lib/components/vms/VmDetailActions.svelte';
 	import VmMigrateModal from '$lib/components/vms/VmMigrateModal.svelte';
+	import VmDetailHeader from '$lib/components/vms/VmDetailHeader.svelte';
+	import VmOverviewTab from '$lib/components/vms/VmOverviewTab.svelte';
+	import VmConsoleTab from '$lib/components/vms/VmConsoleTab.svelte';
+	import VmMetricsTab from '$lib/components/vms/VmMetricsTab.svelte';
+	import VmTasksTab from '$lib/components/vms/VmTasksTab.svelte';
+	import VmSettingsTab from '$lib/components/vms/VmSettingsTab.svelte';
 	import type { ShellTone } from '$lib/shell/app-shell';
-	import { Terminal, FileText, Activity, BarChart3 } from 'lucide-svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -173,20 +174,24 @@
 			onRetry={retryDetailLoad}
 		/>
 	{:else if detail.state === 'empty'}
-		<EmptyInfrastructureState title="Workload Identity Unknown" description="The requested virtual entity is not recognized." hint="Return to the VM catalog and refresh the workload inventory." />
+		<EmptyInfrastructureState
+			title="Workload Identity Unknown"
+			description="The requested virtual entity is not recognized."
+			hint="Return to the VM catalog and refresh the workload inventory."
+		/>
 	{:else}
-		<ResourceDetailHeader
+		<VmDetailHeader
 			title={detail.summary.name}
 			eyebrow={`VM ID ${detail.summary.vm_id}`}
 			statusLabel={detail.summary.power_state}
 			tone={normalizeTone(detail.summary.power_state)}
 			parentLabel="Virtual machines"
 			parentHref="/vms"
-		>
-			{#snippet actions()}
-				<VmDetailActions {pendingAction} powerState={detail.summary.power_state} onExecute={executeAction} onMigrate={() => { migrateModalOpen = true; }} />
-			{/snippet}
-		</ResourceDetailHeader>
+			{pendingAction}
+			powerState={detail.summary.power_state}
+			onExecute={executeAction}
+			onMigrate={() => { migrateModalOpen = true; }}
+		/>
 
 		<div class="tabs-area">
 			<DetailTabs tabs={detail.sections} currentId={detail.currentTab} />
@@ -195,99 +200,39 @@
 		<main class="inventory-main" class:inventory-main--rail-open={supportRailOpen}>
 			<section class="detail-content">
 				{#if detail.currentTab === 'console'}
-					<SectionCard title="Direct Fabric Console" icon={Terminal}>
-						{#if consoleLoading}
-							<p class="empty-hint">Establishing encrypted bypass tunnel...</p>
-						{:else if liveConsoleUrl && VmConsoleComponent}
-							<VmConsoleComponent
-								vmId={detail.summary.vm_id}
-								consoleUrl={liveConsoleUrl}
-								running={detail.summary.power_state.toLowerCase() === 'running'}
-								getConsoleUrl={async () => {
-									const res = await getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined);
-									return res.url;
-								}}
-							/>
-						{:else if liveConsoleUrl}
-							<p class="empty-hint">Loading console workspace...</p>
-						{:else}
-							<p class="empty-hint">Console registry inaccessible. Instance state may prevent access.</p>
-						{/if}
-					</SectionCard>
+					<VmConsoleTab
+						vmId={detail.summary.vm_id}
+						{consoleLoading}
+						{liveConsoleUrl}
+						{VmConsoleComponent}
+						running={detail.summary.power_state.toLowerCase() === 'running'}
+						getConsoleUrl={async () => {
+							const res = await getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined);
+							return res.url;
+						}}
+					/>
 				{:else if detail.currentTab === 'boot-log'}
-					<SectionCard title="Serial Boot Sequence" icon={FileText}>
-						{#if bootLogLoading}
-							<p class="empty-hint">Streaming boot sequence records...</p>
-						{:else}
-							<pre class="boot-log">{bootLog}</pre>
-						{/if}
-					</SectionCard>
+					<VmSettingsTab {bootLogLoading} {bootLog} />
 				{:else if detail.currentTab === 'snapshots'}
-					<VmSnapshots vmId={detail.summary.vm_id} {snapshots} loading={snapshotsLoading} error={snapshotsError} />
+					<VmSnapshots
+						vmId={detail.summary.vm_id}
+						{snapshots}
+						loading={snapshotsLoading}
+						error={snapshotsError}
+					/>
 				{:else if detail.currentTab === 'events'}
-					<SectionCard title="VM Events" icon={Activity}>
-						{#if eventsLoading}
-							<p class="empty-hint">Loading event stream...</p>
-						{:else if eventsError}
-							<p class="empty-hint">Event registry inaccessible: {eventsError}</p>
-						{:else if events.length === 0}
-							<p class="empty-hint">No events recorded for this workload.</p>
-						{:else}
-							<div class="events-table-wrap">
-								<table class="events-table">
-									<thead>
-										<tr>
-											<th>Timestamp</th>
-											<th>Type</th>
-											<th>Severity</th>
-											<th>Message</th>
-										</tr>
-									</thead>
-									<tbody>
-										{#each events as event}
-											<tr>
-												<td class="events-ts">{new Date(event.occurred_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</td>
-												<td>{event.type}</td>
-												<td><span class="severity-badge severity-badge--{event.severity}">{event.severity}</span></td>
-												<td>{event.summary}</td>
-											</tr>
-										{/each}
-									</tbody>
-								</table>
-							</div>
-						{/if}
-					</SectionCard>
+					<VmTasksTab {eventsLoading} {eventsError} {events} />
 				{:else if detail.currentTab === 'metrics'}
-					<SectionCard title="VM Metrics" icon={BarChart3}>
-						<div class="metrics-grid">
-							<div class="metric-card">
-								<span class="metric-label">CPU Assigned</span>
-								<span class="metric-value">{detail.summary.cpu || '—'}</span>
-							</div>
-							<div class="metric-card">
-								<span class="metric-label">Memory Assigned</span>
-								<span class="metric-value">{detail.summary.memory || '—'}</span>
-							</div>
-							<div class="metric-card">
-								<span class="metric-label">Power State</span>
-								<span class="metric-value">{detail.summary.power_state || '—'}</span>
-							</div>
-							<div class="metric-card">
-								<span class="metric-label">Health</span>
-								<span class="metric-value">{detail.summary.health || '—'}</span>
-							</div>
-							<div class="metric-card">
-								<span class="metric-label">Attached Volumes</span>
-								<span class="metric-value">{detail.summary.attached_volumes?.length ?? 0}</span>
-							</div>
-							<div class="metric-card">
-								<span class="metric-label">Attached NICs</span>
-								<span class="metric-value">{detail.summary.attached_nics?.length ?? 0}</span>
-							</div>
-						</div>
-					</SectionCard>
+					<VmMetricsTab
+						cpu={detail.summary.cpu}
+						memory={detail.summary.memory}
+						powerState={detail.summary.power_state}
+						health={detail.summary.health}
+						attachedVolumes={detail.summary.attached_volumes ?? []}
+						attachedNics={detail.summary.attached_nics ?? []}
+					/>
 				{:else}
-					<VmDetailSummaryTab
+					<VmOverviewTab
 						powerState={detail.summary.power_state}
 						health={detail.summary.health}
 						cpu={detail.summary.cpu}
@@ -347,29 +292,6 @@
 		min-width: 0;
 	}
 
-	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		text-align: center;
-		padding: 1rem 0;
-	}
-
-	.boot-log {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		line-height: 1.5;
-		background: var(--color-neutral-50);
-		border: 1px solid var(--shell-line);
-		border-radius: var(--radius-md);
-		padding: var(--space-4);
-		overflow-x: auto;
-		max-height: 600px;
-		overflow-y: auto;
-		white-space: pre;
-		color: var(--shell-text);
-		margin: 0;
-	}
-
 	@media (max-width: 1200px) {
 		.inventory-main {
 			grid-template-columns: 1fr;
@@ -380,88 +302,5 @@
 		.tabs-area {
 			margin-top: 0;
 		}
-
-	}
-
-	.events-table-wrap {
-		overflow-x: auto;
-	}
-
-	.events-table {
-		width: 100%;
-		border-collapse: collapse;
-		font-size: var(--text-xs);
-	}
-
-	.events-table th {
-		text-align: left;
-		font-weight: 700;
-		color: var(--shell-text-muted);
-		padding: 0.5rem 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		white-space: nowrap;
-	}
-
-	.events-table td {
-		padding: 0.5rem 0.75rem;
-		border-bottom: 1px solid var(--shell-line);
-		color: var(--shell-text);
-	}
-
-	.events-ts {
-		white-space: nowrap;
-		color: var(--shell-text-muted);
-	}
-
-	.severity-badge {
-		display: inline-block;
-		font-size: 9px;
-		font-weight: 700;
-		text-transform: uppercase;
-		padding: 2px 6px;
-		border-radius: 3px;
-	}
-
-	.severity-badge--critical {
-		background: var(--color-danger-light, #fee2e2);
-		color: var(--color-danger, #dc2626);
-	}
-
-	.severity-badge--warning {
-		background: var(--color-warning-light, #fef3c7);
-		color: var(--color-warning-dark, #92400e);
-	}
-
-	.severity-badge--info {
-		background: var(--color-neutral-100, #f3f4f6);
-		color: var(--color-neutral-600, #4b5563);
-	}
-
-	.metrics-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-		gap: 0.75rem;
-	}
-
-	.metric-card {
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-		padding: 1rem;
-		background: var(--color-neutral-50, #f9fafb);
-		border: 1px solid var(--shell-line);
-		border-radius: var(--radius-md);
-	}
-
-	.metric-label {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		font-weight: 600;
-	}
-
-	.metric-value {
-		font-size: var(--text-lg, 1.125rem);
-		font-weight: 800;
-		color: var(--shell-text);
 	}
 </style>
