@@ -4,7 +4,7 @@ CHV is a Linux-first, cloud-image-first virtualization platform for sovereign pr
 
 ## Current Phase
 
-**Version:** `0.1.0`  
+**Version:** `0.2.0`  
 **Phase:** Early-to-MVP transitioning to stability  
 
 The project has a solid Phase 1 foundation (Rust control plane, SQLite store, certificate enrollment, gRPC services) and a functional SvelteKit Web UI. Active work is tracked in the [Phased Implementation Plan](./PHASED_IMPLEMENTATION_PLAN.md) covering stability hardening, feature completion, and production readiness.
@@ -87,7 +87,7 @@ CHV is distributed as `.deb` and `.rpm` packages. Choose the guide for your dist
 Quick install (Debian/Ubuntu):
 
 ```bash
-VERSION="0.1.0"
+VERSION="0.2.0"
 BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
 curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
 curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
@@ -150,7 +150,7 @@ cargo build --workspace
 |----------|---------|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | System architecture, data flow, and boundaries |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) | Deploy CHV on a combined control-plane + hypervisor host |
-| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (001–013) |
+| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (0.2.013) |
 | [`docs/specs/component/`](./docs/specs/component) | Component specs (agent, stord, nwd) |
 | [`PHASED_IMPLEMENTATION_PLAN.md`](./PHASED_IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
 | [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) | Day-2 operations, monitoring, and troubleshooting |
@@ -172,7 +172,7 @@ See [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ## Version
 
-Current version: `0.1.0` (see [`VERSION`](./VERSION))
+Current version: `0.2.0` (see [`VERSION`](./VERSION))
 
 ## Direction
 

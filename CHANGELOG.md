@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-29
+
 ### Added
 - Serial console backend: PTY lifecycle, JWT token gating, WebSocket proxy via BFF (`/ws/vms/{id}`)
 - Hypervisor settings: DB schema, BFF CRUD, and orchestrator default-merge logic
@@ -38,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Playwright E2E expansion: 3 new test files (`navigation.spec.ts`, `vms.spec.ts`, `settings.spec.ts`) covering sidebar nav, command palette, logout, VM list, create modal, hypervisor settings
 - Volume snapshot/clone schema (migrations `0025`): `snapshot_op`, `snapshot_name`, `clone_source_volume_id` in `volume_desired_state`; `parent_volume_id` in `volumes`; wired in reconcile loop and agent server
 - Network services schema (migrations `0026`): `firewall_rules_json`, `nat_rules_json`, `dhcp_scope_json`, `dns_enabled`, `dns_scope_json` in `network_desired_state`; wired `set_firewall_policy`, `set_nat_policy`, `ensure_dhcp_scope`, `ensure_dns_scope` in reconcile loop
+- Backup worker: scheduled VM backups with S3/NFS shipping, retention enforcement (count + days), retry logic
+- S3 credential encryption at rest: AES-256-GCM with key from `CHV_ENCRYPTION_KEY` or `CHV_JWT_SECRET`
+- Atomic schedule claim: optimistic locking on `last_run_at` prevents duplicate scheduled jobs
+- Disaster recovery runbooks: 5 operational runbooks covering VM snapshot restore, volume snapshot restore, backup artifact restore, control plane DR, and full site recovery
 
 ### Changed
 - `WEBUI_CHANGES.md` deprecated in favor of CHANGELOG; see [docs/WEBUI_CHANGES.md](./docs/WEBUI_CHANGES.md) for historical reference only
@@ -48,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `app.css` Tailwind migration: removed global utility duplicates (box-sizing, headings, sr-only, etc.); reduced from 387 → 306 lines
 - UI design tokens fully aligned: earthy palette applied to `app.css`, `tailwind.config.cjs`, and all 8 drifted components
 - `tailwind.config.cjs`: mapped custom colors to CSS custom properties with dark-mode support
+- **License:** Changed from MIT to Apache-2.0 across all crates and the UI package
 
 ### Fixed
 - Agent console port collision on restart (systemd `KillMode=mixed`)
@@ -61,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dead code removal: deleted unused `hypervisor_settings_validator.rs` from control-plane-service
 - Post-merge validation: orchestrator now validates `iommu=true` requires `memory_shared=true` before dispatch
 - Serial console PTY resize: verified end-to-end wired (frontend `VmConsole.svelte` → WebSocket JSON → `ioctl(TIOCSWINSZ)`)
+- Race condition in scheduled job creation eliminated via optimistic locking (`try_claim_schedule_run`)
+- Count-based retention pruning now cleans up remote artifacts before deleting DB rows
+- BFF duplicate JSON keys removed from backup response builders
 
 ## [0.1.0] - 2026-05-10
 

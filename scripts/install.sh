@@ -2,7 +2,7 @@
 # CHV All-in-One Installer
 # Usage:
 #   curl -sfL https://get.cellhv.com/ | sh -
-#   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.1.0 sh -
+#   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.2.0 sh -
 #   ./scripts/install.sh --wipe    # Full teardown before clean install
 #
 # Environment variables:
@@ -239,11 +239,11 @@ resolve_version() {
             if [ -n "$latest" ]; then
                 INSTALL_CHV_VERSION="$latest"
             else
-                warn "Could not determine latest version from GitHub API, falling back to 0.1.0"
-                INSTALL_CHV_VERSION="0.1.0"
+                warn "Could not determine latest version from GitHub API, falling back to 0.2.0"
+                INSTALL_CHV_VERSION="0.2.0"
             fi
         else
-            INSTALL_CHV_VERSION="0.1.0"
+            INSTALL_CHV_VERSION="0.2.0"
         fi
     fi
     info "Installing CHV version: $INSTALL_CHV_VERSION"

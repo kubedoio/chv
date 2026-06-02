@@ -38,7 +38,7 @@ export default {
   <p>Run the installer on a fresh Ubuntu server:</p>
   <pre><code>curl -sfL https://get.cellhv.com/ | sh -</code></pre>
   <p>Or install a specific version:</p>
-  <pre><code>curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.1.0 sh -</code></pre>
+  <pre><code>curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.2.0 sh -</code></pre>
   <p>See the <a href="https://github.com/cellhv/chv/blob/main/docs/DEPLOYMENT.md">deployment guide</a> for details.</p>
 </body>
 </html>`, {
