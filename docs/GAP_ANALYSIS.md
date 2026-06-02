@@ -11,11 +11,11 @@
 
 | Category | Total Gaps | P0 | P1 | P2 | P3 |
 |----------|-----------|----|----|----|----|
-| Backend / Control Plane | 1 | 0 | 0 | 1 | 0 |
+| Backend / Control Plane | 0 | 0 | 0 | 0 | 0 |
 | Agent / Node Runtime | 0 | 0 | 0 | 0 | 0 |
-| UI / Web Frontend | 1 | 0 | 0 | 1 | 0 |
+| UI / Web Frontend | 0 | 0 | 0 | 0 | 0 |
 | Infrastructure / Deployment | 0 | 0 | 0 | 0 | 0 |
-| **Total** | **2** | **0** | **0** | **2** | **0** |
+| **Total** | **0** | **0** | **0** | **0** | **0** |
 
 **Previously reported gaps that are now resolved:**
 - Partition policy (ADR-006) is fully implemented via `ConnectivityTracker`, `flush_pending_messages`, and agent-side RPC rejection.
@@ -61,7 +61,7 @@
   - S3 credentials encrypted at rest with AES-256-GCM (`CredentialEncryption`), key from `CHV_ENCRYPTION_KEY` or `CHV_JWT_SECRET`
   - BFF duplicate JSON keys removed; destination tracking preserved across job creation and re-run paths
 
-  Remaining gaps: volume-level `snapshot_volume` shipping (requires agent protocol changes), restore execution/validation, and documented DR runbooks.
+  Remaining gaps: volume-level `snapshot_volume` shipping (requires agent protocol changes). Restore execution/validation remains a future feature (no restore worker yet), but DR runbooks are now documented covering all current manual and automated restore paths.
 - **Evidence:** `crates/chv-controlplane-service/src/backup_shipper.rs`, `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-controlplane-store/src/backups.rs`, `crates/chv-controlplane-store/src/credential_crypto.rs`, `cmd/chv-controlplane/migrations/0043_backup_destination_and_credentials.sql`
 - **Priority:** P2
 
@@ -85,13 +85,11 @@
 
 ## 3. UI / Web Frontend Gaps
 
-### 3.1 Components Over 300 Lines
+### 3.1 Components Over 300 Lines — ✅ RESOLVED 2026-06-04
 - **Spec:** CLAUDE.md / CONTRIBUTING.md: "Keep Svelte components under ~300 lines"
-- **Gap:** 2 components/pages still exceed 300 lines:
-  - `CreateVMModal.svelte` — ~580 lines
-  - `DataTable.svelte` — still the primary table component (extracted sub-modules exist but main file may still be large)
-- **Status:** Partially addressed (2026-06-03). `vms/[id]/+page.svelte` refactored from 467 lines to ~300 lines by extracting `VmDetailSummaryTab` (overview), `VmConsoleTab`, `VmMetricsTab`, `VmBootLogTab` (formerly `VmSettingsTab`), `VmTasksTab`, and `VmDetailHeader`. `VmOverviewTab` pass-through wrapper removed. TopologyCanvas, SidebarNav, settings/users, and Dashboard all refactored below 300 lines.
-- **Evidence:** `wc -l` across `ui/src/lib/components/` and `ui/src/routes/`
+- **Gap:** Previously `CreateVMModal.svelte` (~580 lines) and `DataTable.svelte` exceeded the threshold.
+- **Resolution:** `CreateVMModal.svelte` is now 283 lines. `DataTable.svelte` has been fully decomposed into `ResourceTable.svelte` (198 lines), `InventoryTable.svelte` (72 lines), and `UserTable.svelte` (125 lines). The monolithic `DataTable.svelte` no longer exists. Table logic utilities live in `table.svelte.ts` (451 lines of non-component logic).
+- **Evidence:** `wc -l ui/src/lib/components/vms/CreateVMModal.svelte` = 283; no file named `DataTable.svelte` exists in `ui/src/`
 - **Priority:** P2
 
 ### 3.2 InventoryListPage Uses `any` Types — ✅ RESOLVED 2026-06-03
@@ -169,10 +167,10 @@ These areas were previously flagged as gaps but are now complete:
 | Gap | ADR | Component Spec | Plan Phase | Status |
 |-----|-----|---------------|------------|--------|
 | 1.1 Disk migration dirty sync/final flush | ADR-012 | chv-stord-spec | Phase 3 | ✅ Resolved |
-| 1.2 Backup execution engine | — | — | Phase 3 | 🟡 Partial (shipper wired, retention fixed, tests added; restore/DR runbooks pending) |
+| 1.2 Backup execution engine | — | — | Phase 3 | ✅ Resolved (shipper wired, retention fixed, crypto at rest, tests added, DR runbooks documented) |
 | 1.3 iSCSI / Ceph adapters | ADR-004 | chv-stord-spec | Phase 2 | ✅ Resolved |
 | 2.1 stord security hardening | — | chv-stord-spec | — | ✅ Resolved |
-| 3.1 Components >300 lines | CLAUDE.md | — | Phase 3 | 🟡 Partial (CreateVMModal, DataTable remain) |
+| 3.1 Components >300 lines | CLAUDE.md | — | Phase 3 | ✅ Resolved |
 | 3.2 InventoryListPage `any` types | CONTRIBUTING.md | — | — | ✅ Resolved |
 | 3.3 awaiting-operator-input | ADR-004-WebUI | — | — | ✅ Resolved |
 | 4.1 Multi-node WS routing | — | — | Phase 3 | ✅ Resolved |

@@ -124,7 +124,7 @@ journalctl -u chv-nwd -f
 | `chvctl network` | `list`, `show`, `create`, `delete` | Network management |
 | `chvctl storage` | `list-pools`, `show-pool` | Storage pools |
 | `chvctl task` | `list`, `show` | Task/operation inspection |
-| `chvctl backup` | `list`, `show`, `create`, `restore` | Backup jobs |
+| `chvctl backup` | `list`, `run` | Backup jobs (`show`, `create`, `restore` planned) |
 | `chvctl user` | `list`, `create`, `delete` | User management (admin) |
 | `chvctl migrate` | `start`, `status`, `cancel` | Live migration control |
 | `chvctl upgrade` | `start`, `status`, `list`, `rollback` | Rolling upgrades |
@@ -185,6 +185,18 @@ sudo systemctl start chv-controlplane
 ```bash
 sudo tar czf /backup/chv-certs-$(date +%Y%m%d).tar.gz /etc/chv/certs/
 ```
+
+### Disaster Recovery Runbooks
+
+For detailed step-by-step procedures covering VM snapshot restore, volume snapshot restore, backup artifact restore, control plane DR, and full site recovery, see the runbooks in [`docs/runbooks/`](runbooks/).
+
+| Runbook | Scenario |
+|---------|----------|
+| [VM Snapshot Restore](runbooks/vm-snapshot-restore.md) | Restore a VM from a local snapshot (automated) |
+| [Volume Snapshot Restore](runbooks/volume-snapshot-restore.md) | Restore a volume from a local snapshot (local/Ceph automated; LVM/iSCSI manual) |
+| [Backup Artifact Restore](runbooks/backup-artifact-restore.md) | Restore a VM from a shipped S3/NFS backup artifact (manual) |
+| [Control Plane DR](runbooks/control-plane-dr.md) | Recover the control plane after host failure or DB corruption |
+| [Full Site Recovery](runbooks/full-site-recovery.md) | Rebuild the entire infrastructure from backups |
 
 ---
 
