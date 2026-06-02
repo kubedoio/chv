@@ -12,7 +12,37 @@ Day-2 operations for CHV deployments: monitoring, troubleshooting, backups, and 
 |----------|---------|----------|
 | `curl http://127.0.0.1:8080/health` | Control plane liveness | `200 OK` |
 | `curl http://127.0.0.1:8080/ready` | Control plane readiness | `200 OK` after migrations |
+| `curl http://127.0.0.1:8080/health/deep` | Component-level deep health | `200 OK` (degraded) or `503` (unhealthy) |
 | `curl http://127.0.0.1:9901/metrics` | Agent Prometheus metrics | Prometheus text format |
+
+#### Deep Health Check
+
+The `/health/deep` endpoint reports per-component health:
+
+```bash
+curl -s http://127.0.0.1:8080/health/deep | jq .
+```
+
+Example response (`healthy`):
+```json
+{
+  "status": "healthy",
+  "components": {
+    "database": { "status": "healthy", "latency_ms": 2 },
+    "agent_socket_dir": { "status": "healthy" },
+    "agent_connectivity": { "status": "healthy" }
+  }
+}
+```
+
+- **`database`**: SQLite connectivity with latency measurement.
+- **`agent_socket_dir`**: Agent runtime directory exists and is readable.
+- **`agent_connectivity`**: Can establish a Unix socket connection to at least one agent.
+
+Status semantics:
+- `healthy` — all components pass (HTTP 200)
+- `degraded` — database passes but agent issues (HTTP 200, still serving)
+- `unhealthy` — database fails (HTTP 503)
 
 ### Key Prometheus Metrics
 
@@ -22,6 +52,38 @@ chv_nodes_ready
 chv_operations_completed_total{status="succeeded"}
 chv_operations_latency_seconds_bucket
 ```
+
+#### Circuit Breaker Behavior
+
+Node communication from the control plane is protected by a circuit breaker (`Closed` → `Open` → `HalfOpen`). When open, RPCs to that node are rejected immediately with `BackendUnavailable` without attempting the call. The breaker probes with single requests every 30s (default) in `HalfOpen` state and closes after 3 consecutive successes.
+
+Agent connectivity metrics on `:9901/metrics` complement this:
+
+```
+# 1 = connected, 0 = disconnected
+curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_connected
+
+# Duration of current disconnect in ms
+curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_disconnected_duration_ms
+```
+
+#### Partition / Autonomy Metrics
+
+When an agent loses control-plane connectivity, it enters autonomous mode:
+
+```
+# 1 = connected, 0 = disconnected
+curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_connected
+
+# Duration of current disconnect in ms
+curl -s http://127.0.0.1:9901/metrics | grep chv_agent_cp_disconnected_duration_ms
+```
+
+During a partition:
+- Existing VMs continue running.
+- `CreateVm` and `MigrateVm` RPCs are rejected with `FAILED_PRECONDITION`.
+- `StopVm` and `RebootVm` for existing VMs are allowed.
+- Upon reconnection, pending messages are flushed in order.
 
 ### systemd Service Status
 
@@ -34,6 +96,61 @@ journalctl -u chv-controlplane -f
 journalctl -u chv-agent -f
 journalctl -u chv-stord -f
 journalctl -u chv-nwd -f
+```
+
+---
+
+## CLI Reference (`chvctl`)
+
+`chvctl` is the operator CLI for the CHV platform. It communicates with the BFF HTTP API.
+
+### Global Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--server` | `http://localhost:8080` | BFF server URL |
+| `--token` | (from `~/.chv/credentials`) | Auth token override |
+| `--output` | `table` | Output format: `table`, `json`, `yaml` |
+
+### Commands
+
+| Command | Subcommands | Description |
+|---------|-------------|-------------|
+| `chvctl login` | — | Authenticate and store token |
+| `chvctl vm` | `list`, `show`, `create`, `start`, `stop`, `reboot`, `delete`, `resize` | VM lifecycle management |
+| `chvctl node` | `list`, `show`, `drain`, `maintenance` | Node operations |
+| `chvctl image` | `list`, `show`, `import`, `delete` | Disk image management |
+| `chvctl volume` | `list`, `show`, `create`, `delete` | Storage volumes |
+| `chvctl network` | `list`, `show`, `create`, `delete` | Network management |
+| `chvctl storage` | `list-pools`, `show-pool` | Storage pools |
+| `chvctl task` | `list`, `show` | Task/operation inspection |
+| `chvctl backup` | `list`, `show`, `create`, `restore` | Backup jobs |
+| `chvctl user` | `list`, `create`, `delete` | User management (admin) |
+| `chvctl migrate` | `start`, `status`, `cancel` | Live migration control |
+| `chvctl upgrade` | `start`, `status`, `list`, `rollback` | Rolling upgrades |
+| `chvctl health` | `cluster` | Cluster health summary |
+| `chvctl version` | — | Show version and build info |
+
+### Examples
+
+```bash
+# List VMs
+chvctl vm list
+
+# Show node details
+chvctl node show <NODE_ID>
+
+# Drain a node for maintenance
+chvctl node drain <NODE_ID>
+
+# Check cluster health
+chvctl health cluster
+
+# Start a rolling upgrade
+chvctl upgrade start <NODE_ID> --version 0.5.0
+
+# Resize a VM
+chvctl vm resize <VM_ID> --cpu 4 --memory-mb 8192
 ```
 
 ---

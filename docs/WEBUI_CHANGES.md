@@ -35,16 +35,28 @@ The WebUI has grown substantially since the above sprint. Current capabilities i
 - **Settings** — User management, API tokens, hypervisor settings page (partial)
 - **Metrics** — VM metrics widgets using Chart.js
 
-### Known UI Gaps
+### Resolved UI Gaps (Post-2026-04-26)
+
+| Gap | Resolution |
+|-----|------------|
+| UI Production Readiness refactor (Tailwind-first, component split) | **Done** — 10 feature folders created, DataTable sub-modules extracted, Dashboard refactored to 292 lines |
+| Command palette | **Done** — `CommandPalette.svelte` with fuzzy-search and 16 commands |
+| E2E tests (Playwright) | **Done** — 3 test files covering navigation, VMs, and settings; runs in CI |
+| Client-side caching layer | **Done** — `api-cache.svelte.ts` with TTL, stale-while-revalidate, and mutation invalidation |
+| Dark mode | **Done** — Full `[data-theme="dark"]` token system with `UserMenu` toggle |
+| DataTable component splitting | **Done** — Selection, Sorting, Visibility extracted to `shared/datatable/` |
+| Overview page logic extraction | **Done** — Dashboard helpers and store extracted; page reduced from 635 → 292 lines |
+| svelte-check warnings | **Done** — 0 errors, 0 warnings |
+| Toast hardcoded colors | **Done** — Uses design-system CSS variables |
+
+### Remaining UI Gaps
 
 | Gap | Status | Priority |
 |-----|--------|----------|
-| UI Production Readiness refactor (Tailwind-first, component split) | Not started | P1 |
-| Command palette | TODO | P2 |
-| E2E tests (Playwright) | Missing | P3 |
-| Client-side caching layer | Missing | P3 |
-| Dark mode | Not started | P3 |
-| DataTable component splitting (688 lines) | Not started | P2 |
-| Overview page logic extraction (526 lines) | Not started | P2 |
+| `vms/[id]/+page.svelte` still 467 lines | Partial | P2 |
+| `CreateVMModal.svelte` still 580 lines | Partial | P2 |
+| `InventoryListPage` uses `any[]` types | Not started | P2 |
+| `awaiting-operator-input` task state | Reserved for later | P3 |
+| A11y suppressions on modal backdrops | Not started | P2 |
 
 See the [`PHASED_IMPLEMENTATION_PLAN.md`](../PHASED_IMPLEMENTATION_PLAN.md) for the full UI backlog and sprint schedule.

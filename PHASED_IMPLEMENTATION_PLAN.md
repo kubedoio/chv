@@ -66,11 +66,12 @@ As of Sprint 15 (PRs 49-52), the platform has transitioned from early-MVP toward
 
 **Goal**: Prepare the system for long-term maintainability, backup strategies, and scale.
 
-### 3.1 UI Production Refactor (`U1`, `U6`, `U7`) [NOT STARTED]
-*   **Tailwind-first Migration**: Strip `app.css` and fully migrate primitives/shell components to Tailwind.
-*   **Component Reorganization**: Reorganize `ui/src/lib/components` into strictly feature-based folders.
-*   **DataTable Refactoring**: Split the large `DataTable` (688 lines) into smaller modules handling selection, sorting, and visibility.
-*   **Overview Logic Extraction**: Extract logic from the overview page (526 lines) into dedicated helpers.
+### 3.1 UI Production Refactor (`U1`, `U6`, `U7`) [PARTIAL]
+*   ~~**Component Reorganization**: Reorganized `ui/src/lib/components` into 10 feature-based folders (`vms/`, `nodes/`, `networks/`, `storage/`, `settings/`, `tasks/`, `events/`, `shell/`, `primitives/`, `shared/`) with barrel exports.~~
+*   ~~**DataTable Refactoring**: Extracted `Selection`, `Sorting`, and `Visibility` into `shared/datatable/` sub-modules.~~
+*   ~~**Overview Logic Extraction**: Extracted `dashboard.ts` helpers and `dashboard.svelte.ts` store; reduced `+page.svelte` from 635 → 292 lines.~~
+*   ~~**Tailwind-first Migration**: Design system fully aligned with Tailwind config; `app.css` uses design tokens. Dark mode implemented with `[data-theme="dark"]` tokens.~~
+*   **Remaining**: Some components still exceed 300 lines (`vms/[id]/+page.svelte` at 467 lines, `CreateVMModal.svelte` at 580 lines). Full Tailwind-first purge of legacy CSS selectors not yet complete.
 
 ### 3.2 Backups & Role-Based Access [PARTIAL]
 *   **Backup/DR (`B2`)**: Implement the backup execution worker, VM/volume snapshot orchestration, off-host artifact shipping, restore validation, retention enforcement, and documented DR automation. SQLite pre-migration backup exists, but it is not a full Backup/DR system.
@@ -101,7 +102,7 @@ As of Sprint 15 (PRs 49-52), the platform has transitioned from early-MVP toward
 
 ## Success Criteria
 1.  ~~All Playwright E2E tests pass reliably.~~
-2.  `svelte-check` reports 0 errors and 0 warnings.
+2.  ~~`svelte-check` reports 0 errors and 0 warnings.~~
 3.  ~~All `unimplemented!()` stubs in the agent `reconcile.rs` are replaced with real daemon clients.~~
 4.  ~~No `BffError::NotImplemented` returned from any frontend API call.~~
 5.  CI pipeline is green; automated Backup/DR execution is **PARTIAL** and limited to SQLite pre-migration backup today.

@@ -20,6 +20,7 @@ The project has a solid Phase 1 foundation (Rust control plane, SQLite store, ce
 ┌─────────────────────────────▼───────────────────────────────┐
 │                   chv-controlplane                            │
 │         (Orchestration · SQLite · BFF HTTP · gRPC)          │
+│                        + chvctl CLI                           │
 └─────────────────────────────┬───────────────────────────────┘
                               │ mTLS gRPC
 ┌─────────────────────────────▼───────────────────────────────┐
@@ -149,7 +150,7 @@ cargo build --workspace
 |----------|---------|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | System architecture, data flow, and boundaries |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) | Deploy CHV on a combined control-plane + hypervisor host |
-| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (001–010) |
+| [`docs/specs/adr/`](./docs/specs/adr) | Architecture Decision Records (001–013) |
 | [`docs/specs/component/`](./docs/specs/component) | Component specs (agent, stord, nwd) |
 | [`PHASED_IMPLEMENTATION_PLAN.md`](./PHASED_IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
 | [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) | Day-2 operations, monitoring, and troubleshooting |
@@ -164,7 +165,8 @@ cargo build --workspace
 
 GitHub Actions runs on every push and PR:
 - `cargo check`, `cargo clippy -- -D warnings`, `cargo test --workspace`
-- UI `npm ci`, `npm run build`, and `npm run check` (if present)
+- UI `npm ci`, `npm run build`, `npm run check`, and Playwright E2E tests
+- `chvctl` smoke test and VERSION validation
 
 See [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 

@@ -241,8 +241,8 @@ Status values: `healthy` (all pass), `degraded` (DB pass but agent issues), `unh
 | Backend | Backup/DR execution engine, off-host shipping, restore validation, and runbook automation incomplete | P2 |
 | Backend | Disk migration dirty sync rounds, convergence reporting, and paused final dirty flush incomplete | P1 |
 | Backend | iSCSI and Ceph RBD storage backend adapters planned, not production-complete | P2 |
-| UI | Production-readiness Tailwind-first refactor not started | P2 |
-| UI | Command palette TODO | P2 |
+| UI | Some components still exceed 300 lines (`vms/[id]/+page.svelte`, `CreateVMModal.svelte`) | P2 |
+| UI | `InventoryListPage` uses `any[]` types, defeating table type-safety | P2 |
 
 ## Technology Choices
 

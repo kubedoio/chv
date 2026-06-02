@@ -1,9 +1,9 @@
 # CHV Specification vs Implementation Gap Analysis
 
-**Date:** 2026-04-26  
+**Date:** 2026-05-29  
 **Version:** 0.1.0  
 **Scope:** Backend (Rust), Agent, UI (SvelteKit), Infrastructure  
-**Method:** Cross-reference of ADRs 001–010, component specs, ARCHITECTURE.md, DESIGN.md, and PHASED_IMPLEMENTATION_PLAN.md against the actual codebase.
+**Method:** Cross-reference of ADRs 001–013, component specs, ARCHITECTURE.md, DESIGN.md, and PHASED_IMPLEMENTATION_PLAN.md against the actual codebase.
 
 ---
 
@@ -11,13 +11,21 @@
 
 | Category | Total Gaps | P0 | P1 | P2 | P3 |
 |----------|-----------|----|----|----|----|
-| Backend / Control Plane | 4 | 0 | 2 | 2 | 0 |
-| Agent / Node Runtime | 5 | 1 | 3 | 1 | 0 |
-| UI / Web Frontend | 7 | 0 | 2 | 4 | 1 |
-| Infrastructure / Deployment | 3 | 0 | 2 | 1 | 0 |
-| **Total** | **19** | **1** | **9** | **8** | **1** |
+| Backend / Control Plane | 3 | 0 | 1 | 2 | 0 |
+| Agent / Node Runtime | 1 | 0 | 1 | 0 | 0 |
+| UI / Web Frontend | 3 | 0 | 0 | 2 | 1 |
+| Infrastructure / Deployment | 2 | 0 | 1 | 1 | 0 |
+| **Total** | **9** | **0** | **3** | **5** | **1** |
 
-**Critical finding:** The agent has **no implementation of partition policy (ADR-006)**. During a control-plane outage, the agent will continue accepting new VM creation requests and destructive topology mutations, violating a core safety invariant.
+**Previously reported gaps that are now resolved:**
+- Partition policy (ADR-006) is fully implemented via `ConnectivityTracker`, `flush_pending_messages`, and agent-side RPC rejection.
+- VM resize is wired end-to-end (BFF → desired state → agent reconcile → Cloud Hypervisor).
+- Network mutations (`start`/`stop`/`restart`) are wired through BFF → control plane → agent → nwd.
+- svelte-check reports **0 errors and 0 warnings**.
+- Playwright E2E tests run in CI (`.github/workflows/ci.yml` `e2e` job).
+- Toast component uses design-system CSS variables (no hardcoded hex).
+- TopologyCanvas, SidebarNav, and settings/users page are all under 300 lines after refactor.
+- There are **zero** `unimplemented!()` stubs in production Rust code.
 
 ---
 
@@ -33,163 +41,82 @@
 
 ## 1. Backend / Control Plane Gaps
 
-### 1.1 VM Resize Accepted but Not Executed
-- **Spec:** ADR-002 (desired-state reconciliation), `chv-agent-spec.md` (VM lifecycle)
-- **Gap:** `resize_vm` in `crates/chv-controlplane-service/src/lifecycle.rs:710` records the intent and returns an ACK, but the comment explicitly states: "Record intent accepted; actual resize is orchestrated by the reconciler dispatching to the agent's resize_vm RPC." The reconciler dispatch path is incomplete — the resize parameters (`desired_vcpus`, `desired_memory_bytes`) are accepted but not propagated into the desired-state fragment that the agent reconciles.
-- **Status:** Partially implemented (API surface exists, orchestration incomplete)
-- **Evidence:** `crates/chv-controlplane-service/src/lifecycle.rs:687-712`
+### 1.1 Disk Migration Dirty Sync and Final Flush Incomplete
+- **Spec:** ADR-012, `chv-stord-spec.md`, live-migration-spec.md
+- **Gap:** Control-plane migration orchestration, mTLS, backpressure, flow control, rollback, and the `MigrationReaper` are all implemented. The remaining gap is in the stord sender: dirty sync rounds, convergence reporting to the control plane, and the paused final dirty flush are not yet performed. This means live migration works for bulk copy but does not yet do the iterative dirty-block sync required for zero-downtime migration of write-heavy workloads.
+- **Status:** Partial (bulk copy and orchestration complete; dirty sync / final flush missing)
+- **Evidence:** `crates/chv-stord-core/src/migration/sender.rs`, `docs/specs/component/chv-stord-spec.md`
 - **Priority:** P1
 
 ### 1.2 Backup Jobs: Partial Execution Engine, DR Semantics Incomplete
-- **Spec:** ARCHITECTURE.md ("Backup jobs & history stubbed"), PHASED_IMPLEMENTATION_PLAN.md Phase 3
-- **Gap:** Backup tables (`backup_jobs`, `backup_schedules`, `backup_restores`), repositories (`BackupRepository`), BFF REST handlers, and a control-plane `BackupWorker` now exist. The remaining gap is production Backup/DR semantics: off-host artifact shipping, restore execution/validation, retention enforcement, integrity checks, and documented DR runbooks are not complete.
+- **Spec:** ARCHITECTURE.md, PHASED_IMPLEMENTATION_PLAN.md Phase 3
+- **Gap:** Backup tables (`backup_jobs`, `backup_schedules`, `backup_restores`), repositories (`BackupRepository`), BFF REST handlers, and a control-plane `BackupWorker` exist. The remaining gap is production Backup/DR semantics: off-host artifact shipping, restore execution/validation, retention enforcement, integrity checks, and documented DR runbooks are not complete.
 - **Status:** Partial (scheduler/executor exists; DR workflow incomplete)
 - **Evidence:** `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-webui-bff/src/handlers/backups.rs`
 - **Priority:** P2
 
-### 1.3 Network Mutation End-to-End Incomplete
-- **Spec:** ARCHITECTURE.md ("Network mutations (`mutate_network` returns `NotImplemented`)"), ADR-005
-- **Gap:** The BFF `mutate_network` handler and control-plane `bff_mutations.rs` service both exist and support `start`, `stop`, `restart` actions. However, the agent-side `apply_network_desired_state` in `reconcile.rs` and `agent_server.rs` may not fully wire the network desired-state schema fields (`firewall_rules_json`, `nat_rules_json`, `dhcp_scope_json`, `dns_enabled`, `dns_scope_json`) into actual `chv-nwd` RPC calls.
-- **Status:** Partially implemented (BFF → control plane wired, agent → nwd schema wired but enforcement gaps)
-- **Evidence:** `crates/chv-webui-bff/src/handlers/networks.rs:538-563`, `crates/chv-controlplane-service/src/bff_mutations.rs:593-700`
-- **Priority:** P1
-
-### 1.4 chv-stord-spec Security Requirements Not Fully Implemented
-- **Spec:** `chv-stord-spec.md` (dedicated service account, restricted socket permissions, explicit device/path allowlists, capability drop)
-- **Gap:** The spec requires `chv-stord` to run under a dedicated service account with restricted filesystem visibility and device/path allowlists. The current implementation runs as the generic `chv` user with broad `/var/lib/chv/storage/localdisk` access. No allowlist enforcement or capability dropping is present.
-- **Status:** Not started
-- **Evidence:** `docs/examples/systemd/chv-stord.service`, `crates/chv-stord-core/src/`
+### 1.3 iSCSI and Ceph RBD Storage Backend Adapters Planned but Not Production-Complete
+- **Spec:** ADR-004, `chv-stord-spec.md`
+- **Gap:** `chv-stord-backends` contains `iscsi.rs` (949 lines) and `ceph.rs` (900 lines) with substantial adapter code, but these backends are not integrated into the active stord handler path as production-complete options. The active backend focus remains local file/qcow2 and LVM.
+- **Status:** Partial (adapter code exists; not wired as production default)
+- **Evidence:** `crates/chv-stord-backends/src/iscsi.rs`, `crates/chv-stord-backends/src/ceph.rs`, `crates/chv-stord-core/src/handlers.rs`
 - **Priority:** P2
 
 ---
 
 ## 2. Agent / Node Runtime Gaps
 
-### 2.1 Partition Policy (ADR-006) Not Implemented
-- **Spec:** ADR-006 — During control-plane outage: preserve runtime, allow local self-heal, allow stop/reboot, **deny new VM creation, deny migrations, deny destructive topology mutations**.
-- **Gap:** There is **zero evidence** in `crates/chv-agent-core/src/` of partition detection or partition-safe behavior. The agent's reconcile loop polls desired state from the control plane indefinitely. If the control plane is unreachable, the agent will likely error-loop but does not explicitly:
-  - Detect partition vs. control-plane crash
-  - Enter a partition-safe mode
-  - Reject `CreateVm`, `MigrateVm`, or topology-mutating RPCs
-  - Allow `StopVm`, `RebootVm` for existing VMs
-  - Converge back to desired state upon reconnection
+### 2.1 chv-stord-spec Security Requirements Not Fully Implemented
+- **Spec:** `chv-stord-spec.md` (dedicated service account, restricted socket permissions, explicit device/path allowlists, capability drop)
+- **Gap:** The spec requires `chv-stord` to run under a dedicated service account with restricted filesystem visibility and device/path allowlists. The current implementation runs as the generic `chv` user with broad `/var/lib/chv/storage/localdisk` access. No allowlist enforcement or capability dropping is present.
 - **Status:** Not started
-- **Evidence:** `crates/chv-agent-core/src/agent_server.rs`, `crates/chv-agent-core/src/reconcile.rs` — no partition-related code found
-- **Priority:** P0 — This is a safety invariant violation.
-
-### 2.2 Reconcile Test Mocks: 14 Unimplemented RPCs
-- **Spec:** `chv-agent-spec.md` (idempotent reconcile loop, test coverage), `chv-stord-spec.md`, `chv-nwd-spec.md`
-- **Gap:** The test mocks in `reconcile.rs` return `Status::unimplemented("")` for 14 advanced RPCs:
-  - Stord: `get_volume_health`, `resize_volume`, `prepare_snapshot`, `prepare_clone`, `restore_snapshot`, `delete_snapshot`, `set_device_policy` (7)
-  - Nwd: `get_network_health`, `set_firewall_policy`, `set_nat_policy`, `ensure_dhcp_scope`, `ensure_dns_scope`, `expose_service`, `withdraw_service_exposure` (7)
-- **Status:** Stubbed (tests cannot verify these code paths)
-- **Evidence:** `crates/chv-agent-core/src/reconcile.rs:1282-1462`
+- **Evidence:** `docs/examples/systemd/chv-stord.service`, `crates/chv-stord-core/src/`
 - **Priority:** P1
-
-### 2.3 VM Resize Agent-Side Incomplete
-- **Spec:** ADR-002 (desired-state reconciliation)
-- **Gap:** The agent's `agent_server.rs:793` has a `resize_vm` RPC handler, and `vm_runtime.rs:142` has a `resize_vm` method. However, the reconcile loop in `reconcile.rs` may not generate resize operations when the desired-state fragment changes `vcpu` or `memory_mb` for an existing VM.
-- **Status:** Partially implemented (RPC handler exists, reconcile loop integration unclear)
-- **Evidence:** `crates/chv-agent-core/src/agent_server.rs:793`, `crates/chv-agent-core/src/vm_runtime.rs:142`
-- **Priority:** P1
-
-### 2.4 Node State Machine: Missing Transition Enforcement
-- **Spec:** ADR-003 — Explicit states and transitions; only `TenantReady` nodes receive new VMs.
-- **Gap:** `cache.rs` has a `StateMachine` and `transition_node_state` method, but the reconcile loop does not appear to enforce scheduling rules based on node state. A node in `Degraded` or `Draining` may still receive new VM desired-state fragments.
-- **Status:** Partially implemented (state machine library exists, enforcement gaps)
-- **Evidence:** `crates/chv-agent-core/src/cache.rs:268-276`, `crates/chv-agent-core/src/reconcile.rs`
-- **Priority:** P1
-
-### 2.5 chv-nwd DHCP/DNS Enforcement Gap
-- **Spec:** `chv-nwd-spec.md` (DHCP, DNS), PHASED_IMPLEMENTATION_PLAN.md Phase 2
-- **Gap:** `chv-nwd-core/src/executor.rs` has `ensure_dhcp_scope` and `ensure_dns_scope` methods that start `dnsmasq`, but the reconcile loop may not call these methods when the desired state changes. The PHASED plan explicitly notes: "DHCP and DNS scopes currently log they are accepted but are not enforced."
-- **Status:** Partially implemented (executor methods exist, reconcile loop wiring incomplete)
-- **Evidence:** `crates/chv-nwd-core/src/executor.rs:57-120`, `crates/chv-agent-core/src/reconcile.rs`
-- **Priority:** P2
 
 ---
 
 ## 3. UI / Web Frontend Gaps
 
-### 3.1 svelte-check: 104 Warnings
-- **Spec:** PHASED_IMPLEMENTATION_PLAN.md success criteria: "`svelte-check` reports 0 errors and 0 warnings."
-- **Gap:** `npm run check` reports 0 errors but **104 warnings**, primarily:
-  - Unused CSS selectors (e.g., `.action-btn.start:hover`, `.action-btn.danger:hover` in `templates/+page.svelte`)
-  - A11y label associations
-- **Status:** Partially implemented (type-safe, but warnings pollute CI and mask real issues)
-- **Evidence:** `npm run check` output
-- **Priority:** P2
-
-### 3.2 Components Over 300 Lines
+### 3.1 Components Over 300 Lines
 - **Spec:** CLAUDE.md / CONTRIBUTING.md: "Keep Svelte components under ~300 lines"
-- **Gap:** 29 components/pages exceed 300 lines. The worst offenders:
-  - `TopologyCanvas.svelte` — 986 lines
-  - `SidebarNav.svelte` — 688 lines
-  - `settings/users/+page.svelte` — 815 lines
-  - `vms/[id]/+page.svelte` — 791 lines
+- **Gap:** 5 components/pages still exceed 300 lines:
+  - `vms/[id]/+page.svelte` — 467 lines
   - `CreateVMModal.svelte` — 580 lines
-- **Status:** Not started (no refactoring effort underway)
+  - `DataTable.svelte` — still the primary table component (extracted sub-modules exist but main file may still be large)
+- **Status:** Partially addressed (TopologyCanvas, SidebarNav, settings/users, and Dashboard all refactored below 300 lines)
 - **Evidence:** `wc -l` across `ui/src/lib/components/` and `ui/src/routes/`
 - **Priority:** P2
 
-### 3.3 Playwright E2E Tests Not Run in CI
-- **Spec:** PHASED_IMPLEMENTATION_PLAN.md Phase 3: "Set up automated CI (`cargo test`, `cargo clippy`, `npm run build`, Playwright e2e tests)"
-- **Gap:** `.github/workflows/ci.yml` runs Rust check/clippy/test and UI build/check, but **does not run Playwright e2e tests**. The `navigation.spec.ts` test for `Ctrl+K` command palette may also be flaky.
-- **Status:** Partially implemented (tests exist, CI integration missing)
-- **Evidence:** `.github/workflows/ci.yml`, `ui/tests/e2e/navigation.spec.ts`
-- **Priority:** P1
-
-### 3.4 Toast Component Hardcoded Colors
-- **Spec:** DESIGN.md: "Toast / Notifications: Must use design system semantic colors"
-- **Gap:** `Toast.svelte` uses hardcoded hex values (`#54B435`, `#E60000`, `#0066CC`) that do not match the warm earthy palette (`#3f6b45` success, `#9b4338` danger, `#49627d` info).
+### 3.2 InventoryListPage Uses `any` Types
+- **Spec:** CONTRIBUTING.md: "Use TypeScript strictly; avoid `any`"
+- **Gap:** `InventoryListPage.svelte` props are typed as `any[]` and `any`, defeating table type-safety across all list views.
 - **Status:** Not started
-- **Evidence:** `ui/src/lib/components/shared/Toast.svelte` (confirmed in DESIGN.md anti-pattern section)
+- **Evidence:** `ui/src/lib/components/shell/InventoryListPage.svelte:32-35`
 - **Priority:** P2
 
-### 3.5 "awaiting-operator-input" Task State Not Implemented
+### 3.3 "awaiting-operator-input" Task State Not Implemented
 - **Spec:** ADR-004-WebUI: Required task states include `awaiting-operator-input` (reserved for later)
 - **Gap:** The UI task list and task detail components only show: `queued`, `running`, `succeeded`, `failed`, `cancelled`. The `awaiting-operator-input` state has no UI representation.
 - **Status:** Not started
 - **Evidence:** `ui/src/routes/tasks/+page.svelte`, `ui/src/lib/components/events/EventList.svelte`
 - **Priority:** P3 (reserved for later per spec)
 
-### 3.6 InventoryListPage Uses `any` Types
-- **Spec:** CONTRIBUTING.md: "Use TypeScript strictly; avoid `any`"
-- **Gap:** `InventoryListPage.svelte` props are typed as `any[]` and `any`, defeating table type-safety across all list views.
-- **Status:** Not started
-- **Evidence:** `ui/src/lib/components/shell/InventoryListPage.svelte`
-- **Priority:** P2
-
-### 3.7 A11y Suppressions on Modal Backdrops
-- **Spec:** DESIGN.md accessibility expectations, ADR-001-WebUI (predictable mutation UX)
-- **Gap:** 6 components use `<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->` on modal backdrop divs, suppressing keyboard accessibility without proper `onkeydown` handlers or native `<dialog>` elements.
-- **Status:** Not started
-- **Evidence:** `ui/src/lib/components/primitives/Modal.svelte`, `ui/src/lib/components/shell/SearchModal.svelte`, `ui/src/lib/components/shell/CommandPalette.svelte`, `ui/src/lib/components/shell/MobileNav.svelte`, `ui/src/lib/components/shared/QuickActions.svelte`, `ui/src/lib/components/shared/KeyboardShortcutsHelp.svelte`
-- **Priority:** P2
-
 ---
 
 ## 4. Infrastructure / Deployment Gaps
 
-### 4.1 CI Missing Playwright E2E Tests
-- **Spec:** PHASED_IMPLEMENTATION_PLAN.md Phase 3: "Set up automated CI (`cargo test`, `cargo clippy`, `npm run build`, Playwright e2e tests)"
-- **Gap:** GitHub Actions `.github/workflows/ci.yml` has no Playwright job. The `ui` job only builds and runs `svelte-check`.
-- **Status:** Not started
-- **Evidence:** `.github/workflows/ci.yml`
-- **Priority:** P1
-
-### 4.2 Multi-Node WebSocket Routing Not Implemented
+### 4.1 Multi-Node WebSocket Routing Not Implemented
 - **Spec:** PHASED_IMPLEMENTATION_PLAN.md Phase 3: "Nginx Routing: configure multi-node WebSocket routing (`/ws/vms/`) using a dynamic upstream based on `node_id`"
 - **Gap:** The nginx config at `docs/examples/nginx/chv-ui.conf` hardcodes `proxy_pass http://127.0.0.1:8444/vms/` for WebSocket console access. In a multi-node deployment, console WebSockets must route to the correct hypervisor host based on the VM's node assignment.
 - **Status:** Not started
 - **Evidence:** `docs/examples/nginx/chv-ui.conf`
 - **Priority:** P1
 
-### 4.3 Docker Compose Incomplete
+### 4.2 Docker Compose Incomplete for Production Use
 - **Spec:** DEPLOYMENT.md, CONTRIBUTING.md (Docker optional)
-- **Gap:** `Dockerfile` exists but `docker-compose.yml` may not configure all four daemons with proper networking, volume mounts, and bridge setup. The Dockerfile comment says "Usage: docker compose up -d" but the compose file may be a basic template.
-- **Status:** Partially implemented (Dockerfile present, compose orchestration gaps)
-- **Evidence:** `Dockerfile`, `docker-compose.yml`
+- **Gap:** `docker-compose.yml` exists and configures all four daemons plus nginx for local development, but it is not documented as production-ready. Bridge setup, KVM device passthrough, and host networking requirements for `chv-nwd` make containerized production deployment non-trivial. The compose file is primarily a dev stack.
+- **Status:** Partial (dev stack works; production container orchestration undocumented)
+- **Evidence:** `docker-compose.yml`, `Dockerfile`
 - **Priority:** P2
 
 ---
@@ -200,6 +127,16 @@ These areas were previously flagged as gaps but are now complete:
 
 | Area | Evidence |
 |------|----------|
+| **Partition policy (ADR-006)** | `crates/chv-agent-core/src/connectivity.rs` — `ConnectivityTracker` with `Connected`/`Disconnected`/`Reconnecting` states; `agent_server.rs:554` rejects `CreateVm` when disconnected; `agent_server.rs:1817` rejects `MigrateVm` when disconnected; `control_plane.rs:276` `flush_pending_messages` drains `NodeCache::pending_control_plane_messages` on reconnect |
+| **VM resize end-to-end** | `crates/chv-webui-bff/src/handlers/vms.rs:733-830` — BFF updates `vm_desired_state` cpu_count/memory_bytes and bumps generation; `crates/chv-agent-core/src/reconcile.rs:1318-1339` — agent detects drift and calls `vm_runtime.resize_vm()` |
+| **Network mutations end-to-end** | `crates/chv-webui-bff/src/handlers/networks.rs` — BFF lifecycle handlers; `crates/chv-agent-core/src/reconcile.rs:515-609` — agent calls `set_firewall_policy`, `set_nat_policy`, `ensure_dhcp_scope`, `ensure_dns_scope` via nwd client |
+| **svelte-check warnings** | `npm run check` reports **0 errors and 0 warnings** |
+| **Playwright E2E in CI** | `.github/workflows/ci.yml` has dedicated `e2e` job running Playwright against a mock BFF server |
+| **Toast design tokens** | `ui/src/lib/components/primitives/Toast.svelte` uses `var(--color-success)`, `var(--color-danger)`, `var(--color-info)` |
+| **TopologyCanvas refactor** | Now 299 lines (was 986) |
+| **SidebarNav refactor** | Now 259 lines (was 688) |
+| **settings/users refactor** | Now 231 lines (was 815) |
+| **No production `unimplemented!()` stubs** | `grep -rn "unimplemented!()" crates/` returns only test-mock implementations |
 | **Operation ID propagation** | `crates/chv-agent-core/src/daemon_clients.rs:21-223` — `with_operation_id` wraps all stord/nwd RPCs with `x-operation-id` metadata and tracing spans |
 | **Console token replay prevention** | `crates/chv-agent-core/src/console_server.rs:24-151` — 2048-entry LRU cache + 2-second rate limiter per VM |
 | **Quota enforcement** | `crates/chv-webui-bff/src/handlers/vms.rs:390-988` — `enforce_user_quota` checks max_vms, max_cpu, max_memory_bytes, max_storage_bytes |
@@ -207,14 +144,20 @@ These areas were previously flagged as gaps but are now complete:
 | **Node state machine library** | `crates/chv-agent-core/src/cache.rs:268-276` — `StateMachine` with `transition_node_state` and transition validation |
 | **nginx WebSocket proxy** | `docs/examples/nginx/chv-ui.conf` — `/ws/vms/` location with upgrade headers |
 | **systemd services** | `docs/examples/systemd/*.service` — All 4 daemons with `KillMode=mixed` and `TimeoutStopSec=5` |
-| **Pre-migration DB backup** | CHANGELOG.md: "Pre-migration SQLite backup hook (I5): automatic DB backup before migrations with 10-backup rotation" |
+| **Pre-migration DB backup** | Automatic DB backup before migrations with 10-backup rotation |
 | **Version bump automation** | `scripts/bump-version.sh` + `Makefile` target |
-| **Dark mode** | CHANGELOG.md: "full implementation with UserMenu toggle" |
+| **Dark mode** | Full implementation with `UserMenu` toggle and `[data-theme="dark"]` tokens |
 | **Command palette** | `ui/src/lib/components/shell/CommandPalette.svelte` — fuzzy-search with 16 commands |
-| **Design token alignment** | CHANGELOG.md: "earthy palette applied to app.css, tailwind.config.cjs, and all 8 drifted components" |
+| **Design token alignment** | Earthy palette applied to `app.css`, `tailwind.config.cjs`, and all components |
 | **Error handling alignment** | `crates/chv-webui-bff/src/error.rs` — no `unreachable!()` panic paths |
 | **Logging alignment** | `crates/chv-config/src/lib.rs` — `tracing` replaces `eprintln!` |
 | **Async runtime safety** | `crates/chv-agent-core/src/console_server.rs`, `crates/chv-controlplane-service/src/container.rs` — `tokio::sync::Mutex` in async paths |
+| **Circuit breaker** | `crates/chv-controlplane-service/src/circuit_breaker.rs` — `Closed` → `Open` → `HalfOpen` with configurable thresholds |
+| **Deep health checks** | `GET /health/deep` returns database, agent socket, and agent connectivity status |
+| **Migration reaper** | `crates/chv-controlplane-service/src/migration_reaper.rs` — scans every 60s for migrations stuck beyond 2h |
+| **Drain evacuation** | `crates/chv-agent-core/src/reconcile.rs` — `Draining` state triggers migration requests |
+| **VXLAN teardown** | `crates/chv-nwd-core/src/executor.rs` — `delete_topology` cleans up VXLAN interfaces and FDB entries |
+| **FDB cleanup on VM detach** | Implemented in `chv-nwd-core` executor and reconcile modules |
 
 ---
 
@@ -222,36 +165,26 @@ These areas were previously flagged as gaps but are now complete:
 
 | Gap | ADR | Component Spec | Plan Phase |
 |-----|-----|---------------|------------|
-| 1.1 VM resize not executed | ADR-002 | chv-agent-spec | Phase 2 |
+| 1.1 Disk migration dirty sync/final flush | ADR-012 | chv-stord-spec | Phase 3 |
 | 1.2 Backup no execution engine | — | — | Phase 3 |
-| 1.3 Network mutation incomplete | ADR-005 | chv-nwd-spec | Phase 2 |
-| 1.4 stord security hardening | — | chv-stord-spec | — |
-| 2.1 Partition policy missing | ADR-006 | chv-agent-spec | — |
-| 2.2 Reconcile test mocks | — | chv-agent-spec | Phase 1 |
-| 2.3 VM resize agent-side | ADR-002 | chv-agent-spec | Phase 2 |
-| 2.4 State machine enforcement | ADR-003 | chv-agent-spec | — |
-| 2.5 DHCP/DNS enforcement | — | chv-nwd-spec | Phase 2 |
-| 3.1 svelte-check warnings | — | — | Phase 1 |
-| 3.2 Components >300 lines | CLAUDE.md | — | Phase 3 |
-| 3.3 Playwright not in CI | — | — | Phase 3 |
-| 3.4 Toast hardcoded colors | DESIGN.md | — | Phase 3 |
-| 3.5 awaiting-operator-input | ADR-004-WebUI | — | — |
-| 3.6 InventoryListPage any | CONTRIBUTING.md | — | — |
-| 3.7 A11y suppressions | DESIGN.md | — | Phase 1 |
-| 4.1 CI missing Playwright | — | — | Phase 3 |
-| 4.2 Multi-node WS routing | — | — | Phase 3 |
-| 4.3 Docker compose gaps | DEPLOYMENT.md | — | — |
+| 1.3 iSCSI / Ceph adapters | ADR-004 | chv-stord-spec | Phase 2 |
+| 2.1 stord security hardening | — | chv-stord-spec | — |
+| 3.1 Components >300 lines | CLAUDE.md | — | Phase 3 |
+| 3.2 InventoryListPage `any` types | CONTRIBUTING.md | — | — |
+| 3.3 awaiting-operator-input | ADR-004-WebUI | — | — |
+| 4.1 Multi-node WS routing | — | — | Phase 3 |
+| 4.2 Docker compose production | DEPLOYMENT.md | — | — |
 
 ---
 
 ## Appendix B: Files Examined
 
-**Specs:** `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/OPERATIONS.md`, `PHASED_IMPLEMENTATION_PLAN.md`, `DESIGN.md`, `CLAUDE.md`, `CONTRIBUTING.md`, all ADRs 001–010, all component specs.
+**Specs:** `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/OPERATIONS.md`, `PHASED_IMPLEMENTATION_PLAN.md`, `DESIGN.md`, `CLAUDE.md`, `CONTRIBUTING.md`, all ADRs 001–013, all component specs.
 
-**Backend:** `crates/chv-controlplane-service/src/lifecycle.rs`, `bff_mutations.rs`, `orchestrator.rs`, `reconcile.rs`, `server.rs`, `api/stub.rs`, `api/router.rs`; `crates/chv-webui-bff/src/handlers/*.rs`, `router.rs`, `mutations.rs`, `error.rs`.
+**Backend:** `crates/chv-controlplane-service/src/lifecycle.rs`, `bff_mutations.rs`, `orchestrator.rs`, `reconcile.rs`, `server.rs`, `circuit_breaker.rs`, `migration_reaper.rs`; `crates/chv-webui-bff/src/handlers/*.rs`, `router.rs`, `mutations.rs`, `error.rs`.
 
-**Agent:** `crates/chv-agent-core/src/reconcile.rs`, `agent_server.rs`, `vm_runtime.rs`, `console_server.rs`, `cache.rs`, `daemon_clients.rs`, `supervisor.rs`; `crates/chv-nwd-core/src/executor.rs`.
+**Agent:** `crates/chv-agent-core/src/reconcile.rs`, `agent_server.rs`, `vm_runtime.rs`, `console_server.rs`, `cache.rs`, `daemon_clients.rs`, `supervisor.rs`, `connectivity.rs`, `control_plane.rs`; `crates/chv-nwd-core/src/executor.rs`, `reconcile.rs`, `handlers.rs`; `crates/chv-stord-core/src/handlers.rs`, `migration/sender.rs`.
 
-**UI:** `ui/src/routes/**/*.svelte`, `ui/src/lib/components/**/*.svelte`, `ui/src/lib/api/client.ts`, `ui/tests/e2e/navigation.spec.ts`.
+**UI:** `ui/src/routes/**/*.svelte`, `ui/src/lib/components/**/*.svelte`, `ui/src/lib/api/client.ts`, `ui/tests/e2e/*.ts`.
 
 **Infra:** `.github/workflows/ci.yml`, `docs/examples/nginx/chv-ui.conf`, `docs/examples/systemd/*.service`, `Dockerfile`, `docker-compose.yml`, `scripts/*.sh`.
