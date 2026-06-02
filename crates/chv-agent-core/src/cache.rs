@@ -44,6 +44,7 @@ pub enum PendingControlPlaneMessageKind {
     PublishAlert,
     ReportNodeInventory,
     ReportServiceVersions,
+    MigrationProgressReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +103,13 @@ impl PendingControlPlaneMessage {
         )
     }
 
+    pub fn migration_progress(message: proto::MigrationProgress) -> Self {
+        Self::encode(
+            PendingControlPlaneMessageKind::MigrationProgressReport,
+            message,
+        )
+    }
+
     pub fn decode_node_state(&self) -> Result<proto::NodeStateReport, ChvError> {
         self.decode()
     }
@@ -131,6 +139,10 @@ impl PendingControlPlaneMessage {
     }
 
     pub fn decode_service_versions(&self) -> Result<proto::ReportServiceVersionsRequest, ChvError> {
+        self.decode()
+    }
+
+    pub fn decode_migration_progress(&self) -> Result<proto::MigrationProgress, ChvError> {
         self.decode()
     }
 }

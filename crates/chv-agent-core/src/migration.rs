@@ -245,31 +245,31 @@ pub fn spawn_source_migration_with_disk_precopy(
         );
 
         // Phase 1: Disk pre-copy
+        let mut stord_client =
+            match StordClient::connect(Path::new(&disk_config.stord_socket)).await {
+                Ok(client) => client,
+                Err(e) => {
+                    error!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        error = %e,
+                        "source agent: failed to connect to local stord for disk pre-copy"
+                    );
+                    return Err(format!(
+                        "disk pre-copy failed: cannot connect to stord: {e}"
+                    ));
+                }
+            };
+
+        let mut volume_migrations: Vec<(String, String)> = Vec::new();
+        // (volume_id, migration_id)
+
         if !disk_config.volumes.is_empty() {
             info!(
                 vm_id = %vm_id,
                 operation_id = %operation_id,
                 "source agent: beginning disk pre-copy phase"
             );
-
-            let mut stord_client =
-                match StordClient::connect(Path::new(&disk_config.stord_socket)).await {
-                    Ok(client) => client,
-                    Err(e) => {
-                        error!(
-                            vm_id = %vm_id,
-                            operation_id = %operation_id,
-                            error = %e,
-                            "source agent: failed to connect to local stord for disk pre-copy"
-                        );
-                        return Err(format!(
-                            "disk pre-copy failed: cannot connect to stord: {e}"
-                        ));
-                    }
-                };
-
-            let total_volumes = disk_config.volumes.len() as u32;
-            let mut volumes_completed: u32 = 0;
 
             for volume in &disk_config.volumes {
                 info!(
@@ -280,7 +280,7 @@ pub fn spawn_source_migration_with_disk_precopy(
                     "source agent: triggering disk pre-copy for volume"
                 );
 
-                if let Err(e) = stord_client
+                let migration_id = match stord_client
                     .trigger_disk_migration(
                         &volume.volume_id,
                         &volume.attachment_handle,
@@ -289,53 +289,198 @@ pub fn spawn_source_migration_with_disk_precopy(
                     )
                     .await
                 {
-                    error!(
-                        vm_id = %vm_id,
-                        operation_id = %operation_id,
-                        volume_id = %volume.volume_id,
-                        error = %e,
-                        "source agent: disk pre-copy failed for volume"
-                    );
-                    return Err(format!(
-                        "disk pre-copy failed for volume {}: {e}",
-                        volume.volume_id
-                    ));
+                    Ok(id) => id,
+                    Err(e) => {
+                        error!(
+                            vm_id = %vm_id,
+                            operation_id = %operation_id,
+                            volume_id = %volume.volume_id,
+                            error = %e,
+                            "source agent: disk pre-copy trigger failed for volume"
+                        );
+                        return Err(format!(
+                            "disk pre-copy trigger failed for volume {}: {e}",
+                            volume.volume_id
+                        ));
+                    }
+                };
+
+                volume_migrations.push((volume.volume_id.clone(), migration_id));
+
+                info!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    volume_id = %volume.volume_id,
+                    migration_id = %volume_migrations.last().unwrap().1,
+                    "source agent: disk migration triggered for volume"
+                );
+            }
+
+            // Poll all volume migrations until they converge or need VM pause.
+            let poll_interval = std::time::Duration::from_secs(5);
+            let mut vm_paused_for_final_sync = false;
+
+            loop {
+                tokio::time::sleep(poll_interval).await;
+
+                let mut all_completed = true;
+                let mut any_failed = false;
+                let mut total_bytes_transferred: u64 = 0;
+                let mut total_bytes: u64 = 0;
+                let mut max_dirty_remaining: u64 = 0;
+                let mut max_round: u32 = 0;
+                let mut needs_vm_pause = false;
+
+                for (_vol_id, mig_id) in &volume_migrations {
+                    let status = match stord_client.get_disk_migration_status(mig_id).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!(
+                                vm_id = %vm_id,
+                                operation_id = %operation_id,
+                                migration_id = %mig_id,
+                                error = %e,
+                                "failed to query disk migration status"
+                            );
+                            all_completed = false;
+                            continue;
+                        }
+                    };
+
+                    if let Some(ref result) = status.result {
+                        if !result.status.eq_ignore_ascii_case("ok") {
+                            error!(
+                                vm_id = %vm_id,
+                                operation_id = %operation_id,
+                                migration_id = %mig_id,
+                                error = %result.human_summary,
+                                "disk migration returned error status"
+                            );
+                            any_failed = true;
+                            break;
+                        }
+                    }
+
+                    total_bytes_transferred += status.bytes_transferred;
+                    total_bytes += status.total_bytes;
+                    max_dirty_remaining = max_dirty_remaining.max(status.dirty_blocks_remaining);
+                    max_round = max_round.max(status.convergence_round);
+
+                    use chv_stord_api::chv_stord_api::get_disk_migration_status_response::Phase as StordPhase;
+                    let phase = StordPhase::try_from(status.phase).unwrap_or(StordPhase::Pending);
+
+                    match phase {
+                        StordPhase::Pending | StordPhase::BulkCopy | StordPhase::DirtySync => {
+                            all_completed = false;
+                        }
+                        StordPhase::PausedFinalSync => {
+                            all_completed = false;
+                            needs_vm_pause = true;
+                        }
+                        StordPhase::Completed => {
+                            // volume done
+                        }
+                        StordPhase::Failed => {
+                            any_failed = true;
+                            error!(
+                                vm_id = %vm_id,
+                                operation_id = %operation_id,
+                                migration_id = %mig_id,
+                                error = %status.error_message,
+                                "disk migration failed"
+                            );
+                        }
+                    }
                 }
 
-                volumes_completed += 1;
+                if any_failed {
+                    return Err("disk migration failed for one or more volumes".to_string());
+                }
 
-                // Report progress after each volume sync completes
+                // Report progress to control plane
                 if let Some(ref reporter) = progress_reporter {
-                    let progress_pct = (volumes_completed as f32 / total_volumes as f32) * 50.0; // disk phase = 0-50%
+                    let proto_phase = if needs_vm_pause || all_completed {
+                        proto::MigrationPhase::MemoryMigration
+                    } else if max_round > 0 {
+                        proto::MigrationPhase::ConvergingDisk
+                    } else {
+                        proto::MigrationPhase::PrecopyDisk
+                    };
+                    let progress_pct = if all_completed {
+                        50.0
+                    } else {
+                        let ratio = if total_bytes > 0 {
+                            (total_bytes_transferred as f32 / total_bytes as f32) * 50.0
+                        } else {
+                            0.0
+                        };
+                        ratio.min(45.0) // cap at 45% until all disk work is done
+                    };
+
                     let progress = build_progress(
                         &vm_id,
                         &operation_id,
-                        proto::MigrationPhase::PrecopyDisk,
-                        0, // bytes_transferred not tracked at agent level
-                        0, // total_bytes not tracked at agent level
-                        volumes_completed,
-                        0, // dirty_blocks_remaining: 0 after stord convergence
+                        proto_phase,
+                        total_bytes_transferred,
+                        total_bytes,
+                        max_round,
+                        if needs_vm_pause || all_completed {
+                            0
+                        } else {
+                            max_dirty_remaining
+                        },
                         progress_pct,
                     );
                     let mut cb = reporter.lock().await;
                     cb(progress);
                 }
 
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    volume_id = %volume.volume_id,
-                    volumes_completed,
-                    total_volumes,
-                    "source agent: disk pre-copy triggered successfully for volume"
-                );
-            }
+                if all_completed {
+                    info!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        "source agent: all disk migrations completed"
+                    );
+                    break;
+                }
 
-            info!(
-                vm_id = %vm_id,
-                operation_id = %operation_id,
-                "source agent: disk pre-copy phase complete for all volumes"
-            );
+                if needs_vm_pause && !vm_paused_for_final_sync {
+                    info!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        "source agent: pausing VM for final disk sync"
+                    );
+                    if let Err(e) = vm_runtime.pause_vm(&vm_id, Some(&operation_id)).await {
+                        error!(
+                            vm_id = %vm_id,
+                            operation_id = %operation_id,
+                            error = %e,
+                            "source agent: failed to pause VM for final disk sync"
+                        );
+                        return Err(format!("failed to pause VM for final disk sync: {e}"));
+                    }
+                    vm_paused_for_final_sync = true;
+
+                    for (_vol_id, mig_id) in &volume_migrations {
+                        if let Err(e) = stord_client.resume_disk_migration(mig_id, true).await {
+                            error!(
+                                vm_id = %vm_id,
+                                operation_id = %operation_id,
+                                migration_id = %mig_id,
+                                error = %e,
+                                "source agent: failed to resume disk migration after VM pause"
+                            );
+                            return Err(format!("failed to resume disk migration {mig_id}: {e}"));
+                        }
+                    }
+
+                    info!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        "source agent: VM paused, resumed all disk migrations for final sync"
+                    );
+                }
+            }
         } else {
             info!(
                 vm_id = %vm_id,
@@ -352,7 +497,6 @@ pub fn spawn_source_migration_with_disk_precopy(
             "source agent: starting memory migration (send-migration)"
         );
 
-        // Report entering memory migration phase
         if let Some(ref reporter) = progress_reporter {
             let progress = build_progress(
                 &vm_id,
@@ -362,7 +506,7 @@ pub fn spawn_source_migration_with_disk_precopy(
                 0,
                 0,
                 0,
-                50.0, // memory phase starts at 50%
+                50.0,
             );
             let mut cb = reporter.lock().await;
             cb(progress);
@@ -373,7 +517,6 @@ pub fn spawn_source_migration_with_disk_precopy(
             .await
         {
             Ok(()) => {
-                // Report completion
                 if let Some(ref reporter) = progress_reporter {
                     let progress = build_progress(
                         &vm_id,

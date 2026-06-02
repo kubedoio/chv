@@ -8,9 +8,10 @@ use chv_nwd_api::chv_nwd_api::{
 };
 use chv_stord_api::chv_stord_api::{
     storage_service_client::StorageServiceClient, AttachVolumeToVmRequest, CloseVolumeRequest,
-    DeleteSnapshotRequest, DetachVolumeFromVmRequest, DevicePolicy, ListVolumeSessionsRequest,
-    OpenVolumeRequest, PrepareCloneRequest, PrepareSnapshotRequest, ResizeVolumeRequest,
-    RestoreSnapshotRequest, SetDevicePolicyRequest, VolumeHealthRequest,
+    DeleteSnapshotRequest, DetachVolumeFromVmRequest, DevicePolicy, GetDiskMigrationStatusRequest,
+    ListVolumeSessionsRequest, OpenVolumeRequest, PrepareCloneRequest, PrepareSnapshotRequest,
+    ResizeVolumeRequest, RestoreSnapshotRequest, ResumeDiskMigrationRequest,
+    SetDevicePolicyRequest, TriggerDiskMigrationRequest, VolumeHealthRequest,
 };
 use std::path::Path;
 use tokio::net::UnixStream;
@@ -407,112 +408,128 @@ impl StordClient {
 
     /// Trigger disk pre-copy migration for a volume to a remote stord peer.
     ///
-    /// This instructs the local stord to start streaming the volume's blocks to
-    /// the destination stord at `dest_endpoint`. The migration uses the
-    /// `StorageMigrationService.StreamBlocks` bidirectional RPC between the two
-    /// stord instances.
-    ///
-    /// The `dest_endpoint` is the gRPC address of the destination stord's migration
-    /// service (e.g., `http://dest-host:50052`).
-    ///
-    /// NOTE: This currently uses a direct RPC placeholder. When the StorageService
-    /// proto gains a `TriggerMigration` RPC, this method will be updated to call it.
-    /// For now, we validate connectivity and return Ok — the actual block streaming
-    /// is initiated by the stord daemon internally once it receives this request.
+    /// Returns the migration_id assigned by the local stord.
     pub async fn trigger_disk_migration(
         &mut self,
         volume_id: &str,
         attachment_handle: &str,
         dest_endpoint: &str,
         operation_id: Option<&str>,
-    ) -> Result<(), ChvError> {
+    ) -> Result<String, ChvError> {
+        let req = TriggerDiskMigrationRequest {
+            meta: Some(chv_stord_api::chv_stord_api::Meta {
+                operation_id: operation_id.unwrap_or("").to_string(),
+                request_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            }),
+            volume_id: volume_id.to_string(),
+            attachment_handle: attachment_handle.to_string(),
+            dest_endpoint: dest_endpoint.to_string(),
+        };
         let span = tracing::info_span!(
             "trigger_disk_migration",
             volume_id = %volume_id,
             dest_endpoint = %dest_endpoint,
             operation_id = operation_id.unwrap_or("")
         );
-        let _guard = span.enter();
-
-        tracing::info!(
-            volume_id = %volume_id,
-            attachment_handle = %attachment_handle,
-            dest_endpoint = %dest_endpoint,
-            "triggering disk pre-copy migration via local stord"
-        );
-
-        // TODO: Replace with actual TriggerMigration RPC once the proto is extended.
-        // For now we verify the volume exists by calling health check on it.
-        // The stord daemon will expose a TriggerMigration RPC that:
-        //   1. Creates a MigrationSender for the volume
-        //   2. Connects to dest_endpoint's StorageMigrationService
-        //   3. Runs the full block streaming lifecycle
-        //
-        // Placeholder: verify volume health to confirm the volume is accessible.
-        let health = self.get_volume_health(volume_id).await?;
-        if health.health_status == "error" {
-            return Err(ChvError::BackendUnavailable {
+        let resp = self
+            .inner
+            .trigger_disk_migration(with_operation_id(req, operation_id))
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
                 backend: "stord".to_string(),
-                reason: format!(
-                    "volume {volume_id} is unhealthy, cannot start migration: {}",
-                    health.last_error
-                ),
-            });
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        if let Some(ref result) = resp.result {
+            if !result.status.eq_ignore_ascii_case("ok") {
+                return Err(ChvError::BackendUnavailable {
+                    backend: "stord".to_string(),
+                    reason: format!(
+                        "trigger_disk_migration failed: {} ({})",
+                        result.human_summary, result.error_code
+                    ),
+                });
+            }
         }
+        Ok(resp.migration_id)
+    }
 
-        tracing::info!(
-            volume_id = %volume_id,
-            dest_endpoint = %dest_endpoint,
-            "disk pre-copy migration triggered (stub: volume health verified)"
+    /// Query the status of an active disk migration from the local stord.
+    pub async fn get_disk_migration_status(
+        &mut self,
+        migration_id: &str,
+    ) -> Result<chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse, ChvError> {
+        let req = GetDiskMigrationStatusRequest {
+            migration_id: migration_id.to_string(),
+        };
+        let span = tracing::info_span!("get_disk_migration_status", migration_id = %migration_id);
+        let resp = self
+            .inner
+            .get_disk_migration_status(req)
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        Ok(resp)
+    }
+
+    /// Resume a disk migration after the VM has been paused (or unpaused).
+    pub async fn resume_disk_migration(
+        &mut self,
+        migration_id: &str,
+        vm_paused: bool,
+    ) -> Result<(), ChvError> {
+        let req = ResumeDiskMigrationRequest {
+            migration_id: migration_id.to_string(),
+            vm_paused,
+        };
+        let span = tracing::info_span!(
+            "resume_disk_migration",
+            migration_id = %migration_id,
+            vm_paused = vm_paused
         );
-
+        let resp = self
+            .inner
+            .resume_disk_migration(req)
+            .instrument(span)
+            .await
+            .map_err(|e| ChvError::BackendUnavailable {
+                backend: "stord".to_string(),
+                reason: e.to_string(),
+            })?
+            .into_inner();
+        if let Some(ref result) = resp.result {
+            if !result.status.eq_ignore_ascii_case("ok") {
+                return Err(ChvError::BackendUnavailable {
+                    backend: "stord".to_string(),
+                    reason: format!(
+                        "resume_disk_migration failed: {} ({})",
+                        result.human_summary, result.error_code
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 
     /// Accept incoming disk migration for a volume from a remote stord peer.
     ///
-    /// This instructs the local stord to prepare to receive incoming block streams
-    /// for a new volume. The destination stord's `StorageMigrationService` handles
-    /// the actual block reception via bidirectional streaming.
-    ///
-    /// NOTE: Similar to `trigger_disk_migration`, this is a placeholder until the
-    /// StorageService proto gains an `AcceptMigration` RPC. The destination stord
-    /// already listens on StorageMigrationService for incoming streams; this method
-    /// ensures the volume slot is prepared.
+    /// This is a placeholder: the destination stord's `StorageMigrationService`
+    /// already handles incoming streams. No explicit preparation RPC is needed
+    /// because the receiver creates the volume on `InitMigration`.
     pub async fn accept_disk_migration(
         &mut self,
-        volume_id: &str,
-        expected_size_bytes: u64,
-        operation_id: Option<&str>,
+        _volume_id: &str,
+        _expected_size_bytes: u64,
+        _operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let span = tracing::info_span!(
-            "accept_disk_migration",
-            volume_id = %volume_id,
-            expected_size_bytes = expected_size_bytes,
-            operation_id = operation_id.unwrap_or("")
-        );
-        let _guard = span.enter();
-
-        tracing::info!(
-            volume_id = %volume_id,
-            expected_size_bytes = expected_size_bytes,
-            "preparing to accept disk migration via local stord"
-        );
-
-        // TODO: Replace with actual AcceptMigration RPC once the proto is extended.
-        // The destination stord's StorageMigrationService.StreamBlocks already handles
-        // incoming streams (creates the receiving volume on InitMigration). This method
-        // will pre-allocate the volume slot so the receiver is ready when the sender
-        // connects.
-        //
-        // Placeholder: log and return Ok — the stord daemon's StorageMigrationService
-        // is already listening for incoming bidirectional streams.
-        tracing::info!(
-            volume_id = %volume_id,
-            "disk migration acceptance prepared (stub: stord migration service is listening)"
-        );
-
-        let _ = (expected_size_bytes, operation_id);
         Ok(())
     }
 
@@ -1198,6 +1215,27 @@ mod tests {
             &self,
             _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn trigger_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn get_disk_migration_status(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::GetDiskMigrationStatusRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn resume_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::ResumeDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::ResumeDiskMigrationResponse>, Status>
+        {
             Err(Status::unimplemented(""))
         }
     }

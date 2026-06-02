@@ -1839,24 +1839,69 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
 
         match role {
             crate::migration::MigrationRole::Source => {
-                // Source agent: initiate send-migration to the destination.
+                // Source agent: initiate disk pre-copy then send-migration.
                 let dest_host = crate::migration::extract_destination_host(&inner);
                 let dest_port = crate::migration::DEFAULT_MIGRATION_PORT;
                 let destination_url =
                     crate::migration::build_destination_url(&dest_host, dest_port);
 
+                // Build disk pre-copy config from attached volumes in cache.
+                let (volumes, dest_stord_endpoint) = {
+                    let cache = self.cache.lock().await;
+                    let vol_ids = cache
+                        .vm_attachment_state(&vm_id)
+                        .map(|a| a.volume_ids.clone())
+                        .unwrap_or_default();
+                    let mut volumes = Vec::new();
+                    for vol_id in vol_ids {
+                        if let Some(handle) = cache.volume_handles.get(&vol_id).cloned() {
+                            volumes.push(crate::migration::MigrationVolume {
+                                volume_id: vol_id,
+                                attachment_handle: handle,
+                            });
+                        }
+                    }
+                    // Derive destination stord endpoint from dest host.
+                    // The destination stord migration service listens on a fixed port.
+                    let dest_stord_endpoint = format!("https://{}:50052", dest_host);
+                    (volumes, dest_stord_endpoint)
+                };
+
+                let disk_config = crate::migration::DiskPrecopyConfig {
+                    stord_socket: self.stord_socket.clone(),
+                    dest_stord_endpoint,
+                    volumes,
+                };
+
+                // Build a progress reporter that enqueues migration progress to the
+                // control plane via the cache's pending message queue.
+                let cache_for_reporter = self.cache.clone();
+                let progress_reporter = crate::migration::make_progress_reporter(move |progress| {
+                    let msg =
+                        crate::cache::PendingControlPlaneMessage::migration_progress(progress);
+                    // Best-effort: if lock is held, skip rather than block.
+                    if let Ok(mut cache) = cache_for_reporter.try_lock() {
+                        cache.enqueue_pending_message(msg);
+                    } else {
+                        tracing::warn!("cache locked, skipping migration progress enqueue");
+                    }
+                });
+
                 tracing::info!(
                     vm_id = %vm_id,
                     operation_id = %operation_id,
                     destination_url = %destination_url,
-                    "source agent: ACKing migrate_vm, spawning send-migration task"
+                    volume_count = disk_config.volumes.len(),
+                    "source agent: ACKing migrate_vm, spawning disk+memory migration task"
                 );
 
-                crate::migration::spawn_source_migration(
+                crate::migration::spawn_source_migration_with_disk_precopy(
                     vm_runtime,
                     vm_id,
                     operation_id.clone(),
                     destination_url,
+                    disk_config,
+                    Some(progress_reporter),
                 );
             }
             crate::migration::MigrationRole::Destination => {
@@ -2318,6 +2363,27 @@ mod tests {
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
             Err(Status::unimplemented(""))
         }
+        async fn trigger_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn get_disk_migration_status(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::GetDiskMigrationStatusRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn resume_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::ResumeDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::ResumeDiskMigrationResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
     }
 
     #[derive(Clone, Default)]
@@ -2436,6 +2502,27 @@ mod tests {
             &self,
             _req: Request<chv_stord_api::chv_stord_api::SetDevicePolicyRequest>,
         ) -> Result<Response<chv_stord_api::chv_stord_api::Result>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn trigger_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn get_disk_migration_status(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::GetDiskMigrationStatusRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn resume_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::ResumeDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::ResumeDiskMigrationResponse>, Status>
+        {
             Err(Status::unimplemented(""))
         }
     }

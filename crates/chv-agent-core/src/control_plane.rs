@@ -269,6 +269,10 @@ impl ControlPlaneClient {
                 self.report_service_versions(message.decode_service_versions()?)
                     .await?;
             }
+            PendingControlPlaneMessageKind::MigrationProgressReport => {
+                self.report_migration_progress(message.decode_migration_progress()?)
+                    .await?;
+            }
         }
         Ok(())
     }

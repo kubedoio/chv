@@ -1742,6 +1742,59 @@ mod tests {
                 human_summary: "".to_string(),
             }))
         }
+        async fn trigger_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::TriggerDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_stord_api::chv_stord_api::TriggerDiskMigrationResponse {
+                    result: Some(chv_stord_api::chv_stord_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                    migration_id: "dm-mock-123".to_string(),
+                },
+            ))
+        }
+        async fn get_disk_migration_status(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::GetDiskMigrationStatusRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse {
+                    result: Some(chv_stord_api::chv_stord_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                    phase: 4, // Completed
+                    convergence_round: 0,
+                    dirty_blocks_remaining: 0,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    needs_vm_pause: false,
+                    error_message: "".to_string(),
+                },
+            ))
+        }
+        async fn resume_disk_migration(
+            &self,
+            _req: Request<chv_stord_api::chv_stord_api::ResumeDiskMigrationRequest>,
+        ) -> Result<Response<chv_stord_api::chv_stord_api::ResumeDiskMigrationResponse>, Status>
+        {
+            Ok(Response::new(
+                chv_stord_api::chv_stord_api::ResumeDiskMigrationResponse {
+                    result: Some(chv_stord_api::chv_stord_api::Result {
+                        status: "ok".to_string(),
+                        error_code: "".to_string(),
+                        human_summary: "".to_string(),
+                    }),
+                },
+            ))
+        }
     }
 
     struct MockNwdOk;
