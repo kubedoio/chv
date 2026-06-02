@@ -1,4 +1,5 @@
 pub mod api;
+mod backup_shipper;
 mod backup_worker;
 mod bff_mutations;
 pub mod circuit_breaker;
@@ -21,6 +22,7 @@ pub mod systemd_upgrader;
 mod telemetry;
 pub mod upgrade;
 
+pub use backup_shipper::{shipper_from_destination, BackupShipper, NullShipper, ShipResult};
 pub use backup_worker::BackupWorker;
 pub use bff_mutations::ControlPlaneMutationService;
 pub use container::{ControlPlaneComponents, ControlPlaneRuntime, ControlPlaneService};

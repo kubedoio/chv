@@ -1,3 +1,4 @@
+use crate::backup_shipper::shipper_from_destination;
 use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::{
     BackupJobCreateInput, BackupJobStatusUpdateInput, BackupRepository, StorePool,
@@ -19,6 +20,7 @@ pub struct BackupWorker {
     agent_socket_pattern: String,
     tick_interval: Duration,
     node_client_pool: NodeClientPool,
+    backup_staging_dir: PathBuf,
 }
 
 impl BackupWorker {
@@ -27,6 +29,7 @@ impl BackupWorker {
         backup_repo: BackupRepository,
         agent_socket_pattern: String,
         node_client_pool: NodeClientPool,
+        backup_staging_dir: PathBuf,
     ) -> Self {
         Self {
             pool,
@@ -34,11 +37,12 @@ impl BackupWorker {
             agent_socket_pattern,
             tick_interval: Duration::from_secs(30),
             node_client_pool,
+            backup_staging_dir,
         }
     }
 
     pub async fn run(self, mut shutdown_rx: tokio::sync::watch::Receiver<()>) {
-        info!("backup worker starting");
+        info!(staging_dir = %self.backup_staging_dir.display(), "backup worker starting");
         let mut interval = tokio::time::interval(self.tick_interval);
         let mut tick_count: u64 = 0;
         loop {
@@ -183,14 +187,77 @@ impl BackupWorker {
                                 vm_id = %schedule.vm_id,
                                 pruned_count = pruned,
                                 retention_count = schedule.retention_count,
-                                "pruned old backup jobs"
+                                "pruned old backup jobs by count"
                             );
                         }
                         Err(e) => {
                             warn!(
                                 schedule_id = %schedule.schedule_id,
                                 error = %e,
-                                "failed to prune old backup jobs"
+                                "failed to prune old backup jobs by count"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Enforce retention: prune old completed jobs beyond retention_days
+                if schedule.retention_days > 0 {
+                    match self
+                        .backup_repo
+                        .list_old_jobs_for_retention(
+                            &schedule.schedule_id,
+                            schedule.retention_days,
+                        )
+                        .await
+                    {
+                        Ok(old_jobs) if !old_jobs.is_empty() => {
+                            for old_job in &old_jobs {
+                                // Attempt to delete remote artifact if shipping was used
+                                if let (Some(remote_path), Some(_storage_backend)) =
+                                    (old_job.target_path.as_deref(), old_job.storage_backend.as_deref())
+                                {
+                                    if Self::is_remote_destination(remote_path) {
+                                        if let Ok(shipper) =
+                                            shipper_from_destination(remote_path, None, None)
+                                        {
+                                            if let Err(del_err) =
+                                                shipper.delete(remote_path).await
+                                            {
+                                                warn!(
+                                                    job_id = %old_job.job_id,
+                                                    error = %del_err,
+                                                    "failed to delete remote backup artifact during retention cleanup"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Err(e) = self
+                                    .backup_repo
+                                    .delete_job_by_id(&old_job.job_id)
+                                    .await
+                                {
+                                    warn!(
+                                        job_id = %old_job.job_id,
+                                        error = %e,
+                                        "failed to delete old backup job during retention cleanup"
+                                    );
+                                } else {
+                                    info!(
+                                        job_id = %old_job.job_id,
+                                        retention_days = schedule.retention_days,
+                                        "pruned old backup job by age"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                schedule_id = %schedule.schedule_id,
+                                error = %e,
+                                "failed to list old backup jobs for retention cleanup"
                             );
                         }
                         _ => {}
@@ -345,7 +412,10 @@ impl BackupWorker {
         let snapshot_name = format!("backup-{}", job.job_id);
 
         let ack = if let Some(volume_id) = &job.volume_id {
-            client
+            // Volume-level snapshots are managed by stord; off-host shipping
+            // requires the agent to return the snapshot file path, which is not
+            // yet supported. Log and skip shipping for now.
+            let ack = client
                 .snapshot_volume(
                     &node_id,
                     volume_id,
@@ -354,15 +424,35 @@ impl BackupWorker {
                     &job.job_id,
                     None,
                 )
-                .await
+                .await;
+            if ack.is_ok() {
+                warn!(
+                    job_id = %job.job_id,
+                    "volume-level backup completed; off-host shipping not yet supported for volume snapshots"
+                );
+            }
+            ack
         } else {
-            let destination = job.target_path.as_deref().unwrap_or("");
+            let destination = if let Some(ref target) = job.target_path {
+                if Self::is_remote_destination(target) {
+                    // Remote destination: stage locally first, then ship.
+                    let staging = self.backup_staging_dir.join(format!("{}.backup", job.job_id));
+                    staging.to_string_lossy().to_string()
+                } else {
+                    target.clone()
+                }
+            } else {
+                // No destination provided: use staging dir with NullShipper semantics
+                let staging = self.backup_staging_dir.join(format!("{}.backup", job.job_id));
+                staging.to_string_lossy().to_string()
+            };
+
             client
                 .snapshot_vm(
                     &node_id,
                     &job.vm_id,
                     &generation_str,
-                    destination,
+                    &destination,
                     &job.job_id,
                     None,
                 )
@@ -384,6 +474,67 @@ impl BackupWorker {
                     result.result.map(|r| r.human_summary)
                 };
 
+                let mut size_bytes = None;
+                let mut checksum = None;
+                let mut checksum_algorithm = None;
+                let mut target_path = job.target_path.clone();
+                let mut storage_backend = job.storage_backend.clone();
+
+                // Ship the artifact for VM-level backups when destination is remote.
+                if accepted && job.volume_id.is_none() {
+                    if let Some(ref target) = job.target_path {
+                        if Self::is_remote_destination(target) {
+                            let staging =
+                                self.backup_staging_dir.join(format!("{}.backup", job.job_id));
+                            match shipper_from_destination(target, None, None) {
+                                Ok(shipper) => {
+                                    match shipper.ship(&staging, &job.job_id).await {
+                                        Ok(ship_result) => {
+                                            info!(
+                                                job_id = %job.job_id,
+                                                remote_path = %ship_result.remote_path,
+                                                size_bytes = ship_result.size_bytes,
+                                                "backup artifact shipped"
+                                            );
+                                            size_bytes = Some(ship_result.size_bytes);
+                                            checksum = Some(ship_result.checksum);
+                                            checksum_algorithm =
+                                                Some(ship_result.checksum_algorithm);
+                                            target_path = Some(ship_result.remote_path);
+                                            storage_backend = Some(
+                                                Self::storage_backend_from_destination(target),
+                                            );
+                                        }
+                                        Err(ship_err) => {
+                                            warn!(
+                                                job_id = %job.job_id,
+                                                error = %ship_err,
+                                                "backup snapshot succeeded but shipping failed"
+                                            );
+                                        }
+                                    }
+                                    // Best-effort cleanup of staging file
+                                    if let Err(del_err) = tokio::fs::remove_file(&staging).await {
+                                        warn!(
+                                            job_id = %job.job_id,
+                                            staging = %staging.display(),
+                                            error = %del_err,
+                                            "failed to remove backup staging file"
+                                        );
+                                    }
+                                }
+                                Err(shipper_err) => {
+                                    warn!(
+                                        job_id = %job.job_id,
+                                        error = %shipper_err,
+                                        "failed to construct backup shipper"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let now = chrono::Utc::now().to_rfc3339();
                 self.backup_repo
                     .update_job_status(&BackupJobStatusUpdateInput {
@@ -392,11 +543,11 @@ impl BackupWorker {
                         started_at: Some(now.clone()),
                         completed_at: Some(now),
                         error_message,
-                        size_bytes: None,
-                        target_path: None,
-                        storage_backend: None,
-                        checksum: None,
-                        checksum_algorithm: None,
+                        size_bytes,
+                        target_path,
+                        storage_backend,
+                        checksum,
+                        checksum_algorithm,
                     })
                     .await
                     .map_err(|e| ChvError::Internal {
@@ -407,6 +558,7 @@ impl BackupWorker {
                     job_id = %job.job_id,
                     vm_id = %job.vm_id,
                     node_id = %node_id,
+                    status = %final_status,
                     "backup job executed"
                 );
                 Ok(())
@@ -425,6 +577,22 @@ impl BackupWorker {
             PathBuf::from(self.agent_socket_pattern.replace("{node_id}", node_id))
         } else {
             PathBuf::from(&self.agent_socket_pattern)
+        }
+    }
+
+    fn is_remote_destination(destination: &str) -> bool {
+        destination.starts_with("s3://")
+            || destination.starts_with("nfs://")
+            || destination.eq_ignore_ascii_case("null")
+    }
+
+    fn storage_backend_from_destination(destination: &str) -> String {
+        if destination.starts_with("s3://") {
+            "s3".to_string()
+        } else if destination.starts_with("nfs://") {
+            "nfs".to_string()
+        } else {
+            "null".to_string()
         }
     }
 }

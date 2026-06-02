@@ -1,7 +1,7 @@
 use chv_errors::ChvError;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Result of a successful ship operation.
 #[derive(Debug, Clone)]
@@ -140,7 +140,7 @@ impl BackupShipper for NfsShipper {
 // ── S3 Shipper ─────────────────────────────────────────────────────────────
 
 pub struct S3Shipper {
-    bucket: s3::Bucket,
+    bucket: Box<s3::Bucket>,
     prefix: String,
 }
 

@@ -560,6 +560,7 @@ dependencies = [
  "cron",
  "dashmap",
  "futures",
+ "hex",
  "hyper-util",
  "jsonwebtoken",
  "metrics",

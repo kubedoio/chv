@@ -312,11 +312,20 @@ pub async fn build_service(
     .with_overlay_manager(overlay_manager);
     let orchestrator_handle = tokio::spawn(orchestrator.run(shutdown_rx.clone()));
 
+    let backup_staging_dir = config.runtime_dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&backup_staging_dir) {
+        tracing::warn!(
+            error = %e,
+            path = %backup_staging_dir.display(),
+            "failed to create backup staging directory"
+        );
+    }
     let backup_worker = chv_controlplane_service::BackupWorker::new(
         pool.clone(),
         backup_repo.clone(),
         config.agent_socket_pattern.clone(),
         node_client_pool.clone(),
+        backup_staging_dir,
     );
     let backup_worker_handle = tokio::spawn(backup_worker.run(shutdown_rx.clone()));
 
