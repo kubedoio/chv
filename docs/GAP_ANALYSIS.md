@@ -51,11 +51,10 @@
 - **Evidence:** `proto/node/chv-stord-api.proto`, `crates/chv-stord-core/src/migration/task.rs`, `crates/chv-stord-core/src/handlers.rs:844-1067`, `crates/chv-agent-core/src/migration.rs:229-410`, `crates/chv-agent-core/src/daemon_clients.rs:422-520`
 - **Priority:** P1
 
-### 1.2 Backup Jobs: Partial Execution Engine, DR Semantics Incomplete
+### 1.2 Backup Jobs: Execution Engine Complete — Restore/DR Runbooks Pending
 - **Spec:** ARCHITECTURE.md, PHASED_IMPLEMENTATION_PLAN.md Phase 3
-- **Gap:** Backup tables (`backup_jobs`, `backup_schedules`, `backup_restores`), repositories (`BackupRepository`), BFF REST handlers, and a control-plane `BackupWorker` exist. The remaining gap is production Backup/DR semantics: off-host artifact shipping, restore execution/validation, retention enforcement, integrity checks, and documented DR runbooks are not complete.
-- **Status:** Partially resolved (2026-06-03). Backup shipper trait with Null, NFS, and S3 implementations added. Shipper is wired into `BackupWorker` for VM-level `snapshot_vm` jobs: snapshots are staged locally, shipped to remote destination, and job status is updated with checksum, size, and remote path. `retention_days` enforcement added alongside existing `retention_count` pruning, with remote artifact deletion via `shipper.delete()`. Volume-level `snapshot_volume` shipping requires agent protocol changes to return snapshot paths and remains future work. Restore execution/validation and DR runbooks are still pending.
-- **Evidence:** `crates/chv-controlplane-service/src/backup_shipper.rs`, `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-controlplane-store/src/backups.rs`
+- **Status:** Core execution engine resolved (2026-06-03). Backup shipper trait (Null, NFS, S3 with streaming upload) wired into `BackupWorker`. VM-level snapshots are staged, shipped to remote destinations, and DB records are updated with checksum, size, remote path, and storage backend. `retention_days` enforcement works alongside `retention_count` pruning, with correct remote artifact deletion using `job.destination` (original URL) to build the shipper and `job.target_path` (shipped key/path) for deletion. S3 credentials are configurable per-schedule. 9 unit tests cover shipper implementations. Remaining gaps: volume-level `snapshot_volume` shipping (requires agent protocol changes), restore execution/validation, and documented DR runbooks.
+- **Evidence:** `crates/chv-controlplane-service/src/backup_shipper.rs`, `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-controlplane-store/src/backups.rs`, `cmd/chv-controlplane/migrations/0043_backup_destination_and_credentials.sql`
 - **Priority:** P2
 
 ### 1.3 iSCSI and Ceph RBD Storage Backend Adapters — ✅ RESOLVED 2026-06-03
@@ -81,9 +80,9 @@
 ### 3.1 Components Over 300 Lines
 - **Spec:** CLAUDE.md / CONTRIBUTING.md: "Keep Svelte components under ~300 lines"
 - **Gap:** 2 components/pages still exceed 300 lines:
-  - `CreateVMModal.svelte` — 580 lines
+  - `CreateVMModal.svelte` — ~580 lines
   - `DataTable.svelte` — still the primary table component (extracted sub-modules exist but main file may still be large)
-- **Status:** Partially addressed (2026-06-03). `vms/[id]/+page.svelte` refactored from 467 lines to ~220 lines by extracting `VmOverviewTab`, `VmConsoleTab`, `VmMetricsTab`, `VmSettingsTab`, `VmTasksTab`, and `VmDetailHeader`. TopologyCanvas, SidebarNav, settings/users, and Dashboard all refactored below 300 lines.
+- **Status:** Partially addressed (2026-06-03). `vms/[id]/+page.svelte` refactored from 467 lines to ~300 lines by extracting `VmDetailSummaryTab` (overview), `VmConsoleTab`, `VmMetricsTab`, `VmBootLogTab` (formerly `VmSettingsTab`), `VmTasksTab`, and `VmDetailHeader`. `VmOverviewTab` pass-through wrapper removed. TopologyCanvas, SidebarNav, settings/users, and Dashboard all refactored below 300 lines.
 - **Evidence:** `wc -l` across `ui/src/lib/components/` and `ui/src/routes/`
 - **Priority:** P2
 
@@ -162,7 +161,7 @@ These areas were previously flagged as gaps but are now complete:
 | Gap | ADR | Component Spec | Plan Phase | Status |
 |-----|-----|---------------|------------|--------|
 | 1.1 Disk migration dirty sync/final flush | ADR-012 | chv-stord-spec | Phase 3 | ✅ Resolved |
-| 1.2 Backup no execution engine | — | — | Phase 3 | 🟡 Partial (shipper wired; restore/DR runbooks pending) |
+| 1.2 Backup execution engine | — | — | Phase 3 | 🟡 Partial (shipper wired, retention fixed, tests added; restore/DR runbooks pending) |
 | 1.3 iSCSI / Ceph adapters | ADR-004 | chv-stord-spec | Phase 2 | ✅ Resolved |
 | 2.1 stord security hardening | — | chv-stord-spec | — | ✅ Resolved |
 | 3.1 Components >300 lines | CLAUDE.md | — | Phase 3 | 🟡 Partial (CreateVMModal, DataTable remain) |
