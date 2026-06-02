@@ -11,11 +11,11 @@
 
 | Category | Total Gaps | P0 | P1 | P2 | P3 |
 |----------|-----------|----|----|----|----|
-| Backend / Control Plane | 2 | 0 | 0 | 2 | 0 |
+| Backend / Control Plane | 1 | 0 | 0 | 1 | 0 |
 | Agent / Node Runtime | 0 | 0 | 0 | 0 | 0 |
-| UI / Web Frontend | 2 | 0 | 0 | 2 | 0 |
-| Infrastructure / Deployment | 1 | 0 | 0 | 1 | 0 |
-| **Total** | **5** | **0** | **0** | **5** | **0** |
+| UI / Web Frontend | 1 | 0 | 0 | 1 | 0 |
+| Infrastructure / Deployment | 0 | 0 | 0 | 0 | 0 |
+| **Total** | **2** | **0** | **0** | **2** | **0** |
 
 **Previously reported gaps that are now resolved:**
 - Partition policy (ADR-006) is fully implemented via `ConnectivityTracker`, `flush_pending_messages`, and agent-side RPC rejection.
@@ -54,15 +54,14 @@
 ### 1.2 Backup Jobs: Partial Execution Engine, DR Semantics Incomplete
 - **Spec:** ARCHITECTURE.md, PHASED_IMPLEMENTATION_PLAN.md Phase 3
 - **Gap:** Backup tables (`backup_jobs`, `backup_schedules`, `backup_restores`), repositories (`BackupRepository`), BFF REST handlers, and a control-plane `BackupWorker` exist. The remaining gap is production Backup/DR semantics: off-host artifact shipping, restore execution/validation, retention enforcement, integrity checks, and documented DR runbooks are not complete.
-- **Status:** Partial (scheduler/executor exists; DR workflow incomplete)
-- **Evidence:** `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-webui-bff/src/handlers/backups.rs`
+- **Status:** Partially resolved (2026-06-03). Backup shipper trait with Null, NFS, and S3 implementations added. Shipper is wired into `BackupWorker` for VM-level `snapshot_vm` jobs: snapshots are staged locally, shipped to remote destination, and job status is updated with checksum, size, and remote path. `retention_days` enforcement added alongside existing `retention_count` pruning, with remote artifact deletion via `shipper.delete()`. Volume-level `snapshot_volume` shipping requires agent protocol changes to return snapshot paths and remains future work. Restore execution/validation and DR runbooks are still pending.
+- **Evidence:** `crates/chv-controlplane-service/src/backup_shipper.rs`, `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-controlplane-store/src/backups.rs`
 - **Priority:** P2
 
-### 1.3 iSCSI and Ceph RBD Storage Backend Adapters Planned but Not Production-Complete
+### 1.3 iSCSI and Ceph RBD Storage Backend Adapters — ✅ RESOLVED 2026-06-03
 - **Spec:** ADR-004, `chv-stord-spec.md`
-- **Gap:** `chv-stord-backends` contains `iscsi.rs` (949 lines) and `ceph.rs` (900 lines) with substantial adapter code, but these backends are not integrated into the active stord handler path as production-complete options. The active backend focus remains local file/qcow2 and LVM.
-- **Status:** Partial (adapter code exists; not wired as production default)
-- **Evidence:** `crates/chv-stord-backends/src/iscsi.rs`, `crates/chv-stord-backends/src/ceph.rs`, `crates/chv-stord-core/src/handlers.rs`
+- **Resolution:** Both backends implement the full `StorageBackend` trait (open, close, attach, detach, health, resize, snapshot, clone, dirty tracking, read/write block, migration). They are selectable at runtime in `cmd/chv-stord/src/main.rs` via `backend_type = "iscsi"` or `backend_type = "ceph"` with corresponding config sections. Config parsing (`chv-config`) supports `StordIscsiConfig` and `StordCephConfig`. The generic `StorageServer<B>` and `StorageMigrationServiceImpl<B>` work with `Box<dyn StorageBackend>` via the blanket impl. All backends compile, pass clippy, and have unit tests.
+- **Evidence:** `crates/chv-stord-backends/src/iscsi.rs`, `crates/chv-stord-backends/src/ceph.rs`, `cmd/chv-stord/src/main.rs:43-77`, `crates/chv-config/src/lib.rs:237-242`
 - **Priority:** P2
 
 ---
@@ -81,19 +80,17 @@
 
 ### 3.1 Components Over 300 Lines
 - **Spec:** CLAUDE.md / CONTRIBUTING.md: "Keep Svelte components under ~300 lines"
-- **Gap:** 5 components/pages still exceed 300 lines:
-  - `vms/[id]/+page.svelte` — 467 lines
+- **Gap:** 2 components/pages still exceed 300 lines:
   - `CreateVMModal.svelte` — 580 lines
   - `DataTable.svelte` — still the primary table component (extracted sub-modules exist but main file may still be large)
-- **Status:** Partially addressed (TopologyCanvas, SidebarNav, settings/users, and Dashboard all refactored below 300 lines)
+- **Status:** Partially addressed (2026-06-03). `vms/[id]/+page.svelte` refactored from 467 lines to ~220 lines by extracting `VmOverviewTab`, `VmConsoleTab`, `VmMetricsTab`, `VmSettingsTab`, `VmTasksTab`, and `VmDetailHeader`. TopologyCanvas, SidebarNav, settings/users, and Dashboard all refactored below 300 lines.
 - **Evidence:** `wc -l` across `ui/src/lib/components/` and `ui/src/routes/`
 - **Priority:** P2
 
-### 3.2 InventoryListPage Uses `any` Types
+### 3.2 InventoryListPage Uses `any` Types — ✅ RESOLVED 2026-06-03
 - **Spec:** CONTRIBUTING.md: "Use TypeScript strictly; avoid `any`"
-- **Gap:** `InventoryListPage.svelte` props are typed as `any[]` and `any`, defeating table type-safety across all list views.
-- **Status:** Not started
-- **Evidence:** `ui/src/lib/components/shell/InventoryListPage.svelte:32-35`
+- **Resolution:** Added Svelte 5 generic parameter `<T extends Record<string, unknown>>` to `InventoryListPage.svelte`. Replaced `any[]` props with `ColumnDef<T>[]`, `T[]`, and typed `rowHref`/`cell` snippets. All list views (VMs, volumes, networks, nodes, tasks) now get type-safe column and row typing.
+- **Evidence:** `ui/src/lib/components/shell/InventoryListPage.svelte:1-45`
 - **Priority:** P2
 
 ### 3.3 "awaiting-operator-input" Task State — ✅ RESOLVED 2026-06-02
@@ -112,11 +109,10 @@
 - **Evidence:** `docs/examples/nginx/chv-ui.conf:45-85`, `crates/chv-webui-bff/src/handlers/vms.rs:1047-1062`, `docs/DEPLOYMENT.md`
 - **Priority:** P1
 
-### 4.2 Docker Compose Incomplete for Production Use
+### 4.2 Docker Compose Incomplete for Production Use — ✅ RESOLVED 2026-06-03
 - **Spec:** DEPLOYMENT.md, CONTRIBUTING.md (Docker optional)
-- **Gap:** `docker-compose.yml` exists and configures all four daemons plus nginx for local development, but it is not documented as production-ready. Bridge setup, KVM device passthrough, and host networking requirements for `chv-nwd` make containerized production deployment non-trivial. The compose file is primarily a dev stack.
-- **Status:** Partial (dev stack works; production container orchestration undocumented)
-- **Evidence:** `docker-compose.yml`, `Dockerfile`
+- **Resolution:** Added `docker-compose.prod.yml` with production-oriented configuration: health checks for all services, `read_only: true` root filesystems with `tmpfs` overlays, dedicated service users (`chv`, `chv-stord`), KVM device passthrough for `chv-agent`, host networking for `chv-nwd`, proper volume sharing between services via named Docker volumes, and nginx reverse proxy with WebSocket upgrade support. `Dockerfile` updated with runtime dependencies, service user creation, and additional exposed ports.
+- **Evidence:** `docker-compose.prod.yml`, `Dockerfile`
 - **Priority:** P2
 
 ---
@@ -163,17 +159,17 @@ These areas were previously flagged as gaps but are now complete:
 
 ## Appendix A: Gap-to-Spec Cross-Reference
 
-| Gap | ADR | Component Spec | Plan Phase |
-|-----|-----|---------------|------------|
-| 1.1 Disk migration dirty sync/final flush | ADR-012 | chv-stord-spec | Phase 3 |
-| 1.2 Backup no execution engine | — | — | Phase 3 |
-| 1.3 iSCSI / Ceph adapters | ADR-004 | chv-stord-spec | Phase 2 |
-| 2.1 stord security hardening | — | chv-stord-spec | — |
-| 3.1 Components >300 lines | CLAUDE.md | — | Phase 3 |
-| 3.2 InventoryListPage `any` types | CONTRIBUTING.md | — | — |
-| 3.3 awaiting-operator-input | ADR-004-WebUI | — | — |
-| 4.1 Multi-node WS routing | — | — | Phase 3 |
-| 4.2 Docker compose production | DEPLOYMENT.md | — | — |
+| Gap | ADR | Component Spec | Plan Phase | Status |
+|-----|-----|---------------|------------|--------|
+| 1.1 Disk migration dirty sync/final flush | ADR-012 | chv-stord-spec | Phase 3 | ✅ Resolved |
+| 1.2 Backup no execution engine | — | — | Phase 3 | 🟡 Partial (shipper wired; restore/DR runbooks pending) |
+| 1.3 iSCSI / Ceph adapters | ADR-004 | chv-stord-spec | Phase 2 | ✅ Resolved |
+| 2.1 stord security hardening | — | chv-stord-spec | — | ✅ Resolved |
+| 3.1 Components >300 lines | CLAUDE.md | — | Phase 3 | 🟡 Partial (CreateVMModal, DataTable remain) |
+| 3.2 InventoryListPage `any` types | CONTRIBUTING.md | — | — | ✅ Resolved |
+| 3.3 awaiting-operator-input | ADR-004-WebUI | — | — | ✅ Resolved |
+| 4.1 Multi-node WS routing | — | — | Phase 3 | ✅ Resolved |
+| 4.2 Docker compose production | DEPLOYMENT.md | — | — | ✅ Resolved |
 
 ---
 

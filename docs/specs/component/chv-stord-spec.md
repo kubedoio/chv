@@ -6,8 +6,8 @@
 ## MVP-1 storage classes
 - local qcow2/raw file
 - local block/LVM
-- iSCSI block (planned adapter; not production-complete)
-- Ceph RBD (planned adapter; not production-complete)
+- iSCSI block (adapter implemented; selectable via `backend_type = "iscsi"`)
+- Ceph RBD (adapter implemented; selectable via `backend_type = "ceph"`)
 
 ## Responsibilities
 - open and close volumes
@@ -51,8 +51,8 @@
 |---|---|
 | Local qcow2/raw file backend | Active implementation path |
 | Local block/LVM backend | Active implementation path |
-| iSCSI backend | Planned; host-session and attach/open adapter work remains |
-| Ceph RBD backend | Planned; librbd/host prerequisite integration and attach/open adapter work remains |
+| iSCSI backend | Implemented; full `StorageBackend` trait with `iscsiadm`/`targetcli` integration |
+| Ceph RBD backend | Implemented; full `StorageBackend` trait with `rbd` CLI integration |
 | Disk migration bulk copy, flow control, CRC, resumability | Implemented |
-| Disk migration dirty sync rounds and convergence reporting | Partial/missing; stord does not yet send round progress to control plane |
-| Paused final dirty flush | Missing; required before production live migration |
+| Disk migration dirty sync rounds and convergence reporting | Implemented; `MigrationTaskTable` tracks rounds, dirty blocks, bytes transferred |
+| Paused final dirty flush | Implemented; `MigrationSender` pauses at `PausedFinalSync`, signals via watch channel, waits for agent `resume_disk_migration` |
