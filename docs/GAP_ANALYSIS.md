@@ -1,6 +1,6 @@
 # CHV Specification vs Implementation Gap Analysis
 
-**Date:** 2026-05-29  
+**Date:** 2026-06-02  
 **Version:** 0.1.0  
 **Scope:** Backend (Rust), Agent, UI (SvelteKit), Infrastructure  
 **Method:** Cross-reference of ADRs 001–013, component specs, ARCHITECTURE.md, DESIGN.md, and PHASED_IMPLEMENTATION_PLAN.md against the actual codebase.
@@ -11,11 +11,11 @@
 
 | Category | Total Gaps | P0 | P1 | P2 | P3 |
 |----------|-----------|----|----|----|----|
-| Backend / Control Plane | 3 | 0 | 1 | 2 | 0 |
-| Agent / Node Runtime | 1 | 0 | 1 | 0 | 0 |
-| UI / Web Frontend | 3 | 0 | 0 | 2 | 1 |
-| Infrastructure / Deployment | 2 | 0 | 1 | 1 | 0 |
-| **Total** | **9** | **0** | **3** | **5** | **1** |
+| Backend / Control Plane | 2 | 0 | 0 | 2 | 0 |
+| Agent / Node Runtime | 0 | 0 | 0 | 0 | 0 |
+| UI / Web Frontend | 2 | 0 | 0 | 2 | 0 |
+| Infrastructure / Deployment | 1 | 0 | 0 | 1 | 0 |
+| **Total** | **5** | **0** | **0** | **5** | **0** |
 
 **Previously reported gaps that are now resolved:**
 - Partition policy (ADR-006) is fully implemented via `ConnectivityTracker`, `flush_pending_messages`, and agent-side RPC rejection.
@@ -26,6 +26,10 @@
 - Toast component uses design-system CSS variables (no hardcoded hex).
 - TopologyCanvas, SidebarNav, and settings/users page are all under 300 lines after refactor.
 - There are **zero** `unimplemented!()` stubs in production Rust code.
+- **`awaiting-operator-input` task state** implemented in `OperationStatus`, UI task list, and migration reaper exclusion.
+- **Disk migration dirty sync + final flush** implemented end-to-end: stord `TriggerDiskMigration`/`GetDiskMigrationStatus`/`ResumeDiskMigration` RPCs, `MigrationTaskTable` with VM-pause coordination, agent progress polling and reporting to control plane.
+- **chv-stord security hardening** implemented: dedicated `chv-stord` service account, path/device allowlists, capability dropping in systemd, socket `chown` to `chv-stord` group.
+- **Multi-node WebSocket routing** implemented: nginx `map`-based dynamic upstream by `node_id`, BFF proxied-mode URL generation, documented in `DEPLOYMENT.md`.
 
 ---
 
@@ -41,11 +45,10 @@
 
 ## 1. Backend / Control Plane Gaps
 
-### 1.1 Disk Migration Dirty Sync and Final Flush Incomplete
+### 1.1 Disk Migration Dirty Sync and Final Flush — ✅ RESOLVED 2026-06-02
 - **Spec:** ADR-012, `chv-stord-spec.md`, live-migration-spec.md
-- **Gap:** Control-plane migration orchestration, mTLS, backpressure, flow control, rollback, and the `MigrationReaper` are all implemented. The remaining gap is in the stord sender: dirty sync rounds, convergence reporting to the control plane, and the paused final dirty flush are not yet performed. This means live migration works for bulk copy but does not yet do the iterative dirty-block sync required for zero-downtime migration of write-heavy workloads.
-- **Status:** Partial (bulk copy and orchestration complete; dirty sync / final flush missing)
-- **Evidence:** `crates/chv-stord-core/src/migration/sender.rs`, `docs/specs/component/chv-stord-spec.md`
+- **Resolution:** Implemented end-to-end with stord `TriggerDiskMigration`/`GetDiskMigrationStatus`/`ResumeDiskMigration` RPCs, `MigrationTaskTable` with VM-pause coordination via `tokio::sync::watch`, agent progress polling every 5s, and control-plane progress reporting via `PendingControlPlaneMessage` queue.
+- **Evidence:** `proto/node/chv-stord-api.proto`, `crates/chv-stord-core/src/migration/task.rs`, `crates/chv-stord-core/src/handlers.rs:844-1067`, `crates/chv-agent-core/src/migration.rs:229-410`, `crates/chv-agent-core/src/daemon_clients.rs:422-520`
 - **Priority:** P1
 
 ### 1.2 Backup Jobs: Partial Execution Engine, DR Semantics Incomplete
@@ -66,11 +69,10 @@
 
 ## 2. Agent / Node Runtime Gaps
 
-### 2.1 chv-stord-spec Security Requirements Not Fully Implemented
+### 2.1 chv-stord-spec Security Requirements — ✅ RESOLVED 2026-06-02
 - **Spec:** `chv-stord-spec.md` (dedicated service account, restricted socket permissions, explicit device/path allowlists, capability drop)
-- **Gap:** The spec requires `chv-stord` to run under a dedicated service account with restricted filesystem visibility and device/path allowlists. The current implementation runs as the generic `chv` user with broad `/var/lib/chv/storage/localdisk` access. No allowlist enforcement or capability dropping is present.
-- **Status:** Not started
-- **Evidence:** `docs/examples/systemd/chv-stord.service`, `crates/chv-stord-core/src/`
+- **Resolution:** Dedicated `chv-stord` system user/group created in `install.sh` and `postinstall.sh`. `path_allowlist` and `device_allowlist` enforced in `StorageServiceImpl::open_volume`. Systemd service updated with `CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE`, `RestrictAddressFamilies=AF_UNIX`, `RestrictSUIDSGID=true`, and socket `chown` to `chv-stord` group.
+- **Evidence:** `scripts/install.sh:203-235`, `packaging/scripts/postinstall.sh:15-40`, `docs/examples/systemd/chv-stord.service`, `crates/chv-stord-core/src/handlers.rs:108-213`
 - **Priority:** P1
 
 ---
@@ -94,22 +96,20 @@
 - **Evidence:** `ui/src/lib/components/shell/InventoryListPage.svelte:32-35`
 - **Priority:** P2
 
-### 3.3 "awaiting-operator-input" Task State Not Implemented
+### 3.3 "awaiting-operator-input" Task State — ✅ RESOLVED 2026-06-02
 - **Spec:** ADR-004-WebUI: Required task states include `awaiting-operator-input` (reserved for later)
-- **Gap:** The UI task list and task detail components only show: `queued`, `running`, `succeeded`, `failed`, `cancelled`. The `awaiting-operator-input` state has no UI representation.
-- **Status:** Not started
-- **Evidence:** `ui/src/routes/tasks/+page.svelte`, `ui/src/lib/components/events/EventList.svelte`
-- **Priority:** P3 (reserved for later per spec)
+- **Resolution:** Added `AwaitingOperatorInput` to `OperationStatus` enum with `is_active()` helper. UI displays the state with a warning-tone badge, includes it in active ops count, and the migration reaper excludes it from timeout failures.
+- **Evidence:** `crates/chv-controlplane-types/src/domain.rs:280`, `ui/src/lib/webui/tasks.ts:137-142`, `ui/src/routes/tasks/+page.svelte:99-103`
+- **Priority:** P3
 
 ---
 
 ## 4. Infrastructure / Deployment Gaps
 
-### 4.1 Multi-Node WebSocket Routing Not Implemented
+### 4.1 Multi-Node WebSocket Routing — ✅ RESOLVED 2026-06-02
 - **Spec:** PHASED_IMPLEMENTATION_PLAN.md Phase 3: "Nginx Routing: configure multi-node WebSocket routing (`/ws/vms/`) using a dynamic upstream based on `node_id`"
-- **Gap:** The nginx config at `docs/examples/nginx/chv-ui.conf` hardcodes `proxy_pass http://127.0.0.1:8444/vms/` for WebSocket console access. In a multi-node deployment, console WebSockets must route to the correct hypervisor host based on the VM's node assignment.
-- **Status:** Not started
-- **Evidence:** `docs/examples/nginx/chv-ui.conf`
+- **Resolution:** nginx `map $request_uri $ws_backend` selects the correct agent backend by `node_id` prefix. Regex location rewrites `/ws/vms/{node_id}/{vm_id}/console` to `/vms/{vm_id}/console` before proxying. BFF returns node-routed URLs when `proxied=true` or `agent_ws_address` is empty. Direct `ws://` URLs still work for single-node deployments.
+- **Evidence:** `docs/examples/nginx/chv-ui.conf:45-85`, `crates/chv-webui-bff/src/handlers/vms.rs:1047-1062`, `docs/DEPLOYMENT.md`
 - **Priority:** P1
 
 ### 4.2 Docker Compose Incomplete for Production Use
