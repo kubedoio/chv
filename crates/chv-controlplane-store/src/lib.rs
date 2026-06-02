@@ -1,6 +1,7 @@
 mod alerts;
 mod backups;
 mod bootstrap_tokens;
+mod credential_crypto;
 mod db;
 mod desired_state;
 mod events;

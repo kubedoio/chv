@@ -131,6 +131,29 @@ impl BackupWorker {
 
         if let Some(due_time) = next_due {
             if due_time <= now {
+                // Optimistic locking: claim the schedule run atomically before creating the job.
+                // This prevents duplicate job creation when multiple backup workers run concurrently.
+                let now_str = now.to_rfc3339();
+                let claimed = self
+                    .backup_repo
+                    .try_claim_schedule_run(
+                        &schedule.schedule_id,
+                        schedule.last_run_at.as_deref(),
+                        &now_str,
+                    )
+                    .await
+                    .map_err(|e| ChvError::Internal {
+                        reason: format!("failed to claim schedule run: {e}"),
+                    })?;
+
+                if !claimed {
+                    info!(
+                        schedule_id = %schedule.schedule_id,
+                        "schedule run already claimed by another worker; skipping"
+                    );
+                    return Ok(());
+                }
+
                 // Create a pending backup job
                 let input = BackupJobCreateInput {
                     vm_id: schedule.vm_id.clone(),
@@ -162,15 +185,6 @@ impl BackupWorker {
                     job_id = %job_id,
                     "created scheduled backup job"
                 );
-
-                // Update last_run_at
-                let now_str = now.to_rfc3339();
-                self.backup_repo
-                    .update_schedule_last_run(&schedule.schedule_id, &now_str)
-                    .await
-                    .map_err(|e| ChvError::Internal {
-                        reason: format!("failed to update schedule last_run_at: {e}"),
-                    })?;
 
                 // Enforce retention: prune old completed jobs beyond retention_count
                 if schedule.retention_count > 0 {

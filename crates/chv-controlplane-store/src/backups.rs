@@ -1,4 +1,4 @@
-use crate::{StoreError, StorePool};
+use crate::{credential_crypto::CredentialEncryption, StoreError, StorePool};
 
 // ── Backup Jobs ────────────────────────────────────────────────────────────
 
@@ -303,11 +303,24 @@ WHERE restore_id = ?
 #[derive(Clone)]
 pub struct BackupRepository {
     pool: StorePool,
+    crypto: CredentialEncryption,
 }
 
 impl BackupRepository {
     pub fn new(pool: StorePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            crypto: CredentialEncryption::new(),
+        }
+    }
+
+    fn decrypt_schedule_row(&self, row: &mut BackupScheduleRow) {
+        if let Some(ref key) = row.s3_access_key {
+            row.s3_access_key = Some(self.crypto.decrypt(key));
+        }
+        if let Some(ref key) = row.s3_secret_key {
+            row.s3_secret_key = Some(self.crypto.decrypt(key));
+        }
     }
 
     pub fn pool(&self) -> &StorePool {
@@ -460,7 +473,7 @@ impl BackupRepository {
         page_size: i64,
         offset: i64,
     ) -> Result<(Vec<BackupScheduleRow>, i64), StoreError> {
-        let rows = sqlx::query_as::<_, BackupScheduleRow>(LIST_SCHEDULES_SQL)
+        let mut rows = sqlx::query_as::<_, BackupScheduleRow>(LIST_SCHEDULES_SQL)
             .bind(page_size)
             .bind(offset)
             .fetch_all(&self.pool)
@@ -470,6 +483,10 @@ impl BackupRepository {
             .fetch_one(&self.pool)
             .await?;
 
+        for row in &mut rows {
+            self.decrypt_schedule_row(row);
+        }
+
         Ok((rows, count))
     }
 
@@ -477,10 +494,13 @@ impl BackupRepository {
         &self,
         schedule_id: &str,
     ) -> Result<Option<BackupScheduleRow>, StoreError> {
-        let row = sqlx::query_as::<_, BackupScheduleRow>(GET_SCHEDULE_SQL)
+        let mut row = sqlx::query_as::<_, BackupScheduleRow>(GET_SCHEDULE_SQL)
             .bind(schedule_id)
             .fetch_optional(&self.pool)
             .await?;
+        if let Some(ref mut r) = row {
+            self.decrypt_schedule_row(r);
+        }
         Ok(row)
     }
 
@@ -489,6 +509,8 @@ impl BackupRepository {
         input: &BackupScheduleCreateInput,
     ) -> Result<String, StoreError> {
         let schedule_id = chv_common::gen_short_id();
+        let access_key = input.s3_access_key.as_deref().map(|k| self.crypto.encrypt(k));
+        let secret_key = input.s3_secret_key.as_deref().map(|k| self.crypto.encrypt(k));
         sqlx::query(INSERT_SCHEDULE_SQL)
             .bind(&schedule_id)
             .bind(&input.vm_id)
@@ -499,8 +521,8 @@ impl BackupRepository {
             .bind(input.retention_days)
             .bind(&input.destination)
             .bind(input.enabled)
-            .bind(&input.s3_access_key)
-            .bind(&input.s3_secret_key)
+            .bind(&access_key)
+            .bind(&secret_key)
             .execute(&self.pool)
             .await?;
         Ok(schedule_id)
@@ -510,6 +532,8 @@ impl BackupRepository {
         &self,
         input: &BackupScheduleUpdateInput,
     ) -> Result<(), StoreError> {
+        let access_key = input.s3_access_key.as_deref().map(|k| self.crypto.encrypt(k));
+        let secret_key = input.s3_secret_key.as_deref().map(|k| self.crypto.encrypt(k));
         let result = sqlx::query(UPDATE_SCHEDULE_SQL)
             .bind(&input.vm_id)
             .bind(&input.volume_id)
@@ -519,8 +543,8 @@ impl BackupRepository {
             .bind(input.retention_days)
             .bind(&input.destination)
             .bind(input.enabled)
-            .bind(&input.s3_access_key)
-            .bind(&input.s3_secret_key)
+            .bind(&access_key)
+            .bind(&secret_key)
             .bind(&input.schedule_id)
             .execute(&self.pool)
             .await?;
@@ -548,14 +572,20 @@ impl BackupRepository {
     }
 
     pub async fn list_enabled_schedules(&self) -> Result<Vec<BackupScheduleRow>, StoreError> {
-        sqlx::query_as::<_, BackupScheduleRow>(
+        let mut rows = sqlx::query_as::<_, BackupScheduleRow>(
             "SELECT schedule_id, vm_id, volume_id, name, cron_expression, retention_count, \
              retention_days, destination, enabled, created_at, updated_at, last_run_at, s3_access_key, s3_secret_key \
              FROM backup_schedules WHERE enabled = true ORDER BY created_at ASC LIMIT 100",
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(StoreError::from)
+        .map_err(StoreError::from)?;
+
+        for row in &mut rows {
+            self.decrypt_schedule_row(row);
+        }
+
+        Ok(rows)
     }
 
     pub async fn update_schedule_last_run(
@@ -576,6 +606,39 @@ impl BackupRepository {
             });
         }
         Ok(())
+    }
+
+    /// Atomically claim a schedule run using optimistic locking on `last_run_at`.
+    /// Returns `true` if the row was updated (we won the race), `false` if another
+    /// worker already processed this schedule slot.
+    pub async fn try_claim_schedule_run(
+        &self,
+        schedule_id: &str,
+        expected_last_run: Option<&str>,
+        new_last_run: &str,
+    ) -> Result<bool, StoreError> {
+        let result = match expected_last_run {
+            Some(expected) => {
+                sqlx::query(
+                    "UPDATE backup_schedules SET last_run_at = ? WHERE schedule_id = ? AND last_run_at = ?"
+                )
+                .bind(new_last_run)
+                .bind(schedule_id)
+                .bind(expected)
+                .execute(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE backup_schedules SET last_run_at = ? WHERE schedule_id = ? AND last_run_at IS NULL"
+                )
+                .bind(new_last_run)
+                .bind(schedule_id)
+                .execute(&self.pool)
+                .await?
+            }
+        };
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn list_pending_jobs(&self) -> Result<Vec<BackupJobRow>, StoreError> {
