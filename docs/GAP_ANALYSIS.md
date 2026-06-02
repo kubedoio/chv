@@ -53,8 +53,16 @@
 
 ### 1.2 Backup Jobs: Execution Engine Complete — Restore/DR Runbooks Pending
 - **Spec:** ARCHITECTURE.md, PHASED_IMPLEMENTATION_PLAN.md Phase 3
-- **Status:** Core execution engine resolved (2026-06-03). Backup shipper trait (Null, NFS, S3 with streaming upload) wired into `BackupWorker`. VM-level snapshots are staged, shipped to remote destinations, and DB records are updated with checksum, size, remote path, and storage backend. `retention_days` enforcement works alongside `retention_count` pruning, with correct remote artifact deletion using `job.destination` (original URL) to build the shipper and `job.target_path` (shipped key/path) for deletion. S3 credentials are configurable per-schedule. 9 unit tests cover shipper implementations. Remaining gaps: volume-level `snapshot_volume` shipping (requires agent protocol changes), restore execution/validation, and documented DR runbooks.
-- **Evidence:** `crates/chv-controlplane-service/src/backup_shipper.rs`, `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-controlplane-store/src/backups.rs`, `cmd/chv-controlplane/migrations/0043_backup_destination_and_credentials.sql`
+- **Status:** Core execution engine resolved (2026-06-03). Backup shipper trait (Null, NFS, S3 with streaming upload) wired into `BackupWorker`. VM-level snapshots are staged, shipped to remote destinations, and DB records are updated with checksum, size, remote path, and storage backend. `retention_days` enforcement works alongside `retention_count` pruning, with correct remote artifact deletion using `job.destination` (original URL) to build the shipper and `job.target_path` (shipped key/path) for deletion. S3 credentials are configurable per-schedule. 9 unit tests cover shipper implementations.
+
+  **Post-implementation review fixes (2026-06-03):**
+  - Race condition in scheduled job creation eliminated via optimistic locking (`try_claim_schedule_run`)
+  - Count-based retention pruning now cleans up remote artifacts before deleting DB rows (`list_old_jobs_for_count_retention` + `delete_jobs_by_ids`)
+  - S3 credentials encrypted at rest with AES-256-GCM (`CredentialEncryption`), key from `CHV_ENCRYPTION_KEY` or `CHV_JWT_SECRET`
+  - BFF duplicate JSON keys removed; destination tracking preserved across job creation and re-run paths
+
+  Remaining gaps: volume-level `snapshot_volume` shipping (requires agent protocol changes), restore execution/validation, and documented DR runbooks.
+- **Evidence:** `crates/chv-controlplane-service/src/backup_shipper.rs`, `crates/chv-controlplane-service/src/backup_worker.rs`, `crates/chv-controlplane-store/src/backups.rs`, `crates/chv-controlplane-store/src/credential_crypto.rs`, `cmd/chv-controlplane/migrations/0043_backup_destination_and_credentials.sql`
 - **Priority:** P2
 
 ### 1.3 iSCSI and Ceph RBD Storage Backend Adapters — ✅ RESOLVED 2026-06-03

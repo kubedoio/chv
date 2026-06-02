@@ -10,6 +10,55 @@ pub struct CredentialEncryption {
     cipher: Option<Aes256Gcm>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        // Set a test encryption key
+        std::env::set_var("CHV_ENCRYPTION_KEY", "test-key-for-unit-tests-12345");
+
+        let crypto = CredentialEncryption::new();
+        let plaintext = "my-super-secret-key";
+
+        let encrypted = crypto.encrypt(plaintext);
+        assert!(encrypted.starts_with("enc:"));
+        assert_ne!(encrypted, plaintext);
+
+        let decrypted = crypto.decrypt(&encrypted);
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_plaintext_backward_compatible() {
+        std::env::set_var("CHV_ENCRYPTION_KEY", "test-key-for-unit-tests-12345");
+
+        let crypto = CredentialEncryption::new();
+        let plaintext = "plain-old-value";
+
+        // Decrypting a non-prefixed string returns it as-is
+        let decrypted = crypto.decrypt(plaintext);
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_no_key_stores_plaintext() {
+        // Remove any existing key
+        std::env::remove_var("CHV_ENCRYPTION_KEY");
+        std::env::remove_var("CHV_JWT_SECRET");
+
+        let crypto = CredentialEncryption::new();
+        let plaintext = "no-encryption-active";
+
+        let encrypted = crypto.encrypt(plaintext);
+        assert_eq!(encrypted, plaintext);
+
+        let decrypted = crypto.decrypt(&encrypted);
+        assert_eq!(decrypted, plaintext);
+    }
+}
+
 impl CredentialEncryption {
     pub fn new() -> Self {
         let key_str = std::env::var("CHV_ENCRYPTION_KEY")
@@ -44,9 +93,13 @@ impl CredentialEncryption {
 
         let nonce_bytes: [u8; 12] = rand::random();
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_bytes())
-            .expect("AES-256-GCM encryption should not fail");
+        let ciphertext = match cipher.encrypt(nonce, plaintext.as_bytes()) {
+            Ok(ct) => ct,
+            Err(e) => {
+                tracing::warn!(error = %e, "AES-256-GCM encryption failed; storing plaintext");
+                return plaintext.to_string();
+            }
+        };
 
         let mut combined = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
         combined.extend_from_slice(&nonce_bytes);
