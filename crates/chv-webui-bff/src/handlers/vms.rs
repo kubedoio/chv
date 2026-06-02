@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     response::Json,
 };
 use serde_json::{json, Value};
@@ -998,11 +998,17 @@ fn generate_console_token(
     )
 }
 
+#[derive(serde::Deserialize)]
+pub struct ConsoleUrlQuery {
+    proxied: Option<bool>,
+}
+
 pub async fn get_vm_console_url(
     crate::auth::BearerToken(claims): crate::auth::BearerToken,
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     axum::extract::Path(vm_id): axum::extract::Path<String>,
+    Query(query): Query<ConsoleUrlQuery>,
 ) -> Result<Json<Value>, BffError> {
     if !chv_common::validate_id(&vm_id) {
         return Err(BffError::BadRequest("invalid vm_id format".into()));
@@ -1042,10 +1048,13 @@ pub async fn get_vm_console_url(
         .unwrap_or(false);
     let ws_scheme = if is_tls { "wss" } else { "ws" };
 
-    // Return a full WS URL when the node has an agent_ws_address configured;
-    // otherwise fall back to the relative path for single-node / proxy setups.
+    // Return a full WS URL when the node has an agent_ws_address configured
+    // and the client did not explicitly request proxied mode;
+    // otherwise fall back to the relative path for proxy setups.
+    // In proxied mode the path includes node_id so nginx can route to the
+    // correct hypervisor without requiring dynamic-upstream modules.
     let console_url = match agent_ws_address {
-        Some(addr) if !addr.is_empty() => {
+        Some(addr) if !addr.is_empty() && query.proxied != Some(true) => {
             if !is_tls {
                 tracing::warn!(
                     vm_id = %vm_id,
@@ -1058,7 +1067,7 @@ pub async fn get_vm_console_url(
                 ws_scheme, addr, vm_id, token
             )
         }
-        _ => format!("/ws/vms/{}/console?token={}", vm_id, token),
+        _ => format!("/ws/vms/{}/{}/console?token={}", node_id, vm_id, token),
     };
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
 

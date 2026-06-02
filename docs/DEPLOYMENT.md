@@ -420,6 +420,65 @@ sudo systemctl enable --now chv-agent
 
 ---
 
+## Multi-Node WebSocket Console Routing
+
+When CHV runs on multiple hypervisor nodes, VM serial consoles must be routed to the correct node.  There are two deployment modes.
+
+### Direct Mode
+
+Each node has its `agent_ws_address` column set in the `nodes` table (e.g. `192.168.1.10:8444`).  The BFF returns a full `ws://` or `wss://` URL and the browser connects directly to the node agent.  This is the simplest setup, but it requires the browser to reach every node on the network.
+
+```bash
+# Set a node's WebSocket address
+sqlite3 /var/lib/chv/controlplane.db \
+  "UPDATE nodes SET agent_ws_address = '192.168.1.10:8444' WHERE node_id = 'node-1';"
+```
+
+### Proxied Mode (Default)
+
+When `agent_ws_address` is empty (or the client passes `?proxied=true`), the BFF returns a relative path that includes the `node_id`:
+
+```
+/ws/vms/{node_id}/{vm_id}/console?token=...
+```
+
+nginx strips the `/ws/vms/{node_id}` prefix and forwards the request to the correct agent backend using a static `map`.  This works when nodes are on private networks or the UI is behind a firewall.
+
+#### Configuring nginx for Multi-Node
+
+1. Open `/etc/nginx/sites-available/chv` (copied from `docs/examples/nginx/chv-ui.conf`).
+
+2. Edit the `map $request_uri $ws_backend` block near the top of the file.  Add one line per compute node:
+
+   ```nginx
+   map $request_uri $ws_backend {
+       default              127.0.0.1:8444;
+       ~^/ws/vms/node-1/   192.168.1.10:8444;
+       ~^/ws/vms/node-2/   192.168.1.11:8444;
+   }
+   ```
+
+   The `node_id` value must match the `node_id` stored in the CHV database.
+
+3. Test and reload nginx:
+
+   ```bash
+   sudo nginx -t
+   sudo systemctl reload nginx
+   ```
+
+#### Security Considerations
+
+- Terminate TLS in nginx and set `X-Forwarded-Proto: https` so the BFF generates `wss://` URLs for direct mode.
+- In proxied mode, the WebSocket inherits nginx's TLS termination automatically because the browser connects to the same `wss://` origin.
+- Do **not** expose agent console ports (`:8444`) to untrusted networks unless you are using direct mode with mTLS or WSS.
+
+#### Scaling Note
+
+The static `map` approach is production-standard for small-to-medium clusters (tens of nodes).  For very large clusters, consider OpenResty with `lua-resty-upstream` or a dedicated gateway (Envoy, Traefik) that can route dynamically based on path or query parameters.
+
+---
+
 ## Hosting the Installer (`get.cellhv.com`)
 
 The `curl -sfL https://get.cellhv.com/ | sh -` pattern requires a lightweight endpoint that serves `scripts/install.sh` as plain text.
