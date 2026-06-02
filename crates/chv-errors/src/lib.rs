@@ -15,6 +15,9 @@ pub enum ChvError {
     #[error("unauthorized: {reason}")]
     Unauthorized { reason: String },
 
+    #[error("access denied: {resource} — {reason}")]
+    AccessDenied { resource: String, reason: String },
+
     #[error("quota exceeded: {resource} — limit {limit}, used {used}, requested {requested}")]
     QuotaExceeded {
         resource: String,
@@ -64,6 +67,7 @@ impl ErrorCode {
     pub const INVALID_ARGUMENT: &str = "INVALID_ARGUMENT";
     pub const BAD_REQUEST: &str = "BAD_REQUEST";
     pub const UNAUTHORIZED: &str = "UNAUTHORIZED";
+    pub const ACCESS_DENIED: &str = "ACCESS_DENIED";
     pub const QUOTA_EXCEEDED: &str = "QUOTA_EXCEEDED";
     pub const BACKEND_UNAVAILABLE: &str = "BACKEND_UNAVAILABLE";
     pub const NETWORK_UNAVAILABLE: &str = "NETWORK_UNAVAILABLE";
@@ -82,6 +86,7 @@ impl ChvError {
             ChvError::InvalidArgument { .. } => ErrorCode::INVALID_ARGUMENT,
             ChvError::BadRequest { .. } => ErrorCode::BAD_REQUEST,
             ChvError::Unauthorized { .. } => ErrorCode::UNAUTHORIZED,
+            ChvError::AccessDenied { .. } => ErrorCode::ACCESS_DENIED,
             ChvError::QuotaExceeded { .. } => ErrorCode::QUOTA_EXCEEDED,
             ChvError::BackendUnavailable { .. } => ErrorCode::BACKEND_UNAVAILABLE,
             ChvError::NetworkUnavailable { .. } => ErrorCode::NETWORK_UNAVAILABLE,
@@ -119,6 +124,9 @@ impl From<ChvError> for tonic::Status {
                 tonic::Status::invalid_argument(format!("{field}: {reason}"))
             }
             ChvError::BadRequest { reason } => tonic::Status::invalid_argument(reason.clone()),
+            ChvError::AccessDenied { resource, reason } => {
+                tonic::Status::permission_denied(format!("{resource}: {reason}"))
+            }
             ChvError::Unauthorized { .. } => tonic::Status::unauthenticated("unauthorized"),
             ChvError::QuotaExceeded { resource, .. } => {
                 tonic::Status::resource_exhausted(format!("{resource} quota exceeded"))

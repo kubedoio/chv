@@ -4,3 +4,5 @@
 socket_path = "/run/chv/stord/api.sock"
 runtime_dir = "/var/lib/chv/storage/localdisk"
 log_level = "info"
+path_allowlist = ["/var/lib/chv/storage/localdisk", "/var/lib/chv/storage/lvm"]
+device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]

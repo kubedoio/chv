@@ -677,6 +677,7 @@ dependencies = [
  "crc32fast",
  "dashmap",
  "hyper-util",
+ "nix 0.29.0",
  "prost",
  "rusqlite",
  "tempfile",

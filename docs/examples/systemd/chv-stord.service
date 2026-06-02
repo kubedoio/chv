@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=chv
-Group=chv
+User=chv-stord
+Group=chv-stord
 ExecStartPre=/bin/mkdir -p /run/chv/stord
 ExecStart=/usr/bin/chv-stord /etc/chv/stord.toml
 Restart=on-failure
@@ -13,12 +13,15 @@ RestartSec=5
 KillMode=mixed
 TimeoutStopSec=5
 RuntimeDirectory=chv/stord
-StateDirectory=chv
 LogsDirectory=chv
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/run/chv/stord /var/lib/chv/storage
+AmbientCapabilities=
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

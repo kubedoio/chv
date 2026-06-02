@@ -19,6 +19,7 @@ dashmap = { workspace = true }
 tokio-stream = { workspace = true }
 rusqlite = { workspace = true }
 crc32fast = { workspace = true }
+nix = { workspace = true, features = ["fs", "user"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

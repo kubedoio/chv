@@ -27,6 +27,8 @@ pub struct StorageServiceImpl<B: StorageBackend> {
     sessions: Arc<SessionTable>,
     metrics: Arc<Metrics>,
     backend_allowlist: Vec<String>,
+    path_allowlist: Vec<std::path::PathBuf>,
+    device_allowlist: Vec<String>,
     store: Option<Arc<crate::store::SessionStore>>,
 }
 
@@ -36,12 +38,16 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         sessions: Arc<SessionTable>,
         metrics: Arc<Metrics>,
         backend_allowlist: Vec<String>,
+        path_allowlist: Vec<std::path::PathBuf>,
+        device_allowlist: Vec<String>,
     ) -> Self {
         Self {
             backend,
             sessions,
             metrics,
             backend_allowlist,
+            path_allowlist,
+            device_allowlist,
             store: None,
         }
     }
@@ -117,6 +123,94 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             reason: format!("backend class '{}' not in allowlist", backend_class),
         })
     }
+
+    fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+        let mut result = std::path::PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                    result.push(component);
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    result.pop();
+                }
+                std::path::Component::Normal(c) => {
+                    result.push(c);
+                }
+            }
+        }
+        result
+    }
+
+    fn check_path_allowlist(&self, path: &str) -> Result<(), ChvError> {
+        if self.path_allowlist.is_empty() {
+            return Ok(());
+        }
+        let path = std::path::Path::new(path);
+        if path.is_relative() {
+            // Relative paths are resolved by the backend against runtime_dir;
+            // skip path allowlist for relative locators.
+            return Ok(());
+        }
+        let normalized = Self::normalize_path(path);
+        for allowed in &self.path_allowlist {
+            if normalized.starts_with(allowed) {
+                return Ok(());
+            }
+        }
+        Err(ChvError::AccessDenied {
+            resource: path.to_string_lossy().to_string(),
+            reason: format!(
+                "path '{}' not within allowed prefixes: {:?}",
+                path.display(),
+                self.path_allowlist
+            ),
+        })
+    }
+
+    fn matches_device_pattern(path: &str, pattern: &str) -> bool {
+        // Simple glob matching: only '*' wildcard is supported.
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.is_empty() {
+            return true;
+        }
+        if !path.starts_with(parts[0]) {
+            return false;
+        }
+        let mut rest = &path[parts[0].len()..];
+        for &part in &parts[1..] {
+            if part.is_empty() {
+                continue;
+            }
+            match rest.find(part) {
+                Some(i) => rest = &rest[i + part.len()..],
+                None => return false,
+            }
+        }
+        if !pattern.ends_with('*') && !rest.is_empty() {
+            return false;
+        }
+        true
+    }
+
+    fn check_device_allowlist(&self, path: &str) -> Result<(), ChvError> {
+        if self.device_allowlist.is_empty() {
+            return Ok(());
+        }
+        for pattern in &self.device_allowlist {
+            if Self::matches_device_pattern(path, pattern) {
+                return Ok(());
+            }
+        }
+        Err(ChvError::AccessDenied {
+            resource: path.to_string(),
+            reason: format!(
+                "device path '{}' not in device_allowlist: {:?}",
+                path, self.device_allowlist
+            ),
+        })
+    }
 }
 
 #[tonic::async_trait]
@@ -170,6 +264,28 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                 export_kind: String::new(),
                 export_path: String::new(),
             }));
+        }
+
+        if let Err(e) = self.check_path_allowlist(&locator.locator) {
+            return Ok(Response::new(proto::OpenVolumeResponse {
+                result: Some(e.to_proto_result()),
+                volume_id: req.volume_id,
+                attachment_handle: String::new(),
+                export_kind: String::new(),
+                export_path: String::new(),
+            }));
+        }
+
+        if locator.backend_class == "lvm" || locator.backend_class == "block" {
+            if let Err(e) = self.check_device_allowlist(&locator.locator) {
+                return Ok(Response::new(proto::OpenVolumeResponse {
+                    result: Some(e.to_proto_result()),
+                    volume_id: req.volume_id,
+                    attachment_handle: String::new(),
+                    export_kind: String::new(),
+                    export_path: String::new(),
+                }));
+            }
         }
 
         let policy = Self::map_device_policy(req.policy);

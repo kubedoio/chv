@@ -85,6 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend,
         chv_observability::Metrics::new(),
         config.backend_allowlist,
+        config.path_allowlist,
+        config.device_allowlist,
         Some(store),
     );
 

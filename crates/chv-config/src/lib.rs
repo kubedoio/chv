@@ -223,6 +223,10 @@ pub struct StordConfig {
     pub log_level: String,
     #[serde(default)]
     pub backend_allowlist: Vec<String>,
+    #[serde(default)]
+    pub path_allowlist: Vec<PathBuf>,
+    #[serde(default)]
+    pub device_allowlist: Vec<String>,
     pub metrics_bind: Option<String>,
     /// Storage backend type: "local" (default), "iscsi", "ceph", or "lvm".
     #[serde(default)]
@@ -271,6 +275,11 @@ impl Default for StordConfig {
             runtime_dir: PathBuf::from("/var/lib/chv/storage/localdisk"),
             log_level: "info".to_string(),
             backend_allowlist: vec![],
+            path_allowlist: vec![
+                PathBuf::from("/var/lib/chv/storage/localdisk"),
+                PathBuf::from("/var/lib/chv/storage/lvm"),
+            ],
+            device_allowlist: vec!["/dev/dm-*".to_string(), "/dev/mapper/*".to_string()],
             metrics_bind: None,
             backend_type: None,
             iscsi: None,

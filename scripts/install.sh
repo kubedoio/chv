@@ -204,17 +204,27 @@ setup_user_and_dirs() {
         useradd --system --no-create-home --shell /usr/sbin/nologin "$CHV_USER"
     fi
 
+    if ! id -u "chv-stord" &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin chv-stord
+    fi
+
     usermod -aG kvm "$CHV_USER" 2>/dev/null || true
+    usermod -aG disk chv-stord 2>/dev/null || true
+    usermod -aG chv chv-stord 2>/dev/null || true
 
     mkdir -p "$CHV_CONFIG_DIR"/certs
-    mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk}
+    mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk,storage/lvm}
     mkdir -p "$CHV_LOG_DIR"
     mkdir -p "$CHV_RUN_DIR"/{controlplane,agent,stord,nwd}
     mkdir -p "$CHV_UI_DIR"
     mkdir -p "$CHV_MIGRATIONS_DIR"
 
-    chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR" "$CHV_LOG_DIR" "$CHV_RUN_DIR"
+    chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR"/cache "$CHV_DATA_DIR"/images "$CHV_LOG_DIR" "$CHV_RUN_DIR"/controlplane "$CHV_RUN_DIR"/agent "$CHV_RUN_DIR"/nwd
+    chown -R "chv-stord:chv-stord" "$CHV_DATA_DIR"/storage "$CHV_RUN_DIR"/stord
     chmod 750 "$CHV_DATA_DIR" "$CHV_LOG_DIR"
+    chmod 750 "$CHV_DATA_DIR"/storage
+    chmod 750 "$CHV_DATA_DIR"/storage/localdisk
+    chmod 750 "$CHV_DATA_DIR"/storage/lvm
 }
 
 # -----------------------------------------------------------------------------
@@ -856,9 +866,11 @@ EOF
 socket_path = "/run/chv/stord/api.sock"
 runtime_dir = "${CHV_DATA_DIR}/storage/localdisk"
 log_level = "info"
+path_allowlist = ["${CHV_DATA_DIR}/storage/localdisk", "${CHV_DATA_DIR}/storage/lvm"]
+device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 EOF
     chmod 640 "$CHV_CONFIG_DIR/stord.toml"
-    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/stord.toml"
+    chown root:chv-stord "$CHV_CONFIG_DIR/stord.toml"
 
     cat > "$CHV_CONFIG_DIR/nwd.toml" <<EOF
 socket_path = "/run/chv/nwd/api.sock"
@@ -919,8 +931,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=chv
-Group=chv
+User=chv-stord
+Group=chv-stord
 ExecStartPre=/bin/mkdir -p /run/chv/stord
 ExecStart=/usr/bin/chv-stord /etc/chv/stord.toml
 Restart=on-failure
@@ -928,8 +940,15 @@ RestartSec=5
 KillMode=mixed
 TimeoutStopSec=5
 RuntimeDirectory=chv/stord
-StateDirectory=chv
 LogsDirectory=chv
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/chv/stord /var/lib/chv/storage
+AmbientCapabilities=
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

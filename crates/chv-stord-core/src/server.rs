@@ -7,6 +7,7 @@ use chv_observability::Metrics;
 use chv_stord_api::chv_stord_api::storage_migration_service_server::StorageMigrationServiceServer;
 use chv_stord_api::chv_stord_api::storage_service_server::StorageServiceServer;
 use chv_stord_backends::StorageBackend;
+use nix::unistd::{chown, Group};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,6 +26,8 @@ impl<B: StorageBackend> StorageServer<B> {
         backend: B,
         metrics: Metrics,
         backend_allowlist: Vec<String>,
+        path_allowlist: Vec<std::path::PathBuf>,
+        device_allowlist: Vec<String>,
         store: Option<SessionStore>,
     ) -> Self {
         let backend = Arc::new(backend);
@@ -34,6 +37,8 @@ impl<B: StorageBackend> StorageServer<B> {
             sessions,
             Arc::new(metrics),
             backend_allowlist,
+            path_allowlist,
+            device_allowlist,
         );
         if let Some(store) = store {
             inner.set_store(store);
@@ -98,6 +103,11 @@ impl<B: StorageBackend> StorageServer<B> {
                 path: socket_path.to_string_lossy().to_string(),
                 source: e,
             })?;
+
+        // Ensure the socket is owned by the chv-stord group for defense in depth.
+        if let Ok(Some(group)) = Group::from_name("chv-stord") {
+            let _ = chown(socket_path, None::<nix::unistd::Uid>, Some(group.gid));
+        }
 
         let uds_stream = UnixListenerStream::new(uds);
 

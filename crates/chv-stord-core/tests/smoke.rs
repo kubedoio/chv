@@ -39,7 +39,14 @@ async fn setup_server() -> (
     let socket = dir.path().join("stord.sock");
 
     let backend = LocalFileBackend::new(dir.path().to_path_buf());
-    let server = StorageServer::new(backend, Metrics::new(), vec!["local".to_string()], None);
+    let server = StorageServer::new(
+        backend,
+        Metrics::new(),
+        vec!["local".to_string()],
+        vec![],
+        vec![],
+        None,
+    );
 
     let socket_clone = socket.clone();
     tokio::spawn(async move {
@@ -572,6 +579,8 @@ async fn sqlite_persistence_roundtrip() {
         backend,
         Metrics::new(),
         vec!["local".to_string()],
+        vec![],
+        vec![],
         Some(store),
     );
     let socket_clone = socket.clone();
