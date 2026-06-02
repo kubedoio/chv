@@ -687,6 +687,7 @@ dependencies = [
  "tonic-health",
  "tower 0.5.3",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
