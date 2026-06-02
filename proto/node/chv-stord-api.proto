@@ -137,6 +137,50 @@ message ListVolumeSessionsResponse {
   repeated VolumeSession sessions = 1;
 }
 
+message TriggerDiskMigrationRequest {
+  Meta meta = 1;
+  string volume_id = 2;
+  string attachment_handle = 3;
+  string dest_endpoint = 4;
+}
+
+message TriggerDiskMigrationResponse {
+  Result result = 1;
+  string migration_id = 2;
+}
+
+message GetDiskMigrationStatusRequest {
+  string migration_id = 1;
+}
+
+message GetDiskMigrationStatusResponse {
+  Result result = 1;
+  enum Phase {
+    PENDING = 0;
+    BULK_COPY = 1;
+    DIRTY_SYNC = 2;
+    PAUSED_FINAL_SYNC = 3;
+    COMPLETED = 4;
+    FAILED = 5;
+  }
+  Phase phase = 2;
+  uint32 convergence_round = 3;
+  uint64 dirty_blocks_remaining = 4;
+  uint64 bytes_transferred = 5;
+  uint64 total_bytes = 6;
+  bool needs_vm_pause = 7;
+  string error_message = 8;
+}
+
+message ResumeDiskMigrationRequest {
+  string migration_id = 1;
+  bool vm_paused = 2;
+}
+
+message ResumeDiskMigrationResponse {
+  Result result = 1;
+}
+
 service StorageService {
   rpc OpenVolume(OpenVolumeRequest) returns (OpenVolumeResponse);
   rpc CloseVolume(CloseVolumeRequest) returns (Result);
@@ -150,4 +194,7 @@ service StorageService {
   rpc SetDevicePolicy(SetDevicePolicyRequest) returns (Result);
   rpc GetVolumeHealth(VolumeHealthRequest) returns (VolumeHealthResponse);
   rpc ListVolumeSessions(ListVolumeSessionsRequest) returns (ListVolumeSessionsResponse);
+  rpc TriggerDiskMigration(TriggerDiskMigrationRequest) returns (TriggerDiskMigrationResponse);
+  rpc GetDiskMigrationStatus(GetDiskMigrationStatusRequest) returns (GetDiskMigrationStatusResponse);
+  rpc ResumeDiskMigration(ResumeDiskMigrationRequest) returns (ResumeDiskMigrationResponse);
 }
