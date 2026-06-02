@@ -17,7 +17,7 @@ The restore API rejects requests for VMs in `Running`, `Starting`, or `Resuming`
 ### Via chvctl
 
 ```bash
-chvctl vm show <VM_ID>
+chvctl vm get <VM_ID>
 ```
 
 Look for `status: Stopped`. If the VM is running, stop it first:
@@ -36,12 +36,6 @@ curl -s https://controlplane.example.com/v1/vms/<VM_ID> \
 ---
 
 ## 2. List Available Snapshots
-
-### Via chvctl
-
-```bash
-chvctl vm snapshot list <VM_ID>
-```
 
 ### Via API
 
@@ -116,12 +110,7 @@ chvctl vm start <VM_ID>
 
 ### Verify guest health
 
-```bash
-# If guest agent is enabled
-chvctl vm guest-exec <VM_ID> --command "uname -a"
-```
-
-Or connect via the configured console/SSH and verify data integrity.
+Connect to the VM via SSH or the configured console access method and verify data integrity (e.g., check filesystems, running services, and application state).
 
 ---
 

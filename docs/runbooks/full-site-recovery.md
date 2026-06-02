@@ -226,7 +226,7 @@ while IFS=$'\t' read -r job_id vm_id destination; do
   sleep 5
   
   # Copy disk to hypervisor (requires SSH access)
-  node_ip=$(chvctl node show $(chvctl vm show "$vm_id" | jq -r '.node_id') | jq -r '.management_ip')
+  node_ip=$(chvctl node get $(chvctl vm get "$vm_id" | jq -r '.node_id') | jq -r '.management_ip')
   scp /tmp/$job_id.backup "root@$node_ip:/var/lib/chv/agent/vms/$vm_id/disk.qcow2"
   
   # Fix ownership
@@ -322,11 +322,15 @@ chvctl vm list | jq '.vms[] | {vm_id, name, status, node_id}'
 
 ### 8b. VM Health Checks
 
+Verify each recovered VM is running and reachable:
+
 ```bash
 # For each critical VM
 for vm in vm-1 vm-2 vm-3; do
   echo "Checking $vm..."
-  chvctl vm guest-exec "$vm" --command "uptime" || echo "  ⚠️ Guest agent not responding"
+  chvctl vm get "$vm" | jq '{vm_id, status, node_id}'
+  # Or verify via SSH:
+  # ssh user@$vm_ip "uptime"
 done
 ```
 

@@ -22,6 +22,8 @@
 chvctl backup list
 ```
 
+> **Warning:** `chvctl backup list` queries `/v1/backups` and returns summary fields (`backup_id`, `vm_id`, `label`, `size`, `status`, `created_at`). It does **not** include `job_id`, `destination`, `storage_backend`, `checksum`, or `size_bytes`. To obtain those fields needed for artifact restore, use the API shown below.
+
 ### Via API
 
 ```bash
@@ -151,7 +153,7 @@ chvctl vm stop <VM_ID>
 Verify it is stopped:
 
 ```bash
-chvctl vm show <VM_ID> | grep status
+chvctl vm get <VM_ID> | grep status
 ```
 
 ### 5b. Locate the VM's Current Disk
@@ -206,7 +208,7 @@ curl -X POST https://controlplane.example.com/v1/vms/snapshots/restore \
   }'
 ```
 
-> **Note:** The `snapshot_path` field in the restore API may not be exposed in the public BFF contract. If not, use the CH API directly via `chv-agent` or restart the VM with the restored disk.
+> **Note:** The BFF snapshot restore endpoint only accepts `vm_id` and `snapshot_id`, not a raw filesystem path. If you need to restore from a manual path, use the Cloud Hypervisor API directly via the agent socket (see section 6c) or copy the snapshot files to the expected snapshot directory and use the standard snapshot restore API.
 
 ### 6c. Direct Cloud Hypervisor API (last resort)
 
@@ -235,18 +237,15 @@ chvctl vm start <VM_ID>
 Monitor boot:
 
 ```bash
-# Serial console
-chvctl vm console <VM_ID>
-
-# Or logs
+# Agent logs
 sudo journalctl -u chv-agent -f | grep <VM_ID>
 ```
 
+> **Note:** There is no `chvctl vm console` command. To access the serial console, use the Web UI (Inventory → VM → Console tab), which retrieves a console URL from `GET /v1/vms/{vm_id}/console`.
+
 Verify guest integrity:
 
-```bash
-chvctl vm guest-exec <VM_ID> --command "fsck -n /dev/vda1"
-```
+Start the VM and verify filesystem health via SSH, or inspect the VM boot logs for filesystem errors. There is no `chvctl vm guest-exec` command.
 
 ---
 

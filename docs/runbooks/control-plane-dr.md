@@ -221,7 +221,7 @@ chvctl vm list | wc -l
 chvctl backup list
 
 # 5. Test a non-destructive operation
-chvctl vm show <TEST_VM_ID>
+chvctl vm get <TEST_VM_ID>
 
 # 6. Verify backup worker is running
 sudo systemctl status chv-controlplane | grep -i backup

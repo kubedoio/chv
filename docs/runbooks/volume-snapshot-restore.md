@@ -14,17 +14,11 @@
 ## 1. Identify Volume and Storage Backend
 
 ```bash
-chvctl volume show <VOLUME_ID>
-```
-
-Note the `storage_backend` field. This determines the restore path.
-
-### Via API
-
-```bash
 curl -s https://controlplane.example.com/v1/volumes/<VOLUME_ID> \
   -H "Authorization: Bearer $TOKEN" | jq '{volume_id, storage_backend, node_id, status}'
 ```
+
+Note the `storage_backend` field. This determines the restore path.
 
 ---
 
@@ -176,16 +170,6 @@ sudo blockdev --getsize64 /dev/<DEVICE>
 
 # Restart VMs
 chvctl vm start <VM_ID_1>
-```
-
-### 3g. Record the Manual Intervention
-
-Update the volume's metadata in CHV to reflect the manual restore (optional but recommended for audit trails):
-
-```bash
-# Note the restore time for operational records
-sqlite3 /var/lib/chv/controlplane.db \
-  "INSERT INTO volume_events (volume_id, event_type, created_at) VALUES ('<VOLUME_ID>', 'manual_restore', datetime('now'));"
 ```
 
 ---
