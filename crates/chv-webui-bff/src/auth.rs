@@ -300,4 +300,195 @@ mod tests {
         let hash = chv_common::sha256_hex("chv_test_token");
         assert_eq!(hash.len(), 64);
     }
+
+    fn future_exp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time must be after UNIX epoch")
+            .as_secs()
+            + 3600
+    }
+
+    // Forge a token by splicing the payload from `forged_claims` (signed with `secret`)
+    // onto the signature of `original_claims` (also signed with `secret`). Both tokens
+    // share an identical HS256 header, so concatenating the foreign payload with the
+    // original signature produces a token whose recomputed HMAC will not match.
+    #[test]
+    fn tampered_payload_is_rejected() {
+        // Attack class: payload forgery (e.g., privilege escalation by changing role).
+        let secret = test_secret();
+        let exp = future_exp();
+        let original = Claims {
+            sub: "user-1".into(),
+            username: "alice".into(),
+            role: "viewer".into(),
+            exp,
+        };
+        let forged = Claims {
+            sub: "user-1".into(),
+            username: "alice".into(),
+            role: "admin".into(), // privilege escalation attempt
+            exp,
+        };
+        let original_token = encode_claims(&original, &secret);
+        let forged_token = encode_claims(&forged, &secret);
+
+        let mut original_parts = original_token.split('.');
+        let original_header = original_parts.next().expect("header segment");
+        let _original_payload = original_parts.next().expect("payload segment");
+        let original_sig = original_parts.next().expect("signature segment");
+
+        let mut forged_parts = forged_token.split('.');
+        let _forged_header = forged_parts.next().expect("header segment");
+        let forged_payload = forged_parts.next().expect("payload segment");
+
+        // Splice: header.forged_payload.original_sig -> signature mismatch on verify.
+        let tampered = format!("{}.{}.{}", original_header, forged_payload, original_sig);
+        let result = validate_token(&tampered, &secret);
+        assert!(
+            result.is_err(),
+            "tampered payload must be rejected (signature mismatch)"
+        );
+    }
+
+    #[test]
+    fn tampered_signature_is_rejected() {
+        // Attack class: blind signature mutation.
+        let secret = test_secret();
+        let claims = Claims {
+            sub: "user-1".into(),
+            username: "alice".into(),
+            role: "admin".into(),
+            exp: future_exp(),
+        };
+        let token = encode_claims(&claims, &secret);
+
+        // Flip the last character of the signature segment to a different valid
+        // base64url char so the structure still parses but the HMAC fails.
+        let mut bytes = token.into_bytes();
+        let last = bytes.last_mut().expect("non-empty token");
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(bytes).expect("ascii only");
+
+        let result = validate_token(&tampered, &secret);
+        assert!(result.is_err(), "byte-flipped signature must be rejected");
+    }
+
+    #[test]
+    fn hs512_token_against_hs256_validator_is_rejected() {
+        // Attack class: algorithm confusion / downgrade — a token signed with a
+        // different (even if stronger) algorithm must not validate against the
+        // pinned HS256 validator.
+        let secret = test_secret();
+        let claims = Claims {
+            sub: "user-1".into(),
+            username: "alice".into(),
+            role: "admin".into(),
+            exp: future_exp(),
+        };
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS512);
+        let token = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("HS512 encoding should succeed");
+
+        let result = validate_token(&token, &secret);
+        assert!(
+            result.is_err(),
+            "HS512-signed token must be rejected by HS256-pinned validator"
+        );
+    }
+
+    #[test]
+    fn token_past_exp_leeway_is_rejected() {
+        // Attack class: clock-skew exploitation — a token expired well past the
+        // default jsonwebtoken leeway (60s) must be rejected. We use 5 minutes
+        // to leave no doubt: any reasonable leeway tweak still rejects this.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time must be after UNIX epoch")
+            .as_secs();
+        let claims = Claims {
+            sub: "user-1".into(),
+            username: "alice".into(),
+            role: "admin".into(),
+            exp: now - 300,
+        };
+        let token = encode_claims(&claims, &test_secret());
+        let result = validate_token(&token, &test_secret());
+        assert!(
+            result.is_err(),
+            "token expired 5 minutes ago must be rejected (beyond default 60s leeway)"
+        );
+    }
+
+    #[test]
+    fn token_with_far_future_exp_is_accepted() {
+        // Mirrors the API-token codepath which uses `exp: u64::MAX / 2`.
+        // Confirms an extremely-large exp does not overflow validation.
+        let claims = Claims {
+            sub: "api-token-user".into(),
+            username: "svc".into(),
+            role: "operator".into(),
+            exp: u64::MAX / 2,
+        };
+        let token = encode_claims(&claims, &test_secret());
+        let result = validate_token(&token, &test_secret());
+        let validated = result.expect("far-future exp must validate");
+        assert_eq!(validated.exp, u64::MAX / 2);
+        assert_eq!(validated.role, "operator");
+    }
+
+    #[test]
+    fn token_with_extra_unknown_fields_is_accepted() {
+        // Forward-compat: extra payload fields (e.g., `tenant_id`, `iss`) added by
+        // future issuers must not break deserialization into `Claims`.
+        let secret = test_secret();
+        let payload = serde_json::json!({
+            "sub": "user-1",
+            "username": "alice",
+            "role": "admin",
+            "exp": future_exp(),
+            "iss": "chv-test-issuer",
+            "tenant_id": "tenant-42",
+            "scope": ["read", "write"],
+        });
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        let token = jsonwebtoken::encode(
+            &header,
+            &payload,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encoding json value should succeed");
+        let validated = validate_token(&token, &secret).expect("unknown fields must be ignored");
+        assert_eq!(validated.sub, "user-1");
+        assert_eq!(validated.role, "admin");
+    }
+
+    #[test]
+    fn missing_required_claim_is_rejected() {
+        // Attack class: malformed/incomplete payload — a token missing the `role`
+        // field must fail to deserialize into `Claims` (no defaulting to viewer).
+        let secret = test_secret();
+        let payload = serde_json::json!({
+            "sub": "user-1",
+            "username": "alice",
+            // role intentionally omitted
+            "exp": future_exp(),
+        });
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        let token = jsonwebtoken::encode(
+            &header,
+            &payload,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encoding json value should succeed");
+        let result = validate_token(&token, &secret);
+        assert!(
+            result.is_err(),
+            "token missing required claim must be rejected"
+        );
+    }
 }
