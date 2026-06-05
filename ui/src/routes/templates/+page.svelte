@@ -1,9 +1,8 @@
 <script lang="ts">
 import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
-  import { 
-    Server, Copy, Trash2, Plus, FileCode, Box, LayoutTemplate, 
-    ArrowRight, Activity, ShieldCheck, Search
+  import {
+    FileCode, Box, LayoutTemplate
   } from 'lucide-svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import {
@@ -13,20 +12,17 @@ import Button from '$lib/components/primitives/Button.svelte';
   } from '$lib/webui/bff-resources';
   import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
   import { toast } from '$lib/stores/toast.svelte';
-  import SectionCard from '$lib/components/shell/SectionCard.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-  import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-  import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
   import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-  import ErrorState from '$lib/components/shell/ErrorState.svelte';
-  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
   import CreateFromTemplate from '$lib/components/vms/CreateFromTemplate.svelte';
   import CloudInitModalViewer from '$lib/components/shell/CloudInitModalViewer.svelte';
   import CloudInitModalEditor from '$lib/components/shell/CloudInitModalEditor.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
-  import type { ShellTone } from '$lib/shell/app-shell';
   import type { VMTemplate, CloudInitTemplate, Image, Network, StoragePool, VM } from '$lib/api/types';
   import ConfirmDialog from '$lib/components/shared/ConfirmDialog.svelte';
+  import TemplatesTable from '$lib/components/templates/TemplatesTable.svelte';
+  import TemplatesSidebar from '$lib/components/templates/TemplatesSidebar.svelte';
+  import CreateVMTemplateModal from '$lib/components/templates/CreateVMTemplateModal.svelte';
 
   const client = createAPIClient();
   const pageDef = getPageDefinition('/images'); // Reusing Images definition as it covers library
@@ -147,24 +143,24 @@ import Button from '$lib/components/primitives/Button.svelte';
   </PageHeaderWithAction>
 
   <div class="inventory-metrics">
-    <CompactMetricCard 
-      label="Provision Blueprints" 
-      value={vmTemplates.length} 
+    <CompactMetricCard
+      label="Provision Blueprints"
+      value={vmTemplates.length}
       color="neutral"
     />
-    <CompactMetricCard 
-      label="Init Registries" 
-      value={cloudInitTemplates.length} 
+    <CompactMetricCard
+      label="Init Registries"
+      value={cloudInitTemplates.length}
       color="primary"
     />
-    <CompactMetricCard 
-      label="Library Assets" 
-      value={images.length} 
+    <CompactMetricCard
+      label="Library Assets"
+      value={images.length}
       color="neutral"
     />
-    <CompactMetricCard 
-      label="SLA Compliance" 
-      value="NOMINAL" 
+    <CompactMetricCard
+      label="SLA Compliance"
+      value="NOMINAL"
       color="primary"
     />
   </div>
@@ -181,70 +177,18 @@ import Button from '$lib/components/primitives/Button.svelte';
   </div>
 
   <main class="inventory-main">
-    <section class="inventory-table-area">
-      {#if loading && vmTemplates.length === 0}
-        <div class="skeleton-table"></div>
-      {:else if error}
-        <ErrorState />
-      {:else if activeTab === 'vm'}
-        <InventoryTable columns={vmColumns} rows={vmTemplates.map(t => ({
-          ...t,
-          resources: `${t.vcpu} vCPU / ${t.memory_mb}MB`,
-          image_name: images.find(i => i.id === t.image_id)?.name || t.image_id,
-          status: { label: 'VERIFIED', tone: 'healthy' }
-        }))}>
-          {#snippet cell({ column, row })}
-             {#if column.key === 'name'}
-               <span class="blueprint-name">{row.name}</span>
-             {:else if column.key === 'status'}
-               <StatusBadge label={row.status.label} tone={row.status.tone as ShellTone} />
-             {:else if column.key === '_actions'}
-               <div class="row-ops">
-                  <button type="button" class="op-btn" onclick={() => cloneTemplate(row)} title="Orchestrate Workload"><Copy size={12} /></button>
-               </div>
-             {:else}
-               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
-             {/if}
-          {/snippet}
-        </InventoryTable>
-      {:else}
-        <InventoryTable columns={ciColumns} rows={cloudInitTemplates.map(t => ({
-          ...t,
-          variables: t.variables?.join(', ') || 'NONE'
-        }))}>
-           {#snippet cell({ column, row })}
-             {#if column.key === 'name'}
-               <span class="blueprint-name">{row.name}</span>
-             {:else if column.key === '_actions'}
-               <div class="row-ops">
-                  <button type="button" class="op-btn" title="View Registry"><FileCode size={12} /></button>
-               </div>
-             {:else}
-               <span class="cell-text">{(row as Record<string, unknown>)[column.key]}</span>
-             {/if}
-          {/snippet}
-        </InventoryTable>
-      {/if}
-    </section>
-
-    <aside class="support-area">
-      <SectionCard title="Library Insights" icon={ShieldCheck}>
-        <div class="audit-summary">
-          <div class="summary-row">
-            <span>Scan Status</span>
-            <span>CLEAN</span>
-          </div>
-          <div class="summary-row">
-            <span>Auto-Sync</span>
-            <span>ENABLED</span>
-          </div>
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Directives" icon={ArrowRight}>
-        <p class="empty-hint">Blueprint library optimized for fabric placement acceleration.</p>
-      </SectionCard>
-    </aside>
+    <TemplatesTable
+      {activeTab}
+      {loading}
+      {error}
+      {vmTemplates}
+      {cloudInitTemplates}
+      {images}
+      {vmColumns}
+      {ciColumns}
+      {cloneTemplate}
+    />
+    <TemplatesSidebar />
   </main>
 </div>
 
@@ -284,128 +228,17 @@ import Button from '$lib/components/primitives/Button.svelte';
 />
 
 <!-- Create VM Template Modal -->
-{#if createVMTemplateOpen}
-  <div 
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" 
-    role="dialog"
-    tabindex="-1"
-    aria-modal="true"
-    aria-labelledby="create-template-title"
-    onclick={(e) => {
-      if (e.target === e.currentTarget) createVMTemplateOpen = false;
-    }}
-    onkeydown={(e) => {
-      if (e.key === 'Escape') createVMTemplateOpen = false;
-    }}
-  >
-    <div class="bg-white rounded-lg shadow-lg w-full max-w-lg mx-4">
-      <div class="flex items-center justify-between px-6 py-4 border-b border-line">
-        <h2 id="create-template-title" class="text-lg font-semibold text-ink">Create VM Template</h2>
-        <button
-          type="button"
-          onclick={() => createVMTemplateOpen = false}
-          class="text-muted hover:text-ink"
-          aria-label="Close dialog"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-        </button>
-      </div>
-      
-      <div class="p-6 space-y-4">
-        <div>
-          <label for="template-name" class="block text-sm font-medium text-ink mb-1">
-            Template Name <span class="text-danger">*</span>
-          </label>
-          <input
-            id="template-name"
-            type="text"
-            bind:value={newTemplateName}
-            placeholder="e.g., Ubuntu Web Server"
-            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
-          />
-        </div>
-
-        <div>
-          <label for="template-description" class="block text-sm font-medium text-ink mb-1">
-            Description
-          </label>
-          <input
-            id="template-description"
-            type="text"
-            bind:value={newTemplateDescription}
-            placeholder="Brief description of this template"
-            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
-          />
-        </div>
-
-        <div>
-          <label for="source-vm" class="block text-sm font-medium text-ink mb-1">
-            Source VM <span class="text-danger">*</span>
-          </label>
-          <select
-            id="source-vm"
-            bind:value={selectedVMId}
-            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
-          >
-            <option value="">Select a VM...</option>
-            {#each vms as vm}
-              <option value={vm.id}>{vm.name} ({vm.vcpu} vCPU, {vm.memory_mb} MB)</option>
-            {/each}
-          </select>
-          {#if vms.length === 0}
-            <p class="text-xs text-muted mt-1">No VMs available. Create a VM first to use as a template.</p>
-          {/if}
-        </div>
-
-        <div>
-          <label for="cloud-init-template" class="block text-sm font-medium text-ink mb-1">
-            Default Cloud-init Template (Optional)
-          </label>
-          <select
-            id="cloud-init-template"
-            bind:value={selectedCloudInitId}
-            class="w-full h-9 rounded border border-[#CCCCCC] bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
-          >
-            <option value="">None</option>
-            {#each cloudInitTemplates as cit}
-              <option value={cit.id}>{cit.name}</option>
-            {/each}
-          </select>
-          <p class="text-xs text-muted mt-1">
-            This cloud-init config will be used by default when cloning from this template.
-          </p>
-        </div>
-      </div>
-
-      <div class="flex items-center justify-end gap-2 px-6 py-4 border-t border-line">
-        <button
-          type="button"
-          onclick={() => createVMTemplateOpen = false}
-          disabled={creatingTemplate}
-          class="px-4 py-2 rounded border border-line text-ink bg-white hover:bg-chrome transition-colors disabled:opacity-50"
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          onclick={handleCreateVMTemplate}
-          disabled={creatingTemplate || !newTemplateName.trim() || !selectedVMId}
-          class="px-4 py-2 rounded bg-primary text-white font-medium hover:bg-primary/90 transition-colors disabled:bg-primary/30 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {#if creatingTemplate}
-            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            Creating...
-          {:else}
-            Create Template
-          {/if}
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
+<CreateVMTemplateModal
+  bind:open={createVMTemplateOpen}
+  bind:newTemplateName
+  bind:newTemplateDescription
+  bind:selectedVMId
+  bind:selectedCloudInitId
+  {creatingTemplate}
+  {vms}
+  {cloudInitTemplates}
+  {handleCreateVMTemplate}
+/>
 
 <ConfirmDialog
   bind:open={confirmDialog.open}
@@ -472,65 +305,6 @@ import Button from '$lib/components/primitives/Button.svelte';
     grid-template-columns: 1fr 300px;
     gap: 1rem;
     align-items: start;
-  }
-
-  .support-area {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .blueprint-name {
-    font-weight: 700;
-    color: var(--color-neutral-900);
-  }
-
-  .row-ops {
-    display: flex;
-    gap: 0.25rem;
-  }
-
-  .op-btn {
-    width: 24px;
-    height: 24px;
-    display: grid;
-    place-items: center;
-    border-radius: 4px;
-    color: var(--color-neutral-500);
-    transition: all 0.1s ease;
-  }
-
-  .op-btn:hover {
-    background: var(--bg-surface-muted);
-    color: var(--color-primary);
-  }
-
-  .audit-summary {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .summary-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 10px;
-    color: var(--color-neutral-600);
-    padding: 0.35rem 0.5rem;
-    background: var(--bg-surface-muted);
-    border-radius: var(--radius-xs);
-  }
-
-  .summary-row span:last-child {
-    font-weight: 700;
-    color: var(--color-neutral-900);
-  }
-
-  .empty-hint {
-    font-size: 11px;
-    color: var(--color-neutral-400);
-    padding: 1rem;
-    text-align: center;
   }
 
   @media (max-width: 1100px) {

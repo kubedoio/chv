@@ -2,31 +2,28 @@
 import Button from '$lib/components/primitives/Button.svelte';
   import { onMount } from 'svelte';
   import {
-    Plus, Play, Pause, Calendar,
-    ShieldCheck, Activity, Upload, Download
+    Plus, Calendar,
+    Activity, Upload
   } from 'lucide-svelte';
   import { getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast.svelte';
-  import SectionCard from '$lib/components/shell/SectionCard.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-  import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
-  import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
   import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-  import ErrorState from '$lib/components/shell/ErrorState.svelte';
-  import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
-  import Modal from '$lib/components/primitives/Modal.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
   import {
     listBackupJobs,
     listBackupHistory,
     createBackupJob,
     executeBackupJob,
-    updateBackupJob,
-    deleteBackupJob
+    updateBackupJob
   } from '$lib/bff/backups';
   import { listVms } from '$lib/bff/vms';
   import type { BackupJob, BackupHistory } from '$lib/bff/types';
   import type { VmListItem } from '$lib/bff/types';
+  import BackupJobsTable from '$lib/components/backup-jobs/BackupJobsTable.svelte';
+  import BackupJobsSidebar from '$lib/components/backup-jobs/BackupJobsSidebar.svelte';
+  import BackupJobCreateModal from '$lib/components/backup-jobs/BackupJobCreateModal.svelte';
+  import BackupJobImportModal from '$lib/components/backup-jobs/BackupJobImportModal.svelte';
 
   const pageDef = getPageDefinition('/backups');
 
@@ -196,167 +193,41 @@ import Button from '$lib/components/primitives/Button.svelte';
   </div>
 
   <main class="inventory-main">
-    <section class="inventory-table-area">
-      {#if loading && backupJobs.length === 0}
-        <div class="discovery-loading">Syncing protection metadata...</div>
-      {:else if error}
-        <ErrorState description={error} />
-      {:else if activeTab === 'jobs'}
-        <InventoryTable
-          columns={jobColumns}
-          rows={backupJobs.map(j => ({
-            ...j,
-            created_at: j.created_at ? new Date(j.created_at).toLocaleDateString() : '—'
-          }))}
-        >
-          {#snippet cell({ column, row })}
-             {#if column.key === 'job_id'}
-               <div class="registry-identity">
-                 <span class="p-name">{row.backup_type}</span>
-                 <span class="p-id">ID // {row.job_id.slice(0,8)}</span>
-               </div>
-             {:else if column.key === 'status'}
-               <StatusBadge label={row.status.toUpperCase()} tone={row.status === 'Enabled' || row.status === 'Completed' ? 'healthy' : row.status === 'Pending' ? 'warning' : 'degraded'} />
-             {:else if column.key === '_actions'}
-                <div class="op-cluster">
-                   <button type="button" class="op-ctrl" onclick={() => runJobNow(row)} title="FORCE_EXECUTE"><Play size={12} /></button>
-                   <button type="button" class="op-ctrl" onclick={() => toggleJob(row)} title="TOGGLE_STATUS">
-                      {#if row.status === 'Enabled'}<Pause size={12} />{:else}<Play size={12} />{/if}
-                   </button>
-                </div>
-             {:else}
-               <span class="cell-text">{(row as Record<string, unknown>)[column.key] ?? '—'}</span>
-             {/if}
-          {/snippet}
-        </InventoryTable>
-      {:else}
-        <InventoryTable columns={historyColumns} rows={backupHistory.map(h => ({
-          ...h,
-          size: formatBytes(h.size_bytes ?? 0),
-          started_at: h.started_at ? new Date(h.started_at).toLocaleString() : '—'
-        }))}>
-          {#snippet cell({ column, row })}
-             {#if column.key === 'status'}
-               <StatusBadge label={row.status.toUpperCase()} tone={row.status === 'Completed' ? 'healthy' : row.status === 'Pending' ? 'warning' : 'failed'} />
-             {:else if column.key === 'completed_at'}
-               <div class="trace-end">
-                 <span class="timestamp">{row.completed_at ? new Date(String(row.completed_at)).toLocaleTimeString() : '—'}</span>
-                 <button type="button" class="trace-dl" title="DOWNLOAD_ARTIFACT"><Download size={12} /></button>
-               </div>
-             {:else}
-               <span class="cell-text">{(row as Record<string, unknown>)[column.key] ?? '—'}</span>
-             {/if}
-          {/snippet}
-        </InventoryTable>
-      {/if}
-    </section>
-
-    <aside class="support-area">
-      <SectionCard title="SLA Integrity" icon={ShieldCheck}>
-        <div class="registry-vitals">
-           <div class="vital-row">
-              <span>RPO_TARGET</span>
-              <span>24_HOURS</span>
-           </div>
-           <div class="vital-row">
-              <span>STORAGE_POOL</span>
-              <span>DURABLE_S3</span>
-           </div>
-           <div class="vital-row">
-              <span>LAST_CONSISTENCY</span>
-              <span>NOMINAL</span>
-           </div>
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Recent Sequences" icon={Activity}>
-        <div class="micro-trace-list">
-          {#each backupHistory.slice(0, 3) as trace}
-            <div class="trace-card">
-              <span class="trace-vm">{trace.vm_id}</span>
-              <span class="trace-meta">{trace.status} · {formatBytes(trace.size_bytes ?? 0)}</span>
-            </div>
-          {:else}
-             <p class="empty-hint">No operational traces found.</p>
-          {/each}
-        </div>
-      </SectionCard>
-    </aside>
+    <BackupJobsTable
+      {activeTab}
+      {loading}
+      {error}
+      {backupJobs}
+      {backupHistory}
+      {jobColumns}
+      {historyColumns}
+      {formatBytes}
+      {runJobNow}
+      {toggleJob}
+    />
+    <BackupJobsSidebar {backupHistory} {formatBytes} />
   </main>
 </div>
 
-<!-- Create Policy Modal -->
-<Modal bind:open={createJobOpen} title="DEFINE_PROTECTION_POLICY">
-  <div class="registry-form">
-    <div class="form-group">
-      <label for="vm-select">TARGET_COMPUTE_NODE</label>
-      <select id="vm-select" bind:value={selectedVMId}>
-        <option value="">SELECT_WORKLOAD...</option>
-        {#each vms as vm}
-          <option value={vm.vm_id}>{vm.name} // {vm.cpu} {vm.memory}</option>
-        {/each}
-      </select>
-    </div>
+<BackupJobCreateModal
+  bind:open={createJobOpen}
+  {vms}
+  bind:selectedVMId
+  bind:selectedBackupType
+  bind:selectedTargetPath
+  bind:selectedStorageBackend
+  {creatingJob}
+  {handleCreateJob}
+/>
 
-    <div class="form-group">
-      <label for="backup-type">BACKUP_TYPE</label>
-      <select id="backup-type" bind:value={selectedBackupType}>
-        <option value="full">FULL</option>
-        <option value="incremental">INCREMENTAL</option>
-        <option value="snapshot">SNAPSHOT</option>
-      </select>
-    </div>
-
-    <div class="form-group">
-      <label for="target-path">TARGET_PATH (optional)</label>
-      <input id="target-path" type="text" bind:value={selectedTargetPath} placeholder="e.g. /backups/vm-daily" />
-    </div>
-
-    <div class="form-group">
-      <label for="storage-backend">STORAGE_BACKEND (optional)</label>
-      <select id="storage-backend" bind:value={selectedStorageBackend}>
-        <option value="">DEFAULT</option>
-        <option value="local">LOCAL</option>
-        <option value="s3">S3</option>
-        <option value="nfs">NFS</option>
-      </select>
-    </div>
-  </div>
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={() => createJobOpen = false}>CANCEL</Button>
-    <Button variant="primary" onclick={handleCreateJob} disabled={creatingJob || !selectedVMId}>
-      {creatingJob ? 'COMMITTING...' : 'COMMIT_POLICY'}
-    </Button>
-  {/snippet}
-</Modal>
-
-<!-- Import Modal -->
-<Modal bind:open={importVMOpen} title="INGEST_DURABLE_WORKLOAD">
-  <div class="registry-form">
-    <div class="protocol-hint">
-       <span>PROTOCOL: WORKLOAD_INGESTION_V1</span>
-       <p>Verify artifact checksum before initiating transmission.</p>
-    </div>
-
-    <div class="form-group">
-      <label for="vm-name">INGEST_IDENTIFIER</label>
-      <input id="vm-name" type="text" bind:value={importName} placeholder="e.g. IMPORT_VECT-4" />
-    </div>
-
-    <div class="form-group">
-      <label for="import-file">SOURCE_ARTIFACT (.qcow2, .ova)</label>
-      <input id="import-file" type="file" onchange={handleFileSelect} class="file-ingest" />
-    </div>
-  </div>
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={() => importVMOpen = false}>CANCEL</Button>
-    <Button variant="primary" onclick={handleImportVM} disabled={importing || !importFile || !importName}>
-      {importing ? 'TRANSMITTING...' : 'INITIATE_INGESTION'}
-    </Button>
-  {/snippet}
-</Modal>
+<BackupJobImportModal
+  bind:open={importVMOpen}
+  bind:importName
+  {importFile}
+  {importing}
+  {handleFileSelect}
+  {handleImportVM}
+/>
 
 <style>
   .inventory-page {
@@ -414,160 +285,6 @@ import Button from '$lib/components/primitives/Button.svelte';
     grid-template-columns: 1fr 300px;
     gap: 1rem;
     align-items: start;
-  }
-
-  .support-area {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .registry-identity {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .p-name { font-weight: 800; color: var(--color-neutral-900); font-size: 11px; }
-  .p-id { font-size: 9px; font-weight: 700; color: var(--color-neutral-400); font-family: var(--font-mono); }
-
-  .cell-text { font-size: 11px; color: var(--color-neutral-600); }
-
-  .op-cluster {
-    display: flex;
-    gap: 0.25rem;
-  }
-
-  .op-ctrl {
-    width: 24px;
-    height: 24px;
-    display: grid;
-    place-items: center;
-    background: var(--bg-surface-muted);
-    border: 1px solid var(--border-subtle);
-    border-radius: 2px;
-    color: var(--color-neutral-500);
-    cursor: pointer;
-  }
-
-  .op-ctrl:hover {
-    background: var(--bg-surface);
-    color: var(--color-primary);
-    border-color: var(--color-primary);
-  }
-
-  .trace-end {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 0.75rem;
-  }
-
-  .timestamp { font-size: 10px; font-family: var(--font-mono); color: var(--color-neutral-500); }
-  .trace-dl {
-     background: transparent;
-     border: none;
-     color: var(--color-neutral-400);
-     cursor: pointer;
-  }
-  .trace-dl:hover { color: var(--color-primary); }
-
-  .registry-vitals {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-
-  .vital-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 9px;
-    font-weight: 800;
-    color: var(--color-neutral-500);
-    padding: 0.35rem 0.5rem;
-    background: var(--bg-surface-muted);
-    border-radius: var(--radius-xs);
-  }
-
-  .vital-row span:last-child { color: var(--color-neutral-900); }
-
-  .micro-trace-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .trace-card {
-    display: flex;
-    flex-direction: column;
-    padding: 0.5rem 0.75rem;
-    background: var(--bg-surface-muted);
-    border-radius: var(--radius-xs);
-    gap: 2px;
-  }
-
-  .trace-vm { font-size: 10px; font-weight: 800; color: var(--color-neutral-900); }
-  .trace-meta { font-size: 9px; font-weight: 700; color: var(--color-neutral-400); text-transform: uppercase; }
-
-  .empty-hint { font-size: 10px; font-weight: 700; color: var(--color-neutral-400); text-align: center; padding: 1rem; }
-
-  /* Modals */
-  .registry-form {
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
-  }
-
-  .form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .form-group label {
-    font-size: 9px;
-    font-weight: 800;
-    color: var(--color-neutral-500);
-    letter-spacing: 0.1em;
-  }
-
-  .form-group input,
-  .form-group select {
-    background: var(--bg-surface-muted);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-xs);
-    padding: 0.5rem;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--color-neutral-900);
-  }
-
-  .protocol-hint {
-    background: rgba(var(--color-primary-rgb), 0.1);
-    border-left: 2px solid var(--color-primary);
-    padding: 0.75rem;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .protocol-hint span { font-size: 9px; font-weight: 800; color: var(--color-primary); }
-  .protocol-hint p { font-size: 10px; color: var(--color-neutral-600); margin: 0; }
-
-  .file-ingest {
-    padding: 2rem !important;
-    border: 1px dashed var(--border-subtle) !important;
-    text-align: center;
-    cursor: pointer;
-  }
-
-  .discovery-loading {
-    padding: 4rem;
-    text-align: center;
-    font-size: 10px;
-    font-weight: 800;
-    color: var(--color-neutral-400);
-    letter-spacing: 0.1em;
   }
 
   @media (max-width: 1100px) {
