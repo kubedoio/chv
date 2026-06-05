@@ -538,6 +538,7 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let server = tonic::transport::Server::builder()
+                .layer(chv_observability::GrpcMetricsLayer::new())
                 .add_service(TelemetryServiceServer::new(telemetry))
                 .add_service(InventoryServiceServer::new(inventory))
                 .serve_with_incoming_shutdown(

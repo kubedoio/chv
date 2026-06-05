@@ -109,6 +109,7 @@ impl AgentServer {
         let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o775));
         let uds_stream = UnixListenerStream::new(uds);
         tonic::transport::Server::builder()
+            .layer(chv_observability::GrpcMetricsLayer::new())
             .add_service(proto::reconcile_service_server::ReconcileServiceServer::new(self.clone()))
             .add_service(proto::lifecycle_service_server::LifecycleServiceServer::new(self))
             .serve_with_incoming(uds_stream)

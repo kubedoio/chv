@@ -125,6 +125,7 @@ impl<B: StorageBackend> StorageServer<B> {
         info!(socket = %socket_path.display(), "starting chv-stord server");
 
         Server::builder()
+            .layer(chv_observability::GrpcMetricsLayer::new())
             .add_service(health_service)
             .add_service(StorageServiceServer::new(self.inner))
             .add_service(StorageMigrationServiceServer::new(self.migration_service))
