@@ -419,7 +419,7 @@ and review cycles:
 
 ## Phases
 
-- [ ] Phase 1 (S1): Security defaults — sqlx fix, admin/admin, install.sh TLS, vitest CVE, SECURITY.md
+- [x] Phase 1 (S1): Security defaults — sqlx fix, admin/admin, install.sh TLS, vitest CVE, SECURITY.md ✅ landed in 5 commits (df6f2d42, 0ba3e649, 69bdb40b, b4238ec4, fb260481)
 - [ ] Phase 2 (S2): Data-plane correctness — quota, reconciler parallel, orchestrator N+1, mutex, migration cancel
 - [ ] Phase 3 (S3): Observability + contracts — VM metrics, gRPC interceptor, request-ID, proto reserved, SLO docs
 - [ ] Phase 4 (S4): Tests + cleanup — reconcile tests, JWT tests, crypto tests, Svelte decomp, stord tests
@@ -450,4 +450,10 @@ and review cycles:
 
 ## Status
 
-**Ready to begin Phase 1 (S1)** — waiting for user approval to start implementation.
+**Phase 1 (S1) complete.** All 5 sub-items landed as bisectable commits on
+`gap-cleanup-production`. Working tree clean, `cargo check --workspace` passes,
+svelte-check 0/0, all 129 vitest tests pass.
+
+Closes findings: **C-1, C-2, C-3, C-4, H-6, H-7, H-30 (partial)**.
+
+Ready to begin Phase 2 (S2: data-plane correctness) when authorized.
