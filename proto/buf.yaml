@@ -1,0 +1,19 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # CHV organises protos under proto/{controlplane,node,webui}/ rather than
+    # using Go-package-style directory layout; the directory-match rule expects
+    # the directory structure to mirror the proto package name, which our layout
+    # intentionally does not do.
+    - PACKAGE_DIRECTORY_MATCH
+    # PACKAGE_VERSION_SUFFIX would require every package to be versioned (e.g.
+    # chv.controlplane.v1). Deferred — see ADR-014 §Alternatives for the
+    # rationale on not using per-file semver right now.
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE
