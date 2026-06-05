@@ -946,4 +946,100 @@ mod tests {
         let res = backend.attach("vol-1", "bad-handle", "vm-1").await;
         assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
     }
+
+    // C-19 (S4-5): unit-test boundary for the iSCSI backend.
+    //
+    // IscsiConfig does not derive serde::{Serialize, Deserialize} (and adding
+    // the dep is out of scope for this change — the config is constructed
+    // programmatically by chv-stord), so the originally proposed serde
+    // round-trip is replaced by a Clone round-trip that guards against future
+    // field-add omissions in `#[derive(Clone)]`.
+
+    #[test]
+    fn iscsi_config_clone_preserves_all_fields() {
+        let original = IscsiConfig {
+            portal: "10.0.0.1:3260".to_string(),
+            target_iqn: "iqn.2024-01.com.example:target".to_string(),
+            initiator_name: "iqn.2024-01.com.example:init".to_string(),
+            chap_username: Some("u".to_string()),
+            chap_secret: Some("s".to_string()),
+        };
+        let copy = original.clone();
+        assert_eq!(copy.portal, original.portal);
+        assert_eq!(copy.target_iqn, original.target_iqn);
+        assert_eq!(copy.initiator_name, original.initiator_name);
+        assert_eq!(copy.chap_username, original.chap_username);
+        assert_eq!(copy.chap_secret, original.chap_secret);
+
+        // None branch must also survive Clone.
+        let no_chap = IscsiConfig {
+            chap_username: None,
+            chap_secret: None,
+            ..original
+        };
+        let copy = no_chap.clone();
+        assert!(copy.chap_username.is_none());
+        assert!(copy.chap_secret.is_none());
+    }
+
+    #[test]
+    fn iscsi_expected_handle_format_is_stable() {
+        // The `iscsi-{iqn}-{volume_id}` handle format is observed by chv-stord
+        // and chv-agent; pinning it prevents accidental ABI breaks.
+        let config = IscsiConfig {
+            portal: "10.0.0.1:3260".to_string(),
+            target_iqn: "iqn.2024-01.com.example:storage.t1".to_string(),
+            initiator_name: "iqn.2024-01.com.example:init".to_string(),
+            chap_username: None,
+            chap_secret: None,
+        };
+        let backend = IscsiBackend::new(config).expect("valid config");
+        assert_eq!(
+            backend.expected_handle("vol-42"),
+            "iscsi-iqn.2024-01.com.example:storage.t1-vol-42"
+        );
+    }
+
+    /// Health check against an unreachable iSCSI portal (RFC 5737 TEST-NET-1).
+    ///
+    /// `health()` shells out to `iscsiadm -m session`.  On hosts without
+    /// open-iscsi installed this errors via `ChvError::Io`; on hosts with it
+    /// installed but no session for our IQN it returns `Ok(BackendHealth)`
+    /// with `status == "unhealthy"`.  Both are valid "not connected"
+    /// signals — the test asserts we never report "healthy" for a target the
+    /// node cannot possibly reach.
+    ///
+    /// Marked `#[ignore]`: depends on the host environment (presence of
+    /// `iscsiadm`, system iSCSI database state).  Run with `--ignored` when
+    /// validating on a real Linux host.
+    #[tokio::test]
+    #[ignore]
+    async fn iscsi_health_with_unreachable_target_is_not_reported_healthy() {
+        let config = IscsiConfig {
+            // RFC 5737 TEST-NET-1 — guaranteed not to host an iSCSI portal.
+            portal: "192.0.2.1:3260".to_string(),
+            target_iqn: "iqn.2024-01.com.example:unreachable".to_string(),
+            initiator_name: "iqn.2024-01.com.example:init".to_string(),
+            chap_username: None,
+            chap_secret: None,
+        };
+        let backend = IscsiBackend::new(config).expect("valid config");
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.health("vol-1", "iscsi-iqn.2024-01.com.example:unreachable-vol-1"),
+        )
+        .await
+        .expect("health() should return within 2s for a session list query");
+        match res {
+            Ok(h) => assert_ne!(
+                h.status, "healthy",
+                "health() must not report healthy for an unreachable target; got {:?}",
+                h
+            ),
+            Err(ChvError::Io { .. }) => {
+                // iscsiadm not installed on this host — acceptable.
+            }
+            Err(other) => panic!("unexpected error variant from health(): {:?}", other),
+        }
+    }
 }
