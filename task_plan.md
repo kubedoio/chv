@@ -420,7 +420,7 @@ and review cycles:
 ## Phases
 
 - [x] Phase 1 (S1): Security defaults — sqlx fix, admin/admin, install.sh TLS, vitest CVE, SECURITY.md ✅ landed in 5 commits (df6f2d42, 0ba3e649, 69bdb40b, b4238ec4, fb260481)
-- [ ] Phase 2 (S2): Data-plane correctness — quota, reconciler parallel, orchestrator N+1, mutex, migration cancel
+- [x] Phase 2 (S2): Data-plane correctness — quota TOCTOU, orchestrator N+1, migration cancel, RwLock + reconciler parallelism ✅ landed in 5 commits (49ed8306, 271eae37, 67b8c701, f09f9e1e, 192d58b5)
 - [ ] Phase 3 (S3): Observability + contracts — VM metrics, gRPC interceptor, request-ID, proto reserved, SLO docs
 - [ ] Phase 4 (S4): Tests + cleanup — reconcile tests, JWT tests, crypto tests, Svelte decomp, stord tests
 
@@ -450,10 +450,35 @@ and review cycles:
 
 ## Status
 
-**Phase 1 (S1) complete.** All 5 sub-items landed as bisectable commits on
-`gap-cleanup-production`. Working tree clean, `cargo check --workspace` passes,
-svelte-check 0/0, all 129 vitest tests pass.
+**Phase 2 (S2) complete.** All 5 sub-items landed as bisectable commits on
+`gap-cleanup-production`. Each commit compiles in isolation (verified via
+`git checkout <sha> && cargo check --workspace`). Workspace lib tests:
+481/481 pass. `cargo clippy --workspace --lib -- -D warnings` clean.
+`cargo fmt --all -- --check` clean.
 
-Closes findings: **C-1, C-2, C-3, C-4, H-6, H-7, H-30 (partial)**.
+Phase 2 closes findings: **C-5, C-6, C-8, C-9, C-10**.
 
-Ready to begin Phase 2 (S2: data-plane correctness) when authorized.
+Cumulative findings closed across S1 + S2: **C-1, C-2, C-3, C-4, C-5, C-6,
+C-8, C-9, C-10, H-6, H-7, H-30 (partial)** — 11 of 22 CRITICALs + 3 HIGHs.
+
+Notes for S2 maintainers:
+- S2-1: third callsite (`create_vm_from_template` in templates.rs) was
+  fixed alongside the two listed in the plan; the same TOCTOU was
+  exploitable via the template-clone API.
+- S2-3: SQLite correlated subqueries in RETURNING work on bundled
+  SQLite >= 3.35; no fallback CTE path needed.
+- S2-5: cancel API is HTTP-only at `POST /admin/migrations/{id}/cancel`;
+  proto-level CancelMigration RPC deferred (would touch LifecycleService,
+  MutationService, frontend). The HTTP path is admin-token gated.
+- S2-4: `chv-agent-runtime-ch/src/mock.rs` retains std::sync::Mutex
+  (test-only, not on hot path).
+- S2-2: per-VM workers each open their own short-lived stord/nwd
+  connections; bounded by VM_RECONCILE_CONCURRENCY=8.
+
+Ready to begin Phase 3 (S3: observability + contracts) when authorized.
+
+Pre-existing test flake (NOT introduced by S2) to fix in S4-3:
+- `credential_crypto::tests::test_no_key_stores_plaintext` fails when run
+  in parallel with sibling tests because some other test sets
+  `CHV_ENCRYPTION_KEY` and doesn't restore it. Passes serially. To be
+  fixed by S4-3 (credential crypto tamper tests).
