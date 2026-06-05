@@ -1,0 +1,64 @@
+groups:
+  - name: chv.recording
+    interval: 30s
+    rules:
+      # VM lifecycle
+      - record: chv:vm_op_error_rate:5m
+        expr: |
+          sum by (op) (rate(chv_vm_ops_total{result="err"}[5m]))
+          /
+          clamp_min(sum by (op) (rate(chv_vm_ops_total[5m])), 1e-9)
+
+      - record: chv:vm_op_duration_p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (op, le) (rate(chv_vm_op_duration_seconds_bucket[5m]))
+          )
+
+      - record: chv:vm_op_duration_p50:5m
+        expr: |
+          histogram_quantile(0.50,
+            sum by (op, le) (rate(chv_vm_op_duration_seconds_bucket[5m]))
+          )
+
+      # gRPC
+      - record: chv:grpc_error_rate:5m
+        expr: |
+          sum by (service, method) (
+            rate(chv_grpc_server_requests_total{grpc_status!~"^(0|OK)$"}[5m])
+          )
+          /
+          clamp_min(
+            sum by (service, method) (rate(chv_grpc_server_requests_total[5m])),
+            1e-9
+          )
+
+      - record: chv:grpc_duration_p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, method, le) (
+              rate(chv_grpc_server_duration_seconds_bucket[5m])
+            )
+          )
+
+      # HTTP / BFF
+      - record: chv:http_error_rate:5m
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total[5m])), 1e-9)
+
+      - record: chv:http_duration_p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (method, path, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+      # Control-plane
+      - record: chv:cp_operations_per_tick:5m
+        expr: |
+          rate(chv_cp_operations_dispatched_total[5m])
+          /
+          clamp_min(rate(chv_cp_reconcile_ticks_total[5m]), 1e-9)
