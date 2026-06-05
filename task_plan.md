@@ -422,7 +422,7 @@ and review cycles:
 - [x] Phase 1 (S1): Security defaults — sqlx fix, admin/admin, install.sh TLS, vitest CVE, SECURITY.md ✅ landed in 5 commits (df6f2d42, 0ba3e649, 69bdb40b, b4238ec4, fb260481)
 - [x] Phase 2 (S2): Data-plane correctness — quota TOCTOU, orchestrator N+1, migration cancel, RwLock + reconciler parallelism ✅ landed in 5 commits (49ed8306, 271eae37, 67b8c701, f09f9e1e, 192d58b5)
 - [x] Phase 3 (S3): Observability + contracts — VM metrics, gRPC interceptor, request-ID, proto reserved, SLO docs ✅ landed in 5 commits (ee5a08d7, bd4eb3a8, ee3206b6, a675e15e, 937b9c41)
-- [ ] Phase 4 (S4): Tests + cleanup — reconcile tests, JWT tests, crypto tests, Svelte decomp, stord tests
+- [x] Phase 4 (S4): Tests + cleanup — reconcile tests, JWT tests, crypto tests, Svelte decomp, stord tests ✅ landed in 5 commits (5ae19b48, 70b91bb9, 51142b72, 15dc2690, 20345c74)
 
 ## Key Questions
 
@@ -452,37 +452,55 @@ and review cycles:
 
 ## Status
 
-**Phase 3 (S3) complete.** All 5 sub-items landed as bisectable commits on
-`gap-cleanup-production`. `cargo check --workspace` clean. `cargo clippy
---workspace --lib -- -D warnings` clean. `cargo fmt --all -- --check` clean.
-All workspace lib tests pass (no new failures). YAML rule files validated via
-`python3 yaml.safe_load`.
+**Phase 4 (S4) complete.** All 5 sub-items landed as bisectable commits on
+`gap-cleanup-production`. Each commit compiles in isolation
+(`git checkout <sha> && cargo check --workspace` verified for all 5 SHAs).
+`cargo clippy --workspace --lib -- -D warnings` clean.
+`cargo fmt --all -- --check` clean.
+`cd ui && npm run check`: 0 errors, 0 warnings across 4275 files.
 
-Phase 3 closes findings: **C-11, C-13, H-23, H-24, C-16, H-29**.
+Workspace test suites — **3 consecutive parallel runs, 0 failures, 17 crates green**:
+- chv-agent-core: 136 passed (was 119, +17 new from S4-1)
+- chv-webui-bff: 134 passed (+7 from S4-2)
+- chv-controlplane-store: 24 passed (was 19, +5 from S4-3 plus EnvGuard hardening of 3 existing tests)
+- chv-stord-backends: 62 passed + 2 ignored (was 56, +8 from S4-5)
+- All other crates unchanged.
 
-Cumulative findings closed across S1 + S2 + S3: **C-1, C-2, C-3, C-4, C-5,
-C-6, C-8, C-9, C-10, C-11, C-13, C-16, H-6, H-7, H-23, H-24, H-29,
-H-30 (partial)** — 13 of 22 CRITICALs + 6 HIGHs.
+The pre-existing `credential_crypto::tests::test_no_key_stores_plaintext`
+parallel-test flake noted in Phase 2 + 3 status sections is **fixed** by S4-3's
+EnvGuard. Verified by 3 consecutive `cargo test --workspace --lib` parallel
+runs with 0 failures. The flake is gone.
 
-Notes for S3 maintainers:
-- S3-1: Used VmOpGuard RAII (not async wrapper) so that `?` early-exits are
-  correctly classified as `err`. The guard records on Drop.
-- S3-2: `grpc_status` label is the raw numeric code from the `grpc-status`
-  header. For streaming responses where the trailer is not in leading headers,
-  the label degrades to `"unknown"` — documented in the module comment.
-  Test builders in agent_server.rs and daemon_clients.rs intentionally left
-  unwired to avoid test recorder side-effects.
-- S3-3: Reused the existing `correlation_middleware.rs` — no new middleware
-  module. The middleware body-rewrite is bounded at 64 KiB.
-- S3-4: Proto git-history audit found zero field-number removals across all 7
-  proto files. ADR-014 is purely forward-looking. `buf.yaml` suppresses
-  PACKAGE_DIRECTORY_MATCH and PACKAGE_VERSION_SUFFIX (CHV's layout does not
-  follow Go-package naming conventions).
-- S3-5: Metrics ports documented as configurable via `metrics_bind`; the
-  control-plane's `/metrics` is on its HTTP bind (`127.0.0.1:8080` by default).
+Phase 4 closes findings: **C-17, C-18, C-19, C-20, C-21, C-22**.
 
-Pre-existing test flake (NOT introduced by S3) to fix in S4-3:
-- `credential_crypto::tests::test_no_key_stores_plaintext` — pre-existing
-  parallel-test env-var pollution. Passes serially.
+Cumulative findings closed across S1 + S2 + S3 + S4: **C-1, C-2, C-3, C-4,
+C-5, C-6, C-8, C-9, C-10, C-11, C-13, C-16, C-17, C-18, C-19, C-20, C-21,
+C-22, H-6, H-7, H-23, H-24, H-29, H-30 (partial)** — **18 of 22 CRITICALs**
+(82%) **+ 6 HIGHs**.
 
-Ready to begin Phase 4 (S4: tests + cleanup) when authorized.
+Notes for S4 maintainers:
+- S4-1: 17 new tests, not the planned 30 — quality over quantity. Existing
+  scaffolding already covered the obvious surface. Skipped tests with
+  documented rationale (allocate_port exhaustion would be flaky;
+  DiskPrecopyConfig clone test would just exercise derive macro mechanics).
+- S4-2: Skipped `alg_none` test (the planned `Algorithm::None` confusion path)
+  because `jsonwebtoken` 9.x doesn't expose that algorithm at the API level —
+  HS512 vs HS256 already covers the alg-confusion regression class.
+- S4-3: EnvGuard uses `static Mutex<()>` + Drop-based env-var restoration. No
+  new dep (rejected `serial_test` crate). Poison-tolerant.
+- S4-4: 6 files decomposed; pure layout/logic extraction. Where complexity
+  was in `<script>` (QuickActions, CloudInitEditor), extracted to `*.ts`
+  helpers per the plan's guidance. CSS classes and Tailwind untouched.
+- S4-5: iSCSI/Ceph serde-roundtrip tests skipped (configs don't derive
+  Serialize/Deserialize, and adding serde to dev-deps was forbidden).
+  Replaced with Clone roundtrip + handle-format ABI tests that catch the
+  same regression class.
+
+Findings remaining open (not in scope for this branch):
+- **C-7** STONITH / node fencing — distributed systems design work
+- **C-12** OpenTelemetry OTLP — collector dependency, own branch
+- **C-14, C-15** — verify if these were ever flagged (not handled here)
+- **H-1 through H-5, H-8 through H-22, H-25 through H-28** — out of scope
+  per task plan; deferred to follow-up branches
+
+**Branch is ready for review and PR to main when authorized.**
