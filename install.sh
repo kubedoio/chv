@@ -477,11 +477,21 @@ import_base_image() {
         return
     fi
 
-    # Login to get auth token
+    # Login to get auth token. Read the bootstrap admin password from the
+    # 0600 root-only file written by seed_admin_user(); never embed credentials.
+    local admin_pw
+    admin_pw=$(cat "${CHV_CONFIG_DIR}/initial_admin_password" 2>/dev/null) || {
+        warn "Cannot read ${CHV_CONFIG_DIR}/initial_admin_password — skipping image import."
+        return
+    }
+    if [ -z "$admin_pw" ]; then
+        warn "Empty admin password file — skipping image import."
+        return
+    fi
     local login_response
     login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d '{"username":"admin","password":"admin"}' 2>/dev/null)
+        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null)
     if [ -z "$login_response" ]; then
         warn "Failed to login for image import."
         return
@@ -539,11 +549,21 @@ seed_dev_resources() {
         return
     fi
 
-    # Login as admin to get JWT token
+    # Login as admin to get JWT token. Read the bootstrap password from the
+    # 0600 root-only file written by seed_admin_user(); never embed credentials.
+    local admin_pw
+    admin_pw=$(cat "${CHV_CONFIG_DIR}/initial_admin_password" 2>/dev/null) || {
+        warn "Cannot read ${CHV_CONFIG_DIR}/initial_admin_password — skipping dev resource seeding."
+        return
+    }
+    if [ -z "$admin_pw" ]; then
+        warn "Empty admin password file — skipping dev resource seeding."
+        return
+    fi
     local login_response
     login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d '{"username":"admin","password":"admin"}' 2>/dev/null)
+        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null)
     if [ -z "$login_response" ]; then
         warn "Failed to login as admin, skipping dev resource seeding."
         return
@@ -626,15 +646,98 @@ generate_certs() {
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR"/certs
     chmod 750 "$CHV_CONFIG_DIR"/certs
 
+    # ----- Root CA (idempotent) -----
     if [ ! -f "$CHV_CONFIG_DIR/certs/ca.key" ]; then
         openssl genrsa -out "$CHV_CONFIG_DIR/certs/ca.key" 4096 2>/dev/null
         openssl req -x509 -new -nodes -key "$CHV_CONFIG_DIR/certs/ca.key" \
             -sha256 -days 3650 -out "$CHV_CONFIG_DIR/certs/ca.crt" \
             -subj "/O=CHV/CN=chv-ca" 2>/dev/null
-        chmod 640 "$CHV_CONFIG_DIR/certs/ca.key"
-        chmod 644 "$CHV_CONFIG_DIR/certs/ca.crt"
-        chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/ca.key" "$CHV_CONFIG_DIR/certs/ca.crt"
     fi
+    # H-6 fix: 0600 (was 0640 group-readable). The CA private key is
+    # only ever read by install.sh which runs as root; runtime services
+    # never touch ca.key.
+    chmod 0600 "$CHV_CONFIG_DIR/certs/ca.key"
+    chmod 0644 "$CHV_CONFIG_DIR/certs/ca.crt"
+    chown root:root "$CHV_CONFIG_DIR/certs/ca.key"
+    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/ca.crt"
+
+    # ----- Server cert (control plane) -----
+    if [ ! -f "$CHV_CONFIG_DIR/certs/server.key" ]; then
+        local server_csr_conf
+        server_csr_conf=$(mktemp)
+        cat > "$server_csr_conf" <<CSR_EOF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+
+[req_dn]
+O  = CHV
+CN = chv-controlplane
+
+[v3_req]
+keyUsage         = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName   = @alt_names
+
+[alt_names]
+DNS.1 = localhost
+DNS.2 = chv-controlplane
+IP.1  = 127.0.0.1
+CSR_EOF
+
+        openssl genrsa -out "$CHV_CONFIG_DIR/certs/server.key" 4096 2>/dev/null
+        openssl req -new -key "$CHV_CONFIG_DIR/certs/server.key" \
+            -out "$CHV_CONFIG_DIR/certs/server.csr" \
+            -config "$server_csr_conf" 2>/dev/null
+        openssl x509 -req -in "$CHV_CONFIG_DIR/certs/server.csr" \
+            -CA "$CHV_CONFIG_DIR/certs/ca.crt" \
+            -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
+            -CAcreateserial \
+            -out "$CHV_CONFIG_DIR/certs/server.crt" \
+            -days 825 -sha256 \
+            -extfile "$server_csr_conf" -extensions v3_req 2>/dev/null
+        rm -f "$server_csr_conf" "$CHV_CONFIG_DIR/certs/server.csr"
+    fi
+    chmod 0640 "$CHV_CONFIG_DIR/certs/server.key"
+    chmod 0644 "$CHV_CONFIG_DIR/certs/server.crt"
+    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/server.key" "$CHV_CONFIG_DIR/certs/server.crt"
+
+    # ----- Client cert (agent) -----
+    if [ ! -f "$CHV_CONFIG_DIR/certs/agent-client.key" ]; then
+        local client_csr_conf
+        client_csr_conf=$(mktemp)
+        cat > "$client_csr_conf" <<CSR_EOF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+
+[req_dn]
+O  = CHV
+CN = chv-agent
+
+[v3_req]
+keyUsage         = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth
+CSR_EOF
+
+        openssl genrsa -out "$CHV_CONFIG_DIR/certs/agent-client.key" 4096 2>/dev/null
+        openssl req -new -key "$CHV_CONFIG_DIR/certs/agent-client.key" \
+            -out "$CHV_CONFIG_DIR/certs/agent-client.csr" \
+            -config "$client_csr_conf" 2>/dev/null
+        openssl x509 -req -in "$CHV_CONFIG_DIR/certs/agent-client.csr" \
+            -CA "$CHV_CONFIG_DIR/certs/ca.crt" \
+            -CAkey "$CHV_CONFIG_DIR/certs/ca.key" \
+            -CAcreateserial \
+            -out "$CHV_CONFIG_DIR/certs/agent-client.crt" \
+            -days 825 -sha256 \
+            -extfile "$client_csr_conf" -extensions v3_req 2>/dev/null
+        rm -f "$client_csr_conf" "$CHV_CONFIG_DIR/certs/agent-client.csr"
+    fi
+    chmod 0640 "$CHV_CONFIG_DIR/certs/agent-client.key"
+    chmod 0644 "$CHV_CONFIG_DIR/certs/agent-client.crt"
+    chown root:"$CHV_USER" "$CHV_CONFIG_DIR/certs/agent-client.key" "$CHV_CONFIG_DIR/certs/agent-client.crt"
 }
 
 # -----------------------------------------------------------------------------
@@ -737,6 +840,27 @@ install_configs() {
 
     JWT_SECRET=$(openssl rand -base64 32 | tr -d '=+/')
 
+    # Generate encryption key for S3 credentials at rest (used by chv-controlplane).
+    # Persists to a 0600 root-only env file that systemd reads via EnvironmentFile=.
+    # Rotating this key requires re-encrypting all stored S3 credentials, so the
+    # file is generated once and preserved across re-runs.
+    local enc_key_file="$CHV_CONFIG_DIR/encryption.env"
+    if [ ! -f "$enc_key_file" ]; then
+        local enc_key
+        enc_key=$(openssl rand -base64 32 | tr -d '\n')
+        # Atomic create with safe perms before writing the secret.
+        install -m 0600 -o root -g root /dev/null "$enc_key_file"
+        cat > "$enc_key_file" <<ENC_EOF
+# CHV encryption key for credentials at rest. Generated by install.sh.
+# Mode: 0600 (root only). Read by chv-controlplane.service via EnvironmentFile=.
+# Rotating this key requires re-encrypting all stored S3 credentials.
+CHV_ENCRYPTION_KEY=${enc_key}
+ENC_EOF
+    fi
+    # Re-assert perms in case file was tampered with between runs.
+    chmod 0600 "$enc_key_file"
+    chown root:root "$enc_key_file"
+
     cat > "$CHV_CONFIG_DIR/controlplane.toml" <<EOF
 grpc_bind = "127.0.0.1:8443"
 http_bind = "127.0.0.1:8080"
@@ -752,8 +876,11 @@ min_connections = 1
 acquire_timeout_secs = 5
 
 [tls]
-ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
-ca_key_path = "${CHV_CONFIG_DIR}/certs/ca.key"
+ca_cert_path     = "${CHV_CONFIG_DIR}/certs/ca.crt"
+ca_key_path      = "${CHV_CONFIG_DIR}/certs/ca.key"
+server_cert_path = "${CHV_CONFIG_DIR}/certs/server.crt"
+server_key_path  = "${CHV_CONFIG_DIR}/certs/server.key"
+client_ca_path   = "${CHV_CONFIG_DIR}/certs/ca.crt"
 EOF
     chmod 640 "$CHV_CONFIG_DIR/controlplane.toml"
     chown root:"$CHV_USER" "$CHV_CONFIG_DIR/controlplane.toml"
@@ -762,7 +889,7 @@ EOF
 socket_path = "/run/chv/agent/api.sock"
 runtime_dir = "${CHV_DATA_DIR}/agent"
 log_level = "info"
-control_plane_addr = "http://127.0.0.1:8443"
+control_plane_addr = "https://127.0.0.1:8443"
 stord_socket = "/run/chv/stord/api.sock"
 nwd_socket = "/run/chv/nwd/api.sock"
 chv_binary_path = "/usr/bin/cloud-hypervisor"
@@ -773,8 +900,8 @@ node_id = "${CHV_NODE_ID}"
 metrics_bind = "127.0.0.1:9901"
 storage_base_dir = "${CHV_DATA_DIR}/storage"
 bootstrap_token_path = "${CHV_CONFIG_DIR}/bootstrap.token"
-tls_cert_path = "/run/chv/agent/agent.crt"
-tls_key_path = "/run/chv/agent/agent.key"
+tls_cert_path = "${CHV_CONFIG_DIR}/certs/agent-client.crt"
+tls_key_path = "${CHV_CONFIG_DIR}/certs/agent-client.key"
 ca_cert_path = "${CHV_CONFIG_DIR}/certs/ca.crt"
 console_bind = "127.0.0.1:8444"
 jwt_secret = "${JWT_SECRET}"
@@ -830,6 +957,9 @@ Type=simple
 User=chv
 Group=chv
 ExecStart=/usr/local/bin/chv-controlplane /etc/chv/controlplane.toml
+# Pulls in CHV_ENCRYPTION_KEY for credentials-at-rest encryption.
+# Leading '-' tolerates absence (e.g., on the very first boot).
+EnvironmentFile=-/etc/chv/encryption.env
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
@@ -1079,6 +1209,108 @@ start_services() {
 }
 
 # -----------------------------------------------------------------------------
+# Seed the bootstrap admin user with a randomly-generated password.
+#
+# As of CHV 0.2.x, the SQL migrations no longer ship a default 'admin/admin'
+# credential. This function:
+#   1. Generates a 24-char URL-safe random password (openssl).
+#   2. Bcrypts it at cost 12 (matching the cost used historically in 0008).
+#   3. Inserts a single 'admin' row into the users table with
+#      must_change_password=1 (see migration 0044).
+#   4. Writes the plaintext to /etc/chv/initial_admin_password (mode 0600,
+#      root-owned) and prints it ONCE in a stdout banner.
+#
+# Idempotent: if the admin user already exists in the DB, this is a no-op.
+# Hard-fails if no bcrypt implementation is available; never falls back to
+# a known/weak password.
+# -----------------------------------------------------------------------------
+seed_admin_user() {
+    local pw_file="${CHV_CONFIG_DIR}/initial_admin_password"
+    local db_path="${CHV_DB_PATH}"
+
+    info "Seeding bootstrap admin user..."
+
+    if ! cmd_exists sqlite3; then
+        fatal "sqlite3 not available — cannot seed admin user. Install sqlite3 package."
+    fi
+
+    # Idempotency: if the admin user already exists, do nothing. We talk to the
+    # SQLite DB directly because the API requires authentication (the very
+    # thing we're bootstrapping).
+    if [ -f "$db_path" ] && \
+       [ "$(sqlite3 "$db_path" "SELECT COUNT(*) FROM users WHERE username = 'admin';" 2>/dev/null)" = "1" ]; then
+        info "Admin user already exists — skipping seed."
+        return 0
+    fi
+
+    # 18 bytes of entropy → 24 chars after base64; replace '+/' with '-_' for
+    # URL-safety so operators can paste the password into URL query strings.
+    local plaintext_pw
+    plaintext_pw=$(openssl rand -base64 18 | tr -d '\n' | tr '+/' '-_')
+    if [ -z "$plaintext_pw" ]; then
+        fatal "Failed to generate random password (openssl rand failed)."
+    fi
+
+    # Bcrypt cost 12 matches the hashes that earlier migrations shipped, so
+    # password verification cost stays consistent across upgrades.
+    local hashed_pw=""
+    if python3 -c 'import bcrypt' 2>/dev/null; then
+        hashed_pw=$(python3 -c '
+import bcrypt, sys
+pw = sys.argv[1].encode("utf-8")
+print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode("utf-8"))
+' "$plaintext_pw")
+    elif cmd_exists htpasswd; then
+        # htpasswd emits '$2y$' which bcrypt verifiers accept identically to '$2b$'.
+        hashed_pw=$(htpasswd -nbBC 12 admin "$plaintext_pw" | sed 's/^admin://')
+    else
+        fatal "Neither python3-bcrypt nor htpasswd available — cannot bcrypt admin password. Install one of: 'pip3 install bcrypt' or 'apt install apache2-utils' (Debian/Ubuntu) / 'dnf install httpd-tools' (RHEL/Fedora)."
+    fi
+
+    if [ -z "$hashed_pw" ]; then
+        fatal "Bcrypt produced empty hash — refusing to seed admin user."
+    fi
+
+    # Fixed user_id for predictability across reinstalls (matches the value
+    # historically used by migration 0008).
+    local admin_user_id="00000000-0000-0000-0000-000000000001"
+
+    # The SQL is delivered via heredoc with the surrounding shell expanding
+    # ${admin_user_id} and ${hashed_pw}. The bcrypt hash contains '$' but those
+    # are protected by the surrounding single quotes inside the SQL itself
+    # (heredoc expands shell vars but the SQL parser sees the literal string).
+    if ! sqlite3 "$db_path" <<SQL
+INSERT INTO users (user_id, username, password_hash, role, display_name, must_change_password)
+VALUES ('${admin_user_id}', 'admin', '${hashed_pw}', 'admin', 'Administrator', 1);
+SQL
+    then
+        fatal "Failed to insert bootstrap admin row into ${db_path}."
+    fi
+
+    # Atomically create the credential file with strict perms BEFORE writing
+    # the plaintext, so there is no window where the file exists with permissive
+    # default umask perms.
+    install -m 0600 -o root -g root /dev/null "$pw_file"
+    printf '%s\n' "$plaintext_pw" > "$pw_file"
+    chmod 0600 "$pw_file"
+
+    cat <<BANNER
+
+================================================================================
+  CHV Bootstrap Admin Credentials
+================================================================================
+  Username:      admin
+  Password:      ${plaintext_pw}
+  Stored at:     ${pw_file} (mode 0600, root only)
+  Rotation:      Required on first login (must_change_password=1).
+
+  RECORD THIS PASSWORD NOW. It will not be displayed again.
+================================================================================
+
+BANNER
+}
+
+# -----------------------------------------------------------------------------
 # Cleanup
 # -----------------------------------------------------------------------------
 cleanup() {
@@ -1138,6 +1370,10 @@ create_bootstrap_token
 install_systemd_services
 install_nginx
 start_services
+
+# Seed bootstrap admin (must run before import_base_image which authenticates).
+seed_admin_user || fatal "Failed to seed bootstrap admin user."
+
 import_base_image
 
 if [ "${INSTALL_CHV_NO_SEED:-0}" != "1" ]; then
@@ -1170,7 +1406,9 @@ Logs:
   journalctl -u chv-agent -f
 
 Defaults:
-  Admin login:   admin / admin
+  Admin login:   admin / (see /etc/chv/initial_admin_password)
+                 The bootstrap password is in that file (mode 0600 root).
+                 You will be required to rotate it on first login.
   Bootstrap token valid for 1 hour from installation.
 
 EOF
