@@ -2951,4 +2951,432 @@ mod tests {
             DELAY * N as u32
         );
     }
+
+    // ------------------------------------------------------------------
+    // Backoff predicate (pure unit tests, no I/O)
+    // ------------------------------------------------------------------
+
+    // Tick 0 and 1 must always run regardless of failure count: this is the
+    // "boot window" where we have not yet observed enough failures to back
+    // off, and missing the first tick would delay every freshly-scheduled VM.
+    #[test]
+    fn should_skip_vm_for_tick_runs_first_two_ticks() {
+        assert!(!should_skip_vm_for_tick(0, 0));
+        assert!(!should_skip_vm_for_tick(0, 100));
+        assert!(!should_skip_vm_for_tick(1, 0));
+        assert!(!should_skip_vm_for_tick(1, 100));
+    }
+
+    // Below 3 failures the predicate must never gate. This guards the "no
+    // backoff for healthy VMs" invariant that lives in the same body as the
+    // tier thresholds and is easy to break.
+    #[test]
+    fn should_skip_vm_for_tick_no_skip_below_three_failures() {
+        for tick in 2u64..=120 {
+            for failures in 0u32..3 {
+                assert!(
+                    !should_skip_vm_for_tick(tick, failures),
+                    "tick={} failures={} must not be skipped",
+                    tick,
+                    failures
+                );
+            }
+        }
+    }
+
+    // Mid-tier (3..10 failures): retry every 6th tick.
+    #[test]
+    fn should_skip_vm_for_tick_mid_tier_runs_every_six_ticks() {
+        for tick in 2u64..=120 {
+            let expected_skip = !tick.is_multiple_of(6);
+            assert_eq!(
+                should_skip_vm_for_tick(tick, 5),
+                expected_skip,
+                "tick={} mid-tier should skip={}",
+                tick,
+                expected_skip
+            );
+        }
+    }
+
+    // Persistent-failure tier (>=10 failures): retry every 60th tick.
+    #[test]
+    fn should_skip_vm_for_tick_persistent_tier_runs_every_sixty_ticks() {
+        for tick in 2u64..=240 {
+            let expected_skip = !tick.is_multiple_of(60);
+            assert_eq!(
+                should_skip_vm_for_tick(tick, 25),
+                expected_skip,
+                "tick={} persistent-tier should skip={}",
+                tick,
+                expected_skip
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // VmRuntime failure-tracking API (used by per-VM reconcile workers)
+    // ------------------------------------------------------------------
+
+    // record_failure on a VM that was never created must still bump the
+    // failure_counts map so future ticks can back off. Crucially it must NOT
+    // create a phantom VmRecord — that regression caused the reconciler to
+    // skip create and try start/stop on a non-existent VM.
+    #[tokio::test]
+    async fn record_failure_without_record_increments_counter_only() {
+        let runtime = VmRuntime::new(std::sync::Arc::new(
+            chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+        ));
+        runtime.record_failure("vm-ghost", "1", "boom").await;
+        runtime.record_failure("vm-ghost", "1", "boom again").await;
+        assert_eq!(runtime.consecutive_failures("vm-ghost").await, 2);
+        assert_eq!(
+            runtime
+                .consecutive_failures_for_generation("vm-ghost", "1")
+                .await,
+            2
+        );
+        assert!(
+            runtime.get("vm-ghost").await.is_none(),
+            "record_failure must not synthesise a VmRecord for a never-created VM"
+        );
+    }
+
+    // clear_failure_count zeroes the counter so the per-generation lookup
+    // also returns 0. This is the success path called after a successful
+    // create/start/delete and is what stops the backoff once a VM recovers.
+    #[tokio::test]
+    async fn clear_failure_count_resets_counter() {
+        let runtime = VmRuntime::new(std::sync::Arc::new(
+            chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+        ));
+        runtime.record_failure("vm-x", "1", "err").await;
+        runtime.record_failure("vm-x", "1", "err").await;
+        runtime.record_failure("vm-x", "1", "err").await;
+        assert_eq!(runtime.consecutive_failures("vm-x").await, 3);
+        runtime.clear_failure_count("vm-x").await;
+        assert_eq!(runtime.consecutive_failures("vm-x").await, 0);
+        assert_eq!(
+            runtime
+                .consecutive_failures_for_generation("vm-x", "1")
+                .await,
+            0
+        );
+    }
+
+    // Failures are tracked per-generation: a stale failure from generation
+    // "1" must NOT cause generation "2" to back off when looked up by gen.
+    // The implementation keys the counter map by vm_id and stores a single
+    // (count, latest_generation) pair: the per-generation lookup matches
+    // strictly, so once gen "2" overwrites the stored gen, gen "1" reads 0.
+    // This is what lets a CP operator unstick a VM by bumping its generation.
+    #[tokio::test]
+    async fn record_failure_isolates_generations() {
+        let runtime = VmRuntime::new(std::sync::Arc::new(
+            chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+        ));
+        runtime.record_failure("vm-y", "1", "old gen failed").await;
+        runtime.record_failure("vm-y", "1", "old gen failed").await;
+        // Generation "1" has 2 failures; gen "2" lookup must return 0.
+        assert_eq!(
+            runtime
+                .consecutive_failures_for_generation("vm-y", "1")
+                .await,
+            2
+        );
+        assert_eq!(
+            runtime
+                .consecutive_failures_for_generation("vm-y", "2")
+                .await,
+            0,
+            "stale gen-1 failures must not gate gen-2"
+        );
+        // After recording under "2", the stored generation flips to "2", so
+        // gen "1" lookups return 0 — this is what lets the CP unstick a VM
+        // by bumping its generation.
+        runtime.record_failure("vm-y", "2", "new gen failed").await;
+        assert_eq!(
+            runtime
+                .consecutive_failures_for_generation("vm-y", "1")
+                .await,
+            0,
+            "after gen rollover, gen-1 lookups must read zero"
+        );
+        assert!(
+            runtime
+                .consecutive_failures_for_generation("vm-y", "2")
+                .await
+                >= 1,
+            "gen-2 must have at least one tracked failure"
+        );
+    }
+
+    // record_failure on an existing VmRecord must flip status to Failed and
+    // populate last_error, so the reconciler's recovery path can detect it.
+    #[tokio::test]
+    async fn record_failure_marks_existing_record_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let runtime = VmRuntime::new(mock);
+        let config = VmConfig {
+            vm_id: "vm-flip".to_string(),
+            cpus: 1,
+            memory_bytes: 512,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-flip/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        runtime
+            .create_vm("vm-flip", "1", &config, None)
+            .await
+            .expect("create_vm");
+        runtime.record_failure("vm-flip", "1", "explosion").await;
+
+        let rec = runtime.get("vm-flip").await.expect("record present");
+        assert_eq!(rec.runtime_status, "Failed");
+        assert_eq!(rec.last_error.as_deref(), Some("explosion"));
+        assert_eq!(rec.consecutive_failures, 1);
+        assert_eq!(
+            runtime
+                .consecutive_failures_for_generation("vm-flip", "1")
+                .await,
+            1
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Reconcile invariants
+    // ------------------------------------------------------------------
+
+    // When desired matches observed (Running == Running, same cpus/mem),
+    // reconcile_vms must not delete the VM nor toggle its state. This guards
+    // the "steady state is idempotent" property that the FSM depends on.
+    #[tokio::test]
+    async fn reconcile_vms_is_noop_when_running_vm_matches_desired() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        start_mock_stord(&stord_socket).await;
+        start_mock_nwd(&nwd_socket).await;
+
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let runtime = VmRuntime::new(mock.clone());
+        // Pre-create and start a VM whose cpus/memory match the test_cache spec.
+        let config = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 1,
+            memory_bytes: 1024,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        runtime
+            .create_vm("vm-1", "1", &config, None)
+            .await
+            .expect("create_vm");
+        runtime.start_vm("vm-1", None).await.expect("start_vm");
+        assert_eq!(
+            runtime.get("vm-1").await.expect("record").runtime_status,
+            "Running"
+        );
+
+        let mut rec = Reconciler::new(
+            Arc::new(tokio::sync::Mutex::new(test_cache())),
+            runtime,
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+        )
+        .await;
+        rec.reconcile_vms().await.expect("reconcile_vms");
+
+        // VM must still be present in the runtime map (not deleted).
+        assert!(mock.vms.lock().expect("mock lock").contains_key("vm-1"));
+        // VmRecord must still be Running with the same cpus/mem.
+        let final_rec = rec
+            .vm_runtime
+            .get("vm-1")
+            .await
+            .expect("record present after reconcile");
+        assert_eq!(final_rec.runtime_status, "Running");
+        assert_eq!(final_rec.cpus, 1);
+        assert_eq!(final_rec.memory_bytes, 1024);
+        assert_eq!(final_rec.consecutive_failures, 0);
+    }
+
+    // Bootstrapping is a node-level state that gates all VM operations. Even
+    // if the cache somehow contains a VM fragment, run_once must NOT call
+    // reconcile_vms at all — the agent has not yet been told it can host
+    // tenant workloads. Regression class: a refactor that pulls VM ops above
+    // the node-state guard.
+    #[tokio::test]
+    async fn run_once_in_bootstrapping_does_not_create_vms() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+
+        // Cache has a VM fragment AND a non-tenant-ready node_state.
+        let mut cache = test_cache();
+        cache.node_state = NodeState::Bootstrapping.as_str().to_string();
+
+        let mut rec = Reconciler::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(mock.clone()),
+            // Use bogus sockets — we expect reconcile_vms NOT to be called,
+            // so no probe should ever happen. If the guard is broken, the
+            // probe would fail-soft (warn + return), not panic, but the
+            // post-condition below would still catch it: no VM created.
+            PathBuf::from("/tmp/chv-test-fake-stord-bootstrap.sock"),
+            PathBuf::from("/tmp/chv-test-fake-nwd-bootstrap.sock"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+
+        rec.run_once().await.expect("run_once");
+
+        // No VM was created — the bootstrapping guard held.
+        assert!(
+            mock.vms.lock().expect("mock lock").is_empty(),
+            "Bootstrapping node must not run VM reconcile"
+        );
+    }
+
+    // Malformed spec_json (invalid UTF-8) on an existing VM must record a
+    // failure and never panic. Guards against `from_utf8` being upgraded to
+    // a panicking variant during a refactor.
+    #[tokio::test]
+    async fn reconcile_vms_records_failure_on_malformed_spec_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        start_mock_stord(&stord_socket).await;
+        start_mock_nwd(&nwd_socket).await;
+
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+        let runtime = VmRuntime::new(mock.clone());
+        // Pre-create a VM in the runtime so the existing-VM reconcile path is
+        // hit (rather than the create path, which uses a different decoder).
+        let config = VmConfig {
+            vm_id: "vm-bad".to_string(),
+            cpus: 1,
+            memory_bytes: 512,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: dir.path().join("vms/vm-bad/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        runtime
+            .create_vm("vm-bad", "1", &config, None)
+            .await
+            .expect("create_vm");
+
+        // Cache fragment with invalid UTF-8 bytes (0xFF 0xFE is not valid UTF-8).
+        let mut cache = empty_cache();
+        cache.vm_fragments.insert(
+            "vm-bad".to_string(),
+            crate::cache::DesiredStateFragment {
+                id: "vm-bad".to_string(),
+                kind: "vm".to_string(),
+                generation: "1".to_string(),
+                spec_json: vec![0xFF, 0xFE, 0xFD],
+                policy_json: vec![],
+                updated_at: "2024-01-01T00:00:00Z".to_string(),
+                updated_by: "cp".to_string(),
+            },
+        );
+
+        let mut rec = Reconciler::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            runtime,
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+        )
+        .await;
+
+        // Must not panic — that is the regression we are guarding against.
+        rec.reconcile_vms().await.expect("reconcile_vms");
+
+        // A failure should have been recorded for this generation.
+        let count = rec
+            .vm_runtime
+            .consecutive_failures_for_generation("vm-bad", "1")
+            .await;
+        assert!(
+            count >= 1,
+            "expected at least one recorded failure, got {}",
+            count
+        );
+    }
+
+    // Same as above but with structurally-valid UTF-8 that fails JSON parse.
+    // Exercises the second decoder branch (VmSpec::from_json) which is a
+    // separate code path from the UTF-8 check.
+    #[tokio::test]
+    async fn reconcile_vms_records_failure_on_invalid_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stord_socket = dir.path().join("stord.sock");
+        let nwd_socket = dir.path().join("nwd.sock");
+        start_mock_stord(&stord_socket).await;
+        start_mock_nwd(&nwd_socket).await;
+
+        let mock =
+            std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
+
+        let mut cache = empty_cache();
+        cache.vm_fragments.insert(
+            "vm-junk".to_string(),
+            crate::cache::DesiredStateFragment {
+                id: "vm-junk".to_string(),
+                kind: "vm".to_string(),
+                generation: "1".to_string(),
+                // Valid UTF-8 but not valid JSON for VmSpec.
+                spec_json: b"not-a-json-document".to_vec(),
+                policy_json: vec![],
+                updated_at: "2024-01-01T00:00:00Z".to_string(),
+                updated_by: "cp".to_string(),
+            },
+        );
+
+        let runtime = VmRuntime::new(mock.clone());
+        let mut rec = Reconciler::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            runtime,
+            stord_socket,
+            nwd_socket,
+            dir.path().to_path_buf(),
+        )
+        .await;
+
+        rec.reconcile_vms().await.expect("reconcile_vms");
+
+        // No phantom record should have been created — record_failure on a
+        // non-existent VM must only bump the counter map.
+        assert!(rec.vm_runtime.get("vm-junk").await.is_none());
+        let count = rec
+            .vm_runtime
+            .consecutive_failures_for_generation("vm-junk", "1")
+            .await;
+        assert!(
+            count >= 1,
+            "expected at least one recorded failure for junk JSON, got {}",
+            count
+        );
+        // And no real VM landed in the adapter.
+        assert!(!mock.vms.lock().expect("mock lock").contains_key("vm-junk"));
+    }
 }
