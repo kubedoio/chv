@@ -421,7 +421,7 @@ and review cycles:
 
 - [x] Phase 1 (S1): Security defaults — sqlx fix, admin/admin, install.sh TLS, vitest CVE, SECURITY.md ✅ landed in 5 commits (df6f2d42, 0ba3e649, 69bdb40b, b4238ec4, fb260481)
 - [x] Phase 2 (S2): Data-plane correctness — quota TOCTOU, orchestrator N+1, migration cancel, RwLock + reconciler parallelism ✅ landed in 5 commits (49ed8306, 271eae37, 67b8c701, f09f9e1e, 192d58b5)
-- [ ] Phase 3 (S3): Observability + contracts — VM metrics, gRPC interceptor, request-ID, proto reserved, SLO docs
+- [x] Phase 3 (S3): Observability + contracts — VM metrics, gRPC interceptor, request-ID, proto reserved, SLO docs ✅ landed in 5 commits (ee5a08d7, bd4eb3a8, ee3206b6, a675e15e, 937b9c41)
 - [ ] Phase 4 (S4): Tests + cleanup — reconcile tests, JWT tests, crypto tests, Svelte decomp, stord tests
 
 ## Key Questions
@@ -450,35 +450,39 @@ and review cycles:
 
 ## Status
 
-**Phase 2 (S2) complete.** All 5 sub-items landed as bisectable commits on
-`gap-cleanup-production`. Each commit compiles in isolation (verified via
-`git checkout <sha> && cargo check --workspace`). Workspace lib tests:
-481/481 pass. `cargo clippy --workspace --lib -- -D warnings` clean.
-`cargo fmt --all -- --check` clean.
+## Status
 
-Phase 2 closes findings: **C-5, C-6, C-8, C-9, C-10**.
+**Phase 3 (S3) complete.** All 5 sub-items landed as bisectable commits on
+`gap-cleanup-production`. `cargo check --workspace` clean. `cargo clippy
+--workspace --lib -- -D warnings` clean. `cargo fmt --all -- --check` clean.
+All workspace lib tests pass (no new failures). YAML rule files validated via
+`python3 yaml.safe_load`.
 
-Cumulative findings closed across S1 + S2: **C-1, C-2, C-3, C-4, C-5, C-6,
-C-8, C-9, C-10, H-6, H-7, H-30 (partial)** — 11 of 22 CRITICALs + 3 HIGHs.
+Phase 3 closes findings: **C-11, C-13, H-23, H-24, C-16, H-29**.
 
-Notes for S2 maintainers:
-- S2-1: third callsite (`create_vm_from_template` in templates.rs) was
-  fixed alongside the two listed in the plan; the same TOCTOU was
-  exploitable via the template-clone API.
-- S2-3: SQLite correlated subqueries in RETURNING work on bundled
-  SQLite >= 3.35; no fallback CTE path needed.
-- S2-5: cancel API is HTTP-only at `POST /admin/migrations/{id}/cancel`;
-  proto-level CancelMigration RPC deferred (would touch LifecycleService,
-  MutationService, frontend). The HTTP path is admin-token gated.
-- S2-4: `chv-agent-runtime-ch/src/mock.rs` retains std::sync::Mutex
-  (test-only, not on hot path).
-- S2-2: per-VM workers each open their own short-lived stord/nwd
-  connections; bounded by VM_RECONCILE_CONCURRENCY=8.
+Cumulative findings closed across S1 + S2 + S3: **C-1, C-2, C-3, C-4, C-5,
+C-6, C-8, C-9, C-10, C-11, C-13, C-16, H-6, H-7, H-23, H-24, H-29,
+H-30 (partial)** — 13 of 22 CRITICALs + 6 HIGHs.
 
-Ready to begin Phase 3 (S3: observability + contracts) when authorized.
+Notes for S3 maintainers:
+- S3-1: Used VmOpGuard RAII (not async wrapper) so that `?` early-exits are
+  correctly classified as `err`. The guard records on Drop.
+- S3-2: `grpc_status` label is the raw numeric code from the `grpc-status`
+  header. For streaming responses where the trailer is not in leading headers,
+  the label degrades to `"unknown"` — documented in the module comment.
+  Test builders in agent_server.rs and daemon_clients.rs intentionally left
+  unwired to avoid test recorder side-effects.
+- S3-3: Reused the existing `correlation_middleware.rs` — no new middleware
+  module. The middleware body-rewrite is bounded at 64 KiB.
+- S3-4: Proto git-history audit found zero field-number removals across all 7
+  proto files. ADR-014 is purely forward-looking. `buf.yaml` suppresses
+  PACKAGE_DIRECTORY_MATCH and PACKAGE_VERSION_SUFFIX (CHV's layout does not
+  follow Go-package naming conventions).
+- S3-5: Metrics ports documented as configurable via `metrics_bind`; the
+  control-plane's `/metrics` is on its HTTP bind (`127.0.0.1:8080` by default).
 
-Pre-existing test flake (NOT introduced by S2) to fix in S4-3:
-- `credential_crypto::tests::test_no_key_stores_plaintext` fails when run
-  in parallel with sibling tests because some other test sets
-  `CHV_ENCRYPTION_KEY` and doesn't restore it. Passes serially. To be
-  fixed by S4-3 (credential crypto tamper tests).
+Pre-existing test flake (NOT introduced by S3) to fix in S4-3:
+- `credential_crypto::tests::test_no_key_stores_plaintext` — pre-existing
+  parallel-test env-var pollution. Passes serially.
+
+Ready to begin Phase 4 (S4: tests + cleanup) when authorized.
