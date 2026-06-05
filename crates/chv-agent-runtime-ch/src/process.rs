@@ -14,6 +14,47 @@ use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
 
+/// RAII guard that records VM lifecycle RED metrics when it drops.
+///
+/// - `chv_vm_ops_total{op, result}` counter — `result` is `"ok"` or `"err"`
+/// - `chv_vm_op_duration_seconds{op}` histogram (recorded on BOTH paths so
+///   dashboards can visualise error latency)
+///
+/// Mark `succeeded = true` only when the operation returns `Ok`. Any early
+/// return via `?` will trigger Drop with the default `succeeded = false`.
+struct VmOpGuard {
+    op: &'static str,
+    start: std::time::Instant,
+    succeeded: bool,
+}
+
+impl VmOpGuard {
+    fn new(op: &'static str) -> Self {
+        Self {
+            op,
+            start: std::time::Instant::now(),
+            succeeded: false,
+        }
+    }
+}
+
+impl Drop for VmOpGuard {
+    fn drop(&mut self) {
+        let label = if self.succeeded { "ok" } else { "err" };
+        metrics::counter!(
+            chv_observability::CHV_VM_OPS_TOTAL,
+            "op" => self.op,
+            "result" => label
+        )
+        .increment(1);
+        metrics::histogram!(
+            chv_observability::CHV_VM_OP_DURATION_SECONDS,
+            "op" => self.op
+        )
+        .record(self.start.elapsed().as_secs_f64());
+    }
+}
+
 use crate::adapter::{
     AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo,
 };
@@ -421,6 +462,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         config: &VmConfig,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
+        let mut __guard = VmOpGuard::new("create");
         if !std::path::Path::new("/dev/kvm").exists() {
             return Err(ChvError::Internal {
                 reason: "Host does not have KVM capability (/dev/kvm missing). VMs require hardware virtualization.".into(),
@@ -799,10 +841,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         });
 
+        __guard.succeeded = true;
         Ok(config.vm_id.clone())
     }
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let mut __guard = VmOpGuard::new("start");
         let (api_socket, pty_master_fd, pty_tx, pty_scrollback, broadcaster_alive) = {
             let vms = self.vms.read().await;
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
@@ -853,6 +897,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         }
 
+        __guard.succeeded = true;
         Ok(())
     }
 
@@ -862,6 +907,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         force: bool,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
+        let mut __guard = VmOpGuard::new("stop");
         let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, force = force, op = operation_id.unwrap_or("-"), "stopping vm");
@@ -978,10 +1024,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 }
             }
         }
+        __guard.succeeded = true;
         Ok(())
     }
 
     async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let mut __guard = VmOpGuard::new("delete");
         let mut proc = {
             let mut map = self.vms.write().await;
             map.remove(vm_id).ok_or_else(|| ChvError::NotFound {
@@ -995,6 +1043,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let _ = proc.child.start_kill();
         let _ = proc.child.wait().await;
         let _ = tokio::fs::remove_file(&proc.api_socket).await;
+        __guard.succeeded = true;
         Ok(())
     }
 
@@ -1192,22 +1241,26 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let mut __guard = VmOpGuard::new("pause");
         let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "pausing vm via ch api");
 
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.pause", None).await?;
         Self::expect_status(status, "vm.pause")?;
+        __guard.succeeded = true;
         Ok(())
     }
 
     async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let mut __guard = VmOpGuard::new("resume");
         let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "resuming vm via ch api");
 
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resume", None).await?;
         Self::expect_status(status, "vm.resume")?;
+        __guard.succeeded = true;
         Ok(())
     }
 

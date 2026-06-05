@@ -9,3 +9,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+tower-layer = "0.3"
+tower-service = "0.3"
+http = "1"
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = "0.3"
