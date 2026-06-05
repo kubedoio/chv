@@ -152,9 +152,12 @@ impl Orchestrator {
         self.reap_stuck_operations().await?;
         self.check_node_liveness().await?;
 
-        // Atomically claim operations by marking them Running in the same query.
-        // This prevents double-dispatch if tick overlaps (takes longer than interval).
-        let claimed_rows = sqlx::query_as::<_, ClaimedOperationRow>(
+        // Atomically claim operations by marking them Running and resolve node_id
+        // in the same statement using correlated subqueries in the RETURNING clause.
+        // This prevents double-dispatch if tick overlaps (takes longer than interval)
+        // and eliminates an N+1 query (was: 2 + N round trips per tick; now: 2).
+        // SQLite 3.35+ supports correlated subqueries in RETURNING (sqlx 0.8 bundles 3.46+).
+        let claimed_rows = sqlx::query_as::<_, AcceptedOperationRow>(
             r#"
             UPDATE operations SET status = 'Running', updated_by = 'orchestrator'
             WHERE operation_id IN (
@@ -170,7 +173,12 @@ impl Orchestrator {
                 resource_kind,
                 resource_id,
                 desired_generation,
-                correlation_id
+                correlation_id,
+                COALESCE(
+                    (SELECT target_node_id FROM vm_desired_state WHERE vm_id = operations.resource_id),
+                    (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
+                    (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
+                ) AS node_id
             "#,
         )
         .fetch_all(&self.pool)
@@ -179,8 +187,9 @@ impl Orchestrator {
             reason: format!("failed to claim accepted operations: {e}"),
         })?;
 
-        // Also claim operations that are pending retry and whose next_retry_at has passed
-        let retryable_rows = sqlx::query_as::<_, ClaimedOperationRow>(
+        // Also claim operations that are pending retry and whose next_retry_at has passed.
+        // Same node_id resolution strategy as the Accepted-claim above.
+        let retryable_rows = sqlx::query_as::<_, AcceptedOperationRow>(
             r#"
             UPDATE operations SET status = 'Running', updated_by = 'orchestrator'
             WHERE operation_id IN (
@@ -197,7 +206,12 @@ impl Orchestrator {
                 resource_kind,
                 resource_id,
                 desired_generation,
-                correlation_id
+                correlation_id,
+                COALESCE(
+                    (SELECT target_node_id FROM vm_desired_state WHERE vm_id = operations.resource_id),
+                    (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
+                    (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
+                ) AS node_id
             "#,
         )
         .fetch_all(&self.pool)
@@ -206,40 +220,10 @@ impl Orchestrator {
             reason: format!("failed to claim retryable operations: {e}"),
         })?;
 
-        // Resolve node_id for each claimed operation
+        // Combine accepted + retryable claims, preserving order (accepted first, then retryable).
         let mut rows = Vec::with_capacity(claimed_rows.len() + retryable_rows.len());
-        for claimed in claimed_rows.into_iter().chain(retryable_rows) {
-            let node_id: Option<String> = sqlx::query_scalar(
-                r#"
-                SELECT COALESCE(vds.target_node_id, vol.node_id, net.node_id)
-                FROM operations o
-                LEFT JOIN vm_desired_state vds ON o.resource_id = vds.vm_id
-                LEFT JOIN volumes vol ON o.resource_id = vol.volume_id
-                LEFT JOIN networks net ON o.resource_id = net.network_id
-                WHERE o.operation_id = ?
-                "#,
-            )
-            .bind(&claimed.operation_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| ChvError::Internal {
-                reason: format!(
-                    "failed to resolve node_id for operation {}: {e}",
-                    claimed.operation_id
-                ),
-            })?
-            .flatten();
-
-            rows.push(AcceptedOperationRow {
-                operation_id: claimed.operation_id,
-                operation_type: claimed.operation_type,
-                resource_kind: claimed.resource_kind,
-                resource_id: claimed.resource_id,
-                desired_generation: claimed.desired_generation,
-                correlation_id: claimed.correlation_id,
-                node_id,
-            });
-        }
+        rows.extend(claimed_rows);
+        rows.extend(retryable_rows);
 
         metrics::gauge!("orchestrator_operations_accepted").set(rows.len() as f64);
 
@@ -1366,16 +1350,6 @@ fn validate_merged_overrides(overrides: &HypervisorOverrides) -> Result<(), Stri
 }
 
 #[derive(sqlx::FromRow)]
-struct ClaimedOperationRow {
-    operation_id: String,
-    operation_type: String,
-    resource_kind: String,
-    resource_id: String,
-    desired_generation: Option<i64>,
-    correlation_id: Option<String>,
-}
-
-#[derive(sqlx::FromRow)]
 struct AcceptedOperationRow {
     operation_id: String,
     operation_type: String,
@@ -1472,4 +1446,249 @@ struct AgentNicSpec {
 
 fn now_unix_ms() -> i64 {
     chv_common::now_unix_ms()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chv_controlplane_store::test_util::create_test_pool;
+
+    /// SQL used by `tick()` to claim Accepted operations and resolve `node_id`
+    /// in a single round trip via correlated subqueries in RETURNING.
+    /// Kept in sync with the production query in `tick()`.
+    const CLAIM_ACCEPTED_SQL: &str = r#"
+        UPDATE operations SET status = 'Running', updated_by = 'orchestrator'
+        WHERE operation_id IN (
+            SELECT o.operation_id
+            FROM operations o
+            WHERE o.status = 'Accepted'
+            ORDER BY o.requested_at ASC
+            LIMIT 10
+        )
+        RETURNING
+            operation_id,
+            operation_type,
+            resource_kind,
+            resource_id,
+            desired_generation,
+            correlation_id,
+            COALESCE(
+                (SELECT target_node_id FROM vm_desired_state WHERE vm_id = operations.resource_id),
+                (SELECT node_id FROM volumes WHERE volume_id = operations.resource_id),
+                (SELECT node_id FROM networks WHERE network_id = operations.resource_id)
+            ) AS node_id
+    "#;
+
+    async fn seed_node(pool: &StorePool, node_id: &str) {
+        sqlx::query("INSERT INTO nodes (node_id, hostname, display_name) VALUES (?, ?, ?)")
+            .bind(node_id)
+            .bind(format!("host-{node_id}"))
+            .bind(format!("Node {node_id}"))
+            .execute(pool)
+            .await
+            .expect("insert node");
+    }
+
+    async fn seed_vm(pool: &StorePool, vm_id: &str, target_node_id: &str) {
+        sqlx::query("INSERT INTO vms (vm_id, display_name) VALUES (?, ?)")
+            .bind(vm_id)
+            .bind(format!("VM {vm_id}"))
+            .execute(pool)
+            .await
+            .expect("insert vm");
+        sqlx::query(
+            "INSERT INTO vm_desired_state (vm_id, desired_generation, target_node_id) \
+             VALUES (?, 1, ?)",
+        )
+        .bind(vm_id)
+        .bind(target_node_id)
+        .execute(pool)
+        .await
+        .expect("insert vm_desired_state");
+    }
+
+    async fn seed_volume(pool: &StorePool, volume_id: &str, node_id: &str) {
+        sqlx::query(
+            "INSERT INTO volumes (volume_id, node_id, display_name, capacity_bytes) \
+             VALUES (?, ?, ?, 1024)",
+        )
+        .bind(volume_id)
+        .bind(node_id)
+        .bind(format!("Vol {volume_id}"))
+        .execute(pool)
+        .await
+        .expect("insert volume");
+    }
+
+    async fn seed_network(pool: &StorePool, network_id: &str, node_id: &str) {
+        sqlx::query("INSERT INTO networks (network_id, node_id, display_name) VALUES (?, ?, ?)")
+            .bind(network_id)
+            .bind(node_id)
+            .bind(format!("Net {network_id}"))
+            .execute(pool)
+            .await
+            .expect("insert network");
+    }
+
+    async fn seed_accepted_op(
+        pool: &StorePool,
+        operation_id: &str,
+        resource_kind: &str,
+        resource_id: &str,
+        operation_type: &str,
+        requested_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO operations \
+             (operation_id, idempotency_key, resource_kind, resource_id, operation_type, status, \
+              desired_generation, requested_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, 'Accepted', 1, ?, ?)",
+        )
+        .bind(operation_id)
+        .bind(format!("idem-{operation_id}"))
+        .bind(resource_kind)
+        .bind(resource_id)
+        .bind(operation_type)
+        .bind(requested_at)
+        .bind(requested_at)
+        .execute(pool)
+        .await
+        .expect("insert operation");
+    }
+
+    /// End-to-end check that the production claim SQL atomically:
+    ///   1. transitions Accepted -> Running, and
+    ///   2. resolves `node_id` for VM, volume, and network operations,
+    /// all within a single statement (no follow-up SELECTs needed).
+    #[tokio::test]
+    async fn claim_returning_resolves_node_id_for_mixed_resources() {
+        let pool = create_test_pool().await;
+
+        seed_node(&pool, "node-a").await;
+        seed_node(&pool, "node-b").await;
+        seed_node(&pool, "node-c").await;
+
+        seed_vm(&pool, "vm-1", "node-a").await;
+        seed_volume(&pool, "vol-1", "node-b").await;
+        seed_network(&pool, "net-1", "node-c").await;
+
+        // requested_at varies so we can assert ORDER BY requested_at ASC ordering survives.
+        seed_accepted_op(
+            &pool,
+            "op-vm",
+            "Vm",
+            "vm-1",
+            "StartVm",
+            "2026-01-01T00:00:01Z",
+        )
+        .await;
+        seed_accepted_op(
+            &pool,
+            "op-vol",
+            "Volume",
+            "vol-1",
+            "AttachVolume",
+            "2026-01-01T00:00:02Z",
+        )
+        .await;
+        seed_accepted_op(
+            &pool,
+            "op-net",
+            "Network",
+            "net-1",
+            "StartNetwork",
+            "2026-01-01T00:00:03Z",
+        )
+        .await;
+        // Operation whose resource_id matches no resource → node_id must be NULL.
+        seed_accepted_op(
+            &pool,
+            "op-orphan",
+            "Vm",
+            "ghost",
+            "StartVm",
+            "2026-01-01T00:00:04Z",
+        )
+        .await;
+
+        let rows = sqlx::query_as::<_, AcceptedOperationRow>(CLAIM_ACCEPTED_SQL)
+            .fetch_all(&pool)
+            .await
+            .expect("claim query must succeed: SQLite supports correlated subqueries in RETURNING");
+
+        // All four Accepted ops should be claimed in one statement.
+        assert_eq!(rows.len(), 4, "expected all Accepted ops claimed");
+
+        // RETURNING does not guarantee order, so look up by operation_id.
+        let by_id: std::collections::HashMap<&str, &AcceptedOperationRow> =
+            rows.iter().map(|r| (r.operation_id.as_str(), r)).collect();
+
+        assert_eq!(
+            by_id["op-vm"].node_id.as_deref(),
+            Some("node-a"),
+            "VM op should resolve node_id from vm_desired_state.target_node_id"
+        );
+        assert_eq!(
+            by_id["op-vol"].node_id.as_deref(),
+            Some("node-b"),
+            "Volume op should resolve node_id from volumes.node_id"
+        );
+        assert_eq!(
+            by_id["op-net"].node_id.as_deref(),
+            Some("node-c"),
+            "Network op should resolve node_id from networks.node_id"
+        );
+        assert!(
+            by_id["op-orphan"].node_id.is_none(),
+            "orphan op (no matching resource) must yield NULL node_id"
+        );
+
+        // Confirm the UPDATE actually transitioned the rows to Running.
+        let still_accepted: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE status = 'Accepted'")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(still_accepted, 0, "all Accepted ops should now be Running");
+
+        let now_running: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE status = 'Running'")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(now_running, 4);
+    }
+
+    /// Subsequent ticks must not re-claim rows already moved to Running.
+    /// This guards against accidental loosening of the WHERE-IN subquery.
+    #[tokio::test]
+    async fn claim_does_not_reclaim_running_rows() {
+        let pool = create_test_pool().await;
+        seed_node(&pool, "node-a").await;
+        seed_vm(&pool, "vm-1", "node-a").await;
+        seed_accepted_op(
+            &pool,
+            "op-1",
+            "Vm",
+            "vm-1",
+            "StartVm",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let first = sqlx::query_as::<_, AcceptedOperationRow>(CLAIM_ACCEPTED_SQL)
+            .fetch_all(&pool)
+            .await
+            .expect("first claim");
+        assert_eq!(first.len(), 1);
+
+        let second = sqlx::query_as::<_, AcceptedOperationRow>(CLAIM_ACCEPTED_SQL)
+            .fetch_all(&pool)
+            .await
+            .expect("second claim");
+        assert!(
+            second.is_empty(),
+            "second tick must not reclaim already-Running rows"
+        );
+    }
 }
