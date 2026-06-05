@@ -392,9 +392,13 @@ pub async fn create_vm(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
+    // Use BEGIN IMMEDIATE to acquire SQLite's RESERVED lock at tx start, serializing
+    // concurrent writers from the get-go. This closes the quota-check TOCTOU window:
+    // without IMMEDIATE, two concurrent requests can both pass quota check inside their
+    // (DEFERRED) transactions and then both write, exceeding quota by N. See S2-1.
     let mut tx = state
         .pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE;")
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
@@ -789,9 +793,10 @@ pub async fn resize_vm(
     let operation_id = correlation_id.unwrap_or_else(chv_common::gen_short_id);
     let idempotency_key = format!("resize-vm-{}", vm_id);
 
+    // BEGIN IMMEDIATE: serialize concurrent writers to avoid quota TOCTOU on resize.
     let mut tx = state
         .pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE;")
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 
@@ -1331,4 +1336,172 @@ pub(crate) fn generate_ip(vm_id: &str, network_id: &str, cidr: &str) -> String {
         (host_u32 & 0xFF) as u8,
     ];
     format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3])
+}
+
+#[cfg(test)]
+mod quota_race_tests {
+    //! Concurrency regression test for S2-1 (quota TOCTOU).
+    //!
+    //! Without `BEGIN IMMEDIATE`, two concurrent VM-create requests using
+    //! sqlx's default `BEGIN` (DEFERRED) can both pass the in-tx quota
+    //! check before either has acquired SQLite's RESERVED lock. Both then
+    //! INSERT, allowing the user to exceed their quota.
+    //!
+    //! This test fires N concurrent quota-check + INSERT cycles against a
+    //! shared on-disk SQLite DB (matching prod's WAL + busy_timeout setup)
+    //! and asserts that exactly `max_vms` succeed and the rest return
+    //! `BffError::QuotaExceeded`.
+    use super::enforce_user_quota;
+    use crate::error::BffError;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::SqlitePool;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Build a temp-file SQLite pool with the same pragma profile as prod
+    /// (WAL, foreign_keys ON, busy_timeout 5s) so the test exercises the
+    /// real concurrency semantics.
+    async fn build_test_pool(db_path: &std::path::Path) -> SqlitePool {
+        let url = format!("sqlite://{}", db_path.display());
+        let opts = SqliteConnectOptions::from_str(&url)
+            .expect("parse sqlite url")
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            .pragma("foreign_keys", "ON")
+            .busy_timeout(Duration::from_secs(5));
+        SqlitePoolOptions::new()
+            .max_connections(8)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_with(opts)
+            .await
+            .expect("connect test pool")
+    }
+
+    /// Run a single create-VM-style transaction: BEGIN IMMEDIATE, quota
+    /// check, owning-row INSERTs, COMMIT. Mirrors the structure of
+    /// `create_vm` so the test exercises the same code path that the
+    /// fix touches.
+    async fn try_create_one(
+        pool: &SqlitePool,
+        user_id: &str,
+        vm_id: &str,
+        cpu: i64,
+        mem: i64,
+    ) -> Result<(), BffError> {
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE;")
+            .await
+            .map_err(|e| BffError::Internal(format!("begin: {}", e)))?;
+
+        enforce_user_quota(&mut tx, user_id, cpu, mem, 0, 1).await?;
+
+        sqlx::query(
+            r#"INSERT INTO vms (vm_id, display_name, owner_id, created_at, updated_at)
+               VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                                strftime('%Y-%m-%dT%H:%M:%SZ','now'))"#,
+        )
+        .bind(vm_id)
+        .bind(format!("vm-{}", vm_id))
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("insert vms: {}", e)))?;
+
+        sqlx::query(
+            r#"INSERT INTO vm_desired_state
+               (vm_id, desired_generation, desired_status, desired_power_state,
+                requested_by, cpu_count, memory_bytes, requested_at, updated_at)
+               VALUES (?, 1, 'Pending', 'Running', ?, ?, ?,
+                       strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                       strftime('%Y-%m-%dT%H:%M:%SZ','now'))"#,
+        )
+        .bind(vm_id)
+        .bind(user_id)
+        .bind(cpu)
+        .bind(mem)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| BffError::Internal(format!("insert vds: {}", e)))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| BffError::Internal(format!("commit: {}", e)))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quota_is_serialized_under_concurrent_create() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("chv-quota-race.db");
+        let pool = build_test_pool(&db_path).await;
+        chv_controlplane_store::run_migrations(&pool, None)
+            .await
+            .expect("run migrations");
+
+        let user_id = "race-user";
+        let max_vms: i64 = 3;
+        sqlx::query("INSERT INTO quotas (user_id, max_vms) VALUES (?, ?)")
+            .bind(user_id)
+            .bind(max_vms)
+            .execute(&pool)
+            .await
+            .expect("seed quota");
+
+        let pool = Arc::new(pool);
+        let attempts = 10usize;
+        let mut handles = Vec::with_capacity(attempts);
+        for i in 0..attempts {
+            let pool = Arc::clone(&pool);
+            let user_id = user_id.to_string();
+            let vm_id = format!("vm-race-{:02}", i);
+            handles.push(tokio::spawn(async move {
+                try_create_one(&pool, &user_id, &vm_id, 1, 1024 * 1024 * 1024).await
+            }));
+        }
+
+        let mut succeeded = 0usize;
+        let mut quota_exceeded = 0usize;
+        let mut other_errors: Vec<String> = Vec::new();
+        for h in handles {
+            match h.await.expect("join task") {
+                Ok(()) => succeeded += 1,
+                Err(BffError::QuotaExceeded { .. }) => quota_exceeded += 1,
+                Err(e) => other_errors.push(format!("{:?}", e)),
+            }
+        }
+
+        assert!(
+            other_errors.is_empty(),
+            "unexpected non-quota errors: {:?}",
+            other_errors
+        );
+        assert_eq!(
+            succeeded, max_vms as usize,
+            "expected exactly {} successes, got {}",
+            max_vms, succeeded
+        );
+        assert_eq!(
+            quota_exceeded,
+            attempts - max_vms as usize,
+            "expected {} quota-exceeded errors, got {}",
+            attempts - max_vms as usize,
+            quota_exceeded
+        );
+
+        let vms_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vms")
+            .fetch_one(&*pool)
+            .await
+            .expect("count vms");
+        let vds_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vm_desired_state")
+            .fetch_one(&*pool)
+            .await
+            .expect("count vds");
+        assert_eq!(vms_count, max_vms, "vms row count must equal quota");
+        assert_eq!(
+            vds_count, max_vms,
+            "vm_desired_state row count must equal quota"
+        );
+    }
 }

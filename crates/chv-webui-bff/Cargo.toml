@@ -29,3 +29,7 @@ chrono = "0.4"
 metrics = { workspace = true }
 tokio-util = { version = "0.7.18", features = ["io"] }
 moka = { workspace = true }
+
+[dev-dependencies]
+chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }
+tempfile = { workspace = true }
