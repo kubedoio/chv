@@ -2123,7 +2123,7 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         assert_eq!(
-            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            server.vm_runtime.get("vm-1").await.unwrap().runtime_status,
             "Running"
         );
 
@@ -2140,7 +2140,7 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         assert_eq!(
-            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            server.vm_runtime.get("vm-1").await.unwrap().runtime_status,
             "Stopped"
         );
     }
@@ -2195,7 +2195,7 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         assert_eq!(
-            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            server.vm_runtime.get("vm-1").await.unwrap().runtime_status,
             "Running"
         );
     }
@@ -2771,7 +2771,7 @@ mod tests {
             tracker.detached_nics.lock().unwrap().as_slice(),
             ["vm-1-net-1"]
         );
-        assert!(server.vm_runtime.get("vm-1").is_none());
+        assert!(server.vm_runtime.get("vm-1").await.is_none());
         assert!(!server
             .cache
             .lock()

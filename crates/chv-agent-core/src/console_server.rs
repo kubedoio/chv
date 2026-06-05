@@ -184,7 +184,7 @@ impl ConsoleServer {
 
         // Send scrollback history before subscribing to live feed so the
         // client sees previous console output immediately on connect.
-        if let Some(scrollback) = vm_runtime.pty_scrollback(&vm_id) {
+        if let Some(scrollback) = vm_runtime.pty_scrollback(&vm_id).await {
             const CHUNK_SIZE: usize = 32 * 1024;
             for chunk in scrollback.chunks(CHUNK_SIZE) {
                 let msg = axum::extract::ws::Message::Binary(chunk.to_vec());
@@ -261,13 +261,14 @@ impl ConsoleServer {
         drop(pty_fd);
     }
 
-    /// Retry an operation up to 10 times with 500 ms delays.
-    async fn retry_fetch<T, F>(mut fetch: F, vm_id: &str, resource_name: &str) -> Option<T>
+    /// Retry an async operation up to 10 times with 500 ms delays.
+    async fn retry_fetch<T, F, Fut>(mut fetch: F, vm_id: &str, resource_name: &str) -> Option<T>
     where
-        F: FnMut() -> Option<T>,
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Option<T>>,
     {
         for attempt in 1..=10 {
-            if let Some(val) = fetch() {
+            if let Some(val) = fetch().await {
                 return Some(val);
             }
             if attempt == 10 {

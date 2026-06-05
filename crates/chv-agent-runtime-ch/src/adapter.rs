@@ -177,15 +177,18 @@ pub trait CloudHypervisorAdapter: Send + Sync + 'static {
     ) -> Result<(), ChvError>;
 
     // --- PTY ---
-    fn pty_master(&self, _vm_id: &str) -> Option<OwnedFd> {
+    async fn pty_master(&self, _vm_id: &str) -> Option<OwnedFd> {
         None
     }
 
-    fn pty_output_rx(&self, _vm_id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+    async fn pty_output_rx(
+        &self,
+        _vm_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
         None
     }
 
-    fn pty_scrollback(&self, _vm_id: &str) -> Option<Vec<u8>> {
+    async fn pty_scrollback(&self, _vm_id: &str) -> Option<Vec<u8>> {
         None
     }
 }
