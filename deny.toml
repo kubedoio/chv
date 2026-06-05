@@ -1,0 +1,96 @@
+# cargo-deny configuration for the CHV workspace.
+#
+# Docs: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+#
+# Run locally:
+#   cargo install --locked cargo-deny
+#   cargo deny check
+#
+# CI runs `cargo deny check {advisories|bans|licenses|sources}` independently
+# (see .github/workflows/security.yml) so each class fails on its own merits.
+
+# -----------------------------------------------------------------------------
+# Advisories — RustSec database
+# -----------------------------------------------------------------------------
+[advisories]
+version = 2
+# Advisory database mirrors. Default is the official RustSec advisory-db.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# A vulnerability is a hard fail. Unmaintained crates warn so we have time to
+# migrate without blocking unrelated PRs. Yanked versions fail because they
+# usually indicate an upstream-acknowledged problem.
+yanked = "deny"
+ignore = []
+
+# -----------------------------------------------------------------------------
+# Licenses
+# -----------------------------------------------------------------------------
+[licenses]
+version = 2
+
+# CHV is Apache-2.0 (see LICENSE). The allow list below is restricted to
+# permissive licenses that are compatible with Apache-2.0 redistribution.
+# GPL-* / AGPL-* are denied to keep the workspace shippable as a closed
+# distribution if downstream operators choose to do so.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+]
+
+# Confidence threshold for license auto-detection. 0.8 is the cargo-deny
+# default; bump to 0.93 if false positives appear.
+confidence-threshold = 0.8
+
+# Per-crate license clarifications go here (e.g. ring's mixed license file).
+exceptions = []
+
+# -----------------------------------------------------------------------------
+# Bans — duplicate-version protection on critical infra crates
+# -----------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+# Critical infrastructure crates: duplicate versions almost always indicate
+# a transitive-dep mismatch worth investigating. Forcing a single version
+# prevents subtle ABI / runtime-incompatibility bugs (e.g. two Tokio runtimes,
+# two tonic codegen versions, two serde derive crates).
+deny = [
+    { name = "tokio" },
+    { name = "tonic" },
+    { name = "axum" },
+    { name = "sqlx" },
+    { name = "serde" },
+]
+
+# Crates explicitly allowed to appear multiple times (none today).
+skip = []
+skip-tree = []
+
+# -----------------------------------------------------------------------------
+# Sources — supply-chain provenance
+# -----------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# Only the rust-lang GitHub org is allowed for git dependencies. Add other
+# trusted orgs here on a case-by-case basis (and document why in PR review).
+allow-git = []
+
+[sources.allow-org]
+github = ["rust-lang"]

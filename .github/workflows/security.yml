@@ -1,0 +1,109 @@
+name: Security
+
+# Supply-chain security gates for the Rust workspace.
+#
+# - cargo audit  -> RustSec advisory database (RUSTSEC-XXXX)
+# - cargo deny   -> licenses, banned crates, advisories, sources (see deny.toml)
+#
+# Pinned action versions are listed below the `uses:` line so maintainers can
+# verify and rotate them. Replace with full commit SHAs for stricter pinning.
+#
+#   rustsec/audit-check@v2.0.0
+#     https://github.com/marketplace/actions/rust-audit-check
+#     SHA: <maintainer: pin to a commit SHA on next review>
+#
+#   EmbarkStudios/cargo-deny-action@v2
+#     https://github.com/marketplace/actions/cargo-deny
+#     Latest tag at time of authoring: v2.0.20
+#     SHA: <maintainer: pin to a commit SHA on next review>
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "deny.toml"
+      - ".github/workflows/security.yml"
+  push:
+    branches: [main]
+  schedule:
+    # Daily at 06:00 UTC — catches newly disclosed advisories on
+    # already-merged code without needing a PR.
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+  # Required by rustsec/audit-check to file an issue if a vuln is found
+  # on a scheduled run against the default branch.
+  issues: write
+  checks: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-audit-
+
+      - name: Run cargo audit
+        # rustsec/audit-check@v2.0.0
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Fail CI on any advisory, including warnings (yanked, unmaintained).
+          # Tune in deny.toml if a specific class needs to be downgraded.
+          arguments: --deny warnings
+
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each check is run independently so a failure in one (e.g. a new
+        # advisory) does not mask failures in another (e.g. a license change).
+        check:
+          - advisories
+          - bans
+          - licenses
+          - sources
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-deny-${{ hashFiles('**/Cargo.lock', 'deny.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deny-
+
+      - name: Run cargo deny (${{ matrix.check }})
+        # EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.check }}
+          # deny.toml lives at the repo root.
+          arguments: --all-features
