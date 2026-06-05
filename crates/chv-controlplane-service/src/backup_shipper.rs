@@ -56,11 +56,11 @@ impl BackupShipper for NullShipper {
 
     async fn fetch(&self, remote_path: &str, local_path: &Path) -> Result<(), ChvError> {
         if remote_path != local_path.to_string_lossy() {
-            tokio::fs::copy(remote_path, local_path).await.map_err(|e| {
-                ChvError::Internal {
+            tokio::fs::copy(remote_path, local_path)
+                .await
+                .map_err(|e| ChvError::Internal {
                     reason: format!("NullShipper fetch copy failed: {e}"),
-                }
-            })?;
+                })?;
         }
         Ok(())
     }
@@ -86,17 +86,17 @@ impl BackupShipper for NfsShipper {
         let file_name = format!("{job_id}.backup");
         let dest_path = self.mount_path.join(&file_name);
 
-        tokio::fs::create_dir_all(&self.mount_path).await.map_err(|e| {
-            ChvError::Internal {
+        tokio::fs::create_dir_all(&self.mount_path)
+            .await
+            .map_err(|e| ChvError::Internal {
                 reason: format!("NFS shipper failed to create mount dir: {e}"),
-            }
-        })?;
+            })?;
 
-        tokio::fs::copy(source_path, &dest_path).await.map_err(|e| {
-            ChvError::Internal {
+        tokio::fs::copy(source_path, &dest_path)
+            .await
+            .map_err(|e| ChvError::Internal {
                 reason: format!("NFS shipper copy failed: {e}"),
-            }
-        })?;
+            })?;
 
         info!(
             job_id = %job_id,
@@ -128,11 +128,11 @@ impl BackupShipper for NfsShipper {
     }
 
     async fn fetch(&self, remote_path: &str, local_path: &Path) -> Result<(), ChvError> {
-        tokio::fs::copy(remote_path, local_path).await.map_err(|e| {
-            ChvError::Internal {
+        tokio::fs::copy(remote_path, local_path)
+            .await
+            .map_err(|e| ChvError::Internal {
                 reason: format!("NFS shipper fetch failed: {e}"),
-            }
-        })?;
+            })?;
         Ok(())
     }
 }
@@ -156,22 +156,21 @@ impl S3Shipper {
         let region = if let Some(endpoint) = endpoint {
             s3::Region::Custom { region, endpoint }
         } else {
-            region.parse::<s3::Region>().map_err(|e| ChvError::Internal {
-                reason: format!("invalid S3 region: {e}"),
-            })?
+            region
+                .parse::<s3::Region>()
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("invalid S3 region: {e}"),
+                })?
         };
 
         let credentials = match (access_key, secret_key) {
-            (Some(ak), Some(sk)) => s3::creds::Credentials::new(
-                Some(&ak),
-                Some(&sk),
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| ChvError::Internal {
-                reason: format!("invalid S3 credentials: {e}"),
-            })?,
+            (Some(ak), Some(sk)) => {
+                s3::creds::Credentials::new(Some(&ak), Some(&sk), None, None, None).map_err(
+                    |e| ChvError::Internal {
+                        reason: format!("invalid S3 credentials: {e}"),
+                    },
+                )?
+            }
             _ => s3::creds::Credentials::default().map_err(|e| ChvError::Internal {
                 reason: format!("failed to load default S3 credentials: {e}"),
             })?,
@@ -182,10 +181,7 @@ impl S3Shipper {
                 reason: format!("failed to create S3 bucket: {e}"),
             })?;
 
-        Ok(Self {
-            bucket,
-            prefix,
-        })
+        Ok(Self { bucket, prefix })
     }
 }
 
@@ -204,11 +200,12 @@ impl BackupShipper for S3Shipper {
         // On retry we reopen the file so the stream starts from the beginning.
         let mut retry = 0;
         loop {
-            let mut file = tokio::fs::File::open(source_path).await.map_err(|e| {
-                ChvError::Internal {
-                    reason: format!("S3 shipper failed to open source file: {e}"),
-                }
-            })?;
+            let mut file =
+                tokio::fs::File::open(source_path)
+                    .await
+                    .map_err(|e| ChvError::Internal {
+                        reason: format!("S3 shipper failed to open source file: {e}"),
+                    })?;
 
             match self.bucket.put_object_stream(&mut file, &key).await {
                 Ok(_) => break,
@@ -257,19 +254,19 @@ impl BackupShipper for S3Shipper {
     }
 
     async fn fetch(&self, remote_path: &str, local_path: &Path) -> Result<(), ChvError> {
-        let response = self
-            .bucket
-            .get_object(remote_path)
+        let response =
+            self.bucket
+                .get_object(remote_path)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("S3 shipper fetch failed: {e}"),
+                })?;
+
+        tokio::fs::write(local_path, response.bytes())
             .await
             .map_err(|e| ChvError::Internal {
-                reason: format!("S3 shipper fetch failed: {e}"),
-            })?;
-
-        tokio::fs::write(local_path, response.bytes()).await.map_err(|e| {
-            ChvError::Internal {
                 reason: format!("S3 shipper failed to write fetched file: {e}"),
-            }
-        })?;
+            })?;
 
         Ok(())
     }
@@ -278,9 +275,11 @@ impl BackupShipper for S3Shipper {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 async fn compute_checksum_and_size(path: &Path) -> Result<(String, i64), ChvError> {
-    let mut file = tokio::fs::File::open(path).await.map_err(|e| ChvError::Internal {
-        reason: format!("failed to open file for checksum: {e}"),
-    })?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to open file for checksum: {e}"),
+        })?;
 
     let mut hasher = Sha256::new();
     let mut size_bytes: i64 = 0;
@@ -319,7 +318,9 @@ pub fn shipper_from_destination(
     }
 
     if destination.starts_with("nfs://") || destination.starts_with("nfs+") {
-        let path = destination.trim_start_matches("nfs://").trim_start_matches("nfs+");
+        let path = destination
+            .trim_start_matches("nfs://")
+            .trim_start_matches("nfs+");
         return Ok(Box::new(NfsShipper::new(PathBuf::from(path))));
     }
 
@@ -452,7 +453,11 @@ mod tests {
             Some("ak".into()),
             Some("sk".into()),
         );
-        assert!(result.is_ok(), "S3 shipper construction failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "S3 shipper construction failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]

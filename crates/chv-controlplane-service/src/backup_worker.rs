@@ -199,17 +199,16 @@ impl BackupWorker {
                     {
                         Ok(old_jobs) if !old_jobs.is_empty() => {
                             for old_job in &old_jobs {
-                                if let (Some(dest), Some(remote_path)) =
-                                    (old_job.destination.as_deref(), old_job.target_path.as_deref())
-                                {
+                                if let (Some(dest), Some(remote_path)) = (
+                                    old_job.destination.as_deref(),
+                                    old_job.target_path.as_deref(),
+                                ) {
                                     if Self::is_remote_destination(dest) {
                                         let ak = schedule.s3_access_key.clone();
                                         let sk = schedule.s3_secret_key.clone();
-                                        if let Ok(shipper) =
-                                            shipper_from_destination(dest, ak, sk)
+                                        if let Ok(shipper) = shipper_from_destination(dest, ak, sk)
                                         {
-                                            if let Err(del_err) =
-                                                shipper.delete(remote_path).await
+                                            if let Err(del_err) = shipper.delete(remote_path).await
                                             {
                                                 warn!(
                                                     job_id = %old_job.job_id,
@@ -259,10 +258,7 @@ impl BackupWorker {
                 if schedule.retention_days > 0 {
                     match self
                         .backup_repo
-                        .list_old_jobs_for_retention(
-                            &schedule.schedule_id,
-                            schedule.retention_days,
-                        )
+                        .list_old_jobs_for_retention(&schedule.schedule_id, schedule.retention_days)
                         .await
                     {
                         Ok(old_jobs) if !old_jobs.is_empty() => {
@@ -271,17 +267,16 @@ impl BackupWorker {
                                 // Use `destination` (the original destination URL) to build the
                                 // shipper, and `target_path` (the shipped artifact path/key) as
                                 // the argument to delete().
-                                if let (Some(dest), Some(remote_path)) =
-                                    (old_job.destination.as_deref(), old_job.target_path.as_deref())
-                                {
+                                if let (Some(dest), Some(remote_path)) = (
+                                    old_job.destination.as_deref(),
+                                    old_job.target_path.as_deref(),
+                                ) {
                                     if Self::is_remote_destination(dest) {
                                         let ak = schedule.s3_access_key.clone();
                                         let sk = schedule.s3_secret_key.clone();
-                                        if let Ok(shipper) =
-                                            shipper_from_destination(dest, ak, sk)
+                                        if let Ok(shipper) = shipper_from_destination(dest, ak, sk)
                                         {
-                                            if let Err(del_err) =
-                                                shipper.delete(remote_path).await
+                                            if let Err(del_err) = shipper.delete(remote_path).await
                                             {
                                                 warn!(
                                                     job_id = %old_job.job_id,
@@ -293,10 +288,8 @@ impl BackupWorker {
                                     }
                                 }
 
-                                if let Err(e) = self
-                                    .backup_repo
-                                    .delete_job_by_id(&old_job.job_id)
-                                    .await
+                                if let Err(e) =
+                                    self.backup_repo.delete_job_by_id(&old_job.job_id).await
                                 {
                                     warn!(
                                         job_id = %old_job.job_id,
@@ -496,14 +489,18 @@ impl BackupWorker {
             let destination = if let Some(ref target) = job.target_path {
                 if Self::is_remote_destination(target) {
                     // Remote destination: stage locally first, then ship.
-                    let staging = self.backup_staging_dir.join(format!("{}.backup", job.job_id));
+                    let staging = self
+                        .backup_staging_dir
+                        .join(format!("{}.backup", job.job_id));
                     staging.to_string_lossy().to_string()
                 } else {
                     target.clone()
                 }
             } else {
                 // No destination provided: use staging dir with NullShipper semantics
-                let staging = self.backup_staging_dir.join(format!("{}.backup", job.job_id));
+                let staging = self
+                    .backup_staging_dir
+                    .join(format!("{}.backup", job.job_id));
                 staging.to_string_lossy().to_string()
             };
 
@@ -545,8 +542,9 @@ impl BackupWorker {
                 if accepted && job.volume_id.is_none() {
                     if let Some(ref target) = job.target_path {
                         if Self::is_remote_destination(target) {
-                            let staging =
-                                self.backup_staging_dir.join(format!("{}.backup", job.job_id));
+                            let staging = self
+                                .backup_staging_dir
+                                .join(format!("{}.backup", job.job_id));
                             // Fetch schedule credentials if this is a scheduled job.
                             let (ak, sk) = if let Some(ref sid) = job.schedule_id {
                                 match self.backup_repo.get_schedule(sid).await {
