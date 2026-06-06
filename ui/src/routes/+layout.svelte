@@ -22,7 +22,7 @@
 	import '../app.css';
 
 	let { children }: { children?: Snippet } = $props();
-	const publicPaths = ['/login', '/install'];
+	const publicPaths = ['/login', '/install', '/change-password'];
 	let searchOpen = $state(false);
 	let quickActionsOpen = $state(false);
 
