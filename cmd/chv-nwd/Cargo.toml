@@ -3,6 +3,7 @@ name = "chv-nwd"
 version = "0.2.0"
 license = "Apache-2.0"
 edition = "2021"
+publish = false
 
 [[bin]]
 name = "chv-nwd"

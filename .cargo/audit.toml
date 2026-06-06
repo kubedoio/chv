@@ -1,0 +1,68 @@
+# cargo-audit configuration for the CHV workspace.
+#
+# `cargo audit` (RustSec) walks Cargo.lock directly and is stricter than
+# `cargo deny` — it does not perform feature/target reachability filtering.
+# Advisory ignores listed here MUST stay in sync with the matching entries
+# in deny.toml, with the same rationale comments.
+#
+# Docs: https://github.com/rustsec/rustsec/blob/main/cargo-audit/audit.toml.example
+# CI:   .github/workflows/security.yml (rustsec/audit-check@v2 reads this file)
+
+[advisories]
+# Each ignore below is mirrored verbatim from deny.toml. Keep the two files
+# in lockstep — divergence between them causes cargo audit / cargo deny to
+# report different sets of advisories, which is hard to reason about during
+# triage.
+ignore = [
+    # RUSTSEC-2023-0071 — `rsa` Marvin Attack (no upstream patch).
+    #   Pulled into Cargo.lock by `sqlx-mysql` because sqlx 0.8's top-level
+    #   Cargo.toml lists sqlx-mysql unconditionally even though we only
+    #   enable the `sqlite` feature. None of that code reaches our binaries
+    #   (cargo-deny's feature-aware graph walk confirms the crate is not
+    #   reachable). CHV never performs RSA operations on attacker-observable
+    #   timing channels — the Marvin Attack vector is not applicable.
+    #   Upstream tracking:
+    #     - https://github.com/RustCrypto/RSA/issues/19  (no patch)
+    #     - https://github.com/launchbadge/sqlx/issues/2911 (sqlx side)
+    #   Removal condition: sqlx makes sqlx-mysql/-postgres optional, OR
+    #   `rsa` ships a constant-time implementation.
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2024-0370 — `proc-macro-error` 1.x unmaintained.
+    #   Compile-time-only dep (proc macro) pulled by `tabled_derive` 0.8 ->
+    #   `tabled` 0.16 in chvctl. Never ships in binaries. Informational
+    #   advisory, not a vulnerability.
+    #   Upstream: https://github.com/zhiburt/tabled/issues/411 (tabled 0.17
+    #   migrated to proc-macro-error2).
+    #   Removal condition: chvctl upgrades tabled 0.16 -> 0.17+ (deferred
+    #   from this PR — multi-major upgrade with API changes).
+    "RUSTSEC-2024-0370",
+
+    # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
+    #   Pulled transitively by tonic 0.12 for client TLS PEM parsing.
+    #   Upstream archived the repo and folded the parser into
+    #   rustls-pki-types >= 1.9; tonic 0.13+ uses the new API.
+    #   Upstream:
+    #     - https://github.com/rustls/pemfile/issues/61
+    #     - https://github.com/hyperium/tonic/pull/2103
+    #   Removal condition: CHV upgrades tonic 0.12 -> 0.14+ (deferred —
+    #   gRPC-stack-wide change, not in scope for this supply-chain PR).
+    "RUSTSEC-2025-0134",
+]
+informational_warnings = ["unmaintained", "unsound", "notice"]
+severity_threshold = "none"
+
+[database]
+path = "~/.cargo/advisory-db"
+url  = "https://github.com/rustsec/advisory-db"
+fetch = true
+stale = false
+
+[output]
+deny = ["warnings", "unmaintained", "unsound", "yanked"]
+format = "terminal"
+quiet  = false
+
+[yanked]
+enabled = true
+update_index = true
