@@ -4,7 +4,14 @@ set -euo pipefail
 # Configuration
 BFF_URL="${BFF_URL:-http://localhost:8444}"
 USERNAME="${CHV_USER:-admin}"
-PASSWORD="${CHV_PASS:-admin}"
+# If CHV_PASS is not set, try to read the bootstrap password from the local install.
+if [ -n "${CHV_PASS:-}" ]; then
+    PASSWORD="$CHV_PASS"
+elif [ -r /etc/chv/initial_admin_password ]; then
+    PASSWORD="$(cat /etc/chv/initial_admin_password)"
+else
+    PASSWORD=""
+fi
 DURATION="${DURATION:-30s}"
 CONNECTIONS="${CONNECTIONS:-50}"
 RPS="${RPS:-100}"

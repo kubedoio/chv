@@ -234,7 +234,9 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
 
-    /// Verify that bcrypt::verify works with the hash seeded in migration 0008.
+    /// Verify that bcrypt::verify works with a known hash.
+    /// Uses the historical default hash that migration 0008 once shipped;
+    /// the test only exercises bcrypt verification, not production credentials.
     /// Hash: $2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m
     /// Password: "admin"
     #[test]
@@ -243,7 +245,7 @@ mod tests {
         let result = bcrypt::verify("admin", hash).expect("bcrypt::verify should not error");
         assert!(
             result,
-            "bcrypt::verify should return true for admin/known-hash"
+            "bcrypt::verify should return true for known-hash"
         );
     }
 

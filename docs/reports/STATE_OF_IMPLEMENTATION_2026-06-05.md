@@ -15,7 +15,7 @@ CHV is a **strategically well-architected v0.2 platform** with discipline that e
 
 The gap between **what CHV is today** and **what it should ship to a customer** is **not architectural** — it is concentrated in three workable categories:
 
-1. **Default deployment posture is broken.** Out-of-the-box install boots with `admin/admin`, writes plaintext `http://` for the agent → control-plane channel, and never wires mTLS server certs (despite issuing them). A fresh CHV install fails OWASP A02 + A07 at first boot.
+1. **Default deployment posture is broken.** Out-of-the-box install writes plaintext `http://` for the agent → control-plane channel and never wires mTLS server certs (despite issuing them). A fresh CHV install fails OWASP A02 + A07 at first boot. *(Note: the `admin/admin` default credential was fixed post-review; install.sh now generates a random password and writes it to `/etc/chv/initial_admin_password`.)*
 2. **Three production-blocking correctness gaps in the data plane.** Memory-migration cannot rollback, disk-migration's `PausedFinalSync` is wired in stord but rollback paths are untested, and quota enforcement has a check-then-insert TOCTOU under SQLite's deferred isolation.
 3. **Hygiene gaps will become breaking changes at v1.0.** No proto `reserved` discipline, no SQLite down-migrations, no SLI/SLO docs, no SECURITY.md, no supply-chain scanning in CI, no distributed tracing.
 
@@ -92,7 +92,7 @@ After deduplication (e.g. mTLS install gap counted by Security + Config Safety; 
 
 | # | Finding | Files | Industry Standard |
 |---|---|---|---|
-| C-1 | **Default `admin/admin` shipped in migrations 0008+0033, no `must_change_password` gate, installer logs in with it.** Globally identical for every CHV deployment. | `cmd/chv-controlplane/migrations/0008_users.sql`, `0033_activate_admin_account.sql`, `install.sh:484,546,1173` | NIST SP 800-53 IA-5(1); CIS hypervisor; OWASP A07 |
+| C-1 | ~~**Default `admin/admin` shipped in migrations 0008+0033, no `must_change_password` gate, installer logs in with it.**~~ **FIXED**: `install.sh` now generates a random 24-char password via `openssl rand`, bcrypts it, inserts the admin row with `must_change_password=1`, and writes the plaintext to `/etc/chv/initial_admin_password` (0600 root). All hardcoded `admin/admin` references in API calls were replaced with file-based credential reads. | `scripts/install.sh` | NIST SP 800-53 IA-5(1); CIS hypervisor; OWASP A07 |
 | C-2 | **install.sh writes `http://127.0.0.1:8443` for agent→CP, omits `server_cert_path`/`server_key_path` in controlplane.toml.** mTLS never enables on default install despite certs being issued. | `install.sh:765,740-757`, `crates/chv-agent-core/src/control_plane.rs:20`, `cmd/chv-controlplane/src/bootstrap.rs:260` | NIST 800-190 §4.5; CIS hypervisor; OWASP A02 |
 | C-3 | **vitest <@vitest/mocker> arbitrary file read+exec.** Local-dev/CI surface, fix requires semver-major bump. | `ui/package-lock.json` (vitest 2.1.9 → 4.1.8) | OWASP A06 |
 | C-4 | **`rsa 0.9.10` Marvin timing-side-channel (RUSTSEC-2023-0071)** pulled in via accidental `sqlx-mysql` feature enable. Root cause: `crates/chv-webui-bff/Cargo.toml:21` and `crates/chv-controlplane-store/Cargo.toml:21` redeclare sqlx without `default-features = false`. **Single-line fix kills the CVE plus ~30 transitive crates.** | `crates/chv-webui-bff/Cargo.toml`, `crates/chv-controlplane-store/Cargo.toml` | OWASP A06; SOC2 CC7.1 |
@@ -241,7 +241,7 @@ Several findings are perfectly defensible at v0.2 but become breaking changes at
 - Stringly-typed proto enums (HIGH-17)
 - No `reserved` markers (CRIT-16)
 - No down migrations (CRIT-14)
-- Default admin/admin (CRIT-1) — already breaking
+- ~~Default admin/admin (CRIT-1)~~ — **FIXED**: random bootstrap password + `must_change_password` gate
 
 **Action**: Treat v1.0 as a freeze point. Author an "API Evolution" ADR (proto-evolution policy: never reuse field numbers, always `reserved`, additive within major, `[deprecated]` one minor before removal). Add CI lint that diffs proto vs main for reused field numbers.
 
@@ -250,7 +250,7 @@ Several findings are perfectly defensible at v0.2 but become breaking changes at
 ## Recommended 4-Sprint Sequencing
 
 **Sprint 1 (Security defaults — 1 week)**
-- Fix install.sh: HTTPS, TLS paths, `https://` agent URL, generate random admin password, drop `admin/admin` migration. Closes C-1, C-2, H-6, H-7.
+- Fix install.sh: HTTPS, TLS paths, `https://` agent URL, generate random admin password, drop `admin/admin` migration. **Closes C-1** (random password + `must_change_password` implemented in `scripts/install.sh`), C-2, H-6, H-7.
 - Fix sqlx feature leak: `default-features = false` in BFF + store. Closes C-4 + ~30 transitive crates.
 - Add SECURITY.md, dependabot.yml, cargo-audit/cargo-deny CI gates. Closes H-30 partially.
 - `npm audit fix --force` + vitest 4.x bump. Closes C-3.

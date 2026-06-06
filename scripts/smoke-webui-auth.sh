@@ -7,7 +7,14 @@ set -euo pipefail
 
 BASE_URL="${1:-http://127.0.0.1}"
 USERNAME="${CHV_SMOKE_USER:-admin}"
-PASSWORD="${CHV_SMOKE_PASSWORD:-admin}"
+# If CHV_SMOKE_PASSWORD is not set, try to read the bootstrap password from the local install.
+if [ -n "${CHV_SMOKE_PASSWORD:-}" ]; then
+    PASSWORD="$CHV_SMOKE_PASSWORD"
+elif [ -r /etc/chv/initial_admin_password ]; then
+    PASSWORD="$(cat /etc/chv/initial_admin_password)"
+else
+    PASSWORD=""
+fi
 
 echo "==============================================="
 echo "CHV Web UI Auth Smoke Test"

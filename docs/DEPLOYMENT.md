@@ -64,7 +64,9 @@ The installer will:
 10. Start all services and wait for the local agent to enroll as a compute node
 
 After ~60 seconds, open the printed IP address in your browser.  
-Default login: **admin / admin**
+Default login: **admin / (random password)**. The bootstrap password is written
+to `/etc/chv/initial_admin_password` (mode 0600, root-owned) and printed once
+in the install output. You will be required to change it on first login.
 
 ---
 

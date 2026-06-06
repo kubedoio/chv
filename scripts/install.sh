@@ -497,11 +497,21 @@ import_base_image() {
         return
     fi
 
-    # Login to get auth token
+    # Login to get auth token. Read the bootstrap admin password from the
+    # 0600 root-only file written by seed_admin_user(); never embed credentials.
+    local admin_pw
+    admin_pw=$(cat "${CHV_CONFIG_DIR}/initial_admin_password" 2>/dev/null) || {
+        warn "Cannot read ${CHV_CONFIG_DIR}/initial_admin_password — skipping image import."
+        return
+    }
+    if [ -z "$admin_pw" ]; then
+        warn "Empty admin password file — skipping image import."
+        return
+    fi
     local login_response
     login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d '{"username":"admin","password":"admin"}' 2>/dev/null)
+        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null)
     if [ -z "$login_response" ]; then
         warn "Failed to login for image import."
         return
@@ -559,11 +569,21 @@ seed_dev_resources() {
         return
     fi
 
-    # Login as admin to get JWT token
+    # Login as admin to get JWT token. Read the bootstrap password from the
+    # 0600 root-only file written by seed_admin_user(); never embed credentials.
+    local admin_pw
+    admin_pw=$(cat "${CHV_CONFIG_DIR}/initial_admin_password" 2>/dev/null) || {
+        warn "Cannot read ${CHV_CONFIG_DIR}/initial_admin_password — skipping dev resource seeding."
+        return
+    }
+    if [ -z "$admin_pw" ]; then
+        warn "Empty admin password file — skipping dev resource seeding."
+        return
+    fi
     local login_response
     login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d '{"username":"admin","password":"admin"}' 2>/dev/null)
+        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null)
     if [ -z "$login_response" ]; then
         warn "Failed to login as admin, skipping dev resource seeding."
         return
@@ -1174,11 +1194,14 @@ start_services() {
 
     systemctl enable --now chv-agent
 
-    # Get auth token for API polling
+    # Get auth token for API polling. Read the bootstrap password from the
+    # 0600 root-only file written by seed_admin_user(); never embed credentials.
+    local admin_pw
+    admin_pw=$(cat "${CHV_CONFIG_DIR}/initial_admin_password" 2>/dev/null || true)
     local auth_token
     auth_token=$(curl -sf "http://127.0.0.1:8080/v1/auth/login" \
         -X POST -H "Content-Type: application/json" \
-        -d '{"username":"admin","password":"admin"}' 2>/dev/null \
+        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null \
         | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "")
 
     info "Waiting for agent enrollment (up to 60s)..."
@@ -1202,6 +1225,108 @@ start_services() {
         warn "Node enrollment did not complete within 60s."
         warn "Check enrollment status: journalctl -u chv-agent -n 50"
     fi
+}
+
+# -----------------------------------------------------------------------------
+# Seed the bootstrap admin user with a randomly-generated password.
+#
+# As of CHV 0.2.x, the SQL migrations no longer ship a default 'admin/admin'
+# credential. This function:
+#   1. Generates a 24-char URL-safe random password (openssl).
+#   2. Bcrypts it at cost 12 (matching the cost used historically in 0008).
+#   3. Inserts a single 'admin' row into the users table with
+#      must_change_password=1 (see migration 0044).
+#   4. Writes the plaintext to /etc/chv/initial_admin_password (mode 0600,
+#      root-owned) and prints it ONCE in a stdout banner.
+#
+# Idempotent: if the admin user already exists in the DB, this is a no-op.
+# Hard-fails if no bcrypt implementation is available; never falls back to
+# a known/weak password.
+# -----------------------------------------------------------------------------
+seed_admin_user() {
+    local pw_file="${CHV_CONFIG_DIR}/initial_admin_password"
+    local db_path="${CHV_DB_PATH}"
+
+    info "Seeding bootstrap admin user..."
+
+    if ! cmd_exists sqlite3; then
+        fatal "sqlite3 not available — cannot seed admin user. Install sqlite3 package."
+    fi
+
+    # Idempotency: if the admin user already exists, do nothing. We talk to the
+    # SQLite DB directly because the API requires authentication (the very
+    # thing we're bootstrapping).
+    if [ -f "$db_path" ] && \
+       [ "$(sqlite3 "$db_path" "SELECT COUNT(*) FROM users WHERE username = 'admin';" 2>/dev/null)" = "1" ]; then
+        info "Admin user already exists — skipping seed."
+        return 0
+    fi
+
+    # 18 bytes of entropy → 24 chars after base64; replace '+/' with '-_' for
+    # URL-safety so operators can paste the password into URL query strings.
+    local plaintext_pw
+    plaintext_pw=$(openssl rand -base64 18 | tr -d '\n' | tr '+/' '-_')
+    if [ -z "$plaintext_pw" ]; then
+        fatal "Failed to generate random password (openssl rand failed)."
+    fi
+
+    # Bcrypt cost 12 matches the hashes that earlier migrations shipped, so
+    # password verification cost stays consistent across upgrades.
+    local hashed_pw=""
+    if python3 -c 'import bcrypt' 2>/dev/null; then
+        hashed_pw=$(python3 -c '
+import bcrypt, sys
+pw = sys.argv[1].encode("utf-8")
+print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode("utf-8"))
+' "$plaintext_pw")
+    elif cmd_exists htpasswd; then
+        # htpasswd emits '$2y$' which bcrypt verifiers accept identically to '$2b$'.
+        hashed_pw=$(htpasswd -nbBC 12 admin "$plaintext_pw" | sed 's/^admin://')
+    else
+        fatal "Neither python3-bcrypt nor htpasswd available — cannot bcrypt admin password. Install one of: 'pip3 install bcrypt' or 'apt install apache2-utils' (Debian/Ubuntu) / 'dnf install httpd-tools' (RHEL/Fedora)."
+    fi
+
+    if [ -z "$hashed_pw" ]; then
+        fatal "Bcrypt produced empty hash — refusing to seed admin user."
+    fi
+
+    # Fixed user_id for predictability across reinstalls (matches the value
+    # historically used by migration 0008).
+    local admin_user_id="00000000-0000-0000-0000-000000000001"
+
+    # The SQL is delivered via heredoc with the surrounding shell expanding
+    # ${admin_user_id} and ${hashed_pw}. The bcrypt hash contains '$' but those
+    # are protected by the surrounding single quotes inside the SQL itself
+    # (heredoc expands shell vars but the SQL parser sees the literal string).
+    if ! sqlite3 "$db_path" <<SQL
+INSERT INTO users (user_id, username, password_hash, role, display_name, must_change_password)
+VALUES ('${admin_user_id}', 'admin', '${hashed_pw}', 'admin', 'Administrator', 1);
+SQL
+    then
+        fatal "Failed to insert bootstrap admin row into ${db_path}."
+    fi
+
+    # Atomically create the credential file with strict perms BEFORE writing
+    # the plaintext, so there is no window where the file exists with permissive
+    # default umask perms.
+    install -m 0600 -o root -g root /dev/null "$pw_file"
+    printf '%s\n' "$plaintext_pw" > "$pw_file"
+    chmod 0600 "$pw_file"
+
+    cat <<BANNER
+
+================================================================================
+  CHV Bootstrap Admin Credentials
+================================================================================
+  Username:      admin
+  Password:      ${plaintext_pw}
+  Stored at:     ${pw_file} (mode 0600, root only)
+  Rotation:      Required on first login (must_change_password=1).
+
+  RECORD THIS PASSWORD NOW. It will not be displayed again.
+================================================================================
+
+BANNER
 }
 
 # -----------------------------------------------------------------------------
@@ -1306,6 +1431,10 @@ create_bootstrap_token
 install_systemd_services
 install_nginx
 start_services
+
+# Seed bootstrap admin (must run before import_base_image which authenticates).
+seed_admin_user || fatal "Failed to seed bootstrap admin user."
+
 import_base_image
 
 if [ "${INSTALL_CHV_NO_SEED:-0}" != "1" ]; then
@@ -1338,7 +1467,9 @@ Logs:
   journalctl -u chv-agent -f
 
 Defaults:
-  Admin login:   admin / admin
+  Admin login:   admin / (see /etc/chv/initial_admin_password)
+                 The bootstrap password is in that file (mode 0600 root).
+                 You will be required to rotate it on first login.
   Bootstrap token valid for 1 hour from installation.
 
 EOF

@@ -49,7 +49,7 @@ sqlx = { workspace = true, default-features = false, features = ["runtime-tokio-
 **Files**:
 - `cmd/chv-controlplane/migrations/0008_users.sql`
 - `cmd/chv-controlplane/migrations/0033_activate_admin_account.sql`
-- `install.sh` (lines 484, 546, 1173)
+- `scripts/install.sh` (`seed_admin_user()`, `import_base_image()`, `seed_dev_resources()`, `start_services()`)
 
 **Change**:
 - Migration 0008: keep table DDL, remove the seeded `INSERT` row (move credential
