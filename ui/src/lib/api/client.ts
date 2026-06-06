@@ -256,21 +256,14 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
       }
 
       // Handle 403 Password Change Required - redirect to change-password
-      if (response.status === 403 && payload?.error.code === 'PASSWORD_CHANGE_REQUIRED') {
+      // The BFF returns a flat object: { code: 'PASSWORD_CHANGE_REQUIRED', ... }
+      // Some legacy endpoints may return nested: { error: { code: '...' } }
+      const code = payload?.error?.code || (payload as { code?: string } | undefined)?.code;
+      if (response.status === 403 && code === 'PASSWORD_CHANGE_REQUIRED') {
         if (typeof window !== 'undefined') {
-          try {
-            await goto('/change-password');
-          } catch {
-            window.location.href = '/change-password';
-          }
+          window.location.href = '/change-password';
         }
-
-        throw new APIError(
-          'Password change required before any other action.',
-          403,
-          'PASSWORD_CHANGE_REQUIRED',
-          false
-        );
+        throw new APIError('Password change required', response.status, 'PASSWORD_CHANGE_REQUIRED');
       }
 
       // TODO: integrate structured logger instead of console

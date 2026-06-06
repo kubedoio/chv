@@ -783,6 +783,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         // Dup the fd for the broadcaster BEFORE OwnedFd takes ownership
         let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
+        if broadcaster_fd >= 0 {
+            let _ = nix::fcntl::fcntl(
+                broadcaster_fd,
+                nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+            );
+        }
 
         let mut map = self.vms.write().await;
         map.insert(

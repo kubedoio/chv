@@ -439,10 +439,15 @@ download_base_image() {
 
 ## added for workaround
 copy_firmware() {
-info "Copy BUID firmware file..."
-	#cp /root/Build/CloudHvX64/DEBUG_GCC/FV/CLOUDHV.fd
-	cp /root/CLOUDHV.fd /var/lib/chv/hypervisor-fw
-
+    info "Copy BUID firmware file..."
+    #cp /root/Build/CloudHvX64/DEBUG_GCC/FV/CLOUDHV.fd
+    if [ -f /root/CLOUDHV.fd ]; then
+        cp /root/CLOUDHV.fd /var/lib/chv/hypervisor-fw
+        chown "${CHV_USER}:${CHV_USER}" /var/lib/chv/hypervisor-fw
+        chmod 644 /var/lib/chv/hypervisor-fw
+    else
+        warn "Firmware file /root/CLOUDHV.fd not found; skipping firmware copy."
+    fi
 }
 
 
@@ -511,14 +516,14 @@ import_base_image() {
     local login_response
     login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null)
+        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null || true)
     if [ -z "$login_response" ]; then
         warn "Failed to login for image import."
         return
     fi
 
     local token
-    token=$(echo "$login_response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"//')
+    token=$(echo "$login_response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"//' || true)
     if [ -z "$token" ]; then
         warn "Failed to extract auth token for image import."
         return
@@ -536,11 +541,11 @@ import_base_image() {
             \"source_url\": \"${BASE_IMAGE_PATH}\",
             \"format\": \"raw\",
             \"os\": \"ubuntu\"
-        }" 2>/dev/null)
+        }" 2>/dev/null || true)
 
     if [ -n "$import_response" ]; then
         local image_id
-        image_id=$(echo "$import_response" | grep -o '"image_id":"[^"]*"' | head -1 | sed 's/"image_id":"//;s/"//')
+        image_id=$(echo "$import_response" | grep -o '"image_id":"[^"]*"' | head -1 | sed 's/"image_id":"//;s/"//' || true)
         info "Base image imported via API (image_id: ${image_id})."
     else
         info "Base image import skipped (may already exist)."
@@ -583,14 +588,14 @@ seed_dev_resources() {
     local login_response
     login_response=$(curl -sf -X POST "${api_base}/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null)
+        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null || true)
     if [ -z "$login_response" ]; then
         warn "Failed to login as admin, skipping dev resource seeding."
         return
     fi
 
     local token
-    token=$(echo "$login_response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"//')
+    token=$(echo "$login_response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"//' || true)
     if [ -z "$token" ]; then
         warn "Failed to extract auth token, skipping dev resource seeding."
         return
@@ -616,11 +621,11 @@ seed_dev_resources() {
             \"dhcp_enabled\": true,
             \"ipam_mode\": \"internal\",
             \"is_default\": true
-        }" 2>/dev/null)
+        }" 2>/dev/null || true)
 
     if [ -n "$net_response" ]; then
         local net_id
-        net_id=$(echo "$net_response" | grep -o '"network_id":"[^"]*"' | head -1 | sed 's/"network_id":"//;s/"//')
+        net_id=$(echo "$net_response" | grep -o '"network_id":"[^"]*"' | head -1 | sed 's/"network_id":"//;s/"//' || true)
         info "Default network created via API (id=${net_id}, ${network_cidr}, gateway ${gateway_ip})."
     else
         info "Default network creation skipped (may already exist)."
@@ -668,11 +673,11 @@ seed_dev_resources() {
             \"network_id\": \"${net_id:-default}\",
             \"volume_size_gb\": 10,
             \"requested_by\": \"dev-install\"
-        }" 2>/dev/null)
+        }" 2>/dev/null || true)
 
     if [ -n "$vm_response" ]; then
         local vm_id
-        vm_id=$(echo "$vm_response" | grep -o '"vm_id":"[^"]*"' | head -1 | sed 's/"vm_id":"//;s/"//')
+        vm_id=$(echo "$vm_response" | grep -o '"vm_id":"[^"]*"' | head -1 | sed 's/"vm_id":"//;s/"//' || true)
         info "Test VM created via API (id=${vm_id}, 1 CPU, 512 MB, 10 GB disk)."
     else
         warn "Failed to create test VM via API."
@@ -1289,8 +1294,10 @@ print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode("utf-8"))
     # are protected by the surrounding single quotes inside the SQL itself
     # (heredoc expands shell vars but the SQL parser sees the literal string).
     if ! sqlite3 "$db_path" <<SQL
-INSERT INTO users (user_id, username, password_hash, role, display_name, must_change_password)
-VALUES ('${admin_user_id}', 'admin', '${hashed_pw}', 'admin', 'Administrator', 1);
+INSERT INTO users (user_id, username, password_hash, role, display_name, must_change_password, created_at, updated_at)
+VALUES ('${admin_user_id}', 'admin', '${hashed_pw}', 'admin', 'Administrator', 1,
+        strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 SQL
     then
         fatal "Failed to insert bootstrap admin row into ${db_path}."
@@ -1364,8 +1371,10 @@ reset_must_change_password() {
     # Ensure the bootstrap admin is flagged for rotation on first login even
     # if we temporarily cleared it during install to allow API seeding.
     if [ -f "${CHV_DB_PATH}" ] && cmd_exists sqlite3; then
-        sqlite3 "${CHV_DB_PATH}" \
-            "UPDATE users SET must_change_password = 1 WHERE username = 'admin';" 2>/dev/null || true
+        if ! sqlite3 "${CHV_DB_PATH}" \
+            "UPDATE users SET must_change_password = 1 WHERE username = 'admin';" 2>/dev/null; then
+            warn "CRITICAL: Failed to reset must_change_password flag. Admin may not be forced to rotate password on first login."
+        fi
     fi
 }
 
