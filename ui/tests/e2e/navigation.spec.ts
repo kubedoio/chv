@@ -27,9 +27,7 @@ test.describe('Navigation & Auth', () => {
 	});
 
 	test('command palette opens with Ctrl+K keyboard shortcut', async ({ page }) => {
-		await page.evaluate(() => {
-			document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
-		});
+		await page.keyboard.press('Control+k');
 		await expect(page.locator('.fixed.inset-0')).toBeVisible();
 		await expect(page.getByPlaceholder(/type a command or search/i)).toBeVisible();
 	});

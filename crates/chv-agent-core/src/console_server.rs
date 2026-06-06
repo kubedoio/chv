@@ -260,12 +260,9 @@ impl ConsoleServer {
             }
             // Set FD_CLOEXEC on the dup'd fd so it is not leaked to child processes
             if let Ok(flags) = nix::fcntl::fcntl(dup_fd, nix::fcntl::FcntlArg::F_GETFD) {
-                let new_flags = nix::fcntl::FdFlag::from_bits_truncate(flags)
-                    | nix::fcntl::FdFlag::FD_CLOEXEC;
-                let _ = nix::fcntl::fcntl(
-                    dup_fd,
-                    nix::fcntl::FcntlArg::F_SETFD(new_flags),
-                );
+                let new_flags =
+                    nix::fcntl::FdFlag::from_bits_truncate(flags) | nix::fcntl::FdFlag::FD_CLOEXEC;
+                let _ = nix::fcntl::fcntl(dup_fd, nix::fcntl::FcntlArg::F_SETFD(new_flags));
             }
             let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
             let tokio_file = tokio::fs::File::from_std(std_file);
