@@ -82,6 +82,52 @@ tooling and humans.
 1. The PR carries a `breaking-change` label, **and**
 2. The CHANGELOG entry for the next release documents the migration path for downstream consumers.
 
+### 4a. Naming-rule deferrals — pre-existing v1 protos
+
+The `buf lint` gate runs `STANDARD` rules. Seven of those rules surface pre-existing
+structural naming debt in protos that have already shipped under `chv.controlplane.node.v1`,
+`chv.node.nwd.v1`, `chv.node.stord.v1`, `chv.webui.bff.v1`, `chv.webui.tasks.v1`, and
+`chv.webui.viewmodels.v1`. Each is narrowly excepted in `proto/buf.yaml` with a comment
+linking to this section. The gate continues to catch any *new* naming violations introduced
+in future commits — we are deferring fixes for the existing debt, not silencing the rule
+class wholesale.
+
+| Rule | What it flags | Why a fix is currently blocked |
+|------|---------------|--------------------------------|
+| `FILE_LOWER_SNAKE_CASE` | Filenames such as `control-plane-node.proto`, `chv-nwd-api.proto`, `webui-bff.proto` (kebab-case). | Renaming the file changes every `import "<path>";` statement in the workspace and every `tonic_build::compile_protos!(...)` invocation in `crates/*/build.rs` (4 sites). The path is also baked into `gen/rust/**` module names. |
+| `RPC_REQUEST_STANDARD_NAME` | RPC requests not named `<Verb><Noun>Request` (e.g. `EnrollmentRequest`, `NodeStateReport`, `OverviewRequest`, `VolumeHealthRequest`). | Renaming the message renames the generated Rust struct, breaking every consumer crate that constructs or matches on it. |
+| `RPC_RESPONSE_STANDARD_NAME` | RPC responses not named `<Verb><Noun>Response`. Same root cause as the request rule. | Same as above. |
+| `RPC_REQUEST_RESPONSE_UNIQUE` | A single message reused across many RPCs — specifically `chv.controlplane.node.v1.AckResponse` (~67 sites), `chv.node.stord.v1.Result` (~8 sites), and `chv.node.stord.v1.MigrationMessage`. | Splitting the shared message into per-RPC types is **wire-breaking**: the proto descriptor for each RPC's response changes, so an old binary on one side of an in-flight upgrade decoding a new-format reply would mis-parse. Avoiding wire incompatibility during rolling upgrades is the load-bearing reason. |
+| `DIRECTORY_SAME_PACKAGE` | The `proto/node/` directory holds both `chv.node.nwd.v1` and `chv.node.stord.v1`. | The `node/` grouping is intentional: it co-locates protos consumed by the **agent/stord/nwd binaries that share a deployment target** (the node), per ADR-002. Splitting requires a directory reorg + import-path migration. |
+| `ENUM_VALUE_PREFIX` | Enum values such as `OVERLAY_NONE`, `ACK_OK`, `MIGRATION_ERROR_DISK_FULL` lack the buf-recommended type-name prefix. | Rename changes the generated Rust enum variant identifier, breaking every `match` arm and constructor in consumer crates. |
+| `ENUM_ZERO_VALUE_SUFFIX` | Enum zero values are domain-meaningful (`OVERLAY_NONE`, `DIRECTION_BOTH`, `ACK_OK`) instead of the buf-recommended `_UNSPECIFIED` sentinel. | Same Rust-side variant rename impact. The current zero values are also semantically load-bearing — `OVERLAY_NONE` is a real configuration, not "unset" — so renaming would also obscure intent unless paired with a value-shape redesign. |
+
+#### Migration path
+
+Each excepted rule will be fixed in a **v2 release of the affected proto package**
+(`chv.controlplane.node.v2`, `chv.node.stord.v2`, etc.). The v1 → v2 transition is exactly
+the case the §1 `reserved` discipline and the §3 deprecation lifecycle are designed for:
+v1 keeps shipping in parallel under its current name until consumers have migrated, and v2
+introduces the buf-conformant filenames, message names, and enum names from day one.
+
+#### Removal trigger
+
+An entry is removed from `proto/buf.yaml`'s `lint.except` list as soon as **every proto
+file** previously violating that rule has either:
+1. Been migrated into a v2 package that conforms to the rule, **and**
+2. Had its v1 file deleted (or the v1 file independently renamed/restructured to conform).
+
+Removing an exception while v1 files still violate it would re-break the gate. Adding a
+new v1 file that violates an excepted rule is forbidden — `buf lint` no longer catches it,
+so reviewers must manually enforce conformance for any new file added to `proto/`.
+
+#### Tracking
+
+A follow-up issue should be filed at merge time titled "Plan v2 proto migration to clear
+buf lint deferrals" and linked from this section. Until that issue exists, the deferral
+is documented here but not scheduled — that is acceptable while CHV is pre-1.0 but must
+not persist past the first stable release.
+
 ### 5. Pagination
 
 All list endpoints **must** use cursor-based pagination per [AIP-158](https://google.aip.dev/158):

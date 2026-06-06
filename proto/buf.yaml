@@ -14,6 +14,52 @@ lint:
     # chv.controlplane.v1). Deferred — see ADR-014 §Alternatives for the
     # rationale on not using per-file semver right now.
     - PACKAGE_VERSION_SUFFIX
+    #
+    # ── Naming-rule deferrals (see ADR-014 §"Naming-rule deferrals") ──────────
+    # The following STANDARD lint rules surface pre-existing structural naming
+    # debt in proto files that have already shipped in `chv.controlplane.node.v1`,
+    # `chv.node.nwd.v1`, `chv.node.stord.v1`, `chv.webui.bff.v1`,
+    # `chv.webui.tasks.v1`, and `chv.webui.viewmodels.v1`. Renaming any of these
+    # today would:
+    #   * change the on-disk filename, breaking every `import` statement and
+    #     every `tonic_build::compile_protos!(...)` site under `gen/rust/**`;
+    #   * change generated Rust type/method names, breaking every consumer crate
+    #     that names them at compile time;
+    #   * for `RPC_REQUEST_RESPONSE_UNIQUE`, splitting the shared `AckResponse`
+    #     / `Result` types into per-RPC types changes wire-level descriptors and
+    #     breaks compatibility with in-flight messages during rolling upgrades.
+    # The migration path is a `v2` package (e.g. `chv.controlplane.node.v2`) per
+    # ADR-014's `reserved` discipline. Until v2 ships, we narrowly except these
+    # rules so the `buf lint` gate continues to catch *new* naming violations
+    # introduced by future commits — only the listed pre-existing rule classes
+    # are silenced, never `IGNORE_ALL`.
+    #
+    # Filename uses kebab-case (e.g. control-plane-node.proto). Rename blocked
+    # by import-path coupling described above.
+    - FILE_LOWER_SNAKE_CASE
+    # Several RPCs use request/response types that don't follow the
+    # `<Verb><Noun>Request`/`<Verb><Noun>Response` convention (e.g.
+    # `EnrollmentRequest`, `NodeStateReport`, `OverviewRequest`).
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    # `chv.controlplane.node.v1.AckResponse` and `chv.node.stord.v1.Result` are
+    # deliberately shared by many RPCs as a uniform ack envelope. Splitting
+    # them is wire-breaking; deferred to v2.
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    # `node/` contains both `chv.node.nwd.v1` and `chv.node.stord.v1`. The
+    # `node/` directory groups protos by *deployment target* (the agent/stord/
+    # nwd binaries that run on a node), not by package — see ADR-002 for the
+    # split. A v2 reorg would move each package into its own directory.
+    - DIRECTORY_SAME_PACKAGE
+    # Enum values like `OVERLAY_NONE`, `ACK_OK`, `MIGRATION_ERROR_DISK_FULL`
+    # do not carry the buf-recommended type-name prefix (e.g.
+    # `OVERLAY_TYPE_NONE`). Renaming changes generated Rust enum variant names.
+    - ENUM_VALUE_PREFIX
+    # Several enums use a domain-meaningful zero value (`OVERLAY_NONE`,
+    # `DIRECTION_BOTH`, `ACK_OK`) instead of the buf-recommended `_UNSPECIFIED`
+    # sentinel. Renaming is a wire-compatible source change but breaks every
+    # Rust call site referencing the variant.
+    - ENUM_ZERO_VALUE_SUFFIX
 breaking:
   use:
     - FILE
