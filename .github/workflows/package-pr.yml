@@ -33,7 +33,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        # Pinned to a recent protoc (>= 3.15) so proto3 optional fields work
+        # without --experimental_allow_proto3_optional. Ubuntu 22.04's apt
+        # package ships protoc 3.12, which predates that flag becoming
+        # default. The arduino/setup-protoc action installs an official
+        # protobuf release binary into the runner toolchain.
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install packaging tools
         run: |
