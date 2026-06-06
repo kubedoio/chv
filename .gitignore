@@ -65,3 +65,10 @@ docs/superpowers
 
 # Review tooling output (per-session, not part of the source tree)
 .pr-review-out/
+
+# Per-session task plans (not source-tree material)
+task_plan_ci.md
+
+# Playwright local run artifacts (CI uploads its own)
+ui/playwright-report/
+ui/test-results/
