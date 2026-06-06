@@ -1,65 +1,71 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { syncAuthCookieFromLocalStorage } from '$lib/bff/auth-cookie';
+  import { getStoredToken, clearToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast.svelte';
 
-  let username = '';
-  let password = '';
+  let currentPassword = '';
+  let newPassword = '';
+  let confirmPassword = '';
   let error = '';
   let loading = false;
-  const client = createAPIClient();
 
-  // Redirect if already logged in with a valid token
-  onMount(async () => {
+  const MIN_PASSWORD_LENGTH = 12;
+
+  // Redirect to login if no token is present
+  onMount(() => {
+    if (!getStoredToken()) {
+      goto('/login', { replaceState: true });
+    }
+  });
+
+  async function handleChangePassword() {
+    error = '';
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      error = 'All fields are required';
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      error = 'New password and confirmation do not match';
+      return;
+    }
+
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      error = `New password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+      return;
+    }
+
     const token = getStoredToken();
-    if (!token) return;
-    
+    if (!token) {
+      error = 'Session expired. Please log in again.';
+      goto('/login', { replaceState: true });
+      return;
+    }
+
+    loading = true;
+
     try {
-      // Validate token by making a lightweight API call
-      const response = await fetch('/v1/overview', {
+      const response = await fetch('/v1/auth/change-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({})
-      });
-      if (response.ok) {
-        goto('/');
-      } else {
-        // Token is invalid — clear it so user can log in again
-        client.clearToken();
-      }
-    } catch {
-      // Network or other error — stay on login page
-    }
-  });
-
-  async function handleLogin() {
-    if (!username || !password) {
-      error = 'Username and password are required';
-      return;
-    }
-
-    loading = true;
-    error = '';
-
-    try {
-      const response = await fetch('/v1/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword
+        })
       });
 
       if (!response.ok) {
-        let message = `Login failed (${response.status})`;
+        let message = `Password change failed (${response.status})`;
         const contentType = response.headers.get('content-type');
         if (contentType && contentType.includes('application/json')) {
           try {
             const data = await response.json();
-            message = data.error?.message || data.message || message;
+            message = data.message || data.error?.message || message;
           } catch {
             // ignore JSON parse error
           }
@@ -67,40 +73,21 @@
         throw new Error(message);
       }
 
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('Login endpoint returned an unexpected response format.');
-      }
+      toast.success('Password updated successfully. Please log in again.');
 
-      const data = await response.json();
-      
-      // Store token and sync to cookie for server-side loads
-      client.setToken(data.token);
-      syncAuthCookieFromLocalStorage();
+      // Clear the old token and redirect to login so the user gets a fresh JWT
+      clearToken();
 
-      if (data.must_change_password) {
-        toast.info('Password change required. Please set a new password.');
-        await goto('/change-password', {
-          replaceState: true,
-          invalidateAll: true
-        });
-        return;
-      }
-      
-      toast.success(`Welcome, ${data.user.username}!`);
-
-      await goto('/', {
+      await goto('/login', {
         replaceState: true,
         invalidateAll: true
       });
 
-      // Fall back to a hard navigation if the client router still leaves us on
-      // the login screen after a successful auth response.
-      if (typeof window !== 'undefined' && window.location.pathname === '/login') {
-        window.location.replace('/');
+      if (typeof window !== 'undefined' && window.location.pathname === '/change-password') {
+        window.location.replace('/login');
       }
     } catch (err) {
-      error = err instanceof Error ? err.message : 'Login failed';
+      error = err instanceof Error ? err.message : 'Password change failed';
       toast.error(error);
     } finally {
       loading = false;
@@ -109,7 +96,7 @@
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Enter') {
-      handleLogin();
+      handleChangePassword();
     }
   }
 </script>
@@ -124,33 +111,54 @@
           <span class="subtitle">Cloud Hypervisor Platform</span>
         </div>
       </div>
-      <h2 class="gateway-title">Identity Verification</h2>
+      <h2 class="gateway-title">Password Rotation Required</h2>
     </header>
 
     <main class="login-body">
+      <p class="info-text">
+        Your account requires a password change before you can access the platform.
+        Please enter your current password and choose a new one.
+      </p>
+
       <div class="input-group">
-        <label for="username">Operator Identity</label>
+        <label for="current-password">Current Password</label>
         <div class="input-wrapper">
           <input
-            id="username"
-            bind:value={username}
+            id="current-password"
+            bind:value={currentPassword}
             onkeydown={handleKeydown}
-            placeholder="Username"
-            autocomplete="username"
+            type="password"
+            placeholder="••••••••"
+            autocomplete="current-password"
           />
         </div>
       </div>
 
       <div class="input-group">
-        <label for="password">Access Credential</label>
+        <label for="new-password">New Password</label>
         <div class="input-wrapper">
           <input
-            id="password"
-            bind:value={password}
+            id="new-password"
+            bind:value={newPassword}
             onkeydown={handleKeydown}
             type="password"
-            placeholder="••••••••"
-            autocomplete="current-password"
+            placeholder="••••••••••••"
+            autocomplete="new-password"
+          />
+        </div>
+        <span class="hint">Minimum {MIN_PASSWORD_LENGTH} characters</span>
+      </div>
+
+      <div class="input-group">
+        <label for="confirm-password">Confirm New Password</label>
+        <div class="input-wrapper">
+          <input
+            id="confirm-password"
+            bind:value={confirmPassword}
+            onkeydown={handleKeydown}
+            type="password"
+            placeholder="••••••••••••"
+            autocomplete="new-password"
           />
         </div>
       </div>
@@ -165,7 +173,7 @@
       <button
         type="button"
         class="btn-login"
-        onclick={(e) => { e.preventDefault(); handleLogin(); }}
+        onclick={(e) => { e.preventDefault(); handleChangePassword(); }}
         disabled={loading}
       >
         {#if loading}
@@ -173,7 +181,7 @@
             <span></span><span></span><span></span>
           </div>
         {:else}
-          Authenticate Session
+          Update Password
         {/if}
       </button>
 
@@ -269,6 +277,13 @@
     gap: 1.5rem;
   }
 
+  .info-text {
+    font-size: 0.8rem;
+    color: var(--color-neutral-500);
+    line-height: 1.5;
+    margin: 0;
+  }
+
   .input-group {
     display: flex;
     flex-direction: column;
@@ -299,6 +314,11 @@
     border-color: var(--color-primary);
     background: var(--bg-surface);
     box-shadow: 0 0 0 3px var(--color-primary-light);
+  }
+
+  .hint {
+    font-size: 10px;
+    color: var(--color-neutral-400);
   }
 
   .login-error {

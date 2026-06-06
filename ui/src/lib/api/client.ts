@@ -255,6 +255,24 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         );
       }
 
+      // Handle 403 Password Change Required - redirect to change-password
+      if (response.status === 403 && payload?.error.code === 'PASSWORD_CHANGE_REQUIRED') {
+        if (typeof window !== 'undefined') {
+          try {
+            await goto('/change-password');
+          } catch {
+            window.location.href = '/change-password';
+          }
+        }
+
+        throw new APIError(
+          'Password change required before any other action.',
+          403,
+          'PASSWORD_CHANGE_REQUIRED',
+          false
+        );
+      }
+
       // TODO: integrate structured logger instead of console
       // eslint-disable-next-line no-console
       console.error('API Error:', {

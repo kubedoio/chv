@@ -164,6 +164,7 @@ export interface LoginResponse {
   token: string;
   token_type: string;
   expires_in: number;
+  must_change_password?: boolean;
 }
 
 export interface UserInfo {

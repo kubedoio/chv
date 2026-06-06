@@ -61,5 +61,8 @@ export const BFFEndpoints = {
 	createBackupRestore: '/v1/backups/restores',
 
 	// Storage pool endpoints
-	listStoragePools: '/v1/storage-pools'
+	listStoragePools: '/v1/storage-pools',
+
+	// Auth endpoints
+	changePassword: '/v1/auth/change-password'
 } as const;

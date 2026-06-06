@@ -113,6 +113,13 @@ export async function bffFetch<T>(
 				window.location.href = '/login';
 			}
 		}
+
+		// Force password rotation when the backend signals it
+		if (response.status === 403 && code === 'PASSWORD_CHANGE_REQUIRED') {
+			if (typeof window !== 'undefined') {
+				window.location.href = '/change-password';
+			}
+		}
 		
 		throw new BFFError(message, response.status, code);
 	}
