@@ -243,10 +243,7 @@ mod tests {
     fn bcrypt_verify_known_admin_hash() {
         let hash = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m";
         let result = bcrypt::verify("admin", hash).expect("bcrypt::verify should not error");
-        assert!(
-            result,
-            "bcrypt::verify should return true for known-hash"
-        );
+        assert!(result, "bcrypt::verify should return true for known-hash");
     }
 
     #[test]
