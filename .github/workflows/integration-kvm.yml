@@ -76,7 +76,7 @@ jobs:
           fi
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -100,7 +100,7 @@ jobs:
         if: |
           github.event_name == 'workflow_dispatch' &&
           inputs.package_source == 'artifacts'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # Try to find packages from the current PR or branch workflow run.
           # This requires the package-pr workflow to have already uploaded artifacts.
@@ -135,7 +135,7 @@ jobs:
       # -------------------------------------------------------------------
       - name: Upload test logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kvm-integration-logs-${{ github.run_id }}
           path: /tmp/chv-kvm-test-*/logs/
