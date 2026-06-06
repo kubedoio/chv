@@ -10,12 +10,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::BffError;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub username: String,
     pub role: String,
     pub exp: u64,
+    /// True if the user must rotate their password before performing any
+    /// other action. Marked `serde(default)` so JWTs issued before this
+    /// field existed deserialize cleanly with `false` — no migration of
+    /// outstanding tokens required.
+    #[serde(default)]
+    pub must_change_password: bool,
+}
+
+/// Paths a user with `must_change_password=true` is permitted to hit. Every
+/// other path must be rejected with 403 until the password is rotated and a
+/// fresh JWT is issued by re-login.
+fn is_password_rotation_safe_path(path: &str) -> bool {
+    matches!(path, "/v1/auth/change-password" | "/v1/auth/logout")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +72,27 @@ fn forbidden_response() -> Response {
         .into_response()
 }
 
+fn password_change_required_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "message": "password change required before any other action",
+            "code": "PASSWORD_CHANGE_REQUIRED",
+            "error": "password_change_required"
+        })),
+    )
+        .into_response()
+}
+
 async fn role_check(claims: &Claims, required: Role, req: Request, next: Next) -> Response {
+    // Industrial-grade enforcement of the must_change_password promise made
+    // by install.sh: a user flagged for rotation can ONLY hit the change-
+    // password endpoint (or log out). Every other request is short-circuited
+    // with 403 PASSWORD_CHANGE_REQUIRED so the UI knows to route to the
+    // forced-change screen.
+    if claims.must_change_password && !is_password_rotation_safe_path(req.uri().path()) {
+        return password_change_required_response();
+    }
     let user_role = Role::parse(&claims.role).unwrap_or(Role::Viewer);
     if !user_role.meets(required) {
         return forbidden_response();
@@ -195,6 +228,10 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
                         role: row.role,
                         // Far future expiry for API tokens — their expiry is managed by expires_at in DB
                         exp: u64::MAX / 2,
+                        // API tokens bypass the must-change-password gate: they are
+                        // service credentials minted explicitly by an authenticated
+                        // user, not the seeded bootstrap admin row.
+                        must_change_password: false,
                     };
                     return Ok(BearerToken(claims));
                 }
@@ -242,6 +279,7 @@ mod tests {
             username: "admin".to_string(),
             role: "admin".to_string(),
             exp,
+            must_change_password: false,
         };
         let token = encode_claims(&claims, &test_secret());
         let result = validate_token(&token, &test_secret());
@@ -259,6 +297,7 @@ mod tests {
             username: "admin".to_string(),
             role: "admin".to_string(),
             exp: 1, // expired in 1970
+            must_change_password: false,
         };
         let token = encode_claims(&claims, &test_secret());
         let result = validate_token(&token, &test_secret());
@@ -283,6 +322,7 @@ mod tests {
             username: "admin".to_string(),
             role: "admin".to_string(),
             exp,
+            must_change_password: false,
         };
         let token = encode_claims(&claims, "wrong-secret");
         let result = validate_token(&token, &test_secret());
@@ -323,12 +363,14 @@ mod tests {
             username: "alice".into(),
             role: "viewer".into(),
             exp,
+            must_change_password: false,
         };
         let forged = Claims {
             sub: "user-1".into(),
             username: "alice".into(),
             role: "admin".into(), // privilege escalation attempt
             exp,
+            must_change_password: false,
         };
         let original_token = encode_claims(&original, &secret);
         let forged_token = encode_claims(&forged, &secret);
@@ -360,6 +402,7 @@ mod tests {
             username: "alice".into(),
             role: "admin".into(),
             exp: future_exp(),
+            must_change_password: false,
         };
         let token = encode_claims(&claims, &secret);
 
@@ -385,6 +428,7 @@ mod tests {
             username: "alice".into(),
             role: "admin".into(),
             exp: future_exp(),
+            must_change_password: false,
         };
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS512);
         let token = jsonwebtoken::encode(
@@ -415,6 +459,7 @@ mod tests {
             username: "alice".into(),
             role: "admin".into(),
             exp: now - 300,
+            must_change_password: false,
         };
         let token = encode_claims(&claims, &test_secret());
         let result = validate_token(&token, &test_secret());
@@ -433,6 +478,7 @@ mod tests {
             username: "svc".into(),
             role: "operator".into(),
             exp: u64::MAX / 2,
+            must_change_password: false,
         };
         let token = encode_claims(&claims, &test_secret());
         let result = validate_token(&token, &test_secret());
