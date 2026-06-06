@@ -1208,62 +1208,13 @@ start_services() {
 
     systemctl enable --now chv-agent
 
-    # Get auth token for API polling. Read the bootstrap password from the
-    # 0600 root-only file written by seed_admin_user(); never embed credentials.
-    local admin_pw
-    admin_pw=$(cat "${CHV_CONFIG_DIR}/initial_admin_password" 2>/dev/null || true)
-    local auth_token
-    auth_token=$(curl -sf "http://127.0.0.1:8080/v1/auth/login" \
-        -X POST -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"${admin_pw}\"}" 2>/dev/null \
-        | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "")
-
-    info "Waiting for agent enrollment (up to 60s)..."
-    attempt=1
-    while [ $attempt -le 60 ]; do
-        local node_count
-        node_count=0
-        node_count=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
-            -X POST -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${auth_token}" \
-            -d '{}' 2>/dev/null \
-            | grep -o '"total_items":[0-9]*' | grep -o '[0-9]*' || echo "0")
-        if [ "${node_count}" -gt 0 ] 2>/dev/null; then
-            info "Node enrolled successfully."
-            break
-        fi
-        sleep 1
-        ((attempt++))
-    done
-    if [ $attempt -gt 60 ]; then
-        warn "Node enrollment did not complete within 60s."
-        warn "Check enrollment status: journalctl -u chv-agent -n 50"
-    fi
-
-    # Wait for the node to reach TenantReady before returning.
-    # seed_dev_resources() needs TenantReady to place VMs; if we don't wait
-    # here, the 60s window in seed_dev_resources() may be too short when
-    # stord/nwd take time to initialise.
-    info "Waiting for node to reach TenantReady (up to 90s)..."
-    attempt=1
-    while [ $attempt -le 90 ]; do
-        local node_state
-        node_state=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
-            -X POST -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${auth_token}" \
-            -d '{}' 2>/dev/null \
-            | grep -o '"state":"[^"]*"' | head -1 | sed 's/"state":"//;s/"//' || echo "")
-        if [ "$node_state" = "TenantReady" ]; then
-            info "Node is TenantReady."
-            break
-        fi
-        sleep 1
-        ((attempt++))
-    done
-    if [ $attempt -gt 90 ]; then
-        warn "Node did not reach TenantReady within 90s."
-        warn "VM creation may fail. Check: journalctl -u chv-agent -n 50"
-    fi
+    # We intentionally do NOT wait for enrollment or TenantReady here.
+    # start_services() runs before seed_admin_user(), so the admin password
+    # file does not exist yet and we have no way to authenticate with the
+    # BFF.  seed_dev_resources() performs its own TenantReady wait (60s)
+    # before attempting VM creation, which is sufficient.
+    info "Agent started.  Giving it a few seconds to begin enrollment..."
+    sleep 5
 }
 
 # -----------------------------------------------------------------------------
@@ -1409,10 +1360,20 @@ wipe_deployment() {
 # -----------------------------------------------------------------------------
 # Cleanup
 # -----------------------------------------------------------------------------
+reset_must_change_password() {
+    # Ensure the bootstrap admin is flagged for rotation on first login even
+    # if we temporarily cleared it during install to allow API seeding.
+    if [ -f "${CHV_DB_PATH}" ] && cmd_exists sqlite3; then
+        sqlite3 "${CHV_DB_PATH}" \
+            "UPDATE users SET must_change_password = 1 WHERE username = 'admin';" 2>/dev/null || true
+    fi
+}
+
 cleanup() {
     if [ -n "${CLEANUP_TMPDIR:-}" ] && [ -d "$CLEANUP_TMPDIR" ]; then
         rm -rf "$CLEANUP_TMPDIR"
     fi
+    reset_must_change_password
 }
 
 # -----------------------------------------------------------------------------
@@ -1473,6 +1434,15 @@ start_services
 
 # Seed bootstrap admin (must run before import_base_image which authenticates).
 seed_admin_user || fatal "Failed to seed bootstrap admin user."
+
+# Temporarily clear must_change_password so the install script's own API calls
+# (image import, network + VM creation) are not blocked by the password-rotation
+# middleware.  The flag is restored to 1 in cleanup() / reset_must_change_password()
+# so the operator is still forced to rotate on first UI login.
+info "Temporarily clearing must_change_password for install-time API seeding..."
+sqlite3 "${CHV_DB_PATH}" \
+    "UPDATE users SET must_change_password = 0 WHERE username = 'admin';" \
+    || warn "Failed to clear must_change_password; API seeding may be blocked."
 
 import_base_image
 
