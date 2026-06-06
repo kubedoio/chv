@@ -62,3 +62,6 @@ docs/superpowers
 .claude/worktrees/
 .claude/session-reads.txt
 .gstack/
+
+# Review tooling output (per-session, not part of the source tree)
+.pr-review-out/
