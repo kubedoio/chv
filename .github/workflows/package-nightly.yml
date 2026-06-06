@@ -262,7 +262,7 @@ jobs:
           GIT_SHA: ${{ needs.build-and-package.outputs.git_sha }}
 
       - name: Update nightly GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: nightly
           name: CHV Nightly
