@@ -17,7 +17,7 @@ chv-observability = { path = "../chv-observability" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio-rustls"] }
