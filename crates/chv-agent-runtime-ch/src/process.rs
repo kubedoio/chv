@@ -887,7 +887,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let mut state = String::new();
         let already_running = if info_status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
-                state = v.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                state = v
+                    .get("state")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 state == "Running" || state == "Paused"
             } else {
                 false

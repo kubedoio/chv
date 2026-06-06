@@ -27,8 +27,7 @@ test.describe('VM Management', () => {
 	test('clears VM filters', async ({ page }) => {
 		const searchInput = page.getByPlaceholder(/name or node/i);
 		await searchInput.fill('web');
-		await searchInput.press('Enter');
-		await expect(page).toHaveURL(/query=web/);
+		await page.waitForURL(/query=web/);
 		await page.getByRole('button', { name: /clear all/i }).click();
 		await expect(page).not.toHaveURL(/query=web/);
 	});
