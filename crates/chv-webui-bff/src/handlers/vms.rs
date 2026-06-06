@@ -8,6 +8,7 @@ use crate::handlers::hypervisor_settings::validate_vm_overrides;
 use crate::router::AppState;
 use crate::BffError;
 use chv_common::hypervisor::HypervisorOverrides;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub async fn list_vms(
     crate::auth::BearerToken(_claims): crate::auth::BearerToken,
@@ -955,9 +956,34 @@ pub async fn get_vm_console(
         .join("vms")
         .join(vm_id)
         .join("console.log");
-    let log_content = tokio::fs::read_to_string(&log_path)
-        .await
-        .unwrap_or_default();
+
+    let log_content = match tokio::fs::File::open(&log_path).await {
+        Ok(mut file) => {
+            let metadata = file.metadata().await.map_err(|e| {
+                tracing::warn!(path = %log_path.display(), error = %e, "failed to read console log metadata");
+                BffError::Internal("failed to read console log".into())
+            })?;
+            let file_size = metadata.len();
+            let offset = file_size.saturating_sub(256 * 1024);
+            if offset > 0 {
+                file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e| {
+                    tracing::warn!(path = %log_path.display(), error = %e, "failed to seek console log");
+                    BffError::Internal("failed to read console log".into())
+                })?;
+            }
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.map_err(|e| {
+                tracing::warn!(path = %log_path.display(), error = %e, "failed to read console log");
+                BffError::Internal("failed to read console log".into())
+            })?;
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(path = %log_path.display(), error = %e, "failed to open console log");
+            return Err(BffError::Internal("failed to read console log".into()));
+        }
+    };
 
     let lines: Vec<&str> = log_content.lines().collect();
     let line_count = lines.len();
@@ -1075,7 +1101,8 @@ pub async fn get_vm_console_url(
                 ws_scheme, addr, vm_id, token
             )
         }
-        _ => format!("/ws/vms/{}/{}/console?token={}", node_id, vm_id, token),
+        Some(_) => format!("/ws/vms/{}/{}/console?token={}", node_id, vm_id, token),
+        None => return Err(BffError::NotFound("node not found".into())),
     };
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
 

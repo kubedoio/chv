@@ -32,6 +32,8 @@ struct ConsoleParams {
 
 #[derive(serde::Deserialize)]
 struct ResizeMsg {
+    #[serde(rename = "type")]
+    msg_type: String,
     cols: u16,
     rows: u16,
 }
@@ -74,7 +76,7 @@ impl ConsoleServer {
             loop {
                 interval.tick().await;
                 let now = Instant::now();
-                let cutoff = Duration::from_secs(120);
+                let cutoff = Duration::from_secs(300);
                 let mut limits = rate_limiter.lock().await;
                 limits.retain(|_, last| now.duration_since(*last) < cutoff);
                 drop(limits);
@@ -140,13 +142,33 @@ impl ConsoleServer {
         Query(params): Query<ConsoleParams>,
         ws: WebSocketUpgrade,
     ) -> Response {
-        if let Some(response) = Self::check_rate_limit(&vm_id, &state.rate_limiter).await {
-            return response;
+        const MAX_TOKEN_LEN: usize = 8192;
+        const MAX_VM_ID_LEN: usize = 256;
+
+        if params.token.len() > MAX_TOKEN_LEN {
+            tracing::warn!(token_len = params.token.len(), "console token too long");
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if vm_id.len() > MAX_VM_ID_LEN {
+            tracing::warn!(vm_id_len = vm_id.len(), "vm_id too long");
+            return StatusCode::UNAUTHORIZED.into_response();
         }
 
-        if let Err(e) = validate_console_token(&params.token, &state.jwt_secret) {
-            tracing::warn!(error = %e, "console token validation failed");
+        let claims = match validate_console_token(&params.token, &state.jwt_secret) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "console token validation failed");
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        };
+
+        if claims.sub != vm_id {
+            tracing::warn!(claims_sub = %claims.sub, vm_id = %vm_id, "console token subject mismatch");
             return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        if let Some(response) = Self::check_rate_limit(&vm_id, &state.rate_limiter).await {
+            return response;
         }
 
         if let Some(response) = Self::check_replay(&params.token, &state.consumed_tokens).await {
@@ -155,7 +177,9 @@ impl ConsoleServer {
         }
 
         let vm_runtime = state.vm_runtime.clone();
-        ws.on_upgrade(move |socket| Self::handle_socket(socket, vm_id, vm_runtime))
+        ws.max_message_size(64 * 1024)
+            .max_frame_size(64 * 1024)
+            .on_upgrade(move |socket| Self::handle_socket(socket, vm_id, vm_runtime))
     }
 
     async fn handle_socket(
@@ -170,20 +194,26 @@ impl ConsoleServer {
         };
         let raw_fd = pty_fd.as_raw_fd();
 
-        let Some(mut pty_rx) = Self::retry_fetch(
+        let (mut ws_tx, mut ws_rx) = socket.split();
+
+        // Subscribe to live feed first, then fetch scrollback, to minimize
+        // the window where PTY output between scrollback read and broadcast
+        // subscription could be lost. Duplicates are acceptable for a console.
+        let mut pty_rx = match Self::retry_fetch(
             || vm_runtime.pty_output_rx(&vm_id),
             &vm_id,
             "pty broadcast channel",
         )
         .await
-        else {
-            return;
+        {
+            Some(rx) => rx,
+            None => {
+                return;
+            }
         };
 
-        let (mut ws_tx, mut ws_rx) = socket.split();
-
-        // Send scrollback history before subscribing to live feed so the
-        // client sees previous console output immediately on connect.
+        // Send scrollback history so the client sees previous console
+        // output immediately on connect.
         if let Some(scrollback) = vm_runtime.pty_scrollback(&vm_id).await {
             const CHUNK_SIZE: usize = 32 * 1024;
             for chunk in scrollback.chunks(CHUNK_SIZE) {
@@ -195,19 +225,26 @@ impl ConsoleServer {
             }
         }
 
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+        const MAX_MSG_SIZE: usize = 64 * 1024;
+
         // PTY broadcast → WebSocket
         let mut read_task = tokio::spawn(async move {
             loop {
-                match pty_rx.recv().await {
-                    Ok(data) => {
+                match tokio::time::timeout(IDLE_TIMEOUT, pty_rx.recv()).await {
+                    Ok(Ok(data)) => {
                         let msg = axum::extract::ws::Message::Binary(data);
                         if ws_tx.send(msg).await.is_err() {
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                         // If lagged, continue reading latest data
+                    }
+                    Err(_) => {
+                        tracing::info!("console connection idle timeout on read");
+                        break;
                     }
                 }
             }
@@ -221,24 +258,54 @@ impl ConsoleServer {
                 tracing::warn!(error = %std::io::Error::last_os_error(), "failed to dup pty fd for write");
                 return;
             }
+            // Set FD_CLOEXEC on the dup'd fd so it is not leaked to child processes
+            if let Ok(flags) = nix::fcntl::fcntl(dup_fd, nix::fcntl::FcntlArg::F_GETFD) {
+                let new_flags = nix::fcntl::FdFlag::from_bits_truncate(flags)
+                    | nix::fcntl::FdFlag::FD_CLOEXEC;
+                let _ = nix::fcntl::fcntl(
+                    dup_fd,
+                    nix::fcntl::FcntlArg::F_SETFD(new_flags),
+                );
+            }
             let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
             let tokio_file = tokio::fs::File::from_std(std_file);
             let mut pty_writer = tokio_file;
 
-            while let Some(result) = ws_rx.next().await {
-                let Ok(msg) = result else {
-                    break;
+            loop {
+                let msg = match tokio::time::timeout(IDLE_TIMEOUT, ws_rx.next()).await {
+                    Ok(Some(Ok(msg))) => msg,
+                    Ok(Some(Err(_))) | Ok(None) => break,
+                    Err(_) => {
+                        tracing::info!("console connection idle timeout on write");
+                        break;
+                    }
                 };
-                #[allow(clippy::collapsible_match)]
+
                 match msg {
                     axum::extract::ws::Message::Text(text) => {
-                        if let Ok(resize) = serde_json::from_str::<ResizeMsg>(&text) {
-                            set_pty_size(raw_fd, resize.cols, resize.rows);
-                        } else if pty_writer.write_all(text.as_bytes()).await.is_err() {
+                        if text.len() > MAX_MSG_SIZE {
+                            tracing::warn!(size = text.len(), "console text message too large");
                             break;
+                        }
+                        match serde_json::from_str::<ResizeMsg>(&text) {
+                            Ok(resize) if resize.msg_type == "resize" => {
+                                let writer_fd = pty_writer.as_raw_fd();
+                                if let Err(e) = set_pty_size(writer_fd, resize.cols, resize.rows) {
+                                    tracing::warn!(error = %e, "failed to set pty size");
+                                }
+                            }
+                            _ => {
+                                if pty_writer.write_all(text.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     axum::extract::ws::Message::Binary(data) => {
+                        if data.len() > MAX_MSG_SIZE {
+                            tracing::warn!(size = data.len(), "console binary message too large");
+                            break;
+                        }
                         if pty_writer.write_all(&data).await.is_err() {
                             break;
                         }
@@ -282,18 +349,19 @@ impl ConsoleServer {
     }
 }
 
-fn set_pty_size(fd: std::os::fd::RawFd, cols: u16, rows: u16) {
+fn set_pty_size(fd: std::os::fd::RawFd, cols: u16, rows: u16) -> Result<(), nix::Error> {
+    const MAX_DIM: u16 = 1000;
+    if cols == 0 || cols > MAX_DIM || rows == 0 || rows > MAX_DIM {
+        tracing::warn!(cols = cols, rows = rows, "invalid pty resize dimensions");
+        return Ok(());
+    }
     let ws = nix::libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    unsafe {
-        if let Err(e) = set_winsize(fd, &ws) {
-            tracing::warn!(error = %e, "failed to set pty size");
-        }
-    }
+    unsafe { set_winsize(fd, &ws).map(|_| ()) }
 }
 
 /// Validate a JWT token against the given secret using HS256.

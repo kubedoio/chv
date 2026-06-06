@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
@@ -60,6 +60,7 @@ use crate::adapter::{
 };
 
 const CONSOLE_SCROLLBACK_BYTES: usize = 256 * 1024;
+const CONSOLE_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 struct AliveGuard(Arc<AtomicBool>);
 
@@ -828,10 +829,21 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     return;
                 }
             };
+            let mut written: u64 = 0;
             loop {
                 match pty_rx_log.recv().await {
                     Ok(data) => {
-                        let _ = writer.write_all(&data).await;
+                        if written + data.len() as u64 > CONSOLE_LOG_MAX_BYTES {
+                            // Safety cap: truncate and continue. In-memory scrollback
+                            // preserves the last 256 KiB so recent output is still
+                            // visible via WebSocket.
+                            let _ = writer.set_len(0).await;
+                            let _ = writer.seek(SeekFrom::Start(0)).await;
+                            written = 0;
+                        }
+                        if writer.write_all(&data).await.is_ok() {
+                            written += data.len() as u64;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -866,39 +878,52 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let (info_status, info_body) =
             Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
-        if info_status == 200 {
+        let mut state = String::new();
+        let already_running = if info_status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
-                let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
-                if state == "Running" || state == "Paused" {
-                    info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
-                    // Idempotent success: VM is already in the desired state.
-                    // The guard's succeeded flag must be set on every Ok return
-                    // so RED metrics classify this as ok, not err.
-                    __guard.succeeded = true;
-                    return Ok(());
-                }
+                state = v.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                state == "Running" || state == "Paused"
+            } else {
+                false
             }
+        } else {
+            false
+        };
+
+        // Respawn broadcaster if it died while the VM was running.
+        // This must happen BEFORE the idempotent early return so console
+        // output doesn't stall when start_vm is called on an already-running VM.
+        if !broadcaster_alive.load(Ordering::SeqCst) {
+            info!(vm_id = %vm_id, "respawning pty broadcaster");
+            let broadcaster_fd = unsafe { nix::libc::dup(pty_master_fd) };
+            if broadcaster_fd >= 0 {
+                let _ = nix::fcntl::fcntl(
+                    broadcaster_fd,
+                    nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+                );
+                broadcaster_alive.store(true, Ordering::SeqCst);
+                Self::spawn_pty_broadcaster(
+                    vm_id.to_string(),
+                    broadcaster_fd,
+                    pty_tx.clone(),
+                    pty_scrollback.clone(),
+                    broadcaster_alive.clone(),
+                );
+            }
+        }
+
+        if already_running {
+            info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
+            // Idempotent success: VM is already in the desired state.
+            // The guard's succeeded flag must be set on every Ok return
+            // so RED metrics classify this as ok, not err.
+            __guard.succeeded = true;
+            return Ok(());
         }
 
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
         if status != 200 && status != 204 {
             warn!(vm_id = %vm_id, status = status, "vm.boot returned non-success (VM may have auto-booted)");
-        }
-
-        // Respawn broadcaster if it died during a previous graceful shutdown
-        if !broadcaster_alive.load(Ordering::SeqCst) {
-            info!(vm_id = %vm_id, "respawning pty broadcaster after vm start");
-            let broadcaster_fd = unsafe { nix::libc::dup(pty_master_fd) };
-            if broadcaster_fd >= 0 {
-                broadcaster_alive.store(true, Ordering::SeqCst);
-                Self::spawn_pty_broadcaster(
-                    vm_id.to_string(),
-                    broadcaster_fd,
-                    pty_tx,
-                    pty_scrollback,
-                    broadcaster_alive.clone(),
-                );
-            }
         }
 
         __guard.succeeded = true;

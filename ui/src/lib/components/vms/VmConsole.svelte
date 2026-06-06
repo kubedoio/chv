@@ -10,9 +10,10 @@
 		consoleUrl: string;
 		getConsoleUrl?: () => Promise<string>;
 		running?: boolean;
+		consoleExpiresAt?: string;
 	}
 
-	let { vmId, consoleUrl, getConsoleUrl, running = true }: Props = $props();
+	let { vmId, consoleUrl, getConsoleUrl, running = true, consoleExpiresAt }: Props = $props();
 
 	let terminalEl: HTMLDivElement;
 	let terminal: Terminal;
@@ -28,6 +29,11 @@
 	let wsError = $state('');
 	let terminalReady = $state(false);
 	let manualDisconnect = $state(false);
+	let reconnecting = false;
+	let reconnectDelay = 1500;
+	const MAX_RECONNECT_DELAY = 30000;
+	let tokenRefreshFailures = 0;
+	const MAX_TOKEN_REFRESH_FAILURES = 3;
 
 	function validateWsUrl(url: string): boolean {
 		// Allow relative paths (starting with /) — they're always same-origin
@@ -63,11 +69,13 @@
 		statusText = 'Reconnecting';
 		reconnectTimer = setTimeout(() => {
 			handleReconnect(false);
-		}, 1500);
+		}, reconnectDelay);
+		reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
 	}
 
 	function connectWith(url: string) {
 		if (!terminal) return;
+		if (socket?.readyState === WebSocket.CONNECTING) return;
 		if (!validateWsUrl(url)) {
 			wsError = `Refused to connect: WebSocket URL does not match the application origin.`;
 			statusText = 'Connection blocked';
@@ -86,6 +94,9 @@
 		}
 
 		if (socket) {
+			socket.onopen = null;
+			socket.onmessage = null;
+			socket.onerror = null;
 			socket.onclose = null;
 			socket.close();
 			// Clear terminal on reconnect so scrollback isn't duplicated
@@ -99,6 +110,8 @@
 		socket.onopen = () => {
 			connected = true;
 			statusText = 'Connected';
+			reconnectDelay = 1500;
+			tokenRefreshFailures = 0;
 			terminal.writeln('\r\n\x1b[32m[Connected to serial console]\x1b[0m\r\n');
 		};
 
@@ -126,22 +139,40 @@
 	}
 
 	async function handleReconnect(userInitiated = true) {
-		if (userInitiated) {
-			manualDisconnect = false;
-		}
-		let urlToUse = consoleUrl;
-
-		if (getConsoleUrl) {
-			statusText = 'Refreshing token...';
-			try {
-				urlToUse = await getConsoleUrl();
-			} catch {
-				terminal.writeln('\r\n\x1b[33m[Token refresh failed, retrying with existing URL]\x1b[0m');
-				urlToUse = consoleUrl;
+		if (reconnecting) return;
+		reconnecting = true;
+		try {
+			if (userInitiated) {
+				manualDisconnect = false;
+				reconnectDelay = 1500;
+				tokenRefreshFailures = 0;
 			}
-		}
+			let urlToUse = consoleUrl;
 
-		connectWith(urlToUse);
+			if (getConsoleUrl) {
+				statusText = 'Refreshing token...';
+				try {
+					urlToUse = await getConsoleUrl();
+					tokenRefreshFailures = 0;
+				} catch {
+					tokenRefreshFailures++;
+					const isExpired = consoleExpiresAt && Date.now() > new Date(consoleExpiresAt).getTime() - 10000;
+					if (isExpired || tokenRefreshFailures >= MAX_TOKEN_REFRESH_FAILURES) {
+						wsError = 'Console token expired. Please reconnect manually.';
+						statusText = 'Token expired';
+						terminal.writeln('\r\n\x1b[31m[Console token expired — please reconnect manually]\x1b[0m');
+						return;
+					}
+					terminal.writeln('\r\n\x1b[33m[Token refresh failed, will retry]\x1b[0m');
+					scheduleReconnect();
+					return;
+				}
+			}
+
+			connectWith(urlToUse);
+		} finally {
+			reconnecting = false;
+		}
 	}
 
 	function handleDisconnect() {
@@ -212,6 +243,9 @@
 			connectWith(consoleUrl);
 		} else {
 			if (socket) {
+				socket.onopen = null;
+				socket.onmessage = null;
+				socket.onerror = null;
 				socket.onclose = null;
 				socket.close();
 				socket = undefined;

@@ -28,6 +28,7 @@
 	const detail = $derived(data.detail);
 	let pendingAction = $state<string | null>(null);
 	let liveConsoleUrl = $state<string | undefined>(undefined);
+	let liveConsoleExpiresAt = $state<string | undefined>(undefined);
 	let VmConsoleComponent = $state<typeof import('$lib/components/vms/VmConsole.svelte').default | null>(null);
 	let consoleLoading = $state(false);
 	let bootLog = $state<string>('');
@@ -53,8 +54,8 @@
 			ensureVmConsole();
 			consoleLoading = true;
 			getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined)
-				.then(res => { liveConsoleUrl = res.url; })
-				.catch(() => { liveConsoleUrl = undefined; })
+				.then(res => { liveConsoleUrl = res.url; liveConsoleExpiresAt = res.expires_at; })
+				.catch(() => { liveConsoleUrl = undefined; liveConsoleExpiresAt = undefined; })
 				.finally(() => { consoleLoading = false; });
 		}
 	});
@@ -199,19 +200,22 @@
 
 		<main class="inventory-main" class:inventory-main--rail-open={supportRailOpen}>
 			<section class="detail-content">
-				{#if detail.currentTab === 'console'}
+				<div style:display={detail.currentTab === 'console' ? 'block' : 'none'}>
 					<VmConsoleTab
 						vmId={detail.summary.vm_id}
 						{consoleLoading}
 						{liveConsoleUrl}
 						{VmConsoleComponent}
 						running={detail.summary.power_state.toLowerCase() === 'running'}
+						consoleExpiresAt={liveConsoleExpiresAt}
 						getConsoleUrl={async () => {
 							const res = await getVmConsoleUrl(detail.summary.vm_id, getStoredToken() ?? undefined);
+							liveConsoleExpiresAt = res.expires_at;
 							return res.url;
 						}}
 					/>
-				{:else if detail.currentTab === 'boot-log'}
+				</div>
+				{#if detail.currentTab === 'boot-log'}
 					<VmBootLogTab {bootLogLoading} {bootLog} />
 				{:else if detail.currentTab === 'snapshots'}
 					<VmSnapshots
@@ -231,7 +235,7 @@
 						attachedVolumes={detail.summary.attached_volumes ?? []}
 						attachedNics={detail.summary.attached_nics ?? []}
 					/>
-				{:else}
+				{:else if detail.currentTab === 'summary'}
 					<VmDetailSummaryTab
 						powerState={detail.summary.power_state}
 						health={detail.summary.health}

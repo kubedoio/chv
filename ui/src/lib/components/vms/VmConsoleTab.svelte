@@ -9,6 +9,7 @@
 		VmConsoleComponent: typeof import('$lib/components/vms/VmConsole.svelte').default | null;
 		running: boolean;
 		getConsoleUrl: () => Promise<string>;
+		consoleExpiresAt?: string;
 	}
 
 	let {
@@ -17,7 +18,8 @@
 		liveConsoleUrl,
 		VmConsoleComponent,
 		running,
-		getConsoleUrl
+		getConsoleUrl,
+		consoleExpiresAt
 	}: Props = $props();
 </script>
 
@@ -30,6 +32,7 @@
 			consoleUrl={liveConsoleUrl}
 			{running}
 			{getConsoleUrl}
+			consoleExpiresAt={consoleExpiresAt}
 		/>
 	{:else if liveConsoleUrl}
 		<p class="empty-hint">Loading console workspace...</p>
