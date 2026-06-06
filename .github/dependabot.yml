@@ -30,7 +30,7 @@ updates:
       prefix-development: "chore(deps-dev)"
       include: "scope"
     # reviewers:
-    #   - "your-org/chv-maintainers"
+    #   - "kubedoio/chv-maintainers"
     groups:
       cargo-security:
         applies-to: "security-updates"
@@ -61,7 +61,7 @@ updates:
       prefix-development: "chore(deps-dev)"
       include: "scope"
     # reviewers:
-    #   - "your-org/chv-maintainers"
+    #   - "kubedoio/chv-frontend"
     groups:
       npm-security:
         applies-to: "security-updates"
@@ -91,7 +91,7 @@ updates:
       prefix: "chore(ci)"
       include: "scope"
     # reviewers:
-    #   - "your-org/chv-maintainers"
+    #   - "kubedoio/chv-admins"
     groups:
       actions-security:
         applies-to: "security-updates"

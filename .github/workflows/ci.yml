@@ -4,6 +4,9 @@ name: CI
 #   make bump-version BUMP_TYPE=patch
 # See scripts/bump-version.sh for details.
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
