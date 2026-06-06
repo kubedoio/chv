@@ -871,6 +871,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
                 if state == "Running" || state == "Paused" {
                     info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
+                    // Idempotent success: VM is already in the desired state.
+                    // The guard's succeeded flag must be set on every Ok return
+                    // so RED metrics classify this as ok, not err.
+                    __guard.succeeded = true;
                     return Ok(());
                 }
             }
@@ -989,6 +993,11 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                     let _ = tokio::fs::remove_file(&path).await;
                     info!(vm_id = %vm_id, path = %path.display(), "removed console.log on force stop after graceful timeout");
                 }
+                // Force-kill fallback after graceful-stop timeout is still a
+                // successful stop from the caller's point of view: the VM is no
+                // longer in the runtime map. Mark the guard before the early
+                // return so RED metrics classify this as ok.
+                __guard.succeeded = true;
                 return Ok(());
             }
 
