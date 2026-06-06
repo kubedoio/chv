@@ -1073,8 +1073,11 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location /ws/vms/ {
-        proxy_pass http://127.0.0.1:8444/vms/;
+    # WebSocket proxy for serial console.
+    # The BFF returns proxied paths like /ws/vms/{node_id}/{vm_id}/console?token=...
+    # We strip the node_id and forward /vms/{vm_id}/console?token=... to the agent.
+    location ~ ^/ws/vms/[^/]+/(.*)$ {
+        proxy_pass http://127.0.0.1:8444/vms/$1$is_args$args;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
