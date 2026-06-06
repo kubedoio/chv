@@ -8,6 +8,19 @@ maintainer: Kubedo <engineering@kubedo.io>
 description: CHV control plane service
 homepage: https://github.com/chv-project/chv
 license: MIT
+# Runtime libs: chv-controlplane links against OpenSSL 3 via reqwest's
+# `native-tls` feature and rust-s3. The runtime soname is
+# `libssl.so.3`, but the package name differs between distros —
+# debian/ubuntu ship it as `libssl3`, RHEL ships it as `openssl-libs`.
+# nfpm's per-format `overrides:` block sets the right name in the .deb
+# vs .rpm without shipping a separate nfpm config per format.
+overrides:
+  deb:
+    depends:
+      - libssl3
+  rpm:
+    depends:
+      - openssl-libs
 contents:
   - src: target/release/chv-controlplane
     dst: /usr/bin/chv-controlplane
