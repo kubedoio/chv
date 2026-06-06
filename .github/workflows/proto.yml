@@ -31,5 +31,9 @@ jobs:
         # Only run on PRs — push to main is the baseline, not compared against itself.
         if: github.event_name == 'pull_request'
         working-directory: proto
+        # actions/checkout fetches the PR head; `main` exists as a remote-tracking
+        # ref (refs/remotes/origin/main), not as a local branch. buf-cli's
+        # `branch=` qualifier looks up local branches, so we use `ref=` with
+        # the fully-qualified remote ref instead.
         run: |
-          buf breaking --against '../.git#branch=main,subdir=proto'
+          buf breaking --against '../.git#ref=refs/remotes/origin/main,subdir=proto'
