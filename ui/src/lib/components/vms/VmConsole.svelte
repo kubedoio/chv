@@ -257,6 +257,18 @@
 		}
 	});
 
+	function safeFit() {
+		if (!terminalEl || !fitAddon) return;
+		// offsetParent is null when the element (or an ancestor) is display:none.
+		// Calling fit() in that state crashes xterm.js because dimensions are undefined.
+		if (terminalEl.offsetParent === null) return;
+		try {
+			fitAddon.fit();
+		} catch (e) {
+			// Silently ignore transient dimension errors
+		}
+	}
+
 	onMount(() => {
 		const rootStyle = getComputedStyle(document.documentElement);
 		terminal = new Terminal({
@@ -275,7 +287,7 @@
 		fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
 		terminal.open(terminalEl);
-		fitAddon.fit();
+		safeFit();
 
 		terminal.onData((data) => {
 			if (socket?.readyState === WebSocket.OPEN) {
@@ -285,12 +297,12 @@
 
 		terminal.onResize(({ cols, rows }) => {
 			if (socket?.readyState === WebSocket.OPEN) {
-				socket.send(JSON.stringify({ cols, rows }));
+				socket.send(JSON.stringify({ type: 'resize', cols, rows }));
 			}
 		});
 
 		resizeObserver = new ResizeObserver(() => {
-			fitAddon?.fit();
+			safeFit();
 		});
 		resizeObserver.observe(terminalEl);
 
