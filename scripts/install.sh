@@ -1192,6 +1192,17 @@ start_services() {
     chown "$CHV_USER":"$CHV_USER" /run/chv/agent/agent.crt /run/chv/agent/agent.key /run/chv/agent/ca.crt
     chmod 640 /run/chv/agent/agent.key
 
+    # Ensure storage directory ownership is correct before starting agent.
+    # The agent spawns chv-stord as a child; stord needs write access to its
+    # runtime directory. In all-in-one mode the agent-managed stord uses
+    # /var/lib/chv/agent, but the systemd unit (if ever enabled) uses
+    # /var/lib/chv/storage. Keeping both paths correctly owned prevents
+    # health-check failures that stall the node in Degraded.
+    if [ -d "$CHV_DATA_DIR/storage" ]; then
+        chown -R "chv-stord:chv-stord" "$CHV_DATA_DIR/storage" 2>/dev/null || true
+        chmod 750 "$CHV_DATA_DIR/storage" "$CHV_DATA_DIR/storage/localdisk" "$CHV_DATA_DIR/storage/lvm" 2>/dev/null || true
+    fi
+
     systemctl enable --now chv-agent
 
     # Get auth token for API polling. Read the bootstrap password from the
@@ -1224,6 +1235,31 @@ start_services() {
     if [ $attempt -gt 60 ]; then
         warn "Node enrollment did not complete within 60s."
         warn "Check enrollment status: journalctl -u chv-agent -n 50"
+    fi
+
+    # Wait for the node to reach TenantReady before returning.
+    # seed_dev_resources() needs TenantReady to place VMs; if we don't wait
+    # here, the 60s window in seed_dev_resources() may be too short when
+    # stord/nwd take time to initialise.
+    info "Waiting for node to reach TenantReady (up to 90s)..."
+    attempt=1
+    while [ $attempt -le 90 ]; do
+        local node_state
+        node_state=$(curl -sf "http://127.0.0.1:8080/v1/nodes" \
+            -X POST -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${auth_token}" \
+            -d '{}' 2>/dev/null \
+            | grep -o '"state":"[^"]*"' | head -1 | sed 's/"state":"//;s/"//' || echo "")
+        if [ "$node_state" = "TenantReady" ]; then
+            info "Node is TenantReady."
+            break
+        fi
+        sleep 1
+        ((attempt++))
+    done
+    if [ $attempt -gt 90 ]; then
+        warn "Node did not reach TenantReady within 90s."
+        warn "VM creation may fail. Check: journalctl -u chv-agent -n 50"
     fi
 }
 
