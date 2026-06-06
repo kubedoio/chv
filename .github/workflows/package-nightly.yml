@@ -195,7 +195,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nightly-packages
           path: dist/packages/
@@ -291,7 +291,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nightly-packages
           path: dist/packages/
