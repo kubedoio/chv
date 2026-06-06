@@ -73,7 +73,29 @@ async fn inject_request_id(resp: Response, request_id: &str) -> Response {
                 error = %e,
                 "failed to buffer error response body for request_id injection; returning empty body"
             );
-            return Response::from_parts(parts, Body::empty());
+            // Build a small JSON replacement that still carries the request_id
+            // so the client gets a usable correlation handle. The original
+            // upstream Content-Length advertises the unbuffered body's length,
+            // which would now be a framing lie (clients on HTTP/1.1 hang
+            // waiting for the promised bytes; HTTP/2 may RST_STREAM). We must
+            // either rewrite or drop Content-Length to match the new payload.
+            let replacement = serde_json::json!({
+                "error": "response_body_too_large_for_correlation_injection",
+                "request_id": request_id,
+            });
+            // serde_json::to_vec on a Value built from a json! macro is
+            // infallible for these inputs, but fall back defensively.
+            let new_bytes = serde_json::to_vec(&replacement).unwrap_or_else(|_| {
+                b"{\"error\":\"response_body_too_large_for_correlation_injection\"}".to_vec()
+            });
+            if let Ok(len) = HeaderValue::from_str(&new_bytes.len().to_string()) {
+                parts
+                    .headers
+                    .insert(axum::http::header::CONTENT_LENGTH, len);
+            } else {
+                parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+            }
+            return Response::from_parts(parts, Body::from(new_bytes));
         }
     };
 
@@ -295,5 +317,87 @@ mod tests {
         let (_, body) = resp.into_parts();
         let bytes = to_bytes(body, 64 * 1024).await.unwrap();
         assert_eq!(&bytes[..], b"raw text error");
+    }
+
+    /// Regression: when the upstream JSON error body exceeds `MAX_ERR_BODY`,
+    /// `axum::body::to_bytes` returns Err, and the middleware must replace the
+    /// body with a small JSON payload AND recompute (or drop) Content-Length.
+    /// Otherwise Content-Length still advertises the original (huge) length
+    /// while the wire body is short — an HTTP framing lie.
+    #[tokio::test]
+    async fn oversized_error_body_does_not_lie_about_content_length() {
+        use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+
+        // Handler returns a 500 with an `application/json` body that
+        // serializes well past MAX_ERR_BODY. A Vec<u8> serializes as a JSON
+        // array of integers (each "0," is two bytes), so 200_000 elements
+        // dwarfs the 64 KiB cap.
+        async fn huge_json_error() -> Response {
+            let payload = serde_json::json!({
+                "code": "OVERSIZED",
+                "data": vec![0u8; 200_000],
+            });
+            let body = serde_json::to_vec(&payload).unwrap();
+            let mut resp = Response::new(Body::from(body.clone()));
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            resp.headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            resp.headers_mut().insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&body.len().to_string()).unwrap(),
+            );
+            resp
+        }
+
+        let app = Router::new()
+            .route("/huge", get(huge_json_error))
+            .layer(middleware::from_fn(extract_correlation_id));
+
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/huge")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // x-correlation-id is still attached by the outer wrapper.
+        assert!(resp.headers().get("x-correlation-id").is_some());
+
+        let advertised_len: Option<usize> = resp
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse().ok());
+
+        let (_, body) = resp.into_parts();
+        // Cap higher than the original advertised length so we can detect a lie.
+        let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+
+        // Core invariant: if Content-Length is present, it must equal the
+        // actual body length. Equivalently, the middleware may drop it.
+        if let Some(n) = advertised_len {
+            assert_eq!(
+                n,
+                bytes.len(),
+                "Content-Length advertised {} bytes but body is {} bytes — framing lie",
+                n,
+                bytes.len()
+            );
+        }
+
+        // The replacement payload must still carry the request_id so the
+        // client can correlate this oversized failure.
+        let v: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("replacement body is not valid JSON: {e}; bytes={bytes:?}"));
+        assert!(
+            v.get("request_id")
+                .and_then(|x| x.as_str())
+                .is_some_and(|s| !s.is_empty()),
+            "replacement body missing non-empty request_id: {v}"
+        );
     }
 }
