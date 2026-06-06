@@ -28,7 +28,7 @@ pub async fn login_handler(
 
     // Look up user by username
     let row = sqlx::query_as::<_, UserRow>(
-        "SELECT user_id, password_hash, role FROM users WHERE username = $1",
+        "SELECT user_id, password_hash, role, must_change_password FROM users WHERE username = $1",
     )
     .bind(username)
     .fetch_optional(&state.pool)
@@ -66,11 +66,14 @@ pub async fn login_handler(
         .as_secs()
         + 24 * 60 * 60; // 24 hours
 
+    let must_change_password = row.must_change_password != 0;
+
     let claims = Claims {
         sub: row.user_id.clone(),
         username: username.to_string(),
         role: row.role.clone(),
         exp,
+        must_change_password,
     };
 
     let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
@@ -94,7 +97,8 @@ pub async fn login_handler(
             "id": row.user_id,
             "username": username,
             "role": row.role,
-        }
+        },
+        "must_change_password": must_change_password
     })))
 }
 
@@ -120,4 +124,9 @@ struct UserRow {
     user_id: String,
     password_hash: String,
     role: String,
+    /// Mirrors the `must_change_password` column added in migration 0044.
+    /// Stored as INTEGER in SQLite; sqlx maps that to `i64`. install.sh
+    /// sets it to 1 on the seeded admin row so the operator is forced to
+    /// rotate the credential on first login.
+    must_change_password: i64,
 }

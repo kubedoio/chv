@@ -1,0 +1,121 @@
+<script lang="ts">
+	import { Download, Tag } from 'lucide-svelte';
+	import SectionCard from '$lib/components/shell/SectionCard.svelte';
+
+	interface PendingImage {
+		name: string;
+		size: string;
+	}
+
+	interface Props {
+		pendingImages: PendingImage[];
+	}
+
+	let { pendingImages }: Props = $props();
+</script>
+
+<aside class="support-area">
+	<SectionCard title="Ingestion Pipeline" icon={Download} badgeLabel={String(pendingImages.length)}>
+		{#if pendingImages.length === 0}
+			<p class="empty-hint">No active artifact transmissions detected.</p>
+		{:else}
+			<ul class="attention-list">
+				{#each pendingImages as img}
+					<li>
+						<div class="attention-card">
+							<div class="attention-card__main">
+								<span class="res-name">{img.name}</span>
+								<span class="res-issue">Ingesting · {img.size}</span>
+							</div>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</SectionCard>
+
+	<SectionCard title="Base Manifest" icon={Tag}>
+		<div class="artifact-manifest">
+			<div class="manifest-row">
+				<span>Standard Templates</span>
+				<span>Online</span>
+			</div>
+			<div class="manifest-row">
+				<span>Global Projections</span>
+				<span>3 Verified</span>
+			</div>
+		</div>
+	</SectionCard>
+</aside>
+
+<style>
+	.support-area {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.empty-hint {
+		font-size: 11px;
+		color: var(--color-neutral-400);
+		padding: 1rem;
+		text-align: center;
+	}
+
+	.attention-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.attention-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+		color: var(--color-neutral-800);
+	}
+
+	.attention-card__main {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.res-name {
+		font-size: 11px;
+		font-weight: 700;
+	}
+
+	.res-issue {
+		font-size: 9px;
+		color: var(--color-warning);
+		font-weight: 600;
+		text-transform: uppercase;
+	}
+
+	.artifact-manifest {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.manifest-row {
+		display: flex;
+		justify-content: space-between;
+		font-size: 10px;
+		color: var(--color-neutral-600);
+		padding: 0.35rem 0.5rem;
+		background: var(--bg-surface-muted);
+		border-radius: var(--radius-xs);
+	}
+
+	.manifest-row span:last-child {
+		font-weight: 700;
+		color: var(--color-neutral-900);
+	}
+</style>

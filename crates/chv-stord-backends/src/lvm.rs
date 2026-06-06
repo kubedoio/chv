@@ -916,4 +916,70 @@ mod tests {
         let res = backend.resize("vol-1", "lvm-vg0-vol-1", u64::MAX).await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
+
+    // C-19 (S4-5): unit-test boundary for the LVM backend.
+    //
+    // The backend has no Config struct (vg_name is the only construction-time
+    // argument) and no `lvcreate_path` field, so the originally proposed
+    // "config_default_values_are_safe" and "missing-binary" tests are not
+    // meaningful for this implementation.  Health is path-existence based, not
+    // binary-probe based, so we instead lock down the unhealthy contract and
+    // strengthen the construction-time tamper checks.
+
+    #[tokio::test]
+    async fn lvm_new_rejects_path_traversal_in_vg_name() {
+        // sanitize_id must reject anything outside [a-zA-Z0-9._-].  These
+        // strings model classic shell-injection / path-traversal attempts that
+        // could otherwise be interpolated into /dev/{vg}/{vol} or into an
+        // lvremove arg.
+        for malicious in [
+            "../escape",
+            "vg/sub",
+            "vg;rm -rf",
+            "vg`whoami`",
+            "vg$(id)",
+            "vg|cat",
+            "vg with space",
+            "",
+        ] {
+            let res = LVMBackend::new(malicious.to_string());
+            assert!(
+                matches!(res, Err(ChvError::InvalidArgument { .. })),
+                "expected InvalidArgument for vg_name={:?}",
+                malicious
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lvm_health_with_unknown_volume_returns_unhealthy_with_reason() {
+        // health() is path-existence based: it reports unhealthy with a
+        // non-empty last_error when /dev/{vg}/{vol} does not exist.  Lock down
+        // the exact contract callers in chv-stord rely on.
+        let backend =
+            LVMBackend::new("vg-does-not-exist".to_string()).expect("vg name with hyphen is valid");
+        let h = backend
+            .health(
+                "vol-does-not-exist",
+                "lvm-vg-does-not-exist-vol-does-not-exist",
+            )
+            .await
+            .expect("health() returns BackendHealth, never an error, for an unknown volume");
+        assert_eq!(h.status, "unhealthy");
+        assert_eq!(h.backend_state, "open");
+        assert!(
+            h.last_error.contains("path does not exist"),
+            "last_error should mention missing path, got: {:?}",
+            h.last_error
+        );
+    }
+
+    #[tokio::test]
+    async fn lvm_volume_path_uses_dev_prefix() {
+        // The /dev/{vg}/{lv} layout is part of the ABI with chv-stord's
+        // attach plumbing; regress-protect it.
+        let backend = LVMBackend::new("vg0".to_string()).expect("valid vg");
+        let path = backend.volume_path("vol-1").expect("valid volume id");
+        assert_eq!(path.to_string_lossy(), "/dev/vg0/vol-1");
+    }
 }

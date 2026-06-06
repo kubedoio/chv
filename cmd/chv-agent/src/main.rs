@@ -775,7 +775,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
 
-        for vm in reconciler.vm_runtime.list() {
+        for vm in reconciler.vm_runtime.list().await {
             let mut counters = control_plane_node_api::control_plane_node_api::VmStateReport {
                 node_id: node_id.clone(),
                 vm_id: vm.vm_id.clone(),
@@ -943,7 +943,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ms = metrics_state.lock().await;
             ms.node_id = cache.lock().await.node_id.clone();
             ms.node_state = reconciler.current_state().await.as_str().to_string();
-            ms.vm_count = reconciler.vm_runtime.list().len();
+            ms.vm_count = reconciler.vm_runtime.list().await.len();
             ms.tick_count = tick_count;
             ms.reconcile_failures = consecutive_reconcile_failures;
             ms.health_failures = consecutive_health_failures;

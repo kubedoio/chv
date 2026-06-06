@@ -36,6 +36,17 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
     // Unauthenticated
     let login = Router::new().route("/v1/auth/login", post(crate::handlers::auth::login));
 
+    // Authenticated change-password endpoint. Lives in its own sub-router so
+    // it is reachable even when the caller's JWT carries
+    // `must_change_password=true` (the role middleware in `viewer`/`operator`/
+    // `admin` would otherwise short-circuit with 403 PASSWORD_CHANGE_REQUIRED).
+    // The handler itself extracts `BearerToken`, so authentication still
+    // happens — there is no auth bypass.
+    let change_password = Router::new().route(
+        "/v1/auth/change-password",
+        post(crate::handlers::auth::change_password),
+    );
+
     // Viewer — read-only and personal endpoints
     let viewer = Router::new()
         .route(
@@ -381,6 +392,7 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         ));
 
     login
+        .merge(change_password)
         .merge(viewer)
         .merge(operator)
         .merge(admin)

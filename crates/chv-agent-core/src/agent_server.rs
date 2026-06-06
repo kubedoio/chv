@@ -109,6 +109,7 @@ impl AgentServer {
         let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o775));
         let uds_stream = UnixListenerStream::new(uds);
         tonic::transport::Server::builder()
+            .layer(chv_observability::GrpcMetricsLayer::new())
             .add_service(proto::reconcile_service_server::ReconcileServiceServer::new(self.clone()))
             .add_service(proto::lifecycle_service_server::LifecycleServiceServer::new(self))
             .serve_with_incoming(uds_stream)
@@ -2123,7 +2124,7 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         assert_eq!(
-            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            server.vm_runtime.get("vm-1").await.unwrap().runtime_status,
             "Running"
         );
 
@@ -2140,7 +2141,7 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         assert_eq!(
-            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            server.vm_runtime.get("vm-1").await.unwrap().runtime_status,
             "Stopped"
         );
     }
@@ -2195,7 +2196,7 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         assert_eq!(
-            server.vm_runtime.get("vm-1").unwrap().runtime_status,
+            server.vm_runtime.get("vm-1").await.unwrap().runtime_status,
             "Running"
         );
     }
@@ -2771,7 +2772,7 @@ mod tests {
             tracker.detached_nics.lock().unwrap().as_slice(),
             ["vm-1-net-1"]
         );
-        assert!(server.vm_runtime.get("vm-1").is_none());
+        assert!(server.vm_runtime.get("vm-1").await.is_none());
         assert!(!server
             .cache
             .lock()

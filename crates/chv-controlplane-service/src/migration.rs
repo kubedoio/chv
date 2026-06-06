@@ -425,6 +425,22 @@ pub async fn execute_migration(
         // Phase 1: PreCopyDisk - dispatch migrate_vm to source agent
         transition_phase(pool, state, MigrationPhase::PreCopyDisk).await?;
 
+        // Cooperative cancel check: a cancel issued before precopy starts must
+        // short-circuit before we contact the source agent at all.
+        if is_cancel_requested(pool, &state.migration_id).await? {
+            info!(
+                migration_id = %state.migration_id,
+                "cancel observed before precopy dispatch; rolling back"
+            );
+            rollback_precopy(pool, state).await?;
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "migration {} cancelled by operator (PreCopyDisk)",
+                    state.migration_id
+                ),
+            });
+        }
+
         let vm_generation = get_vm_generation(pool, &state.vm_id).await?;
 
         let source_socket = resolve_agent_socket(agent_socket_pattern, &state.source_node_id);
@@ -519,6 +535,22 @@ pub async fn execute_migration(
         }
 
         // Phase 3: MemoryMigration - transfer VM memory
+        // Cooperative cancel check between disk convergence and memory migration —
+        // last clean rollback point before CH owns the live transfer.
+        if is_cancel_requested(pool, &state.migration_id).await? {
+            info!(
+                migration_id = %state.migration_id,
+                "cancel observed before memory migration; rolling back"
+            );
+            rollback_precopy(pool, state).await?;
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "migration {} cancelled by operator (before MemoryMigration)",
+                    state.migration_id
+                ),
+            });
+        }
+
         transition_phase(pool, state, MigrationPhase::MemoryMigration).await?;
 
         let memory_result = tokio::time::timeout(
@@ -560,6 +592,26 @@ pub async fn execute_migration(
         }
 
         // Phase 4: Paused - final sync, VM is paused
+        // Cooperative cancel check before we explicitly pause the source. After
+        // memory migration succeeded, CH holds VM state on the destination, so
+        // honoring cancel here means attempting `rollback_paused` (resume on
+        // source) — best-effort and may fail if source has already released state.
+        // Once paused, source VM state is on destination; cancel becomes "attempt
+        // to resume on source" which is best-effort and may fail.
+        if is_cancel_requested(pool, &state.migration_id).await? {
+            warn!(
+                migration_id = %state.migration_id,
+                "cancel observed after memory migration; attempting best-effort rollback to source"
+            );
+            rollback_paused(pool, state, node_client_pool, agent_socket_pattern).await?;
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "migration {} cancelled by operator (post-MemoryMigration, best-effort)",
+                    state.migration_id
+                ),
+            });
+        }
+
         // Explicitly pause the source VM before final sync to ensure no writes
         // can occur during the final data transfer. Cloud Hypervisor's send-migration
         // typically pauses the VM internally, but we enforce it here for coordination.
@@ -916,7 +968,10 @@ async fn disable_source_dirty_tracking(
 ///
 /// If no progress is detected between rounds (bytes_transferred unchanged), the
 /// migration is cancelled early to avoid wasting time on a stalled transfer.
-async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Result<(), ChvError> {
+pub(crate) async fn wait_for_convergence(
+    pool: &StorePool,
+    state: &MigrationState,
+) -> Result<(), ChvError> {
     let max_rounds = state.config.max_convergence_rounds;
     let threshold = state.config.dirty_threshold_blocks as i64;
     let mut poll_count: u32 = 0;
@@ -935,6 +990,23 @@ async fn wait_for_convergence(pool: &StorePool, state: &MigrationState) -> Resul
         let poll_interval = Duration::from_secs(5);
         tokio::time::sleep(poll_interval).await;
         poll_count += 1;
+
+        // Cooperative cancel check: observe the flag at every iteration. This
+        // is a safe point — we have not yet read other state for this round,
+        // so an early return here cannot leave anything inconsistent.
+        if is_cancel_requested(pool, &state.migration_id).await? {
+            info!(
+                migration_id = %state.migration_id,
+                round = state.convergence_round,
+                "cancel observed during convergence; rolling back"
+            );
+            return Err(ChvError::Internal {
+                reason: format!(
+                    "migration {} cancelled by operator during convergence",
+                    state.migration_id
+                ),
+            });
+        }
 
         // Enforce max total time
         if started.elapsed().as_secs() >= MAX_TOTAL_SECS {
@@ -1146,6 +1218,132 @@ async fn update_migration_phase(
     }
 
     Ok(())
+}
+
+/// Check whether a cooperative cancel has been requested for the given migration.
+///
+/// Cancel is signalled by the `cancel_requested_at` column being non-NULL. This
+/// function is invoked at safe points by the long-running migration loop so that
+/// an operator-initiated cancel can be observed without forcing a hard abort.
+async fn is_cancel_requested(pool: &StorePool, migration_id: &str) -> Result<bool, ChvError> {
+    let result: Option<Option<String>> =
+        sqlx::query_scalar("SELECT cancel_requested_at FROM migrations WHERE migration_id = ?")
+            .bind(migration_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to check cancel flag: {e}"),
+            })?;
+    Ok(result.flatten().is_some())
+}
+
+/// Outcome of a cooperative cancel request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelMigrationOutcome {
+    /// Cancel flag has been set; migration loop will observe it at the next safe point.
+    Requested,
+    /// Cancel flag was already set on a prior call; idempotent no-op.
+    AlreadyRequested,
+    /// Migration is already in a terminal phase (Completed/Failed/RolledBack); no-op.
+    AlreadyTerminal,
+    /// No migration with the given ID was found.
+    NotFound,
+}
+
+/// Public API: request a cooperative cancel for an in-flight migration.
+///
+/// This is a sideband signal — it does not change the FSM phase. The long-running
+/// migration loop polls the `cancel_requested_at` column at safe points and
+/// transitions to `RolledBack` (or best-effort recovery during MemoryMigration /
+/// Paused) when the flag is observed.
+///
+/// The call is idempotent: setting the flag twice is harmless. Once the migration
+/// is in a terminal phase (Completed, Failed, RolledBack), the call is a no-op
+/// because rollback is no longer meaningful.
+///
+/// Cancel is honored at:
+///  - Pending → no-op until the loop starts; observed at PreCopyDisk entry.
+///  - PreCopyDisk → observed between phases; triggers `rollback_precopy`.
+///  - ConvergingDisk → observed at top of each `wait_for_convergence` iteration.
+///  - Paused → operator must call `rollback_paused` separately; here we just mark
+///    the flag, and the existing destination-resume failure path takes over if
+///    relevant. Once paused, source VM state is on destination; cancel becomes
+///    "attempt to resume on source" which is best-effort and may fail.
+///  - MemoryMigration → flag is observable but cancel is best-effort: CH may be
+///    mid-transfer with no clean rollback path.
+///  - Completed/Failed/RolledBack → no-op (`AlreadyTerminal`).
+pub async fn request_migration_cancel(
+    pool: &StorePool,
+    migration_id: &str,
+) -> Result<CancelMigrationOutcome, ChvError> {
+    // Look up current phase and existing flag in one read.
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT phase, cancel_requested_at FROM migrations WHERE migration_id = ?")
+            .bind(migration_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to look up migration {migration_id} for cancel: {e}"),
+            })?;
+
+    let (phase, existing_flag) = match row {
+        Some(r) => r,
+        None => return Ok(CancelMigrationOutcome::NotFound),
+    };
+
+    // Once terminal, cancel is meaningless — do not flip the flag.
+    if matches!(phase.as_str(), "Completed" | "Failed" | "RolledBack") {
+        return Ok(CancelMigrationOutcome::AlreadyTerminal);
+    }
+
+    if existing_flag.is_some() {
+        return Ok(CancelMigrationOutcome::AlreadyRequested);
+    }
+
+    // Set the flag. The phase guard in WHERE is belt-and-suspenders against a
+    // race where the migration completed between the SELECT above and this UPDATE.
+    let affected = sqlx::query(
+        r#"UPDATE migrations
+              SET cancel_requested_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE migration_id = ?
+              AND cancel_requested_at IS NULL
+              AND phase NOT IN ('Completed', 'Failed', 'RolledBack')"#,
+    )
+    .bind(migration_id)
+    .execute(pool)
+    .await
+    .map_err(|e| ChvError::Internal {
+        reason: format!("failed to set cancel flag for {migration_id}: {e}"),
+    })?
+    .rows_affected();
+
+    if affected == 0 {
+        // Race: another writer set the flag, or migration reached terminal phase.
+        // Re-read to give a precise outcome.
+        let phase_now: Option<String> =
+            sqlx::query_scalar("SELECT phase FROM migrations WHERE migration_id = ?")
+                .bind(migration_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!("failed to recheck phase after cancel race: {e}"),
+                })?;
+        return Ok(match phase_now.as_deref() {
+            Some("Completed") | Some("Failed") | Some("RolledBack") => {
+                CancelMigrationOutcome::AlreadyTerminal
+            }
+            Some(_) => CancelMigrationOutcome::AlreadyRequested,
+            None => CancelMigrationOutcome::NotFound,
+        });
+    }
+
+    info!(
+        migration_id = %migration_id,
+        phase = %phase,
+        "cancel requested for migration"
+    );
+    metrics::counter!("chv_migration_cancel_requested_total").increment(1);
+    Ok(CancelMigrationOutcome::Requested)
 }
 
 /// Create a migration record in the database.

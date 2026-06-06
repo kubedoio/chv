@@ -1,0 +1,39 @@
+name: proto
+
+on:
+  pull_request:
+    paths:
+      - 'proto/**'
+      - '.github/workflows/proto.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'proto/**'
+
+jobs:
+  buf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # buf breaking needs full git history to compare against main.
+          fetch-depth: 0
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: '1.45.0'
+
+      - name: buf lint
+        working-directory: proto
+        run: buf lint
+
+      - name: buf breaking against main
+        # Only run on PRs — push to main is the baseline, not compared against itself.
+        if: github.event_name == 'pull_request'
+        working-directory: proto
+        # actions/checkout fetches the PR head; `main` exists as a remote-tracking
+        # ref (refs/remotes/origin/main), not as a local branch. buf-cli's
+        # `branch=` qualifier looks up local branches, so we use `ref=` with
+        # the fully-qualified remote ref instead.
+        run: |
+          buf breaking --against '../.git#ref=refs/remotes/origin/main,subdir=proto'

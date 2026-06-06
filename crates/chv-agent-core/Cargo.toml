@@ -3,6 +3,7 @@ name = "chv-agent-core"
 version = "0.2.0"
 license = "Apache-2.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 chv-common = { path = "../chv-common" }
@@ -29,7 +30,7 @@ libc = "0.2"
 futures-util = "0.3"
 nix = { workspace = true, features = ["term", "ioctl", "process"] }
 jsonwebtoken = { workspace = true }
-lru = "0.12"
+lru = "0.16"
 sysinfo = "0.30"
 
 [dev-dependencies]

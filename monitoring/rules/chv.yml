@@ -1,0 +1,198 @@
+groups:
+  # ---------------------------------------------------------------------------
+  # VM lifecycle SLOs
+  # ---------------------------------------------------------------------------
+  - name: chv.slo.vm
+    interval: 30s
+    rules:
+      - alert: VmStartLatencyHighP99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (
+              rate(chv_vm_op_duration_seconds_bucket{op="start"}[5m])
+            )
+          ) > 45
+        for: 10m
+        labels:
+          severity: warning
+          slo: vm-start-latency
+          team: chv
+        annotations:
+          summary: "VM start p99 latency > 45s for 10m"
+          description: >
+            The 99th percentile VM start time has exceeded 45s for 10 minutes,
+            breaching the 30s SLO with no remaining error-budget headroom.
+            Check agent logs for slow CH API responses or resource exhaustion.
+          runbook: "docs/OBSERVABILITY.md#vms-tart-latency"
+
+      - alert: VmOpFailureRateHigh
+        expr: |
+          (
+            sum(rate(chv_vm_ops_total{result="err"}[5m]))
+            /
+            sum(rate(chv_vm_ops_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          slo: vm-op-success
+          team: chv
+        annotations:
+          summary: "VM lifecycle error rate > 5% for 5m"
+          description: >
+            More than 5% of VM lifecycle operations (create/start/stop/delete/
+            pause/resume) are returning errors cluster-wide. Check per-op
+            breakdown with: rate(chv_vm_ops_total{result="err"}[5m]) by (op)
+          runbook: "docs/OBSERVABILITY.md#vm-op-failure-rate"
+
+  # ---------------------------------------------------------------------------
+  # gRPC control-plane SLOs
+  # ---------------------------------------------------------------------------
+  - name: chv.slo.grpc
+    interval: 30s
+    rules:
+      - alert: ControlPlaneGrpcErrorRateHigh
+        expr: |
+          (
+            sum(rate(chv_grpc_server_requests_total{grpc_status!~"^(0|OK)$"}[5m]))
+            /
+            sum(rate(chv_grpc_server_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          slo: grpc-error-rate
+          team: chv
+        annotations:
+          summary: "gRPC control-plane error rate > 5% for 5m"
+          description: >
+            More than 5% of gRPC requests to the control plane are returning
+            non-OK status. Break down by service and method:
+            rate(chv_grpc_server_requests_total{grpc_status!~"0|OK"}[5m]) by (service, method, grpc_status)
+          runbook: "docs/runbooks/control-plane-dr.md"
+
+  # ---------------------------------------------------------------------------
+  # Control-plane convergence SLOs
+  # ---------------------------------------------------------------------------
+  - name: chv.slo.control_plane
+    interval: 30s
+    rules:
+      - alert: ControlPlaneOpQueueGrowing
+        expr: chv_cp_pending_operations > 100
+        for: 10m
+        labels:
+          severity: warning
+          team: chv
+        annotations:
+          summary: "Control-plane pending operation queue > 100 for 10m"
+          description: >
+            The orchestrator's operation queue has exceeded 100 entries for 10
+            minutes. This may indicate agents are not draining work fast enough
+            or the orchestrator loop is stalled.
+          runbook: "docs/runbooks/control-plane-dr.md"
+
+      - alert: ControlPlaneConvergenceSlow
+        expr: chv_cp_convergence_avg_ms > 10000
+        for: 10m
+        labels:
+          severity: warning
+          team: chv
+        annotations:
+          summary: "Control-plane avg convergence latency > 10s for 10m"
+          description: >
+            Average convergence time has exceeded 10s for 10 minutes, breaching
+            the 5s SLO. This may indicate DB lock contention, slow agent gRPC,
+            or clock skew. Check chv_cp_drift_count and pending_operations.
+          runbook: "docs/runbooks/control-plane-dr.md"
+
+      - alert: ControlPlaneDriftPersistent
+        expr: chv_cp_consecutive_drift_ticks > 30
+        for: 5m
+        labels:
+          severity: critical
+          team: chv
+        annotations:
+          summary: "Control-plane has not converged for 30+ consecutive ticks"
+          description: >
+            The control plane has failed to drive desired state to observed state
+            for more than 30 consecutive reconcile ticks (~5 minutes at default
+            tick interval). This is a production-impacting condition. Check agent
+            connectivity and chv_cp_drift_count for affected resources.
+          runbook: "docs/runbooks/control-plane-dr.md"
+
+  # ---------------------------------------------------------------------------
+  # Migration SLOs
+  # ---------------------------------------------------------------------------
+  - name: chv.slo.migration
+    interval: 60s
+    rules:
+      - alert: MigrationFailureRateHigh
+        expr: |
+          (
+            sum(increase(chv_migration_duration_seconds_count{result="failed"}[1h]))
+            /
+            clamp_min(sum(increase(chv_migration_duration_seconds_count[1h])), 1)
+          ) > 0.10
+        for: 1h
+        labels:
+          severity: warning
+          slo: migration-success
+          team: chv
+        annotations:
+          summary: "Migration failure rate > 10% over 1h"
+          description: >
+            More than 10% of VM migrations have failed in the last hour. Check
+            source and destination agent logs for network connectivity or
+            disk I/O errors during the precopy phase.
+          runbook: "docs/runbooks/vm-snapshot-restore.md"
+
+  # ---------------------------------------------------------------------------
+  # BFF (webui-bff) SLOs
+  # ---------------------------------------------------------------------------
+  - name: chv.slo.bff
+    interval: 30s
+    rules:
+      - alert: BffApiErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(http_requests_total[5m])), 1e-9)
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          slo: bff-success-rate
+          team: chv
+        annotations:
+          summary: "BFF 5xx error rate > 1% for 5m"
+          description: >
+            More than 1% of HTTP requests to chv-webui-bff are returning 5xx
+            status codes. The request_id in error response bodies can be used
+            to correlate with control-plane logs via x-correlation-id.
+          runbook: "docs/OBSERVABILITY.md#bff-api-error-rate"
+
+  # ---------------------------------------------------------------------------
+  # Node liveness SLOs
+  # ---------------------------------------------------------------------------
+  - name: chv.slo.nodes
+    interval: 30s
+    rules:
+      - alert: NodeDown
+        expr: |
+          chv_nodes_ready
+            < on() group_left()
+          count(up{job=~"chv-agent|chv-agent.*"} == 1)
+        for: 2m
+        labels:
+          severity: critical
+          slo: node-liveness
+          team: chv
+        annotations:
+          summary: "One or more CHV nodes are not Ready"
+          description: >
+            chv_nodes_ready has dropped below the count of reachable agent
+            instances. At least one node is enrolled but not reporting Ready
+            state. Check agent logs and network connectivity to the affected
+            hypervisor host.
+          runbook: "docs/runbooks/full-site-recovery.md"

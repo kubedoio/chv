@@ -1,0 +1,168 @@
+# cargo-deny configuration for the CHV workspace.
+#
+# Docs: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+#
+# Run locally:
+#   cargo install --locked cargo-deny
+#   cargo deny check
+#
+# CI runs `cargo deny check {advisories|bans|licenses|sources}` independently
+# (see .github/workflows/security.yml) so each class fails on its own merits.
+
+# -----------------------------------------------------------------------------
+# Advisories — RustSec database
+# -----------------------------------------------------------------------------
+[advisories]
+version = 2
+# Advisory database mirrors. Default is the official RustSec advisory-db.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# A vulnerability is a hard fail. Unmaintained crates warn so we have time to
+# migrate without blocking unrelated PRs. Yanked versions fail because they
+# usually indicate an upstream-acknowledged problem.
+yanked = "deny"
+
+# Advisory ignores. EVERY entry below MUST document:
+#   (a) why the advisory is non-applicable to CHV's runtime / threat model,
+#   (b) link to upstream tracking issue (or "no upstream fix" with rationale),
+#   (c) the removal condition (target version, milestone, or upstream event).
+#
+# See docs/specs/adr/ for the broader supply-chain posture.
+ignore = [
+    # RUSTSEC-2023-0071 — `rsa` Marvin Attack (no upstream patch).
+    #   (a) Non-applicable: CHV uses sqlx with only the `sqlite` feature
+    #       (Cargo.toml line 57). The `rsa` crate enters the lockfile because
+    #       sqlx 0.8's top-level Cargo.toml unconditionally lists
+    #       `sqlx-mysql` as a dep (regardless of features), and `sqlx-mysql`
+    #       depends on `rsa` for MySQL auth handshakes. None of that code is
+    #       compiled into CHV binaries (sqlx feature gating excludes it),
+    #       and CHV never performs RSA operations over an attacker-observable
+    #       channel — the Marvin Attack vector does not apply.
+    #   (b) Upstream: https://github.com/RustCrypto/RSA/issues/19 (no patch).
+    #       sqlx side: https://github.com/launchbadge/sqlx/issues/2911
+    #       (track removal of unconditional sqlx-mysql dep).
+    #   (c) Remove when sqlx makes sqlx-mysql/-postgres optional, or when
+    #       `rsa` ships a constant-time implementation.
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2024-0370 — `proc-macro-error` 1.x unmaintained.
+    #   (a) Non-applicable at runtime: this is a proc-macro build dep pulled
+    #       by `tabled_derive` 0.8 (used by `chvctl` for CLI table rendering).
+    #       It runs only at compile time, never in shipped binaries. The
+    #       advisory is informational ("unmaintained"), not a vulnerability.
+    #   (b) Upstream: https://github.com/zhiburt/tabled/issues/411
+    #       (tabled 0.17+ migrated to `proc-macro-error2`).
+    #   (c) Remove when chvctl migrates to tabled >= 0.17 (tracked separately
+    #       — multi-major upgrade with API changes, deferred from this PR).
+    "RUSTSEC-2024-0370",
+
+    # RUSTSEC-2025-0134 — `rustls-pemfile` 2.x unmaintained.
+    #   (a) Non-applicable as vuln: informational ("unmaintained"). The crate
+    #       is pulled transitively by `tonic` 0.12 for client-side TLS PEM
+    #       parsing. Upstream archived the repo and folded the parser into
+    #       `rustls-pki-types` >= 1.9; tonic 0.13+ uses the new API.
+    #   (b) Upstream: https://github.com/rustls/pemfile/issues/61
+    #       tonic side: https://github.com/hyperium/tonic/pull/2103
+    #   (c) Remove when CHV upgrades tonic 0.12 -> 0.14 (tracked separately —
+    #       gRPC stack-wide change deferred from this supply-chain PR).
+    "RUSTSEC-2025-0134",
+]
+
+# -----------------------------------------------------------------------------
+# Licenses
+# -----------------------------------------------------------------------------
+[licenses]
+version = 2
+
+# CHV is Apache-2.0 (see LICENSE). The allow list below is restricted to
+# permissive licenses that are compatible with Apache-2.0 redistribution.
+# GPL-* / AGPL-* are denied to keep the workspace shippable as a closed
+# distribution if downstream operators choose to do so.
+#
+# `Unicode-DFS-2016` was removed: the Unicode Consortium re-licensed under
+# `Unicode-3.0` (SPDX) effective late 2024, and `unicode-ident` / friends
+# now declare `Unicode-3.0` exclusively. Listing a SPDX id no crate uses
+# is treated by cargo-deny v2 as an unmatched-allow error.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+    # CDLA-Permissive-2.0: used by `webpki-roots` (Mozilla CA root data) since
+    # v0.26 — the crate ships data, not code, under the Community Data License
+    # Agreement. The "Permissive" variant has no copyleft/share-alike clauses
+    # and is OSI-permissive-equivalent for redistribution. Apache-2.0 + CDLA-P-2
+    # is the same license-pair Linux distros (Debian, Fedora) accept for the
+    # NSS/CA-roots data path.
+    "CDLA-Permissive-2.0",
+]
+
+# Confidence threshold for license auto-detection. 0.8 is the cargo-deny
+# default; bump to 0.93 if false positives appear.
+confidence-threshold = 0.8
+
+# Per-crate license clarifications go here (e.g. ring's mixed license file).
+exceptions = []
+
+# -----------------------------------------------------------------------------
+# Bans — duplicate-version protection on critical infra crates
+# -----------------------------------------------------------------------------
+[bans]
+# Workspace-wide policy:
+#   - Duplicate versions of any crate are a `warn` by default (some are
+#     unavoidable in a Rust ecosystem this size, e.g. syn 1 vs syn 2).
+#   - Critical-infra crates listed below in `[[bans.deny]]` with a
+#     `wrappers`/version bound elevate to a hard fail on mismatch.
+multiple-versions = "warn"
+
+# Path-only workspace deps (e.g. `chv-errors = { path = "../chv-errors" }`)
+# are reported as wildcards by cargo-deny because they have no version
+# constraint. We deliberately use path deps for internal coherence — that is
+# not a wildcard in the sense the lint targets (loose external version
+# pinning). `allow-wildcard-paths` (cargo-deny >= 0.14.6) exempts path deps
+# while keeping the lint active for true wildcard external deps.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+highlight = "all"
+
+# Critical-infrastructure crates: duplicate versions almost always indicate
+# a transitive-dep mismatch worth investigating (e.g. two Tokio runtimes,
+# two tonic codegen versions, two serde derive crates). These entries do
+# NOT ban the crate; they raise duplicate-version detection from `warn` to
+# the cargo-deny "denied" output for these specific crates. See:
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html#the-deny-field
+deny = [
+    { name = "tokio", deny-multiple-versions = true },
+    { name = "tonic", deny-multiple-versions = true },
+    { name = "axum", deny-multiple-versions = true },
+    { name = "sqlx", deny-multiple-versions = true },
+    { name = "serde", deny-multiple-versions = true },
+]
+
+# Crates explicitly allowed to appear multiple times (none today).
+skip = []
+skip-tree = []
+
+# -----------------------------------------------------------------------------
+# Sources — supply-chain provenance
+# -----------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# Only the rust-lang GitHub org is allowed for git dependencies. Add other
+# trusted orgs here on a case-by-case basis (and document why in PR review).
+allow-git = []
+
+[sources.allow-org]
+github = ["rust-lang"]

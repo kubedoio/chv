@@ -509,8 +509,14 @@ impl BackupRepository {
         input: &BackupScheduleCreateInput,
     ) -> Result<String, StoreError> {
         let schedule_id = chv_common::gen_short_id();
-        let access_key = input.s3_access_key.as_deref().map(|k| self.crypto.encrypt(k));
-        let secret_key = input.s3_secret_key.as_deref().map(|k| self.crypto.encrypt(k));
+        let access_key = input
+            .s3_access_key
+            .as_deref()
+            .map(|k| self.crypto.encrypt(k));
+        let secret_key = input
+            .s3_secret_key
+            .as_deref()
+            .map(|k| self.crypto.encrypt(k));
         sqlx::query(INSERT_SCHEDULE_SQL)
             .bind(&schedule_id)
             .bind(&input.vm_id)
@@ -532,8 +538,14 @@ impl BackupRepository {
         &self,
         input: &BackupScheduleUpdateInput,
     ) -> Result<(), StoreError> {
-        let access_key = input.s3_access_key.as_deref().map(|k| self.crypto.encrypt(k));
-        let secret_key = input.s3_secret_key.as_deref().map(|k| self.crypto.encrypt(k));
+        let access_key = input
+            .s3_access_key
+            .as_deref()
+            .map(|k| self.crypto.encrypt(k));
+        let secret_key = input
+            .s3_secret_key
+            .as_deref()
+            .map(|k| self.crypto.encrypt(k));
         let result = sqlx::query(UPDATE_SCHEDULE_SQL)
             .bind(&input.vm_id)
             .bind(&input.volume_id)
@@ -847,8 +859,7 @@ impl BackupRepository {
         schedule_id: &str,
         retention_days: i64,
     ) -> Result<Vec<BackupJobRow>, StoreError> {
-        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days))
-            .to_rfc3339();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
         sqlx::query_as::<_, BackupJobRow>(
             "SELECT job_id, vm_id, volume_id, schedule_id, status, backup_type, \
              target_path, storage_backend, created_at, started_at, completed_at, \
@@ -899,7 +910,6 @@ pub struct BackupJobRow {
     pub destination: Option<String>,
 }
 
-
 #[derive(sqlx::FromRow)]
 pub struct BackupScheduleRow {
     pub schedule_id: String,
@@ -917,7 +927,6 @@ pub struct BackupScheduleRow {
     pub s3_access_key: Option<String>,
     pub s3_secret_key: Option<String>,
 }
-
 
 #[derive(sqlx::FromRow)]
 pub struct BackupRestoreRow {
@@ -954,7 +963,6 @@ pub struct BackupJobCreateInput {
     pub destination: Option<String>,
 }
 
-
 #[derive(Clone)]
 pub struct BackupJobStatusUpdateInput {
     pub job_id: String,
@@ -969,7 +977,6 @@ pub struct BackupJobStatusUpdateInput {
     pub checksum_algorithm: Option<String>,
     pub destination: Option<String>,
 }
-
 
 #[derive(Clone)]
 pub struct BackupJobUpdateInput {
@@ -988,7 +995,6 @@ pub struct BackupJobUpdateInput {
     pub destination: Option<String>,
 }
 
-
 #[derive(Clone)]
 pub struct BackupScheduleCreateInput {
     pub vm_id: String,
@@ -1002,7 +1008,6 @@ pub struct BackupScheduleCreateInput {
     pub s3_access_key: Option<String>,
     pub s3_secret_key: Option<String>,
 }
-
 
 #[derive(Clone)]
 pub struct BackupScheduleUpdateInput {
@@ -1018,7 +1023,6 @@ pub struct BackupScheduleUpdateInput {
     pub s3_access_key: Option<String>,
     pub s3_secret_key: Option<String>,
 }
-
 
 #[derive(Clone)]
 pub struct BackupRestoreCreateInput {

@@ -3,19 +3,16 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { deleteImage } from '$lib/bff/images';
 	import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
-	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import FilterBar from '$lib/components/shared/FilterBar.svelte';
-	import ErrorState from '$lib/components/shell/ErrorState.svelte';
-	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import ImportImageModal from '$lib/components/storage/ImportImageModal.svelte';
-	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
-	import StatusBadge from '$lib/components/shell/StatusBadge.svelte';
 	import { getPageDefinition } from '$lib/shell/app-shell';
 	import type { PageData } from './$types';
-	import { Plus, Download, Tag, Trash2, Box } from 'lucide-svelte';
+	import { Plus } from 'lucide-svelte';
 	import { goto, invalidateAll } from '$app/navigation';
 	import { page as appPage } from '$app/stores';
+	import ImagesTable from '$lib/components/images/ImagesTable.svelte';
+	import ImagesSidebar from '$lib/components/images/ImagesSidebar.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -125,19 +122,19 @@ import Button from '$lib/components/primitives/Button.svelte';
 	{/if}
 
 	<div class="inventory-metrics">
-		<CompactMetricCard 
-			label="Catalog Size" 
-			value={items.length} 
+		<CompactMetricCard
+			label="Catalog Size"
+			value={items.length}
 			color="neutral"
 		/>
-		<CompactMetricCard 
-			label="Operational Ready" 
-			value={items.filter(i => i.status === 'ready').length} 
+		<CompactMetricCard
+			label="Operational Ready"
+			value={items.filter(i => i.status === 'ready').length}
 			color="primary"
 		/>
-		<CompactMetricCard 
-			label="Pending Ingestion" 
-			value={items.filter(i => i.status === 'pending').length} 
+		<CompactMetricCard
+			label="Pending Ingestion"
+			value={items.filter(i => i.status === 'pending').length}
 			color={items.filter(i => i.status === 'pending').length > 0 ? 'warning' : 'neutral'}
 		/>
 	</div>
@@ -152,83 +149,15 @@ import Button from '$lib/components/primitives/Button.svelte';
 	</div>
 
 	<main class="inventory-main">
-		<section class="inventory-table-area">
-			{#if model.state === 'error'}
-				<ErrorState
-					description={model.errorMessage ?? 'The control plane responded with an error or is unreachable.'}
-				/>
-			{:else if model.state === 'empty'}
-				<EmptyInfrastructureState
-					title="No artifacts detected"
-					description="Adjust your search criteria or ingest a new distribution image."
-					hint="Images are foundational blocks for all compute workloads."
-				/>
-			{:else}
-				<InventoryTable
-					{columns}
-					rows={tableRows}
-				>
-					{#snippet cell({ column, row })}
-						{#if column.key === '_actions'}
-							<button
-								type="button"
-								class="btn-icon-destructive"
-								disabled={deletingId === row.image_id}
-								onclick={(e) => { e.preventDefault(); e.stopPropagation(); handleDelete(row.image_id, row.name, row.usage_count); }}
-								title="Purge Image"
-							>
-								<Trash2 size={13} />
-							</button>
-						{:else if column.key === 'name'}
-							<div class="artifact-identity">
-								<span class="artifact-name">{row.name}</span>
-								{#if (row as any).is_template}
-									<span class="artifact-tag">SYS</span>
-								{/if}
-							</div>
-						{:else if (row as any)[column.key] && typeof (row as any)[column.key] === 'object' && 'label' in (row as any)[column.key]}
-							<StatusBadge label={(row as any)[column.key].label} tone={(row as any)[column.key].tone} />
-						{:else}
-							<span class="cell-text">{(row as any)[column.key] ?? ''}</span>
-						{/if}
-					{/snippet}
-				</InventoryTable>
-			{/if}
-		</section>
-
-		<aside class="support-area">
-			<SectionCard title="Ingestion Pipeline" icon={Download} badgeLabel={String(pendingImages.length)}>
-				{#if pendingImages.length === 0}
-					<p class="empty-hint">No active artifact transmissions detected.</p>
-				{:else}
-					<ul class="attention-list">
-						{#each pendingImages as img}
-							<li>
-								<div class="attention-card">
-									<div class="attention-card__main">
-										<span class="res-name">{img.name}</span>
-										<span class="res-issue">Ingesting · {img.size}</span>
-									</div>
-								</div>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</SectionCard>
-
-			<SectionCard title="Base Manifest" icon={Tag}>
-				<div class="artifact-manifest">
-					<div class="manifest-row">
-						<span>Standard Templates</span>
-						<span>Online</span>
-					</div>
-					<div class="manifest-row">
-						<span>Global Projections</span>
-						<span>3 Verified</span>
-					</div>
-				</div>
-			</SectionCard>
-		</aside>
+		<ImagesTable
+			state={model.state}
+			errorMessage={model.errorMessage}
+			{columns}
+			{tableRows}
+			{deletingId}
+			{handleDelete}
+		/>
+		<ImagesSidebar {pendingImages} />
 	</main>
 </div>
 
@@ -261,32 +190,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		align-items: start;
 	}
 
-	.support-area {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	.artifact-identity {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.artifact-name {
-		font-weight: 700;
-		color: var(--color-neutral-900);
-	}
-
-	.artifact-tag {
-		font-size: 8px;
-		font-weight: 800;
-		color: #ffffff;
-		background: var(--color-neutral-400);
-		padding: 1px 3px;
-		border-radius: 2px;
-	}
-
 	.operation-alert {
 		display: flex;
 		align-items: center;
@@ -309,86 +212,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		color: inherit;
 		cursor: pointer;
 		text-decoration: underline;
-	}
-
-	.empty-hint {
-		font-size: 11px;
-		color: var(--color-neutral-400);
-		padding: 1rem;
-		text-align: center;
-	}
-
-	.attention-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-		list-style: none;
-		padding: 0;
-		margin: 0;
-	}
-
-	.attention-card {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.5rem 0.75rem;
-		background: var(--bg-surface-muted);
-		border-radius: var(--radius-xs);
-		color: var(--color-neutral-800);
-	}
-
-	.attention-card__main {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.res-name {
-		font-size: 11px;
-		font-weight: 700;
-	}
-
-	.res-issue {
-		font-size: 9px;
-		color: var(--color-warning);
-		font-weight: 600;
-		text-transform: uppercase;
-	}
-
-	.artifact-manifest {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-	}
-
-	.manifest-row {
-		display: flex;
-		justify-content: space-between;
-		font-size: 10px;
-		color: var(--color-neutral-600);
-		padding: 0.35rem 0.5rem;
-		background: var(--bg-surface-muted);
-		border-radius: var(--radius-xs);
-	}
-
-	.manifest-row span:last-child {
-		font-weight: 700;
-		color: var(--color-neutral-900);
-	}
-
-	.btn-icon-destructive {
-		background: transparent;
-		border: 1px solid transparent;
-		color: var(--color-neutral-400);
-		padding: 4px;
-		border-radius: 4px;
-		cursor: pointer;
-		transition: all 0.1s ease;
-	}
-
-	.btn-icon-destructive:hover:not(:disabled) {
-		color: var(--color-danger);
-		border-color: var(--color-danger-light);
-		background: var(--color-danger-light);
 	}
 
 	@media (max-width: 1100px) {
@@ -414,52 +237,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 		grid-template-columns: 1fr 280px;
 		gap: 1rem;
 		align-items: start;
-	}
-
-	.support-area {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.empty-hint {
-		font-size: var(--text-xs);
-		color: var(--shell-text-muted);
-		padding: 0.5rem 0;
-	}
-
-	.attention-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-		list-style: none;
-		padding: 0;
-		margin: 0;
-	}
-
-	.attention-card {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.5rem;
-		background: var(--shell-surface-muted);
-		border-radius: 0.25rem;
-		text-decoration: none;
-		color: var(--shell-text);
-	}
-
-	.res-name {
-		font-size: var(--text-sm);
-		font-weight: 600;
-	}
-
-	.res-issue {
-		font-size: var(--text-xs);
-		color: var(--color-warning-dark);
-	}
-
-	.cell-text {
-		font-variant-numeric: tabular-nums;
 	}
 
 	@media (max-width: 1100px) {

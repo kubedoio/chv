@@ -1254,3 +1254,264 @@ async fn test_overlay_manager_construction() {
     // Verify overlay manager can be cloned (required for concurrent usage)
     let _cloned = overlay_manager.clone();
 }
+
+// =============================================================================
+// 9.3 — Cooperative migration cancel (S2-5)
+// =============================================================================
+
+/// Helper: insert a migration row in a given phase for cancel-flag tests.
+///
+/// We bypass `create_migration_record` so we can park the row in any phase
+/// without driving the full state machine.
+async fn insert_migration_at_phase(
+    pool: &StorePool,
+    migration_id: &str,
+    operation_id: &str,
+    vm_id: &str,
+    phase: &str,
+) {
+    sqlx::query(
+        r#"INSERT INTO migrations
+           (migration_id, operation_id, vm_id, source_node_id, destination_node_id, phase)
+           VALUES (?, ?, ?, 'node-a', 'node-b', ?)"#,
+    )
+    .bind(migration_id)
+    .bind(operation_id)
+    .bind(vm_id)
+    .bind(phase)
+    .execute(pool)
+    .await
+    .expect("failed to insert migration row");
+}
+
+/// Cancel on a non-existent migration returns NotFound (no row inserted).
+#[tokio::test]
+async fn test_cancel_unknown_migration_is_not_found() {
+    let cluster = TestCluster::new().await;
+    cluster.setup_two_nodes().await;
+
+    let outcome = crate::migration::request_migration_cancel(&cluster.pool, "mig-does-not-exist")
+        .await
+        .expect("cancel should not return Err for missing row");
+    assert_eq!(
+        outcome,
+        crate::migration::CancelMigrationOutcome::NotFound,
+        "missing migration must yield NotFound"
+    );
+}
+
+/// Cancel on a fresh migration sets the flag and is idempotent on a second call.
+#[tokio::test]
+async fn test_cancel_is_idempotent_when_called_twice() {
+    let cluster = TestCluster::new().await;
+    cluster.setup_two_nodes().await;
+    cluster
+        .create_vm_on_node(
+            "vm-cancel-1",
+            "node-a",
+            "net-overlay",
+            "aa:bb:cc:dd:ee:11",
+            4_294_967_296,
+        )
+        .await;
+    cluster.create_operation("op-cancel-1").await;
+    insert_migration_at_phase(
+        &cluster.pool,
+        "mig-cancel-1",
+        "op-cancel-1",
+        "vm-cancel-1",
+        "ConvergingDisk",
+    )
+    .await;
+
+    // First call sets the flag.
+    let first = crate::migration::request_migration_cancel(&cluster.pool, "mig-cancel-1")
+        .await
+        .expect("first cancel must succeed");
+    assert_eq!(
+        first,
+        crate::migration::CancelMigrationOutcome::Requested,
+        "first cancel must return Requested"
+    );
+
+    // Verify the column is now non-NULL.
+    let flag: Option<String> = sqlx::query_scalar(
+        "SELECT cancel_requested_at FROM migrations WHERE migration_id = 'mig-cancel-1'",
+    )
+    .fetch_one(&cluster.pool)
+    .await
+    .unwrap();
+    assert!(flag.is_some(), "cancel_requested_at must be populated");
+
+    // Second call must be idempotent and not flip the flag again.
+    let second = crate::migration::request_migration_cancel(&cluster.pool, "mig-cancel-1")
+        .await
+        .expect("second cancel must succeed");
+    assert_eq!(
+        second,
+        crate::migration::CancelMigrationOutcome::AlreadyRequested,
+        "second cancel must return AlreadyRequested (idempotent)"
+    );
+
+    // The original timestamp must be preserved (no double-write).
+    let flag_after: Option<String> = sqlx::query_scalar(
+        "SELECT cancel_requested_at FROM migrations WHERE migration_id = 'mig-cancel-1'",
+    )
+    .fetch_one(&cluster.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        flag, flag_after,
+        "cancel_requested_at must not change on idempotent re-call"
+    );
+}
+
+/// Cancel against a terminal-phase migration is a no-op (does not set flag).
+#[tokio::test]
+async fn test_cancel_in_terminal_phase_is_noop() {
+    let cluster = TestCluster::new().await;
+    cluster.setup_two_nodes().await;
+    cluster
+        .create_vm_on_node(
+            "vm-term",
+            "node-a",
+            "net-overlay",
+            "aa:bb:cc:dd:ee:22",
+            4_294_967_296,
+        )
+        .await;
+
+    for (mig_id, op_id, phase) in [
+        ("mig-completed", "op-completed", "Completed"),
+        ("mig-failed", "op-failed", "Failed"),
+        ("mig-rolled", "op-rolled", "RolledBack"),
+    ] {
+        cluster.create_operation(op_id).await;
+        insert_migration_at_phase(&cluster.pool, mig_id, op_id, "vm-term", phase).await;
+
+        let outcome = crate::migration::request_migration_cancel(&cluster.pool, mig_id)
+            .await
+            .expect("terminal cancel should not return Err");
+        assert_eq!(
+            outcome,
+            crate::migration::CancelMigrationOutcome::AlreadyTerminal,
+            "{phase} migration must yield AlreadyTerminal"
+        );
+
+        let flag: Option<String> =
+            sqlx::query_scalar("SELECT cancel_requested_at FROM migrations WHERE migration_id = ?")
+                .bind(mig_id)
+                .fetch_one(&cluster.pool)
+                .await
+                .unwrap();
+        assert!(
+            flag.is_none(),
+            "cancel_requested_at must remain NULL for terminal migration in {phase}"
+        );
+    }
+}
+
+/// `wait_for_convergence` observes the cancel flag at the top of the next
+/// iteration and returns an error containing "cancelled by operator". This
+/// drives the same code path that `execute_migration` would translate into a
+/// `rollback_precopy()` + RolledBack transition.
+#[tokio::test]
+async fn test_wait_for_convergence_honors_cancel_flag() {
+    let cluster = TestCluster::new().await;
+    cluster.setup_two_nodes().await;
+    cluster
+        .create_vm_on_node(
+            "vm-cancel-conv",
+            "node-a",
+            "net-overlay",
+            "aa:bb:cc:dd:ee:33",
+            4_294_967_296,
+        )
+        .await;
+    cluster.create_operation("op-cancel-conv").await;
+
+    // Park the migration in ConvergingDisk with non-zero dirty blocks so the
+    // loop will not converge on its own — it would otherwise poll forever.
+    let state = MigrationState {
+        migration_id: "mig-cancel-conv".to_string(),
+        operation_id: "op-cancel-conv".to_string(),
+        vm_id: "vm-cancel-conv".to_string(),
+        source_node_id: "node-a".to_string(),
+        dest_node_id: "node-b".to_string(),
+        phase: MigrationPhase::ConvergingDisk,
+        config: MigrationConfig::default(),
+        bytes_transferred: 0,
+        total_bytes: 10_737_418_240,
+        convergence_round: 1,
+        dirty_blocks_remaining: 1_000_000, // far above threshold
+    };
+
+    create_migration_record(&cluster.pool, &state)
+        .await
+        .expect("failed to create migration record");
+
+    // Set initial progress so the loop sees a non-converged state.
+    update_migration_progress(
+        &cluster.pool,
+        "vm-cancel-conv",
+        "op-cancel-conv",
+        proto::MigrationPhase::ConvergingDisk as i32,
+        1_000_000,      // bytes_transferred
+        10_737_418_240, // total_bytes
+        1,              // convergence_round
+        1_000_000,      // dirty_blocks_remaining (well above threshold)
+    )
+    .await
+    .unwrap();
+
+    let pool_for_cancel = cluster.pool.clone();
+    let pool_for_loop = cluster.pool.clone();
+
+    // Spawn the convergence loop and a delayed cancel. The loop polls every 5s
+    // (hardcoded inside wait_for_convergence), so we must wait at least one
+    // poll interval before cancelling. Set the cancel flag after ~500ms; the
+    // first iteration finishes its 5s sleep, then the cancel check at the top
+    // of iteration 2 trips the early return.
+    let convergence_handle = tokio::spawn(async move {
+        let local_state = MigrationState {
+            migration_id: "mig-cancel-conv".to_string(),
+            operation_id: "op-cancel-conv".to_string(),
+            vm_id: "vm-cancel-conv".to_string(),
+            source_node_id: "node-a".to_string(),
+            dest_node_id: "node-b".to_string(),
+            phase: MigrationPhase::ConvergingDisk,
+            config: MigrationConfig::default(),
+            bytes_transferred: 0,
+            total_bytes: 10_737_418_240,
+            convergence_round: 1,
+            dirty_blocks_remaining: 1_000_000,
+        };
+        crate::migration::wait_for_convergence(&pool_for_loop, &local_state).await
+    });
+
+    // Give the loop a moment to enter its first sleep, then signal cancel.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let outcome = crate::migration::request_migration_cancel(&pool_for_cancel, "mig-cancel-conv")
+        .await
+        .expect("cancel must succeed");
+    assert_eq!(
+        outcome,
+        crate::migration::CancelMigrationOutcome::Requested,
+        "cancel must transition NULL → set"
+    );
+
+    // The loop must observe cancel within at most ~2 poll intervals (5s each)
+    // plus a small buffer. We bound the wait at 20s so a regression cannot
+    // hang CI.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), convergence_handle)
+        .await
+        .expect("convergence loop must terminate within 20s after cancel")
+        .expect("join handle must not panic");
+
+    let err = result.expect_err("wait_for_convergence must return Err on cancel");
+    let err_str = format!("{err}");
+    assert!(
+        err_str.contains("cancelled by operator"),
+        "error must identify operator cancel; got: {err_str}"
+    );
+}

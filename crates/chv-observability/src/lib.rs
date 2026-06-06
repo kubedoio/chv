@@ -2,10 +2,33 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::sync::OnceLock;
 use tracing::Span;
 
+pub mod grpc_metrics;
+pub use grpc_metrics::{GrpcMetricsLayer, GrpcMetricsService};
+
 /// ADR-009 mandated metric names.
 pub const CHV_VMS_TOTAL: &str = "chv_vms_total";
 pub const CHV_NODES_READY: &str = "chv_nodes_ready";
 pub const CHV_OPERATION_DURATION_SECONDS: &str = "chv_operation_duration_seconds";
+
+// ---------------------------------------------------------------------------
+// gRPC server-side RED metric names (S3-2 / C-13)
+// ---------------------------------------------------------------------------
+pub const CHV_GRPC_SERVER_REQUESTS_TOTAL: &str = "chv_grpc_server_requests_total";
+pub const CHV_GRPC_SERVER_DURATION_SECONDS: &str = "chv_grpc_server_duration_seconds";
+
+// ---------------------------------------------------------------------------
+// VM lifecycle RED metric names (S3-1 / C-11)
+//
+// Emitted by the agent's Cloud Hypervisor adapter for every VM lifecycle
+// operation (create, start, stop, delete, pause, resume).
+//
+// Labels:
+//   * `op`     — one of: `create`, `start`, `stop`, `delete`, `pause`, `resume`
+//   * `result` — one of: `ok`, `err` (on the counter only; the histogram is
+//                always recorded so dashboards can show error latency too)
+// ---------------------------------------------------------------------------
+pub const CHV_VM_OPS_TOTAL: &str = "chv_vm_ops_total";
+pub const CHV_VM_OP_DURATION_SECONDS: &str = "chv_vm_op_duration_seconds";
 
 // ---------------------------------------------------------------------------
 // Multi-node metric names (Phase 10)

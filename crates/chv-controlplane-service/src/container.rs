@@ -231,6 +231,7 @@ impl ControlPlaneService {
 
         let mut shutdown_rx = self.runtime.shutdown_rx.clone();
         let grpc_result = server
+            .layer(chv_observability::GrpcMetricsLayer::new())
             .add_service(enrollment_server)
             .add_service(inventory_server)
             .add_service(telemetry_server)

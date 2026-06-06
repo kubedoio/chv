@@ -897,4 +897,78 @@ mod tests {
         assert_eq!(export.export_path, "/dev/rbd/rbd/vol-1");
         assert_eq!(export.attachment_handle, "rbd-rbd-vol-1");
     }
+
+    // C-19 (S4-5): unit-test boundary for the Ceph RBD backend.
+    //
+    // CephRbdConfig does not derive serde::{Serialize, Deserialize}, so the
+    // proposed serde round-trip is out of scope for this change — chv-stord
+    // builds the config programmatically.  Pool-name validation today is
+    // emptiness-only; we lock that contract down and document the absence of
+    // stricter pool-name validation as a known gap for later hardening.
+
+    #[test]
+    fn ceph_config_pool_name_validation_is_emptiness_only() {
+        // A pool name consisting only of whitespace is technically invalid for
+        // RBD ("  " is not a real pool), but the current backend only rejects
+        // strictly-empty strings.  This test pins the *current* behavior: if
+        // we ever tighten validation, update this test along with the change.
+        let mut config = test_config();
+        config.pool_name = "   ".to_string();
+        assert!(
+            CephRbdBackend::new(config).is_ok(),
+            "whitespace-only pool name is currently accepted; tighten validation in a follow-up"
+        );
+
+        let mut config = test_config();
+        config.pool_name = "".to_string();
+        assert!(
+            matches!(
+                CephRbdBackend::new(config),
+                Err(ChvError::InvalidArgument { .. })
+            ),
+            "empty pool name must be rejected"
+        );
+    }
+
+    /// Health check with a non-existent keyring path.
+    ///
+    /// `health()` shells out to `rbd info`.  On a host without `rbd`
+    /// installed this surfaces `ChvError::Io`; on a host with `rbd` installed
+    /// but pointing at a missing keyring + bogus monitor the command exits
+    /// non-zero and the backend returns `Ok(BackendHealth)` with
+    /// `status == "unhealthy"`.  Both are valid "not connected" signals — the
+    /// test asserts we never report "healthy" when authentication cannot
+    /// possibly succeed.
+    ///
+    /// Marked `#[ignore]`: depends on the host having (or not having) the
+    /// `rbd` binary; behavior differs across CI environments.
+    #[tokio::test]
+    #[ignore]
+    async fn ceph_health_with_missing_keyring_is_not_reported_healthy() {
+        let config = CephRbdConfig {
+            cluster_name: "ceph".to_string(),
+            pool_name: "rbd".to_string(),
+            user: "admin".to_string(),
+            keyring_path: "/nonexistent/keyring".to_string(),
+            monitors: "192.0.2.1:6789".to_string(),
+        };
+        let backend = CephRbdBackend::new(config).expect("config is structurally valid");
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.health("vol-1", "rbd-rbd-vol-1"),
+        )
+        .await
+        .expect("health() should return within 2s when the rbd command fails fast");
+        match res {
+            Ok(h) => assert_ne!(
+                h.status, "healthy",
+                "health() must not report healthy with a missing keyring; got {:?}",
+                h
+            ),
+            Err(ChvError::Io { .. }) => {
+                // rbd binary not installed on this host — acceptable.
+            }
+            Err(other) => panic!("unexpected error variant from health(): {:?}", other),
+        }
+    }
 }

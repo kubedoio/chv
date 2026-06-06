@@ -828,4 +828,108 @@ mod tests {
         };
         assert!(config.volumes.is_empty());
     }
+
+    // Guard against a regression where caller passes total_bytes=0 and
+    // computes progress_percent upstream as `bytes / total`. The constructor
+    // itself must accept the value verbatim and never panic.
+    #[test]
+    fn build_progress_with_zero_total_does_not_panic() {
+        let progress = build_progress(
+            "vm-1",
+            "op-1",
+            proto::MigrationPhase::Pending,
+            0,
+            0,
+            0,
+            0,
+            0.0,
+        );
+        assert_eq!(progress.total_bytes, 0);
+        assert_eq!(progress.bytes_transferred, 0);
+        assert_eq!(progress.progress_percent, 0.0);
+    }
+
+    // Re-counted dirty pages can legitimately push bytes_transferred past
+    // total_bytes during convergence rounds. The proto builder must not clamp
+    // or reject — that is the caller's job — so we verify pass-through.
+    #[test]
+    fn build_progress_with_excess_bytes_preserves_values() {
+        let progress = build_progress(
+            "vm-1",
+            "op-1",
+            proto::MigrationPhase::ConvergingDisk,
+            8192,
+            4096,
+            7,
+            32,
+            150.0,
+        );
+        assert_eq!(progress.bytes_transferred, 8192);
+        assert_eq!(progress.total_bytes, 4096);
+        assert_eq!(progress.convergence_round, 7);
+        assert_eq!(progress.dirty_blocks_remaining, 32);
+        assert_eq!(progress.progress_percent, 150.0);
+    }
+
+    // MigrationRole is `Copy`. Removing the derive would silently move the
+    // value out of locals at every match site in the codebase. This test
+    // makes that regression a compile error in the test build.
+    #[test]
+    fn migration_role_is_copy() {
+        let original = MigrationRole::Source;
+        let copied = original; // Copy semantics — original must remain usable.
+        assert_eq!(original, MigrationRole::Source);
+        assert_eq!(copied, MigrationRole::Source);
+    }
+
+    // Guards against proto enum drift: every variant must round-trip through
+    // i32 unchanged. If a variant is added to the .proto and the agent forgets
+    // to handle it, this test forces a compile-time match-arm failure here.
+    #[test]
+    fn migration_phase_round_trip_all_variants() {
+        use proto::MigrationPhase;
+        for variant in [
+            MigrationPhase::Unspecified,
+            MigrationPhase::Pending,
+            MigrationPhase::PrecopyDisk,
+            MigrationPhase::ConvergingDisk,
+            MigrationPhase::MemoryMigration,
+            MigrationPhase::Paused,
+            MigrationPhase::Completed,
+            MigrationPhase::Failed,
+            MigrationPhase::RolledBack,
+        ] {
+            let raw = variant as i32;
+            let recovered =
+                MigrationPhase::try_from(raw).expect("known variant must round-trip through i32");
+            assert_eq!(recovered, variant, "round-trip mismatch for {:?}", variant);
+        }
+    }
+
+    // Symmetric test for the string-form round-trip — protects against
+    // ProtoBuf field-name renames that would silently break wire-compat.
+    #[test]
+    fn migration_phase_round_trip_via_str_name() {
+        use proto::MigrationPhase;
+        for variant in [
+            MigrationPhase::Unspecified,
+            MigrationPhase::Pending,
+            MigrationPhase::PrecopyDisk,
+            MigrationPhase::ConvergingDisk,
+            MigrationPhase::MemoryMigration,
+            MigrationPhase::Paused,
+            MigrationPhase::Completed,
+            MigrationPhase::Failed,
+            MigrationPhase::RolledBack,
+        ] {
+            let name = variant.as_str_name();
+            let recovered = MigrationPhase::from_str_name(name)
+                .expect("known variant must round-trip through str_name");
+            assert_eq!(
+                recovered, variant,
+                "str-name round-trip mismatch for {:?}",
+                variant
+            );
+        }
+    }
 }

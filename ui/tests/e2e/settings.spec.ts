@@ -9,7 +9,7 @@ test.describe('Settings', () => {
 
 	test('settings page loads and shows infrastructure environment', async ({ page }) => {
 		await page.goto('/settings');
-		await expect(page.getByRole('heading', { name: 'Settings / Access' })).toBeVisible();
+		await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
 		await expect(page.getByText('Infrastructure Environment')).toBeVisible();
 		await expect(page.getByText('v0.1.0').first()).toBeVisible();
 	});

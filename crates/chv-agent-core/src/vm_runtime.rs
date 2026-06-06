@@ -2,7 +2,8 @@ use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig, VmCounters
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct VmRecord {
@@ -16,8 +17,8 @@ pub struct VmRecord {
 }
 
 pub struct VmRuntime {
-    vms: Arc<Mutex<HashMap<String, VmRecord>>>,
-    failure_counts: Arc<Mutex<HashMap<String, (u32, String)>>>,
+    vms: Arc<RwLock<HashMap<String, VmRecord>>>,
+    failure_counts: Arc<RwLock<HashMap<String, (u32, String)>>>,
     adapter: Arc<dyn CloudHypervisorAdapter>,
 }
 
@@ -34,22 +35,25 @@ impl Clone for VmRuntime {
 impl VmRuntime {
     pub fn new(adapter: Arc<dyn CloudHypervisorAdapter>) -> Self {
         Self {
-            vms: Arc::new(Mutex::new(HashMap::new())),
-            failure_counts: Arc::new(Mutex::new(HashMap::new())),
+            vms: Arc::new(RwLock::new(HashMap::new())),
+            failure_counts: Arc::new(RwLock::new(HashMap::new())),
             adapter,
         }
     }
 
-    pub fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
-        self.adapter.pty_master(vm_id)
+    pub async fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
+        self.adapter.pty_master(vm_id).await
     }
 
-    pub fn pty_output_rx(&self, vm_id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
-        self.adapter.pty_output_rx(vm_id)
+    pub async fn pty_output_rx(
+        &self,
+        vm_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        self.adapter.pty_output_rx(vm_id).await
     }
 
-    pub fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
-        self.adapter.pty_scrollback(vm_id)
+    pub async fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
+        self.adapter.pty_scrollback(vm_id).await
     }
 
     pub async fn create_vm(
@@ -63,16 +67,12 @@ impl VmRuntime {
         self.adapter.create_vm(config, operation_id).await?;
         let prior_failures = self
             .failure_counts
-            .lock()
-            .map_err(|_| ChvError::Internal {
-                reason: "failure_counts mutex poisoned".to_string(),
-            })?
+            .read()
+            .await
             .get(&id)
             .map(|(c, _)| *c)
             .unwrap_or(0);
-        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
-            reason: "vms mutex poisoned".to_string(),
-        })?;
+        let mut map = self.vms.write().await;
         map.insert(
             id.clone(),
             VmRecord {
@@ -90,9 +90,7 @@ impl VmRuntime {
 
     pub async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.start_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
-            reason: "vms mutex poisoned".to_string(),
-        })?;
+        let mut map = self.vms.write().await;
         let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
             resource: "vm".to_string(),
             id: vm_id.to_string(),
@@ -100,12 +98,7 @@ impl VmRuntime {
         rec.runtime_status = "Running".to_string();
         rec.consecutive_failures = 0;
         drop(map);
-        self.failure_counts
-            .lock()
-            .map_err(|_| ChvError::Internal {
-                reason: "failure_counts mutex poisoned".to_string(),
-            })?
-            .remove(vm_id);
+        self.failure_counts.write().await.remove(vm_id);
         Ok(())
     }
 
@@ -116,9 +109,7 @@ impl VmRuntime {
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
         self.adapter.stop_vm(vm_id, force, operation_id).await?;
-        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
-            reason: "vms mutex poisoned".to_string(),
-        })?;
+        let mut map = self.vms.write().await;
         if let Some(rec) = map.get_mut(vm_id) {
             rec.runtime_status = "Stopped".to_string();
         }
@@ -127,20 +118,13 @@ impl VmRuntime {
 
     pub async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.delete_vm(vm_id, operation_id).await?;
-        self.vms
-            .lock()
-            .map_err(|_| ChvError::Internal {
-                reason: "vms mutex poisoned".to_string(),
-            })?
-            .remove(vm_id);
+        self.vms.write().await.remove(vm_id);
         Ok(())
     }
 
     pub async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.reboot_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
-            reason: "vms mutex poisoned".to_string(),
-        })?;
+        let mut map = self.vms.write().await;
         let rec = map.get_mut(vm_id).ok_or_else(|| ChvError::NotFound {
             resource: "vm".to_string(),
             id: vm_id.to_string(),
@@ -193,9 +177,7 @@ impl VmRuntime {
 
     pub async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.pause_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
-            reason: "vms mutex poisoned".to_string(),
-        })?;
+        let mut map = self.vms.write().await;
         if let Some(rec) = map.get_mut(vm_id) {
             rec.runtime_status = "Paused".to_string();
         }
@@ -204,9 +186,7 @@ impl VmRuntime {
 
     pub async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         self.adapter.resume_vm(vm_id, operation_id).await?;
-        let mut map = self.vms.lock().map_err(|_| ChvError::Internal {
-            reason: "vms mutex poisoned".to_string(),
-        })?;
+        let mut map = self.vms.write().await;
         if let Some(rec) = map.get_mut(vm_id) {
             rec.runtime_status = "Running".to_string();
         }
@@ -303,24 +283,15 @@ impl VmRuntime {
         self.adapter.get_vm_state(vm_id).await
     }
 
-    pub fn get(&self, vm_id: &str) -> Option<VmRecord> {
-        self.vms
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(vm_id)
-            .cloned()
+    pub async fn get(&self, vm_id: &str) -> Option<VmRecord> {
+        self.vms.read().await.get(vm_id).cloned()
     }
 
-    pub fn list(&self) -> Vec<VmRecord> {
-        self.vms
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .collect()
+    pub async fn list(&self) -> Vec<VmRecord> {
+        self.vms.read().await.values().cloned().collect()
     }
 
-    pub fn record_failure(
+    pub async fn record_failure(
         &self,
         vm_id: impl Into<String>,
         generation: impl Into<String>,
@@ -329,7 +300,7 @@ impl VmRuntime {
         let vm_id = vm_id.into();
         let generation = generation.into();
         let error = error.into();
-        let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.vms.write().await;
         // Only update existing records; do not create phantom records for VMs
         // that were never successfully created. A phantom record causes the
         // reconciler to skip creation and try start/stop on a non-existent VM.
@@ -341,49 +312,43 @@ impl VmRuntime {
             let count = entry.consecutive_failures;
             drop(map);
             self.failure_counts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .write()
+                .await
                 .insert(vm_id, (count, generation));
         } else {
             drop(map);
-            let mut fc = self
-                .failure_counts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut fc = self.failure_counts.write().await;
             let entry = fc.entry(vm_id).or_insert((0, generation.clone()));
             entry.0 = entry.0.saturating_add(1);
             entry.1 = generation;
         }
     }
 
-    pub fn consecutive_failures(&self, vm_id: &str) -> u32 {
+    pub async fn consecutive_failures(&self, vm_id: &str) -> u32 {
         self.failure_counts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .read()
+            .await
             .get(vm_id)
             .map(|(c, _)| *c)
             .unwrap_or(0)
     }
 
-    pub fn consecutive_failures_for_generation(&self, vm_id: &str, generation: &str) -> u32 {
+    pub async fn consecutive_failures_for_generation(&self, vm_id: &str, generation: &str) -> u32 {
         self.failure_counts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .read()
+            .await
             .get(vm_id)
             .filter(|(_, gen)| gen == generation)
             .map(|(c, _)| *c)
             .unwrap_or(0)
     }
 
-    pub fn clear_failure_count(&self, vm_id: &str) {
-        self.failure_counts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(vm_id);
+    pub async fn clear_failure_count(&self, vm_id: &str) {
+        self.failure_counts.write().await.remove(vm_id);
     }
 
-    pub fn update_vm_config(&self, vm_id: &str, cpus: u32, memory_bytes: u64) -> bool {
-        let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+    pub async fn update_vm_config(&self, vm_id: &str, cpus: u32, memory_bytes: u64) -> bool {
+        let mut map = self.vms.write().await;
         if let Some(rec) = map.get_mut(vm_id) {
             rec.cpus = cpus;
             rec.memory_bytes = memory_bytes;
@@ -423,7 +388,7 @@ mod tests {
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
             .unwrap();
-        let rec = rt.get("vm-1").unwrap();
+        let rec = rt.get("vm-1").await.unwrap();
         assert_eq!(rec.observed_generation, "5");
         assert_eq!(rec.runtime_status, "Created");
         assert!(mock.vms.lock().unwrap().contains_key("vm-1"));
@@ -448,9 +413,9 @@ mod tests {
             .await
             .unwrap();
         rt.start_vm("vm-1", Some("op-2")).await.unwrap();
-        assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Running");
+        assert_eq!(rt.get("vm-1").await.unwrap().runtime_status, "Running");
         rt.stop_vm("vm-1", false, Some("op-3")).await.unwrap();
-        assert_eq!(rt.get("vm-1").unwrap().runtime_status, "Stopped");
+        assert_eq!(rt.get("vm-1").await.unwrap().runtime_status, "Stopped");
     }
 
     #[tokio::test]
@@ -472,7 +437,7 @@ mod tests {
             .await
             .unwrap();
         rt.delete_vm("vm-1", Some("op-4")).await.unwrap();
-        assert!(rt.get("vm-1").is_none());
+        assert!(rt.get("vm-1").await.is_none());
     }
 
     #[tokio::test]
@@ -493,24 +458,24 @@ mod tests {
         rt.create_vm("vm-1", "5", &config, Some("op-1"))
             .await
             .unwrap();
-        rt.record_failure("vm-1", "7", "kernel missing");
-        let rec = rt.get("vm-1").unwrap();
+        rt.record_failure("vm-1", "7", "kernel missing").await;
+        let rec = rt.get("vm-1").await.unwrap();
         assert_eq!(rec.observed_generation, "7");
         assert_eq!(rec.runtime_status, "Failed");
         assert_eq!(rec.last_error.as_deref(), Some("kernel missing"));
         assert_eq!(rec.consecutive_failures, 1);
-        assert_eq!(rt.consecutive_failures("vm-1"), 1);
+        assert_eq!(rt.consecutive_failures("vm-1").await, 1);
 
-        rt.record_failure("vm-1", "7", "kernel missing again");
-        assert_eq!(rt.get("vm-1").unwrap().consecutive_failures, 2);
-        assert_eq!(rt.consecutive_failures("vm-1"), 2);
+        rt.record_failure("vm-1", "7", "kernel missing again").await;
+        assert_eq!(rt.get("vm-1").await.unwrap().consecutive_failures, 2);
+        assert_eq!(rt.consecutive_failures("vm-1").await, 2);
     }
 
-    #[test]
-    fn vm_runtime_record_failure_does_not_create_phantom() {
+    #[tokio::test]
+    async fn vm_runtime_record_failure_does_not_create_phantom() {
         let (rt, _mock) = test_runtime();
-        rt.record_failure("vm-phantom", "1", "prepare failed");
-        assert!(rt.get("vm-phantom").is_none());
-        assert_eq!(rt.consecutive_failures("vm-phantom"), 1);
+        rt.record_failure("vm-phantom", "1", "prepare failed").await;
+        assert!(rt.get("vm-phantom").await.is_none());
+        assert_eq!(rt.consecutive_failures("vm-phantom").await, 1);
     }
 }

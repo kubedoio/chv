@@ -338,9 +338,11 @@ pub async fn clone_vm_template(
         * 1024
         * 1024;
 
+    // BEGIN IMMEDIATE: serialize concurrent writers to close the quota-check TOCTOU
+    // window on template-driven VM creation. See S2-1 / vms.rs::create_vm for context.
     let mut tx = state
         .pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE;")
         .await
         .map_err(|e| BffError::Internal(format!("failed to begin transaction: {}", e)))?;
 

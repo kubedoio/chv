@@ -91,20 +91,33 @@ verify_install_state() {
 verify_version_output() {
     info "Checking binary version outputs..."
 
-    local version_output
-    version_output="$(/usr/bin/chvctl --version 2>&1)"
-    if echo "$version_output" | grep -q "chvctl"; then
+    # Capture stdout+stderr AND exit code without letting `set -e` abort.
+    # Bash gotcha: when this function is called plainly (no `&&` / `||`
+    # guard) under `set -euo pipefail`, the two-statement form
+    #     local var
+    #     var="$(failing_cmd)"
+    # propagates the substitution's non-zero exit and kills the shell
+    # *before* any error message is printed — exactly the silent-abort
+    # symptom we hit on debian:12 when a binary fails to load. Using
+    # `var="$(cmd)" || rc=$?` masks the substitution exit so we can
+    # capture and report it explicitly.
+    local version_output rc
+
+    rc=0
+    version_output="$(/usr/bin/chvctl --version 2>&1)" || rc=$?
+    if [[ "$rc" -eq 0 ]] && echo "$version_output" | grep -q "chvctl"; then
         info "  chvctl --version: ${version_output}"
     else
-        error "chvctl --version failed: ${version_output}"
+        error "chvctl --version failed (exit ${rc}): ${version_output}"
     fi
 
     for bin in chv-agent chv-controlplane chv-nwd chv-stord; do
-        version_output="$("/usr/bin/${bin}" --version 2>&1)"
-        if echo "$version_output" | grep -q "${bin}"; then
+        rc=0
+        version_output="$("/usr/bin/${bin}" --version 2>&1)" || rc=$?
+        if [[ "$rc" -eq 0 ]] && echo "$version_output" | grep -q "${bin}"; then
             info "  ${bin} --version: ${version_output}"
         else
-            error "${bin} --version failed: ${version_output}"
+            error "${bin} --version failed (exit ${rc}): ${version_output}"
         fi
     done
 }

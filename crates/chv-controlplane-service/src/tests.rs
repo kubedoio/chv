@@ -69,6 +69,7 @@ fn test_admin_token() -> String {
         username: "admin".to_string(),
         role: "admin".to_string(),
         exp,
+        must_change_password: false,
     };
     let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
     jsonwebtoken::encode(

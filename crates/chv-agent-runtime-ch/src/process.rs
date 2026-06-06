@@ -14,6 +14,47 @@ use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
 
+/// RAII guard that records VM lifecycle RED metrics when it drops.
+///
+/// - `chv_vm_ops_total{op, result}` counter — `result` is `"ok"` or `"err"`
+/// - `chv_vm_op_duration_seconds{op}` histogram (recorded on BOTH paths so
+///   dashboards can visualise error latency)
+///
+/// Mark `succeeded = true` only when the operation returns `Ok`. Any early
+/// return via `?` will trigger Drop with the default `succeeded = false`.
+struct VmOpGuard {
+    op: &'static str,
+    start: std::time::Instant,
+    succeeded: bool,
+}
+
+impl VmOpGuard {
+    fn new(op: &'static str) -> Self {
+        Self {
+            op,
+            start: std::time::Instant::now(),
+            succeeded: false,
+        }
+    }
+}
+
+impl Drop for VmOpGuard {
+    fn drop(&mut self) {
+        let label = if self.succeeded { "ok" } else { "err" };
+        metrics::counter!(
+            chv_observability::CHV_VM_OPS_TOTAL,
+            "op" => self.op,
+            "result" => label
+        )
+        .increment(1);
+        metrics::histogram!(
+            chv_observability::CHV_VM_OP_DURATION_SECONDS,
+            "op" => self.op
+        )
+        .record(self.start.elapsed().as_secs_f64());
+    }
+}
+
 use crate::adapter::{
     AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo,
 };
@@ -33,7 +74,7 @@ struct VmProcess {
     child: Child,
     pty_master: OwnedFd,
     pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    pty_scrollback: Arc<std::sync::Mutex<Vec<u8>>>,
+    pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
     broadcaster_alive: Arc<AtomicBool>,
     last_cpu_seconds: f64,
     last_cpu_at: Option<std::time::Instant>,
@@ -41,14 +82,14 @@ struct VmProcess {
 
 pub struct ProcessCloudHypervisorAdapter {
     chv_binary: std::path::PathBuf,
-    vms: Arc<std::sync::Mutex<HashMap<String, VmProcess>>>,
+    vms: Arc<tokio::sync::RwLock<HashMap<String, VmProcess>>>,
 }
 
 impl ProcessCloudHypervisorAdapter {
     pub fn new(chv_binary: impl Into<std::path::PathBuf>) -> Self {
         Self {
             chv_binary: chv_binary.into(),
-            vms: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            vms: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -67,8 +108,8 @@ impl ProcessCloudHypervisorAdapter {
         }
     }
 
-    fn get_vm_socket(&self, vm_id: &str) -> Result<std::path::PathBuf, ChvError> {
-        let vms = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+    async fn get_vm_socket(&self, vm_id: &str) -> Result<std::path::PathBuf, ChvError> {
+        let vms = self.vms.read().await;
         let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
             resource: "vm".to_string(),
             id: vm_id.to_string(),
@@ -380,7 +421,7 @@ impl ProcessCloudHypervisorAdapter {
         vm_id: String,
         pty_fd: std::os::fd::RawFd,
         pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-        pty_scrollback: Arc<std::sync::Mutex<Vec<u8>>>,
+        pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
         broadcaster_alive: Arc<AtomicBool>,
     ) {
         tokio::spawn(async move {
@@ -394,7 +435,7 @@ impl ProcessCloudHypervisorAdapter {
                     Ok(n) => {
                         let data = buf[..n].to_vec();
                         {
-                            let mut sb = pty_scrollback.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut sb = pty_scrollback.write().await;
                             sb.extend_from_slice(&data);
                             if sb.len() > CONSOLE_SCROLLBACK_BYTES {
                                 let excess = sb.len() - CONSOLE_SCROLLBACK_BYTES;
@@ -421,6 +462,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         config: &VmConfig,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
+        let mut __guard = VmOpGuard::new("create");
         if !std::path::Path::new("/dev/kvm").exists() {
             return Err(ChvError::Internal {
                 reason: "Host does not have KVM capability (/dev/kvm missing). VMs require hardware virtualization.".into(),
@@ -735,13 +777,13 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         );
 
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
 
         // Dup the fd for the broadcaster BEFORE OwnedFd takes ownership
         let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
 
-        let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.vms.write().await;
         map.insert(
             config.vm_id.clone(),
             VmProcess {
@@ -799,12 +841,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         });
 
+        __guard.succeeded = true;
         Ok(config.vm_id.clone())
     }
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let mut __guard = VmOpGuard::new("start");
         let (api_socket, pty_master_fd, pty_tx, pty_scrollback, broadcaster_alive) = {
-            let vms = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+            let vms = self.vms.read().await;
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
                 id: vm_id.to_string(),
@@ -827,6 +871,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
                 if state == "Running" || state == "Paused" {
                     info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
+                    // Idempotent success: VM is already in the desired state.
+                    // The guard's succeeded flag must be set on every Ok return
+                    // so RED metrics classify this as ok, not err.
+                    __guard.succeeded = true;
                     return Ok(());
                 }
             }
@@ -853,6 +901,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         }
 
+        __guard.succeeded = true;
         Ok(())
     }
 
@@ -862,25 +911,28 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         force: bool,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let mut __guard = VmOpGuard::new("stop");
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, force = force, op = operation_id.unwrap_or("-"), "stopping vm");
 
         if force {
-            let log_path = {
-                let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(mut proc) = map.remove(vm_id) {
-                    // Clear in-memory scrollback before dropping the process.
-                    if let Ok(mut sb) = proc.pty_scrollback.lock() {
-                        sb.clear();
-                    }
-                    let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
-                    let _ = proc.child.start_kill();
-                    let _ = proc.child.try_wait();
-                    log_path
-                } else {
-                    None
+            let removed = {
+                let mut map = self.vms.write().await;
+                map.remove(vm_id)
+            };
+            let log_path = if let Some(mut proc) = removed {
+                // Clear in-memory scrollback before dropping the process.
+                {
+                    let mut sb = proc.pty_scrollback.write().await;
+                    sb.clear();
                 }
+                let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
+                let _ = proc.child.start_kill();
+                let _ = proc.child.try_wait();
+                log_path
+            } else {
+                None
             };
             if let Some(path) = log_path {
                 let _ = tokio::fs::remove_file(&path).await;
@@ -921,24 +973,31 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
             if !graceful_shutdown {
                 tracing::warn!(vm_id = %vm_id, "VM did not shut down gracefully within timeout, force-killing");
-                let log_path = {
-                    let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(mut proc) = map.remove(vm_id) {
-                        if let Ok(mut sb) = proc.pty_scrollback.lock() {
-                            sb.clear();
-                        }
-                        let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
-                        let _ = proc.child.start_kill();
-                        let _ = proc.child.try_wait();
-                        log_path
-                    } else {
-                        None
+                let removed = {
+                    let mut map = self.vms.write().await;
+                    map.remove(vm_id)
+                };
+                let log_path = if let Some(mut proc) = removed {
+                    {
+                        let mut sb = proc.pty_scrollback.write().await;
+                        sb.clear();
                     }
+                    let log_path = proc.api_socket.parent().map(|p| p.join("console.log"));
+                    let _ = proc.child.start_kill();
+                    let _ = proc.child.try_wait();
+                    log_path
+                } else {
+                    None
                 };
                 if let Some(path) = log_path {
                     let _ = tokio::fs::remove_file(&path).await;
                     info!(vm_id = %vm_id, path = %path.display(), "removed console.log on force stop after graceful timeout");
                 }
+                // Force-kill fallback after graceful-stop timeout is still a
+                // successful stop from the caller's point of view: the VM is no
+                // longer in the runtime map. Mark the guard before the early
+                // return so RED metrics classify this as ok.
+                __guard.succeeded = true;
                 return Ok(());
             }
 
@@ -946,7 +1005,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             // in the map so a later vm.boot can restart it; we truncate the
             // on-disk log so the existing writer task can continue appending.
             let (pty_scrollback, log_path) = {
-                let vms = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+                let vms = self.vms.read().await;
                 let proc = vms.get(vm_id);
                 (
                     proc.map(|p| p.pty_scrollback.clone()),
@@ -954,9 +1013,8 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 )
             };
             if let Some(sb) = pty_scrollback {
-                if let Ok(mut buf) = sb.lock() {
-                    buf.clear();
-                }
+                let mut buf = sb.write().await;
+                buf.clear();
             }
             if let Some(path) = log_path {
                 match tokio::fs::OpenOptions::new()
@@ -975,12 +1033,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
                 }
             }
         }
+        __guard.succeeded = true;
         Ok(())
     }
 
     async fn delete_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
+        let mut __guard = VmOpGuard::new("delete");
         let mut proc = {
-            let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+            let mut map = self.vms.write().await;
             map.remove(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
                 id: vm_id.to_string(),
@@ -992,11 +1052,12 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let _ = proc.child.start_kill();
         let _ = proc.child.wait().await;
         let _ = tokio::fs::remove_file(&proc.api_socket).await;
+        __guard.succeeded = true;
         Ok(())
     }
 
     async fn reboot_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "rebooting vm via ch api");
 
@@ -1014,7 +1075,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         memory_bytes: Option<u64>,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, ?cpus, ?memory_bytes, op = operation_id.unwrap_or("-"), "resizing vm via ch api");
 
@@ -1034,7 +1095,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn vm_info(&self, vm_id: &str) -> Result<VmInfo, ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         let (status, body) =
             Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
@@ -1071,7 +1132,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn vm_counters(&self, vm_id: &str) -> Result<VmCounters, ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         let (status, body) =
             Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.counters", None).await?;
@@ -1094,7 +1155,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
         let mut cpu_percent = 0.0;
         {
-            let mut map = self.vms.lock().unwrap_or_else(|e| e.into_inner());
+            let mut map = self.vms.write().await;
             if let Some(proc) = map.get_mut(vm_id) {
                 if let Some(last_at) = proc.last_cpu_at {
                     let delta_secs = cpu_seconds - proc.last_cpu_seconds;
@@ -1159,7 +1220,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         destination: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "snapshotting vm via ch api");
 
@@ -1177,7 +1238,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         source: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, source = %source, op = operation_id.unwrap_or("-"), "restoring snapshot via ch api");
 
@@ -1189,27 +1250,31 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn pause_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let mut __guard = VmOpGuard::new("pause");
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "pausing vm via ch api");
 
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.pause", None).await?;
         Self::expect_status(status, "vm.pause")?;
+        __guard.succeeded = true;
         Ok(())
     }
 
     async fn resume_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let mut __guard = VmOpGuard::new("resume");
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "resuming vm via ch api");
 
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resume", None).await?;
         Self::expect_status(status, "vm.resume")?;
+        __guard.succeeded = true;
         Ok(())
     }
 
     async fn power_button(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, op = operation_id.unwrap_or("-"), "sending ACPI power button via ch api");
 
@@ -1225,7 +1290,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         params: &AddDiskParams,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, path = %params.path.display(), op = operation_id.unwrap_or("-"), "hot-adding disk via ch api");
 
@@ -1256,7 +1321,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         device_id: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, device_id = %device_id, op = operation_id.unwrap_or("-"), "hot-removing device via ch api");
 
@@ -1274,7 +1339,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         params: &AddNetParams,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, tap = %params.tap_name, mac = %params.mac_address, op = operation_id.unwrap_or("-"), "hot-adding net via ch api");
 
@@ -1306,7 +1371,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         new_size_bytes: u64,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, disk_id = %disk_id, new_size = new_size_bytes, op = operation_id.unwrap_or("-"), "resizing disk via ch api");
 
@@ -1318,7 +1383,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 
     async fn ping(&self, vm_id: &str) -> Result<bool, ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         match Self::ch_api_request(&api_socket, "GET", "/api/v1/vmm.ping", None).await {
             Ok(status) => Ok(status == 200),
@@ -1332,7 +1397,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         destination_url: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(
             vm_id = %vm_id,
@@ -1428,7 +1493,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         receiver_url: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(
             vm_id = %vm_id,
@@ -1529,7 +1594,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         destination: &str,
         operation_id: Option<&str>,
     ) -> Result<(), ChvError> {
-        let api_socket = self.get_vm_socket(vm_id)?;
+        let api_socket = self.get_vm_socket(vm_id).await?;
 
         info!(vm_id = %vm_id, destination = %destination, op = operation_id.unwrap_or("-"), "generating coredump via ch api");
 
@@ -1540,23 +1605,26 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         Ok(())
     }
 
-    fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
-        let map = self.vms.lock().ok()?;
+    async fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
+        let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
         let fd = nix::unistd::dup(proc.pty_master.as_raw_fd()).ok()?;
         Some(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
-    fn pty_output_rx(&self, vm_id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
-        let map = self.vms.lock().ok()?;
+    async fn pty_output_rx(
+        &self,
+        vm_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
         Some(proc.pty_tx.subscribe())
     }
 
-    fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
-        let map = self.vms.lock().ok()?;
+    async fn pty_scrollback(&self, vm_id: &str) -> Option<Vec<u8>> {
+        let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
-        let sb = proc.pty_scrollback.lock().ok()?;
+        let sb = proc.pty_scrollback.read().await;
         Some(sb.clone())
     }
 }
@@ -1694,11 +1762,11 @@ mod tests {
         // Create a fake VmProcess directly in the adapter's map.
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::Mutex::new(Vec::from(b"scrollback data")));
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::from(b"scrollback data")));
         let pty_master = std::fs::File::open("/dev/null").unwrap().into();
 
         {
-            let mut map = adapter.vms.lock().unwrap();
+            let mut map = adapter.vms.write().await;
             map.insert(
                 "vm-test".to_string(),
                 VmProcess {
@@ -1716,7 +1784,7 @@ mod tests {
 
         // Pre-stop assertions.
         assert_eq!(
-            adapter.pty_scrollback("vm-test").unwrap(),
+            adapter.pty_scrollback("vm-test").await.unwrap(),
             b"scrollback data"
         );
         assert!(console_log.exists());
@@ -1728,7 +1796,7 @@ mod tests {
             .unwrap();
 
         // Post-stop assertions.
-        assert!(adapter.pty_scrollback("vm-test").is_none());
+        assert!(adapter.pty_scrollback("vm-test").await.is_none());
         assert!(
             !console_log.exists(),
             "console.log should be removed on force stop"
@@ -1752,7 +1820,7 @@ mod tests {
         // We test this by manually exercising the internal logic via the adapter.
         let adapter = ProcessCloudHypervisorAdapter::new(dir.path().join("chv"));
         let (pty_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(4096);
-        let pty_scrollback = Arc::new(std::sync::Mutex::new(Vec::from(b"scrollback data")));
+        let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::from(b"scrollback data")));
         let pty_master = std::fs::File::open("/dev/null").unwrap().into();
 
         // Spawn a child that exits immediately so the graceful shutdown loop
@@ -1761,7 +1829,7 @@ mod tests {
         let _ = child.wait().await;
 
         {
-            let mut map = adapter.vms.lock().unwrap();
+            let mut map = adapter.vms.write().await;
             map.insert(
                 "vm-test".to_string(),
                 VmProcess {
@@ -1779,7 +1847,7 @@ mod tests {
 
         // Pre-stop assertions.
         assert_eq!(
-            adapter.pty_scrollback("vm-test").unwrap(),
+            adapter.pty_scrollback("vm-test").await.unwrap(),
             b"scrollback data"
         );
         assert!(console_log.exists());
@@ -1794,7 +1862,7 @@ mod tests {
             .unwrap();
 
         // Post-stop assertions: scrollback cleared, log truncated.
-        assert_eq!(adapter.pty_scrollback("vm-test").unwrap(), b"");
+        assert_eq!(adapter.pty_scrollback("vm-test").await.unwrap(), b"");
         assert!(
             console_log.exists(),
             "console.log should still exist after graceful stop"

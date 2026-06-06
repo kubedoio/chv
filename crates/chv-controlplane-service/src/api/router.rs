@@ -1,4 +1,4 @@
-use crate::api::{auth, bootstrap, health, nodes, operations, stub};
+use crate::api::{auth, bootstrap, health, migrations, nodes, operations, stub};
 use crate::convergence_metrics::SharedConvergenceMetrics;
 use axum::{
     extract::Request,
@@ -50,6 +50,10 @@ pub fn admin_router(bff_state: AppState, convergence_metrics: SharedConvergenceM
         .route("/admin/nodes/{id}", get(nodes::get_node))
         .route("/admin/operations", get(operations::list_operations))
         .route("/admin/operations/{id}", get(operations::get_operation))
+        .route(
+            "/admin/migrations/{id}/cancel",
+            post(migrations::cancel_migration),
+        )
         .route("/metrics", get(health::metrics_handler))
         .route("/api/v1/install/status", get(stub::get_install_status_stub))
         .route(

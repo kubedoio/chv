@@ -10,12 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at text
 );
 
--- Bootstrap admin user (default password: admin — change immediately after first login)
-INSERT OR IGNORE INTO users (user_id, username, password_hash, role, display_name)
-VALUES (
-    '00000000-0000-0000-0000-000000000001',
-    'admin',
-    '$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS7yI71m',
-    'admin',
-    'Administrator'
-);
+-- NOTE: The bootstrap admin user is seeded at install time by install.sh,
+-- which generates a random password, bcrypts it, and writes it to
+-- /etc/chv/initial_admin_password (mode 0600, root-owned). The user is
+-- created with must_change_password=true (see migration 0044) so the
+-- operator is forced to rotate the credential on first login.
