@@ -16,7 +16,13 @@ permissions:
 jobs:
   build-and-package:
     name: Build and Package
-    runs-on: ubuntu-latest
+    # Pin to ubuntu-22.04 (glibc 2.35) so dynamically-linked binaries run on
+    # the oldest distro in our smoke matrix (debian:12 ships glibc 2.36).
+    # ubuntu-latest currently maps to ubuntu-24.04 (glibc 2.39); binaries
+    # built there fail to load on debian:12 with "GLIBC_2.3X not found",
+    # which the smoke test surfaces as a silent abort during --version checks.
+    # See docs/release/release-implementation-checklist.md (CI matrix item).
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
