@@ -299,6 +299,7 @@
         type="button"
         onclick={() => goToPage(currentPage - 1)}
         disabled={currentPage === 1}
+        aria-label="Previous page"
         class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         Previous
@@ -310,6 +311,7 @@
         type="button"
         onclick={() => goToPage(currentPage + 1)}
         disabled={currentPage === getTotalPages()}
+        aria-label="Next page"
         class="text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         Next
