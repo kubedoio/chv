@@ -507,7 +507,7 @@ dependencies = [
  "libc",
  "lru",
  "nix 0.29.0",
- "prost 0.13.5",
+ "prost 0.14.3",
  "serde",
  "serde_json",
  "sysinfo 0.30.13",
@@ -671,7 +671,7 @@ dependencies = [
 name = "chv-nwd-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-types 0.14.3",
  "tonic",
  "tonic-build",
@@ -690,7 +690,7 @@ dependencies = [
  "hyper-util",
  "libbpf-rs",
  "libc",
- "prost 0.13.5",
+ "prost 0.14.3",
  "rusqlite",
  "serde",
  "serde_json",
@@ -737,7 +737,7 @@ dependencies = [
 name = "chv-stord-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-types 0.14.3",
  "tonic",
  "tonic-build",
@@ -770,7 +770,7 @@ dependencies = [
  "dashmap",
  "hyper-util",
  "nix 0.29.0",
- "prost 0.13.5",
+ "prost 0.14.3",
  "rusqlite",
  "tempfile",
  "tokio",
@@ -816,7 +816,7 @@ dependencies = [
 name = "chv-webui-bff-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-types 0.14.3",
  "tonic",
  "tonic-build",
@@ -951,7 +951,7 @@ dependencies = [
 name = "control-plane-node-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-types 0.14.3",
  "tonic",
  "tonic-build",
