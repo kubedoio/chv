@@ -124,7 +124,7 @@ jobs:
         run: cargo build --workspace --release
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
@@ -158,7 +158,7 @@ jobs:
           tar -czf "dist/${TARBALL_NAME}" -C dist "${RELEASE_NAME}"
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: release-binaries
           path: |
@@ -169,13 +169,13 @@ jobs:
             target/release/chv-stord
 
       - name: Upload UI build
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: ui-build
           path: ui/build/**
 
       - name: Upload release tarball
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: release-tarball
           path: dist/${{ env.TARBALL_NAME }}
@@ -306,7 +306,7 @@ jobs:
           CHV_RELEASE_COSIGN_PASSWORD: ${{ secrets.CHV_RELEASE_COSIGN_PASSWORD }}
 
       - name: Upload packages
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: release-packages
           path: |
