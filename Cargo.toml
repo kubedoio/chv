@@ -50,7 +50,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 hyper-util = { version = "0.1", features = ["client", "server", "tokio"] }
 metrics-exporter-prometheus = "0.18"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum = "0.7"
 bcrypt = "0.15"
