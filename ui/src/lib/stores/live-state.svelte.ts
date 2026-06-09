@@ -1,8 +1,10 @@
 import { browser } from '$app/environment';
 import { invalidateAll } from '$app/navigation';
 import { getStoredToken } from '$lib/api/client';
-import { inventory } from './inventory.svelte';
-import { invalidatePattern } from './api-cache.svelte';
+import type { NodeWithResources, VM } from '$lib/api/types';
+import { listNodes } from '$lib/bff/nodes';
+import { listVms } from '$lib/bff/vms';
+import type { NodeListItem, VmListItem } from '$lib/bff/types';
 import { taskStream, type TaskUpdate } from './task-stream.svelte';
 
 export interface InvalidateOpts {
@@ -52,17 +54,162 @@ class LiveState {
 		}
 	}
 
+	// Inventory state
+	nodes = $state<NodeWithResources[]>([]);
+	vms = $state<VM[]>([]);
+	inventoryLoading = $state(true);
+
+	// Derived
+	pinnedVms = $derived(
+		this.vms
+			.filter((v) => v.actual_state === 'running')
+			.slice(0, 3)
+	);
+
+	private normalizeNodeStatus(state: string): NodeWithResources['status'] {
+		const s = state.toLowerCase();
+		if (s.includes('ready') || s.includes('online') || s.includes('active')) return 'online';
+		if (s.includes('error') || s.includes('fail')) return 'error';
+		if (s.includes('maint')) return 'maintenance';
+		return 'offline';
+	}
+
+	private normalizeVmState(state: string): string {
+		return state.toLowerCase();
+	}
+
+	private mapNode(item: NodeListItem): NodeWithResources {
+		return {
+			id: item.node_id,
+			name: item.name,
+			hostname: item.name,
+			ip_address: '',
+			status: this.normalizeNodeStatus(item.state),
+			is_local: false,
+			resources: { vms: 0, images: 0, storage_pools: 0, networks: 0 },
+			capabilities: '',
+			last_seen_at: '',
+			created_at: '',
+			updated_at: '',
+		};
+	}
+
+	private mapVm(item: VmListItem): VM {
+		const state = this.normalizeVmState(item.power_state);
+		return {
+			id: item.vm_id,
+			name: item.name,
+			node_id: item.node_id,
+			image_id: '',
+			storage_pool_id: '',
+			network_id: '',
+			desired_state: state,
+			actual_state: state,
+			vcpu: 0,
+			memory_mb: 0,
+			disk_path: '',
+			seed_iso_path: '',
+			workspace_path: '',
+			ip_address: '',
+			mac_address: '',
+			console_type: 'serial',
+		};
+	}
+
+	async fetchInventory() {
+		const token = getStoredToken();
+		if (!token) {
+			this.inventoryLoading = false;
+			return;
+		}
+		try {
+			const [nodesRes, vmsRes] = await Promise.all([
+				listNodes({ page: 1, page_size: 100, filters: {} }, token),
+				listVms({ page: 1, page_size: 100, filters: {} }, token),
+			]);
+			this.nodes = (nodesRes.items || []).map((item) => this.mapNode(item));
+			this.vms = (vmsRes.items || []).map((item) => this.mapVm(item));
+		} catch (err) {
+			console.error('Failed to load inventory:', err);
+			this.nodes = [];
+			this.vms = [];
+		} finally {
+			this.inventoryLoading = false;
+		}
+	}
+
+	// Cache
+	private cache = new Map<string, { data: unknown; timestamp: number; ttl: number }>();
+	private readonly LIST_TTL = 30_000;
+	private readonly DETAIL_TTL = 60_000;
+
+	private isCacheFresh(entry: { timestamp: number; ttl: number }) {
+		return Date.now() - entry.timestamp < entry.ttl;
+	}
+
+	async cachedFetch<T>(key: string, fetcher: () => Promise<T>, ttlMs?: number): Promise<T> {
+		if (!browser) return fetcher();
+		const entry = this.cache.get(key) as { data: T; timestamp: number; ttl: number } | undefined;
+		if (entry && this.isCacheFresh(entry)) return entry.data;
+
+		try {
+			const data = await fetcher();
+			this.cache.set(key, { data, timestamp: Date.now(), ttl: ttlMs ?? this.LIST_TTL });
+			return data;
+		} catch (err) {
+			if (entry) {
+				console.warn(`[liveState] fetch error for key "${key}", returning stale data`, err);
+				return entry.data;
+			}
+			throw err;
+		}
+	}
+
+	invalidateCache(key: string) {
+		if (!browser) return;
+		this.cache.delete(key);
+	}
+
+	invalidateCachePattern(prefix: string) {
+		if (!browser) return;
+		for (const k of this.cache.keys()) {
+			if (k.startsWith(prefix)) this.cache.delete(k);
+		}
+	}
+
+	clearCache() {
+		if (!browser) return;
+		this.cache.clear();
+	}
+
+	// Polling
+	private inventoryPollId: ReturnType<typeof setInterval> | null = null;
+
+	startInventoryPolling(intervalMs = 10_000) {
+		this.stopInventoryPolling();
+		this.inventoryPollId = setInterval(() => {
+			this.fetchInventory();
+		}, intervalMs);
+	}
+
+	stopInventoryPolling() {
+		if (this.inventoryPollId) {
+			clearInterval(this.inventoryPollId);
+			this.inventoryPollId = null;
+		}
+	}
+
 	async invalidateAndRefresh(opts: InvalidateOpts = {}) {
 		if (!browser) return;
 
 		if (opts.patterns) {
 			for (const p of opts.patterns) {
-				invalidatePattern(p as import('./api-cache.svelte').CacheKey);
+				this.invalidateCachePattern(p);
 			}
 		}
 
 		if (opts.sidebar) {
-			await inventory.fetch();
+			await this.fetchInventory();
 		}
 
 		await invalidateAll();
@@ -71,7 +218,7 @@ class LiveState {
 			setTimeout(() => {
 				if (opts.patterns) {
 					for (const p of opts.patterns) {
-						invalidatePattern(p as import('./api-cache.svelte').CacheKey);
+						this.invalidateCachePattern(p);
 					}
 				}
 				invalidateAll();
