@@ -4,8 +4,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { mutateNode } from '$lib/bff/nodes';
 	import { toast } from '$lib/stores/toast.svelte';
-	import { invalidateAll } from '$app/navigation';
-	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
@@ -39,8 +38,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		try {
 			await mutateNode({ node_id, action }, token);
 			toast.success(`Node ${action.replace('_', ' ')} accepted`);
-			invalidatePattern('nodes:');
-			await invalidateAll();
+			await liveState.invalidateAndRefresh({ patterns: ['nodes:'], sidebar: true });
 		} catch (err: any) {
 			toast.error(err.message || 'Action failed');
 		} finally {

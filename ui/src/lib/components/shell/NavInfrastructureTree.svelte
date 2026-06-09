@@ -8,7 +8,7 @@
 		Box,
 		MoreVertical
 	} from 'lucide-svelte';
-	import { inventory } from '$lib/stores/inventory.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
 	import { selection } from '$lib/stores/selection.svelte';
 	import InstanceStatusBadge from './InstanceStatusBadge.svelte';
 	import type { InstanceTreeItem } from '$lib/api/types';
@@ -36,29 +36,29 @@
 		return pathname === href || pathname.startsWith(`${href}/`);
 	}
 
-	function getVmNodeId(vm: (typeof inventory.vms)[number]): string {
+	function getVmNodeId(vm: (typeof liveState.vms)[number]): string {
 		return vm.node_id ?? 'unassigned';
 	}
 
 	const filteredNodes = $derived(
 		searchQuery.trim() === ''
-			? inventory.nodes
-			: inventory.nodes.filter((n) =>
+			? liveState.nodes
+			: liveState.nodes.filter((n) =>
 					n.name.toLowerCase().includes(searchQuery.toLowerCase())
 				)
 	);
 
 	const filteredVms = $derived(
 		searchQuery.trim() === ''
-			? inventory.vms
-			: inventory.vms.filter((v) =>
+			? liveState.vms
+			: liveState.vms.filter((v) =>
 					v.name.toLowerCase().includes(searchQuery.toLowerCase())
 				)
 	);
 
 	const vmsByNode = $derived(
 		(() => {
-			const map = new Map<string, typeof inventory.vms>();
+			const map = new Map<string, typeof liveState.vms>();
 			for (const vm of filteredVms) {
 				const nodeId = getVmNodeId(vm);
 				const list = map.get(nodeId) ?? [];
@@ -73,7 +73,7 @@
 		return `host-${nodeId}`;
 	}
 
-	function vmToTreeItem(vm: (typeof inventory.vms)[number]): InstanceTreeItem {
+	function vmToTreeItem(vm: (typeof liveState.vms)[number]): InstanceTreeItem {
 		return {
 			id: vm.id,
 			name: vm.name,
@@ -87,7 +87,7 @@
 	<div class="text-[10px] font-bold uppercase text-[var(--color-neutral-500)] mb-1 pl-2 tracking-wider">Infrastructure</div>
 
 	<div class="flex flex-col pl-2">
-		{#if inventory.isLoading}
+		{#if liveState.inventoryLoading}
 			<div class="py-2 px-4 text-[10px] text-[var(--color-neutral-500)] flex items-center gap-2">
 				<Loader2 size={12} class="animate-spin" />
 				<span>Syncing fleet...</span>
@@ -134,7 +134,7 @@
 														aria-expanded={hostExpanded}
 														aria-controls="group-{node.id}"
 														onclick={() => onToggleGroup(getNodeExpandedKey(node.id))}
-												>
+													>
 														<ChevronDown size={10} class={!hostExpanded ? '-rotate-90' : ''} />
 														<div
 															class="w-1.5 h-1.5 rounded-full {node.status === 'online' ? 'bg-[var(--color-success)]' : node.status === 'error' ? 'bg-[var(--color-danger)]' : 'bg-[var(--color-neutral-600)]'}"
@@ -164,21 +164,21 @@
 																			<InstanceStatusBadge status={inst.status} showText={false} />
 																			<span class="truncate flex-1 min-w-0">{vm.name}</span>
 																			<button
-																				type="button"
-																				class="app-nav__instance-action"
-																				aria-label="Actions for instance {vm.name}"
-																				onclick={(e) => onKebabClick(e, inst)}
-																			>
-																				<MoreVertical size={12} />
-																			</button>
-																		</div>
+																					type="button"
+																					class="app-nav__instance-action"
+																					aria-label="Actions for instance {vm.name}"
+																					onclick={(e) => onKebabClick(e, inst)}
+																				>
+																					<MoreVertical size={12} />
+																				</button>
+																			</div>
 																	{/each}
 																{/if}
 															</div>
 														</div>
 													{/if}
-											</div>
-										{/each}
+										</div>
+									{/each}
 								</div>
 							{/if}
 						</div>
