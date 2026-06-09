@@ -125,7 +125,7 @@ describe('bffFetch', () => {
 	});
 
 	it('uses BFF_BASE_URL env var', async () => {
-		const g = globalThis as typeof globalThis & { process?: { env?: Record<string, string> } };
+		const g = globalThis as unknown as { process?: { env?: Record<string, string> } };
 		if (!g.process) g.process = { env: {} };
 		if (!g.process.env) g.process.env = {};
 		g.process.env.BFF_BASE_URL = 'http://bff.example';
@@ -142,7 +142,7 @@ describe('bffFetch', () => {
 	});
 
 	it('falls back to CHV_BFF_BASE_URL env var', async () => {
-		const g = globalThis as typeof globalThis & { process?: { env?: Record<string, string> } };
+		const g = globalThis as unknown as { process?: { env?: Record<string, string> } };
 		if (!g.process) g.process = { env: {} };
 		if (!g.process.env) g.process.env = {};
 		g.process.env.CHV_BFF_BASE_URL = 'http://chv.example';

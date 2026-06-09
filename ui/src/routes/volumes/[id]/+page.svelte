@@ -7,7 +7,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { mutateVolume } from '$lib/bff/volumes';
 	import { listVms } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast.svelte';
-	import { liveState } from '$lib/stores/live-state.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -98,12 +98,16 @@ import Button from '$lib/components/primitives/Button.svelte';
 		const token = getStoredToken() ?? undefined;
 		const volume_id = detail.summary.volume_id;
 		try {
-			await mutateVolume({ volume_id, action: 'attach', force: false, vm_id: selectedVmId }, token);
-			toast.success('Volume attach accepted');
-			await liveState.invalidateAndRefresh({ patterns: ['volumes:'], sidebar: true });
+			await mutateWithRefresh(
+				() => mutateVolume({ volume_id, action: 'attach', force: false, vm_id: selectedVmId }, token),
+				{
+					patterns: ['volumes:'],
+					successMessage: 'Volume attach accepted',
+					errorMessage: 'Attach failed',
+				}
+			);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Attach failed';
-			toast.error(message);
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}
@@ -125,12 +129,16 @@ import Button from '$lib/components/primitives/Button.svelte';
 		const token = getStoredToken() ?? undefined;
 		const volume_id = detail.summary.volume_id;
 		try {
-			await mutateVolume({ volume_id, action: 'resize', force: false, resize_bytes: newBytes }, token);
-			toast.success('Volume resize accepted');
-			await liveState.invalidateAndRefresh({ patterns: ['volumes:'], sidebar: true });
+			await mutateWithRefresh(
+				() => mutateVolume({ volume_id, action: 'resize', force: false, resize_bytes: newBytes }, token),
+				{
+					patterns: ['volumes:'],
+					successMessage: 'Volume resize accepted',
+					errorMessage: 'Resize failed',
+				}
+			);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Resize failed';
-			toast.error(message);
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}
@@ -142,12 +150,16 @@ import Button from '$lib/components/primitives/Button.svelte';
 		const token = getStoredToken() ?? undefined;
 		const volume_id = detail.summary.volume_id;
 		try {
-			await mutateVolume({ volume_id, action, force: false }, token);
-			toast.success(`Volume ${action} accepted`);
-			await liveState.invalidateAndRefresh({ patterns: ['volumes:'], sidebar: true });
+			await mutateWithRefresh(
+				() => mutateVolume({ volume_id, action, force: false }, token),
+				{
+					patterns: ['volumes:'],
+					successMessage: `Volume ${action} accepted`,
+					errorMessage: 'Action failed',
+				}
+			);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : 'Action failed';
-			toast.error(message);
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}

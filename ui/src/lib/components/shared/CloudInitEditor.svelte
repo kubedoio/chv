@@ -4,6 +4,7 @@
   import Input from '$lib/components/primitives/TextInput.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import { Copy, Check } from 'lucide-svelte';
   import { extractVariables } from './cloudinit-helpers';
   import CloudInitEditorSidebar from './CloudInitEditorSidebar.svelte';
@@ -178,18 +179,22 @@
     formError = '';
 
     try {
-      const template = await client.createCloudInitTemplate({
-        name: name.trim(),
-        description: description.trim() || undefined,
-        content: content.trim()
-      });
+      await mutateWithRefresh(
+        () => client.createCloudInitTemplate({
+          name: name.trim(),
+          description: description.trim() || undefined,
+          content: content.trim()
+        }),
+        {
+          successMessage: 'Template created successfully',
+          errorMessage: 'Failed to create template',
+        }
+      );
 
-      toast.success(`Template "${template.name}" created successfully`);
       open = false;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create template';
       formError = message;
-      toast.error(message);
     } finally {
       submitting = false;
     }

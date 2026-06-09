@@ -11,8 +11,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     loadVmsFromBff
   } from '$lib/webui/bff-resources';
   import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
-  import { toast } from '$lib/stores/toast.svelte';
-	import { liveState } from '$lib/stores/live-state.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
   import CreateFromTemplate from '$lib/components/vms/CreateFromTemplate.svelte';
@@ -56,13 +55,20 @@ import Button from '$lib/components/primitives/Button.svelte';
     if (!newTemplateName.trim() || !selectedVMId) return;
     creatingTemplate = true;
     try {
-      await client.createVMTemplate({
-        name: newTemplateName.trim(),
-        description: newTemplateDescription.trim() || undefined,
-        source_vm_id: selectedVMId,
-        cloud_init_config: selectedCloudInitId ? undefined : undefined
-      });
-      toast.success('Template created successfully');
+      await mutateWithRefresh(
+        () => client.createVMTemplate({
+          name: newTemplateName.trim(),
+          description: newTemplateDescription.trim() || undefined,
+          source_vm_id: selectedVMId,
+          cloud_init_config: selectedCloudInitId ? undefined : undefined
+        }),
+        {
+          patterns: ['templates:'],
+          successMessage: 'Template created successfully',
+          errorMessage: 'Failed to create template',
+          skipRefresh: true,
+        }
+      );
       createVMTemplateOpen = false;
       newTemplateName = '';
       newTemplateDescription = '';
@@ -70,7 +76,7 @@ import Button from '$lib/components/primitives/Button.svelte';
       selectedCloudInitId = '';
       await loadData();
     } catch (err: any) {
-      toast.error(err.message || 'Failed to create template');
+      // Error already toasted by mutateWithRefresh
     } finally {
       creatingTemplate = false;
     }
@@ -119,7 +125,6 @@ import Button from '$lib/components/primitives/Button.svelte';
   onMount(loadData);
 
   async function refreshTemplates() {
-    await liveState.invalidateAndRefresh({ sidebar: true });
     await loadData();
   }
 

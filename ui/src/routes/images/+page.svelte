@@ -10,7 +10,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import { Plus } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
-	import { liveState } from '$lib/stores/live-state.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import { page as appPage } from '$app/stores';
 	import ImagesTable from '$lib/components/images/ImagesTable.svelte';
 	import ImagesSidebar from '$lib/components/images/ImagesSidebar.svelte';
@@ -93,8 +93,14 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 		try {
 			const token = getStoredToken() ?? undefined;
-			await deleteImage({ image_id: imageId }, token);
-			await liveState.invalidateAndRefresh({ patterns: ['images:'], sidebar: true });
+			await mutateWithRefresh(
+				() => deleteImage({ image_id: imageId }, token),
+				{
+					patterns: ['images:'],
+					successMessage: 'Image deleted',
+					errorMessage: 'Failed to delete image',
+				}
+			);
 		} catch (err: any) {
 			deleteError = err.message ?? 'Failed to delete image';
 		} finally {
@@ -113,9 +119,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		{/snippet}
 	</PageHeaderWithAction>
 
-	<ImportImageModal bind:open={modalOpen} onSuccess={async () => {
-		await liveState.invalidateAndRefresh({ patterns: ['images:'], sidebar: true });
-	}} />
+	<ImportImageModal bind:open={modalOpen} onSuccess={() => {}} />
 
 	{#if deleteError}
 		<div class="operation-alert operation-alert--danger">

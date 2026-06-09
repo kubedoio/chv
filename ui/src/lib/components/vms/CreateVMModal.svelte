@@ -4,7 +4,7 @@
 	import { listImages } from '$lib/bff/images';
 	import { listNetworks } from '$lib/bff/networks';
 	import { getStoredToken } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import VmStep1Form from './VmStep1Form.svelte';
 	import VmStep2Form from './VmStep2Form.svelte';
 	import VmReviewPanel from './VmReviewPanel.svelte';
@@ -187,14 +187,19 @@
 		};
 
 		try {
-			await createVm(data, token);
-			toast.success('VM created successfully');
+			await mutateWithRefresh(
+				() => createVm(data, token),
+				{
+					patterns: ['vms:'],
+					successMessage: 'VM created successfully',
+					errorMessage: 'Failed to create VM',
+				}
+			);
 			open = false;
 			onSuccess?.();
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'Failed to create VM';
 			formError = message;
-			toast.error(message);
 		} finally {
 			submitting = false;
 		}

@@ -221,6 +221,9 @@ class LiveState {
 						this.invalidateCachePattern(p);
 					}
 				}
+				if (opts.sidebar) {
+					this.fetchInventory();
+				}
 				invalidateAll();
 			}, opts.delayMs);
 		}

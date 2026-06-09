@@ -4,7 +4,7 @@
 	import Input from '$lib/components/primitives/TextInput.svelte';
 	import Select from '$lib/components/primitives/Select.svelte';
 	import { createAPIClient, getStoredToken } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import type { CreateStoragePoolInput } from '$lib/api/types';
 
 	interface Props {
@@ -121,14 +121,18 @@
 		}
 
 		try {
-			await client.createStoragePool(data);
-			toast.success(`Storage pool "${name}" created successfully`);
+			await mutateWithRefresh(
+				() => client.createStoragePool(data),
+				{
+					successMessage: `Storage pool "${name}" created successfully`,
+					errorMessage: 'Failed to create storage pool',
+				}
+			);
 			open = false;
 			onSuccess?.();
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'Failed to create storage pool';
 			formError = message;
-			toast.error(message);
 		} finally {
 			submitting = false;
 		}
