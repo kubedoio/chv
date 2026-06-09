@@ -7,7 +7,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { mutateVolume } from '$lib/bff/volumes';
 	import { listVms } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast.svelte';
-	import { invalidateAll } from '$app/navigation';
+	import { liveState } from '$lib/stores/live-state.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import ActionStrip from '$lib/components/shell/ActionStrip.svelte';
@@ -100,7 +100,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		try {
 			await mutateVolume({ volume_id, action: 'attach', force: false, vm_id: selectedVmId }, token);
 			toast.success('Volume attach accepted');
-			await invalidateAll();
+			await liveState.invalidateAndRefresh({ patterns: ['volumes:'], sidebar: true });
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'Attach failed';
 			toast.error(message);
@@ -127,7 +127,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		try {
 			await mutateVolume({ volume_id, action: 'resize', force: false, resize_bytes: newBytes }, token);
 			toast.success('Volume resize accepted');
-			await invalidateAll();
+			await liveState.invalidateAndRefresh({ patterns: ['volumes:'], sidebar: true });
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'Resize failed';
 			toast.error(message);
@@ -144,7 +144,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 		try {
 			await mutateVolume({ volume_id, action, force: false }, token);
 			toast.success(`Volume ${action} accepted`);
-			await invalidateAll();
+			await liveState.invalidateAndRefresh({ patterns: ['volumes:'], sidebar: true });
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'Action failed';
 			toast.error(message);

@@ -8,7 +8,7 @@
 		Search,
 		Loader2
 	} from 'lucide-svelte';
-	import { inventory } from '$lib/stores/inventory.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
 	import { taskStream } from '$lib/stores/task-stream.svelte';
 	import { selection } from '$lib/stores/selection.svelte';
 	import { clearToken, getStoredToken } from '$lib/api/client';
@@ -43,10 +43,12 @@
 	let contextMenuRef = $state<InstanceContextMenu | null>(null);
 
 	onMount(() => {
-		inventory.fetch();
+		liveState.fetchInventory();
+		liveState.startInventoryPolling();
 		taskStream.connect(['vm', 'node', 'network', 'volume', 'image']);
 
 		return () => {
+			liveState.stopInventoryPolling();
 			taskStream.disconnect();
 		};
 	});
@@ -125,7 +127,7 @@
 			const isForce = false;
 			await mutateVm({ vm_id: inst.id, action: apiAction, force: isForce }, token);
 			toast.success(`${action} accepted for ${inst.name}`);
-			await inventory.fetch();
+			await liveState.fetchInventory();
 		} catch (err: any) {
 			toast.error(err.message || `${action} failed`);
 		} finally {
@@ -142,7 +144,7 @@
 			await deleteVm({ vm_id: inst.id, requested_by: 'webui' }, token);
 			toast.success(`Instance ${inst.name} deleted`);
 			deleteDialogInstance = null;
-			await inventory.fetch();
+			await liveState.fetchInventory();
 		} catch (err: any) {
 			toast.error(err.message || 'Delete failed');
 		} finally {
@@ -159,7 +161,7 @@
 			await mutateVm({ vm_id: inst.id, action: 'stop', force: true }, token);
 			toast.success(`Power off accepted for ${inst.name}`);
 			poweroffDialogInstance = null;
-			await inventory.fetch();
+			await liveState.fetchInventory();
 		} catch (err: any) {
 			toast.error(err.message || 'Power off failed');
 		} finally {
