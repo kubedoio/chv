@@ -8,7 +8,8 @@
 		Search,
 		Loader2
 	} from 'lucide-svelte';
-	import { inventory } from '$lib/stores/inventory.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
+	import { taskStream } from '$lib/stores/task-stream.svelte';
 	import { selection } from '$lib/stores/selection.svelte';
 	import { clearToken, getStoredToken } from '$lib/api/client';
 	import { mutateVm, deleteVm } from '$lib/bff/vms';
@@ -42,7 +43,14 @@
 	let contextMenuRef = $state<InstanceContextMenu | null>(null);
 
 	onMount(() => {
-		inventory.fetch();
+		liveState.fetchInventory();
+		liveState.startInventoryPolling();
+		taskStream.connect(['vm', 'node', 'network', 'volume', 'image']);
+
+		return () => {
+			liveState.stopInventoryPolling();
+			taskStream.disconnect();
+		};
 	});
 
 	function toggleGroup(label: string) {
@@ -119,7 +127,7 @@
 			const isForce = false;
 			await mutateVm({ vm_id: inst.id, action: apiAction, force: isForce }, token);
 			toast.success(`${action} accepted for ${inst.name}`);
-			await inventory.fetch();
+			await liveState.fetchInventory();
 		} catch (err: any) {
 			toast.error(err.message || `${action} failed`);
 		} finally {
@@ -136,7 +144,7 @@
 			await deleteVm({ vm_id: inst.id, requested_by: 'webui' }, token);
 			toast.success(`Instance ${inst.name} deleted`);
 			deleteDialogInstance = null;
-			await inventory.fetch();
+			await liveState.fetchInventory();
 		} catch (err: any) {
 			toast.error(err.message || 'Delete failed');
 		} finally {
@@ -153,7 +161,7 @@
 			await mutateVm({ vm_id: inst.id, action: 'stop', force: true }, token);
 			toast.success(`Power off accepted for ${inst.name}`);
 			poweroffDialogInstance = null;
-			await inventory.fetch();
+			await liveState.fetchInventory();
 		} catch (err: any) {
 			toast.error(err.message || 'Power off failed');
 		} finally {
@@ -249,6 +257,11 @@
 
 	<!-- Footer controls -->
 	<NavFooterControls onLogout={handleLogout} />
+
+	<div class="stream-status" title={taskStream.status === 'open' ? 'Live updates connected' : taskStream.status === 'error' ? 'Reconnecting...' : 'Live updates off'}>
+		<span class="status-dot" class:connected={taskStream.status === 'open'} class:error={taskStream.status === 'error'}></span>
+		<span class="status-label">{taskStream.status === 'open' ? 'Live' : taskStream.status === 'error' ? 'Reconnecting' : 'Off'}</span>
+	</div>
 </nav>
 
 <style>
@@ -256,4 +269,24 @@
 		width: 4px;
 	}
 
+	.stream-status {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.25rem 0.75rem;
+		font-size: 0.7rem;
+		color: var(--color-neutral-500);
+	}
+	.status-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--color-neutral-400);
+	}
+	.status-dot.connected {
+		background: var(--color-success);
+	}
+	.status-dot.error {
+		background: var(--color-danger);
+	}
 </style>

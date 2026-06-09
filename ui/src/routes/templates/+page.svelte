@@ -12,6 +12,7 @@ import Button from '$lib/components/primitives/Button.svelte';
   } from '$lib/webui/bff-resources';
   import { loadStoragePoolsFromBff } from '$lib/webui/storage-pools';
   import { toast } from '$lib/stores/toast.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
   import CreateFromTemplate from '$lib/components/vms/CreateFromTemplate.svelte';
@@ -117,6 +118,11 @@ import Button from '$lib/components/primitives/Button.svelte';
 
   onMount(loadData);
 
+  async function refreshTemplates() {
+    await liveState.invalidateAndRefresh({ sidebar: true });
+    await loadData();
+  }
+
   function cloneTemplate(template: VMTemplate) {
     selectedTemplate = template;
     createFromTemplateOpen = true;
@@ -199,7 +205,7 @@ import Button from '$lib/components/primitives/Button.svelte';
     {images}
     {networks}
     {pools}
-    onSuccess={loadData}
+    onSuccess={refreshTemplates}
   />
 {/if}
 
@@ -212,7 +218,7 @@ import Button from '$lib/components/primitives/Button.svelte';
   {images}
   {networks}
   {pools}
-  onSuccess={loadData}
+  onSuccess={refreshTemplates}
 />
 
 <!-- Cloud-init Viewer Modal -->
@@ -224,7 +230,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 <!-- Cloud-init Editor Modal -->
 <CloudInitModalEditor
   bind:open={cloudInitEditorOpen}
-  onSuccess={loadData}
+  onSuccess={refreshTemplates}
 />
 
 <!-- Create VM Template Modal -->

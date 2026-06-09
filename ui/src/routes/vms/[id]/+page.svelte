@@ -9,6 +9,7 @@
 	import { toast } from '$lib/stores/toast.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import DetailTabs from '$lib/components/shared/DetailTabs.svelte';
 	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
@@ -130,12 +131,12 @@
 				const result = await mutateVm({ vm_id, action: apiAction, force: isForce }, token);
 				toast.success(`Workload ${action} accepted — tracking task ${result.task_id}`);
 			}
-			invalidatePattern('vms:');
-			await invalidateAll();
-			setTimeout(() => {
-				invalidatePattern('vms:');
-				invalidateAll();
-			}, 2000);
+			await liveState.invalidateAndRefresh({
+				patterns: ['vms:'],
+				sidebar: true,
+				detailId: vm_id,
+				delayMs: 2000,
+			});
 		} catch (err: unknown) {
 			toast.error(err instanceof Error ? err.message : 'Mutation failed');
 		} finally {
@@ -152,8 +153,7 @@
 			await mutateVm({ vm_id, action: 'migrate', force: false, target_node_id: targetNodeId }, token);
 			toast.success(`Migration of VM ${vm_id} accepted`);
 			migrateModalOpen = false;
-			invalidatePattern('vms:');
-			await invalidateAll();
+			await liveState.invalidateAndRefresh({ patterns: ['vms:'], sidebar: true, detailId: vm_id });
 		} catch (err: any) {
 			toast.error(err.message || 'Migration failed');
 		} finally {

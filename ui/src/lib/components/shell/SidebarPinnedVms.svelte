@@ -2,7 +2,7 @@
 	import { Pin } from 'lucide-svelte';
 	import InstanceStatusBadge from './InstanceStatusBadge.svelte';
 	import { normalizeInstanceStatus } from '$lib/shell/instance-actions';
-	import { inventory } from '$lib/stores/inventory.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
 	import type { InstanceTreeItem } from '$lib/api/types';
 
 	interface Props {
@@ -14,12 +14,12 @@
 	let { pathname, onSelectVm, onContextMenu }: Props = $props();
 
 	const pinnedVms = $derived(
-		inventory.vms
+		liveState.vms
 			.filter((vm) => normalizeInstanceStatus(vm.actual_state) === 'running')
 			.slice(0, 3)
 	);
 
-	function vmToTreeItem(vm: (typeof inventory.vms)[number]): InstanceTreeItem {
+	function vmToTreeItem(vm: (typeof liveState.vms)[number]): InstanceTreeItem {
 		return {
 			id: vm.id,
 			name: vm.name,
