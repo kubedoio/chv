@@ -7,6 +7,7 @@ import Button from '$lib/components/primitives/Button.svelte';
   } from 'lucide-svelte';
   import { getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import CompactMetricCard from '$lib/components/shared/CompactMetricCard.svelte';
   import PageHeaderWithAction from '$lib/components/shell/PageHeaderWithAction.svelte';
   import { getPageDefinition } from '$lib/shell/app-shell';
@@ -99,11 +100,17 @@ import Button from '$lib/components/primitives/Button.svelte';
   async function runJobNow(job: BackupJob): Promise<void> {
     try {
       const token = getStoredToken() ?? undefined;
-      await executeBackupJob(job.job_id, token);
-      toast.success('Sequence initiated');
+      await mutateWithRefresh(
+        () => executeBackupJob(job.job_id, token),
+        {
+          successMessage: 'Sequence initiated',
+          errorMessage: 'Failed to execute job',
+          skipRefresh: true,
+        }
+      );
       loadData();
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to execute job');
+      // Error already toasted by mutateWithRefresh
     }
   }
 
@@ -111,11 +118,17 @@ import Button from '$lib/components/primitives/Button.svelte';
     try {
       const token = getStoredToken() ?? undefined;
       const newStatus = job.status === 'Enabled' ? 'Disabled' : 'Enabled';
-      await updateBackupJob(job.job_id, { status: newStatus }, token);
-      toast.success(job.status === 'Enabled' ? 'Sequence suspended' : 'Sequence resumed');
+      await mutateWithRefresh(
+        () => updateBackupJob(job.job_id, { status: newStatus }, token),
+        {
+          successMessage: job.status === 'Enabled' ? 'Sequence suspended' : 'Sequence resumed',
+          errorMessage: 'Failed to toggle job',
+          skipRefresh: true,
+        }
+      );
       loadData();
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to toggle job');
+      // Error already toasted by mutateWithRefresh
     }
   }
 
@@ -123,17 +136,23 @@ import Button from '$lib/components/primitives/Button.svelte';
     creatingJob = true;
     try {
       const token = getStoredToken() ?? undefined;
-      await createBackupJob({
-        vm_id: selectedVMId,
-        backup_type: selectedBackupType,
-        target_path: selectedTargetPath || undefined,
-        storage_backend: selectedStorageBackend || undefined
-      }, token);
-      toast.success('Policy created');
+      await mutateWithRefresh(
+        () => createBackupJob({
+          vm_id: selectedVMId,
+          backup_type: selectedBackupType,
+          target_path: selectedTargetPath || undefined,
+          storage_backend: selectedStorageBackend || undefined
+        }, token),
+        {
+          successMessage: 'Policy created',
+          errorMessage: 'Failed to create job',
+          skipRefresh: true,
+        }
+      );
       createJobOpen = false;
       loadData();
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to create job');
+      // Error already toasted by mutateWithRefresh
     } finally {
       creatingJob = false;
     }

@@ -3,8 +3,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import { getStoredToken } from '$lib/api/client';
 	import { mutateNode } from '$lib/bff/nodes';
-	import { toast } from '$lib/stores/toast.svelte';
-	import { liveState } from '$lib/stores/live-state.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import ResourceDetailHeader from '$lib/components/shell/ResourceDetailHeader.svelte';
 	import PropertyGrid from '$lib/components/shell/PropertyGrid.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
@@ -36,11 +35,16 @@ import Button from '$lib/components/primitives/Button.svelte';
 		const token = getStoredToken() ?? undefined;
 		const node_id = detail.summary.node_id;
 		try {
-			await mutateNode({ node_id, action }, token);
-			toast.success(`Node ${action.replace('_', ' ')} accepted`);
-			await liveState.invalidateAndRefresh({ patterns: ['nodes:'], sidebar: true });
+			await mutateWithRefresh(
+				() => mutateNode({ node_id, action }, token),
+				{
+					patterns: ['nodes:'],
+					successMessage: `Node ${action.replace('_', ' ')} accepted`,
+					errorMessage: 'Action failed',
+				}
+			);
 		} catch (err: any) {
-			toast.error(err.message || 'Action failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}

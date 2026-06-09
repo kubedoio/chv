@@ -3,6 +3,7 @@
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import InstallStatusPanel from '$lib/components/shared/InstallStatusPanel.svelte';
   import { toast } from '$lib/stores/toast.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import type { InstallStatusResponse, InstallActionResponse } from '$lib/api/types';
   import ErrorState from '$lib/components/shell/ErrorState.svelte';
 
@@ -31,7 +32,10 @@
     actionLoading = true;
     lastActionResult = null;
     try {
-      const result = await client.bootstrapInstall();
+      const result = await mutateWithRefresh(
+        () => client.bootstrapInstall(),
+        { sidebar: false, errorMessage: 'Bootstrap failed' }
+      );
       lastActionResult = result;
       
       if (result.errors.length > 0) {
@@ -44,8 +48,7 @@
       
       await loadStatus();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Bootstrap failed';
-      toast.error(`Bootstrap failed: ${message}`);
+      // Error already toasted by mutateWithRefresh
     } finally {
       actionLoading = false;
     }
@@ -67,7 +70,10 @@
     actionLoading = true;
     lastActionResult = null;
     try {
-      const result = await client.repairInstall(body);
+      const result = await mutateWithRefresh(
+        () => client.repairInstall(body),
+        { sidebar: false, errorMessage: `${name} repair failed` }
+      );
       lastActionResult = result;
       
       if (result.errors.length > 0) {
@@ -80,8 +86,7 @@
       
       await loadStatus();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Repair failed';
-      toast.error(`${name} repair failed: ${message}`);
+      // Error already toasted by mutateWithRefresh
     } finally {
       actionLoading = false;
     }

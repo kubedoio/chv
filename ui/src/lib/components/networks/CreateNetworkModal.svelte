@@ -5,7 +5,7 @@
 	import Select from '$lib/components/primitives/Select.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { createNetwork, updateNetwork } from '$lib/bff/networks';
-	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import type { CreateNetworkInput, NetworkDetailModel, UpdateNetworkInput } from '$lib/bff/types';
 
 	interface Props {
@@ -173,8 +173,14 @@
 					ipam_mode: ipamMode as 'internal' | 'external' | 'none',
 					is_default: isDefault
 				};
-				await updateNetwork(data, getStoredToken() ?? undefined);
-				toast.success(`Network "${name}" updated successfully`);
+				await mutateWithRefresh(
+					() => updateNetwork(data, getStoredToken() ?? undefined),
+					{
+						patterns: ['networks:'],
+						successMessage: `Network "${name}" updated successfully`,
+						errorMessage: 'Failed to update network',
+					}
+				);
 			} else {
 				const data: CreateNetworkInput = {
 					name: name.trim(),
@@ -185,15 +191,20 @@
 					ipam_mode: ipamMode as 'internal' | 'external' | 'none',
 					is_default: isDefault
 				};
-				await createNetwork(data, getStoredToken() ?? undefined);
-				toast.success(`Network "${name}" created successfully`);
+				await mutateWithRefresh(
+					() => createNetwork(data, getStoredToken() ?? undefined),
+					{
+						patterns: ['networks:'],
+						successMessage: `Network "${name}" created successfully`,
+						errorMessage: 'Failed to create network',
+					}
+				);
 			}
 			open = false;
 			onSuccess?.();
 		} catch (err) {
 			const message = err instanceof Error ? err.message : (editMode ? 'Failed to update network' : 'Failed to create network');
 			formError = message;
-			toast.error(message);
 		} finally {
 			submitting = false;
 		}

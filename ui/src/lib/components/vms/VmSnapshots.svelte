@@ -4,6 +4,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { listVmSnapshots, createSnapshot, deleteSnapshot, restoreSnapshot } from '$lib/bff/snapshots';
 	import { getStoredToken } from '$lib/api/client';
 	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import SectionCard from '$lib/components/shell/SectionCard.svelte';
 	import InventoryTable from '$lib/components/shell/InventoryTable.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
@@ -98,15 +99,20 @@ import Button from '$lib/components/primitives/Button.svelte';
 		createSubmitting = true;
 		try {
 			const token = getStoredToken() ?? undefined;
-			const result = await createSnapshot({ vm_id: vmId, name: createName.trim() }, token);
-			toast.success(`Snapshot creation accepted — tracking task ${result.task_id}`);
+			await mutateWithRefresh(
+				() => createSnapshot({ vm_id: vmId, name: createName.trim() }, token),
+				{
+					patterns: ['vms:'],
+					successMessage: 'Snapshot creation accepted',
+					errorMessage: 'Snapshot creation failed',
+				}
+			);
 			createOpen = false;
 			createName = '';
 			createDescription = '';
 			createIncludesMemory = false;
-			await loadSnapshots();
 		} catch (err) {
-			toast.error(err instanceof Error ? err.message : 'Snapshot creation failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			createSubmitting = false;
 		}
@@ -114,16 +120,22 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 	async function handleRestore() {
 		if (!restoreTarget) return;
+		const target = restoreTarget;
 		restoreSubmitting = true;
 		try {
 			const token = getStoredToken() ?? undefined;
-			const result = await restoreSnapshot({ vm_id: vmId, snapshot_id: restoreTarget.snapshot_id }, token);
-			toast.success(`Snapshot restore accepted — tracking task ${result.task_id}`);
+			await mutateWithRefresh(
+				() => restoreSnapshot({ vm_id: vmId, snapshot_id: target.snapshot_id }, token),
+				{
+					patterns: ['vms:'],
+					successMessage: 'Snapshot restore accepted',
+					errorMessage: 'Snapshot restore failed',
+				}
+			);
 			restoreOpen = false;
 			restoreTarget = null;
-			await loadSnapshots();
 		} catch (err) {
-			toast.error(err instanceof Error ? err.message : 'Snapshot restore failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			restoreSubmitting = false;
 		}
@@ -131,16 +143,22 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 	async function handleDelete() {
 		if (!deleteTarget) return;
+		const target = deleteTarget;
 		deleteSubmitting = true;
 		try {
 			const token = getStoredToken() ?? undefined;
-			const result = await deleteSnapshot({ vm_id: vmId, snapshot_id: deleteTarget.snapshot_id }, token);
-			toast.success(`Snapshot deletion accepted — tracking task ${result.task_id}`);
+			await mutateWithRefresh(
+				() => deleteSnapshot({ vm_id: vmId, snapshot_id: target.snapshot_id }, token),
+				{
+					patterns: ['vms:'],
+					successMessage: 'Snapshot deletion accepted',
+					errorMessage: 'Snapshot deletion failed',
+				}
+			);
 			deleteOpen = false;
 			deleteTarget = null;
-			await loadSnapshots();
 		} catch (err) {
-			toast.error(err instanceof Error ? err.message : 'Snapshot deletion failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			deleteSubmitting = false;
 		}

@@ -14,6 +14,7 @@
 	import { clearToken, getStoredToken } from '$lib/api/client';
 	import { mutateVm, deleteVm } from '$lib/bff/vms';
 	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import { buildInstanceActions } from '$lib/shell/instance-actions';
 	import InstanceContextMenu from './InstanceContextMenu.svelte';
 	import DeleteInstanceDialog from '$lib/components/vms/DeleteInstanceDialog.svelte';
@@ -125,11 +126,16 @@
 		try {
 			const apiAction = action === 'shutdown' ? 'stop' : action;
 			const isForce = false;
-			await mutateVm({ vm_id: inst.id, action: apiAction, force: isForce }, token);
-			toast.success(`${action} accepted for ${inst.name}`);
-			await liveState.fetchInventory();
+			await mutateWithRefresh(
+				() => mutateVm({ vm_id: inst.id, action: apiAction, force: isForce }, token),
+				{
+					patterns: ['vms:'],
+					successMessage: `${action} accepted for ${inst.name}`,
+					errorMessage: `${action} failed`,
+				}
+			);
 		} catch (err: any) {
-			toast.error(err.message || `${action} failed`);
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}
@@ -141,12 +147,17 @@
 		const token = getStoredToken() ?? undefined;
 		pendingAction = 'delete';
 		try {
-			await deleteVm({ vm_id: inst.id, requested_by: 'webui' }, token);
-			toast.success(`Instance ${inst.name} deleted`);
+			await mutateWithRefresh(
+				() => deleteVm({ vm_id: inst.id, requested_by: 'webui' }, token),
+				{
+					patterns: ['vms:'],
+					successMessage: `Instance ${inst.name} deleted`,
+					errorMessage: 'Delete failed',
+				}
+			);
 			deleteDialogInstance = null;
-			await liveState.fetchInventory();
 		} catch (err: any) {
-			toast.error(err.message || 'Delete failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}
@@ -158,12 +169,17 @@
 		const token = getStoredToken() ?? undefined;
 		pendingAction = 'poweroff';
 		try {
-			await mutateVm({ vm_id: inst.id, action: 'stop', force: true }, token);
-			toast.success(`Power off accepted for ${inst.name}`);
+			await mutateWithRefresh(
+				() => mutateVm({ vm_id: inst.id, action: 'stop', force: true }, token),
+				{
+					patterns: ['vms:'],
+					successMessage: `Power off accepted for ${inst.name}`,
+					errorMessage: 'Power off failed',
+				}
+			);
 			poweroffDialogInstance = null;
-			await liveState.fetchInventory();
 		} catch (err: any) {
-			toast.error(err.message || 'Power off failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}

@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('$env/dynamic/public', () => ({
+	env: {}
+}));
+
 import { buildVmsLoad } from './vms-load';
 import { clearCache } from '$lib/stores/api-cache.svelte';
 

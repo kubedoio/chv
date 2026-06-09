@@ -14,7 +14,6 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import type { PageData } from './$types';
 	import { Plus, Shield, Globe, Lock } from 'lucide-svelte';
 	import { goto } from '$app/navigation';
-	import { liveState } from '$lib/stores/live-state.svelte';
 	import { page as appPage } from '$app/stores';
 
 	let { data }: { data: PageData } = $props();
@@ -216,9 +215,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 
 <CreateNetworkModal
 		bind:open={createOpen}
-		onSuccess={async () => {
-			await liveState.invalidateAndRefresh({ patterns: ['networks:'], sidebar: true });
-		}}
+		onSuccess={() => {}}
 	/>
 
 <style>
