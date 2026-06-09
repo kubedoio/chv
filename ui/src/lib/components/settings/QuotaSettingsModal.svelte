@@ -3,7 +3,7 @@
   import FormField from '../shared/FormField.svelte';
   import Input from '../primitives/Input.svelte';
   import { createAPIClient } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import type { Quota, UserInfo } from '$lib/api/types';
 
   interface Props {
@@ -108,14 +108,24 @@
       };
 
       if (isEditing && quota) {
-        await client.updateQuota(quota.user_id, data);
-        toast.success('Quota updated successfully');
+        await mutateWithRefresh(
+          () => client.updateQuota(quota.user_id, data),
+          {
+            successMessage: 'Quota updated successfully',
+            errorMessage: 'Failed to save quota',
+          }
+        );
       } else {
-        await client.createQuota({
-          user_id: userId,
-          ...data
-        });
-        toast.success('Quota created successfully');
+        await mutateWithRefresh(
+          () => client.createQuota({
+            user_id: userId,
+            ...data
+          }),
+          {
+            successMessage: 'Quota created successfully',
+            errorMessage: 'Failed to save quota',
+          }
+        );
       }
 
       open = false;
@@ -123,7 +133,6 @@
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save quota';
       formError = message;
-      toast.error(message);
     } finally {
       submitting = false;
     }

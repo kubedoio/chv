@@ -2,6 +2,7 @@
   import { createAPIClient, getStoredToken } from '$lib/api/client';
   import Modal from '../primitives/Modal.svelte';
   import { toast } from '$lib/stores/toast.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import { AlertTriangle } from 'lucide-svelte';
   import type { VM } from '$lib/api/types';
   
@@ -29,12 +30,18 @@
     
     deleting = true;
     try {
-      await client.deleteVM(vm.id);
-      toast.success(`VM ${vm.name} deleted`);
+      await mutateWithRefresh(
+        () => client.deleteVM(vm.id),
+        {
+          patterns: ['vms:'],
+          successMessage: `VM ${vm.name} deleted`,
+          errorMessage: 'Failed to delete VM',
+        }
+      );
       open = false;
       onSuccess?.();
     } catch (e: any) {
-      toast.error(`Failed to delete VM: ${e.message}`);
+      // Error already toasted by mutateWithRefresh
     } finally {
       deleting = false;
     }

@@ -3,7 +3,7 @@
   import FormField from '$lib/components/shared/FormField.svelte';
   import Input from '$lib/components/primitives/TextInput.svelte';
   import { createAPIClient, getStoredToken } from '$lib/api/client';
-  import { toast } from '$lib/stores/toast.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import type { VMTemplate, Image, Network, StoragePool, VM, CloudInitTemplate } from '$lib/api/types';
   import { onMount } from 'svelte';
 
@@ -113,20 +113,25 @@
     formError = '';
 
     try {
-      const vm = await client.cloneFromTemplate(template.id, {
-        name: name.trim(),
-        variables: useCustomUserData ? {} : cloudInitVars,
-        custom_user_data: useCustomUserData ? customUserData : undefined
-      });
+      const vm = await mutateWithRefresh(
+        () => client.cloneFromTemplate(template.id, {
+          name: name.trim(),
+          variables: useCustomUserData ? {} : cloudInitVars,
+          custom_user_data: useCustomUserData ? customUserData : undefined
+        }),
+        {
+          patterns: ['vms:'],
+          successMessage: 'VM created successfully',
+          errorMessage: 'Failed to create VM',
+        }
+      );
 
-      toast.success(`VM "${vm.name}" created successfully`);
       open = false;
       onSuccess?.();
       resetForm();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create VM';
       formError = message;
-      toast.error(message);
     } finally {
       submitting = false;
     }

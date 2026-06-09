@@ -68,6 +68,47 @@ cd ui && npm run check
 - Keep Svelte components under ~300 lines; extract helpers and sub-components when growing larger
 - Use TypeScript strictly; avoid `any`
 
+## Frontend Development Guidelines
+
+### State Management
+
+All mutating actions MUST use `mutateWithRefresh()` from `$lib/stores/mutation.svelte`. This ensures page cache, sidebar inventory, and task stream stay in sync.
+
+```svelte
+<!-- ✅ Correct -->
+<script>
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
+  async function handleAction() {
+    await mutateWithRefresh(
+      () => myBffCall(args, token),
+      { patterns: ['my-resource:'] }
+    );
+  }
+</script>
+
+<!-- ❌ Incorrect -->
+<script>
+  import { invalidateAll } from '$app/navigation';
+  import { invalidatePattern } from '$lib/stores/api-cache.svelte.ts';
+  async function handleAction() {
+    await myBffCall(args, token);
+    invalidatePattern('my-resource:');
+    await invalidateAll();  // DON'T DO THIS
+  }
+</script>
+```
+
+### Compliance
+
+CI runs `mutation-compliance.test.ts` which scans all `+page.svelte` files. Adding direct `invalidateAll` or `invalidatePattern` imports will break the build.
+
+### New Resource Types
+
+When adding a new resource with mutations:
+1. Edit `src/lib/stores/live-state.svelte.ts` and add the task summary → cache pattern mapping to the `taskPatternMap` object inside the `LiveState` class
+2. Wire the page mutation through `mutateWithRefresh()`
+3. Verify your page passes the compliance tests by running `npm test -- --run src/lib/stores/mutation-compliance.test.ts`
+
 ## Changing Protocol Buffers
 
 1. Edit the `.proto` file in `/proto/`

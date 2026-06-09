@@ -4,7 +4,7 @@
 	import Input from '../primitives/Input.svelte';
 	import { importImage } from '$lib/bff/images';
 	import { getStoredToken } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 
 	interface Props {
 		open?: boolean;
@@ -55,26 +55,38 @@
 		try {
 			const token = getStoredToken() ?? undefined;
 			if (activeTab === 'remote') {
-				await importImage({
-					name,
-					source_url: sourceUrl,
-					checksum: checksum || undefined,
-					os: osFamily,
-					architecture: architecture,
-					format: 'qcow2'
-				}, token);
-				toast.success('Image import started');
+				await mutateWithRefresh(
+					() => importImage({
+						name,
+						source_url: sourceUrl,
+						checksum: checksum || undefined,
+						os: osFamily,
+						architecture: architecture,
+						format: 'qcow2'
+					}, token),
+					{
+						patterns: ['images:'],
+						successMessage: 'Image import started',
+						errorMessage: 'Action failed',
+					}
+				);
 			} else {
 				// Local file upload: for MVP we save metadata pointing to the file path.
 				// A full upload endpoint would stream the file bytes to the server.
-				await importImage({
-					name,
-					source_url: fileInput ? `file:///var/lib/chv/images/${fileInput.name}` : undefined,
-					os: osFamily,
-					architecture: architecture,
-					format: 'qcow2'
-				}, token);
-				toast.success('Image metadata registered. Copy the file to /var/lib/chv/images/ to complete.');
+				await mutateWithRefresh(
+					() => importImage({
+						name,
+						source_url: fileInput ? `file:///var/lib/chv/images/${fileInput.name}` : undefined,
+						os: osFamily,
+						architecture: architecture,
+						format: 'qcow2'
+					}, token),
+					{
+						patterns: ['images:'],
+						successMessage: 'Image metadata registered. Copy the file to /var/lib/chv/images/ to complete.',
+						errorMessage: 'Action failed',
+					}
+				);
 			}
 
 			open = false;
@@ -82,7 +94,6 @@
 			onSuccess?.();
 		} catch (e: any) {
 			formError = e.message || 'Action failed';
-			toast.error(`Failed: ${e.message}`);
 		} finally {
 			submitting = false;
 		}

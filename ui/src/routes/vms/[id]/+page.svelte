@@ -7,9 +7,8 @@
 	import { listVmEvents } from '$lib/bff/events';
 	import type { VmSnapshotItem, InfrastructureEvent } from '$lib/bff/types';
 	import { toast } from '$lib/stores/toast.svelte';
-	import { invalidateAll } from '$app/navigation';
-	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
 	import { liveState } from '$lib/stores/live-state.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import EmptyInfrastructureState from '$lib/components/shell/EmptyInfrastructureState.svelte';
 	import DetailTabs from '$lib/components/shared/DetailTabs.svelte';
 	import VmSnapshots from '$lib/components/vms/VmSnapshots.svelte';
@@ -105,7 +104,7 @@
 	});
 
 	async function retryDetailLoad() {
-		await invalidateAll();
+		await liveState.invalidateAndRefresh();
 	}
 
 	function normalizeTone(status: string): ShellTone {
@@ -123,22 +122,32 @@
 
 		try {
 			if (action === 'delete') {
-				const result = await deleteVm({ vm_id, requested_by: 'webui' }, token);
-				toast.success(`VM ${vm_id} delete accepted — tracking task ${result.task_id}`);
+				await mutateWithRefresh(
+					() => deleteVm({ vm_id, requested_by: 'webui' }, token),
+					{
+						patterns: ['vms:'],
+						detailId: vm_id,
+						delayMs: 2000,
+						successMessage: `VM ${vm_id} delete accepted`,
+						errorMessage: 'Mutation failed',
+					}
+				);
 			} else {
 				const apiAction = action === 'shutdown' ? 'stop' : action;
 				const isForce = action === 'poweroff';
-				const result = await mutateVm({ vm_id, action: apiAction, force: isForce }, token);
-				toast.success(`Workload ${action} accepted — tracking task ${result.task_id}`);
+				await mutateWithRefresh(
+					() => mutateVm({ vm_id, action: apiAction, force: isForce }, token),
+					{
+						patterns: ['vms:'],
+						detailId: vm_id,
+						delayMs: 2000,
+						successMessage: `Workload ${action} accepted`,
+						errorMessage: 'Mutation failed',
+					}
+				);
 			}
-			await liveState.invalidateAndRefresh({
-				patterns: ['vms:'],
-				sidebar: true,
-				detailId: vm_id,
-				delayMs: 2000,
-			});
 		} catch (err: unknown) {
-			toast.error(err instanceof Error ? err.message : 'Mutation failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			pendingAction = null;
 		}
@@ -150,12 +159,18 @@
 		const vm_id = detail.summary.vm_id;
 
 		try {
-			await mutateVm({ vm_id, action: 'migrate', force: false, target_node_id: targetNodeId }, token);
-			toast.success(`Migration of VM ${vm_id} accepted`);
+			await mutateWithRefresh(
+				() => mutateVm({ vm_id, action: 'migrate', force: false, target_node_id: targetNodeId }, token),
+				{
+					patterns: ['vms:'],
+					detailId: vm_id,
+					successMessage: `Migration of VM ${vm_id} accepted`,
+					errorMessage: 'Migration failed',
+				}
+			);
 			migrateModalOpen = false;
-			await liveState.invalidateAndRefresh({ patterns: ['vms:'], sidebar: true, detailId: vm_id });
 		} catch (err: any) {
-			toast.error(err.message || 'Migration failed');
+			// Error already toasted by mutateWithRefresh
 		} finally {
 			migrateSubmitting = false;
 		}

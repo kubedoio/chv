@@ -12,6 +12,7 @@
 	import HypervisorTextField from '$lib/components/settings/HypervisorTextField.svelte';
 	import HypervisorProfilePanel from '$lib/components/settings/HypervisorProfilePanel.svelte';
 	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import {
 		updateHypervisorSettings,
@@ -74,12 +75,17 @@
 	async function handleApplyProfile(profileId: string) {
 		if (!profileId) return;
 		try {
-			const res = await applyHypervisorProfile(profileId, token);
+			const res = await mutateWithRefresh(
+				() => applyHypervisorProfile(profileId, token),
+				{
+					successMessage: 'Profile applied',
+					errorMessage: 'Profile application failed',
+				}
+			);
 			settings = res.settings;
 			selectedProfileId = res.settings.profile_id ?? '';
-			toast.success('Profile applied');
 		} catch (err: any) {
-			toast.error(err.message || 'Profile application failed');
+			// Error already toasted by mutateWithRefresh
 		}
 	}
 

@@ -66,6 +66,7 @@ The workspace `build.rs` files use `tonic-build` to regenerate code in `/gen/rus
 - Use `chv-errors` for structured errors; avoid panics in service code.
 - Use `tracing` for logging; never `println!` in library crates.
 - Keep Svelte components under ~300 lines; extract helpers when growing larger.
+- Use `mutateWithRefresh()` for all WebUI mutations; never call `invalidateAll()` or `invalidatePattern()` directly in page components
 
 ## Key Files for Context
 

@@ -7,6 +7,7 @@
 	import ErrorState from '$lib/components/shell/ErrorState.svelte';
 	import ConfirmAction from '$lib/components/shared/ConfirmAction.svelte';
 	import { toast } from '$lib/stores/toast.svelte';
+	import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
 	import { getStoredToken } from '$lib/api/client';
 	import { listUsers, createUser, updateUser, deleteUser, type UserItem } from '$lib/bff/users';
 	import type { ShellTone } from '$lib/shell/app-shell';
@@ -82,14 +83,21 @@
 	async function handleCreateSave(payload: { username?: string; password: string; role: string; display_name: string; email: string }) {
 		if (!payload.username?.trim()) { createForm.error = 'IDENTITY_ID_REQUIRED'; return; }
 		if (payload.password.length < 8) { createForm.error = 'PWD_MIN_LENGTH_ERR'; return; }
+		const username = payload.username;
 		createForm.submitting = true;
 		try {
-			await createUser({
-				username: payload.username.trim(), password: payload.password,
-				role: payload.role, display_name: payload.display_name.trim() || undefined,
-				email: payload.email.trim() || undefined
-			}, token);
-			toast.success('Identity created');
+			await mutateWithRefresh(
+				() => createUser({
+					username: username.trim(), password: payload.password,
+					role: payload.role, display_name: payload.display_name.trim() || undefined,
+					email: payload.email.trim() || undefined
+				}, token),
+				{
+					successMessage: 'Identity created',
+					errorMessage: 'Identity creation failed',
+					skipRefresh: true,
+				}
+			);
 			createOpen = false;
 			await reloadUsers();
 		} catch (err: any) {
@@ -99,15 +107,22 @@
 
 	async function handleEditSave(payload: { password: string; role: string; display_name: string; email: string }) {
 		if (!selectedUser) return;
+		const user = selectedUser;
 		editForm.submitting = true;
 		try {
-			await updateUser({
-				user_id: selectedUser.user_id, role: payload.role || undefined,
-				display_name: payload.display_name.trim() || undefined,
-				email: payload.email.trim() || undefined,
-				password: payload.password.trim() || undefined
-			}, token);
-			toast.success('Identity updated');
+			await mutateWithRefresh(
+				() => updateUser({
+					user_id: user.user_id, role: payload.role || undefined,
+					display_name: payload.display_name.trim() || undefined,
+					email: payload.email.trim() || undefined,
+					password: payload.password.trim() || undefined
+				}, token),
+				{
+					successMessage: 'Identity updated',
+					errorMessage: 'Identity update failed',
+					skipRefresh: true,
+				}
+			);
 			editOpen = false;
 			await reloadUsers();
 		} catch (err: any) {
@@ -117,12 +132,19 @@
 
 	async function handleDelete() {
 		if (!selectedUser) return;
+		const user = selectedUser;
 		try {
-			await deleteUser(selectedUser.user_id, token);
-			toast.success('Identity purged');
+			await mutateWithRefresh(
+				() => deleteUser(user.user_id, token),
+				{
+					successMessage: 'Identity purged',
+					errorMessage: 'Identity purge failed',
+					skipRefresh: true,
+				}
+			);
 			await reloadUsers();
 		} catch (err: any) {
-			toast.error(err.message || 'Identity purge failed');
+			// Error already toasted by mutateWithRefresh
 		}
 	}
 

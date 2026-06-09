@@ -3,6 +3,7 @@
   import { Plus, Trash2, Shield, ArrowUp, ArrowDown } from 'lucide-svelte';
   import { getStoredToken } from '$lib/api/client';
   import { toast } from '$lib/stores/toast.svelte';
+  import { mutateWithRefresh } from '$lib/stores/mutation.svelte';
   import {
     listFirewallRules,
     createFirewallRule,
@@ -49,33 +50,43 @@
 
   async function createRule() {
     try {
-      await createFirewallRule({
-        network_id: networkId,
-        direction: form.direction,
-        action: form.action,
-        protocol: form.protocol,
-        port_range: form.port_range,
-        source_cidr: form.source_cidr,
-        description: form.description,
-        priority: form.priority
-      }, token);
-      toast.success('Firewall rule created');
+      await mutateWithRefresh(
+        () => createFirewallRule({
+          network_id: networkId,
+          direction: form.direction,
+          action: form.action,
+          protocol: form.protocol,
+          port_range: form.port_range,
+          source_cidr: form.source_cidr,
+          description: form.description,
+          priority: form.priority
+        }, token),
+        {
+          successMessage: 'Firewall rule created',
+          errorMessage: 'Failed to create rule',
+        }
+      );
       showForm = false;
       resetForm();
       loadRules();
     } catch (e: any) {
-      toast.error(e.message || 'Failed to create rule');
+      // Error already toasted by mutateWithRefresh
     }
   }
 
   async function deleteRule(ruleId: string) {
     if (!confirm('Are you sure you want to delete this rule?')) return;
     try {
-      await deleteFirewallRule(ruleId, token);
-      toast.success('Rule deleted');
+      await mutateWithRefresh(
+        () => deleteFirewallRule(ruleId, token),
+        {
+          successMessage: 'Rule deleted',
+          errorMessage: 'Failed to delete rule',
+        }
+      );
       loadRules();
     } catch (e: any) {
-      toast.error(e.message || 'Failed to delete rule');
+      // Error already toasted by mutateWithRefresh
     }
   }
   
