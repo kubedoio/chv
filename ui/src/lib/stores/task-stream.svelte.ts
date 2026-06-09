@@ -15,11 +15,15 @@ export interface TaskUpdate {
 }
 
 export class TaskStreamStore {
-	private es: EventSource | null = null;
+	private abortCtrl: AbortController | null = null;
+	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private seen = new Set<string>();
 	private pollTimer: ReturnType<typeof setInterval> | null = null;
 	status = $state<'idle' | 'connecting' | 'open' | 'error'>('idle');
 	onTaskCompleted: ((task: TaskUpdate) => void) | null = null;
+
+	private reconnectDelay = 1000;
+	private readonly maxReconnectDelay = 30000;
 
 	startPollingFallback(intervalMs = 10_000) {
 		this.stopPollingFallback();
@@ -37,13 +41,12 @@ export class TaskStreamStore {
 				});
 				if (!res.ok) return;
 				const data = await res.json();
+				const terminal = ['Completed', 'Failed', 'Cancelled'];
 				for (const item of data.items || []) {
-					if (!this.seen.has(item.task_id)) {
-						this.seen.add(item.task_id);
-						if (['Completed', 'Failed', 'Cancelled'].includes(item.status)) {
-							this.onTaskCompleted?.(item);
-						}
-					}
+					if (!terminal.includes(item.status)) continue;
+					if (this.seen.has(item.task_id)) continue;
+					this.seen.add(item.task_id);
+					this.onTaskCompleted?.(item);
 				}
 			} catch {
 				// Silently ignore polling errors
@@ -58,54 +61,114 @@ export class TaskStreamStore {
 		}
 	}
 
-	connect(resourceKinds?: string[]) {
+	private scheduleReconnect(resourceKinds?: string[]) {
+		if (this.reconnectTimer) return;
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = null;
+			this.connect(resourceKinds);
+		}, this.reconnectDelay);
+		this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
+	}
+
+	async connect(resourceKinds?: string[]) {
 		if (!browser) return;
 		this.disconnect();
-		if (typeof EventSource === 'undefined') {
+		const token = getStoredToken();
+		if (!token) {
 			this.startPollingFallback();
 			return;
 		}
 
-		const token = getStoredToken() ?? '';
 		const url = new URL('/v1/tasks/stream', window.location.origin);
 		if (resourceKinds && resourceKinds.length > 0) {
 			url.searchParams.set('resource_kinds', resourceKinds.join(','));
 		}
 
-		this.es = new EventSource(url.toString(), {
-			headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-		} as EventSourceInit);
+		this.abortCtrl = new AbortController();
 		this.status = 'connecting';
 
-		this.es.onopen = () => {
-			this.status = 'open';
-		};
+		try {
+			const res = await fetch(url.toString(), {
+				headers: {
+					Accept: 'text/event-stream',
+					Authorization: `Bearer ${token}`,
+				},
+				signal: this.abortCtrl.signal,
+			});
 
-		this.es.onerror = () => {
-			this.status = 'error';
-		};
-
-		this.es.onmessage = (event) => {
-			try {
-				const payload = JSON.parse(event.data);
-				const items: TaskUpdate[] = payload.items ?? [];
-				for (const task of items) {
-					if (task.status !== 'Completed') continue;
-					if (this.seen.has(task.task_id)) continue;
-					this.seen.add(task.task_id);
-					this.onTaskCompleted?.(task);
+			if (!res.ok) {
+				if (res.status === 401) {
+					this.status = 'error';
+					// Token invalid/expired — don't retry, let user re-login
+					return;
 				}
-			} catch {
-				// Ignore malformed messages
+				throw new Error(`HTTP ${res.status}`);
 			}
-		};
+
+			if (!res.body) {
+				throw new Error('No response body');
+			}
+
+			this.status = 'open';
+			this.reconnectDelay = 1000; // Reset on successful connection
+
+			const reader = res.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = '';
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() ?? '';
+
+				let dataLine = '';
+				for (const line of lines) {
+					if (line.startsWith('data:')) {
+						dataLine = line.slice(5).trim();
+					} else if (line === '' && dataLine) {
+						try {
+							const payload = JSON.parse(dataLine);
+							const items: TaskUpdate[] = payload.items ?? [];
+							const terminal = ['Completed', 'Failed', 'Cancelled'];
+							for (const task of items) {
+								if (!terminal.includes(task.status)) continue;
+								if (this.seen.has(task.task_id)) continue;
+								this.seen.add(task.task_id);
+								this.onTaskCompleted?.(task);
+							}
+						} catch {
+							// Ignore malformed messages
+						}
+						dataLine = '';
+					}
+				}
+			}
+
+			// Stream ended normally — reconnect
+			this.status = 'idle';
+			this.scheduleReconnect(resourceKinds);
+		} catch (err) {
+			if ((err as Error).name === 'AbortError') {
+				this.status = 'idle';
+				return;
+			}
+			this.status = 'error';
+			this.scheduleReconnect(resourceKinds);
+		}
 	}
 
 	disconnect() {
 		this.stopPollingFallback();
-		if (this.es) {
-			this.es.close();
-			this.es = null;
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+		if (this.abortCtrl) {
+			this.abortCtrl.abort();
+			this.abortCtrl = null;
 		}
 		this.status = 'idle';
 	}
