@@ -52,6 +52,7 @@ hyper-util = { version = "0.1", features = ["client", "server", "tokio"] }
 metrics-exporter-prometheus = "0.18"
 jsonwebtoken = "9"
 rusqlite = { version = "0.32", features = ["bundled"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 axum = "0.7"
 bcrypt = "0.15"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "migrate", "derive", "json", "uuid", "chrono"] }
