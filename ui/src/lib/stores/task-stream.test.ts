@@ -19,7 +19,7 @@ function makeMockReader(chunks: Uint8Array[], hang = false) {
 
 function mockFetchWithStream(chunks: Uint8Array[], status = 200, hang = false) {
 	const reader = makeMockReader(chunks, hang);
-	global.fetch = vi.fn(() =>
+	globalThis.fetch = vi.fn(() =>
 		Promise.resolve({
 			ok: status >= 200 && status < 300,
 			status,
@@ -44,7 +44,7 @@ describe('TaskStreamStore', () => {
 		const store = new TaskStreamStore();
 		store.connect(['vm', 'node']);
 
-		expect(global.fetch).toHaveBeenCalledWith(
+		expect(globalThis.fetch).toHaveBeenCalledWith(
 			expect.stringContaining('/v1/tasks/stream?resource_kinds=vm%2Cnode'),
 			expect.objectContaining({
 				headers: expect.objectContaining({
