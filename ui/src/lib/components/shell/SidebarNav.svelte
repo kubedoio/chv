@@ -9,6 +9,7 @@
 		Loader2
 	} from 'lucide-svelte';
 	import { inventory } from '$lib/stores/inventory.svelte';
+	import { taskStream } from '$lib/stores/task-stream.svelte';
 	import { selection } from '$lib/stores/selection.svelte';
 	import { clearToken, getStoredToken } from '$lib/api/client';
 	import { mutateVm, deleteVm } from '$lib/bff/vms';
@@ -43,6 +44,11 @@
 
 	onMount(() => {
 		inventory.fetch();
+		taskStream.connect(['vm', 'node', 'network', 'volume', 'image']);
+
+		return () => {
+			taskStream.disconnect();
+		};
 	});
 
 	function toggleGroup(label: string) {
@@ -249,6 +255,11 @@
 
 	<!-- Footer controls -->
 	<NavFooterControls onLogout={handleLogout} />
+
+	<div class="stream-status" title={taskStream.status === 'open' ? 'Live updates connected' : taskStream.status === 'error' ? 'Reconnecting...' : 'Live updates off'}>
+		<span class="status-dot" class:connected={taskStream.status === 'open'} class:error={taskStream.status === 'error'}></span>
+		<span class="status-label">{taskStream.status === 'open' ? 'Live' : taskStream.status === 'error' ? 'Reconnecting' : 'Off'}</span>
+	</div>
 </nav>
 
 <style>
@@ -256,4 +267,24 @@
 		width: 4px;
 	}
 
+	.stream-status {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.25rem 0.75rem;
+		font-size: 0.7rem;
+		color: var(--color-neutral-500);
+	}
+	.status-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--color-neutral-400);
+	}
+	.status-dot.connected {
+		background: var(--color-success);
+	}
+	.status-dot.error {
+		background: var(--color-danger);
+	}
 </style>
