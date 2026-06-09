@@ -1,5 +1,9 @@
 import { browser } from '$app/environment';
-import { getStoredToken } from '$lib/api/client';
+
+function getStoredToken(): string | null {
+	if (typeof localStorage === 'undefined') return null;
+	return localStorage.getItem('chv-api-token');
+}
 
 export interface TaskUpdate {
 	task_id: string;
