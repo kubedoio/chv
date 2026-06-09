@@ -10,6 +10,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 	import { page as appPage } from '$app/stores';
 	import { invalidateAll } from '$app/navigation';
 	import { invalidatePattern } from '$lib/stores/api-cache.svelte';
+	import { liveState } from '$lib/stores/live-state.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -175,8 +176,7 @@ import Button from '$lib/components/primitives/Button.svelte';
 <CreateVMModal
 		bind:open={modalOpen}
 		onSuccess={async () => {
-			invalidatePattern('vms:');
-			await invalidateAll();
+			await liveState.invalidateAndRefresh({ patterns: ['vms:'], sidebar: true });
 		}}
 	/>
 
