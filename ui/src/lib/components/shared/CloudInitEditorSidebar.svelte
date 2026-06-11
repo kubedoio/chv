@@ -108,6 +108,8 @@
           type="button"
           onclick={() => showPreview = false}
           class="text-xs text-muted hover:text-ink"
+          aria-label="Hide preview"
+          title="Hide preview"
         >
           <EyeOff size={12} />
         </button>

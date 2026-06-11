@@ -5,3 +5,7 @@
 ## 2024-06-13 - Dynamic ARIA Labels for Icon-Only Buttons in Tables
 **Learning:** When using icon-only action buttons within table rows (like in ImagesTable or TemplatesTable), static labels (e.g. 'Clone template') are insufficient for screen readers as they lack context about *which* row is being acted upon.
 **Action:** Use dynamic `aria-label` attributes that interpolate the row identifier (e.g., `aria-label="Clone template {row.name}"`) so the intent is fully accessible without visual context.
+
+## 2026-06-11 - [ARIA labels on Icon Buttons]
+**Learning:** [Many icon-only buttons in complex Svelte components lack `aria-label` or `title` attributes, making them inaccessible to screen readers and difficult for users to infer their action without context. Adding `title` provides a tooltip, while `aria-label` informs screen readers.]
+**Action:** [Consistently review newly added or existing icon-only buttons to ensure they have descriptive `aria-label` and `title` attributes.]
