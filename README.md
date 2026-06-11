@@ -1,5 +1,35 @@
 # CHV
 
+> Cloud Hypervisor control plane for lightweight virtualization and infrastructure evaluation.
+
+CHV is an open-source control plane and evaluation platform around **Cloud Hypervisor**. It is designed for teams exploring lightweight virtualization, KVM-based workloads, and infrastructure patterns beyond traditional hypervisor stacks.
+
+| Field   | Value                                  |
+| ------- | -------------------------------------- |
+| Status  | Technical Preview / Active Development |
+| License | Apache-2.0 core |
+| Website | [cellhv.com](https://cellhv.com)       |
+
+## What this is
+
+CHV is a technical evaluation platform for lightweight virtualization and Cloud Hypervisor-based infrastructure.
+
+It focuses on:
+
+* Cloud Hypervisor-based VM lifecycle experiments
+* lightweight virtualization control-plane patterns
+* KVM-based workload evaluation
+* API-driven infrastructure management
+* reproducible technical evaluation
+* operator-friendly infrastructure workflows
+
+## What this is not
+
+CHV is not presented as a general VMware, Proxmox, or OpenStack replacement.
+
+It is not a fully mature production virtualization platform yet. It is a technical-preview infrastructure product for teams that want to evaluate lightweight virtualization patterns before adopting or extending them.
+
+
 CHV is a Linux-first, cloud-image-first virtualization platform for sovereign private cloud and edge cloud environments. It provides API-driven VM lifecycle management built on [Cloud Hypervisor](https://www.cloudhypervisor.org/).
 
 ## Current Phase
