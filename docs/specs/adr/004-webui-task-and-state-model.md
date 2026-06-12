@@ -26,7 +26,7 @@ All mutating actions MUST flow through `liveState.invalidateAndRefresh()` (or th
 1. **Page cache invalidation** — SvelteKit load functions re-run
 2. **Sidebar inventory refresh** — nodes and VMs re-fetched
 3. **Real-time sync** — the SSE task stream calls the same path for background changes
-4. **Deduplication** — terminal tasks are tracked via `taskStream.seen` to prevent double-refreshes
+4. **Deduplication** — each terminal task event (`Completed`, `Failed`, `Cancelled`) triggers cache invalidation exactly once, even when the same event is observed via both the SSE stream and the polling fallback, or replayed across a reconnect. The deduplication window is bounded so that long-running sessions do not accumulate unbounded state, while still tolerating the gap between disconnect and reconnect without dropping events.
 
 #### Invariant
 
