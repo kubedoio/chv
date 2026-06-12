@@ -45,6 +45,10 @@ class LiveState {
 			patterns: [pattern],
 			sidebar: true,
 			detailId: task.resource_id,
+		}).catch((err) => {
+			// TODO: integrate structured logger instead of console
+			// eslint-disable-next-line no-console
+			console.error('[liveState] invalidateAndRefresh failed for completed task:', err);
 		});
 	}
 
@@ -130,6 +134,8 @@ class LiveState {
 			this.nodes = (nodesRes.items || []).map((item) => this.mapNode(item));
 			this.vms = (vmsRes.items || []).map((item) => this.mapVm(item));
 		} catch (err) {
+			// TODO: integrate structured logger instead of console
+			// eslint-disable-next-line no-console
 			console.error('Failed to load inventory:', err);
 			this.nodes = [];
 			this.vms = [];
@@ -141,7 +147,6 @@ class LiveState {
 	// Cache
 	private cache = new Map<string, { data: unknown; timestamp: number; ttl: number }>();
 	private readonly LIST_TTL = 30_000;
-	private readonly DETAIL_TTL = 60_000;
 
 	private isCacheFresh(entry: { timestamp: number; ttl: number }) {
 		return Date.now() - entry.timestamp < entry.ttl;
@@ -158,6 +163,8 @@ class LiveState {
 			return data;
 		} catch (err) {
 			if (entry) {
+				// TODO: integrate structured logger instead of console
+				// eslint-disable-next-line no-console
 				console.warn(`[liveState] fetch error for key "${key}", returning stale data`, err);
 				return entry.data;
 			}
@@ -205,6 +212,12 @@ class LiveState {
 		if (opts.patterns) {
 			for (const p of opts.patterns) {
 				this.invalidateCachePattern(p);
+				// When a specific resource id is provided, also drop the
+				// per-resource cache key (e.g. "vms:abc-123") so the detail
+				// view picks up the post-mutation state on next read.
+				if (opts.detailId) {
+					this.invalidateCache(`${p}${opts.detailId}`);
+				}
 			}
 		}
 
@@ -216,15 +229,24 @@ class LiveState {
 
 		if (opts.delayMs && opts.delayMs > 0) {
 			setTimeout(() => {
+				const tasks: Promise<unknown>[] = [];
 				if (opts.patterns) {
 					for (const p of opts.patterns) {
 						this.invalidateCachePattern(p);
+						if (opts.detailId) {
+							this.invalidateCache(`${p}${opts.detailId}`);
+						}
 					}
 				}
 				if (opts.sidebar) {
-					this.fetchInventory();
+					tasks.push(this.fetchInventory());
 				}
-				invalidateAll();
+				tasks.push(invalidateAll());
+				Promise.all(tasks).catch((err) => {
+					// TODO: integrate structured logger instead of console
+					// eslint-disable-next-line no-console
+					console.warn('[liveState] deferred invalidateAndRefresh failed:', err);
+				});
 			}, opts.delayMs);
 		}
 	}
