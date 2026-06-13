@@ -1,5 +1,7 @@
 # WebUI Information Architecture
 
+> **Status:** Executive summary. The canonical source for this material is [ADR-003-WebUI](../adr/003-webui-navigation-model.md) and [left-panel-redesign-spec.md](../left-panel-redesign-spec.md). Update there first; this file is a quick orientation pointer only.
+
 ## Top-level navigation
 
 1. Overview
