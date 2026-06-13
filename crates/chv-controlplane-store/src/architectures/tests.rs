@@ -81,7 +81,7 @@ async fn topology_list_excludes_archived_by_default() {
     repo.create(make_topology_input("topo-b", "beta"))
         .await
         .unwrap();
-    repo.archive(&aid("topo-a")).await.unwrap();
+    repo.archive(&aid("topo-a"), 1).await.unwrap();
 
     let active = repo
         .list(TopologyListFilter::default())
@@ -110,9 +110,11 @@ async fn topology_archive_then_archive_again_is_not_found() {
     repo.create(make_topology_input("topo-1", "alpha"))
         .await
         .unwrap();
-    repo.archive(&aid("topo-1")).await.expect("first archive");
+    repo.archive(&aid("topo-1"), 1)
+        .await
+        .expect("first archive");
 
-    let err = repo.archive(&aid("topo-1")).await.unwrap_err();
+    let err = repo.archive(&aid("topo-1"), 1).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }));
 }
 
@@ -225,6 +227,228 @@ async fn topology_update_missing_returns_not_found() {
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }), "got {err:?}");
+}
+
+#[tokio::test]
+async fn archive_with_stale_version_returns_stale_version() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let created = repo
+        .create(make_topology_input("topo-1", "alpha"))
+        .await
+        .unwrap();
+    assert_eq!(created.version_number, 1);
+
+    // Bump the version with a successful update first.
+    repo.update(TopologyUpdateInput {
+        id: aid("topo-1"),
+        expected_version: 1,
+        display_name: Some("v2".to_string()),
+        description: None,
+        environment: None,
+        status: None,
+        design_graph_json: None,
+        latest_yaml: None,
+        latest_version_id: None,
+        last_validation_status: None,
+        last_fleet_check_status: None,
+    })
+    .await
+    .unwrap();
+
+    // Caller still holds the pre-update version → must see StaleVersion, not
+    // NotFound. Surfacing this as 409 keeps optimistic-concurrency intent
+    // visible at the wire.
+    let err = repo.archive(&aid("topo-1"), 1).await.unwrap_err();
+    match err {
+        StoreError::StaleVersion {
+            current, expected, ..
+        } => {
+            assert_eq!(current, 2);
+            assert_eq!(expected, 1);
+        }
+        other => panic!("expected StaleVersion, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn archive_with_correct_version_succeeds_and_returns_archived_row() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let created = repo
+        .create(make_topology_input("topo-1", "alpha"))
+        .await
+        .unwrap();
+
+    let archived = repo
+        .archive(&aid("topo-1"), created.version_number)
+        .await
+        .expect("archive should succeed");
+    assert_eq!(archived.id, created.id);
+    assert_eq!(archived.status, ArchitectureStatus::Archived);
+    assert!(archived.archived_at.is_some());
+    // Archive bumps the version too so subsequent stale calls cannot succeed.
+    assert_eq!(archived.version_number, created.version_number + 1);
+}
+
+#[tokio::test]
+async fn archive_already_archived_returns_not_found() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let created = repo
+        .create(make_topology_input("topo-1", "alpha"))
+        .await
+        .unwrap();
+    let archived = repo
+        .archive(&aid("topo-1"), created.version_number)
+        .await
+        .expect("first archive");
+    // Even with the latest version_number, an already-archived row maps to
+    // NotFound — the repository treats archived as "gone for routing".
+    let err = repo
+        .archive(&aid("topo-1"), archived.version_number)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::NotFound { .. }),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn update_then_concurrent_archive_returns_stale_version_not_not_found() {
+    // Simulates: client A reads v1, client B archives in the meantime, client
+    // A submits update(v=1). The transactional disambiguation must still see
+    // the row (now archived) and surface NotFound, not Internal. We accept
+    // either NotFound or StaleVersion (both are 4xx); the contract under
+    // review is "no Internal/500 leak".
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let created = repo
+        .create(make_topology_input("topo-1", "alpha"))
+        .await
+        .unwrap();
+    assert_eq!(created.version_number, 1);
+
+    // Race: archive happens out-of-band before the update lands.
+    repo.archive(&aid("topo-1"), 1)
+        .await
+        .expect("concurrent archive");
+
+    let err = repo
+        .update(TopologyUpdateInput {
+            id: aid("topo-1"),
+            expected_version: 1,
+            display_name: Some("racing".to_string()),
+            description: None,
+            environment: None,
+            status: None,
+            design_graph_json: None,
+            latest_yaml: None,
+            latest_version_id: None,
+            last_validation_status: None,
+            last_fleet_check_status: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            StoreError::NotFound { .. } | StoreError::StaleVersion { .. }
+        ),
+        "expected NotFound or StaleVersion, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_with_duplicate_name_returns_conflict() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    repo.create(make_topology_input("topo-1", "alpha"))
+        .await
+        .expect("first create");
+
+    // Different id, same name → UNIQUE violation must surface as Conflict,
+    // not as a leaked Database error (which would 500 at the BFF).
+    let err = repo
+        .create(make_topology_input("topo-2", "alpha"))
+        .await
+        .unwrap_err();
+    match err {
+        StoreError::Conflict { entity, id, reason } => {
+            assert_eq!(entity, "architecture_topology");
+            assert_eq!(id, "alpha");
+            assert!(
+                reason.contains("name already exists"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cascade_delete_topology_removes_plans() {
+    // Mirrors `version_cascades_when_topology_hard_deleted` for plans:
+    // soft-delete is the public contract, but the FK ON DELETE CASCADE wired
+    // in 0049 is exercised here via raw SQL so a future hard-delete job is
+    // covered too.
+    let db = TestDb::new().await;
+    let topo = TopologyRepository::new(db.pool.clone());
+    let ver = VersionRepository::new(db.pool.clone());
+    let plan = PlanRepository::new(db.pool.clone());
+
+    topo.create(make_topology_input("topo-1", "alpha"))
+        .await
+        .unwrap();
+    ver.create(VersionCreateInput {
+        id: vid("v-1"),
+        architecture_id: aid("topo-1"),
+        version_number: 1,
+        yaml_content: "x".to_string(),
+        design_graph_json: None,
+        normalized_model_json: None,
+        change_summary: None,
+        created_by: None,
+    })
+    .await
+    .unwrap();
+    plan.create(PlanCreateInput {
+        id: pid("plan-1"),
+        architecture_id: aid("topo-1"),
+        architecture_version_id: vid("v-1"),
+        inventory_snapshot_id: None,
+        mode: PlanMode::DryRun,
+        status: PlanStatus::Draft,
+        plan_json: None,
+        summary_json: None,
+        created_by: None,
+        expires_at: Utc::now() + Duration::minutes(15),
+    })
+    .await
+    .unwrap();
+
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM architecture_topologies WHERE id = $1")
+        .bind("topo-1")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let err = plan.get(&pid("plan-1")).await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::NotFound { .. }),
+        "expected plan to cascade, got {err:?}"
+    );
 }
 
 // ── VersionRepository ──────────────────────────────────────────────────────

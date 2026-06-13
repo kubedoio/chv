@@ -263,12 +263,13 @@ async fn crud_lifecycle_create_list_get_update_archive() {
         Some("Customer A — Prod (renamed)")
     );
 
-    // 5. Archive
+    // 5. Archive — supplies the bumped version_number from the update.
     let _ = archive_architecture(
         BearerToken(claims_for("operator")),
         State(state.clone()),
         Json(ArchiveArchitectureRequest {
             id: arch_id.clone(),
+            expected_version: updated.0.architecture.version_number,
         }),
     )
     .await
@@ -486,6 +487,7 @@ async fn viewer_cannot_archive_architecture() {
         State(state),
         Json(ArchiveArchitectureRequest {
             id: created.id.clone(),
+            expected_version: 1,
         }),
     )
     .await
@@ -508,13 +510,25 @@ async fn viewer_cannot_archive_architecture() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn validate_stub_returns_501() {
+async fn validate_stub_returns_501_for_operator() {
+    let state = build_state().await;
+    let op = claims_for("operator");
+    let err = validate_architecture(BearerToken(op), State(state), Json(json!({})))
+        .await
+        .expect_err("stub must error");
+    assert_eq!(err_status(&err), 501);
+}
+
+#[tokio::test]
+async fn validate_stub_forbids_viewer_before_501() {
+    // Validate is operator+ even before the real handler lands; verify the
+    // role gate sticks so a viewer never gets a misleading 501.
     let state = build_state().await;
     let v = claims_for("viewer");
     let err = validate_architecture(BearerToken(v), State(state), Json(json!({})))
         .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
+        .expect_err("viewer must be forbidden");
+    assert_eq!(err_status(&err), 403);
 }
 
 #[tokio::test]
@@ -689,4 +703,162 @@ async fn get_with_blank_id_returns_400() {
     .await
     .expect_err("blank id must 400");
     assert_eq!(err_status(&err), 400);
+}
+
+// ---------------------------------------------------------------------------
+// Optimistic-concurrency on archive
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn archive_with_stale_expected_version_returns_409() {
+    let state = build_state().await;
+
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "stale-archive".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+    assert_eq!(created.version_number, 1);
+
+    // Bump the version via update; client B still holds v=1.
+    let _ = update_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(UpdateArchitectureRequest {
+            id: created.id.clone(),
+            expected_version: 1,
+            display_name: Some("renamed".to_string()),
+            description: None,
+            environment: None,
+            design_graph_json: None,
+            latest_yaml: None,
+            latest_version_id: None,
+        }),
+    )
+    .await
+    .expect("update");
+
+    // Stale archive must surface as 409 with the documented version banner.
+    let err = archive_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(ArchiveArchitectureRequest {
+            id: created.id.clone(),
+            expected_version: 1,
+        }),
+    )
+    .await
+    .expect_err("stale archive must 409");
+    assert_eq!(err_status(&err), 409);
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("stale version")
+            && msg.contains("client sent 1")
+            && msg.contains("current is 2"),
+        "conflict message should reveal versions; got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate name → 409 (UNIQUE violation surfaces as Conflict, not 500)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_duplicate_name_returns_409() {
+    let state = build_state().await;
+
+    create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "dup-name".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect("first create");
+
+    let err = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(CreateArchitectureRequest {
+            name: "dup-name".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect_err("duplicate name must fail");
+    assert_eq!(err_status(&err), 409, "duplicate name => 409 Conflict");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("dup-name") && msg.contains("name already exists"),
+        "conflict message should name the offending field; got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// No-op update keeps version stable (M1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn update_with_no_field_changes_does_not_bump_version() {
+    let state = build_state().await;
+
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "noop-update".to_string(),
+            description: Some("d".to_string()),
+            environment: Some("test".to_string()),
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+    assert_eq!(created.version_number, 1);
+
+    let result = update_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(UpdateArchitectureRequest {
+            id: created.id.clone(),
+            expected_version: 1,
+            display_name: None,
+            description: None,
+            environment: None,
+            design_graph_json: None,
+            latest_yaml: None,
+            latest_version_id: None,
+        }),
+    )
+    .await
+    .expect("noop update should succeed");
+    assert_eq!(
+        result.0.architecture.version_number, 1,
+        "no field changes must NOT bump the version"
+    );
 }
