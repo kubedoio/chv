@@ -1,84 +1,135 @@
-# Task Plan: Fix Comprehensive PR Review Findings (2026-06-12)
+# Task Plan: Architecture Designer — Phase 2 (Svelte Flow canvas + inspector)
 
 ## Goal
-Resolve all CRITICAL and HIGH findings from the comprehensive review of HEAD~5..HEAD on `fix/pr-review-findings-2026-06-12`, with verified industrial-grade quality (build green, type-check clean, tests pass, no regressions).
+Land an editable Svelte Flow canvas with eight custom node types, a draggable
+palette, an inspector panel, edge-validation rules, and a graph⇄YAML
+synchronization pipeline behind a feature flag — meeting every Phase 2
+acceptance gate from `docs/plans/2026-06-13-architecture-designer-implementation-plan.md` §3.
 
 ## Branch
-`fix/pr-review-findings-2026-06-12` (forked from `main` at 73a9d174)
+`feat/architecture-designer-phase2-canvas` (forked from `main` at d13b2258)
 
 ## Phases
-- [x] Phase 1: Understand/research (review already complete in prior turn)
-- [x] Phase 2: Plan + branch
-- [x] Phase 3: Implement fixes via parallel subagents
-- [x] Phase 4: Verify (npm run check, npm test, cargo build) and deliver
+- [x] Phase 1: Lock plan + create branch
+- [ ] Phase 2: UI deps + canvas store + edge rules (parallel agent A)
+- [ ] Phase 3: Eight node components + palette + inspector (parallel agent B)
+- [ ] Phase 4: Page wiring + feature flag + Playwright + a11y (parallel agent C)
+- [ ] Phase 5: Independent code review (parallel reviewer agent)
+- [ ] Phase 6: Address review findings, run full quality matrix, push, open PR
 
-## Findings to Fix
+## Scope ledger (locked from §3 of the plan)
 
-### Group A — Build/Test Infrastructure (BLOCKER — must run first)
-- **CQ-1** `glob` not installed → `cd ui && npm install`
-- **CQ-2** `import.meta.dirname` undefined in jsdom → `fileURLToPath(new URL('../../../', import.meta.url))` AND add `// @vitest-environment node`
-- **CQ-3** 13 implicit `any` lambdas → cast `globSync(...)` as `string[]`
+### In scope
+1. UI deps: pin `@xyflow/svelte` and `js-yaml` in `ui/package.json`.
+2. `ui/src/lib/components/architectures/canvas/Canvas.svelte` — mounts
+   `<SvelteFlow>` with `nodeTypes` + `edgeTypes` props.
+3. Eight node components in `ui/src/lib/components/architectures/nodes/`:
+   `HostNode`, `NetworkNode`, `DatastoreNode`, `ImageNode`, `TemplateNode`,
+   `InstanceNode`, `UserNode`, `RoleNode`. Each ≤300 lines.
+4. Palette (drag source) + `palette.ts` registry. Adding a new resource
+   kind requires changes in exactly two places: YAML model + palette registry.
+   Compile-time test enforces.
+5. `lib/components/architectures/canvas/edge-rules.ts` — implements every
+   row of the edge-rules matrix from `docs/specs/architecture-designer/contracts/graph-contract.md`.
+   Companion vitest `edge-rules.test.ts` covers every (source, target, edgeType)
+   pair (allowed and disallowed) with ≥95 % line coverage.
+6. Inspector (`inspector/Inspector.svelte`) — when a node is selected, edits
+   YAML-equivalent fields and updates the canvas store, which regenerates
+   the YAML buffer.
+7. Graph save/load: `architecture-canvas-store.svelte.ts` calls
+   `architectureStore.update(id, expectedVersion, { design_graph_json,
+   latest_yaml })`. Both blobs persist atomically through the existing
+   `update` handler (BFF already accepts both fields — see Phase 1 wire-up
+   at `crates/chv-webui-bff/src/handlers/architectures.rs:312-334`).
+8. Per-node validation badges: red (error), yellow (warning), gray (clean),
+   bound to the validation findings from Phase 1's
+   `ValidationFindingsPanel`. Badge attaches when `finding.resource_ref`
+   matches the node's `(kind, name)`.
+9. Replace the Overview canvas-placeholder in
+   `ui/src/routes/architectures/[id]/+page.svelte` with the live canvas
+   when the feature flag is enabled. Flag default OFF in production builds,
+   ON in dev — controlled by `PUBLIC_ARCHITECTURE_DESIGNER_CANVAS=1` env var
+   (read in `ui/src/lib/feature-flags.ts`, new file).
+10. Playwright spec `architectures-canvas.spec.ts` covering: drag-add-host,
+    drag-add-instance, draw `placed_on` edge, attempt `placed_on` from
+    instance to network (rejected w/ toast), persist, reload page, assert
+    state restored.
+11. Axe a11y scan in Playwright passes with 0 violations on the canvas page.
 
-### Group B — Silent failures + reactive store bugs (`task-stream.svelte.ts`, `live-state.svelte.ts`)
-- **SF-1** Separate `onTaskCompleted` from JSON parse try/catch
-- **SF-2** Empty polling catch → log + 401 handling consistent with SSE
-- **BUG-1** Implement `detailId` consumption (invalidate detail key `${pattern}${detailId}`)
-- **BUG-2** Reset `reconnectDelay` in `disconnect()`
-- **BUG-3** `.catch()` on unawaited `invalidateAndRefresh` in `handleTaskCompleted`
-- **BUG-4** `.catch()` on unawaited calls inside `setTimeout` deferred path
-- **SEC-1** Replace local `getStoredToken()` with import from `$lib/api/client`
-- **SEC-2** Bound `seen` Set: TTL Map with pruning + clear on disconnect
-- **SEC-3** Polling 401 → mirror SSE behavior (set status='error', stop polling)
-- **CQ-4** Remove dead `DETAIL_TTL` constant from `live-state.svelte.ts`
-- **CQ-6** Add `// eslint-disable-next-line no-console` annotations consistent with old code
-- **DOC-1** Fix `getCacheEntry` deprecation message → recommend `liveState.cachedFetch()`
+### Explicit non-goals
+- Plan/Apply pipeline (Phase 4 of the master plan).
+- Fleet inventory checks (Phase 3 of the master plan).
+- Drift reconciler.
+- Multi-user concurrent canvas editing.
+- Touch/mobile gestures.
 
-### Group C — New tests (TypeScript/Vitest)
-- **T-1** Tests for `mutateWithRefresh` (success path, error rethrow, skipRefresh, options forwarding)
-- **T-2** Tests for `liveState.invalidateAndRefresh` (patterns, sidebar, detailId, delayMs, SSR no-op)
+## Acceptance gates (must all be green before PR opens)
 
-### Group D — Rust packaging
-- **CQ-5** Remove redundant `libsqlite3-sys` from 3 library crates (keep workspace decl + binary crate `cmd/chv-controlplane`)
+```bash
+# Rust
+rtk cargo build --workspace
+rtk cargo test --workspace
+rtk cargo clippy --workspace -- -D warnings
+rtk cargo fmt --all -- --check
 
-### Group E — Docs
-- **DOC-2** ADR-004: stop referencing `taskStream.seen` as if public — describe behavior abstractly
+# UI
+cd ui && rtk npm run check                           # 0 errors, 0 warnings
+cd ui && rtk npx vitest run                          # all green
+cd ui && rtk npx playwright test architectures-canvas.spec.ts
+
+# Component-size lint (project rule: ≤300 lines per Svelte component)
+find ui/src/lib/components/architectures -name '*.svelte' -exec wc -l {} \; \
+  | awk '$1>300 {print; e=1} END {exit e}'
+```
+
+## Subagent dispatch plan
+
+| Agent | Subagent type | Owns |
+|---|---|---|
+| A | typescript-frontend-engineer | UI deps, `architecture-canvas-store.svelte.ts`, `edge-rules.ts` + tests, `palette.ts`, `feature-flags.ts` |
+| B | ui-design-engineer | Eight node components + `Canvas.svelte` + `Inspector.svelte` + per-node validation badge bindings |
+| C | testing-automation-engineer | Playwright spec `architectures-canvas.spec.ts` + axe a11y scan + page wiring (`[id]/+page.svelte` overview tab swap behind flag) |
+| R | reviewer-code-quality | Independent diff review against CLAUDE.md, edge-rules correctness vs `graph-contract.md` matrix, finding↔node binding logic, atomic save (single `update` call carrying both blobs) |
+
+A runs first (foundation). B and C run in parallel after A lands. R runs
+**after** A/B/C complete and **before** the PR is opened.
+
+## Key Questions (resolved before dispatch)
+
+1. **Wire format for `design_graph_json`?** ANSWER: locked to
+   `docs/specs/architecture-designer/contracts/graph-contract.md` v1.0
+   shape: `{ version: "1.0", nodes: [...], edges: [...] }`. The BFF already
+   round-trips this column as an opaque string.
+2. **How does graph→YAML regeneration work in Phase 2?** ANSWER: Phase 2
+   does NOT generate canonical YAML server-side from the graph yet (the BFF
+   handler at handler line 532 explicitly defers this). The canvas store
+   serializes a *best-effort* YAML on the client using `js-yaml` and posts
+   it as `latest_yaml` alongside `design_graph_json`. If empty / invalid,
+   the user can open the YAML tab and import explicit YAML — Phase 1 import
+   flow already handles this.
+3. **Per-node validation binding key?** ANSWER: tuple `(node.data.kind,
+   node.data.name)` matched against `finding.resource_ref` shape
+   `"<kind>/<name>"` (already produced by `chv-architecture-validate`).
+4. **Feature flag scope?** ANSWER: gate the **canvas mount only**. Tabs
+   themselves stay visible on `[id]/+page.svelte` so existing Playwright
+   selectors don't break. Overview tab shows canvas when flag on, the
+   Phase-1 placeholder when off.
 
 ## Decisions Made
-- **Branch**: `fix/pr-review-findings-2026-06-12`
-- **Sequencing**: Group A first (foundation); then B, C, D, E in parallel via subagents
-- **detailId**: Implement targeted invalidation by also clearing cache key `${pattern}${detailId}` (the cache uses `:` separator like `vms:abc-123`)
-- **No commit to main** — work isolated to feature branch
-
-## Key Questions
-1. After Group A fix, does `npm run check` exit 0? → Verify before launching B/C
-2. Does the existing `live-state.test.ts` still pass after Group B mutations?
-3. Does `cargo build --workspace` succeed after Group D?
+- **Architecture-store extends, not replaces**: existing `update(id,
+  expectedVersion, fields)` already accepts `design_graph_json` and
+  `latest_yaml` (Phase 1 added them). The new `architecture-canvas-store`
+  delegates to it for persistence — no parallel save path.
+- **Edge rules live in TS, not in the Rust validator** for Phase 2: they
+  are UX-time guards (reject the drop, toast). The Rust validator already
+  catches the same class of mistake at validate-time via `INVALID_EDGE`.
+- **Node component size budget**: each ≤300 lines. Inspector field groups
+  extract into per-kind `inspector/{Kind}Fields.svelte` partials when growing.
+- **Feature flag default**: OFF in `production` builds. For Phase 2 the
+  nav is already shipped — flag governs only the canvas mount.
 
 ## Errors Encountered
-(to be logged)
+(populate during execution)
 
 ## Status
-**Phase 4 complete — all findings closed.**
-
-### Commits on `fix/pr-review-findings-2026-06-12` (5 bisectable)
-| SHA | Group | Closes |
-|-----|-------|--------|
-| `8c60d340` | A | CQ-1, CQ-2, CQ-3 |
-| `24917ddc` | E | DOC-2 |
-| `e1c7716d` | D | CQ-5 |
-| `16f46b81` | B | SF-1, SF-2, BUG-1..4, SEC-1, SEC-2, SEC-3, CQ-4, CQ-6, DOC-1 |
-| `72ea9134` | C | T-1, T-2 |
-
-### Final verification
-- `cd ui && npm run check`: **4424 files, 0 errors, 0 warnings**
-- `cd ui && npx vitest run`: **162 tests passing across 32 files** (was 153 before — 9 new in mutation.test.ts, 7 new in live-state.test.ts; less the 7 mutation-compliance tests that are no longer vacuous)
-- `cargo build --workspace`: clean
-- `cargo test -p chv-controlplane-store -p chv-webui-bff -p chv-controlplane-service --lib`: 47+ tests pass, 0 fail
-- compliance suite now actively scans **26** `+page.svelte` files (was 0 — vacuously passing)
-
-### Findings closed: **18 of 18** from this review pass
-Critical: CQ-1, CQ-2, CQ-3, SF-1, SF-2, T-1, T-2 (7)
-High: BUG-1, BUG-2, BUG-3, BUG-4, SEC-1, SEC-2, DOC-1 (7)
-Medium: SEC-3, CQ-4, CQ-5, CQ-6, DOC-2 (5)
-
-Branch ready for PR. No commit to `main`.
+**Phase 2 — agent A dispatched (foundation: deps + store + edge rules).**

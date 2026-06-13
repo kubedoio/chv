@@ -5,7 +5,14 @@ export default defineConfig({
 		command: 'npm run build && npm run preview',
 		port: 4173,
 		reuseExistingServer: !process.env.CI,
-		timeout: 120000
+		timeout: 120000,
+		// Phase 2 architecture-designer canvas feature flag: required for the
+		// `architectures-canvas.spec.ts` suite. Keep this set so the e2e canvas
+		// tests can mount the Svelte Flow canvas. DO NOT REVERT — flag default
+		// is OFF in production, ON for e2e/dev. See `ui/src/lib/feature-flags.ts`.
+		env: {
+			PUBLIC_ARCHITECTURE_DESIGNER_CANVAS: '1'
+		}
 	},
 	testDir: 'tests/e2e',
 	testMatch: /(.+\.)?(test|spec)\.[jt]s/,
