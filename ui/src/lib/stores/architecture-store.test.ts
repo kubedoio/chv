@@ -39,32 +39,35 @@ import {
 	archiveArchitecture,
 	StaleVersionError,
 	type Architecture,
+	type ArchitectureDetail,
 	type ArchitectureSummary
 } from '$lib/bff/architectures';
 import { liveState } from './live-state.svelte';
 import { architectureStore } from './architecture-store.svelte';
 import { toast } from './toast.svelte';
 
-const ARCH: Architecture = {
+const SUMMARY: ArchitectureSummary = {
 	id: 'arch-1',
 	name: 'phase-0-test',
+	display_name: 'Phase 0 Test',
 	description: 'smoke',
 	environment: 'development',
 	status: 'draft',
+	owner_user_id: null,
+	last_validation_status: null,
+	last_fleet_check_status: null,
 	version_number: 1,
 	created_at: '2026-06-13T00:00:00Z',
-	updated_at: '2026-06-13T00:00:00Z'
+	updated_at: '2026-06-13T00:00:00Z',
+	archived_at: null
 };
 
-const SUMMARY: ArchitectureSummary = {
-	id: ARCH.id,
-	name: ARCH.name,
-	description: ARCH.description,
-	environment: ARCH.environment,
-	status: ARCH.status,
-	version_number: ARCH.version_number,
-	created_at: ARCH.created_at,
-	updated_at: ARCH.updated_at
+const ARCH: Architecture = SUMMARY;
+
+const DETAIL: ArchitectureDetail = {
+	architecture: SUMMARY,
+	design_graph_json: null,
+	latest_yaml: null
 };
 
 describe('architectureStore', () => {
@@ -80,11 +83,8 @@ describe('architectureStore', () => {
 	});
 
 	describe('list', () => {
-		it('loads items and returns them', async () => {
-			vi.mocked(listArchitectures).mockResolvedValue({
-				items: [SUMMARY],
-				page: { page: 1, page_size: 50, total_items: 1 }
-			});
+		it('loads items from `architectures` (new wire shape) and returns them', async () => {
+			vi.mocked(listArchitectures).mockResolvedValue({ architectures: [SUMMARY] });
 
 			const items = await architectureStore.list();
 
@@ -95,10 +95,7 @@ describe('architectureStore', () => {
 		});
 
 		it('passes the stored token through to the BFF client', async () => {
-			vi.mocked(listArchitectures).mockResolvedValue({
-				items: [],
-				page: { page: 1, page_size: 50, total_items: 0 }
-			});
+			vi.mocked(listArchitectures).mockResolvedValue({ architectures: [] });
 
 			await architectureStore.list();
 
@@ -116,12 +113,12 @@ describe('architectureStore', () => {
 	});
 
 	describe('get', () => {
-		it('returns the architecture from the BFF', async () => {
-			vi.mocked(getArchitecture).mockResolvedValue({ architecture: ARCH });
+		it('returns the architecture detail from the BFF', async () => {
+			vi.mocked(getArchitecture).mockResolvedValue(DETAIL);
 
 			const result = await architectureStore.get('arch-1');
 
-			expect(result).toEqual(ARCH);
+			expect(result).toEqual(DETAIL);
 			expect(getArchitecture).toHaveBeenCalledWith({ id: 'arch-1' }, 'test-token');
 		});
 
@@ -184,19 +181,29 @@ describe('architectureStore', () => {
 	});
 
 	describe('update', () => {
-		it('calls updateArchitecture with id, expected_version and patch', async () => {
+		it('calls updateArchitecture with a FLAT body — id, expected_version and the editable fields', async () => {
 			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
 			vi.mocked(updateArchitecture).mockResolvedValue({
-				architecture: { ...ARCH, name: 'renamed', version_number: 2 }
+				architecture: { ...ARCH, display_name: 'renamed', version_number: 2 }
 			});
 
-			const result = await architectureStore.update('arch-1', 1, { name: 'renamed' });
+			const result = await architectureStore.update('arch-1', 1, {
+				display_name: 'renamed',
+				description: 'edited',
+				environment: 'staging'
+			});
 
 			expect(updateArchitecture).toHaveBeenCalledWith(
-				{ id: 'arch-1', expected_version: 1, patch: { name: 'renamed' } },
+				{
+					id: 'arch-1',
+					expected_version: 1,
+					display_name: 'renamed',
+					description: 'edited',
+					environment: 'staging'
+				},
 				'test-token'
 			);
-			expect(result.name).toBe('renamed');
+			expect(result.display_name).toBe('renamed');
 			expect(result.version_number).toBe(2);
 		});
 
@@ -213,21 +220,38 @@ describe('architectureStore', () => {
 			);
 		});
 
+		it('accepts an empty fields object (partial-patch is valid even with no changes)', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			vi.mocked(updateArchitecture).mockResolvedValue({ architecture: ARCH });
+
+			await architectureStore.update('arch-1', 1, {});
+
+			expect(updateArchitecture).toHaveBeenCalledWith(
+				{ id: 'arch-1', expected_version: 1 },
+				'test-token'
+			);
+		});
+
 		it('propagates StaleVersionError on 409', async () => {
 			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
 			const stale = new StaleVersionError('arch-1', 1, 'stale', 'STALE_VERSION');
 			vi.mocked(updateArchitecture).mockRejectedValue(stale);
 
 			await expect(
-				architectureStore.update('arch-1', 1, { name: 'renamed' })
+				architectureStore.update('arch-1', 1, { display_name: 'renamed' })
 			).rejects.toBeInstanceOf(StaleVersionError);
 		});
 	});
 
 	describe('archive', () => {
-		it('calls archiveArchitecture with id and expected_version', async () => {
+		it('calls archiveArchitecture with id and expected_version and returns the archived architecture', async () => {
 			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
-			const archived: Architecture = { ...ARCH, status: 'archived', version_number: 2 };
+			const archived: Architecture = {
+				...ARCH,
+				status: 'archived',
+				version_number: 2,
+				archived_at: '2026-06-13T01:00:00Z'
+			};
 			vi.mocked(archiveArchitecture).mockResolvedValue({ architecture: archived });
 
 			const result = await architectureStore.archive('arch-1', 1);
@@ -236,6 +260,7 @@ describe('architectureStore', () => {
 				{ id: 'arch-1', expected_version: 1 },
 				'test-token'
 			);
+			expect(result).toEqual(archived);
 			expect(result.status).toBe('archived');
 		});
 

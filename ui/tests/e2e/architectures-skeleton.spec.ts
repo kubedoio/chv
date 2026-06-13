@@ -7,41 +7,68 @@ import { loginAsAdmin } from './helpers';
  * stale-version banner.
  *
  * The BFF endpoints under `/v1/architectures/*` are mocked at the Playwright
- * route layer because the backend (separate agent) is in flight. Once the BFF
- * lands these mocks can be deleted in favour of the real preview server,
- * with the same assertions still passing.
+ * route layer so the UI can be exercised against the locked wire shape:
+ *   - List  -> `{ architectures: [...] }` (no `items`/`page` wrapper).
+ *   - Get   -> `{ architecture, design_graph_json, latest_yaml }`.
+ *   - Update body is FLAT — `{ id, expected_version, display_name?, description?, environment?, ... }` with NO `patch` wrapper.
+ *   - Archive requires `expected_version` and returns `{ architecture }`.
  */
 
-type ArchEnv = 'development' | 'staging' | 'production';
 type ArchStatus = 'draft' | 'applied' | 'archived';
 
 interface MockArch {
 	id: string;
 	name: string;
-	description: string;
-	environment: ArchEnv;
+	display_name: string | null;
+	description: string | null;
+	environment: string | null;
 	status: ArchStatus;
+	owner_user_id: string | null;
+	last_validation_status: 'unknown' | 'passed' | 'failed' | null;
+	last_fleet_check_status: 'unknown' | 'passed' | 'failed' | null;
 	version_number: number;
 	created_at: string;
 	updated_at: string;
+	archived_at: string | null;
+}
+
+interface UpdateBody {
+	id: string;
+	expected_version: number;
+	display_name?: string | null;
+	description?: string | null;
+	environment?: string | null;
+	design_graph_json?: string | null;
+	latest_yaml?: string | null;
+	latest_version_id?: string | null;
 }
 
 class FakeBackend {
 	architectures: MockArch[] = [];
 	private idCounter = 0;
 
-	create(input: { name: string; description?: string; environment: ArchEnv }): MockArch {
+	create(input: {
+		name: string;
+		description?: string | null;
+		environment?: string | null;
+		display_name?: string | null;
+	}): MockArch {
 		this.idCounter += 1;
 		const now = new Date().toISOString();
 		const arch: MockArch = {
 			id: `arch-${this.idCounter}`,
 			name: input.name,
-			description: input.description ?? '',
-			environment: input.environment,
+			display_name: input.display_name ?? null,
+			description: input.description ?? null,
+			environment: input.environment ?? null,
 			status: 'draft',
+			owner_user_id: null,
+			last_validation_status: null,
+			last_fleet_check_status: null,
 			version_number: 1,
 			created_at: now,
-			updated_at: now
+			updated_at: now,
+			archived_at: null
 		};
 		this.architectures.push(arch);
 		return arch;
@@ -52,9 +79,31 @@ class FakeBackend {
 	}
 
 	update(
+		body: UpdateBody
+	): { ok: true; arch: MockArch } | { ok: false; reason: 'stale' | 'not_found' } {
+		const idx = this.architectures.findIndex((a) => a.id === body.id);
+		if (idx === -1) return { ok: false, reason: 'not_found' };
+		const current = this.architectures[idx]!;
+		if (current.version_number !== body.expected_version) {
+			return { ok: false, reason: 'stale' };
+		}
+		// Build the next row by overlaying any provided field. `undefined` means
+		// "leave alone" — only properties present on the body get applied.
+		const next: MockArch = {
+			...current,
+			...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+			...(body.description !== undefined ? { description: body.description } : {}),
+			...(body.environment !== undefined ? { environment: body.environment } : {}),
+			version_number: current.version_number + 1,
+			updated_at: new Date().toISOString()
+		};
+		this.architectures[idx] = next;
+		return { ok: true, arch: next };
+	}
+
+	archive(
 		id: string,
-		expectedVersion: number,
-		patch: { name?: string; description?: string; environment?: ArchEnv }
+		expectedVersion: number
 	): { ok: true; arch: MockArch } | { ok: false; reason: 'stale' | 'not_found' } {
 		const idx = this.architectures.findIndex((a) => a.id === id);
 		if (idx === -1) return { ok: false, reason: 'not_found' };
@@ -62,11 +111,13 @@ class FakeBackend {
 		if (current.version_number !== expectedVersion) {
 			return { ok: false, reason: 'stale' };
 		}
+		const now = new Date().toISOString();
 		const next: MockArch = {
 			...current,
-			...patch,
+			status: 'archived',
+			archived_at: now,
 			version_number: current.version_number + 1,
-			updated_at: new Date().toISOString()
+			updated_at: now
 		};
 		this.architectures[idx] = next;
 		return { ok: true, arch: next };
@@ -82,18 +133,15 @@ async function installArchitectureMocks(page: Page, backend: FakeBackend) {
 		});
 
 	await page.route('**/v1/architectures/list', async (route) => {
-		await json(route, 200, {
-			items: backend.architectures,
-			page: { page: 1, page_size: 50, total_items: backend.architectures.length }
-		});
+		await json(route, 200, { architectures: backend.architectures });
 	});
 
 	await page.route('**/v1/architectures/create', async (route) => {
-		const req = route.request();
-		const body = req.postDataJSON() as {
+		const body = route.request().postDataJSON() as {
 			name: string;
-			description?: string;
-			environment: ArchEnv;
+			description?: string | null;
+			environment?: string | null;
+			display_name?: string | null;
 		};
 		const arch = backend.create(body);
 		await json(route, 200, { architecture: arch });
@@ -106,16 +154,38 @@ async function installArchitectureMocks(page: Page, backend: FakeBackend) {
 			await json(route, 404, { message: 'not found', code: 'NOT_FOUND' });
 			return;
 		}
-		await json(route, 200, { architecture: arch });
+		await json(route, 200, {
+			architecture: arch,
+			design_graph_json: null,
+			latest_yaml: null
+		});
 	});
 
 	await page.route('**/v1/architectures/update', async (route) => {
+		// Phase 0 wire shape is FLAT: editable fields live alongside `id` and
+		// `expected_version`. There is no `patch` wrapper.
+		const body = route.request().postDataJSON() as UpdateBody;
+		const result = backend.update(body);
+		if (!result.ok && result.reason === 'stale') {
+			await json(route, 409, {
+				message: 'Stale architecture version',
+				code: 'STALE_VERSION'
+			});
+			return;
+		}
+		if (!result.ok) {
+			await json(route, 404, { message: 'not found', code: 'NOT_FOUND' });
+			return;
+		}
+		await json(route, 200, { architecture: result.arch });
+	});
+
+	await page.route('**/v1/architectures/archive', async (route) => {
 		const body = route.request().postDataJSON() as {
 			id: string;
 			expected_version: number;
-			patch: { name?: string; description?: string; environment?: ArchEnv };
 		};
-		const result = backend.update(body.id, body.expected_version, body.patch);
+		const result = backend.archive(body.id, body.expected_version);
 		if (!result.ok && result.reason === 'stale') {
 			await json(route, 409, {
 				message: 'Stale architecture version',
@@ -177,10 +247,13 @@ test.describe('Architecture Designer — Phase 0 skeleton', () => {
 		await page.locator('#arch-environment').selectOption('development');
 		await page.getByRole('button', { name: /create architecture/i }).click();
 
-		// 4. Detail page renders the metadata
+		// 4. Detail page renders the metadata. The heading shows display_name
+		//    when present; with the new wire shape display_name starts null so
+		//    the slug `name` is shown instead.
 		await expect(page).toHaveURL(/\/architectures\/arch-1$/);
 		await expect(page.getByTestId('architecture-name')).toHaveText('phase-0-test');
 		await expect(page.getByTestId('meta-name')).toHaveText('phase-0-test');
+		await expect(page.getByTestId('meta-slug')).toHaveText('phase-0-test');
 		await expect(page.getByTestId('meta-description')).toHaveText('smoke');
 		await expect(page.getByTestId('meta-environment')).toHaveText('development');
 		await expect(page.getByTestId('meta-version')).toHaveText('1');
@@ -190,27 +263,30 @@ test.describe('Architecture Designer — Phase 0 skeleton', () => {
 		await expect(page.getByTestId('architectures-list')).toBeVisible();
 		await expect(page.getByTestId('architecture-card-name')).toHaveText('phase-0-test');
 
-		// 6. Open detail again, edit name, save, assert UI updated
+		// 6. Open detail again, edit display name, save, assert UI updated
 		await page.goto('/architectures/arch-1');
 		await expect(page.getByTestId('meta-name')).toHaveText('phase-0-test');
 		await page.getByRole('button', { name: /^edit metadata$/i }).click();
 		await expect(page.getByTestId('architecture-meta-edit-form')).toBeVisible();
-		await page.locator('#meta-name').fill('phase-0-renamed');
+		await page.locator('#meta-display-name').fill('Phase 0 Renamed');
 		await page.getByRole('button', { name: /save metadata/i }).click();
-		await expect(page.getByTestId('meta-name')).toHaveText('phase-0-renamed');
+		await expect(page.getByTestId('meta-name')).toHaveText('Phase 0 Renamed');
 		await expect(page.getByTestId('meta-version')).toHaveText('2');
 
-		// 7. Programmatically POST a stale update via fetch -> bumps the server's
-		//    version to 3 while the client still has v2 cached. Then trigger an
-		//    edit from the UI and assert the StaleVersionBanner appears.
+		// 7. Programmatically POST a stale update via fetch -> bumps the
+		//    server's version to 3 while the client still has v2 cached. Then
+		//    trigger an edit from the UI and assert:
+		//      a) the StaleVersionBanner appears
+		//      b) the user's draft is preserved (M5: still in edit mode)
 		const staleBumpStatus = await page.evaluate(async () => {
 			const res = await fetch('/v1/architectures/update', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
+				// FLAT body — no `patch` wrapper.
 				body: JSON.stringify({
 					id: 'arch-1',
 					expected_version: 2,
-					patch: { description: 'out-of-band change' }
+					description: 'out-of-band change'
 				})
 			});
 			return res.status;
@@ -218,12 +294,79 @@ test.describe('Architecture Designer — Phase 0 skeleton', () => {
 		expect(staleBumpStatus).toBe(200);
 
 		await page.getByRole('button', { name: /^edit metadata$/i }).click();
-		await page.locator('#meta-name').fill('phase-0-renamed-again');
+		await page.locator('#meta-display-name').fill('Phase 0 Renamed Again');
 		await page.getByRole('button', { name: /save metadata/i }).click();
 
 		await expect(page.getByTestId('stale-version-banner')).toBeVisible();
+		// M5: edit form must remain visible AND retain the user's draft typing
+		// so they don't have to retype after the conflict.
+		await expect(page.getByTestId('architecture-meta-edit-form')).toBeVisible();
+		await expect(page.locator('#meta-display-name')).toHaveValue('Phase 0 Renamed Again');
+
 		await page.getByRole('button', { name: /reload architecture/i }).click();
 		await expect(page.getByTestId('stale-version-banner')).toBeHidden();
+		// After Reload the panel exits edit mode so the user can see the fresh
+		// server metadata (now at v3 because of the out-of-band bump).
+		await expect(page.getByTestId('meta-version')).toHaveText('3');
+		// M5 follow-through: the user's draft survives across the Reload, so
+		// re-clicking Edit shows the in-flight text instead of overwriting it
+		// from the new server copy.
+		await page.getByRole('button', { name: /^edit metadata$/i }).click();
+		await expect(page.locator('#meta-display-name')).toHaveValue('Phase 0 Renamed Again');
+		await page.getByRole('button', { name: /^cancel$/i }).click();
+	});
+
+	test('archive with stale version surfaces the banner; reload then archive succeeds', async ({
+		page
+	}) => {
+		// Seed one architecture so the detail page has something to render.
+		backend.create({ name: 'archive-target', description: 'doomed' });
+		await page.goto('/architectures/arch-1');
+		await expect(page.getByTestId('meta-version')).toHaveText('1');
+
+		// Bump the server to v2 while the client still believes it is on v1.
+		const bumpStatus = await page.evaluate(async () => {
+			const res = await fetch('/v1/architectures/update', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					id: 'arch-1',
+					expected_version: 1,
+					description: 'out-of-band'
+				})
+			});
+			return res.status;
+		});
+		expect(bumpStatus).toBe(200);
+
+		// First archive call uses the stale v1 — should 409.
+		const staleArchiveStatus = await page.evaluate(async () => {
+			const res = await fetch('/v1/architectures/archive', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id: 'arch-1', expected_version: 1 })
+			});
+			return res.status;
+		});
+		expect(staleArchiveStatus).toBe(409);
+
+		// Reload picks up the fresh v2.
+		await page.reload();
+		await expect(page.getByTestId('meta-version')).toHaveText('2');
+
+		// Second archive call with the right version succeeds and flips status.
+		const goodArchiveStatus = await page.evaluate(async () => {
+			const res = await fetch('/v1/architectures/archive', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id: 'arch-1', expected_version: 2 })
+			});
+			return res.status;
+		});
+		expect(goodArchiveStatus).toBe(200);
+
+		await page.reload();
+		await expect(page.getByTestId('meta-status')).toHaveText('archived');
 		await expect(page.getByTestId('meta-version')).toHaveText('3');
 	});
 
