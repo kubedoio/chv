@@ -1,0 +1,470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chv.kubedo.io/schemas/chvarchitecture-v1alpha1.schema.json",
+  "title": "CHVArchitecture v1alpha1",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "chv.kubedo.io/v1alpha1"
+    },
+    "kind": {
+      "const": "CHVArchitecture"
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string",
+          "enum": [
+            "dev",
+            "test",
+            "staging",
+            "production",
+            "lab"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "servers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/server"
+      }
+    },
+    "networks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/network"
+      }
+    },
+    "datastores": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/datastore"
+      }
+    },
+    "backup_targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/backup_target"
+      }
+    },
+    "backup_policies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/backup_policy"
+      }
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/image"
+      }
+    },
+    "templates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/template"
+      }
+    },
+    "instances": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/instance"
+      }
+    },
+    "ssh_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ssh_key"
+      }
+    },
+    "instance_users": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/instance_user"
+      }
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/role"
+      }
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/user"
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "named": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "server": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/named"
+        }
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "management_ip": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "compute",
+            "storage",
+            "network",
+            "management",
+            "mixed"
+          ]
+        },
+        "labels": {
+          "type": "object"
+        },
+        "resources": {
+          "type": "object"
+        },
+        "networks": {
+          "type": "object"
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "bridge",
+            "vlan",
+            "nat",
+            "isolated",
+            "routed"
+          ]
+        },
+        "bridge": {
+          "type": "string"
+        },
+        "vlan_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4094
+        },
+        "cidr": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "dns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dhcp": {
+          "type": "object"
+        }
+      }
+    },
+    "datastore": {
+      "type": "object",
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "qcow2-dir",
+            "ceph-rbd",
+            "nfs",
+            "lvm",
+            "zfs"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "object"
+        },
+        "secret_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "backup_target": {
+      "type": "object",
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "secret_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "backup_policy": {
+      "type": "object",
+      "required": [
+        "name",
+        "target"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "required": [
+        "name",
+        "source",
+        "format"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "qcow2",
+            "raw"
+          ]
+        },
+        "datastore": {
+          "type": "string"
+        }
+      }
+    },
+    "template": {
+      "type": "object",
+      "required": [
+        "name",
+        "image"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "cpu": {
+          "type": "integer"
+        },
+        "memory_mb": {
+          "type": "integer"
+        },
+        "disk_gb": {
+          "type": "integer"
+        }
+      }
+    },
+    "instance": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        },
+        "placement": {
+          "type": "object"
+        },
+        "resources": {
+          "type": "object"
+        },
+        "disks": {
+          "type": "array"
+        },
+        "networks": {
+          "type": "array"
+        },
+        "cloud_init": {
+          "type": "object"
+        },
+        "backup": {
+          "type": "object"
+        }
+      }
+    },
+    "ssh_key": {
+      "type": "object",
+      "required": [
+        "name",
+        "public_key"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        }
+      }
+    },
+    "instance_user": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sudo": {
+          "type": "boolean"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "ssh_authorized_keys": {
+          "type": "array"
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "required": [
+        "name",
+        "permissions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "user": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "auth": {
+          "type": "object"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

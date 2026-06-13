@@ -26,7 +26,7 @@ These are intentionally not part of the archival/deletion set:
 - `/docs/specs/adr/*`
 - `/docs/specs/component/*`
 - `/docs/specs/ops/*`
-- `/docs/specs/proto/*`
+- `/proto/*` (canonical proto contracts; the former `/docs/specs/proto/` mirror was removed on 2026-06-13)
 - `/docs/chv-llm-handoff-pack/*`
 - `/docs/rust-controlplane-pack/*`
 

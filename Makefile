@@ -11,7 +11,7 @@
 
 .PHONY: all build build-debug build-ui build-release release dev-install clean test fmt lint check
 .PHONY: package-deb package-rpm package-local package-smoke package-check bump-version
-.PHONY: integration-kvm integration-kvm-source integration-kvm-packages
+.PHONY: integration-kvm integration-kvm-source integration-kvm-packages check-no-println
 
 BUMP_TYPE ?= patch
 
@@ -42,6 +42,9 @@ fmt:
 
 lint:
 	cargo clippy --workspace -- -D warnings
+
+check-no-println:
+	./scripts/check-no-println.sh
 
 check:
 	./scripts/check-release-local.sh

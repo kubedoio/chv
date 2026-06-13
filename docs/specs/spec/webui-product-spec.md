@@ -1,5 +1,7 @@
 # WebUI Product Spec
 
+> **Status:** Executive summary. The canonical source for this material is [ADR-001-WebUI](../adr/001-webui-product-principles.md). Update there first; this file is a quick orientation pointer only.
+
 ## Goal
 Deliver a virtualization management UI that is better than incumbent operator experiences by being:
 - clearer

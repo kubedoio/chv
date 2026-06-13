@@ -1,5 +1,7 @@
 # WebUI Design System Spec
 
+> **Status:** Executive summary. The canonical source for this material is [ADR-005-WebUI](../adr/005-webui-design-system-direction.md). Update there first; this file is a quick orientation pointer only.
+
 ## Design goals
 - fast scanning
 - low ambiguity

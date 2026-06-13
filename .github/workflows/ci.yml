@@ -38,6 +38,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
 
+      - name: ADR-009 println!/eprintln! ban (library crates)
+        run: ./scripts/check-no-println.sh
+
       - name: cargo test
         run: cargo test --workspace
 

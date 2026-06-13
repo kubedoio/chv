@@ -1,4 +1,4 @@
-# ADR-002 WebUI Architecture Boundary
+# ADR-002-WebUI WebUI Architecture Boundary
 
 ## Status
 Accepted
