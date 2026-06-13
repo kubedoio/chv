@@ -8,8 +8,8 @@ import {
 	StaleVersionError,
 	type Architecture,
 	type ArchitectureSummary,
-	type CreateArchitectureRequest,
-	type UpdateArchitecturePatch
+	type ArchitectureDetail,
+	type CreateArchitectureRequest
 } from '$lib/bff/architectures';
 import type { MutateOpts } from './mutation.svelte';
 import { mutateWithRefresh } from './mutation.svelte';
@@ -30,8 +30,27 @@ import { mutateWithRefresh } from './mutation.svelte';
  * pages can render the StaleVersionBanner and offer a Reload action.
  */
 
-export type { Architecture, ArchitectureSummary } from '$lib/bff/architectures';
+export type {
+	Architecture,
+	ArchitectureSummary,
+	ArchitectureDetail
+} from '$lib/bff/architectures';
 export { StaleVersionError } from '$lib/bff/architectures';
+
+/**
+ * Editable subset for `update()`. Field names mirror the wire (display_name,
+ * not name) so callers don't have to translate. All fields are optional —
+ * partial updates are valid and the server treats `undefined` as "leave alone"
+ * and `null` as "clear".
+ */
+export interface ArchitectureEditableFields {
+	display_name?: string | null;
+	description?: string | null;
+	environment?: string | null;
+	design_graph_json?: string | null;
+	latest_yaml?: string | null;
+	latest_version_id?: string | null;
+}
 
 const REFRESH_PATTERNS = ['architectures:'];
 
@@ -46,7 +65,7 @@ class ArchitectureStore {
 		try {
 			const token = getStoredToken() ?? undefined;
 			const res = await listArchitectures({}, token);
-			this.items = res.items ?? [];
+			this.items = res.architectures ?? [];
 			return this.items;
 		} catch (err) {
 			this.error = err instanceof Error ? err.message : 'Failed to load architectures';
@@ -56,10 +75,9 @@ class ArchitectureStore {
 		}
 	}
 
-	async get(id: string): Promise<Architecture> {
+	async get(id: string): Promise<ArchitectureDetail> {
 		const token = getStoredToken() ?? undefined;
-		const res = await getArchitecture({ id }, token);
-		return res.architecture;
+		return getArchitecture({ id }, token);
 	}
 
 	async create(
@@ -85,14 +103,16 @@ class ArchitectureStore {
 	async update(
 		id: string,
 		expectedVersion: number,
-		patch: UpdateArchitecturePatch,
+		fields: ArchitectureEditableFields,
 		opts: MutateOpts<Architecture> = {}
 	): Promise<Architecture> {
 		const token = getStoredToken() ?? undefined;
 		return mutateWithRefresh<Architecture>(
 			async () => {
+				// FLAT request shape: id + expected_version + the editable fields,
+				// no `patch` wrapper. Matches the BFF wire (PR review B3).
 				const res = await updateArchitecture(
-					{ id, expected_version: expectedVersion, patch },
+					{ id, expected_version: expectedVersion, ...fields },
 					token
 				);
 				return res.architecture;

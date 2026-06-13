@@ -3,7 +3,7 @@
 
 	let { architecture }: { architecture: ArchitectureSummary } = $props();
 
-	function formatDate(iso: string): string {
+	function formatDate(iso: string | null): string {
 		if (!iso) return '—';
 		try {
 			return new Date(iso).toLocaleString();
@@ -12,10 +12,16 @@
 		}
 	}
 
+	// Card heading prefers `display_name` (the human label), falling back to
+	// `name` (the slug). The slug is always present on the wire.
+	const heading = $derived(architecture.display_name ?? architecture.name);
+	const description = $derived(architecture.description ?? '');
+	const environment = $derived(architecture.environment ?? '');
+
 	const envClass = $derived(
-		architecture.environment === 'production'
+		environment === 'production'
 			? 'env-prod'
-			: architecture.environment === 'staging'
+			: environment === 'staging'
 				? 'env-staging'
 				: 'env-dev'
 	);
@@ -25,19 +31,21 @@
 	href={`/architectures/${architecture.id}`}
 	class="card"
 	data-testid="architecture-card"
-	aria-label={`Open architecture ${architecture.name}`}
+	aria-label={`Open architecture ${heading}`}
 >
 	<div class="card-header">
 		<div class="card-title" data-testid="architecture-card-name">
-			{architecture.name}
+			{heading}
 		</div>
-		<span class="env-badge {envClass}" aria-label={`Environment ${architecture.environment}`}>
-			{architecture.environment}
-		</span>
+		{#if environment}
+			<span class="env-badge {envClass}" aria-label={`Environment ${environment}`}>
+				{environment}
+			</span>
+		{/if}
 	</div>
 
-	{#if architecture.description}
-		<p class="card-description">{architecture.description}</p>
+	{#if description}
+		<p class="card-description">{description}</p>
 	{/if}
 
 	<div class="card-meta">

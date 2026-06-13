@@ -2,7 +2,10 @@
 	import { goto } from '$app/navigation';
 	import Button from '$lib/components/primitives/Button.svelte';
 	import { architectureStore } from '$lib/stores/architecture-store.svelte';
-	import type { ArchitectureEnvironment } from '$lib/bff/architectures';
+	import {
+		KNOWN_ARCHITECTURE_ENVIRONMENTS,
+		type ArchitectureEnvironment
+	} from '$lib/bff/architectures';
 
 	let name = $state('');
 	let description = $state('');
@@ -27,9 +30,14 @@
 		if (!canSubmit) return;
 		submitting = true;
 		try {
+			// `environment` is a free-form string on the wire; we narrow the
+			// dropdown to the three well-known values for now but the wire
+			// accepts anything. `description` becomes null when the textarea
+			// is empty so the server knows the field is intentionally absent.
+			const trimmedDescription = description.trim();
 			const arch = await architectureStore.create({
 				name: name.trim(),
-				description: description.trim() || undefined,
+				description: trimmedDescription.length > 0 ? trimmedDescription : null,
 				environment
 			});
 			goto(`/architectures/${arch.id}`);
@@ -85,9 +93,9 @@
 	<div class="field">
 		<label for="arch-environment">Environment</label>
 		<select id="arch-environment" name="environment" bind:value={environment}>
-			<option value="development">development</option>
-			<option value="staging">staging</option>
-			<option value="production">production</option>
+			{#each KNOWN_ARCHITECTURE_ENVIRONMENTS as env (env)}
+				<option value={env}>{env}</option>
+			{/each}
 		</select>
 	</div>
 

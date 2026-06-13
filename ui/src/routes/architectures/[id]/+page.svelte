@@ -27,6 +27,8 @@
 		}
 	});
 
+	const heading = $derived(current ? (current.display_name ?? current.name) : '');
+
 	function handleUpdated(next: Architecture) {
 		current = next;
 	}
@@ -43,7 +45,7 @@
 
 <svelte:head>
 	<title>
-		{current ? `${current.name} · Architecture` : 'Architecture · CellHV'}
+		{current ? `${heading} · Architecture` : 'Architecture · CellHV'}
 	</title>
 </svelte:head>
 
@@ -71,7 +73,7 @@
 				>
 					← Architectures
 				</button>
-				<h1 class="page-title" data-testid="architecture-name">{current.name}</h1>
+				<h1 class="page-title" data-testid="architecture-name">{heading}</h1>
 				<p class="page-subtitle">
 					Phase 0 metadata view. The visual designer arrives in Phase 2.
 				</p>

@@ -13,7 +13,9 @@ export const load: PageLoad = async () => {
 
 	try {
 		const res = await listArchitectures({}, token);
-		const items = res.items ?? [];
+		// The wire response is `{ architectures: [...] }` — there is no
+		// pagination wrapper for Phase 0 (PR review B1).
+		const items = res.architectures ?? [];
 		const model: ArchitecturesListModel = {
 			items,
 			state: items.length === 0 ? 'empty' : 'ready'
