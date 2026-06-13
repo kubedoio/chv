@@ -1,5 +1,7 @@
 # WebUI State and Tasks Spec
 
+> **Status:** Executive summary. The canonical source for this material is [ADR-004-WebUI](../adr/004-webui-task-and-state-model.md). Update there first; this file is a quick orientation pointer only.
+
 ## Backend-aligned state model
 
 ### Node states

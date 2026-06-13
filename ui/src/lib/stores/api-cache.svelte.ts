@@ -14,7 +14,7 @@ export function invalidate(key: CacheKey): void {
 	// TODO: integrate structured logger instead of console
 	// eslint-disable-next-line no-console
 	console.warn(
-		`[api-cache] invalidate("${key}") is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004.`
+		`[api-cache] invalidate("${key}") is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004-WebUI.`
 	);
 	liveState.invalidateCache(key);
 }
@@ -23,7 +23,7 @@ export function invalidatePattern(prefix: CacheKey): void {
 	// TODO: integrate structured logger instead of console
 	// eslint-disable-next-line no-console
 	console.warn(
-		`[api-cache] invalidatePattern("${prefix}") is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004.`
+		`[api-cache] invalidatePattern("${prefix}") is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004-WebUI.`
 	);
 	liveState.invalidateCachePattern(prefix);
 }
@@ -32,7 +32,7 @@ export function getCacheEntry<T>(_key: CacheKey): CacheEntry<T> | undefined {
 	// TODO: integrate structured logger instead of console
 	// eslint-disable-next-line no-console
 	console.warn(
-		`[api-cache] getCacheEntry() is deprecated. Use liveState.cachedFetch() for read access, or mutateWithRefresh() for post-mutation refresh. See ADR-004.`
+		`[api-cache] getCacheEntry() is deprecated. Use liveState.cachedFetch() for read access, or mutateWithRefresh() for post-mutation refresh. See ADR-004-WebUI.`
 	);
 	return undefined; // Deprecated — consumers should migrate to liveState
 }
@@ -41,7 +41,7 @@ export function clearCache(): void {
 	// TODO: integrate structured logger instead of console
 	// eslint-disable-next-line no-console
 	console.warn(
-		`[api-cache] clearCache() is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004.`
+		`[api-cache] clearCache() is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004-WebUI.`
 	);
 	liveState.clearCache();
 }

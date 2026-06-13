@@ -123,10 +123,11 @@ so reviewers must manually enforce conformance for any new file added to `proto/
 
 #### Tracking
 
-A follow-up issue should be filed at merge time titled "Plan v2 proto migration to clear
-buf lint deferrals" and linked from this section. Until that issue exists, the deferral
-is documented here but not scheduled — that is acceptable while CHV is pre-1.0 but must
-not persist past the first stable release.
+The deferral is currently tracked only by this ADR section — no separate issue exists yet.
+A follow-up issue titled "Plan v2 proto migration to clear buf lint deferrals" must be
+filed and linked here before the first stable release. Until that issue exists, the
+deferral is documented but not scheduled — that is acceptable while CHV is pre-1.0 but
+must not persist past 1.0.0.
 
 ### 5. Pagination
 

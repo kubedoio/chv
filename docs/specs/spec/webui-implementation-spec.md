@@ -1,5 +1,7 @@
 # WebUI Implementation Spec
 
+> **Status:** Executive summary. The canonical source for this material is [component/webui.md](../component/webui.md). Update there first; this file is a quick orientation pointer only.
+
 ## Stack
 - SvelteKit
 - TypeScript

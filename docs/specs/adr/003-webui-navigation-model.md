@@ -1,7 +1,7 @@
-# ADR-003 WebUI Navigation Model
+# ADR-003-WebUI WebUI Navigation Model
 
 ## Status
-Accepted
+Superseded by ADR-006-WebUI (2026-06-13)
 
 ## Date
 2026-04-15

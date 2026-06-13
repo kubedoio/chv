@@ -1,4 +1,4 @@
-# ADR-001 WebUI Product Principles
+# ADR-001-WebUI WebUI Product Principles
 
 ## Status
 Accepted

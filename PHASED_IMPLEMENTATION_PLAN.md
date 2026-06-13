@@ -23,7 +23,7 @@ As of Sprint 15 (PRs 49-52), the platform has transitioned from early-MVP toward
 **Known partials that remain production-relevant:**
 - Disk migration orchestration is partial: control-plane phases, reaper, flow control, and mTLS exist, but dirty sync rounds, convergence reporting from stord, and paused final dirty flush remain incomplete.
 - `chv-nwd` scope is kernel VXLAN plus explicit FDB management; eBPF is for policy/rate limiting only and is not the overlay datapath.
-- `chv-stord` local file and local block/LVM paths are the active backend focus. iSCSI and Ceph RBD remain planned backend adapters, not complete production backends.
+- `chv-stord` ships local file, local block/LVM, iSCSI, and Ceph RBD adapters (`crates/chv-stord-backends/src/{local,lvm,iscsi,ceph}.rs`) implementing the `StorageBackend` trait. iSCSI and Ceph adapters are integrated and unit-tested but have not yet been validated against production-grade external arrays/clusters; field hardening (multi-portal failover, RBD locking edge cases, performance tuning) is the remaining work.
 - Backup/DR has SQLite pre-migration backup and schema/API surfaces, but still lacks the VM/volume backup execution engine, off-host shipping, restore validation, and operator-run DR automation.
 
 ---
