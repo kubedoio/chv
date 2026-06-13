@@ -208,15 +208,14 @@ pub async fn download_export(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
 
     #[test]
     fn path_traversal_detected() {
         let base = PathBuf::from("/var/lib/chv/vms");
-        let bad = PathBuf::from("/var/lib/chv/vms/../etc/passwd");
         // Note: PathBuf::starts_with compares components, so canonicalize first
-        // as the production code does. Here we simulate the canonicalized result.
+        // as the production code does. Here we simulate the canonicalized result
+        // of resolving "/var/lib/chv/vms/../etc/passwd".
         let canonical_bad = PathBuf::from("/var/lib/chv/etc/passwd");
         assert!(!canonical_bad.starts_with(&base));
     }
