@@ -11,6 +11,8 @@ export async function cachedFetch<T>(key: CacheKey, fetcher: () => Promise<T>, t
 }
 
 export function invalidate(key: CacheKey): void {
+	// TODO: integrate structured logger instead of console
+	// eslint-disable-next-line no-console
 	console.warn(
 		`[api-cache] invalidate("${key}") is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004.`
 	);
@@ -18,6 +20,8 @@ export function invalidate(key: CacheKey): void {
 }
 
 export function invalidatePattern(prefix: CacheKey): void {
+	// TODO: integrate structured logger instead of console
+	// eslint-disable-next-line no-console
 	console.warn(
 		`[api-cache] invalidatePattern("${prefix}") is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004.`
 	);
@@ -25,13 +29,17 @@ export function invalidatePattern(prefix: CacheKey): void {
 }
 
 export function getCacheEntry<T>(_key: CacheKey): CacheEntry<T> | undefined {
+	// TODO: integrate structured logger instead of console
+	// eslint-disable-next-line no-console
 	console.warn(
-		`[api-cache] getCacheEntry() is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004.`
+		`[api-cache] getCacheEntry() is deprecated. Use liveState.cachedFetch() for read access, or mutateWithRefresh() for post-mutation refresh. See ADR-004.`
 	);
 	return undefined; // Deprecated — consumers should migrate to liveState
 }
 
 export function clearCache(): void {
+	// TODO: integrate structured logger instead of console
+	// eslint-disable-next-line no-console
 	console.warn(
 		`[api-cache] clearCache() is deprecated. Use liveState.invalidateAndRefresh() or mutateWithRefresh() instead. See ADR-004.`
 	);

@@ -37,6 +37,8 @@ export async function mutateWithRefresh<T>(
 					delayMs: opts.delayMs,
 				});
 			} catch (refreshErr) {
+				// TODO: integrate structured logger instead of console
+				// eslint-disable-next-line no-console
 				console.warn('[mutateWithRefresh] refresh failed after successful mutation:', refreshErr);
 			}
 		}

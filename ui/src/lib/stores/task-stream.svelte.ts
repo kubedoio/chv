@@ -1,9 +1,5 @@
 import { browser } from '$app/environment';
-
-function getStoredToken(): string | null {
-	if (typeof localStorage === 'undefined') return null;
-	return localStorage.getItem('chv-api-token');
-}
+import { getStoredToken } from '$lib/api/client';
 
 export interface TaskUpdate {
 	task_id: string;
@@ -17,13 +13,24 @@ export interface TaskUpdate {
 export class TaskStreamStore {
 	private abortCtrl: AbortController | null = null;
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-	private seen = new Set<string>();
+	// Map of task_id -> first-seen timestamp (ms). TTL-bounded so reconnects
+	// do not silently drop events that re-arrive after the window expires.
+	private seen = new Map<string, number>();
 	private pollTimer: ReturnType<typeof setInterval> | null = null;
 	status = $state<'idle' | 'connecting' | 'open' | 'error'>('idle');
 	onTaskCompleted: ((task: TaskUpdate) => void) | null = null;
 
 	private reconnectDelay = 1000;
+	private readonly initialReconnectDelay = 1000;
 	private readonly maxReconnectDelay = 30000;
+	private readonly SEEN_TTL_MS = 60_000;
+
+	private pruneSeen(): void {
+		const cutoff = Date.now() - this.SEEN_TTL_MS;
+		for (const [id, ts] of this.seen) {
+			if (ts < cutoff) this.seen.delete(id);
+		}
+	}
 
 	startPollingFallback(intervalMs = 10_000) {
 		this.stopPollingFallback();
@@ -39,17 +46,32 @@ export class TaskStreamStore {
 					},
 					body: JSON.stringify({ page: 1, page_size: 50 }),
 				});
+				if (res.status === 401) {
+					// Token invalid/expired — match SSE semantics: stop and surface error.
+					this.status = 'error';
+					this.stopPollingFallback();
+					return;
+				}
 				if (!res.ok) return;
 				const data = await res.json();
 				const terminal = ['Completed', 'Failed', 'Cancelled'];
+				this.pruneSeen();
 				for (const item of data.items || []) {
 					if (!terminal.includes(item.status)) continue;
 					if (this.seen.has(item.task_id)) continue;
-					this.seen.add(item.task_id);
-					this.onTaskCompleted?.(item);
+					this.seen.set(item.task_id, Date.now());
+					try {
+						this.onTaskCompleted?.(item);
+					} catch (cbErr) {
+						// TODO: integrate structured logger instead of console
+						// eslint-disable-next-line no-console
+						console.error('[taskStream] onTaskCompleted handler threw (polling):', cbErr);
+					}
 				}
-			} catch {
-				// Silently ignore polling errors
+			} catch (err) {
+				// TODO: integrate structured logger instead of console
+				// eslint-disable-next-line no-console
+				console.warn('[taskStream] polling fallback request failed:', err);
 			}
 		}, intervalMs);
 	}
@@ -110,7 +132,7 @@ export class TaskStreamStore {
 			}
 
 			this.status = 'open';
-			this.reconnectDelay = 1000; // Reset on successful connection
+			this.reconnectDelay = this.initialReconnectDelay; // Reset on successful connection
 
 			const reader = res.body.getReader();
 			const decoder = new TextDecoder();
@@ -129,18 +151,35 @@ export class TaskStreamStore {
 					if (line.startsWith('data:')) {
 						dataLine = line.slice(5).trim();
 					} else if (line === '' && dataLine) {
+						// Parse JSON in its own scope so handler exceptions are not
+						// silently swallowed by the malformed-message catch.
+						let payload: { items?: TaskUpdate[] } | null = null;
 						try {
-							const payload = JSON.parse(dataLine);
+							payload = JSON.parse(dataLine) as { items?: TaskUpdate[] };
+						} catch (parseErr) {
+							// TODO: integrate structured logger instead of console
+							// eslint-disable-next-line no-console
+							console.warn('[taskStream] dropping malformed SSE message:', parseErr);
+						}
+						if (payload) {
 							const items: TaskUpdate[] = payload.items ?? [];
 							const terminal = ['Completed', 'Failed', 'Cancelled'];
+							this.pruneSeen();
 							for (const task of items) {
 								if (!terminal.includes(task.status)) continue;
 								if (this.seen.has(task.task_id)) continue;
-								this.seen.add(task.task_id);
-								this.onTaskCompleted?.(task);
+								this.seen.set(task.task_id, Date.now());
+								try {
+									this.onTaskCompleted?.(task);
+								} catch (cbErr) {
+									// TODO: integrate structured logger instead of console
+									// eslint-disable-next-line no-console
+									console.error(
+										'[taskStream] onTaskCompleted handler threw (SSE):',
+										cbErr
+									);
+								}
 							}
-						} catch {
-							// Ignore malformed messages
 						}
 						dataLine = '';
 					}
@@ -161,6 +200,10 @@ export class TaskStreamStore {
 	}
 
 	disconnect() {
+		// Reset reconnect backoff and dedupe state first so a subsequent
+		// connect() starts from a clean slate.
+		this.reconnectDelay = this.initialReconnectDelay;
+		this.seen.clear();
 		this.stopPollingFallback();
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer);

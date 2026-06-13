@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * CI-breaking mutation compliance tests.
  *
@@ -13,6 +14,11 @@
  *   - src/lib/stores/mutation.svelte.ts
  *   - src/lib/stores/live-state.svelte.ts
  * The glob pattern routes/…/+page.svelte already excludes those files.
+ *
+ * This file runs under the `node` test environment (see directive above) so
+ * that `import.meta.url` and Node's `fs`/`glob` modules behave correctly. Under
+ * jsdom, `import.meta.dirname` is undefined and the suite would scan zero
+ * files — silently turning every assertion into a vacuous pass.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -30,10 +36,18 @@ describe('Mutation compliance — all pages must use mutateWithRefresh()', async
 	// which would fail in the jsdom/browser test environment.
 	const { globSync } = await import('glob');
 	const { readFileSync } = await import('fs');
-	const path = await import('path');
-	const UI_ROOT = path.resolve(import.meta.dirname, '../../../src');
+	const { fileURLToPath } = await import('node:url');
+	// Resolve src/ relative to this test file's URL. This works under any test
+	// environment (no reliance on `import.meta.dirname`) and gives an absolute
+	// filesystem path. This file lives at ui/src/lib/stores/, so ../../../src
+	// resolves to ui/src.
+	const UI_ROOT = fileURLToPath(new URL('../../../src', import.meta.url));
 
-	const files = globSync('routes/**/+page.svelte', { cwd: UI_ROOT, absolute: true });
+	// Cast to string[]: dynamic import() loses globSync's overload-based return
+	// type, which would propagate `any` into every .filter((f) => ...) below
+	// and trip strict TS noImplicitAny. We pass `absolute: true`, so the runtime
+	// shape matches string[].
+	const files = globSync('routes/**/+page.svelte', { cwd: UI_ROOT, absolute: true }) as string[];
 
 	it('scans at least one +page.svelte file', () => {
 		expect(files.length, 'No +page.svelte files found — glob pattern or path is broken').toBeGreaterThan(0);
