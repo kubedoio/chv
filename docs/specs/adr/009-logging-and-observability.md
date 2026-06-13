@@ -58,3 +58,24 @@ Use `tracing` as the unified logging framework across all Rust code. Follow thes
 - All crates must declare `tracing` as a dependency
 - Log output format is environment-configurable (pretty for dev, JSON for production)
 - Future work: OpenTelemetry trace export for cross-service request tracing
+
+## Enforcement
+
+The `println!`/`eprintln!` ban for library code (rule 1 above) is enforced by a CI gate:
+
+- **Script:** [`scripts/check-no-println.sh`](../../../scripts/check-no-println.sh) greps `crates/` for `println!`, `eprintln!`, `print!`, and `eprint!` macro invocations and exits non-zero on any match.
+- **CI step:** the `Rust checks` job in [`.github/workflows/ci.yml`](../../../.github/workflows/ci.yml) runs the script after `cargo clippy`.
+- **Local invocation:** `make check-no-println`.
+
+### Scope
+
+The hard gate applies to **library crates only** (`crates/*`), where current usage is zero. Binary crates under `cmd/*` are excluded for these documented exceptions:
+
+- `cmd/chvctl/**` — CLI tool, allowed by rule 1 to use `println!` for user-facing output.
+- `cmd/<daemon>/src/main.rs` — single `println!` for `--version` flag output, conventional CLI surface.
+- `cmd/*/build.rs` — `println!` is the documented Cargo build-script API for emitting `cargo:rustc-env` directives, not application logging.
+
+### Future tightening
+
+A follow-up may extend enforcement to `cmd/*/src/` (excluding `main.rs --version` blocks and `chvctl`) once the daemon entry points are refactored to route version output through a small helper that the gate can allow-list explicitly. Tracking this here so it does not get lost; opening a new ADR is not required.
+
