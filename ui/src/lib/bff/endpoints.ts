@@ -72,4 +72,10 @@ export const BFFEndpoints = {
 	createArchitecture: '/v1/architectures/create',
 	updateArchitecture: '/v1/architectures/update',
 	archiveArchitecture: '/v1/architectures/archive',
+
+	// Architecture Designer endpoints (Phase 1 — validation + YAML)
+	validateArchitecture: '/v1/architectures/validate',
+	validateYaml: '/v1/architectures/validate-yaml',
+	generateYaml: '/v1/architectures/generate-yaml',
+	importYaml: '/v1/architectures/import-yaml'
 } as const;

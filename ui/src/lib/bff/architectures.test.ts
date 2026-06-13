@@ -15,7 +15,12 @@ import {
 	createArchitecture,
 	updateArchitecture,
 	archiveArchitecture,
-	type ArchitectureSummary
+	validateArchitecture,
+	validateYaml,
+	generateYaml,
+	importYaml,
+	type ArchitectureSummary,
+	type ValidationResult
 } from './architectures';
 
 const SUMMARY: ArchitectureSummary = {
@@ -227,6 +232,129 @@ describe('architectures BFF wrapper — wire shape', () => {
 			await expect(
 				archiveArchitecture({ id: 'arch-1', expected_version: 1 })
 			).rejects.toBe(otherErr);
+		});
+	});
+});
+
+// ─── Phase 1: validation + YAML wrappers ────────────────────────────────
+
+const VALID_RESULT: ValidationResult = {
+	status: 'valid',
+	summary: { errors: 0, warnings: 0, info: 0 },
+	findings: []
+};
+
+const INVALID_RESULT: ValidationResult = {
+	status: 'invalid',
+	summary: { errors: 1, warnings: 0, info: 0 },
+	findings: [
+		{
+			severity: 'error',
+			code: 'INVALID_CIDR',
+			message: 'CIDR is not parseable',
+			path: 'networks[0].cidr',
+			resource_ref: 'networks/lan',
+			blocking: true,
+			suggestion: 'Use a valid IPv4 CIDR like 10.0.0.0/24'
+		}
+	]
+};
+
+describe('architectures BFF wrapper — Phase 1 validation + YAML', () => {
+	beforeEach(() => {
+		vi.mocked(bffFetch).mockReset();
+	});
+
+	describe('validateArchitecture', () => {
+		it('POSTs the id and returns the ValidationResult verbatim', async () => {
+			vi.mocked(bffFetch).mockResolvedValue(INVALID_RESULT);
+
+			const res = await validateArchitecture({ id: 'arch-1' });
+
+			expect(res).toEqual(INVALID_RESULT);
+			expect(bffFetch).toHaveBeenCalledWith(
+				expect.stringMatching(/architectures\/validate$/),
+				expect.objectContaining({
+					method: 'POST',
+					body: JSON.stringify({ id: 'arch-1' })
+				})
+			);
+		});
+
+		it('forwards the optional token to bffFetch', async () => {
+			vi.mocked(bffFetch).mockResolvedValue(VALID_RESULT);
+
+			await validateArchitecture({ id: 'arch-1' }, 'tok');
+
+			expect(bffFetch).toHaveBeenCalledWith(
+				expect.any(String),
+				expect.objectContaining({ token: 'tok' })
+			);
+		});
+
+		it('rethrows BFFErrors so callers can branch on them', async () => {
+			const boom = new BFFError('boom', 500, 'INTERNAL');
+			vi.mocked(bffFetch).mockRejectedValue(boom);
+
+			await expect(validateArchitecture({ id: 'arch-1' })).rejects.toBe(boom);
+		});
+	});
+
+	describe('validateYaml', () => {
+		it('POSTs the YAML body and returns the ValidationResult', async () => {
+			vi.mocked(bffFetch).mockResolvedValue(VALID_RESULT);
+
+			const res = await validateYaml({ yaml: 'kind: Topology\n' });
+
+			expect(res).toEqual(VALID_RESULT);
+			expect(bffFetch).toHaveBeenCalledWith(
+				expect.stringMatching(/architectures\/validate-yaml$/),
+				expect.objectContaining({
+					method: 'POST',
+					body: JSON.stringify({ yaml: 'kind: Topology\n' })
+				})
+			);
+		});
+	});
+
+	describe('generateYaml', () => {
+		it('POSTs the id and returns the YAML string', async () => {
+			vi.mocked(bffFetch).mockResolvedValue({ yaml: 'kind: Topology\nname: app\n' });
+
+			const res = await generateYaml({ id: 'arch-1' });
+
+			expect(res.yaml).toBe('kind: Topology\nname: app\n');
+			expect(bffFetch).toHaveBeenCalledWith(
+				expect.stringMatching(/architectures\/generate-yaml$/),
+				expect.objectContaining({
+					method: 'POST',
+					body: JSON.stringify({ id: 'arch-1' })
+				})
+			);
+		});
+
+		it('lets a 422 GRAPH_EMPTY BFFError propagate so the UI can render an empty state', async () => {
+			const empty = new BFFError('Graph is empty', 422, 'GRAPH_EMPTY');
+			vi.mocked(bffFetch).mockRejectedValue(empty);
+
+			await expect(generateYaml({ id: 'arch-1' })).rejects.toBe(empty);
+		});
+	});
+
+	describe('importYaml', () => {
+		it('POSTs id+yaml and returns the wrapped ValidationResult', async () => {
+			vi.mocked(bffFetch).mockResolvedValue({ result: INVALID_RESULT });
+
+			const res = await importYaml({ id: 'arch-1', yaml: 'kind: Topology\n' });
+
+			expect(res.result).toEqual(INVALID_RESULT);
+			expect(bffFetch).toHaveBeenCalledWith(
+				expect.stringMatching(/architectures\/import-yaml$/),
+				expect.objectContaining({
+					method: 'POST',
+					body: JSON.stringify({ id: 'arch-1', yaml: 'kind: Topology\n' })
+				})
+			);
 		});
 	});
 });
