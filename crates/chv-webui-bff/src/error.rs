@@ -13,6 +13,11 @@ pub enum BffError {
     Forbidden(String),
     Conflict(String),
     TooManyRequests(String),
+    /// Endpoint exists in the routing surface but is not yet wired to a real
+    /// implementation. Mapped to HTTP 501 with `code: "NOT_IMPLEMENTED"` so
+    /// callers get a deterministic signal during phased rollouts. The string
+    /// payload describes the phase / reason (e.g., `"phase 0"`).
+    NotImplemented(String),
     QuotaExceeded {
         resource: String,
         limit: i64,
@@ -39,6 +44,9 @@ impl IntoResponse for BffError {
             BffError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), "CONFLICT"),
             BffError::TooManyRequests(msg) => {
                 (StatusCode::TOO_MANY_REQUESTS, msg.clone(), "RATE_LIMITED")
+            }
+            BffError::NotImplemented(msg) => {
+                (StatusCode::NOT_IMPLEMENTED, msg.clone(), "NOT_IMPLEMENTED")
             }
             BffError::QuotaExceeded {
                 resource,
@@ -78,6 +86,18 @@ impl From<chv_controlplane_store::StoreError> for BffError {
                     "{} {} was modified by another request (stale generation)",
                     entity, id
                 ))
+            }
+            chv_controlplane_store::StoreError::StaleVersion {
+                entity,
+                id,
+                current,
+                expected,
+            } => BffError::Conflict(format!(
+                "{} {} stale version: client sent {expected}, current is {current}",
+                entity, id
+            )),
+            chv_controlplane_store::StoreError::NotImplemented { reason } => {
+                BffError::NotImplemented(reason.to_string())
             }
             _ => BffError::Internal(err.to_string()),
         }
