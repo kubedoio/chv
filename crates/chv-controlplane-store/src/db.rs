@@ -33,8 +33,17 @@ pub enum StoreError {
         id: String,
         incoming: i64,
     },
+    #[error("stale version for {entity} '{id}': expected {expected}, current {current}")]
+    StaleVersion {
+        entity: &'static str,
+        id: String,
+        current: i64,
+        expected: i64,
+    },
     #[error("invalid store configuration: {reason}")]
     InvalidConfiguration { reason: String },
+    #[error("not implemented: {reason}")]
+    NotImplemented { reason: &'static str },
 }
 
 #[derive(Debug, Clone, Deserialize)]
