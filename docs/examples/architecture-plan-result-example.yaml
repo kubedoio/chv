@@ -1,0 +1,42 @@
+plan_id: plan_01HX_EXAMPLE
+architecture_id: arch_01HX_EXAMPLE
+architecture_version: 3
+status: requires_confirmation
+mode: apply
+summary:
+  create: 5
+  update: 1
+  delete: 0
+  replace: 0
+  warnings: 1
+changes:
+  - action: create
+    resource_type: network
+    resource_name: tenant-prod
+    resource_ref: networks/tenant-prod
+    description: Create VLAN-backed network tenant-prod on bridge chv-br0
+    risk: low
+    requires_confirmation: false
+
+  - action: create
+    resource_type: image
+    resource_name: ubuntu-24.04
+    resource_ref: images/ubuntu-24.04
+    description: Register image ubuntu-24.04 in datastore local-nvme
+    risk: low
+    requires_confirmation: false
+
+  - action: create
+    resource_type: instance
+    resource_name: app-01
+    resource_ref: instances/app-01
+    description: Create instance app-01 on chv-node-01
+    risk: medium
+    requires_confirmation: false
+
+warnings:
+  - severity: warning
+    code: STATIC_IP_NEAR_DHCP_RANGE
+    message: Static IP 10.120.0.21 is outside DHCP range but in the same subnet. Confirm IP management policy.
+    resource_ref: instances/app-01
+    blocking: false

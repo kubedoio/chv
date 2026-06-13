@@ -27,6 +27,21 @@ This directory indexes all Architecture Decision Records for CHV. The canonical 
 | [ADR-004-WebUI](../specs/adr/004-webui-task-and-state-model.md) | WebUI Task and State Model | **Accepted** | Tasks and state are first-class UI objects. Every mutation creates a task. Defines task states and resource health states. |
 | [ADR-005-WebUI](../specs/adr/005-webui-design-system-direction.md) | WebUI Design System Direction | **Accepted** | Modern but restrained, enterprise-serious, light-mode first, high information density, border-first surfaces, strong typography. Avoids copying Proxmox/Xen Orchestra visually. |
 
+## Architecture Designer ADRs
+
+These ADRs scope the Architecture Designer feature (design-time topology editor with YAML source-of-truth, validation, plan/apply via the CHV task system, and drift detection). All currently **Proposed**; acceptance is per-ADR pending review.
+
+| ADR | Title | Status | Summary |
+|-----|-------|--------|---------|
+| [ADR-001-Designer](../specs/adr/001-designer-first-class-surface.md) | Architecture Designer as First-Class Surface | **Proposed** | Adds a `DESIGN` group above Fleet Overview with `Architecture Designer` and `Saved Topologies` routes. Designer is the design-time view; Fleet Overview remains the operational view. |
+| [ADR-002-Designer](../specs/adr/002-designer-svelte-flow.md) | Use Svelte Flow for the Editable Designer Canvas | **Proposed** | Adopts Svelte Flow for the editable canvas; existing CHV live-topology canvas stays as the read-only operational view. |
+| [ADR-003-Designer](../specs/adr/003-designer-yaml-source-of-truth.md) | CHVArchitecture YAML as Source of Truth | **Proposed** | `CHVArchitecture` YAML (`apiVersion: chv.kubedo.io/v1alpha1`) is the authoritative serialized form; the graph is derived. Schema lives at [`docs/schemas/chvarchitecture-v1alpha1.schema.json`](../schemas/chvarchitecture-v1alpha1.schema.json). |
+| [ADR-004-Designer](../specs/adr/004-designer-validation-plan-apply.md) | Validation-, Plan-, and Task-Gated Deployment | **Proposed** | Deployment is forbidden without static validation, fleet consistency check, and a confirmed plan. Apply runs through the existing CHV task system. |
+| [ADR-005-Designer](../specs/adr/005-designer-separate-desired-vs-live.md) | Separate Desired Topology from Live Fleet Topology | **Proposed** | The Designer's desired-state graph is intentionally separate from live-fleet topology data. Drift detection compares baseline vs current. |
+| [ADR-006-Designer](../specs/adr/006-designer-no-tosca-engine.md) | Do Not Adopt a Generic Cloudify/TOSCA Engine | **Proposed** | The Designer borrows the topology-orchestrator pattern but stays scoped to CHV-native virtualization resources. No generic TOSCA/Cloudify DSL compatibility. |
+
+Feature documentation (contracts, prompts, research notes, READMEs) lives at [`docs/specs/architecture-designer/`](../specs/architecture-designer/). Component specs live alongside other component specs at [`docs/specs/component/architecture-designer-*.md`](../specs/component/). The implementation roadmap is at [`docs/plans/2026-06-13-architecture-designer-roadmap.md`](../plans/2026-06-13-architecture-designer-roadmap.md).
+
 ## Lifecycle
 
 ```
@@ -34,6 +49,16 @@ PROPOSED → ACCEPTED → (SUPERSEDED by ADR-XXX or DEPRECATED)
 ```
 
 Do not delete old ADRs. When a decision changes, write a new ADR that references and supersedes the old one.
+
+## Naming Convention
+
+ADRs use suffixes to disambiguate parallel namespaces with overlapping numbering:
+
+- **Backend & Infrastructure ADRs** use no suffix (e.g., `ADR-001`).
+- **Web UI ADRs** use the `-WebUI` suffix (e.g., `ADR-001-WebUI`).
+- **Architecture Designer ADRs** use the `-Designer` suffix (e.g., `ADR-001-Designer`).
+
+Cross-references to a non-backend ADR must include the suffix.
 
 ## Contributing
 
