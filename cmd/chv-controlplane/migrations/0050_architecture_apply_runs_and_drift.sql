@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS architecture_apply_runs (
     architecture_version_id text NOT NULL REFERENCES architecture_versions (id) ON DELETE CASCADE,
     plan_id text REFERENCES architecture_plans (id) ON DELETE SET NULL,
     task_id text,
-    status text NOT NULL DEFAULT 'queued',
+    status text NOT NULL DEFAULT 'queued'
+        CHECK (status IN (
+            'queued','running','succeeded','partially_failed','failed','cancelled'
+        )),
     started_at text,
     finished_at text,
     requested_by text,
@@ -44,7 +47,8 @@ CREATE TABLE IF NOT EXISTS architecture_drift_reports (
     architecture_id text NOT NULL REFERENCES architecture_topologies (id) ON DELETE CASCADE,
     baseline_version_id text NOT NULL REFERENCES architecture_versions (id) ON DELETE CASCADE,
     inventory_snapshot_id text REFERENCES inventory_snapshots (id) ON DELETE SET NULL,
-    status text NOT NULL DEFAULT 'unknown',
+    status text NOT NULL DEFAULT 'unknown'
+        CHECK (status IN ('unknown','no_drift','drifted','check_failed')),
     summary_json text,
     findings_json text,
     created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))

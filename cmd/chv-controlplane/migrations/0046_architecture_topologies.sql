@@ -9,13 +9,21 @@ CREATE TABLE IF NOT EXISTS architecture_topologies (
     display_name text,
     description text,
     environment text,
-    status text NOT NULL DEFAULT 'draft',
+    status text NOT NULL DEFAULT 'draft'
+        CHECK (status IN (
+            'draft','valid','invalid','planned','applying','applied',
+            'drifted','failed','archived'
+        )),
     owner_user_id text,
     design_graph_json text,
     latest_yaml text,
     latest_version_id text,
-    last_validation_status text,
-    last_fleet_check_status text,
+    last_validation_status text
+        CHECK (last_validation_status IS NULL
+               OR last_validation_status IN ('unknown','passed','failed')),
+    last_fleet_check_status text
+        CHECK (last_fleet_check_status IS NULL
+               OR last_fleet_check_status IN ('unknown','passed','failed')),
     last_plan_id text,
     last_apply_run_id text,
     last_apply_task_id text,

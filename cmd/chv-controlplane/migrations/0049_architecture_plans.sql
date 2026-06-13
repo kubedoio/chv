@@ -1,18 +1,22 @@
 -- Architecture Designer: plan snapshots.
 -- A plan is generated from a specific architecture_version + inventory snapshot.
 -- Plans expire (default 15 minutes from created_at, set by application code per
--- ADR-004-Designer) so stale confirmation tokens cannot be applied. The
--- inventory_snapshots table is created by migration 0049; SQLite resolves the
--- FK lazily at row-insert time, so forward reference here is intentional and
--- safe.
+-- ADR-004-Designer) so stale confirmation tokens cannot be applied.
+-- inventory_snapshots is created by migration 0048 so its FK is resolvable at
+-- table-create time and at row-insert time alike.
 
 CREATE TABLE IF NOT EXISTS architecture_plans (
     id text PRIMARY KEY,
     architecture_id text NOT NULL REFERENCES architecture_topologies (id) ON DELETE CASCADE,
     architecture_version_id text NOT NULL REFERENCES architecture_versions (id) ON DELETE CASCADE,
     inventory_snapshot_id text REFERENCES inventory_snapshots (id) ON DELETE SET NULL,
-    mode text NOT NULL,
-    status text NOT NULL DEFAULT 'draft',
+    mode text NOT NULL
+        CHECK (mode IN ('dry_run','confirm')),
+    status text NOT NULL DEFAULT 'draft'
+        CHECK (status IN (
+            'draft','failed_validation','requires_confirmation','ready_to_apply',
+            'applying','applied','failed','expired','discarded'
+        )),
     plan_json text,
     summary_json text,
     created_by text,
