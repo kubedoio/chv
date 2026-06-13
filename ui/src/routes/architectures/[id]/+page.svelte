@@ -3,25 +3,43 @@
 	import Button from '$lib/components/primitives/Button.svelte';
 	import ArchitectureMetaPanel from '$lib/components/architectures/dashboard/ArchitectureMetaPanel.svelte';
 	import StaleVersionBanner from '$lib/components/architectures/dashboard/StaleVersionBanner.svelte';
+	import ValidationFindingsPanel from '$lib/components/architectures/dashboard/ValidationFindingsPanel.svelte';
+	import YamlSidePanel from '$lib/components/architectures/dashboard/YamlSidePanel.svelte';
 	import { liveState } from '$lib/stores/live-state.svelte';
-	import type { Architecture } from '$lib/bff/architectures';
+	import { architectureStore } from '$lib/stores/architecture-store.svelte';
+	import { BFFError } from '$lib/bff/client';
+	import type { Architecture, ValidationResult } from '$lib/bff/architectures';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 	const detail = $derived(data.detail);
 
-	// Local mirror of the loaded architecture so inline edits can update the UI
-	// without a full page reload. The +page.ts loader is the source of truth on
-	// initial load and after the user clicks "Reload" on the stale-version banner.
-	// We start at null and let the $effect below sync from the loader's data;
-	// this avoids capturing the initial prop value at component creation time.
 	let current = $state<Architecture | null>(null);
 	let staleVersion = $state(false);
+
+	// Tab state. The Validation and YAML tabs are Phase 1 additions; Overview
+	// remains the default so existing playwright tests stay green.
+	type Tab = 'overview' | 'yaml' | 'validation';
+	let activeTab = $state<Tab>('overview');
+
+	// Validation panel state. Findings are NOT persisted server-side; we keep
+	// the latest result locally and re-fetch when the user clicks Re-validate
+	// or re-enters the tab from a fresh load.
+	let validationResult = $state<ValidationResult | null>(null);
+	let validating = $state(false);
+
+	// YAML side panel state. We also lazy-load on first tab activation.
+	let yamlContent = $state<string | null>(null);
+	let yamlLoading = $state(false);
+	let yamlEmptyReason = $state<string | undefined>(undefined);
 
 	$effect(() => {
 		if (detail.state === 'ready') {
 			current = detail.architecture;
 			staleVersion = false;
+			// Seed the YAML panel from the loader payload so a freshly imported
+			// topology shows its YAML without requiring a Generate click.
+			yamlContent = detail.latestYaml;
 		} else {
 			current = null;
 		}
@@ -40,6 +58,36 @@
 	async function handleReload() {
 		staleVersion = false;
 		await liveState.invalidateAndRefresh({ patterns: ['architectures:'], detailId: current?.id });
+	}
+
+	async function handleRevalidate() {
+		if (!current || validating) return;
+		validating = true;
+		try {
+			validationResult = await architectureStore.validate(current.id);
+		} catch {
+			// mutateWithRefresh has already toasted the error.
+		} finally {
+			validating = false;
+		}
+	}
+
+	async function handleGenerateYaml() {
+		if (!current || yamlLoading) return;
+		yamlLoading = true;
+		yamlEmptyReason = undefined;
+		try {
+			yamlContent = await architectureStore.generateYaml(current.id);
+		} catch (err) {
+			if (err instanceof BFFError && err.code === 'GRAPH_EMPTY') {
+				yamlContent = null;
+				yamlEmptyReason = 'This topology has no graph yet — design the topology first (Phase 2 canvas) or import YAML.';
+			} else {
+				yamlEmptyReason = err instanceof Error ? err.message : 'Failed to generate YAML';
+			}
+		} finally {
+			yamlLoading = false;
+		}
 	}
 </script>
 
@@ -75,7 +123,7 @@
 				</button>
 				<h1 class="page-title" data-testid="architecture-name">{heading}</h1>
 				<p class="page-subtitle">
-					Phase 0 metadata view. The visual designer arrives in Phase 2.
+					Phase 1 detail view. The visual designer arrives in Phase 2.
 				</p>
 			</div>
 		</header>
@@ -90,14 +138,78 @@
 			onStaleVersion={handleStaleVersion}
 		/>
 
-		<section class="canvas-placeholder" aria-label="Designer canvas placeholder">
-			<div class="placeholder-title">Designer canvas coming in Phase 2</div>
-			<p class="placeholder-text">
-				This pane will host the Svelte Flow canvas, node palette and inspector
-				once the YAML model and validator land. For now, drafts can be created
-				and renamed; the canvas, YAML editor and plan view will follow.
-			</p>
-		</section>
+		<div class="tablist" role="tablist" aria-label="Architecture views">
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'overview'}
+				aria-controls="tab-panel-overview"
+				class="tab"
+				class:tab-active={activeTab === 'overview'}
+				onclick={() => (activeTab = 'overview')}
+				data-testid="tab-overview"
+			>
+				Overview
+			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'yaml'}
+				aria-controls="tab-panel-yaml"
+				class="tab"
+				class:tab-active={activeTab === 'yaml'}
+				onclick={() => (activeTab = 'yaml')}
+				data-testid="tab-yaml"
+			>
+				YAML
+			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'validation'}
+				aria-controls="tab-panel-validation"
+				class="tab"
+				class:tab-active={activeTab === 'validation'}
+				onclick={() => (activeTab = 'validation')}
+				data-testid="tab-validation"
+			>
+				Validation
+			</button>
+		</div>
+
+		{#if activeTab === 'overview'}
+			<div
+				id="tab-panel-overview"
+				class="canvas-placeholder"
+				role="tabpanel"
+				aria-labelledby="tab-overview"
+				aria-label="Designer canvas placeholder"
+			>
+				<div class="placeholder-title">Designer canvas coming in Phase 2</div>
+				<p class="placeholder-text">
+					This pane will host the Svelte Flow canvas, node palette and inspector
+					once the YAML model and validator land. For now, the YAML and Validation
+					tabs let you import topologies and see their findings.
+				</p>
+			</div>
+		{:else if activeTab === 'yaml'}
+			<div id="tab-panel-yaml" role="tabpanel" aria-labelledby="tab-yaml">
+				<YamlSidePanel
+					yaml={yamlContent}
+					loading={yamlLoading}
+					emptyReason={yamlEmptyReason}
+					onGenerate={handleGenerateYaml}
+				/>
+			</div>
+		{:else}
+			<div id="tab-panel-validation" role="tabpanel" aria-labelledby="tab-validation">
+				<ValidationFindingsPanel
+					result={validationResult}
+					loading={validating}
+					onRevalidate={handleRevalidate}
+				/>
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -140,6 +252,39 @@
 		margin: 0;
 		font-size: var(--text-sm);
 		color: var(--color-neutral-600);
+	}
+
+	.tablist {
+		display: flex;
+		gap: 0.25rem;
+		border-bottom: 1px solid var(--color-neutral-200);
+	}
+
+	.tab {
+		appearance: none;
+		background: none;
+		border: none;
+		padding: 0.5rem 0.85rem;
+		font-size: var(--text-sm);
+		color: var(--color-neutral-600);
+		cursor: pointer;
+		border-bottom: 2px solid transparent;
+		margin-bottom: -1px;
+	}
+
+	.tab:hover {
+		color: var(--color-neutral-900);
+	}
+
+	.tab:focus-visible {
+		outline: 2px solid var(--color-primary);
+		outline-offset: 2px;
+	}
+
+	.tab-active {
+		color: var(--color-primary);
+		border-bottom-color: var(--color-primary);
+		font-weight: 600;
 	}
 
 	.canvas-placeholder {
