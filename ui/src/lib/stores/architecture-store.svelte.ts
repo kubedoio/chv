@@ -5,11 +5,16 @@ import {
 	createArchitecture,
 	updateArchitecture,
 	archiveArchitecture,
+	validateArchitecture,
+	validateYaml,
+	generateYaml,
+	importYaml,
 	StaleVersionError,
 	type Architecture,
 	type ArchitectureSummary,
 	type ArchitectureDetail,
-	type CreateArchitectureRequest
+	type CreateArchitectureRequest,
+	type ValidationResult
 } from '$lib/bff/architectures';
 import type { MutateOpts } from './mutation.svelte';
 import { mutateWithRefresh } from './mutation.svelte';
@@ -33,7 +38,12 @@ import { mutateWithRefresh } from './mutation.svelte';
 export type {
 	Architecture,
 	ArchitectureSummary,
-	ArchitectureDetail
+	ArchitectureDetail,
+	ValidationResult,
+	ValidationSummary,
+	ValidationStatus,
+	ValidationSeverity,
+	Finding
 } from '$lib/bff/architectures';
 export { StaleVersionError } from '$lib/bff/architectures';
 
@@ -143,6 +153,81 @@ class ArchitectureStore {
 				detailId: id,
 				successMessage: 'Architecture archived',
 				errorMessage: 'Failed to archive architecture',
+				...opts
+			}
+		);
+	}
+
+	/**
+	 * Run server-side validation on a saved topology.
+	 *
+	 * Goes through `mutateWithRefresh` because the server persists
+	 * `last_validation_status` on the architecture row — the dashboard list
+	 * must refresh so the status pill stays in sync. We deliberately leave
+	 * `successMessage` undefined so re-validation does not spam toasts; the
+	 * findings panel itself surfaces the outcome.
+	 */
+	async validate(
+		id: string,
+		opts: MutateOpts<ValidationResult> = {}
+	): Promise<ValidationResult> {
+		const token = getStoredToken() ?? undefined;
+		return mutateWithRefresh<ValidationResult>(
+			async () => validateArchitecture({ id }, token),
+			{
+				patterns: REFRESH_PATTERNS,
+				detailId: id,
+				errorMessage: 'Failed to validate architecture',
+				...opts
+			}
+		);
+	}
+
+	/**
+	 * Ad-hoc validation of a YAML string with no persistent target. Used by
+	 * the Import dialog to preview findings before committing. Pure read-side
+	 * — does NOT go through `mutateWithRefresh` because nothing persists.
+	 */
+	async validateYaml(yaml: string): Promise<ValidationResult> {
+		const token = getStoredToken() ?? undefined;
+		return validateYaml({ yaml }, token);
+	}
+
+	/**
+	 * Fetch the canonical YAML serialisation of a saved topology.
+	 *
+	 * Read-only — bypasses `mutateWithRefresh`. Errors propagate so the
+	 * caller (YAML side panel) can branch on `BFFError.code === 'GRAPH_EMPTY'`
+	 * and render a helpful empty state instead of a generic toast.
+	 */
+	async generateYaml(id: string): Promise<string> {
+		const token = getStoredToken() ?? undefined;
+		const res = await generateYaml({ id }, token);
+		return res.yaml;
+	}
+
+	/**
+	 * Import a YAML blob into a topology. Goes through `mutateWithRefresh`
+	 * because the server persists `latest_yaml` and `last_validation_status`
+	 * — the dashboard list must refresh to reflect the new pill. The unwrapped
+	 * ValidationResult is returned so the dialog can surface findings inline.
+	 */
+	async importYaml(
+		id: string,
+		yaml: string,
+		opts: MutateOpts<ValidationResult> = {}
+	): Promise<ValidationResult> {
+		const token = getStoredToken() ?? undefined;
+		return mutateWithRefresh<ValidationResult>(
+			async () => {
+				const res = await importYaml({ id, yaml }, token);
+				return res.result;
+			},
+			{
+				patterns: REFRESH_PATTERNS,
+				detailId: id,
+				successMessage: 'YAML imported',
+				errorMessage: 'Failed to import YAML',
 				...opts
 			}
 		);
