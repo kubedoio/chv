@@ -35,7 +35,10 @@ pub fn parse_yaml(yaml: &str) -> Result<CHVArchitecture, ParseError> {
         .get("apiVersion")
         .and_then(|v| v.as_str())
         .unwrap_or("<missing>");
-    let kind = raw.get("kind").and_then(|v| v.as_str()).unwrap_or("<missing>");
+    let kind = raw
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
     if api_version != EXPECTED_API_VERSION || kind != EXPECTED_KIND {
         return Err(ParseError::WrongKind {
             found: format!("apiVersion={api_version} kind={kind}"),
@@ -113,8 +116,10 @@ metadata:
 
     #[test]
     fn syntax_error_is_yaml_syntax() {
-        let err = parse_yaml("apiVersion: chv.kubedo.io/v1alpha1\nkind: CHVArchitecture\n  bad: indent: thing")
-            .expect_err("syntax err");
+        let err = parse_yaml(
+            "apiVersion: chv.kubedo.io/v1alpha1\nkind: CHVArchitecture\n  bad: indent: thing",
+        )
+        .expect_err("syntax err");
         assert!(matches!(err, ParseError::YamlSyntax(_)));
     }
 

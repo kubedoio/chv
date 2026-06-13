@@ -159,7 +159,10 @@ metadata:
 "#;
         let r = validate(yaml);
         assert_eq!(r.status, ValidationStatusKind::Invalid);
-        assert!(r.findings.iter().all(|f| f.code.as_ref() == codes::SCHEMA_INVALID));
+        assert!(r
+            .findings
+            .iter()
+            .all(|f| f.code.as_ref() == codes::SCHEMA_INVALID));
     }
 
     #[test]
@@ -169,18 +172,27 @@ metadata:
             warnings: 0,
             info: 0,
         };
-        assert_eq!(ValidationStatusKind::from_summary(&s), ValidationStatusKind::Valid);
+        assert_eq!(
+            ValidationStatusKind::from_summary(&s),
+            ValidationStatusKind::Valid
+        );
         let s = ValidationSummary {
             errors: 0,
             warnings: 1,
             info: 0,
         };
-        assert_eq!(ValidationStatusKind::from_summary(&s), ValidationStatusKind::Warning);
+        assert_eq!(
+            ValidationStatusKind::from_summary(&s),
+            ValidationStatusKind::Warning
+        );
         let s = ValidationSummary {
             errors: 1,
             warnings: 0,
             info: 0,
         };
-        assert_eq!(ValidationStatusKind::from_summary(&s), ValidationStatusKind::Invalid);
+        assert_eq!(
+            ValidationStatusKind::from_summary(&s),
+            ValidationStatusKind::Invalid
+        );
     }
 }

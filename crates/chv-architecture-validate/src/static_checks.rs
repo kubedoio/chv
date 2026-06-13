@@ -19,10 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use crate::codes::{
-    ALLOWED_PERMISSIONS, DHCP_RANGE_INVALID, DUPLICATE_IP, DUPLICATE_NAME,
-    GATEWAY_OUTSIDE_NETWORK, INVALID_CIDR, INVALID_EDGE, INVALID_PERMISSION, IP_OUTSIDE_NETWORK,
-    MISSING_REFERENCE, NETWORK_CIDR_OVERLAP, RAW_SECRET_FORBIDDEN, STATIC_IP_IN_DHCP_RANGE,
-    USER_NAMESPACE_COLLISION,
+    ALLOWED_PERMISSIONS, DHCP_RANGE_INVALID, DUPLICATE_IP, DUPLICATE_NAME, GATEWAY_OUTSIDE_NETWORK,
+    INVALID_CIDR, INVALID_EDGE, INVALID_PERMISSION, IP_OUTSIDE_NETWORK, MISSING_REFERENCE,
+    NETWORK_CIDR_OVERLAP, RAW_SECRET_FORBIDDEN, STATIC_IP_IN_DHCP_RANGE, USER_NAMESPACE_COLLISION,
 };
 use crate::model::{CHVArchitecture, Network};
 
@@ -53,7 +52,12 @@ pub fn run_static_checks(model: &CHVArchitecture) -> Vec<Finding> {
 // ---------------------------------------------------------------------------
 
 fn check_duplicate_names(model: &CHVArchitecture, out: &mut Vec<Finding>) {
-    fn check<T, F: Fn(&T) -> &str>(items: &[T], section: &'static str, name_of: F, out: &mut Vec<Finding>) {
+    fn check<T, F: Fn(&T) -> &str>(
+        items: &[T],
+        section: &'static str,
+        name_of: F,
+        out: &mut Vec<Finding>,
+    ) {
         let mut seen: HashMap<&str, usize> = HashMap::new();
         for (idx, item) in items.iter().enumerate() {
             let n = name_of(item);
@@ -78,13 +82,28 @@ fn check_duplicate_names(model: &CHVArchitecture, out: &mut Vec<Finding>) {
     check(&model.servers, "servers", |s| s.name.as_str(), out);
     check(&model.networks, "networks", |s| s.name.as_str(), out);
     check(&model.datastores, "datastores", |s| s.name.as_str(), out);
-    check(&model.backup_targets, "backup_targets", |s| s.name.as_str(), out);
-    check(&model.backup_policies, "backup_policies", |s| s.name.as_str(), out);
+    check(
+        &model.backup_targets,
+        "backup_targets",
+        |s| s.name.as_str(),
+        out,
+    );
+    check(
+        &model.backup_policies,
+        "backup_policies",
+        |s| s.name.as_str(),
+        out,
+    );
     check(&model.images, "images", |s| s.name.as_str(), out);
     check(&model.templates, "templates", |s| s.name.as_str(), out);
     check(&model.instances, "instances", |s| s.name.as_str(), out);
     check(&model.ssh_keys, "ssh_keys", |s| s.name.as_str(), out);
-    check(&model.instance_users, "instance_users", |s| s.name.as_str(), out);
+    check(
+        &model.instance_users,
+        "instance_users",
+        |s| s.name.as_str(),
+        out,
+    );
     check(&model.roles, "roles", |s| s.name.as_str(), out);
     check(&model.users, "users", |s| s.name.as_str(), out);
     check(&model.projects, "projects", |s| s.name.as_str(), out);
@@ -100,16 +119,31 @@ fn check_missing_references(model: &CHVArchitecture, out: &mut Vec<Finding>) {
     let network_names: HashSet<&str> = model.networks.iter().map(|x| x.name.as_str()).collect();
     let image_names: HashSet<&str> = model.images.iter().map(|x| x.name.as_str()).collect();
     let template_names: HashSet<&str> = model.templates.iter().map(|x| x.name.as_str()).collect();
-    let instance_user_names: HashSet<&str> =
-        model.instance_users.iter().map(|x| x.name.as_str()).collect();
-    let backup_policy_names: HashSet<&str> =
-        model.backup_policies.iter().map(|x| x.name.as_str()).collect();
-    let backup_target_names: HashSet<&str> =
-        model.backup_targets.iter().map(|x| x.name.as_str()).collect();
+    let instance_user_names: HashSet<&str> = model
+        .instance_users
+        .iter()
+        .map(|x| x.name.as_str())
+        .collect();
+    let backup_policy_names: HashSet<&str> = model
+        .backup_policies
+        .iter()
+        .map(|x| x.name.as_str())
+        .collect();
+    let backup_target_names: HashSet<&str> = model
+        .backup_targets
+        .iter()
+        .map(|x| x.name.as_str())
+        .collect();
     let role_names: HashSet<&str> = model.roles.iter().map(|x| x.name.as_str()).collect();
     let ssh_key_names: HashSet<&str> = model.ssh_keys.iter().map(|x| x.name.as_str()).collect();
 
-    fn emit(out: &mut Vec<Finding>, section: &str, value: &str, path: String, ref_: Option<String>) {
+    fn emit(
+        out: &mut Vec<Finding>,
+        section: &str,
+        value: &str,
+        path: String,
+        ref_: Option<String>,
+    ) {
         out.push(Finding {
             severity: Severity::Error,
             code: Cow::Borrowed(MISSING_REFERENCE),
@@ -117,7 +151,9 @@ fn check_missing_references(model: &CHVArchitecture, out: &mut Vec<Finding>) {
             path: Some(path),
             resource_ref: ref_,
             blocking: true,
-            suggestion: Some(format!("create a {section} named '{value}' or change the reference")),
+            suggestion: Some(format!(
+                "create a {section} named '{value}' or change the reference"
+            )),
         });
     }
 
@@ -381,8 +417,12 @@ fn check_ip_attachment(model: &CHVArchitecture, out: &mut Vec<Finding>) {
     for (i, inst) in model.instances.iter().enumerate() {
         for (ni, attach) in inst.networks.iter().enumerate() {
             let Some(ip_str) = &attach.ip else { continue };
-            let Ok(ip) = ip_str.parse::<IpAddr>() else { continue };
-            let Some(cidr) = net_cidrs.get(attach.name.as_str()) else { continue };
+            let Ok(ip) = ip_str.parse::<IpAddr>() else {
+                continue;
+            };
+            let Some(cidr) = net_cidrs.get(attach.name.as_str()) else {
+                continue;
+            };
             if !cidr.contains(ip) {
                 out.push(Finding {
                     severity: Severity::Error,
@@ -420,10 +460,7 @@ fn check_gateway_in_network(model: &CHVArchitecture, out: &mut Vec<Finding>) {
             out.push(Finding {
                 severity: Severity::Error,
                 code: Cow::Borrowed(GATEWAY_OUTSIDE_NETWORK),
-                message: format!(
-                    "network '{}' gateway {gw} is outside CIDR {cidr}",
-                    net.name
-                ),
+                message: format!("network '{}' gateway {gw} is outside CIDR {cidr}", net.name),
                 path: Some(format!("networks[{i}].gateway")),
                 resource_ref: Some(format!("networks/{}", net.name)),
                 blocking: true,
@@ -444,8 +481,14 @@ fn check_dhcp_ranges(model: &CHVArchitecture, out: &mut Vec<Finding>) {
             continue;
         }
         let net_cidr = cidr_of(net);
-        let start = dhcp.range_start.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
-        let end = dhcp.range_end.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
+        let start = dhcp
+            .range_start
+            .as_deref()
+            .and_then(|s| s.parse::<IpAddr>().ok());
+        let end = dhcp
+            .range_end
+            .as_deref()
+            .and_then(|s| s.parse::<IpAddr>().ok());
 
         // If both bounds parse and the network has a CIDR, perform full check.
         match (start, end, net_cidr) {
@@ -532,8 +575,12 @@ fn check_static_ip_in_dhcp_range(model: &CHVArchitecture, out: &mut Vec<Finding>
     for (i, inst) in model.instances.iter().enumerate() {
         for (ni, attach) in inst.networks.iter().enumerate() {
             let Some(ip_str) = &attach.ip else { continue };
-            let Ok(ip) = ip_str.parse::<IpAddr>() else { continue };
-            let Some(&(start, end)) = net_dhcp.get(attach.name.as_str()) else { continue };
+            let Ok(ip) = ip_str.parse::<IpAddr>() else {
+                continue;
+            };
+            let Some(&(start, end)) = net_dhcp.get(attach.name.as_str()) else {
+                continue;
+            };
             if ip_in_range(ip, start, end) {
                 out.push(Finding {
                     severity: Severity::Warning,
@@ -563,24 +610,25 @@ fn check_duplicate_ips(model: &CHVArchitecture, out: &mut Vec<Finding>) {
     // occurrence so the user sees every collision pair.
     let mut seen: HashMap<IpAddr, String> = HashMap::new();
 
-    let record = |path: String, ip_str: &str, out: &mut Vec<Finding>, seen: &mut HashMap<IpAddr, String>| {
-        let Ok(ip) = ip_str.parse::<IpAddr>() else { return };
-        if let Some(prev_path) = seen.get(&ip) {
-            out.push(Finding {
-                severity: Severity::Error,
-                code: Cow::Borrowed(DUPLICATE_IP),
-                message: format!(
-                    "duplicate IP {ip}: also used at {prev_path}"
-                ),
-                path: Some(path.clone()),
-                resource_ref: None,
-                blocking: true,
-                suggestion: Some("assign a unique IP to each interface".to_string()),
-            });
-        } else {
-            seen.insert(ip, path);
-        }
-    };
+    let record =
+        |path: String, ip_str: &str, out: &mut Vec<Finding>, seen: &mut HashMap<IpAddr, String>| {
+            let Ok(ip) = ip_str.parse::<IpAddr>() else {
+                return;
+            };
+            if let Some(prev_path) = seen.get(&ip) {
+                out.push(Finding {
+                    severity: Severity::Error,
+                    code: Cow::Borrowed(DUPLICATE_IP),
+                    message: format!("duplicate IP {ip}: also used at {prev_path}"),
+                    path: Some(path.clone()),
+                    resource_ref: None,
+                    blocking: true,
+                    suggestion: Some("assign a unique IP to each interface".to_string()),
+                });
+            } else {
+                seen.insert(ip, path);
+            }
+        };
 
     for (i, net) in model.networks.iter().enumerate() {
         if let Some(gw) = &net.gateway {
@@ -685,13 +733,13 @@ fn walk_yaml_for_secrets(
     out: &mut Vec<Finding>,
 ) {
     match v {
-        serde_yaml::Value::String(s) => {
-            if !s.is_empty() && SECRET_FIELD_NAMES.contains(&leaf_name) {
-                out.push(make_secret_finding(
-                    path.to_string(),
-                    Some(resource_ref.to_string()),
-                ));
-            }
+        serde_yaml::Value::String(s)
+            if !s.is_empty() && SECRET_FIELD_NAMES.contains(&leaf_name) =>
+        {
+            out.push(make_secret_finding(
+                path.to_string(),
+                Some(resource_ref.to_string()),
+            ));
         }
         serde_yaml::Value::Mapping(m) => {
             for (k, val) in m {
@@ -889,7 +937,10 @@ networks:
 "#,
         );
         let f = run_static_checks(&m);
-        let dups: Vec<_> = f.iter().filter(|x| x.code.as_ref() == DUPLICATE_NAME).collect();
+        let dups: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == DUPLICATE_NAME)
+            .collect();
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].path.as_deref(), Some("networks[1].name"));
     }
@@ -908,9 +959,14 @@ templates:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == MISSING_REFERENCE).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == MISSING_REFERENCE)
+            .collect();
         assert!(!r.is_empty());
-        assert!(r.iter().any(|x| x.path.as_deref() == Some("templates[0].image")));
+        assert!(r
+            .iter()
+            .any(|x| x.path.as_deref() == Some("templates[0].image")));
     }
 
     #[test]
@@ -928,7 +984,10 @@ networks:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == INVALID_CIDR).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == INVALID_CIDR)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -950,7 +1009,10 @@ networks:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == NETWORK_CIDR_OVERLAP).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == NETWORK_CIDR_OVERLAP)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -978,7 +1040,10 @@ instances:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == DUPLICATE_IP).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == DUPLICATE_IP)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1002,7 +1067,10 @@ instances:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == IP_OUTSIDE_NETWORK).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == IP_OUTSIDE_NETWORK)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1022,7 +1090,10 @@ networks:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == GATEWAY_OUTSIDE_NETWORK).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == GATEWAY_OUTSIDE_NETWORK)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1045,7 +1116,10 @@ networks:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == DHCP_RANGE_INVALID).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == DHCP_RANGE_INVALID)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1068,7 +1142,10 @@ networks:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == DHCP_RANGE_INVALID).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == DHCP_RANGE_INVALID)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1086,7 +1163,10 @@ users:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == RAW_SECRET_FORBIDDEN).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == RAW_SECRET_FORBIDDEN)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1105,7 +1185,10 @@ roles:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == INVALID_PERMISSION).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == INVALID_PERMISSION)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1127,7 +1210,10 @@ instances:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == INVALID_EDGE).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == INVALID_EDGE)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 
@@ -1146,7 +1232,10 @@ instance_users:
 "#,
         );
         let f = run_static_checks(&m);
-        let r: Vec<_> = f.iter().filter(|x| x.code.as_ref() == USER_NAMESPACE_COLLISION).collect();
+        let r: Vec<_> = f
+            .iter()
+            .filter(|x| x.code.as_ref() == USER_NAMESPACE_COLLISION)
+            .collect();
         assert_eq!(r.len(), 1);
     }
 

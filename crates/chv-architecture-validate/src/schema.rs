@@ -15,7 +15,8 @@ use std::sync::OnceLock;
 
 use crate::codes::SCHEMA_INVALID;
 
-const SCHEMA_JSON: &str = include_str!("../../../docs/schemas/chvarchitecture-v1alpha1.schema.json");
+const SCHEMA_JSON: &str =
+    include_str!("../../../docs/schemas/chvarchitecture-v1alpha1.schema.json");
 
 fn compiled_schema() -> &'static Validator {
     static SCHEMA: OnceLock<Validator> = OnceLock::new();

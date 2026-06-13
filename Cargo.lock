@@ -832,6 +832,7 @@ dependencies = [
  "axum",
  "bcrypt",
  "chrono",
+ "chv-architecture-validate",
  "chv-common",
  "chv-controlplane-store",
  "chv-controlplane-types",

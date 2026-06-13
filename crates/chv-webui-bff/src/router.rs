@@ -387,6 +387,14 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             post(crate::handlers::architectures::generate_architecture_yaml),
         )
         .route(
+            "/v1/architectures/validate-yaml",
+            post(crate::handlers::architectures::validate_architecture_yaml),
+        )
+        .route(
+            "/v1/architectures/import-yaml",
+            post(crate::handlers::architectures::import_yaml_architecture),
+        )
+        .route(
             "/v1/architectures/plan",
             post(crate::handlers::architectures::plan_architecture),
         )

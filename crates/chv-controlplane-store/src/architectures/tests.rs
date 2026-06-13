@@ -856,7 +856,10 @@ async fn set_validation_status_happy_path_bumps_version() {
         .await
         .unwrap();
     assert_eq!(updated.version_number, 2);
-    assert_eq!(updated.last_validation_status, Some(ValidationStatus::Passed));
+    assert_eq!(
+        updated.last_validation_status,
+        Some(ValidationStatus::Passed)
+    );
     // Ensure other fields are unchanged
     assert_eq!(updated.name, created.name);
     assert_eq!(updated.description, created.description);
@@ -880,7 +883,9 @@ async fn set_validation_status_with_stale_version_returns_stale_version() {
         .await
         .unwrap_err();
     match err {
-        StoreError::StaleVersion { current, expected, .. } => {
+        StoreError::StaleVersion {
+            current, expected, ..
+        } => {
             assert_eq!(current, 2);
             assert_eq!(expected, 1);
         }
