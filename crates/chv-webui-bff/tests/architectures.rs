@@ -19,10 +19,12 @@ use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
     apply_architecture, archive_architecture, check_fleet_architecture, create_architecture,
     destroy_architecture, destroy_plan_architecture, discard_plan_architecture,
-    generate_architecture_yaml, get_architecture, get_architecture_drift, list_architecture_runs,
-    list_architecture_versions, list_architectures, plan_architecture, update_architecture,
-    validate_architecture, ArchiveArchitectureRequest, CreateArchitectureRequest,
-    GetArchitectureRequest, ListArchitecturesRequest, UpdateArchitectureRequest,
+    generate_architecture_yaml, get_architecture, get_architecture_drift, import_yaml_architecture,
+    list_architecture_runs, list_architecture_versions, list_architectures, plan_architecture,
+    update_architecture, validate_architecture, validate_architecture_yaml,
+    ArchiveArchitectureRequest, CreateArchitectureRequest, GenerateYamlRequest,
+    GetArchitectureRequest, ImportYamlRequest, ListArchitecturesRequest, UpdateArchitectureRequest,
+    ValidateArchitectureRequest, ValidateArchitectureYamlRequest,
 };
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};
@@ -182,6 +184,7 @@ fn err_status(e: &BffError) -> u16 {
         BffError::Internal(_) => 500,
         BffError::NotImplemented(_) => 501,
         BffError::QuotaExceeded { .. } => 422,
+        BffError::GraphEmpty => 422,
     }
 }
 
@@ -510,24 +513,199 @@ async fn viewer_cannot_archive_architecture() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn validate_stub_returns_501_for_operator() {
+async fn validate_yaml_endpoint_returns_clean_result_for_canonical_example() {
     let state = build_state().await;
     let op = claims_for("operator");
-    let err = validate_architecture(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
+
+    let yaml = include_str!("../../../docs/examples/chvarchitecture-example.yaml").to_string();
+    let resp = validate_architecture_yaml(
+        BearerToken(op),
+        State(state),
+        Json(ValidateArchitectureYamlRequest { yaml }),
+    )
+    .await
+    .expect("validate-yaml should succeed");
+    assert_eq!(
+        resp.0.result.summary.errors, 0,
+        "{:#?}",
+        resp.0.result.findings
+    );
 }
 
 #[tokio::test]
-async fn validate_stub_forbids_viewer_before_501() {
-    // Validate is operator+ even before the real handler lands; verify the
-    // role gate sticks so a viewer never gets a misleading 501.
+async fn validate_yaml_endpoint_returns_error_for_invalid_cidr() {
+    let state = build_state().await;
+    let op = claims_for("operator");
+
+    let yaml = r#"
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: bad-cidr
+networks:
+  - name: bad
+    type: bridge
+    cidr: 999.0.0.0/24
+"#
+    .to_string();
+    let resp = validate_architecture_yaml(
+        BearerToken(op),
+        State(state),
+        Json(ValidateArchitectureYamlRequest { yaml }),
+    )
+    .await
+    .expect("validate-yaml should succeed");
+    let invalid_cidr_findings: Vec<_> = resp
+        .0
+        .result
+        .findings
+        .iter()
+        .filter(|f| f.code.as_ref() == "INVALID_CIDR")
+        .collect();
+    assert_eq!(
+        invalid_cidr_findings.len(),
+        1,
+        "{:#?}",
+        resp.0.result.findings
+    );
+}
+
+#[tokio::test]
+async fn validate_yaml_forbids_viewer() {
     let state = build_state().await;
     let v = claims_for("viewer");
-    let err = validate_architecture(BearerToken(v), State(state), Json(json!({})))
-        .await
-        .expect_err("viewer must be forbidden");
+    let err = validate_architecture_yaml(
+        BearerToken(v),
+        State(state),
+        Json(ValidateArchitectureYamlRequest {
+            yaml: "x".to_string(),
+        }),
+    )
+    .await
+    .expect_err("viewer must be forbidden");
+    assert_eq!(err_status(&err), 403);
+}
+
+#[tokio::test]
+async fn validate_persistent_topology_writes_validation_status() {
+    let state = build_state().await;
+    let op = claims_for("operator");
+
+    let yaml = include_str!("../../../docs/examples/chvarchitecture-example.yaml").to_string();
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "validate-status-test".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: Some(yaml),
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let _ = validate_architecture(
+        BearerToken(op),
+        State(state.clone()),
+        Json(ValidateArchitectureRequest {
+            id: created.id.clone(),
+        }),
+    )
+    .await
+    .expect("validate should succeed");
+
+    let got = get_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(GetArchitectureRequest {
+            id: created.id.clone(),
+        }),
+    )
+    .await
+    .expect("get");
+    assert_eq!(
+        got.0.architecture.last_validation_status,
+        Some(chv_controlplane_types::architecture::ValidationStatus::Passed),
+    );
+    // version_number was bumped by set_validation_status
+    assert!(got.0.architecture.version_number >= 2);
+}
+
+#[tokio::test]
+async fn validate_persistent_topology_records_failed_for_bad_yaml() {
+    let state = build_state().await;
+    let op = claims_for("operator");
+
+    let bad_yaml = r#"
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: bad-cidr
+networks:
+  - name: bad
+    type: bridge
+    cidr: 999.0.0.0/24
+"#
+    .to_string();
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "validate-status-bad".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: Some(bad_yaml),
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let resp = validate_architecture(
+        BearerToken(op),
+        State(state.clone()),
+        Json(ValidateArchitectureRequest {
+            id: created.id.clone(),
+        }),
+    )
+    .await
+    .expect("validate runs even when invalid");
+    assert!(resp.0.result.summary.errors >= 1);
+
+    let got = get_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(GetArchitectureRequest { id: created.id }),
+    )
+    .await
+    .expect("get");
+    assert_eq!(
+        got.0.architecture.last_validation_status,
+        Some(chv_controlplane_types::architecture::ValidationStatus::Failed),
+    );
+}
+
+#[tokio::test]
+async fn viewer_cannot_validate_topology() {
+    let state = build_state().await;
+    let v = claims_for("viewer");
+    let err = validate_architecture(
+        BearerToken(v),
+        State(state),
+        Json(ValidateArchitectureRequest {
+            id: "any".to_string(),
+        }),
+    )
+    .await
+    .expect_err("viewer must be forbidden");
     assert_eq!(err_status(&err), 403);
 }
 
@@ -543,9 +721,6 @@ async fn check_fleet_stub_returns_501_for_operator() {
 
 #[tokio::test]
 async fn check_fleet_stub_forbids_viewer_before_501() {
-    // Verify the stub still enforces the role gate so callers don't get a
-    // misleading 501 when they actually lack permission. Stubs that gate on
-    // operator+ MUST return 403 to a viewer.
     let state = build_state().await;
     let v = claims_for("viewer");
     let err = check_fleet_architecture(BearerToken(v), State(state), Json(json!({})))
@@ -555,13 +730,194 @@ async fn check_fleet_stub_forbids_viewer_before_501() {
 }
 
 #[tokio::test]
-async fn generate_yaml_stub_returns_501_for_operator() {
+async fn generate_yaml_returns_persisted_yaml_when_present() {
     let state = build_state().await;
-    let op = claims_for("operator");
-    let err = generate_architecture_yaml(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
+    let yaml_body =
+        "apiVersion: chv.kubedo.io/v1alpha1\nkind: CHVArchitecture\nmetadata:\n  name: g1\n"
+            .to_string();
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "gen-yaml-test".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: Some(yaml_body.clone()),
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let resp = generate_architecture_yaml(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(GenerateYamlRequest {
+            id: created.id.clone(),
+        }),
+    )
+    .await
+    .expect("generate-yaml should succeed");
+    assert_eq!(resp.0.yaml, yaml_body);
+}
+
+#[tokio::test]
+async fn generate_yaml_returns_422_when_topology_has_empty_graph() {
+    let state = build_state().await;
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "gen-yaml-empty".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let err = generate_architecture_yaml(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(GenerateYamlRequest { id: created.id }),
+    )
+    .await
+    .expect_err("empty graph must 422");
+    assert_eq!(err_status(&err), 422);
+    assert!(matches!(err, BffError::GraphEmpty));
+}
+
+#[tokio::test]
+async fn import_yaml_endpoint_persists_yaml_and_validation_status() {
+    let state = build_state().await;
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "import-yaml-test".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let yaml = include_str!("../../../docs/examples/chvarchitecture-example.yaml").to_string();
+    let resp = import_yaml_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(ImportYamlRequest {
+            id: created.id.clone(),
+            yaml: yaml.clone(),
+        }),
+    )
+    .await
+    .expect("import-yaml should succeed");
+    assert_eq!(resp.0.result.summary.errors, 0);
+
+    let got = get_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(GetArchitectureRequest {
+            id: created.id.clone(),
+        }),
+    )
+    .await
+    .expect("get");
+    assert_eq!(got.0.latest_yaml.as_deref(), Some(yaml.as_str()));
+    assert_eq!(
+        got.0.architecture.last_validation_status,
+        Some(chv_controlplane_types::architecture::ValidationStatus::Passed),
+    );
+}
+
+#[tokio::test]
+async fn import_yaml_persists_invalid_yaml_with_failed_status() {
+    let state = build_state().await;
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "import-yaml-bad".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let bad_yaml = r#"
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: bad
+networks:
+  - name: x
+    type: bridge
+    cidr: not-a-cidr
+"#
+    .to_string();
+    let resp = import_yaml_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(ImportYamlRequest {
+            id: created.id.clone(),
+            yaml: bad_yaml.clone(),
+        }),
+    )
+    .await
+    .expect("import succeeds even when validation fails");
+    assert!(resp.0.result.summary.errors >= 1);
+
+    let got = get_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(GetArchitectureRequest {
+            id: created.id.clone(),
+        }),
+    )
+    .await
+    .expect("get");
+    assert_eq!(got.0.latest_yaml.as_deref(), Some(bad_yaml.as_str()));
+    assert_eq!(
+        got.0.architecture.last_validation_status,
+        Some(chv_controlplane_types::architecture::ValidationStatus::Failed),
+    );
+}
+
+#[tokio::test]
+async fn import_yaml_forbids_viewer() {
+    let state = build_state().await;
+    let v = claims_for("viewer");
+    let err = import_yaml_architecture(
+        BearerToken(v),
+        State(state),
+        Json(ImportYamlRequest {
+            id: "x".to_string(),
+            yaml: "y".to_string(),
+        }),
+    )
+    .await
+    .expect_err("viewer must be forbidden");
+    assert_eq!(err_status(&err), 403);
 }
 
 #[tokio::test]
@@ -778,7 +1134,7 @@ async fn archive_with_stale_expected_version_returns_409() {
 async fn create_duplicate_name_returns_409() {
     let state = build_state().await;
 
-    create_architecture(
+    let _ = create_architecture(
         BearerToken(claims_for("operator")),
         State(state.clone()),
         Json(CreateArchitectureRequest {

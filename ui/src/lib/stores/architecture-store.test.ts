@@ -27,7 +27,11 @@ vi.mock('$lib/bff/architectures', async () => {
 		getArchitecture: vi.fn(),
 		createArchitecture: vi.fn(),
 		updateArchitecture: vi.fn(),
-		archiveArchitecture: vi.fn()
+		archiveArchitecture: vi.fn(),
+		validateArchitecture: vi.fn(),
+		validateYaml: vi.fn(),
+		generateYaml: vi.fn(),
+		importYaml: vi.fn()
 	};
 });
 
@@ -37,10 +41,15 @@ import {
 	createArchitecture,
 	updateArchitecture,
 	archiveArchitecture,
+	validateArchitecture,
+	validateYaml as validateYamlBff,
+	generateYaml as generateYamlBff,
+	importYaml as importYamlBff,
 	StaleVersionError,
 	type Architecture,
 	type ArchitectureDetail,
-	type ArchitectureSummary
+	type ArchitectureSummary,
+	type ValidationResult
 } from '$lib/bff/architectures';
 import { liveState } from './live-state.svelte';
 import { architectureStore } from './architecture-store.svelte';
@@ -272,6 +281,136 @@ describe('architectureStore', () => {
 			await expect(architectureStore.archive('arch-1', 1)).rejects.toBeInstanceOf(
 				StaleVersionError
 			);
+		});
+	});
+
+	// ─── Phase 1: validation + YAML store methods ──────────────────────────
+
+	const VALID_RESULT: ValidationResult = {
+		status: 'valid',
+		summary: { errors: 0, warnings: 0, info: 0 },
+		findings: []
+	};
+
+	const INVALID_RESULT: ValidationResult = {
+		status: 'invalid',
+		summary: { errors: 1, warnings: 0, info: 0 },
+		findings: [
+			{
+				severity: 'error',
+				code: 'INVALID_CIDR',
+				message: 'CIDR is not parseable',
+				path: 'networks[0].cidr',
+				resource_ref: 'networks/lan',
+				blocking: true,
+				suggestion: 'Use 10.0.0.0/24'
+			}
+		]
+	};
+
+	describe('validate', () => {
+		it('calls validateArchitecture and refreshes the architectures: pattern', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(validateArchitecture).mockResolvedValue(INVALID_RESULT);
+
+			const res = await architectureStore.validate('arch-1');
+
+			expect(res).toEqual(INVALID_RESULT);
+			expect(validateArchitecture).toHaveBeenCalledWith({ id: 'arch-1' }, 'test-token');
+			expect(refreshSpy).toHaveBeenCalledWith(
+				expect.objectContaining({ patterns: ['architectures:'], detailId: 'arch-1' })
+			);
+		});
+
+		it('rethrows BFF errors so callers can branch on them', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			const boom = new Error('validate failed');
+			vi.mocked(validateArchitecture).mockRejectedValue(boom);
+
+			await expect(architectureStore.validate('arch-1')).rejects.toBe(boom);
+		});
+
+		it('forwards skipRefresh so silent re-validation does not invalidate the list', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(validateArchitecture).mockResolvedValue(VALID_RESULT);
+
+			await architectureStore.validate('arch-1', { skipRefresh: true });
+
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('validateYaml', () => {
+		it('calls the BFF wrapper directly and does NOT trigger a refresh', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(validateYamlBff).mockResolvedValue(VALID_RESULT);
+
+			const res = await architectureStore.validateYaml('kind: Topology\n');
+
+			expect(res).toEqual(VALID_RESULT);
+			expect(validateYamlBff).toHaveBeenCalledWith(
+				{ yaml: 'kind: Topology\n' },
+				'test-token'
+			);
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+
+		it('rethrows BFF errors verbatim', async () => {
+			const boom = new Error('boom');
+			vi.mocked(validateYamlBff).mockRejectedValue(boom);
+
+			await expect(architectureStore.validateYaml('bad')).rejects.toBe(boom);
+		});
+	});
+
+	describe('generateYaml', () => {
+		it('returns the yaml string and does NOT trigger a refresh', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(generateYamlBff).mockResolvedValue({ yaml: 'kind: Topology\n' });
+
+			const yaml = await architectureStore.generateYaml('arch-1');
+
+			expect(yaml).toBe('kind: Topology\n');
+			expect(generateYamlBff).toHaveBeenCalledWith({ id: 'arch-1' }, 'test-token');
+			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('importYaml', () => {
+		it('runs through mutateWithRefresh and unwraps the ValidationResult', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(importYamlBff).mockResolvedValue({ result: VALID_RESULT });
+
+			const res = await architectureStore.importYaml('arch-1', 'kind: Topology\n');
+
+			expect(res).toEqual(VALID_RESULT);
+			expect(importYamlBff).toHaveBeenCalledWith(
+				{ id: 'arch-1', yaml: 'kind: Topology\n' },
+				'test-token'
+			);
+			expect(refreshSpy).toHaveBeenCalledWith(
+				expect.objectContaining({ patterns: ['architectures:'], detailId: 'arch-1' })
+			);
+		});
+
+		it('rethrows when the BFF call rejects so the dialog can stay open', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			const boom = new Error('import failed');
+			vi.mocked(importYamlBff).mockRejectedValue(boom);
+
+			await expect(
+				architectureStore.importYaml('arch-1', 'oops')
+			).rejects.toBe(boom);
 		});
 	});
 });

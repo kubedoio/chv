@@ -18,6 +18,11 @@ pub enum BffError {
     /// callers get a deterministic signal during phased rollouts. The string
     /// payload describes the phase / reason (e.g., `"phase 0"`).
     NotImplemented(String),
+    /// 422 — Phase 1 generate-yaml was called but the topology has no
+    /// `latest_yaml` and no graph→YAML mapper has shipped yet (Phase 2).
+    /// Surfaced as a stable code so the UI can render a deterministic
+    /// "design something on the canvas first" state.
+    GraphEmpty,
     QuotaExceeded {
         resource: String,
         limit: i64,
@@ -47,6 +52,13 @@ impl IntoResponse for BffError {
             }
             BffError::NotImplemented(msg) => {
                 (StatusCode::NOT_IMPLEMENTED, msg.clone(), "NOT_IMPLEMENTED")
+            }
+            BffError::GraphEmpty => {
+                let body = Json(json!({
+                    "message": "topology graph is empty; YAML generation requires a non-empty graph (Phase 2 deliverable)",
+                    "code": "GRAPH_EMPTY",
+                }));
+                return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
             }
             BffError::QuotaExceeded {
                 resource,

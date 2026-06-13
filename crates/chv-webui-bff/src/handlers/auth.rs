@@ -480,6 +480,7 @@ mod tests {
             BffError::Internal(_) => 500,
             BffError::NotImplemented(_) => 501,
             BffError::QuotaExceeded { .. } => 422,
+            BffError::GraphEmpty => 422,
         }
     }
 

@@ -232,3 +232,139 @@ export async function archiveArchitecture(
 		rethrowAsStaleVersion(err, req.id, req.expected_version);
 	}
 }
+
+// ─── Phase 1: Validation + YAML wire types ────────────────────────────────
+//
+// Source of truth: docs/specs/architecture-designer/contracts/validation-plan-contract.md
+//
+// The BFF computes a structured ValidationResult — a status pill, a summary
+// of counts by severity, and an ordered list of findings. Findings are
+// stable across calls for the same input (so the UI can sort by severity →
+// code → path without resorting to server-side ordering).
+
+export type ValidationSeverity = 'error' | 'warning' | 'info';
+export type ValidationStatus = 'valid' | 'warning' | 'invalid';
+
+export interface Finding {
+	severity: ValidationSeverity;
+	/** Stable string code from the registry (e.g. SCHEMA_INVALID, DUPLICATE_NAME). */
+	code: string;
+	message: string;
+	/** JSON path within the topology, e.g. "instances[0].disks[1].datastore". */
+	path: string;
+	/** Human-friendly resource ref, e.g. "instances/app-01"; null when not bound to a resource. */
+	resource_ref: string | null;
+	/** Apply pipelines must refuse to proceed when blocking is true. */
+	blocking: boolean;
+	suggestion: string | null;
+}
+
+export interface ValidationSummary {
+	errors: number;
+	warnings: number;
+	info: number;
+}
+
+export interface ValidationResult {
+	status: ValidationStatus;
+	summary: ValidationSummary;
+	findings: Finding[];
+}
+
+export interface ValidateArchitectureRequest {
+	id: string;
+}
+
+export interface ValidateYamlRequest {
+	yaml: string;
+}
+
+export interface GenerateYamlRequest {
+	id: string;
+}
+
+export interface GenerateYamlResponse {
+	yaml: string;
+}
+
+export interface ImportYamlRequest {
+	id: string;
+	yaml: string;
+}
+
+export interface ImportYamlResponse {
+	result: ValidationResult;
+}
+
+/**
+ * Run server-side validation against a saved topology.
+ *
+ * The server reads the latest persisted graph + YAML and recomputes findings;
+ * it also persists `last_validation_status` so the dashboard pill stays in
+ * sync. The findings list itself is NOT persisted — re-validate to see them
+ * again after a page reload.
+ */
+export async function validateArchitecture(
+	req: ValidateArchitectureRequest,
+	token?: string
+): Promise<ValidationResult> {
+	return bffFetch<ValidationResult>(BFFEndpoints.validateArchitecture, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+/**
+ * Ad-hoc validation of a YAML string with no persistent target.
+ *
+ * Used by the Import dialog so operators can verify YAML before committing
+ * it to a topology. Pure read-side — does not mutate any architecture row.
+ */
+export async function validateYaml(
+	req: ValidateYamlRequest,
+	token?: string
+): Promise<ValidationResult> {
+	return bffFetch<ValidationResult>(BFFEndpoints.validateYaml, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+/**
+ * Generate the canonical YAML serialisation of a saved topology.
+ *
+ * May 422 with `code === 'GRAPH_EMPTY'` when the topology has no graph and
+ * no `latest_yaml` (Phase 2 supplies the canvas → graph mapping; Phase 1
+ * just lays the wire). Callers should surface this as a helpful empty state
+ * rather than an error toast.
+ */
+export async function generateYaml(
+	req: GenerateYamlRequest,
+	token?: string
+): Promise<GenerateYamlResponse> {
+	return bffFetch<GenerateYamlResponse>(BFFEndpoints.generateYaml, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+/**
+ * Import a YAML blob into the topology, validate it, and persist the result.
+ *
+ * The server stores `latest_yaml` and updates `last_validation_status` on
+ * the architecture row, so the dashboard pill reflects the import outcome.
+ * Findings are returned inline; they are NOT persisted (see {@link validateArchitecture}).
+ */
+export async function importYaml(
+	req: ImportYamlRequest,
+	token?: string
+): Promise<ImportYamlResponse> {
+	return bffFetch<ImportYamlResponse>(BFFEndpoints.importYaml, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}

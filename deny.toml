@@ -95,6 +95,12 @@ allow = [
     "MPL-2.0",
     "Zlib",
     "CC0-1.0",
+    # MIT-0: MIT No Attribution. OSI-approved permissive license, identical to
+    # MIT minus the attribution clause — strictly more permissive than MIT and
+    # therefore Apache-2.0 redistribution-compatible. Pulled in transitively by
+    # `borrow-or-share` (via `fluent-uri` → `referencing` → `jsonschema 0.46`,
+    # used by `chv-architecture-validate` for JSON Schema validation).
+    "MIT-0",
     # CDLA-Permissive-2.0: used by `webpki-roots` (Mozilla CA root data) since
     # v0.26 — the crate ships data, not code, under the Community Data License
     # Agreement. The "Permissive" variant has no copyleft/share-alike clauses

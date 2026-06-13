@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
+chv-architecture-validate = { path = "../chv-architecture-validate" }
 chv-common = { path = "../chv-common" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

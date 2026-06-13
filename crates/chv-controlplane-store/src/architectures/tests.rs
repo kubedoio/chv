@@ -836,3 +836,89 @@ async fn inventory_snapshot_create_get_list_recent() {
     let err = repo.capture_from_fleet().await.unwrap_err();
     assert!(matches!(err, StoreError::NotImplemented { .. }));
 }
+
+// ── set_validation_status ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn set_validation_status_happy_path_bumps_version() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let created = repo
+        .create(make_topology_input("topo-vs-1", "vs-alpha"))
+        .await
+        .unwrap();
+    assert_eq!(created.version_number, 1);
+    assert_eq!(created.last_validation_status, None);
+
+    let updated = repo
+        .set_validation_status(&created.id, 1, ValidationStatus::Passed)
+        .await
+        .unwrap();
+    assert_eq!(updated.version_number, 2);
+    assert_eq!(
+        updated.last_validation_status,
+        Some(ValidationStatus::Passed)
+    );
+    // Ensure other fields are unchanged
+    assert_eq!(updated.name, created.name);
+    assert_eq!(updated.description, created.description);
+}
+
+#[tokio::test]
+async fn set_validation_status_with_stale_version_returns_stale_version() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let created = repo
+        .create(make_topology_input("topo-vs-2", "vs-stale"))
+        .await
+        .unwrap();
+    repo.set_validation_status(&created.id, 1, ValidationStatus::Passed)
+        .await
+        .unwrap();
+
+    let err = repo
+        .set_validation_status(&created.id, 1, ValidationStatus::Failed)
+        .await
+        .unwrap_err();
+    match err {
+        StoreError::StaleVersion {
+            current, expected, ..
+        } => {
+            assert_eq!(current, 2);
+            assert_eq!(expected, 1);
+        }
+        other => panic!("expected StaleVersion, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn set_validation_status_on_archived_returns_not_found() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let created = repo
+        .create(make_topology_input("topo-vs-3", "vs-arch"))
+        .await
+        .unwrap();
+    repo.archive(&created.id, 1).await.unwrap();
+
+    let err = repo
+        .set_validation_status(&created.id, 2, ValidationStatus::Failed)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::NotFound { .. }));
+}
+
+#[tokio::test]
+async fn set_validation_status_on_unknown_id_returns_not_found() {
+    let db = TestDb::new().await;
+    let repo = TopologyRepository::new(db.pool.clone());
+
+    let err = repo
+        .set_validation_status(&aid("nope"), 1, ValidationStatus::Failed)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::NotFound { .. }));
+}

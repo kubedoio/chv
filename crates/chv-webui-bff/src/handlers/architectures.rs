@@ -42,6 +42,7 @@
 //! invariant.
 
 use axum::{extract::State, Json};
+use chv_architecture_validate::{validate as validate_yaml_str, ValidationResult};
 use chv_controlplane_store::{
     StoreError, TopologyCreateInput, TopologyListFilter, TopologyUpdateInput,
 };
@@ -393,37 +394,208 @@ pub async fn archive_architecture(
 // stubs are tolerant of any body shape — clients can probe the surface
 // without crafting endpoint-specific payloads.
 
+// ---------------------------------------------------------------------------
+// Phase 1 DTOs — validate, generate-yaml, import-yaml
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ValidateArchitectureRequest {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ValidateArchitectureYamlRequest {
+    pub yaml: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ValidateArchitectureResponse {
+    #[serde(flatten)]
+    pub result: ValidationResult,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateYamlRequest {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateYamlResponse {
+    pub yaml: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ImportYamlRequest {
+    pub id: String,
+    pub yaml: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ImportYamlResponse {
+    pub result: ValidationResult,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 handlers
+// ---------------------------------------------------------------------------
+
+/// Validate the persisted topology's `latest_yaml`. Persists the outcome by
+/// setting `last_validation_status` on the topology row (Passed when no
+/// errors, Failed otherwise).
+///
+/// A topology with no `latest_yaml` is reported as a single SCHEMA_INVALID
+/// finding (no body to validate) rather than a 4xx — the caller might be a
+/// dashboard that just wants to display "no YAML yet" alongside other
+/// validation state.
 pub async fn validate_architecture(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    Json(req): Json<ValidateArchitectureRequest>,
+) -> Result<Json<ValidateArchitectureResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    let id = parse_id(&req.id)?;
+    tracing::info!(architecture_id = %id, "validate_architecture");
+
+    let topo = state.topology_repo.get(&id).await?;
+    let yaml = topo.latest_yaml.as_deref().unwrap_or("");
+    let result = validate_yaml_str(yaml);
+
+    // Best-effort persistence of the outcome. If the row was bumped between
+    // our get() and the set_validation_status call, surface the conflict so
+    // the caller can re-read; the validation result itself was correct, but
+    // the persisted status would be against a stale row.
+    let new_status = if result.summary.errors == 0 {
+        ValidationStatus::Passed
+    } else {
+        ValidationStatus::Failed
+    };
+    match state
+        .topology_repo
+        .set_validation_status(&id, topo.version_number, new_status)
+        .await
+    {
+        Ok(_) => {}
+        Err(StoreError::StaleVersion {
+            current, expected, ..
+        }) => {
+            return Err(BffError::Conflict(format!(
+                "topology was modified concurrently while persisting validation status: client sent {expected}, current is {current}"
+            )));
+        }
+        Err(other) => return Err(other.into()),
+    }
+
+    Ok(Json(ValidateArchitectureResponse { result }))
+}
+
+/// Validate an ad-hoc YAML body without touching persistent state. Used by
+/// the editor's "validate before save" path.
+pub async fn validate_architecture_yaml(
+    BearerToken(claims): BearerToken,
+    State(_state): State<AppState>,
+    Json(req): Json<ValidateArchitectureYamlRequest>,
+) -> Result<Json<ValidateArchitectureResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    if req.yaml.trim().is_empty() {
+        return Err(BffError::BadRequest("yaml must not be blank".into()));
+    }
+    let result = validate_yaml_str(&req.yaml);
+    Ok(Json(ValidateArchitectureResponse { result }))
+}
+
+/// Phase 1 generate-yaml. Returns the topology's `latest_yaml` verbatim if
+/// present; otherwise responds with a 422 carrying `code: GRAPH_EMPTY`.
+///
+/// The graph→YAML mapper is a Phase 2 deliverable owned by the canvas (the
+/// canvas knows the node/edge schema; the validator does not). Surfacing a
+/// stable code now lets the UI behave deterministically while the mapper
+/// is built.
+pub async fn generate_architecture_yaml(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    Json(req): Json<GenerateYamlRequest>,
+) -> Result<Json<GenerateYamlResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    let id = parse_id(&req.id)?;
+    tracing::info!(architecture_id = %id, "generate_architecture_yaml");
+    let topo = state.topology_repo.get(&id).await?;
+    if let Some(yaml) = topo.latest_yaml.filter(|s| !s.trim().is_empty()) {
+        return Ok(Json(GenerateYamlResponse { yaml }));
+    }
+    // Phase 2 will translate design_graph_json → YAML. Until then, an
+    // empty graph means we have nothing to emit.
+    Err(BffError::GraphEmpty)
+}
+
+/// Replace a topology's `latest_yaml` with caller-supplied YAML. Validates
+/// the YAML, persists `latest_yaml` and `last_validation_status` together
+/// in one optimistic-concurrency-checked update. Validation failure does
+/// NOT block the import — the YAML is stored and the row is marked
+/// `last_validation_status = failed` so the operator can iterate.
+pub async fn import_yaml_architecture(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    Json(req): Json<ImportYamlRequest>,
+) -> Result<Json<ImportYamlResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    let id = parse_id(&req.id)?;
+    if req.yaml.trim().is_empty() {
+        return Err(BffError::BadRequest("yaml must not be blank".into()));
+    }
+    tracing::info!(architecture_id = %id, "import_yaml_architecture");
+
+    let topo = state.topology_repo.get(&id).await?;
+    let result = validate_yaml_str(&req.yaml);
+    let new_status = if result.summary.errors == 0 {
+        ValidationStatus::Passed
+    } else {
+        ValidationStatus::Failed
+    };
+
+    let update_result = state
+        .topology_repo
+        .update(TopologyUpdateInput {
+            id: id.clone(),
+            expected_version: topo.version_number,
+            display_name: None,
+            description: None,
+            environment: None,
+            status: None,
+            design_graph_json: None,
+            latest_yaml: Some(req.yaml),
+            latest_version_id: None,
+            last_validation_status: Some(new_status),
+            last_fleet_check_status: None,
+        })
+        .await;
+    match update_result {
+        Ok(_) => Ok(Json(ImportYamlResponse { result })),
+        Err(StoreError::StaleVersion {
+            current, expected, ..
+        }) => Err(BffError::Conflict(format!(
+            "stale version: client sent {expected}, current is {current}"
+        ))),
+        Err(other) => Err(other.into()),
+    }
+}
+
+pub async fn plan_architecture(
     BearerToken(claims): BearerToken,
     State(_state): State<AppState>,
     Json(_body): Json<Value>,
 ) -> Result<Json<Value>, BffError> {
-    // Phase 1 will wire the real validate handler. The role gate is enforced
-    // here so the routing decision is identical now and after the real
-    // implementation lands — a viewer hitting validate sees 403, not 501.
     require_operator_or_admin(&claims)?;
     Err(BffError::NotImplemented("phase 0".into()))
 }
 
 pub async fn check_fleet_architecture(
-    BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    require_operator_or_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
-}
-
-pub async fn generate_architecture_yaml(
-    BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    require_operator_or_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
-}
-
-pub async fn plan_architecture(
     BearerToken(claims): BearerToken,
     State(_state): State<AppState>,
     Json(_body): Json<Value>,
