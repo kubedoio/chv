@@ -6,7 +6,10 @@
 		House,
 		Database,
 		Search,
-		Loader2
+		Loader2,
+		LayoutGrid,
+		Compass,
+		ChevronDown
 	} from 'lucide-svelte';
 	import { liveState } from '$lib/stores/live-state.svelte';
 	import { taskStream } from '$lib/stores/task-stream.svelte';
@@ -31,7 +34,8 @@
 
 	let openGroups = $state<Record<string, boolean>>({
 		'cloud-1': true,
-		'hosts': true
+		'hosts': true,
+		'design': true
 	});
 	let searchQuery = $state('');
 	let contextMenuInstance = $state<InstanceTreeItem | null>(null);
@@ -244,6 +248,43 @@
 
 	<!-- Scrollable content -->
 	<div class="flex-1 flex flex-col gap-6 overflow-y-auto pr-2 app-nav__scrollbox">
+		<!-- DESIGN group (Architecture Designer) — placed above Fleet Overview per ADR-001-Designer -->
+		<div class="flex flex-col gap-1" data-testid="nav-design-group">
+			<button
+				type="button"
+				class="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-[var(--color-neutral-500)] bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] px-2 py-1 hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+				aria-expanded={openGroups['design']}
+				aria-controls="group-design"
+				onclick={() => toggleGroup('design')}
+			>
+				<ChevronDown size={10} class={!openGroups['design'] ? '-rotate-90' : ''} aria-hidden="true" />
+				<span>Design</span>
+			</button>
+
+			{#if openGroups['design']}
+				<div id="group-design" class="flex flex-col gap-1">
+					<a
+						href="/architectures/new"
+						data-testid="nav-architecture-designer"
+						class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {isActive('/architectures/new', $page.url.pathname) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+						aria-current={isActive('/architectures/new', $page.url.pathname) ? 'page' : undefined}
+					>
+						<Compass size={14} />
+						<span>Architecture Designer</span>
+					</a>
+					<a
+						href="/architectures"
+						data-testid="nav-saved-topologies"
+						class="flex items-center gap-[0.625rem] py-[0.35rem] px-2 text-[length:var(--text-sm)] text-[var(--color-neutral-300)] no-underline rounded-[var(--radius-xs)] transition-all duration-[120ms] ease-in-out hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)] {$page.url.pathname === '/architectures' || ($page.url.pathname.startsWith('/architectures/') && !$page.url.pathname.startsWith('/architectures/new')) ? 'bg-[var(--color-primary)] text-[var(--color-sidebar-text-active,#ffffff)]' : ''}"
+						aria-current={$page.url.pathname === '/architectures' || ($page.url.pathname.startsWith('/architectures/') && !$page.url.pathname.startsWith('/architectures/new')) ? 'page' : undefined}
+					>
+						<LayoutGrid size={14} />
+						<span>Saved Topologies</span>
+					</a>
+				</div>
+			{/if}
+		</div>
+
 		<!-- Fleet Overview -->
 		<div class="flex flex-col gap-1">
 			<a

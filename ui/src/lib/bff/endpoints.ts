@@ -64,5 +64,12 @@ export const BFFEndpoints = {
 	listStoragePools: '/v1/storage-pools',
 
 	// Auth endpoints
-	changePassword: '/v1/auth/change-password'
+	changePassword: '/v1/auth/change-password',
+
+	// Architecture Designer endpoints (Phase 0 skeleton)
+	listArchitectures: '/v1/architectures/list',
+	getArchitecture: '/v1/architectures/get',
+	createArchitecture: '/v1/architectures/create',
+	updateArchitecture: '/v1/architectures/update',
+	archiveArchitecture: '/v1/architectures/archive',
 } as const;
