@@ -403,7 +403,7 @@ mod tests {
 
         use chv_controlplane_store::{
             AlertRepository, BackupRepository, DesiredStateRepository, EventRepository,
-            NodeRepository, ObservedStateRepository, OperationRepository,
+            NodeRepository, ObservedStateRepository, OperationRepository, TopologyRepository,
         };
         AppState {
             pool: pool.clone(),
@@ -414,6 +414,7 @@ mod tests {
             desired_state_repo: DesiredStateRepository::new(pool.clone()),
             observed_state_repo: ObservedStateRepository::new(pool.clone()),
             backup_repo: BackupRepository::new(pool.clone()),
+            topology_repo: TopologyRepository::new(pool.clone()),
             mutations: Arc::new(NoopMutations),
             jwt_secret: "test-secret".to_string(),
             agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
@@ -477,6 +478,7 @@ mod tests {
             BffError::Conflict(_) => 409,
             BffError::TooManyRequests(_) => 429,
             BffError::Internal(_) => 500,
+            BffError::NotImplemented(_) => 501,
             BffError::QuotaExceeded { .. } => 422,
         }
     }

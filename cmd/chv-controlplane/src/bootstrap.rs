@@ -167,6 +167,7 @@ pub async fn build_service(
     let desired_state_repo = DesiredStateRepository::new(pool.clone());
     let operation_repo = OperationRepository::new(pool.clone());
     let backup_repo = BackupRepository::new(pool.clone());
+    let topology_repo = chv_controlplane_store::TopologyRepository::new(pool.clone());
     let vtep_repo = VtepRepository::new(pool.clone());
 
     let lifecycle_service = Arc::new(LifecycleServiceImplementation::new(
@@ -185,6 +186,7 @@ pub async fn build_service(
         desired_state_repo: desired_state_repo.clone(),
         observed_state_repo: observed_state_repo.clone(),
         backup_repo: backup_repo.clone(),
+        topology_repo: topology_repo.clone(),
         mutations: Arc::new(ControlPlaneMutationService::new(
             pool.clone(),
             lifecycle_service.clone(),

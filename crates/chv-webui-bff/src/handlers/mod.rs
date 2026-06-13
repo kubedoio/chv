@@ -1,3 +1,4 @@
+pub mod architectures;
 pub mod auth;
 pub mod backups;
 pub mod clusters;

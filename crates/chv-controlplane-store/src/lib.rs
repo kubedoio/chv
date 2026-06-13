@@ -1,4 +1,5 @@
 mod alerts;
+mod architectures;
 mod backups;
 mod bootstrap_tokens;
 mod credential_crypto;
@@ -13,6 +14,13 @@ mod operations;
 mod vtep;
 
 pub use alerts::{AlertCreateInput, AlertRepository};
+pub use architectures::{
+    ApplyRunCreateInput, ApplyRunRepository, ApplyRunUpdateInput, DriftReportCreateInput,
+    DriftReportRepository, InventorySnapshotCreateInput, InventorySnapshotRepository,
+    PlanCreateInput, PlanRepository, PlanStatusUpdateInput, TopologyCreateInput,
+    TopologyListFilter, TopologyRepository, TopologyUpdateInput, VersionCreateInput,
+    VersionRepository,
+};
 pub use backups::{
     BackupJobCreateInput, BackupJobRow, BackupJobStatusUpdateInput, BackupJobUpdateInput,
     BackupRepository, BackupRestoreCreateInput, BackupRestoreRow, BackupRestoreStatusUpdateInput,

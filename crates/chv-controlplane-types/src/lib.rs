@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
 
+pub mod architecture;
 pub mod config;
 pub mod constants;
 pub mod domain;

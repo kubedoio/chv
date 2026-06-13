@@ -9,7 +9,7 @@ use axum::{
 };
 use chv_controlplane_store::{
     AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository, StorePool,
+    ObservedStateRepository, OperationRepository, StorePool, TopologyRepository,
 };
 use tower_http::cors::CorsLayer;
 
@@ -26,6 +26,8 @@ pub struct AppState {
     pub desired_state_repo: DesiredStateRepository,
     pub observed_state_repo: ObservedStateRepository,
     pub backup_repo: BackupRepository,
+    /// Architecture Designer topology repository (Phase 0).
+    pub topology_repo: TopologyRepository,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
@@ -190,6 +192,31 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/backups/restores/:restore_id",
             get(crate::handlers::backups::get_backup_restore),
         )
+        // Architecture Designer (Phase 0) — viewer-accessible reads + stubs.
+        .route(
+            "/v1/architectures/list",
+            post(crate::handlers::architectures::list_architectures),
+        )
+        .route(
+            "/v1/architectures/get",
+            post(crate::handlers::architectures::get_architecture),
+        )
+        .route(
+            "/v1/architectures/validate",
+            post(crate::handlers::architectures::validate_architecture),
+        )
+        .route(
+            "/v1/architectures/drift",
+            post(crate::handlers::architectures::get_architecture_drift),
+        )
+        .route(
+            "/v1/architectures/runs/list",
+            post(crate::handlers::architectures::list_architecture_runs),
+        )
+        .route(
+            "/v1/architectures/versions/list",
+            post(crate::handlers::architectures::list_architecture_versions),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::auth::viewer_middleware,
@@ -337,6 +364,40 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/backups/restores",
             post(crate::handlers::backups::create_backup_restore),
         )
+        // Architecture Designer (Phase 0) — operator CRUD writes + planning
+        // stubs. Apply/destroy live in the admin layer below.
+        .route(
+            "/v1/architectures/create",
+            post(crate::handlers::architectures::create_architecture),
+        )
+        .route(
+            "/v1/architectures/update",
+            post(crate::handlers::architectures::update_architecture),
+        )
+        .route(
+            "/v1/architectures/archive",
+            post(crate::handlers::architectures::archive_architecture),
+        )
+        .route(
+            "/v1/architectures/check-fleet",
+            post(crate::handlers::architectures::check_fleet_architecture),
+        )
+        .route(
+            "/v1/architectures/generate-yaml",
+            post(crate::handlers::architectures::generate_architecture_yaml),
+        )
+        .route(
+            "/v1/architectures/plan",
+            post(crate::handlers::architectures::plan_architecture),
+        )
+        .route(
+            "/v1/architectures/destroy-plan",
+            post(crate::handlers::architectures::destroy_plan_architecture),
+        )
+        .route(
+            "/v1/architectures/discard-plan",
+            post(crate::handlers::architectures::discard_plan_architecture),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::auth::operator_middleware,
@@ -385,6 +446,15 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/quotas/:user_id",
             patch(crate::handlers::quotas::update_quota)
                 .delete(crate::handlers::quotas::delete_quota),
+        )
+        // Architecture Designer (Phase 0) — admin-only mutating verbs.
+        .route(
+            "/v1/architectures/apply",
+            post(crate::handlers::architectures::apply_architecture),
+        )
+        .route(
+            "/v1/architectures/destroy",
+            post(crate::handlers::architectures::destroy_architecture),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
