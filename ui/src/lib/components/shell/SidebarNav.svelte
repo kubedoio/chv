@@ -22,7 +22,6 @@
 	import NavInfrastructureTree from './NavInfrastructureTree.svelte';
 	import NavGlobalLinks from './NavGlobalLinks.svelte';
 	import NavFooterControls from './NavFooterControls.svelte';
-	import SidebarPinnedVms from './SidebarPinnedVms.svelte';
 	import type { InstanceTreeItem } from '$lib/api/types';
 
 	function isActive(href: string, pathname: string): boolean {
@@ -256,8 +255,6 @@
 				<span>Fleet Overview</span>
 			</a>
 		</div>
-
-		<SidebarPinnedVms pathname={$page.url.pathname} onSelectVm={handleSelectVm} onContextMenu={handleInstanceContextMenu} />
 
 		<NavInfrastructureTree
 			{openGroups}
