@@ -40,6 +40,12 @@ pub enum StoreError {
         current: i64,
         expected: i64,
     },
+    #[error("conflict on {entity} '{id}': {reason}")]
+    Conflict {
+        entity: &'static str,
+        id: String,
+        reason: &'static str,
+    },
     #[error("invalid store configuration: {reason}")]
     InvalidConfiguration { reason: String },
     #[error("not implemented: {reason}")]

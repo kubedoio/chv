@@ -64,7 +64,7 @@ impl TopologyRepository {
         &self,
         input: TopologyCreateInput,
     ) -> Result<ArchitectureTopology, StoreError> {
-        let row = sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO architecture_topologies (
                 id,
@@ -92,9 +92,12 @@ impl TopologyRepository {
         .bind(&input.design_graph_json)
         .bind(&input.latest_yaml)
         .fetch_one(&self.pool)
-        .await?;
+        .await;
 
-        row_to_topology(&row)
+        match result {
+            Ok(row) => row_to_topology(&row),
+            Err(err) => Err(map_create_error(err, &input.name)),
+        }
     }
 
     pub async fn get(&self, id: &ArchitectureId) -> Result<ArchitectureTopology, StoreError> {
@@ -135,13 +138,18 @@ impl TopologyRepository {
 
     /// Update with optimistic concurrency. The query carries
     /// `WHERE version_number = expected_version`; on zero rows affected we
-    /// distinguish "version mismatch" from "missing row" with a follow-up
-    /// SELECT and return either [`StoreError::StaleVersion`] or
-    /// [`StoreError::NotFound`].
+    /// distinguish "version mismatch" from "missing/archived row" with a
+    /// follow-up SELECT executed *in the same transaction* and return either
+    /// [`StoreError::StaleVersion`] or [`StoreError::NotFound`]. Running both
+    /// statements in one transaction closes the TOCTOU race against a
+    /// concurrent archive that could otherwise turn a stale-version error
+    /// into a misleading not-found.
     pub async fn update(
         &self,
         input: TopologyUpdateInput,
     ) -> Result<ArchitectureTopology, StoreError> {
+        let mut tx = self.pool.begin().await?;
+
         let result = sqlx::query(
             r#"
             UPDATE architecture_topologies SET
@@ -170,60 +178,140 @@ impl TopologyRepository {
         .bind(input.last_validation_status.map(|s| s.as_str()))
         .bind(input.last_fleet_check_status.map(|s| s.as_str()))
         .bind(input.expected_version)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         if result.rows_affected() == 0 {
-            // Distinguish stale-version from not-found.
-            let current: Option<i64> = sqlx::query_scalar(
-                r#"SELECT version_number FROM architecture_topologies WHERE id = $1 AND archived_at IS NULL"#,
-            )
-            .bind(input.id.as_str())
-            .fetch_optional(&self.pool)
-            .await?;
-            return match current {
-                Some(current) => Err(StoreError::StaleVersion {
-                    entity: ENTITY,
-                    id: input.id.to_string(),
-                    current,
-                    expected: input.expected_version,
-                }),
-                None => Err(StoreError::NotFound {
-                    entity: ENTITY,
-                    id: input.id.to_string(),
-                }),
-            };
+            let probe = fetch_version_and_archived_in_tx(&mut tx, &input.id).await?;
+            // We ran no UPDATE; commit-or-rollback are equivalent. Rolling
+            // back keeps our intent explicit ("this transaction made no
+            // change").
+            tx.rollback().await?;
+            return Err(stale_or_not_found(probe, &input.id, input.expected_version));
         }
 
-        self.get(&input.id).await
+        // Re-SELECT the freshly-updated row inside the same transaction so
+        // we return a consistent view that cannot interleave with another
+        // writer.
+        let row = sqlx::query(r#"SELECT * FROM architecture_topologies WHERE id = $1"#)
+            .bind(input.id.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+        let topology = row_to_topology(&row)?;
+        tx.commit().await?;
+        Ok(topology)
     }
 
-    /// Soft-delete via `archived_at = now()`. Hard delete is deferred.
-    pub async fn archive(&self, id: &ArchitectureId) -> Result<(), StoreError> {
+    /// Soft-delete via `archived_at = now()` with optimistic concurrency. The
+    /// caller passes the version they read; concurrent updates that bumped
+    /// the row are reported as [`StoreError::StaleVersion`]. An already-archived
+    /// row (regardless of version) is reported as [`StoreError::NotFound`] so
+    /// archive remains idempotent at the routing layer.
+    pub async fn archive(
+        &self,
+        id: &ArchitectureId,
+        expected_version: i64,
+    ) -> Result<ArchitectureTopology, StoreError> {
+        let mut tx = self.pool.begin().await?;
+
         let result = sqlx::query(
             r#"
             UPDATE architecture_topologies SET
                 archived_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
                 status = 'archived',
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-            WHERE id = $1 AND archived_at IS NULL
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                version_number = version_number + 1
+            WHERE id = $1 AND archived_at IS NULL AND version_number = $2
             "#,
         )
         .bind(id.as_str())
-        .execute(&self.pool)
+        .bind(expected_version)
+        .execute(&mut *tx)
         .await?;
 
         if result.rows_affected() == 0 {
-            // Either does not exist or already archived. Treat both as
-            // not-found so callers get a single, predictable error.
-            return Err(StoreError::NotFound {
-                entity: ENTITY,
-                id: id.to_string(),
-            });
+            let probe = fetch_version_and_archived_in_tx(&mut tx, id).await?;
+            tx.rollback().await?;
+            return Err(stale_or_not_found(probe, id, expected_version));
         }
 
-        Ok(())
+        let row = sqlx::query(r#"SELECT * FROM architecture_topologies WHERE id = $1"#)
+            .bind(id.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+        let topology = row_to_topology(&row)?;
+        tx.commit().await?;
+        Ok(topology)
     }
+}
+
+/// Probe the current `(version_number, archived)` state of a topology row
+/// inside an open transaction so callers can disambiguate "missing", "already
+/// archived", and "version mismatch" without racing a concurrent writer.
+async fn fetch_version_and_archived_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &ArchitectureId,
+) -> Result<Option<(i64, bool)>, StoreError> {
+    let row = sqlx::query(
+        r#"SELECT version_number, archived_at FROM architecture_topologies WHERE id = $1"#,
+    )
+    .bind(id.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    match row {
+        None => Ok(None),
+        Some(row) => {
+            let version: i64 = row.try_get("version_number")?;
+            let archived_at: Option<String> = row.try_get("archived_at")?;
+            Ok(Some((version, archived_at.is_some())))
+        }
+    }
+}
+
+/// Translate the result of [`fetch_version_and_archived_in_tx`] into the
+/// canonical store error for the failed-update path:
+///
+/// - row missing → `NotFound`
+/// - row archived → `NotFound` (already-archived is treated as gone)
+/// - row not archived, version mismatch → `StaleVersion`
+fn stale_or_not_found(
+    probe: Option<(i64, bool)>,
+    id: &ArchitectureId,
+    expected: i64,
+) -> StoreError {
+    match probe {
+        None => StoreError::NotFound {
+            entity: ENTITY,
+            id: id.to_string(),
+        },
+        Some((_, true)) => StoreError::NotFound {
+            entity: ENTITY,
+            id: id.to_string(),
+        },
+        Some((current, false)) => StoreError::StaleVersion {
+            entity: ENTITY,
+            id: id.to_string(),
+            current,
+            expected,
+        },
+    }
+}
+
+/// Map a sqlx error from the create path into [`StoreError`]. Surfaces UNIQUE
+/// violations (duplicate `name`) as [`StoreError::Conflict`] so the BFF can
+/// answer 409 instead of 500.
+fn map_create_error(err: sqlx::Error, name: &str) -> StoreError {
+    if let sqlx::Error::Database(ref db_err) = err {
+        if db_err.is_unique_violation() {
+            return StoreError::Conflict {
+                entity: ENTITY,
+                id: name.to_string(),
+                reason: "name already exists",
+            };
+        }
+    }
+    StoreError::Database(err)
 }
 
 fn opt_status_to_validation(s: Option<String>) -> Result<Option<ValidationStatus>, StoreError> {
