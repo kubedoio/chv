@@ -441,15 +441,21 @@ At one full-time engineer + reviewer overhead, expected delivery is ~11 calendar
 
 ---
 
-## 11. Open questions to resolve **before** Phase 0 starts
+## 11. Resolved questions (locked 2026-06-13)
 
-1. Is `chv-architecture-validate` and `chv-architecture-reconcile` accepted as new workspace crates, or should the logic live inside an existing crate (e.g. `chv-controlplane-service`)? **Default if no answer:** new crates, for separation of concerns and tighter dependency graphs.
-2. Does the operator role model already include the `architecture:*` permission strings, or do they need to be added in Phase 0? **Default:** added in Phase 0 with a migration that grants `architecture:read` to existing read-only roles.
-3. Multi-user concurrency: optimistic last-write-wins via `version_number` (default), or pessimistic editing locks? **Default:** optimistic, with a UI banner if a stale write is rejected.
-4. Inventory snapshot retention policy. **Default:** keep last 50 per topology; prune older nightly. Tracking issue filed in Phase 3, implementation in Phase 7.
-5. Does the existing CI have a fake-clock harness, or do we need to add one for the stale-plan test? **Default:** add a thin `Clock` trait in Phase 4; production uses `std::time`, tests use a manual ticker.
+The five §11 questions plus two additional dependency-choice questions were resolved at plan-acceptance time. Implementation begins with these as **locked decisions**; changing any of them requires a plan amendment PR.
 
-If answers diverge from defaults, this plan is updated **before** the first PR opens.
+| # | Question | Resolution | Rationale |
+|---|---|---|---|
+| Q1 | New crates vs. extend existing? | **Two new crates:** `chv-architecture-validate` (pure data, no I/O) and `chv-architecture-reconcile` (planner + apply + drift) | `validate` reusable from BFF, CLI, and reconcile without dragging SQLite. Keeps dependency graph clean. |
+| Q2 | `architecture:*` permission strings — exist or add? | **Add in Phase 0** via forward-only migration. Grant `architecture:read` to read-only roles; `architecture:*` (less `:apply:production`) to operator/admin roles | Existing role schema has no `architecture:*` namespace. Doing this once in Phase 0 unblocks every later handler. |
+| Q3 | Multi-user concurrency model | **Optimistic with `version_number`.** `PUT /architectures/{id}` rejects on stale version; UI banner offers reload | Operator-scale audience; conflicts will be rare. Pessimistic locking adds 4× endpoints + lock-expiry timer for a problem we don't have. Upgrade path stays open. |
+| Q4 | Inventory snapshot retention | **Keep last 50 per topology; prune nightly via periodic task in `chv-controlplane-service`.** Tracking issue filed Phase 3, implementation Phase 7 | 50 covers ~weeks of typical use. Snapshots can be large (full inventory JSON). |
+| Q5 | Fake-clock harness | **Add `Clock` trait in `chv-common`, introduced Phase 4.** Production binds to `std::time::SystemTime`; tests bind to `ManualClock` with `tick(Duration)` | ~50 lines of code. Avoids `tokio::time::pause()` foot-guns. Used by stale-plan tests in Phase 4 and drift tests in Phase 6. |
+| Q6 | YAML library | **`serde_yml`** (Rust, parsing/emitting) and **`js-yaml`** (UI side) | `serde_yaml` is unmaintained as of 2024; `serde_yml` is the maintained fork with the same API. |
+| Q7 | JSON Schema library | **`jsonschema` v0.18+** (Rust) | De facto crate; supports JSON Schema draft 2020-12 used by `chvarchitecture-v1alpha1.schema.json`; structured errors with JSON pointer paths. |
+
+These resolutions are reflected in §2 *Code-surface map* and §3 *Phases*.
 
 ---
 
