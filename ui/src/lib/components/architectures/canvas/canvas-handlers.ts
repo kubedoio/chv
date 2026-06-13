@@ -62,6 +62,14 @@ export function severityForNode(
 	node: CanvasNode,
 	findings: ReadonlyArray<Finding>
 ): FindingSeverity {
+	// Defensive: a node persisted from a malformed external graph blob could
+	// arrive without a name. The validator's `resource_ref` shape is
+	// `<kind>/<name>` with a non-empty name segment, so a blank-named node
+	// can never legitimately match — short-circuit so a finding whose ref
+	// happens to end in `/` can't be misattributed to the wrong node.
+	if (typeof node.data.name !== 'string' || node.data.name.length === 0) {
+		return 'clean';
+	}
 	const ref = `${node.data.kind}/${node.data.name}`;
 	let best: FindingSeverity = 'clean';
 	for (const f of findings) {

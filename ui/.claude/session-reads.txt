@@ -154,3 +154,13 @@
 /Users/I761222/projects/claude/chv/docs/DEPLOYMENT.md
 /Users/I761222/projects/claude/chv/crates/chv-controlplane-types/src/constants.rs
 /Users/I761222/projects/claude/chv/Dockerfile
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/canvas/CanvasPane.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/NodeShell.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/NetworkNode.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/DatastoreNode.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/ImageNode.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/TemplateNode.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/InstanceNode.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/UserNode.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/RoleNode.svelte
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/canvas/canvas-handlers.ts

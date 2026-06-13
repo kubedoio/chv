@@ -42,18 +42,16 @@ describe('Architecture Designer Phase-2 components must stay ≤ 300 lines', asy
 		absolute: true
 	}) as string[];
 
-	it('scans at least one Phase-2 component (guards against vacuous pass once agent B lands)', () => {
-		// This test is permitted to find zero files BEFORE agent B lands —
-		// but the moment any canvas/nodes/inspector component exists the
-		// suite must enforce the limit. We assert truthiness on an
-		// environment hint so CI stays informative without false-failing
-		// during the parallel implementation window.
-		const phase2Landed = files.length > 0;
+	it('scans at least one Phase-2 component (guards against vacuous pass once components land)', () => {
+		// Once any canvas/nodes/inspector component exists, this suite
+		// must enforce the limit. Assert ≥1 file is discovered so a
+		// glob-pattern bug or path-resolution regression can't silently
+		// turn every per-file assertion below into a vacuous pass.
 		// eslint-disable-next-line no-console
 		console.log(
 			`[component-size] scanned ${files.length} Phase-2 Svelte file(s) under ${PHASE_2_DIRS.join(', ')}`
 		);
-		expect(typeof phase2Landed).toBe('boolean');
+		expect(files.length).toBeGreaterThan(0);
 	});
 
 	for (const file of files) {
