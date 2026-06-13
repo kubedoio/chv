@@ -21,6 +21,7 @@ members = [
     "gen/rust/control-plane-node-api",
     "gen/rust/chv-webui-bff-api",
     "crates/chv-webui-bff",
+    "crates/chv-architecture-validate",
     "cmd/chvctl",
 ]
 resolver = "2"
