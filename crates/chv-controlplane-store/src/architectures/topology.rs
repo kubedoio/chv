@@ -243,6 +243,55 @@ impl TopologyRepository {
         tx.commit().await?;
         Ok(topology)
     }
+
+    /// Persist only the `last_validation_status` field of a topology, with
+    /// the same optimistic-concurrency guarantee as [`Self::update`]. Bumps
+    /// `version_number` because validation results are part of the
+    /// observable topology state — clients caching the row need to re-read.
+    ///
+    /// This exists as a dedicated entry point so the validate handler does
+    /// not need to plumb a full `TopologyUpdateInput` (every other field
+    /// would be `None`) through the BFF, which obscured intent and caused
+    /// the Phase 0 stub to leave the field permanently `None`. A focused
+    /// method makes the semantics — "record a validation outcome" — explicit
+    /// at the call site.
+    pub async fn set_validation_status(
+        &self,
+        id: &ArchitectureId,
+        expected_version: i64,
+        status: ValidationStatus,
+    ) -> Result<ArchitectureTopology, StoreError> {
+        let mut tx = self.pool.begin().await?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE architecture_topologies SET
+                last_validation_status = $2,
+                version_number = version_number + 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
+            "#,
+        )
+        .bind(id.as_str())
+        .bind(status.as_str())
+        .bind(expected_version)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            let probe = fetch_version_and_archived_in_tx(&mut tx, id).await?;
+            tx.rollback().await?;
+            return Err(stale_or_not_found(probe, id, expected_version));
+        }
+
+        let row = sqlx::query(r#"SELECT * FROM architecture_topologies WHERE id = $1"#)
+            .bind(id.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+        let topology = row_to_topology(&row)?;
+        tx.commit().await?;
+        Ok(topology)
+    }
 }
 
 /// Probe the current `(version_number, archived)` state of a topology row
