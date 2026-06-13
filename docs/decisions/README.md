@@ -27,9 +27,10 @@ This directory indexes all Architecture Decision Records for CHV. The canonical 
 |-----|-------|--------|---------|
 | [ADR-001-WebUI](../specs/adr/001-webui-product-principles.md) | WebUI Product Principles | **Accepted** | 7 principles: cluster-first nav, tasks as first-class, legible state, no browser-to-node coupling, progressive depth, predictable mutation UX, private-cloud-first usability. |
 | [ADR-002-WebUI](../specs/adr/002-webui-architecture-boundary.md) | WebUI Architecture Boundary | **Accepted** | Browser talks only to control-plane BFF. Direct access to agent, stord, nwd, or CHV APIs is forbidden. |
-| [ADR-003-WebUI](../specs/adr/003-webui-navigation-model.md) | WebUI Navigation Model | **Accepted** | Primary nav hierarchy and detail-page tab structure (Summary, Configuration, Tasks, Events, Related Resources). |
+| [ADR-003-WebUI](../specs/adr/003-webui-navigation-model.md) | WebUI Navigation Model | **Superseded by ADR-006-WebUI** | Primary nav hierarchy and detail-page tab structure (Summary, Configuration, Tasks, Events, Related Resources). |
 | [ADR-004-WebUI](../specs/adr/004-webui-task-and-state-model.md) | WebUI Task and State Model | **Accepted** | Tasks and state are first-class UI objects. Every mutation creates a task. Defines task states and resource health states. |
 | [ADR-005-WebUI](../specs/adr/005-webui-design-system-direction.md) | WebUI Design System Direction | **Accepted** | Modern but restrained, enterprise-serious, light-mode first, high information density, border-first surfaces, strong typography. Avoids copying Proxmox/Xen Orchestra visually. |
+| [ADR-006-WebUI](../specs/adr/006-webui-navigation-revised.md) | Revised WebUI Navigation Model (Cloud/Hosts/Instances) | **Accepted** | Supersedes ADR-003-WebUI. Operator-facing taxonomy: Default Cloud → Hosts → Instances. Renames Nodes→Hosts and Virtual Machines→Instances to match private/public cloud conventions. |
 
 ## Lifecycle
 
