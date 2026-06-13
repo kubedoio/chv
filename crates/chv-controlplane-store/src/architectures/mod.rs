@@ -12,6 +12,9 @@ mod snapshot;
 mod topology;
 mod version;
 
+#[cfg(test)]
+mod tests;
+
 pub use apply_run::{ApplyRunCreateInput, ApplyRunRepository, ApplyRunUpdateInput};
 pub use drift::{DriftReportCreateInput, DriftReportRepository};
 pub use plan::{PlanCreateInput, PlanRepository, PlanStatusUpdateInput};
