@@ -189,11 +189,17 @@ pub struct UpdateArchitectureResponse {
 #[serde(rename_all = "snake_case")]
 pub struct ArchiveArchitectureRequest {
     pub id: String,
+    /// Version the client read; mirrors `update`'s optimistic-concurrency
+    /// contract so concurrent edits cannot be silently overwritten by an
+    /// archive. Stale-version archives surface as 409 Conflict.
+    pub expected_version: i64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ArchiveArchitectureResponse {}
+pub struct ArchiveArchitectureResponse {
+    pub architecture: ArchitectureSummary,
+}
 
 // ---------------------------------------------------------------------------
 // CRUD handlers
@@ -293,6 +299,25 @@ pub async fn update_architecture(
         expected_version = req.expected_version,
         "update_architecture"
     );
+
+    // Skip the UPDATE entirely when the caller sent no field changes — this
+    // keeps version_number stable for clients that re-submit a PATCH-style
+    // form without modifying anything. The optimistic-concurrency check on
+    // expected_version is preserved by passing it to `update()` only when
+    // there is actual work to do; a pure-readback path uses `get()`.
+    let no_field_changes = req.display_name.is_none()
+        && req.description.is_none()
+        && req.environment.is_none()
+        && req.design_graph_json.is_none()
+        && req.latest_yaml.is_none()
+        && latest_version_id.is_none();
+    if no_field_changes {
+        let topo = state.topology_repo.get(&id).await?;
+        return Ok(Json(UpdateArchitectureResponse {
+            architecture: ArchitectureSummary::from(topo),
+        }));
+    }
+
     let result = state
         .topology_repo
         .update(TopologyUpdateInput {
@@ -328,9 +353,10 @@ pub async fn update_architecture(
     }
 }
 
-/// Soft-delete a topology. Operator+ only. Idempotent at the routing layer:
-/// archiving an already-archived row returns 404, so callers know whether
-/// they were the one that archived it.
+/// Soft-delete a topology. Operator+ only. Optimistic-concurrency: the caller
+/// supplies the version they read; a concurrent edit that bumped the row
+/// returns 409 Conflict. Already-archived rows return 404 so callers know
+/// whether they were the one that archived it.
 pub async fn archive_architecture(
     BearerToken(claims): BearerToken,
     State(state): State<AppState>,
@@ -338,9 +364,23 @@ pub async fn archive_architecture(
 ) -> Result<Json<ArchiveArchitectureResponse>, BffError> {
     require_operator_or_admin(&claims)?;
     let id = parse_id(&req.id)?;
-    tracing::info!(architecture_id = %id, "archive_architecture");
-    state.topology_repo.archive(&id).await?;
-    Ok(Json(ArchiveArchitectureResponse::default()))
+    tracing::info!(
+        architecture_id = %id,
+        expected_version = req.expected_version,
+        "archive_architecture"
+    );
+    let result = state.topology_repo.archive(&id, req.expected_version).await;
+    match result {
+        Ok(topo) => Ok(Json(ArchiveArchitectureResponse {
+            architecture: ArchitectureSummary::from(topo),
+        })),
+        Err(StoreError::StaleVersion {
+            current, expected, ..
+        }) => Err(BffError::Conflict(format!(
+            "stale version: client sent {expected}, current is {current}"
+        ))),
+        Err(other) => Err(other.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -354,10 +394,14 @@ pub async fn archive_architecture(
 // without crafting endpoint-specific payloads.
 
 pub async fn validate_architecture(
-    BearerToken(_claims): BearerToken,
+    BearerToken(claims): BearerToken,
     State(_state): State<AppState>,
     Json(_body): Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    // Phase 1 will wire the real validate handler. The role gate is enforced
+    // here so the routing decision is identical now and after the real
+    // implementation lands — a viewer hitting validate sees 403, not 501.
+    require_operator_or_admin(&claims)?;
     Err(BffError::NotImplemented("phase 0".into()))
 }
 

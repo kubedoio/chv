@@ -96,6 +96,9 @@ impl From<chv_controlplane_store::StoreError> for BffError {
                 "{} {} stale version: client sent {expected}, current is {current}",
                 entity, id
             )),
+            chv_controlplane_store::StoreError::Conflict { entity, id, reason } => {
+                BffError::Conflict(format!("{} '{}': {}", entity, id, reason))
+            }
             chv_controlplane_store::StoreError::NotImplemented { reason } => {
                 BffError::NotImplemented(reason.to_string())
             }
