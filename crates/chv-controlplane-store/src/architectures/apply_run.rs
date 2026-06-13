@@ -2,12 +2,12 @@
 
 use crate::architectures::{format_ts, parse_ts, parse_ts_opt};
 use crate::{StoreError, StorePool};
+use chrono::{DateTime, Utc};
 use chv_controlplane_types::architecture::{
     ArchitectureApplyRun, ArchitectureApplyRunId, ArchitectureId, ArchitecturePlanId,
     ArchitectureVersionId, RunStatus,
 };
 use chv_controlplane_types::domain::IdentifierError;
-use chrono::{DateTime, Utc};
 use sqlx::Row;
 
 const ENTITY: &str = "architecture_apply_run";
@@ -199,17 +199,15 @@ where
 
 fn row_to_run(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitectureApplyRun, StoreError> {
     let id_str: String = row.try_get("id")?;
-    let id = ArchitectureApplyRunId::new(id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
+    let id =
+        ArchitectureApplyRunId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
             reason: format!("invalid id in apply_run row: {err}"),
-        }
-    })?;
+        })?;
     let arch_id_str: String = row.try_get("architecture_id")?;
-    let architecture_id = ArchitectureId::new(arch_id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
+    let architecture_id =
+        ArchitectureId::new(arch_id_str).map_err(|err| StoreError::InvalidConfiguration {
             reason: format!("invalid architecture_id in apply_run row: {err}"),
-        }
-    })?;
+        })?;
     let version_id_str: String = row.try_get("architecture_version_id")?;
     let architecture_version_id = ArchitectureVersionId::new(version_id_str).map_err(|err| {
         StoreError::InvalidConfiguration {

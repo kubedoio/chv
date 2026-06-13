@@ -145,23 +145,22 @@ where
 
 fn row_to_drift(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitectureDriftReport, StoreError> {
     let id_str: String = row.try_get("id")?;
-    let id = ArchitectureDriftReportId::new(id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
+    let id =
+        ArchitectureDriftReportId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
             reason: format!("invalid id in drift_report row: {err}"),
-        }
-    })?;
+        })?;
     let arch_id_str: String = row.try_get("architecture_id")?;
-    let architecture_id = ArchitectureId::new(arch_id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
+    let architecture_id =
+        ArchitectureId::new(arch_id_str).map_err(|err| StoreError::InvalidConfiguration {
             reason: format!("invalid architecture_id in drift_report row: {err}"),
-        }
-    })?;
+        })?;
     let baseline_version_id_str: String = row.try_get("baseline_version_id")?;
-    let baseline_version_id = ArchitectureVersionId::new(baseline_version_id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
-            reason: format!("invalid baseline_version_id in drift_report row: {err}"),
-        }
-    })?;
+    let baseline_version_id =
+        ArchitectureVersionId::new(baseline_version_id_str).map_err(|err| {
+            StoreError::InvalidConfiguration {
+                reason: format!("invalid baseline_version_id in drift_report row: {err}"),
+            }
+        })?;
     let status_str: String = row.try_get("status")?;
     let created_at: String = row.try_get("created_at")?;
 

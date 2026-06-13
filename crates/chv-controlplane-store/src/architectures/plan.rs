@@ -212,17 +212,14 @@ where
 
 fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitecturePlan, StoreError> {
     let id_str: String = row.try_get("id")?;
-    let id = ArchitecturePlanId::new(id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
-            reason: format!("invalid id in plan row: {err}"),
-        }
+    let id = ArchitecturePlanId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
+        reason: format!("invalid id in plan row: {err}"),
     })?;
     let arch_id_str: String = row.try_get("architecture_id")?;
-    let architecture_id = ArchitectureId::new(arch_id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
+    let architecture_id =
+        ArchitectureId::new(arch_id_str).map_err(|err| StoreError::InvalidConfiguration {
             reason: format!("invalid architecture_id in plan row: {err}"),
-        }
-    })?;
+        })?;
     let version_id_str: String = row.try_get("architecture_version_id")?;
     let architecture_version_id = ArchitectureVersionId::new(version_id_str).map_err(|err| {
         StoreError::InvalidConfiguration {

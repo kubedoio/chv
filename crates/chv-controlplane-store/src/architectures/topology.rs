@@ -115,11 +115,9 @@ impl TopologyRepository {
         filter: TopologyListFilter,
     ) -> Result<Vec<ArchitectureTopology>, StoreError> {
         let rows = if filter.include_archived {
-            sqlx::query(
-                r#"SELECT * FROM architecture_topologies ORDER BY created_at DESC, id ASC"#,
-            )
-            .fetch_all(&self.pool)
-            .await?
+            sqlx::query(r#"SELECT * FROM architecture_topologies ORDER BY created_at DESC, id ASC"#)
+                .fetch_all(&self.pool)
+                .await?
         } else {
             sqlx::query(
                 r#"
@@ -285,10 +283,9 @@ where
 
 fn row_to_topology(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitectureTopology, StoreError> {
     let id_str: String = row.try_get("id")?;
-    let id =
-        ArchitectureId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
-            reason: format!("invalid id in topology row: {err}"),
-        })?;
+    let id = ArchitectureId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
+        reason: format!("invalid id in topology row: {err}"),
+    })?;
     let status_str: String = row.try_get("status")?;
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
@@ -304,10 +301,11 @@ fn row_to_topology(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitectureTopology
         owner_user_id: row.try_get("owner_user_id")?,
         design_graph_json: row.try_get("design_graph_json")?,
         latest_yaml: row.try_get("latest_yaml")?,
-        latest_version_id: opt_id(row.try_get("latest_version_id")?, ArchitectureVersionId::new)?,
-        last_validation_status: opt_status_to_validation(
-            row.try_get("last_validation_status")?,
+        latest_version_id: opt_id(
+            row.try_get("latest_version_id")?,
+            ArchitectureVersionId::new,
         )?,
+        last_validation_status: opt_status_to_validation(row.try_get("last_validation_status")?)?,
         last_fleet_check_status: opt_status_to_fleet(row.try_get("last_fleet_check_status")?)?,
         last_plan_id: row.try_get("last_plan_id")?,
         last_apply_run_id: row.try_get("last_apply_run_id")?,

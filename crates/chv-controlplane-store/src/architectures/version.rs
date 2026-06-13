@@ -78,10 +78,7 @@ impl VersionRepository {
         row_to_version(&row)
     }
 
-    pub async fn get(
-        &self,
-        id: &ArchitectureVersionId,
-    ) -> Result<ArchitectureVersion, StoreError> {
+    pub async fn get(&self, id: &ArchitectureVersionId) -> Result<ArchitectureVersion, StoreError> {
         let row = sqlx::query(r#"SELECT * FROM architecture_versions WHERE id = $1"#)
             .bind(id.as_str())
             .fetch_optional(&self.pool)
@@ -115,11 +112,10 @@ impl VersionRepository {
 fn row_to_version(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitectureVersion, StoreError> {
     let id_str: String = row.try_get("id")?;
     let arch_id_str: String = row.try_get("architecture_id")?;
-    let id = ArchitectureVersionId::new(id_str).map_err(|err| {
-        StoreError::InvalidConfiguration {
+    let id =
+        ArchitectureVersionId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
             reason: format!("invalid id in version row: {err}"),
-        }
-    })?;
+        })?;
     let architecture_id =
         ArchitectureId::new(arch_id_str).map_err(|err| StoreError::InvalidConfiguration {
             reason: format!("invalid architecture_id in version row: {err}"),

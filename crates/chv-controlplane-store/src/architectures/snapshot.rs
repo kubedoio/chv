@@ -94,10 +94,9 @@ impl InventorySnapshotRepository {
 
 fn row_to_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<InventorySnapshot, StoreError> {
     let id_str: String = row.try_get("id")?;
-    let id =
-        InventorySnapshotId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
-            reason: format!("invalid id in inventory snapshot row: {err}"),
-        })?;
+    let id = InventorySnapshotId::new(id_str).map_err(|err| StoreError::InvalidConfiguration {
+        reason: format!("invalid id in inventory snapshot row: {err}"),
+    })?;
     let created_at: String = row.try_get("created_at")?;
 
     Ok(InventorySnapshot {

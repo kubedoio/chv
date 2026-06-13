@@ -5,9 +5,8 @@ use crate::test_util::TestDb;
 use crate::StoreError;
 use chrono::{Duration, Utc};
 use chv_controlplane_types::architecture::{
-    ArchitectureId, ArchitecturePlanId, ArchitectureStatus, ArchitectureVersionId,
-    DriftStatus, FleetCheckStatus, InventorySnapshotId, PlanMode, PlanStatus, RunStatus,
-    ValidationStatus,
+    ArchitectureId, ArchitecturePlanId, ArchitectureStatus, ArchitectureVersionId, DriftStatus,
+    FleetCheckStatus, InventorySnapshotId, PlanMode, PlanStatus, RunStatus, ValidationStatus,
 };
 
 fn aid(s: &str) -> ArchitectureId {
@@ -523,12 +522,16 @@ async fn apply_run_create_get_list_update() {
 // Helper because we don't want to repeatedly type the long path; ditto the
 // matching helper for drift IDs below.
 #[allow(non_snake_case)]
-fn ArchitectureApplyRunIdNew(s: &str) -> chv_controlplane_types::architecture::ArchitectureApplyRunId {
+fn ArchitectureApplyRunIdNew(
+    s: &str,
+) -> chv_controlplane_types::architecture::ArchitectureApplyRunId {
     chv_controlplane_types::architecture::ArchitectureApplyRunId::new(s).unwrap()
 }
 
 #[allow(non_snake_case)]
-fn ArchitectureDriftReportIdNew(s: &str) -> chv_controlplane_types::architecture::ArchitectureDriftReportId {
+fn ArchitectureDriftReportIdNew(
+    s: &str,
+) -> chv_controlplane_types::architecture::ArchitectureDriftReportId {
     chv_controlplane_types::architecture::ArchitectureDriftReportId::new(s).unwrap()
 }
 
