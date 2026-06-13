@@ -1,4 +1,4 @@
-# ADR-005 WebUI Design System Direction
+# ADR-005-WebUI WebUI Design System Direction
 
 ## Status
 Accepted

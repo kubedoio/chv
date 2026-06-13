@@ -63,8 +63,8 @@ If the SSE stream fails (401, network error), `taskStream` falls back to POST po
 
 ## References
 
-- ADR-004: WebUI Task and State Model
-- ADR-002: WebUI Architecture Boundary
+- ADR-004-WebUI: WebUI Task and State Model
+- ADR-002-WebUI: WebUI Architecture Boundary
 - `ui/src/lib/stores/live-state.svelte.ts`
 - `ui/src/lib/stores/task-stream.svelte.ts`
 - `ui/src/lib/stores/mutation.svelte.ts`

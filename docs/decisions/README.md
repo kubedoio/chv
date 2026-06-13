@@ -48,3 +48,7 @@ When making a significant architectural decision:
 2. Store it in `docs/specs/adr/` with sequential numbering
 3. Update this index
 4. If the decision changes an existing ADR, mark the old one as `Superseded by ADR-XXX`
+
+## Naming Convention
+
+WebUI ADRs use the `-WebUI` suffix (e.g., `ADR-001-WebUI`) to disambiguate from backend ADRs with the same number. Cross-references to a WebUI ADR must include the suffix.
