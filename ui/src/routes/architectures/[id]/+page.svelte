@@ -5,8 +5,15 @@
 	import StaleVersionBanner from '$lib/components/architectures/dashboard/StaleVersionBanner.svelte';
 	import ValidationFindingsPanel from '$lib/components/architectures/dashboard/ValidationFindingsPanel.svelte';
 	import YamlSidePanel from '$lib/components/architectures/dashboard/YamlSidePanel.svelte';
+	import Canvas from '$lib/components/architectures/canvas/Canvas.svelte';
+	import Inspector from '$lib/components/architectures/inspector/Inspector.svelte';
 	import { liveState } from '$lib/stores/live-state.svelte';
-	import { architectureStore } from '$lib/stores/architecture-store.svelte';
+	import { architectureStore, StaleVersionError } from '$lib/stores/architecture-store.svelte';
+	import {
+		architectureCanvasStore,
+		type GraphPayload
+	} from '$lib/stores/architecture-canvas-store.svelte';
+	import { architectureDesignerCanvasEnabled } from '$lib/feature-flags';
 	import { BFFError } from '$lib/bff/client';
 	import type { Architecture, ValidationResult } from '$lib/bff/architectures';
 	import type { PageData } from './$types';
@@ -16,6 +23,13 @@
 
 	let current = $state<Architecture | null>(null);
 	let staleVersion = $state(false);
+
+	// Canvas wiring (Phase 2). The flag default is OFF so production keeps the
+	// Phase-1 placeholder; dev / e2e set PUBLIC_ARCHITECTURE_DESIGNER_CANVAS=1.
+	const canvasEnabled = architectureDesignerCanvasEnabled();
+	let canvasDirty = $state(false);
+	let canvasSaving = $state(false);
+	let lastHydratedId = $state<string | null>(null);
 
 	// Tab state. The Validation and YAML tabs are Phase 1 additions; Overview
 	// remains the default so existing playwright tests stay green.
@@ -40,6 +54,14 @@
 			// Seed the YAML panel from the loader payload so a freshly imported
 			// topology shows its YAML without requiring a Generate click.
 			yamlContent = detail.latestYaml;
+			// Hydrate the canvas store from the persisted graph blob, but only
+			// on architecture-id transitions — re-hydrating after every save
+			// would clobber unsaved local edits.
+			if (canvasEnabled && lastHydratedId !== detail.architecture.id) {
+				lastHydratedId = detail.architecture.id;
+				canvasDirty = false;
+				architectureCanvasStore.load(parseGraphBlob(detail.designGraphJson));
+			}
 		} else {
 			current = null;
 		}
@@ -87,6 +109,46 @@
 			}
 		} finally {
 			yamlLoading = false;
+		}
+	}
+
+	function parseGraphBlob(blob: string | null): GraphPayload | null {
+		if (!blob) return null;
+		try {
+			const parsed = JSON.parse(blob);
+			if (parsed && typeof parsed === 'object' && parsed.version === '1.0') {
+				return parsed as GraphPayload;
+			}
+		} catch {
+			// fall through — malformed blob loads as empty graph
+		}
+		return null;
+	}
+
+	function handleCanvasChange() {
+		canvasDirty = true;
+	}
+
+	async function handleCanvasSave() {
+		if (!current || canvasSaving) return;
+		canvasSaving = true;
+		try {
+			const updated = await architectureCanvasStore.persist(
+				current.id,
+				current.version_number
+			);
+			current = updated;
+			canvasDirty = false;
+			// Findings re-fetch so per-node badges reflect the freshly persisted
+			// graph. handleRevalidate() already toasts on its own errors.
+			await handleRevalidate();
+		} catch (err) {
+			if (err instanceof StaleVersionError) {
+				staleVersion = true;
+			}
+			// Any other error has already been toasted by mutateWithRefresh.
+		} finally {
+			canvasSaving = false;
 		}
 	}
 </script>
@@ -178,20 +240,74 @@
 		</div>
 
 		{#if activeTab === 'overview'}
-			<div
-				id="tab-panel-overview"
-				class="canvas-placeholder"
-				role="tabpanel"
-				aria-labelledby="tab-overview"
-				aria-label="Designer canvas placeholder"
-			>
-				<div class="placeholder-title">Designer canvas coming in Phase 2</div>
-				<p class="placeholder-text">
-					This pane will host the Svelte Flow canvas, node palette and inspector
-					once the YAML model and validator land. For now, the YAML and Validation
-					tabs let you import topologies and see their findings.
-				</p>
-			</div>
+			{#if canvasEnabled && current.status !== 'archived'}
+				<div
+					id="tab-panel-overview"
+					class="canvas-shell"
+					role="tabpanel"
+					aria-labelledby="tab-overview"
+					data-testid="canvas-shell"
+				>
+					<div class="canvas-toolbar" data-testid="canvas-toolbar">
+						<div class="toolbar-status">
+							{#if architectureCanvasStore.dirty || canvasDirty}
+								<span
+									class="dirty-dot"
+									data-testid="canvas-dirty-indicator"
+									role="img"
+									aria-label="Unsaved canvas changes"
+									title="Unsaved canvas changes"
+								></span>
+								<span class="toolbar-status-text">Unsaved changes</span>
+							{:else}
+								<span class="toolbar-status-text">All changes saved</span>
+							{/if}
+						</div>
+						<div class="toolbar-actions">
+							<Button
+								variant="secondary"
+								size="sm"
+								onclick={handleRevalidate}
+								disabled={validating}
+								data-testid="canvas-validate-button"
+							>
+								{validating ? 'Validating…' : 'Validate'}
+							</Button>
+							<Button
+								variant="primary"
+								size="sm"
+								onclick={handleCanvasSave}
+								disabled={canvasSaving || !(architectureCanvasStore.dirty || canvasDirty)}
+								data-testid="canvas-save-button"
+							>
+								{canvasSaving ? 'Saving…' : 'Save canvas'}
+							</Button>
+						</div>
+					</div>
+					<div class="canvas-grid">
+						<Canvas
+							findings={validationResult?.findings ?? []}
+							onChange={handleCanvasChange}
+						/>
+						<Inspector />
+					</div>
+				</div>
+			{:else}
+				<div
+					id="tab-panel-overview"
+					class="canvas-placeholder"
+					role="tabpanel"
+					aria-labelledby="tab-overview"
+					aria-label="Designer canvas placeholder"
+				>
+					<div class="placeholder-title">Designer canvas coming in Phase 2</div>
+					<p class="placeholder-text">
+						This pane will host the Svelte Flow canvas, node palette and inspector
+						once the YAML model and validator land. For now, the YAML and Validation
+						tabs let you import topologies and see their findings.
+					</p>
+				</div>
+			{/if}
 		{:else if activeTab === 'yaml'}
 			<div id="tab-panel-yaml" role="tabpanel" aria-labelledby="tab-yaml">
 				<YamlSidePanel
@@ -296,6 +412,51 @@
 		border: 1px dashed var(--color-neutral-300);
 		border-radius: var(--radius-sm);
 		text-align: center;
+	}
+
+	.canvas-shell {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.canvas-toolbar {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--color-neutral-50, #f8fafc);
+		border: 1px solid var(--color-neutral-200);
+		border-radius: var(--radius-sm);
+	}
+
+	.toolbar-status {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: var(--text-xs);
+		color: var(--color-neutral-600);
+	}
+
+	.toolbar-actions {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.dirty-dot {
+		display: inline-block;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--color-warning, #f59e0b);
+	}
+
+	.canvas-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+		gap: 0.75rem;
+		min-height: 520px;
 	}
 
 	.placeholder-title {

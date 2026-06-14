@@ -164,3 +164,7 @@ jobs:
         run: cd ui && npm run test:e2e
         env:
           BFF_BASE_URL: http://localhost:8888
+          # Phase 2 architecture-designer canvas feature flag. We use
+          # `$env/dynamic/public` so this is read at request time by the
+          # SvelteKit preview server — no rebuild needed.
+          PUBLIC_ARCHITECTURE_DESIGNER_CANVAS: '1'

@@ -1,0 +1,50 @@
+/* Shared field styles for Architecture Designer inspector field groups.
+ *
+ * Used by `inspector/{Kind}Fields.svelte`. We pull these into a plain CSS
+ * file rather than per-component scoped styles so the eight per-kind files
+ * stay short and consistent. The Inspector.svelte parent imports this once,
+ * making the classes available globally to any descendant Svelte component.
+ *
+ * Class names are deliberately namespaced (`chv-fields-*`) to avoid
+ * collisions with other parts of the app.
+ */
+
+.chv-fields-grid {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 0.4rem;
+}
+
+.chv-fields-grid label {
+	font-size: var(--text-xs, 0.6875rem);
+	font-weight: 600;
+	color: var(--color-neutral-700, #423b33);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.chv-fields-grid input,
+.chv-fields-grid select,
+.chv-fields-grid textarea {
+	width: 100%;
+	padding: 0.4rem 0.55rem;
+	font-size: var(--text-sm, 0.8125rem);
+	font-family: var(--font-sans, 'IBM Plex Sans', system-ui, sans-serif);
+	border: 1px solid var(--color-neutral-300, #c7bcac);
+	border-radius: var(--radius-sm, 0.25rem);
+	background: var(--bg-surface, #fff);
+	color: var(--color-neutral-900, #191612);
+}
+
+.chv-fields-grid textarea {
+	min-height: 80px;
+	font-family: var(--font-mono, 'IBM Plex Mono', monospace);
+	resize: vertical;
+}
+
+.chv-fields-grid input:focus,
+.chv-fields-grid select:focus,
+.chv-fields-grid textarea:focus {
+	outline: 2px solid var(--color-primary, #8f5a2a);
+	outline-offset: 1px;
+}
