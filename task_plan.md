@@ -132,4 +132,26 @@ A runs first (foundation). B and C run in parallel after A lands. R runs
 (populate during execution)
 
 ## Status
-**Phase 2 — agent A dispatched (foundation: deps + store + edge rules).**
+**Phase 2 complete. PR #114 open, CI running, all local quality gates green.**
+
+### Commits on `feat/architecture-designer-phase2-canvas`
+| SHA | Description |
+|-----|-------------|
+| `edf254e` | feat(designer): Phase 2 — canvas + 8 nodes + inspector + palette |
+| `4a28e12` | fix(designer): apply Phase 2 review NITs (severity guard, size-test rigor) |
+
+### Final verification (local)
+- `cargo build --workspace` — clean
+- `cargo test --workspace` — 676 passed, 2 ignored
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+- `cargo fmt --all -- --check` — clean
+- `cd ui && npm run check` — 4604 files, **0 errors, 0 warnings**
+- `cd ui && npx vitest run` — 41 files, **280 tests pass**
+- Component-size guard: all canvas/nodes/inspector components ≤300 lines
+
+### PR
+https://github.com/kubedoio/chv/pull/114 — OPEN, MERGEABLE, mergeStateStatus=UNSTABLE (CI in progress).
+
+### Reviewer verdict
+ship-it (4 NITs total — 2 applied in `4a28e12`, 2 deferred to Phase 2.1).
+

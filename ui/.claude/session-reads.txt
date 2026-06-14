@@ -164,3 +164,6 @@
 /Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/UserNode.svelte
 /Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/nodes/RoleNode.svelte
 /Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/canvas/canvas-handlers.ts
+/Users/I761222/projects/claude/chv/ui/tests/e2e/architectures-canvas.spec.ts
+/Users/I761222/projects/claude/chv/ui/src/lib/components/architectures/canvas/Canvas.svelte
+/Users/I761222/projects/claude/chv/ui/src/routes/architectures/[id]/+page.svelte

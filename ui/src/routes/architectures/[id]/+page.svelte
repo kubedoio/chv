@@ -254,6 +254,7 @@
 								<span
 									class="dirty-dot"
 									data-testid="canvas-dirty-indicator"
+									role="img"
 									aria-label="Unsaved canvas changes"
 									title="Unsaved canvas changes"
 								></span>

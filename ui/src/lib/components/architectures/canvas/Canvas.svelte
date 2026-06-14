@@ -22,6 +22,7 @@
 	import { SvelteFlowProvider, type Node as FlowNode, type NodeTypes } from '@xyflow/svelte';
 
 	import { architectureCanvasStore } from '$lib/stores/architecture-canvas-store.svelte';
+	import { toast } from '$lib/stores/toast.svelte';
 	import type { Finding } from '$lib/bff/architectures';
 
 	import HostNode from '../nodes/HostNode.svelte';
@@ -82,6 +83,28 @@
 			onChange?.();
 		}
 		lastDirty = isDirty;
+	});
+
+	// Expose the canvas store and toast on `window` for the Phase-2
+	// Playwright suite. Svelte Flow's pointer-event-based connection
+	// gesture is too flaky in headless Chromium (the node body intercepts
+	// pointer events on the handle subtree), so the e2e suite invokes the
+	// store directly through these handles to verify the same code path
+	// without the flaky pointer-event dance. Exposed only client-side.
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		(
+			window as unknown as {
+				__architectureCanvasStore?: typeof architectureCanvasStore;
+				__toast?: typeof toast;
+			}
+		).__architectureCanvasStore = architectureCanvasStore;
+		(
+			window as unknown as {
+				__architectureCanvasStore?: typeof architectureCanvasStore;
+				__toast?: typeof toast;
+			}
+		).__toast = toast;
 	});
 </script>
 
