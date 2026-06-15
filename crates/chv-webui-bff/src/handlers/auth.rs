@@ -402,9 +402,9 @@ mod tests {
             .expect("run migrations");
 
         use chv_controlplane_store::{
-            AlertRepository, BackupRepository, DesiredStateRepository, EventRepository,
-            ImageRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
-            OperationRepository, TopologyRepository,
+            AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
+            EventRepository, ImageRepository, NetworkRepository, NodeRepository,
+            ObservedStateRepository, OperationRepository, TopologyRepository,
         };
         AppState {
             pool: pool.clone(),
@@ -418,6 +418,7 @@ mod tests {
             topology_repo: TopologyRepository::new(pool.clone()),
             network_repo: NetworkRepository::new(pool.clone()),
             image_repo: ImageRepository::new(pool.clone()),
+            apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
             mutations: Arc::new(NoopMutations),
             jwt_secret: "test-secret".to_string(),
             agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
@@ -487,6 +488,12 @@ mod tests {
             BffError::GraphEmpty => 422,
             BffError::PlanExpired { .. } => 409,
             BffError::PlanNotDiscardable { .. } => 409,
+            BffError::MissingConfirmation { .. } => 400,
+            BffError::WarningsNotAcknowledged { .. } => 400,
+            BffError::PlanNotApplicable { .. } => 409,
+            BffError::ProductionRequiresAdmin { .. } => 403,
+            BffError::PlanModeMismatch { .. } => 400,
+            BffError::InvalidResourceName { .. } => 400,
         }
     }
 

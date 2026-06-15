@@ -42,6 +42,9 @@
 //! invariant.
 
 use axum::{extract::State, Json};
+use chv_architecture_reconcile::apply::{
+    apply_plan, ApplyContext, ApplyError, ApplyOutcome, ConfirmationToken,
+};
 use chv_architecture_reconcile::FleetInventoryProvider;
 use chv_architecture_validate::{
     fleet::check_fleet, parse_yaml as parse_arch_yaml, validate as validate_yaml_str,
@@ -61,7 +64,8 @@ use chv_controlplane_types::architecture::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::auth::{require_admin, require_operator_or_admin, BearerToken};
+use crate::auth::{require_operator_or_admin, BearerToken, Role};
+use crate::metrics_apply::{record_apply_status, ApplyStatusLabel, ApplyTimer};
 use crate::router::AppState;
 use crate::BffError;
 
@@ -266,6 +270,18 @@ pub async fn create_architecture(
     if req.name.trim().is_empty() {
         return Err(BffError::BadRequest("name must not be blank".into()));
     }
+    // Production-environment write guard (Security F2): only admins may
+    // tag an architecture as production. Without this gate an operator
+    // could set environment="production" themselves and then bypass the
+    // apply-time admin check by toggling the label off and on at will.
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    if is_production_environment(req.environment.as_deref()) && !role.meets(Role::Admin) {
+        return Err(BffError::ProductionRequiresAdmin {
+            environment: req.environment.as_deref().unwrap_or("").trim().to_string(),
+        });
+    }
     let id = ArchitectureId::new(chv_common::gen_short_id())
         .map_err(|e| BffError::Internal(format!("failed to mint architecture id: {e}")))?;
     tracing::info!(architecture_id = %id, name = %req.name, "create_architecture");
@@ -303,6 +319,16 @@ pub async fn update_architecture(
                 .map_err(|e| BffError::BadRequest(format!("invalid latest_version_id: {e}")))?,
         ),
     };
+    // Production-environment write guard (Security F2): only admins may
+    // tag (or re-tag) an architecture as production via update.
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    if is_production_environment(req.environment.as_deref()) && !role.meets(Role::Admin) {
+        return Err(BffError::ProductionRequiresAdmin {
+            environment: req.environment.as_deref().unwrap_or("").trim().to_string(),
+        });
+    }
     tracing::info!(
         architecture_id = %id,
         expected_version = req.expected_version,
@@ -1195,22 +1221,322 @@ pub async fn check_fleet_architecture(
     }))
 }
 
-pub async fn apply_architecture(
-    BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    require_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
+// ---------------------------------------------------------------------------
+// Phase 5 DTOs — apply / destroy
+// ---------------------------------------------------------------------------
+
+/// Body for `POST /v1/architectures/apply` and
+/// `POST /v1/architectures/destroy`.
+///
+/// `confirmation.typed_name` is required for destructive plans (any
+/// `Delete`/`Replace` change, or `destroy` mode); the apply path rejects
+/// missing/mismatched names with `code: "MISSING_CONFIRMATION"`.
+///
+/// `acknowledged_warnings` is a hard gate when the plan carries warnings —
+/// the apply path rejects with `code: "WARNINGS_NOT_ACKNOWLEDGED"` when it
+/// is left at its `false` default and the plan has any warnings.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ApplyArchitectureRequest {
+    pub id: String,
+    pub plan_id: String,
+    #[serde(default)]
+    pub confirmation: ConfirmationDto,
+    #[serde(default)]
+    pub acknowledged_warnings: bool,
 }
 
+/// Wire-shape for the typed-name confirmation payload. Mirrors the
+/// reconcile crate's [`ConfirmationToken`] but stays a separate type so the
+/// JSON contract is owned by the BFF.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConfirmationDto {
+    pub typed_name: Option<String>,
+}
+
+impl From<ConfirmationDto> for ConfirmationToken {
+    fn from(d: ConfirmationDto) -> Self {
+        Self {
+            typed_name: d.typed_name,
+        }
+    }
+}
+
+/// Response shape for `apply` and `destroy`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ApplyResponse {
+    pub run_id: String,
+    pub task_id: Option<String>,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub architecture_id: String,
+    pub architecture_version_id: String,
+    pub plan_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 production-environment guard
+// ---------------------------------------------------------------------------
+
+/// Normalize and decide whether a string is the production environment.
+///
+/// We trim leading/trailing whitespace (covers UI-side copy/paste with a
+/// stray newline) and ASCII-lowercase the result so casing variants
+/// ("Production", "PROD", " prod\n") all map to the same answer.
+///
+/// Note: ASCII-only on purpose. A Cyrillic-look-alike like "prоduction"
+/// (with Cyrillic 'о', U+043E) deliberately does NOT match — only the
+/// Latin spelling is treated as production. Documented intent: the guard
+/// is a courtesy for typo-tolerance, not a defence against deliberate
+/// homograph spoofing (which would be defeated at the input-validation
+/// layer instead).
+fn is_production_environment(environment: Option<&str>) -> bool {
+    match environment {
+        Some(env) => {
+            let normalized = env.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "production" | "prod")
+        }
+        None => false,
+    }
+}
+
+/// Reject apply/destroy attempts against a production-tagged architecture
+/// when the caller is not an admin. The codebase has only Viewer/Operator/
+/// Admin roles today; spec §architecture-designer/contracts hints at a
+/// future fine-grained `architecture:apply:production` permission, but this
+/// guard is the conservative bridge until that lands.
+///
+/// A `None` environment, or any non-`production`/`prod` value, passes
+/// through. Admins always pass through. Operators (and viewers) hit a
+/// dedicated 403 with `code: "PRODUCTION_REQUIRES_ADMIN"` so the UI can
+/// route to "ask an admin to apply this".
+fn enforce_production_guard(environment: Option<&str>, role: Role) -> Result<(), BffError> {
+    if is_production_environment(environment) && !role.meets(Role::Admin) {
+        return Err(BffError::ProductionRequiresAdmin {
+            environment: environment.unwrap_or("").trim().to_string(),
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 handlers — apply / destroy
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/architectures/apply` — turn a `ready_to_apply` plan into a
+/// queued [`chv_controlplane_types::architecture::ArchitectureApplyRun`]
+/// and idempotent per-change Operations.
+///
+/// Operator role is required at the routing layer; the
+/// production-environment guard escalates to Admin for
+/// `environment ∈ {"production", "prod"}`. Non-prod environments are
+/// applyable by any operator.
+pub async fn apply_architecture(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    Json(req): Json<ApplyArchitectureRequest>,
+) -> Result<Json<ApplyResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    apply_inner(&state, &claims, req, /*destroy_mode=*/ false).await
+}
+
+/// `POST /v1/architectures/destroy` — same shape as `apply_architecture`,
+/// but rejects with 400 when the plan is not in `Destroy` mode. The
+/// reconcile crate's typed-name confirmation guard fires identically for
+/// both paths because every destroy plan is destructive.
 pub async fn destroy_architecture(
     BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    require_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
+    State(state): State<AppState>,
+    Json(req): Json<ApplyArchitectureRequest>,
+) -> Result<Json<ApplyResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    apply_inner(&state, &claims, req, /*destroy_mode=*/ true).await
+}
+
+/// Shared implementation for `apply` and `destroy`. The only behavioural
+/// difference between the two endpoints is the destroy-mode pre-condition
+/// check; everything else (production guard, plan parse, reconcile call,
+/// metrics, tracing) is identical.
+async fn apply_inner(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    req: ApplyArchitectureRequest,
+    destroy_mode: bool,
+) -> Result<Json<ApplyResponse>, BffError> {
+    record_apply_status(ApplyStatusLabel::Started);
+    let timer = ApplyTimer::start();
+    match apply_inner_core(state, claims, req, destroy_mode).await {
+        Ok(resp) => {
+            record_apply_status(ApplyStatusLabel::Enqueued);
+            timer.observe();
+            Ok(resp)
+        }
+        Err(err) => {
+            record_apply_status(ApplyStatusLabel::Failed);
+            timer.observe();
+            Err(err)
+        }
+    }
+}
+
+async fn apply_inner_core(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    req: ApplyArchitectureRequest,
+    destroy_mode: bool,
+) -> Result<Json<ApplyResponse>, BffError> {
+    let architecture_id = parse_id(&req.id)?;
+    let plan_id = ArchitecturePlanId::new(req.plan_id.clone())
+        .map_err(|e| BffError::BadRequest(format!("invalid plan id: {e}")))?;
+    let role = Role::parse(&claims.role).unwrap_or(Role::Viewer);
+
+    // 1. Look up architecture (404 if missing).
+    let architecture = state.topology_repo.get(&architecture_id).await?;
+
+    // 2. Look up plan (404 if missing).
+    let plan_repo = PlanRepository::new(state.pool.clone());
+    let plan_record = plan_repo.get(&plan_id).await?;
+
+    // 3. Verify the plan was generated against this architecture and the
+    //    current `latest_version_id`. A version-drift mismatch is a 409 so
+    //    the UI can re-run /plan rather than silently widening the apply
+    //    window.
+    //
+    // Phase-4 plans may run against a topology that has no
+    // `latest_version_id` yet (the plan handler mints a fresh version row
+    // but does not back-fill `topology.latest_version_id`). In that case
+    // there is no recorded "current version" to drift-check against, so
+    // we trust the plan's version reference.
+    if plan_record.architecture_id != architecture.id {
+        return Err(BffError::Conflict(format!(
+            "plan {plan_id} belongs to architecture {} not {}",
+            plan_record.architecture_id, architecture.id
+        )));
+    }
+    if let Some(latest_version_id) = architecture.latest_version_id.as_ref() {
+        if plan_record.architecture_version_id != *latest_version_id {
+            return Err(BffError::PlanNotApplicable {
+                plan_id: plan_id.to_string(),
+                current_status: plan_record.status.as_str().to_string(),
+                reason: Some("version_drift".to_string()),
+            });
+        }
+    } else {
+        // `latest_version_id` is unset (Phase-4 plan handler does not
+        // back-fill the topology row). Compare numeric `version_number` if
+        // we can. The plan row records `architecture_version_number` since
+        // Phase 4; without that, log a warn and trust the plan.
+        tracing::warn!(
+            target: "architecture.apply",
+            architecture_id = %architecture.id,
+            plan_id = %plan_id,
+            "skipping version-drift check: topology.latest_version_id is None — see Phase-7 hardening"
+        );
+    }
+
+    // 4. Production-environment guard. Operator hits a clean
+    //    PRODUCTION_REQUIRES_ADMIN; admin passes through.
+    enforce_production_guard(architecture.environment.as_deref(), role)?;
+
+    // 5. Deserialize the persisted plan body. Phase 4 always writes a non-
+    //    empty `plan_json`; treat its absence as an internal error rather
+    //    than a 4xx — the row is corrupt if it lacks the body.
+    let plan_json = plan_record
+        .plan_json
+        .as_deref()
+        .ok_or_else(|| BffError::Internal(format!("plan {plan_id} has no persisted plan_json")))?;
+    let plan: chv_architecture_reconcile::Plan = serde_json::from_str(plan_json).map_err(|e| {
+        BffError::Internal(format!(
+            "failed to deserialize plan_json for {plan_id}: {e}"
+        ))
+    })?;
+
+    // 6. Destroy-mode contract: the destroy endpoint must only accept plans
+    //    generated with `mode = destroy`. Apply mode plans hit a 400 here so
+    //    the UI knows to call /destroy-plan first.
+    if destroy_mode && plan.mode != PlanMode::Destroy {
+        return Err(BffError::BadRequest(format!(
+            "plan {plan_id} has mode {:?}; destroy endpoint requires Destroy-mode plan",
+            plan.mode
+        )));
+    }
+    if !destroy_mode && plan.mode == PlanMode::Destroy {
+        return Err(BffError::BadRequest(format!(
+            "plan {plan_id} has mode Destroy; use the /destroy endpoint instead",
+        )));
+    }
+
+    let environment_for_log = architecture.environment.clone();
+    tracing::info!(
+        target: "architecture.apply",
+        architecture_id = %architecture.id,
+        version_id = %plan_record.architecture_version_id,
+        plan_id = %plan_id,
+        environment = environment_for_log.as_deref().unwrap_or(""),
+        destroy_mode,
+        "apply_plan invoked"
+    );
+
+    // 7. Build the reconcile-side context and call `apply_plan`.
+    let ctx = ApplyContext {
+        architecture_id: architecture.id.clone(),
+        architecture_version_id: plan_record.architecture_version_id.clone(),
+        topology_name: architecture.name.clone(),
+        environment: architecture.environment.clone(),
+        plan_id: plan_id.clone(),
+        requested_by: Some(claims.sub.clone()),
+        confirmation: req.confirmation.into(),
+        acknowledged_warnings: req.acknowledged_warnings,
+    };
+
+    let outcome: ApplyOutcome = apply_plan(
+        &plan,
+        &plan_record,
+        &state.operation_repo,
+        state.apply_runs.as_ref(),
+        &plan_repo,
+        &ctx,
+        state.clock.as_ref(),
+    )
+    .await
+    .map_err(|err: ApplyError| {
+        // Log failures with the error type so dashboards can split out
+        // 4xx pre-condition violations from 5xx store failures without
+        // matching on bodies.
+        tracing::warn!(
+            target: "architecture.apply",
+            architecture_id = %architecture.id,
+            plan_id = %plan_id,
+            environment = environment_for_log.as_deref().unwrap_or(""),
+            error = %err,
+            "apply_plan failed"
+        );
+        BffError::from(err)
+    })?;
+
+    tracing::info!(
+        target: "architecture.apply",
+        architecture_id = %architecture.id,
+        version_id = %plan_record.architecture_version_id,
+        plan_id = %plan_id,
+        run_id = %outcome.run.id,
+        environment = environment_for_log.as_deref().unwrap_or(""),
+        queued = outcome.queued_operations.len(),
+        skipped = outcome.skipped_operations.len(),
+        "apply_plan succeeded"
+    );
+
+    Ok(Json(ApplyResponse {
+        run_id: outcome.run.id.as_str().to_string(),
+        task_id: outcome.run.task_id.clone(),
+        status: outcome.run.status.as_str().to_string(),
+        started_at: outcome.run.started_at.map(|d| d.to_rfc3339()),
+        architecture_id: architecture.id.into_inner(),
+        architecture_version_id: plan_record.architecture_version_id.into_inner(),
+        plan_id: plan_id.into_inner(),
+    }))
 }
 
 pub async fn get_architecture_drift(
@@ -1244,4 +1570,56 @@ pub async fn list_architecture_versions(
 fn parse_id(id: &str) -> Result<ArchitectureId, BffError> {
     ArchitectureId::new(id)
         .map_err(|e| BffError::BadRequest(format!("invalid architecture id: {e}")))
+}
+
+#[cfg(test)]
+mod prod_guard_tests {
+    use super::*;
+
+    #[test]
+    fn none_environment_passes_for_any_role() {
+        enforce_production_guard(None, Role::Viewer).expect("None must pass for viewer");
+        enforce_production_guard(None, Role::Operator).expect("None must pass for operator");
+        enforce_production_guard(None, Role::Admin).expect("None must pass for admin");
+    }
+
+    #[test]
+    fn staging_passes_for_operator() {
+        enforce_production_guard(Some("staging"), Role::Operator)
+            .expect("staging is not gated; operator must pass");
+    }
+
+    #[test]
+    fn production_blocks_operator() {
+        let err = enforce_production_guard(Some("production"), Role::Operator)
+            .expect_err("production must block operator");
+        match err {
+            BffError::ProductionRequiresAdmin { environment } => {
+                assert_eq!(environment, "production");
+            }
+            other => panic!("expected ProductionRequiresAdmin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prod_alias_blocks_operator() {
+        let err = enforce_production_guard(Some("prod"), Role::Operator)
+            .expect_err("'prod' alias must block operator");
+        assert!(matches!(err, BffError::ProductionRequiresAdmin { .. }));
+    }
+
+    #[test]
+    fn production_passes_for_admin() {
+        enforce_production_guard(Some("production"), Role::Admin)
+            .expect("admin must clear the production guard");
+    }
+
+    #[test]
+    fn production_blocks_viewer() {
+        // Viewer should never reach here in practice (admin middleware
+        // gates the route) but defence-in-depth: the guard itself rejects.
+        let err = enforce_production_guard(Some("production"), Role::Viewer)
+            .expect_err("viewer must be blocked");
+        assert!(matches!(err, BffError::ProductionRequiresAdmin { .. }));
+    }
 }

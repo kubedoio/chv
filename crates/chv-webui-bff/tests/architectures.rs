@@ -12,18 +12,18 @@ use async_trait::async_trait;
 use axum::extract::State;
 use axum::Json;
 use chv_controlplane_store::{
-    AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, ImageRepository,
-    NetworkRepository, NodeRepository, ObservedStateRepository, OperationRepository,
-    TopologyRepository,
+    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository, EventRepository,
+    ImageRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
+    OperationRepository, TopologyRepository,
 };
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
-    apply_architecture, archive_architecture, check_fleet_architecture, create_architecture,
-    destroy_architecture, generate_architecture_yaml, get_architecture, get_architecture_drift,
-    import_yaml_architecture, list_architecture_runs, list_architecture_versions,
-    list_architectures, update_architecture, validate_architecture, validate_architecture_yaml,
-    ArchiveArchitectureRequest, CheckFleetRequest, CreateArchitectureRequest, GenerateYamlRequest,
-    GetArchitectureRequest, ImportYamlRequest, ListArchitecturesRequest, UpdateArchitectureRequest,
+    archive_architecture, check_fleet_architecture, create_architecture,
+    generate_architecture_yaml, get_architecture, get_architecture_drift, import_yaml_architecture,
+    list_architecture_runs, list_architecture_versions, list_architectures, update_architecture,
+    validate_architecture, validate_architecture_yaml, ArchiveArchitectureRequest,
+    CheckFleetRequest, CreateArchitectureRequest, GenerateYamlRequest, GetArchitectureRequest,
+    ImportYamlRequest, ListArchitecturesRequest, UpdateArchitectureRequest,
     ValidateArchitectureRequest, ValidateArchitectureYamlRequest, ValidationStatusKind,
 };
 use chv_webui_bff::mutations::MutationService;
@@ -158,6 +158,7 @@ async fn build_state() -> AppState {
         topology_repo: TopologyRepository::new(pool.clone()),
         network_repo: NetworkRepository::new(pool.clone()),
         image_repo: ImageRepository::new(pool.clone()),
+        apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
         mutations: Arc::new(NoopMutations),
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
@@ -190,6 +191,12 @@ fn err_status(e: &BffError) -> u16 {
         BffError::GraphEmpty => 422,
         BffError::PlanExpired { .. } => 409,
         BffError::PlanNotDiscardable { .. } => 409,
+        BffError::MissingConfirmation { .. } => 400,
+        BffError::WarningsNotAcknowledged { .. } => 400,
+        BffError::PlanNotApplicable { .. } => 409,
+        BffError::ProductionRequiresAdmin { .. } => 403,
+        BffError::PlanModeMismatch { .. } => 400,
+        BffError::InvalidResourceName { .. } => 400,
     }
 }
 
@@ -201,9 +208,10 @@ fn err_status(e: &BffError) -> u16 {
 async fn crud_lifecycle_create_list_get_update_archive() {
     let state = build_state().await;
 
-    // 1. Create
+    // 1. Create — production-environment topologies require Admin since
+    //    Phase 5 reviewer F2 (operator-writable-label bypass).
     let create = create_architecture(
-        BearerToken(claims_for("operator")),
+        BearerToken(claims_for("admin")),
         State(state.clone()),
         Json(CreateArchitectureRequest {
             name: "customer-a-prod".to_string(),
@@ -1148,47 +1156,10 @@ async fn import_yaml_forbids_viewer() {
 // Phase-0 stub tests that previously lived here have been removed; the
 // real surface no longer returns 501.
 
-#[tokio::test]
-async fn apply_stub_returns_501_for_admin() {
-    let state = build_state().await;
-    let admin = claims_for("admin");
-    let err = apply_architecture(BearerToken(admin), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
-}
-
-#[tokio::test]
-async fn apply_stub_forbids_operator_before_501() {
-    // The apply verb is admin-only — an operator hitting it must see 403,
-    // not 501. This guards the routing decision in §2 of the plan.
-    let state = build_state().await;
-    let op = claims_for("operator");
-    let err = apply_architecture(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("operator must be forbidden from apply");
-    assert_eq!(err_status(&err), 403);
-}
-
-#[tokio::test]
-async fn destroy_stub_returns_501_for_admin() {
-    let state = build_state().await;
-    let admin = claims_for("admin");
-    let err = destroy_architecture(BearerToken(admin), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
-}
-
-#[tokio::test]
-async fn destroy_stub_forbids_operator_before_501() {
-    let state = build_state().await;
-    let op = claims_for("operator");
-    let err = destroy_architecture(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("operator must be forbidden from destroy");
-    assert_eq!(err_status(&err), 403);
-}
+// Apply / destroy handlers are exercised in `tests/architectures_apply.rs`.
+// The Phase-0 stub tests that previously lived here are gone — apply and
+// destroy now require a generated plan and matching confirmation, so the
+// stub-shape JSON inputs no longer round-trip.
 
 #[tokio::test]
 async fn drift_stub_returns_501_for_viewer() {

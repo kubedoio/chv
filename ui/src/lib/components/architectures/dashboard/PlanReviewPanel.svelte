@@ -2,6 +2,7 @@
 	import Button from '$lib/components/primitives/Button.svelte';
 	import PlanChangeRow from './PlanChangeRow.svelte';
 	import PlanTtlBadge from './PlanTtlBadge.svelte';
+	import ApplyConfirmDialog from '$lib/components/architectures/runs/ApplyConfirmDialog.svelte';
 	import type {
 		Architecture,
 		PlanChange,
@@ -18,10 +19,23 @@
 		loading?: boolean;
 		/** True while a discard-plan request is in flight. */
 		discarding?: boolean;
+		/** True while the apply/destroy POST is in flight (Phase 5). */
+		applying?: boolean;
 		/** Click handler for "Generate plan" / "Generate destroy plan". */
 		onGenerate: (mode: PlanMode) => void;
 		/** Click handler for "Discard plan" — receives the plan_id. */
 		onDiscard: (planId: string) => void;
+		/**
+		 * Phase 5 apply hook. Receives the typed-name (empty string when not
+		 * required) and the warning-acknowledgment flag. Parent owns the
+		 * BFF call + post-success navigation.
+		 */
+		onApply?: (
+			planId: string,
+			mode: PlanMode,
+			typedName: string,
+			acknowledgedWarnings: boolean
+		) => void;
 	}
 
 	let {
@@ -29,20 +43,21 @@
 		planResult,
 		loading = false,
 		discarding = false,
+		applying = false,
 		onGenerate,
-		onDiscard
+		onDiscard,
+		onApply
 	}: Props = $props();
 
 	const architectureName = $derived(architecture.display_name ?? architecture.name);
 
 	const blocked = $derived(planResult?.status === 'failed_validation');
 
-	const needsConfirmation = $derived(
+	const hasDestructiveChanges = $derived(
 		planResult?.changes.some((c) => c.requires_confirmation) ?? false
 	);
 
-	let typedName = $state('');
-	const confirmationMatches = $derived(typedName.trim() === architectureName);
+	let dialogOpen = $state(false);
 
 	/**
 	 * Group changes by `resource_type`, preserving the wire's apply-order via
@@ -65,6 +80,35 @@
 	const generateLabel = $derived(loading ? 'Generating…' : 'Generate plan');
 	const destroyLabel = $derived(loading ? 'Generating…' : 'Generate destroy plan');
 	const discardLabel = $derived(discarding ? 'Discarding…' : 'Discard plan');
+
+	/**
+	 * Apply is enabled when the plan is in the canonical ready-to-apply
+	 * status (or its `requires_confirmation` cousin) and the parent supplied
+	 * an onApply handler. Expired/discarded/failed plans must regenerate.
+	 */
+	const applyEnabled = $derived(
+		!!onApply &&
+			!!planResult &&
+			!blocked &&
+			!applying &&
+			(planResult.status === 'ready_to_apply' ||
+				planResult.status === 'requires_confirmation') &&
+			new Date(planResult.expires_at).getTime() > Date.now()
+	);
+
+	function handleApplyClick() {
+		if (!applyEnabled || !planResult) return;
+		dialogOpen = true;
+	}
+
+	function handleDialogConfirm(typedName: string, acknowledgedWarnings: boolean) {
+		if (!planResult || !onApply) return;
+		onApply(planResult.plan_id, planResult.mode, typedName, acknowledgedWarnings);
+	}
+
+	function handleDialogCancel() {
+		dialogOpen = false;
+	}
 </script>
 
 <section class="panel" aria-label="Plan review" data-testid="plan-review-panel">
@@ -151,33 +195,16 @@
 			</div>
 		{/if}
 
-		{#if needsConfirmation && !blocked}
-			<div class="cf" data-testid="plan-confirmation">
-				<label for="plan-confirm-name" class="cfl">
-					Type the architecture name <strong>{architectureName}</strong> to confirm.
-				</label>
-				<input
-					id="plan-confirm-name"
-					type="text"
-					class="cfi"
-					bind:value={typedName}
-					autocomplete="off"
-					spellcheck="false"
-					data-testid="plan-confirm-input"
-					aria-describedby="plan-confirm-help"
-				/>
-				<p id="plan-confirm-help" class="cfh">Apply lands in Phase 5; the button is disabled until then.</p>
-			</div>
-		{/if}
-
 		<footer class="ft">
 			<Button
-				variant="primary"
+				variant={planResult.mode === 'destroy' ? 'danger' : 'primary'}
 				size="sm"
-				disabled={true}
-				title="Apply available in Phase 5"
-				ariaLabel="Apply plan (available in Phase 5)"
+				disabled={!applyEnabled}
+				loading={applying}
+				onclick={handleApplyClick}
+				ariaLabel={planResult.mode === 'destroy' ? 'Apply destroy plan' : 'Apply plan'}
 				data-testid="plan-apply-button"
+				title={!applyEnabled && !blocked ? 'Plan is not in a ready-to-apply state' : undefined}
 			>{planResult.mode === 'destroy' ? 'Apply destroy' : 'Apply plan'}</Button>
 			<Button
 				variant="ghost"
@@ -188,14 +215,22 @@
 				ariaLabel="Discard plan"
 				data-testid="plan-discard-button"
 			>{discardLabel}</Button>
-			{#if needsConfirmation && !confirmationMatches}
-				<span class="fh" data-testid="plan-apply-hint">
-					Apply will unlock once Phase 5 ships and the typed name matches.
-				</span>
-			{/if}
 		</footer>
 	{/if}
 </section>
+
+{#if planResult}
+	<ApplyConfirmDialog
+		bind:open={dialogOpen}
+		architectureName={architectureName}
+		planMode={planResult.mode}
+		warnings={planResult.warnings}
+		hasDestructiveChanges={hasDestructiveChanges}
+		submitting={applying}
+		onConfirm={handleDialogConfirm}
+		onCancel={handleDialogCancel}
+	/>
+{/if}
 
 <style>
 	.panel { display: flex; flex-direction: column; gap: 0.75rem; padding: 1rem;
@@ -236,15 +271,5 @@
 		letter-spacing: 0.04em; color: var(--color-neutral-600); }
 	.cl { list-style: none; margin: 0; padding: 0; display: flex;
 		flex-direction: column; gap: 0.25rem; }
-	.cf { display: flex; flex-direction: column; gap: 0.25rem;
-		padding: 0.6rem 0.85rem; background: var(--color-neutral-50, #f8fafc);
-		border: 1px solid var(--color-neutral-200); border-radius: var(--radius-xs); }
-	.cfl { font-size: var(--text-sm); color: var(--color-neutral-700); }
-	.cfi { padding: 0.35rem 0.55rem; font-size: var(--text-sm);
-		border: 1px solid var(--color-neutral-300); border-radius: var(--radius-xs);
-		background: var(--bg-surface); color: var(--color-neutral-900); }
-	.cfi:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
-	.cfh { margin: 0; font-size: 12px; color: var(--color-neutral-500); }
 	.ft { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-	.fh { font-size: 12px; color: var(--color-neutral-500); }
 </style>

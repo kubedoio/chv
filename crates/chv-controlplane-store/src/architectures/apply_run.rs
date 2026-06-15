@@ -21,6 +21,12 @@ pub struct ApplyRunCreateInput {
     pub task_id: Option<String>,
     pub status: RunStatus,
     pub requested_by: Option<String>,
+    /// Wall-clock instant the run started doing work. Persisted at
+    /// create time when the caller already has a clock reading; lets the
+    /// failure path always render a non-NULL `started_at` even when the
+    /// run never reached `Running`. Pass `None` for runs that genuinely
+    /// have not started yet (orchestrator-driven create).
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,9 +68,10 @@ impl ApplyRunRepository {
                 plan_id,
                 task_id,
                 status,
-                requested_by
+                requested_by,
+                started_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             "#,
         )
@@ -75,6 +82,7 @@ impl ApplyRunRepository {
         .bind(&input.task_id)
         .bind(input.status.as_str())
         .bind(&input.requested_by)
+        .bind(input.started_at.map(format_ts))
         .fetch_one(&self.pool)
         .await
         .map_err(|err| match &err {

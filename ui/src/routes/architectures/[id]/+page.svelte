@@ -11,6 +11,7 @@
 	import Inspector from '$lib/components/architectures/inspector/Inspector.svelte';
 	import { liveState } from '$lib/stores/live-state.svelte';
 	import { architectureStore, StaleVersionError } from '$lib/stores/architecture-store.svelte';
+	import { architectureRunsStore } from '$lib/stores/architecture-runs-store.svelte';
 	import {
 		architectureCanvasStore,
 		type GraphPayload
@@ -59,6 +60,7 @@
 	let planResult = $state<PlanResult | null>(null);
 	let planLoading = $state(false);
 	let planDiscarding = $state(false);
+	let planApplying = $state(false);
 
 	// YAML side panel state. We also lazy-load on first tab activation.
 	let yamlContent = $state<string | null>(null);
@@ -139,6 +141,33 @@
 			// planResult so the operator does not lose context.
 		} finally {
 			planLoading = false;
+		}
+	}
+
+	async function handlePlanApply(
+		planId: string,
+		mode: PlanMode,
+		typedName: string,
+		acknowledgedWarnings: boolean
+	) {
+		if (!current || planApplying) return;
+		planApplying = true;
+		try {
+			const confirmation = typedName ? { typed_name: typedName } : {};
+			await architectureRunsStore.applyAndNavigate(
+				current.id,
+				planId,
+				confirmation,
+				acknowledgedWarnings,
+				mode
+			);
+			// applyAndNavigate already issued goto(); planResult intentionally
+			// stays so a back-navigation lands on the prior state.
+		} catch {
+			// mutateWithRefresh has already toasted the BFF error; staying on
+			// this page lets the operator fix typed-name / warnings and retry.
+		} finally {
+			planApplying = false;
 		}
 	}
 
@@ -248,6 +277,16 @@
 				<p class="page-subtitle">
 					Phase 1 detail view. The visual designer arrives in Phase 2.
 				</p>
+			</div>
+			<div class="page-header-actions">
+				<a
+					class="runs-link"
+					href={`/architectures/${current.id}/runs`}
+					data-testid="architecture-runs-link"
+					aria-label={`View runs for ${heading}`}
+				>
+					View runs →
+				</a>
 			</div>
 		</header>
 
@@ -443,8 +482,10 @@
 					planResult={planResult}
 					loading={planLoading}
 					discarding={planDiscarding}
+					applying={planApplying}
 					onGenerate={handlePlanGenerate}
 					onDiscard={handlePlanDiscard}
+					onApply={handlePlanApply}
 				/>
 			</div>
 		{/if}
@@ -460,8 +501,32 @@
 
 	.page-header {
 		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
+		flex-direction: row;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.page-header-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.runs-link {
+		font-size: var(--text-sm);
+		color: var(--color-primary);
+		text-decoration: none;
+		padding: 0.25rem 0.5rem;
+		border-radius: var(--radius-xs);
+	}
+
+	.runs-link:hover,
+	.runs-link:focus-visible {
+		text-decoration: underline;
+		outline: 2px solid var(--color-primary);
+		outline-offset: 2px;
 	}
 
 	.back-link {

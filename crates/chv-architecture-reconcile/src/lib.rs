@@ -14,9 +14,11 @@ pub use chv_architecture_validate::fleet::{
     InventorySnapshot, NetworkInfo, NodeInfo,
 };
 
+pub mod apply;
 pub mod fleet_inventory;
 pub mod plan;
 
+pub use apply::{apply_plan, ApplyContext, ApplyError, ApplyOutcome, ConfirmationToken};
 pub use fleet_inventory::FleetInventoryProvider;
 pub use plan::{
     build_plan, compute as compute_diff, is_expired, order_changes, Diff, Plan, PlanSummary,

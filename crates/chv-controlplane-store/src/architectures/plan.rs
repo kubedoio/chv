@@ -166,6 +166,36 @@ impl PlanRepository {
         self.get(&input.id).await
     }
 
+    /// Atomic status transition with a precondition: the row only updates
+    /// when its current `status` equals `from`. Returns `true` when the
+    /// row was updated, `false` when no row matched the predicate (TOCTOU
+    /// loss).
+    ///
+    /// Used by the apply path to claim a `ReadyToApply -> Applying`
+    /// transition without a separate read; if a concurrent discard or
+    /// apply already moved the row, the apply path rolls back its own
+    /// state without leaving a stuck `Applying` plan behind.
+    pub async fn update_status_if_current(
+        &self,
+        plan_id: &ArchitecturePlanId,
+        from: PlanStatus,
+        to: PlanStatus,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE architecture_plans
+            SET status = $3
+            WHERE id = $1 AND status = $2
+            "#,
+        )
+        .bind(plan_id.as_str())
+        .bind(from.as_str())
+        .bind(to.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Stub: generating a plan from a (version, inventory) pair is a
     /// Phase 1+ concern. Persistence callers should use [`Self::create`]
     /// directly with the precomputed plan JSON.
