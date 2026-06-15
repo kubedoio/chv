@@ -14,6 +14,8 @@ thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 jsonschema = { version = "0.46", default-features = false }
 ipnetwork = "0.20"
+async-trait = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

@@ -69,6 +69,65 @@ pub const USER_NAMESPACE_COLLISION: &str = "USER_NAMESPACE_COLLISION";
 /// reserve it, but the operator should know.
 pub const STATIC_IP_IN_DHCP_RANGE: &str = "STATIC_IP_IN_DHCP_RANGE";
 
+// --- Fleet (layer-2) consistency codes -------------------------------------
+//
+// Emitted by `crate::fleet` after consulting an `InventoryProvider`. Each
+// code's trigger is documented inline. All are "error" / blocking by default
+// except where noted.
+
+/// `instance.placement.server` names a host that does not exist in the live
+/// inventory.
+pub const HOST_NOT_FOUND: &str = "HOST_NOT_FOUND";
+
+/// `instance.placement.server` names a host that exists but is currently
+/// flagged unschedulable (cordoned, draining, in maintenance).
+pub const HOST_NOT_SCHEDULABLE: &str = "HOST_NOT_SCHEDULABLE";
+
+/// The placement target host does not have enough free memory to honour
+/// `instance.resources.memory_mb` (or the template default).
+pub const INSUFFICIENT_MEMORY: &str = "INSUFFICIENT_MEMORY";
+
+/// The placement target host does not have enough CPU cores to honour
+/// `instance.resources.cpu` (or the template default).
+pub const INSUFFICIENT_CPU: &str = "INSUFFICIENT_CPU";
+
+/// A network references a `bridge` name that the target host(s) do not
+/// expose.
+pub const BRIDGE_UNAVAILABLE: &str = "BRIDGE_UNAVAILABLE";
+
+/// A network references a `vlan_id` that no host in the fleet permits.
+pub const VLAN_UNAVAILABLE: &str = "VLAN_UNAVAILABLE";
+
+/// An `instance.networks[].ip` is already in use elsewhere in the live fleet
+/// (DHCP lease, static reservation, sibling instance).
+pub const IP_ALREADY_USED: &str = "IP_ALREADY_USED";
+
+/// A `datastore` referenced from a template/instance/image does not exist
+/// in the live inventory.
+pub const DATASTORE_NOT_FOUND: &str = "DATASTORE_NOT_FOUND";
+
+/// Sum of declared `instance.disks[].size_gb` (and template defaults)
+/// targeting a single datastore exceeds the datastore's free capacity.
+pub const DATASTORE_INSUFFICIENT_CAPACITY: &str = "DATASTORE_INSUFFICIENT_CAPACITY";
+
+/// An `image` referenced from a template/instance is not registered with
+/// any datastore in the live inventory.
+pub const IMAGE_NOT_FOUND: &str = "IMAGE_NOT_FOUND";
+
+/// A `backup_target` referenced from a `backup_policy` is currently
+/// unreachable. Severity is **warning** (non-blocking) when the snapshot
+/// reports `backup_targets_complete = false` (no real BackupTargetRepository
+/// yet); upgrades to **error** once the inventory source is authoritative.
+pub const BACKUP_TARGET_UNREACHABLE: &str = "BACKUP_TARGET_UNREACHABLE";
+
+/// A `secret_ref` (datastore/backup-target/user) names a secret that does
+/// not exist in the platform secret store.
+pub const SECRET_REF_MISSING: &str = "SECRET_REF_MISSING";
+
+/// The caller does not hold the `architecture:apply` permission required to
+/// deploy this architecture.
+pub const PERMISSION_DENIED_DEPLOY: &str = "PERMISSION_DENIED_DEPLOY";
+
 // retired YYYY-MM-DD: <reason>
 //
 // (Intentional sentinel — keeps the lifecycle pattern documented and
@@ -92,6 +151,20 @@ pub const ALL_CODES: &[&str] = &[
     INVALID_EDGE,
     USER_NAMESPACE_COLLISION,
     STATIC_IP_IN_DHCP_RANGE,
+    // Fleet (layer-2) codes
+    HOST_NOT_FOUND,
+    HOST_NOT_SCHEDULABLE,
+    INSUFFICIENT_MEMORY,
+    INSUFFICIENT_CPU,
+    BRIDGE_UNAVAILABLE,
+    VLAN_UNAVAILABLE,
+    IP_ALREADY_USED,
+    DATASTORE_NOT_FOUND,
+    DATASTORE_INSUFFICIENT_CAPACITY,
+    IMAGE_NOT_FOUND,
+    BACKUP_TARGET_UNREACHABLE,
+    SECRET_REF_MISSING,
+    PERMISSION_DENIED_DEPLOY,
 ];
 
 /// Canonical CHV permission strings used by `INVALID_PERMISSION`. Wildcard

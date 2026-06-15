@@ -20,6 +20,7 @@
 //! eventual fleet-check / plan layers all share one diagnostic shape.
 
 pub mod codes;
+pub mod fleet;
 pub mod model;
 pub mod parse;
 pub mod schema;

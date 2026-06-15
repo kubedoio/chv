@@ -9,11 +9,13 @@ import {
 	validateYaml,
 	generateYaml,
 	importYaml,
+	checkFleet,
 	StaleVersionError,
 	type Architecture,
 	type ArchitectureSummary,
 	type ArchitectureDetail,
 	type CreateArchitectureRequest,
+	type FleetCheckResult,
 	type ValidationResult
 } from '$lib/bff/architectures';
 import type { MutateOpts } from './mutation.svelte';
@@ -39,6 +41,7 @@ export type {
 	Architecture,
 	ArchitectureSummary,
 	ArchitectureDetail,
+	FleetCheckResult,
 	ValidationResult,
 	ValidationSummary,
 	ValidationStatus,
@@ -228,6 +231,32 @@ class ArchitectureStore {
 				detailId: id,
 				successMessage: 'YAML imported',
 				errorMessage: 'Failed to import YAML',
+				...opts
+			}
+		);
+	}
+
+	/**
+	 * Run Layer 2 fleet-consistency checks against a saved topology.
+	 *
+	 * Goes through `mutateWithRefresh` because the server persists
+	 * `last_fleet_check_status` on the architecture row — the dashboard list
+	 * must refresh so the per-row fleet pill stays in sync. We deliberately
+	 * leave `successMessage` undefined; the FleetCheckPanel surfaces the
+	 * outcome inline (status pill + finding list) so a toast on every refresh
+	 * would just be noise.
+	 */
+	async checkFleet(
+		id: string,
+		opts: MutateOpts<FleetCheckResult> = {}
+	): Promise<FleetCheckResult> {
+		const token = getStoredToken() ?? undefined;
+		return mutateWithRefresh<FleetCheckResult>(
+			async () => checkFleet({ id }, token),
+			{
+				patterns: REFRESH_PATTERNS,
+				detailId: id,
+				errorMessage: 'Failed to run fleet check',
 				...opts
 			}
 		);

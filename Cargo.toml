@@ -22,6 +22,7 @@ members = [
     "gen/rust/chv-webui-bff-api",
     "crates/chv-webui-bff",
     "crates/chv-architecture-validate",
+    "crates/chv-architecture-reconcile",
     "cmd/chvctl",
 ]
 resolver = "2"

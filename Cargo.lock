@@ -563,9 +563,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "chv-architecture-reconcile"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "chv-architecture-validate",
+ "chv-controlplane-store",
+ "chv-controlplane-types",
+ "chv-errors",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "chv-architecture-validate"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "chv-controlplane-types",
  "ipnetwork",
@@ -576,6 +595,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -832,6 +852,7 @@ dependencies = [
  "axum",
  "bcrypt",
  "chrono",
+ "chv-architecture-reconcile",
  "chv-architecture-validate",
  "chv-common",
  "chv-controlplane-store",

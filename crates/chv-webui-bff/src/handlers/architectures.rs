@@ -42,13 +42,18 @@
 //! invariant.
 
 use axum::{extract::State, Json};
-use chv_architecture_validate::{validate as validate_yaml_str, ValidationResult};
+use chv_architecture_reconcile::FleetInventoryProvider;
+use chv_architecture_validate::{
+    fleet::check_fleet, parse_yaml as parse_arch_yaml, validate as validate_yaml_str,
+    ValidationResult,
+};
 use chv_controlplane_store::{
-    StoreError, TopologyCreateInput, TopologyListFilter, TopologyUpdateInput,
+    InventorySnapshotCreateInput, StoreError, TopologyCreateInput, TopologyListFilter,
+    TopologyUpdateInput,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureId, ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId,
-    FleetCheckStatus, ValidationStatus,
+    ArchitectureId, ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId, Finding,
+    FleetCheckStatus, InventorySnapshotId, Severity, ValidationStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -595,13 +600,177 @@ pub async fn plan_architecture(
     Err(BffError::NotImplemented("phase 0".into()))
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 DTOs — check-fleet
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckFleetRequest {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckFleetResponse {
+    pub status: ValidationStatusKind,
+    pub inventory_snapshot_id: String,
+    pub checked_at: String,
+    pub findings: Vec<Finding>,
+}
+
+/// Mirrors `chv_architecture_validate::ValidationStatusKind` so the BFF
+/// surface owns the wire enum without re-exporting it. Keeping the
+/// duplication local keeps the contract stable if the validator tag
+/// changes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationStatusKind {
+    Valid,
+    Warning,
+    Invalid,
+}
+
+/// Phase 3 fleet check. Captures a fresh inventory snapshot, runs
+/// layer-2 checks against the topology's `latest_yaml`, persists the
+/// snapshot, updates `last_fleet_check_status`, and returns the
+/// findings.
+///
+/// Role-gated to Operator+ via the router. The `caller_can_deploy`
+/// signal passed to the inventory provider is `true` until the
+/// `architecture:apply` permission ships in Phase 4 — without it we
+/// would emit `PERMISSION_DENIED_DEPLOY` on every call.
 pub async fn check_fleet_architecture(
     BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
+    State(state): State<AppState>,
+    Json(req): Json<CheckFleetRequest>,
+) -> Result<Json<CheckFleetResponse>, BffError> {
     require_operator_or_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
+    let id = parse_id(&req.id)?;
+    tracing::info!(architecture_id = %id, "check_fleet_architecture");
+
+    let topo = state.topology_repo.get(&id).await?;
+    let yaml = topo
+        .latest_yaml
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if yaml.is_empty() {
+        return Err(BffError::BadRequest(
+            "topology has no latest_yaml; import or generate YAML first".into(),
+        ));
+    }
+
+    // Capture the fleet snapshot. Phase 4 wires deploy_allowed_for_caller
+    // to the architecture:apply permission check; Phase 3 short-circuits
+    // to true so PERMISSION_DENIED_DEPLOY does not fire spuriously.
+    let provider = FleetInventoryProvider {
+        nodes: state.node_repo.clone(),
+        networks: state.network_repo.clone(),
+        images: state.image_repo.clone(),
+        deploy_allowed_for_caller: true,
+    };
+    let snapshot = chv_architecture_reconcile::capture(&provider, "bff/check-fleet")
+        .await
+        .map_err(|e| BffError::Internal(format!("capture inventory: {e}")))?;
+
+    // Persist the snapshot for plan/drift downstream.
+    let snapshot_id = InventorySnapshotId::new(chv_common::gen_short_id())
+        .map_err(|e| BffError::Internal(format!("mint inventory snapshot id: {e}")))?;
+    let snapshot_json = serde_json::to_string(&snapshot)?;
+    let summary_json = Some(
+        serde_json::json!({
+            "totals": {
+                "hosts": snapshot.nodes.len(),
+                "networks": snapshot.networks.len(),
+                "datastores": snapshot.datastores.len(),
+                "images": snapshot.images.len(),
+                "backup_targets": snapshot.backup_targets.len(),
+            },
+            "backup_targets_complete": snapshot.backup_targets_complete,
+            "captured_by": "bff/check-fleet",
+        })
+        .to_string(),
+    );
+    let persisted = state.topology_repo.pool();
+    // Use the existing snapshot repository so persistence stays
+    // single-source-of-truth.
+    let snapshot_repo = chv_controlplane_store::InventorySnapshotRepository::new(persisted.clone());
+    let saved = snapshot_repo
+        .create(InventorySnapshotCreateInput {
+            id: snapshot_id.clone(),
+            source: snapshot.source.clone(),
+            snapshot_json,
+            summary_json,
+            captured_by: Some(claims.sub.clone()),
+        })
+        .await?;
+
+    // Parse the model and run pure-data fleet checks.
+    let model = parse_arch_yaml(yaml)
+        .map_err(|e| BffError::BadRequest(format!("latest_yaml parse failed: {e}")))?;
+    let findings: Vec<Finding> = check_fleet(&model, &snapshot);
+
+    // Compute status from finding severities. Errors → invalid;
+    // warnings → warning; clean → valid.
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    for f in &findings {
+        match f.severity {
+            Severity::Error => errors += 1,
+            Severity::Warning => warnings += 1,
+            Severity::Info => {}
+        }
+    }
+    let status = if errors > 0 {
+        ValidationStatusKind::Invalid
+    } else if warnings > 0 {
+        ValidationStatusKind::Warning
+    } else {
+        ValidationStatusKind::Valid
+    };
+
+    // Persist last_fleet_check_status. Failed when any error finding,
+    // Passed otherwise (warnings still count as a successful check).
+    let new_status = if errors > 0 {
+        FleetCheckStatus::Failed
+    } else {
+        FleetCheckStatus::Passed
+    };
+    let update_result = state
+        .topology_repo
+        .update(TopologyUpdateInput {
+            id: id.clone(),
+            expected_version: topo.version_number,
+            display_name: None,
+            description: None,
+            environment: None,
+            status: None,
+            design_graph_json: None,
+            latest_yaml: None,
+            latest_version_id: None,
+            last_validation_status: None,
+            last_fleet_check_status: Some(new_status),
+        })
+        .await;
+    match update_result {
+        Ok(_) => {}
+        Err(StoreError::StaleVersion {
+            current, expected, ..
+        }) => {
+            return Err(BffError::Conflict(format!(
+                "topology was modified concurrently while persisting fleet check status: client sent {expected}, current is {current}"
+            )));
+        }
+        Err(other) => return Err(other.into()),
+    }
+
+    Ok(Json(CheckFleetResponse {
+        status,
+        inventory_snapshot_id: saved.id.into_inner(),
+        checked_at: snapshot.captured_at.to_rfc3339(),
+        findings,
+    }))
 }
 
 pub async fn destroy_plan_architecture(

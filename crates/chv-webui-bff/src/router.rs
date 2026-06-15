@@ -8,8 +8,9 @@ use axum::{
     Router,
 };
 use chv_controlplane_store::{
-    AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository, StorePool, TopologyRepository,
+    AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, ImageRepository,
+    NetworkRepository, NodeRepository, ObservedStateRepository, OperationRepository, StorePool,
+    TopologyRepository,
 };
 use tower_http::cors::CorsLayer;
 
@@ -28,6 +29,10 @@ pub struct AppState {
     pub backup_repo: BackupRepository,
     /// Architecture Designer topology repository (Phase 0).
     pub topology_repo: TopologyRepository,
+    /// Read-only network rows for fleet checks (Phase 3).
+    pub network_repo: NetworkRepository,
+    /// Read-only image rows for fleet checks (Phase 3).
+    pub image_repo: ImageRepository,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,

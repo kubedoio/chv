@@ -31,7 +31,8 @@ vi.mock('$lib/bff/architectures', async () => {
 		validateArchitecture: vi.fn(),
 		validateYaml: vi.fn(),
 		generateYaml: vi.fn(),
-		importYaml: vi.fn()
+		importYaml: vi.fn(),
+		checkFleet: vi.fn()
 	};
 });
 
@@ -45,10 +46,12 @@ import {
 	validateYaml as validateYamlBff,
 	generateYaml as generateYamlBff,
 	importYaml as importYamlBff,
+	checkFleet as checkFleetBff,
 	StaleVersionError,
 	type Architecture,
 	type ArchitectureDetail,
 	type ArchitectureSummary,
+	type FleetCheckResult,
 	type ValidationResult
 } from '$lib/bff/architectures';
 import { liveState } from './live-state.svelte';
@@ -411,6 +414,68 @@ describe('architectureStore', () => {
 			await expect(
 				architectureStore.importYaml('arch-1', 'oops')
 			).rejects.toBe(boom);
+		});
+	});
+
+	// ─── Phase 3: fleet check store method ──────────────────────────────────
+
+	const FLEET_VALID: FleetCheckResult = {
+		status: 'valid',
+		inventory_snapshot_id: 'snap-1',
+		checked_at: '2026-06-15T12:00:00Z',
+		findings: []
+	};
+
+	const FLEET_INVALID: FleetCheckResult = {
+		status: 'invalid',
+		inventory_snapshot_id: 'snap-2',
+		checked_at: '2026-06-15T12:01:00Z',
+		findings: [
+			{
+				severity: 'error',
+				code: 'INSUFFICIENT_MEMORY',
+				message: 'host lacks 32GB RAM',
+				path: 'instances[0]',
+				resource_ref: 'instance/web',
+				blocking: true,
+				suggestion: 'reduce instance memory or pick a larger host'
+			}
+		]
+	};
+
+	describe('checkFleet', () => {
+		it('calls checkFleet and refreshes the architectures: pattern with detailId', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(checkFleetBff).mockResolvedValue(FLEET_INVALID);
+
+			const res = await architectureStore.checkFleet('arch-1');
+
+			expect(res).toEqual(FLEET_INVALID);
+			expect(checkFleetBff).toHaveBeenCalledWith({ id: 'arch-1' }, 'test-token');
+			expect(refreshSpy).toHaveBeenCalledWith(
+				expect.objectContaining({ patterns: ['architectures:'], detailId: 'arch-1' })
+			);
+		});
+
+		it('rethrows BFF errors so the panel can surface them via the toast', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			const boom = new Error('snapshot failed');
+			vi.mocked(checkFleetBff).mockRejectedValue(boom);
+
+			await expect(architectureStore.checkFleet('arch-1')).rejects.toBe(boom);
+		});
+
+		it('forwards skipRefresh so silent re-checks do not invalidate the list', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(checkFleetBff).mockResolvedValue(FLEET_VALID);
+
+			await architectureStore.checkFleet('arch-1', { skipRefresh: true });
+
+			expect(refreshSpy).not.toHaveBeenCalled();
 		});
 	});
 });

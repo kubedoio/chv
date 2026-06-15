@@ -403,7 +403,8 @@ mod tests {
 
         use chv_controlplane_store::{
             AlertRepository, BackupRepository, DesiredStateRepository, EventRepository,
-            NodeRepository, ObservedStateRepository, OperationRepository, TopologyRepository,
+            ImageRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
+            OperationRepository, TopologyRepository,
         };
         AppState {
             pool: pool.clone(),
@@ -415,6 +416,8 @@ mod tests {
             observed_state_repo: ObservedStateRepository::new(pool.clone()),
             backup_repo: BackupRepository::new(pool.clone()),
             topology_repo: TopologyRepository::new(pool.clone()),
+            network_repo: NetworkRepository::new(pool.clone()),
+            image_repo: ImageRepository::new(pool.clone()),
             mutations: Arc::new(NoopMutations),
             jwt_secret: "test-secret".to_string(),
             agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
