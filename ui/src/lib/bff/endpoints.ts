@@ -77,5 +77,8 @@ export const BFFEndpoints = {
 	validateArchitecture: '/v1/architectures/validate',
 	validateYaml: '/v1/architectures/validate-yaml',
 	generateYaml: '/v1/architectures/generate-yaml',
-	importYaml: '/v1/architectures/import-yaml'
+	importYaml: '/v1/architectures/import-yaml',
+
+	// Architecture Designer endpoints (Phase 3 — fleet consistency check)
+	architecturesCheckFleet: '/v1/architectures/check-fleet'
 } as const;

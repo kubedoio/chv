@@ -368,3 +368,46 @@ export async function importYaml(
 		token
 	});
 }
+
+// ─── Phase 3: Fleet consistency check wire types ─────────────────────────
+//
+// Layer 2 validates the topology against the live fleet inventory captured
+// at request time. The BFF persists `last_fleet_check_status` on the
+// architecture row and stores the inventory snapshot keyed by
+// `inventory_snapshot_id` for later forensic replay. Findings reuse the
+// same `Finding` shape as Phase 1 validation; the per-row `status` here is
+// the fleet-check verdict, not the schema verdict.
+
+export interface FleetCheckResult {
+	status: ValidationStatus;
+	/** Stable id of the inventory snapshot the server captured for this run. */
+	inventory_snapshot_id: string;
+	/** RFC3339 timestamp of when the snapshot was taken (server clock). */
+	checked_at: string;
+	findings: Finding[];
+}
+
+export interface CheckFleetRequest {
+	id: string;
+}
+
+/**
+ * Run Layer 2 fleet-consistency checks against a saved topology.
+ *
+ * The server captures a fresh inventory snapshot, evaluates fleet checks
+ * (host capacity, network availability, datastore capacity, image presence,
+ * backup-target reachability), and persists `last_fleet_check_status`.
+ * Findings are returned inline; the snapshot itself is keyed by
+ * `inventory_snapshot_id` so a future replay flow can re-run checks against
+ * the captured fleet without re-snapshotting.
+ */
+export async function checkFleet(
+	req: CheckFleetRequest,
+	token?: string
+): Promise<FleetCheckResult> {
+	return bffFetch<FleetCheckResult>(BFFEndpoints.architecturesCheckFleet, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}

@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use axum::extract::State;
 use axum::Json;
 use chv_controlplane_store::{
-    AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, NodeRepository,
-    ObservedStateRepository, OperationRepository, TopologyRepository,
+    AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, ImageRepository,
+    NetworkRepository, NodeRepository, ObservedStateRepository, OperationRepository,
+    TopologyRepository,
 };
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
@@ -22,9 +23,9 @@ use chv_webui_bff::handlers::architectures::{
     generate_architecture_yaml, get_architecture, get_architecture_drift, import_yaml_architecture,
     list_architecture_runs, list_architecture_versions, list_architectures, plan_architecture,
     update_architecture, validate_architecture, validate_architecture_yaml,
-    ArchiveArchitectureRequest, CreateArchitectureRequest, GenerateYamlRequest,
+    ArchiveArchitectureRequest, CheckFleetRequest, CreateArchitectureRequest, GenerateYamlRequest,
     GetArchitectureRequest, ImportYamlRequest, ListArchitecturesRequest, UpdateArchitectureRequest,
-    ValidateArchitectureRequest, ValidateArchitectureYamlRequest,
+    ValidateArchitectureRequest, ValidateArchitectureYamlRequest, ValidationStatusKind,
 };
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};
@@ -156,6 +157,8 @@ async fn build_state() -> AppState {
         observed_state_repo: ObservedStateRepository::new(pool.clone()),
         backup_repo: BackupRepository::new(pool.clone()),
         topology_repo: TopologyRepository::new(pool.clone()),
+        network_repo: NetworkRepository::new(pool.clone()),
+        image_repo: ImageRepository::new(pool.clone()),
         mutations: Arc::new(NoopMutations),
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
@@ -710,23 +713,241 @@ async fn viewer_cannot_validate_topology() {
 }
 
 #[tokio::test]
-async fn check_fleet_stub_returns_501_for_operator() {
+async fn check_fleet_returns_insufficient_memory_when_node_too_small() {
     let state = build_state().await;
-    let op = claims_for("operator");
-    let err = check_fleet_architecture(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
+
+    // Seed one node with 16 GiB RAM and 4 cores; mark it schedulable.
+    sqlx::query(
+        r#"INSERT INTO nodes (node_id, hostname, display_name)
+           VALUES ('n1', 'host-1', 'host-1')"#,
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes)
+           VALUES ('n1', 'x86_64', 4, ?1)"#,
+    )
+    .bind(16i64 * 1024 * 1024 * 1024)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO node_desired_state
+           (node_id, desired_generation, desired_state, scheduling_paused)
+           VALUES ('n1', 1, 'Running', 0)"#,
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    // Architecture with one instance requesting 32 GiB on host-1.
+    let yaml = r#"apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: too-big
+templates:
+  - name: large
+    image: ubuntu-24.04
+    cpu: 2
+    memory_mb: 32768
+instances:
+  - name: app
+    template: large
+    placement:
+      server: host-1
+"#
+    .to_string();
+
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "fleet-mem-test".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: Some(yaml),
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let resp = check_fleet_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CheckFleetRequest {
+            id: created.id.clone(),
+        }),
+    )
+    .await
+    .expect("check-fleet should succeed");
+
+    let body = resp.0;
+    assert_eq!(body.status, ValidationStatusKind::Invalid);
+    let mem_findings: Vec<_> = body
+        .findings
+        .iter()
+        .filter(|f| f.code.as_ref() == "INSUFFICIENT_MEMORY")
+        .collect();
+    assert_eq!(
+        mem_findings.len(),
+        1,
+        "expected exactly one INSUFFICIENT_MEMORY finding, got: {:#?}",
+        body.findings
+    );
+    let f = mem_findings[0];
+    assert_eq!(f.resource_ref.as_deref(), Some("instance/app"));
+    assert!(
+        f.path
+            .as_deref()
+            .map(|p| p.contains("instances["))
+            .unwrap_or(false),
+        "path should reference the instances[] index, got {:?}",
+        f.path
+    );
+    assert!(!body.inventory_snapshot_id.is_empty());
+    assert!(!body.checked_at.is_empty());
+
+    // last_fleet_check_status persisted as Failed.
+    let got = get_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(GetArchitectureRequest { id: created.id }),
+    )
+    .await
+    .expect("get");
+    assert_eq!(
+        got.0.architecture.last_fleet_check_status,
+        Some(chv_controlplane_types::architecture::FleetCheckStatus::Failed),
+    );
 }
 
 #[tokio::test]
-async fn check_fleet_stub_forbids_viewer_before_501() {
+async fn check_fleet_happy_path_returns_valid_with_no_findings() {
+    let state = build_state().await;
+
+    sqlx::query(
+        r#"INSERT INTO nodes (node_id, hostname, display_name)
+           VALUES ('n1', 'host-1', 'host-1')"#,
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO node_inventory (node_id, architecture, cpu_count, memory_bytes)
+           VALUES ('n1', 'x86_64', 16, ?1)"#,
+    )
+    .bind(64i64 * 1024 * 1024 * 1024)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO node_desired_state
+           (node_id, desired_generation, desired_state, scheduling_paused)
+           VALUES ('n1', 1, 'Running', 0)"#,
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let yaml = r#"apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: happy
+templates:
+  - name: small
+    image: ubuntu-24.04
+    cpu: 1
+    memory_mb: 1024
+instances:
+  - name: app
+    template: small
+    placement:
+      server: host-1
+"#
+    .to_string();
+
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "fleet-happy".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: Some(yaml),
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let resp = check_fleet_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CheckFleetRequest { id: created.id }),
+    )
+    .await
+    .expect("check-fleet should succeed");
+
+    assert_eq!(resp.0.status, ValidationStatusKind::Valid);
+    assert!(
+        resp.0.findings.is_empty(),
+        "expected no findings, got: {:#?}",
+        resp.0.findings
+    );
+}
+
+#[tokio::test]
+async fn check_fleet_forbids_viewer() {
     let state = build_state().await;
     let v = claims_for("viewer");
-    let err = check_fleet_architecture(BearerToken(v), State(state), Json(json!({})))
-        .await
-        .expect_err("viewer must be forbidden");
+    let err = check_fleet_architecture(
+        BearerToken(v),
+        State(state),
+        Json(CheckFleetRequest {
+            id: "any".to_string(),
+        }),
+    )
+    .await
+    .expect_err("viewer must be forbidden");
     assert_eq!(err_status(&err), 403);
+}
+
+#[tokio::test]
+async fn check_fleet_returns_400_when_topology_has_no_yaml() {
+    let state = build_state().await;
+    let created = create_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(CreateArchitectureRequest {
+            name: "fleet-no-yaml".to_string(),
+            description: None,
+            environment: None,
+            display_name: None,
+            design_graph_json: None,
+            latest_yaml: None,
+        }),
+    )
+    .await
+    .expect("create")
+    .0
+    .architecture;
+
+    let err = check_fleet_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(CheckFleetRequest { id: created.id }),
+    )
+    .await
+    .expect_err("missing yaml must 400");
+    assert_eq!(err_status(&err), 400);
 }
 
 #[tokio::test]

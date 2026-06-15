@@ -19,7 +19,9 @@ import {
 	validateYaml,
 	generateYaml,
 	importYaml,
+	checkFleet,
 	type ArchitectureSummary,
+	type FleetCheckResult,
 	type ValidationResult
 } from './architectures';
 
@@ -356,5 +358,70 @@ describe('architectures BFF wrapper — Phase 1 validation + YAML', () => {
 				})
 			);
 		});
+	});
+});
+
+// ─── Phase 3: fleet check wrapper ─────────────────────────────────────────
+
+const FLEET_VALID: FleetCheckResult = {
+	status: 'valid',
+	inventory_snapshot_id: 'snap-1',
+	checked_at: '2026-06-15T12:00:00Z',
+	findings: []
+};
+
+const FLEET_INVALID: FleetCheckResult = {
+	status: 'invalid',
+	inventory_snapshot_id: 'snap-2',
+	checked_at: '2026-06-15T12:01:00Z',
+	findings: [
+		{
+			severity: 'error',
+			code: 'INSUFFICIENT_MEMORY',
+			message: 'host lacks 32GB RAM',
+			path: 'instances[0]',
+			resource_ref: 'instance/web',
+			blocking: true,
+			suggestion: 'reduce instance memory or pick a larger host'
+		}
+	]
+};
+
+describe('architectures BFF wrapper — Phase 3 fleet check', () => {
+	beforeEach(() => {
+		vi.mocked(bffFetch).mockReset();
+	});
+
+	it('POSTs the id to /v1/architectures/check-fleet and returns the FleetCheckResult', async () => {
+		vi.mocked(bffFetch).mockResolvedValue(FLEET_INVALID);
+
+		const res = await checkFleet({ id: 'arch-1' });
+
+		expect(res).toEqual(FLEET_INVALID);
+		expect(bffFetch).toHaveBeenCalledWith(
+			expect.stringMatching(/architectures\/check-fleet$/),
+			expect.objectContaining({
+				method: 'POST',
+				body: JSON.stringify({ id: 'arch-1' })
+			})
+		);
+	});
+
+	it('forwards the optional token to bffFetch', async () => {
+		vi.mocked(bffFetch).mockResolvedValue(FLEET_VALID);
+
+		await checkFleet({ id: 'arch-1' }, 'tok');
+
+		expect(bffFetch).toHaveBeenCalledWith(
+			expect.any(String),
+			expect.objectContaining({ token: 'tok' })
+		);
+	});
+
+	it('rethrows BFFErrors so callers can branch on them', async () => {
+		const boom = new BFFError('snapshot failed', 503, 'INVENTORY_UNAVAILABLE');
+		vi.mocked(bffFetch).mockRejectedValue(boom);
+
+		await expect(checkFleet({ id: 'arch-1' })).rejects.toBe(boom);
 	});
 });

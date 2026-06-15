@@ -1,0 +1,23 @@
+[package]
+name = "chv-architecture-reconcile"
+version = "0.2.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chv-architecture-validate = { path = "../chv-architecture-validate" }
+chv-controlplane-store = { path = "../chv-controlplane-store" }
+chv-controlplane-types = { path = "../chv-controlplane-types" }
+chv-errors = { path = "../chv-errors" }
+async-trait = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, default-features = false, features = ["runtime-tokio-rustls", "sqlite"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }

@@ -7,7 +7,9 @@ mod db;
 mod desired_state;
 mod events;
 mod hypervisor_settings;
+mod images;
 mod network_exposures;
+mod networks;
 mod nodes;
 mod observed_state;
 mod operations;
@@ -42,7 +44,9 @@ pub use hypervisor_settings::{
     HypervisorProfileRow, HypervisorSettingsPatchInput, HypervisorSettingsRepository,
     HypervisorSettingsRow,
 };
+pub use images::{ImageRepository, ImageRow};
 pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
+pub use networks::{NetworkRepository, NetworkRow};
 pub use nodes::{
     NodeBootstrapResultInput, NodeDrainIntentInput, NodeInventoryInput, NodeRepository,
     NodeSchedulingPatchInput, NodeStateInput, NodeStatePatchInput, NodeUpsertInput,

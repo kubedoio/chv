@@ -4,6 +4,7 @@
 	import ArchitectureMetaPanel from '$lib/components/architectures/dashboard/ArchitectureMetaPanel.svelte';
 	import StaleVersionBanner from '$lib/components/architectures/dashboard/StaleVersionBanner.svelte';
 	import ValidationFindingsPanel from '$lib/components/architectures/dashboard/ValidationFindingsPanel.svelte';
+	import FleetCheckPanel from '$lib/components/architectures/dashboard/FleetCheckPanel.svelte';
 	import YamlSidePanel from '$lib/components/architectures/dashboard/YamlSidePanel.svelte';
 	import Canvas from '$lib/components/architectures/canvas/Canvas.svelte';
 	import Inspector from '$lib/components/architectures/inspector/Inspector.svelte';
@@ -15,7 +16,7 @@
 	} from '$lib/stores/architecture-canvas-store.svelte';
 	import { architectureDesignerCanvasEnabled } from '$lib/feature-flags';
 	import { BFFError } from '$lib/bff/client';
-	import type { Architecture, ValidationResult } from '$lib/bff/architectures';
+	import type { Architecture, FleetCheckResult, ValidationResult } from '$lib/bff/architectures';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -31,9 +32,10 @@
 	let canvasSaving = $state(false);
 	let lastHydratedId = $state<string | null>(null);
 
-	// Tab state. The Validation and YAML tabs are Phase 1 additions; Overview
-	// remains the default so existing playwright tests stay green.
-	type Tab = 'overview' | 'yaml' | 'validation';
+	// Tab state. The Validation and YAML tabs are Phase 1 additions; the Fleet
+	// tab arrives in Phase 3. Overview remains the default so existing
+	// playwright tests stay green.
+	type Tab = 'overview' | 'yaml' | 'validation' | 'fleet';
 	let activeTab = $state<Tab>('overview');
 
 	// Validation panel state. Findings are NOT persisted server-side; we keep
@@ -41,6 +43,13 @@
 	// or re-enters the tab from a fresh load.
 	let validationResult = $state<ValidationResult | null>(null);
 	let validating = $state(false);
+
+	// Fleet-check panel state. Same lifecycle as validation: not persisted, so
+	// re-running the check on tab activation gives the operator a fresh
+	// snapshot. The architecture row's `last_fleet_check_status` is what
+	// persists across reloads (refreshed via mutateWithRefresh).
+	let fleetResult = $state<FleetCheckResult | null>(null);
+	let fleetLoading = $state(false);
 
 	// YAML side panel state. We also lazy-load on first tab activation.
 	let yamlContent = $state<string | null>(null);
@@ -91,6 +100,20 @@
 			// mutateWithRefresh has already toasted the error.
 		} finally {
 			validating = false;
+		}
+	}
+
+	async function handleFleetRefresh() {
+		if (!current || fleetLoading) return;
+		fleetLoading = true;
+		try {
+			fleetResult = await architectureStore.checkFleet(current.id);
+		} catch {
+			// mutateWithRefresh has already toasted the error; keep prior
+			// fleetResult so the user does not lose context on a transient
+			// inventory failure.
+		} finally {
+			fleetLoading = false;
 		}
 	}
 
@@ -237,6 +260,18 @@
 			>
 				Validation
 			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'fleet'}
+				aria-controls="tab-panel-fleet"
+				class="tab"
+				class:tab-active={activeTab === 'fleet'}
+				onclick={() => (activeTab = 'fleet')}
+				data-testid="tab-fleet"
+			>
+				Fleet check
+			</button>
 		</div>
 
 		{#if activeTab === 'overview'}
@@ -317,12 +352,20 @@
 					onGenerate={handleGenerateYaml}
 				/>
 			</div>
-		{:else}
+		{:else if activeTab === 'validation'}
 			<div id="tab-panel-validation" role="tabpanel" aria-labelledby="tab-validation">
 				<ValidationFindingsPanel
 					result={validationResult}
 					loading={validating}
 					onRevalidate={handleRevalidate}
+				/>
+			</div>
+		{:else}
+			<div id="tab-panel-fleet" role="tabpanel" aria-labelledby="tab-fleet">
+				<FleetCheckPanel
+					result={fleetResult}
+					loading={fleetLoading}
+					onRefresh={handleFleetRefresh}
 				/>
 			</div>
 		{/if}
