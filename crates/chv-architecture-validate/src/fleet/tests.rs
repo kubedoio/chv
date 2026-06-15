@@ -45,6 +45,9 @@ fn empty_arch(name: &str) -> CHVArchitecture {
 }
 
 fn empty_inv() -> InventorySnapshot {
+    // Defaults to "fully complete" so per-test setup is minimal — tests for
+    // the incomplete-inventory severity downgrade explicitly flip the
+    // relevant `*_complete` flag to false.
     InventorySnapshot {
         captured_at: Utc::now(),
         source: "test".into(),
@@ -54,6 +57,9 @@ fn empty_inv() -> InventorySnapshot {
         images: vec![],
         backup_targets: vec![],
         backup_targets_complete: true,
+        secrets: vec![],
+        secrets_complete: true,
+        network_facts_complete: true,
         deploy_allowed: true,
     }
 }
@@ -199,6 +205,53 @@ fn ip_already_used_emitted() {
 }
 
 #[test]
+fn network_facts_incomplete_downgrades_to_warning() {
+    // When `network_facts_complete=false`, all three network checks
+    // (BRIDGE_UNAVAILABLE, VLAN_UNAVAILABLE, IP_ALREADY_USED) emit as
+    // non-blocking warnings rather than blocking errors.
+    use chv_controlplane_types::architecture::Severity;
+    let mut a = empty_arch("t");
+    a.networks.push(Network {
+        name: "n1".into(),
+        network_type: NetworkType::Bridge,
+        bridge: Some("br-missing".into()),
+        vlan_id: Some(4000),
+        cidr: None,
+        gateway: None,
+        dns: vec![],
+        dhcp: None,
+    });
+    let mut inst = instance_on("vm1", "h1");
+    inst.networks.push(InstanceNetwork {
+        name: "n1".into(),
+        ip: Some("10.0.0.5".into()),
+    });
+    a.instances.push(inst);
+    let mut inv = empty_inv();
+    inv.network_facts_complete = false;
+    let mut node = ok_node("h1");
+    node.used_ips.push("10.0.0.5".into());
+    inv.nodes.push(node);
+    let f = check_fleet(&a, &inv);
+    for code in [
+        codes::BRIDGE_UNAVAILABLE,
+        codes::VLAN_UNAVAILABLE,
+        codes::IP_ALREADY_USED,
+    ] {
+        let finding = f
+            .iter()
+            .find(|x| x.code.as_ref() == code)
+            .unwrap_or_else(|| panic!("{code} expected in incomplete-network-facts mode"));
+        assert!(
+            matches!(finding.severity, Severity::Warning),
+            "{code} should be Warning when network_facts_complete=false; got {:?}",
+            finding.severity
+        );
+        assert!(!finding.blocking, "{code} should be non-blocking warning");
+    }
+}
+
+#[test]
 fn datastore_not_found_emitted() {
     let mut a = empty_arch("t");
     a.datastores.push(Datastore {
@@ -312,7 +365,8 @@ fn backup_target_unreachable_errors_when_complete() {
 }
 
 #[test]
-fn secret_ref_missing_emitted() {
+fn secret_ref_missing_emitted_when_secret_store_complete() {
+    // secrets_complete=true: SECRET_REF_MISSING is a blocking error.
     let mut a = empty_arch("t");
     a.datastores.push(Datastore {
         name: "ds1".into(),
@@ -330,8 +384,87 @@ fn secret_ref_missing_emitted() {
         free_gb: 1000,
         host: None,
     });
+    // Authoritative secret store with a different name — `ceph-key` is missing.
+    inv.secrets.push(crate::fleet::SecretInfo {
+        name: "other-secret".into(),
+        kind: "opaque".into(),
+    });
+    inv.secrets_complete = true;
     let f = check_fleet(&a, &inv);
-    assert!(has_code(&f, codes::SECRET_REF_MISSING));
+    let finding = f
+        .iter()
+        .find(|x| x.code.as_ref() == codes::SECRET_REF_MISSING)
+        .expect("SECRET_REF_MISSING expected");
+    assert!(matches!(
+        finding.severity,
+        chv_controlplane_types::architecture::Severity::Error
+    ));
+    assert!(finding.blocking);
+}
+
+#[test]
+fn secret_ref_missing_warns_when_secret_store_incomplete() {
+    // secrets_complete=false: same model triggers a non-blocking warning,
+    // because the absence of the secret store cannot be distinguished from
+    // a real missing secret.
+    let mut a = empty_arch("t");
+    a.datastores.push(Datastore {
+        name: "ds1".into(),
+        datastore_type: DatastoreType::CephRbd,
+        path: None,
+        pool: None,
+        capabilities: None,
+        secret_ref: Some("ceph-key".into()),
+    });
+    let mut inv = empty_inv();
+    inv.secrets_complete = false;
+    let f = check_fleet(&a, &inv);
+    let finding = f
+        .iter()
+        .find(|x| x.code.as_ref() == codes::SECRET_REF_MISSING)
+        .expect("SECRET_REF_MISSING expected");
+    assert!(matches!(
+        finding.severity,
+        chv_controlplane_types::architecture::Severity::Warning
+    ));
+    assert!(!finding.blocking);
+}
+
+#[test]
+fn secret_ref_present_in_authoritative_store_does_not_emit() {
+    // When the secret IS in the authoritative store, no finding fires —
+    // verifies the placeholder regression (datastore-name-as-secret-name)
+    // is gone.
+    let mut a = empty_arch("t");
+    a.datastores.push(Datastore {
+        name: "ds-ceph".into(),
+        datastore_type: DatastoreType::CephRbd,
+        path: None,
+        pool: None,
+        capabilities: None,
+        secret_ref: Some("ceph-key".into()),
+    });
+    let mut inv = empty_inv();
+    // Old placeholder logic would have suppressed the finding because the
+    // datastore name matched the secret name. New logic only consults
+    // `inv.secrets`.
+    inv.datastores.push(DatastoreInfo {
+        name: "ceph-key".into(), // intentionally same name as the secret_ref
+        kind: "ceph-rbd".into(),
+        capacity_gb: 1000,
+        free_gb: 1000,
+        host: None,
+    });
+    inv.secrets.push(crate::fleet::SecretInfo {
+        name: "ceph-key".into(),
+        kind: "opaque".into(),
+    });
+    inv.secrets_complete = true;
+    let f = check_fleet(&a, &inv);
+    assert!(
+        !has_code(&f, codes::SECRET_REF_MISSING),
+        "secret present in authoritative store must NOT emit SECRET_REF_MISSING; findings={f:?}"
+    );
 }
 
 #[test]

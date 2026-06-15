@@ -16,7 +16,7 @@ pub mod inventory;
 pub use checks::check_fleet;
 pub use inventory::{
     capture, BackupTargetInfo, DatastoreInfo, ImageInfo, InventoryProvider, InventorySnapshot,
-    NetworkInfo, NodeInfo,
+    NetworkInfo, NodeInfo, SecretInfo,
 };
 
 use thiserror::Error;

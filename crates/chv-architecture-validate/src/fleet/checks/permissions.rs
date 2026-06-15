@@ -1,16 +1,12 @@
 //! Secret-ref existence and deploy-permission checks.
 //!
-//! Phase 3 leaves the secret-store inventory unmodelled — every `secret_ref`
-//! that appears in the architecture currently triggers `SECRET_REF_MISSING`
-//! unless the snapshot supplies a sentinel: any datastore named `*-with-secret`
-//! is considered to satisfy a known reference for tests. Real implementations
-//! will gain a `secrets: Vec<SecretInfo>` slot on the snapshot once a secret
-//! repository ships; the check function below is the single place to update.
-//!
-//! For now we surface every concrete `secret_ref` from the model that does
-//! not appear in `inv.datastores[].name` (used as a placeholder secret
-//! registry — replaced by a real one in a follow-up). This keeps the code
-//! present and tested while the contract evolves.
+//! `SECRET_REF_MISSING` matches each concrete `secret_ref` in the model
+//! against `inv.secrets[].name`. When `inv.secrets_complete == false` (no
+//! authoritative `SecretRepository` ships yet), the finding downgrades to
+//! warning severity rather than blocking — the absence of the secret store
+//! cannot be distinguished from a real missing secret. Once a real
+//! `SecretRepository` ships and the provider sets
+//! `secrets_complete = true`, the finding promotes to a blocking error.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -62,20 +58,33 @@ pub(super) fn check(model: &CHVArchitecture, inv: &InventorySnapshot) -> Vec<Fin
         }
     }
 
-    // Placeholder secret registry — see module doc comment.
-    let known: HashSet<&str> = inv.datastores.iter().map(|d| d.name.as_str()).collect();
+    let known: HashSet<&str> = inv.secrets.iter().map(|s| s.name.as_str()).collect();
+
+    // Severity downgrades when the secret-store inventory is incomplete —
+    // we cannot confidently call a reference "missing" if we never saw the
+    // real registry. The check still fires so operators are aware the
+    // reference is unverified; it just doesn't block deployment.
+    let (severity, blocking, suffix) = if inv.secrets_complete {
+        (Severity::Error, true, String::new())
+    } else {
+        (
+            Severity::Warning,
+            false,
+            " (secret store inventory is incomplete — verification deferred)".to_string(),
+        )
+    };
 
     for (path, resource_ref, secret_name) in refs {
         if !known.contains(secret_name.as_str()) {
             findings.push(Finding {
-                severity: Severity::Error,
+                severity,
                 code: Cow::Borrowed(codes::SECRET_REF_MISSING),
                 message: format!(
-                    "secret reference {secret_name} is not present in the platform secret store"
+                    "secret reference {secret_name} is not present in the platform secret store{suffix}"
                 ),
                 path: Some(path),
                 resource_ref: Some(resource_ref),
-                blocking: true,
+                blocking,
                 suggestion: Some(format!(
                     "create secret {secret_name} or remove the reference"
                 )),
