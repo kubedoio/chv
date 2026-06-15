@@ -9,9 +9,9 @@ use axum::{
 };
 use chv_common::Clock;
 use chv_controlplane_store::{
-    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository, EventRepository,
-    ImageRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
-    OperationRepository, StorePool, TopologyRepository,
+    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
+    DriftReportRepository, EventRepository, ImageRepository, NetworkRepository, NodeRepository,
+    ObservedStateRepository, OperationRepository, StorePool, TopologyRepository,
 };
 use tower_http::cors::CorsLayer;
 
@@ -39,6 +39,11 @@ pub struct AppState {
     /// handlers to enqueue runs and propagate status. Stored as `Arc` so
     /// `AppState` stays cheap to clone.
     pub apply_runs: std::sync::Arc<ApplyRunRepository>,
+    /// Architecture Designer drift-report repository (Phase 6). Wraps the
+    /// `architecture_drift_reports` table; used by the drift handler to
+    /// cache the most recent report (5-minute TTL) and persist fresh
+    /// computations. Stored as `Arc` so `AppState` stays cheap to clone.
+    pub drift_reports: std::sync::Arc<DriftReportRepository>,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
@@ -220,14 +225,6 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .route(
             "/v1/architectures/validate",
             post(crate::handlers::architectures::validate_architecture),
-        )
-        .route(
-            "/v1/architectures/drift",
-            post(crate::handlers::architectures::get_architecture_drift),
-        )
-        .route(
-            "/v1/architectures/runs/list",
-            post(crate::handlers::architectures::list_architecture_runs),
         )
         .route(
             "/v1/architectures/versions/list",
@@ -437,6 +434,25 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         .route(
             "/v1/architectures/destroy",
             post(crate::handlers::architectures::destroy_architecture),
+        )
+        // Architecture Designer (Phase 5/6) — apply-run history. Lifted from
+        // the viewer block because run history can leak operational details
+        // (task ids, error messages, requested_by actor) that should not be
+        // visible to the read-only viewer role per Phase-5 reviewer F1.
+        .route(
+            "/v1/architectures/runs/list",
+            post(crate::handlers::architectures::list_architecture_runs),
+        )
+        // Architecture Designer (Phase 6) — drift detection. Lifted from
+        // the viewer block for the same reason as `/runs/list` (Phase-5 F1):
+        // the drift response surfaces `<<live>>/...` resource enumeration
+        // plus raw bridge / CIDR / datastore values, all of which constitute
+        // fleet-detail leakage to the read-only viewer role. Operator gating
+        // mirrors `/check-fleet`, which exposes the same shape of inventory
+        // detail.
+        .route(
+            "/v1/architectures/drift",
+            post(crate::handlers::architectures::get_architecture_drift),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

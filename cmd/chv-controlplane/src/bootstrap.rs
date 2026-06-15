@@ -192,6 +192,9 @@ pub async fn build_service(
         apply_runs: Arc::new(chv_controlplane_store::ApplyRunRepository::new(
             pool.clone(),
         )),
+        drift_reports: Arc::new(chv_controlplane_store::DriftReportRepository::new(
+            pool.clone(),
+        )),
         mutations: Arc::new(ControlPlaneMutationService::new(
             pool.clone(),
             lifecycle_service.clone(),

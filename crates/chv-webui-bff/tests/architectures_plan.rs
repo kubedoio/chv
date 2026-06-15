@@ -13,9 +13,10 @@ use axum::Json;
 use chrono::{Duration, TimeZone, Utc};
 use chv_common::ManualClock;
 use chv_controlplane_store::{
-    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository, EventRepository,
-    ImageRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
-    OperationRepository, PlanRepository, PlanStatusUpdateInput, TopologyRepository,
+    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
+    DriftReportRepository, EventRepository, ImageRepository, NetworkRepository, NodeRepository,
+    ObservedStateRepository, OperationRepository, PlanRepository, PlanStatusUpdateInput,
+    TopologyRepository,
 };
 use chv_controlplane_types::architecture::{
     ArchitectureId, ArchitecturePlan, ArchitecturePlanId, ArchitectureVersionId, PlanAction,
@@ -163,6 +164,7 @@ async fn build_state_with_clock(clock: ManualClock) -> AppState {
         network_repo: NetworkRepository::new(pool.clone()),
         image_repo: ImageRepository::new(pool.clone()),
         apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
+        drift_reports: Arc::new(DriftReportRepository::new(pool.clone())),
         mutations: Arc::new(NoopMutations),
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
@@ -201,6 +203,7 @@ fn err_status(e: &BffError) -> u16 {
         BffError::ProductionRequiresAdmin { .. } => 403,
         BffError::PlanModeMismatch { .. } => 400,
         BffError::InvalidResourceName { .. } => 400,
+        BffError::DriftCheckFailed { .. } => 502,
     }
 }
 

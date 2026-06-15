@@ -45,6 +45,7 @@ use axum::{extract::State, Json};
 use chv_architecture_reconcile::apply::{
     apply_plan, ApplyContext, ApplyError, ApplyOutcome, ConfirmationToken,
 };
+use chv_architecture_reconcile::drift::{compute_drift, DriftFinding, DriftReport, DriftSummary};
 use chv_architecture_reconcile::FleetInventoryProvider;
 use chv_architecture_validate::{
     fleet::check_fleet, parse_yaml as parse_arch_yaml, validate as validate_yaml_str,
@@ -52,20 +53,22 @@ use chv_architecture_validate::{
 };
 use chv_common::Clock;
 use chv_controlplane_store::{
-    InventorySnapshotCreateInput, PlanCreateInput, PlanRepository, PlanStatusUpdateInput,
-    StoreError, TopologyCreateInput, TopologyListFilter, TopologyUpdateInput, VersionCreateInput,
-    VersionRepository,
+    DriftReportCreateInput, InventorySnapshotCreateInput, PlanCreateInput, PlanRepository,
+    PlanStatusUpdateInput, StoreError, TopologyCreateInput, TopologyListFilter,
+    TopologyUpdateInput, VersionCreateInput, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureId, ArchitecturePlan, ArchitecturePlanId, ArchitectureStatus, ArchitectureTopology,
-    ArchitectureVersionId, Finding, FleetCheckStatus, InventorySnapshotId, PlanChange, PlanMode,
-    PlanStatus, Severity, ValidationStatus,
+    ArchitectureDriftReportId, ArchitectureId, ArchitecturePlan, ArchitecturePlanId,
+    ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId, DriftStatus, Finding,
+    FleetCheckStatus, InventorySnapshotId, PlanChange, PlanMode, PlanStatus, RunStatus, Severity,
+    ValidationStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::auth::{require_operator_or_admin, BearerToken, Role};
 use crate::metrics_apply::{record_apply_status, ApplyStatusLabel, ApplyTimer};
+use crate::metrics_drift::{record_drift_status, DriftStatusLabel};
 use crate::router::AppState;
 use crate::BffError;
 
@@ -1539,20 +1542,421 @@ async fn apply_inner_core(
     }))
 }
 
-pub async fn get_architecture_drift(
-    BearerToken(_claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    Err(BffError::NotImplemented("phase 0".into()))
+// ---------------------------------------------------------------------------
+// Drift detection (Phase 6)
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /v1/architectures/drift`.
+///
+/// `force_refresh` (default `false`) skips the 5-minute cache and always
+/// re-captures the live fleet snapshot + recomputes drift.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DriftRequest {
+    pub id: String,
+    #[serde(default)]
+    pub force_refresh: bool,
 }
 
+/// Response body for `POST /v1/architectures/drift`.
+///
+/// `drift_report_id` is populated whenever a row was returned (cache hit
+/// or fresh persist). `cache_hit` is `true` iff the response was served
+/// from the most-recent persisted report without recomputing. When
+/// `status == CheckFailed`, `error_message` carries the underlying
+/// failure (snapshot capture or YAML parse) — `findings` is then empty.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DriftResponse {
+    pub drift_report_id: Option<String>,
+    pub status: DriftStatus,
+    pub findings: Vec<DriftFinding>,
+    pub summary: DriftSummary,
+    pub baseline_version_id: String,
+    pub computed_at: String,
+    pub cache_hit: bool,
+    pub error_message: Option<String>,
+}
+
+/// Cache TTL for drift reports. Re-running the snapshot capture + drift
+/// compute against a fleet of cluster scale is cheap (low ms), but the
+/// downstream UI hits this endpoint on every dashboard mount, so a small
+/// TTL stops a wave of identical requests after a successful compute.
+///
+/// Exposed `pub` so integration tests at the crate boundary can reference
+/// the same constant the handler uses (no magic numbers in the test
+/// fixtures).
+pub const DRIFT_CACHE_TTL_SECS: i64 = 300;
+
+/// Phase 6: real handler for `POST /v1/architectures/drift`.
+///
+/// Mounted under viewer middleware (drift is read-only). Algorithm:
+///
+/// 1. Look up the architecture (404 if missing).
+/// 2. Resolve `baseline_version_id` from `latest_version_id`, falling
+///    back to the topology's `version_number` if unset (Phase-5 carryover
+///    pattern).
+/// 3. If `!force_refresh`, fetch the most-recent persisted drift report
+///    for this architecture. If it's within [`DRIFT_CACHE_TTL_SECS`],
+///    return it as `cache_hit = true`.
+/// 4. Otherwise, capture a live fleet snapshot and run [`compute_drift`].
+///    If snapshot capture or YAML parse fails, persist a `check_failed`
+///    drift report and return 200 with that status. Only return 502
+///    `DRIFT_CHECK_FAILED` if even persistence fails.
+/// 5. On a successful compute, persist the report and return it with
+///    `cache_hit = false`.
+pub async fn get_architecture_drift(
+    BearerToken(_claims): BearerToken,
+    State(state): State<AppState>,
+    Json(req): Json<DriftRequest>,
+) -> Result<Json<DriftResponse>, BffError> {
+    let architecture_id = parse_id(&req.id)?;
+
+    tracing::info!(
+        target: "architecture.drift",
+        architecture_id = %architecture_id,
+        force_refresh = req.force_refresh,
+        "architecture.drift.invoked"
+    );
+
+    // 1. Look up the architecture (404 if missing).
+    let topo = state.topology_repo.get(&architecture_id).await?;
+
+    // 2. Resolve baseline_version_id. The drift_reports row carries a FK
+    //    onto `architecture_versions(id)` so we must persist a real version
+    //    row when the topology has none. Phase-4 plan handler back-fills
+    //    `latest_version_id` whenever it mints a fresh version row, so this
+    //    branch only fires on architectures that were created but never
+    //    planned. Reuse an existing version row if one already matches the
+    //    topology's `version_number` to avoid the UNIQUE(architecture_id,
+    //    version_number) collision on subsequent drift calls.
+    let version_repo = VersionRepository::new(state.pool.clone());
+    let baseline_version_id = match topo.latest_version_id.as_ref() {
+        Some(v) => v.clone(),
+        None => {
+            // Look for an existing version row with this architecture's
+            // current version_number first.
+            let existing = version_repo.list_for_architecture(&architecture_id).await?;
+            if let Some(matching) = existing
+                .into_iter()
+                .find(|v| v.version_number == topo.version_number)
+            {
+                matching.id
+            } else {
+                let new_id = ArchitectureVersionId::new(chv_common::gen_short_id())
+                    .map_err(|e| BffError::Internal(format!("mint baseline version id: {e}")))?;
+                let yaml = topo.latest_yaml.clone().unwrap_or_default();
+                version_repo
+                    .create(VersionCreateInput {
+                        id: new_id.clone(),
+                        architecture_id: architecture_id.clone(),
+                        version_number: topo.version_number,
+                        yaml_content: yaml,
+                        design_graph_json: topo.design_graph_json.clone(),
+                        normalized_model_json: None,
+                        change_summary: Some("auto-created by bff/drift".to_string()),
+                        created_by: None,
+                    })
+                    .await?;
+                new_id
+            }
+        }
+    };
+
+    // 3. Cache lookup: most-recent drift_report row, served if it falls
+    //    within the TTL window. Uses the indexed point-query
+    //    `most_recent_for_architecture` so the hot path is a `LIMIT 1`
+    //    seek on `architecture_drift_reports_architecture_id_created_at_idx`,
+    //    not a full-list scan.
+    if !req.force_refresh {
+        let latest = state
+            .drift_reports
+            .most_recent_for_architecture(&architecture_id)
+            .await?;
+        if let Some(latest) = latest {
+            let age_secs = state
+                .clock
+                .now()
+                .signed_duration_since(latest.created_at)
+                .num_seconds();
+            // A negative `age_secs` means the persisted `created_at` is
+            // ahead of the configured clock — typically a `ManualClock`
+            // running behind `strftime('now')`, but also a defensible
+            // signal in production: the row is at least as fresh as
+            // `now`, so treat it as a cache hit. The forward bound stays
+            // strict against the TTL.
+            if age_secs < DRIFT_CACHE_TTL_SECS {
+                let summary = latest
+                    .summary_json
+                    .as_deref()
+                    .map(serde_json::from_str::<DriftSummary>)
+                    .transpose()
+                    .map_err(|e| {
+                        BffError::Internal(format!(
+                            "drift_report {} has unparsable summary_json: {e}",
+                            latest.id
+                        ))
+                    })?
+                    .unwrap_or_default();
+                let findings = latest
+                    .findings_json
+                    .as_deref()
+                    .map(serde_json::from_str::<Vec<DriftFinding>>)
+                    .transpose()
+                    .map_err(|e| {
+                        BffError::Internal(format!(
+                            "drift_report {} has unparsable findings_json: {e}",
+                            latest.id
+                        ))
+                    })?
+                    .unwrap_or_default();
+                record_drift_status(DriftStatusLabel::CacheHit);
+                tracing::info!(
+                    target: "architecture.drift",
+                    architecture_id = %architecture_id,
+                    report_id = %latest.id,
+                    findings_count = findings.len(),
+                    age_secs,
+                    "architecture.drift.cache_hit"
+                );
+                return Ok(Json(DriftResponse {
+                    drift_report_id: Some(latest.id.into_inner()),
+                    status: latest.status,
+                    findings,
+                    summary,
+                    baseline_version_id: latest.baseline_version_id.into_inner(),
+                    computed_at: latest.created_at.to_rfc3339(),
+                    cache_hit: true,
+                    error_message: None,
+                }));
+            }
+        }
+    }
+
+    // 4. Fresh compute. Two failure modes flow through the
+    //    `check_failed` persist path: snapshot capture errors and YAML
+    //    parse errors. Anything else (e.g. drift_reports.create failing)
+    //    is a 502 DRIFT_CHECK_FAILED.
+    let provider = FleetInventoryProvider {
+        nodes: state.node_repo.clone(),
+        networks: state.network_repo.clone(),
+        images: state.image_repo.clone(),
+        deploy_allowed_for_caller: true,
+    };
+
+    let yaml = topo
+        .latest_yaml
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+
+    let compute_outcome: Result<DriftReport, String> = if yaml.is_empty() {
+        Err("architecture has no latest_yaml; nothing to drift-check against".to_string())
+    } else {
+        match chv_architecture_reconcile::capture(&provider, "bff/drift").await {
+            Err(e) => Err(format!("snapshot capture failed: {e}")),
+            Ok(snapshot) => match parse_arch_yaml(yaml) {
+                Err(e) => Err(format!("baseline yaml parse failed: {e}")),
+                Ok(model) => Ok(compute_drift(&model, &snapshot)),
+            },
+        }
+    };
+
+    let drift_report_id = ArchitectureDriftReportId::new(chv_common::gen_short_id())
+        .map_err(|e| BffError::Internal(format!("mint drift_report id: {e}")))?;
+
+    match compute_outcome {
+        Ok(report) => {
+            let summary_json = serde_json::to_string(&report.summary)?;
+            let findings_json = serde_json::to_string(&report.findings)?;
+            let persisted = state
+                .drift_reports
+                .create(DriftReportCreateInput {
+                    id: drift_report_id,
+                    architecture_id: architecture_id.clone(),
+                    baseline_version_id: baseline_version_id.clone(),
+                    inventory_snapshot_id: None,
+                    status: report.status,
+                    summary_json: Some(summary_json),
+                    findings_json: Some(findings_json),
+                })
+                .await
+                .map_err(|e| BffError::DriftCheckFailed {
+                    architecture_id: architecture_id.to_string(),
+                    message: format!("persist drift report: {e}"),
+                })?;
+
+            let label = match report.status {
+                DriftStatus::NoDrift => DriftStatusLabel::NoDrift,
+                DriftStatus::Drifted => DriftStatusLabel::Drifted,
+                DriftStatus::Unknown => DriftStatusLabel::Unknown,
+                DriftStatus::CheckFailed => DriftStatusLabel::CheckFailed,
+            };
+            record_drift_status(label);
+
+            tracing::info!(
+                target: "architecture.drift",
+                architecture_id = %architecture_id,
+                report_id = %persisted.id,
+                findings_count = report.findings.len(),
+                status = report.status.as_str(),
+                "architecture.drift.computed"
+            );
+
+            Ok(Json(DriftResponse {
+                drift_report_id: Some(persisted.id.into_inner()),
+                status: report.status,
+                findings: report.findings,
+                summary: report.summary,
+                baseline_version_id: persisted.baseline_version_id.into_inner(),
+                computed_at: persisted.created_at.to_rfc3339(),
+                cache_hit: false,
+                error_message: None,
+            }))
+        }
+        Err(message) => {
+            // Persist a `check_failed` row with no findings so the UI can
+            // render the failure inline. Empty summary + empty findings
+            // keeps the wire shape uniform with the success path.
+            let empty_summary = DriftSummary::default();
+            let summary_json = serde_json::to_string(&empty_summary)?;
+            let findings_json = serde_json::to_string::<Vec<DriftFinding>>(&Vec::new())?;
+            let persisted = state
+                .drift_reports
+                .create(DriftReportCreateInput {
+                    id: drift_report_id,
+                    architecture_id: architecture_id.clone(),
+                    baseline_version_id: baseline_version_id.clone(),
+                    inventory_snapshot_id: None,
+                    status: DriftStatus::CheckFailed,
+                    summary_json: Some(summary_json),
+                    findings_json: Some(findings_json),
+                })
+                .await
+                .map_err(|e| BffError::DriftCheckFailed {
+                    architecture_id: architecture_id.to_string(),
+                    message: format!("persist check_failed report: {e}"),
+                })?;
+
+            record_drift_status(DriftStatusLabel::CheckFailed);
+            tracing::warn!(
+                target: "architecture.drift",
+                architecture_id = %architecture_id,
+                report_id = %persisted.id,
+                error = %message,
+                "architecture.drift.failed"
+            );
+
+            Ok(Json(DriftResponse {
+                drift_report_id: Some(persisted.id.into_inner()),
+                status: DriftStatus::CheckFailed,
+                findings: Vec::new(),
+                summary: empty_summary,
+                baseline_version_id: persisted.baseline_version_id.into_inner(),
+                computed_at: persisted.created_at.to_rfc3339(),
+                cache_hit: false,
+                error_message: Some(message),
+            }))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Apply-run history (Phase 5 carryover, wired in Phase 6)
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /v1/architectures/runs/list`.
+///
+/// The wire field is `id` (not `architecture_id`) for parity with every
+/// other architecture-scoped DTO in this module (`GetArchitectureRequest`,
+/// `DriftRequest`, `PlanArchitectureRequest`, `ApplyArchitectureRequest`).
+/// Reviewers flagged the original `architecture_id` name as a stray
+/// inconsistency in the otherwise-uniform `{ id }` convention.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ListApplyRunsRequest {
+    pub id: String,
+}
+
+/// Response body for `POST /v1/architectures/runs/list`. Runs are returned
+/// in `created_at DESC` order (most-recent first).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ListApplyRunsResponse {
+    pub runs: Vec<ApplyRunDto>,
+}
+
+/// Wire shape for an apply-run row. RFC3339 strings for timestamps so the
+/// JSON wire format is timezone-explicit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ApplyRunDto {
+    pub id: String,
+    pub architecture_id: String,
+    pub architecture_version_id: String,
+    pub plan_id: Option<String>,
+    pub task_id: Option<String>,
+    pub status: RunStatus,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub requested_by: Option<String>,
+    pub result_json: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Phase 5 carryover B1: real handler for `POST /v1/architectures/runs/list`.
+///
+/// Mounted under operator middleware (run history can leak operational
+/// detail). Algorithm:
+///
+/// 1. Parse the architecture_id (400 if invalid).
+/// 2. Verify the architecture exists (404 if missing).
+/// 3. Call [`ApplyRunRepository::list_for_architecture`] (DESC).
+/// 4. Map each row to [`ApplyRunDto`] and return.
 pub async fn list_architecture_runs(
     BearerToken(_claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    Err(BffError::NotImplemented("phase 0".into()))
+    State(state): State<AppState>,
+    Json(req): Json<ListApplyRunsRequest>,
+) -> Result<Json<ListApplyRunsResponse>, BffError> {
+    let architecture_id = parse_id(&req.id)?;
+
+    // 404 if the architecture does not exist. Without this the endpoint
+    // would happily return `runs: []` for a typoed id, hiding the bug.
+    let _ = state.topology_repo.get(&architecture_id).await?;
+
+    let runs = state
+        .apply_runs
+        .list_for_architecture(&architecture_id)
+        .await?;
+    let runs: Vec<ApplyRunDto> = runs
+        .into_iter()
+        .map(|r| ApplyRunDto {
+            id: r.id.into_inner(),
+            architecture_id: r.architecture_id.into_inner(),
+            architecture_version_id: r.architecture_version_id.into_inner(),
+            plan_id: r.plan_id.map(|p| p.into_inner()),
+            task_id: r.task_id,
+            status: r.status,
+            started_at: r.started_at.map(|d| d.to_rfc3339()),
+            finished_at: r.finished_at.map(|d| d.to_rfc3339()),
+            requested_by: r.requested_by,
+            result_json: r.result_json,
+            error_message: r.error_message,
+            created_at: r.created_at.to_rfc3339(),
+            updated_at: r.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    tracing::info!(
+        target: "architecture.runs",
+        architecture_id = %architecture_id,
+        run_count = runs.len(),
+        "architecture.runs.listed"
+    );
+
+    Ok(Json(ListApplyRunsResponse { runs }))
 }
 
 pub async fn list_architecture_versions(

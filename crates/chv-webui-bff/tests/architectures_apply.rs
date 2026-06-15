@@ -26,9 +26,10 @@ use axum::Json;
 use chrono::{Duration, TimeZone, Utc};
 use chv_common::ManualClock;
 use chv_controlplane_store::{
-    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository, EventRepository,
-    ImageRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
-    OperationRepository, PlanRepository, PlanStatusUpdateInput, TopologyRepository,
+    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
+    DriftReportRepository, EventRepository, ImageRepository, NetworkRepository, NodeRepository,
+    ObservedStateRepository, OperationRepository, PlanRepository, PlanStatusUpdateInput,
+    TopologyRepository,
 };
 use chv_controlplane_types::architecture::{
     ArchitectureId, ArchitecturePlanId, PlanMode, PlanStatus, RunStatus,
@@ -36,8 +37,8 @@ use chv_controlplane_types::architecture::{
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
     apply_architecture, create_architecture, destroy_architecture, destroy_plan_architecture,
-    plan_architecture, ApplyArchitectureRequest, ConfirmationDto, CreateArchitectureRequest,
-    PlanArchitectureRequest,
+    list_architecture_runs, plan_architecture, ApplyArchitectureRequest, ConfirmationDto,
+    CreateArchitectureRequest, ListApplyRunsRequest, PlanArchitectureRequest,
 };
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};
@@ -176,6 +177,7 @@ async fn build_state_with_clock(clock: ManualClock) -> AppState {
         network_repo: NetworkRepository::new(pool.clone()),
         image_repo: ImageRepository::new(pool.clone()),
         apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
+        drift_reports: Arc::new(DriftReportRepository::new(pool.clone())),
         mutations: Arc::new(NoopMutations),
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
@@ -214,6 +216,7 @@ fn err_status(e: &BffError) -> u16 {
         BffError::ProductionRequiresAdmin { .. } => 403,
         BffError::PlanModeMismatch { .. } => 400,
         BffError::InvalidResourceName { .. } => 400,
+        BffError::DriftCheckFailed { .. } => 502,
     }
 }
 
@@ -942,4 +945,145 @@ async fn apply_records_metrics_for_scrape() {
         scrape.contains("chv_architecture_apply_duration_seconds"),
         "metrics scrape missing duration histogram. Output:\n{scrape}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 13. list_architecture_runs (Phase-5 carryover B1, wired in Phase 6)
+// ---------------------------------------------------------------------------
+//
+// The route was lifted from viewer to operator middleware in Phase 6 because
+// run history can leak operational detail (task ids, error messages,
+// requested_by actor). The handler itself remains role-agnostic; the role
+// gate is the routing-layer middleware.
+
+#[tokio::test]
+async fn list_runs_returns_empty_for_architecture_with_no_runs() {
+    let clock = ManualClock::new(t0());
+    let state = build_state_with_clock(clock).await;
+    seed_capable_host(&state).await;
+    let arch_id = create_arch(&state, "list-empty", Some(HAPPY_YAML.to_string()), None).await;
+
+    let resp = list_architecture_runs(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(ListApplyRunsRequest { id: arch_id }),
+    )
+    .await
+    .expect("list should succeed")
+    .0;
+
+    assert!(
+        resp.runs.is_empty(),
+        "freshly-created arch must have no runs"
+    );
+}
+
+#[tokio::test]
+async fn list_runs_returns_runs_in_descending_order_by_created_at() {
+    let clock = ManualClock::new(t0());
+    let state = build_state_with_clock(clock).await;
+    seed_capable_host(&state).await;
+    let arch_id = create_arch(&state, "list-order", Some(HAPPY_YAML.to_string()), None).await;
+
+    // Generate plan A and apply it.
+    let plan_a = generate_ready_plan(&state, &arch_id).await;
+    let _ = apply_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(ApplyArchitectureRequest {
+            id: arch_id.clone(),
+            plan_id: plan_a.plan_id.clone(),
+            confirmation: ConfirmationDto::default(),
+            acknowledged_warnings: false,
+        }),
+    )
+    .await
+    .expect("first apply");
+
+    // Sleep just over 1 second so the second run row's SQLite-stamped
+    // `created_at` (truncated to whole seconds) strictly exceeds the first
+    // row's. The injected `ManualClock` only drives the BFF's expiry/cache
+    // logic; `created_at` is set by `strftime('now')` on the real wall
+    // clock, so we have to wait it out.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // Bump the topology's `version_number` so the second plan can mint a
+    // fresh `architecture_versions` row without colliding on the
+    // `(architecture_id, version_number)` UNIQUE constraint. The Phase-4
+    // plan handler does not backfill `latest_version_id` on the topology,
+    // so it would otherwise try to create another version row with the
+    // same number.
+    sqlx::query(
+        r#"UPDATE architecture_topologies
+           SET version_number = version_number + 1,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+           WHERE id = ?1"#,
+    )
+    .bind(&arch_id)
+    .execute(&state.pool)
+    .await
+    .expect("bump version_number");
+
+    // Generate plan B (a fresh plan row → fresh apply run row, since
+    // apply_plan is idempotent only on (plan_id) and each plan call mints
+    // a new id).
+    let plan_b = generate_ready_plan(&state, &arch_id).await;
+    let _ = apply_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(ApplyArchitectureRequest {
+            id: arch_id.clone(),
+            plan_id: plan_b.plan_id.clone(),
+            confirmation: ConfirmationDto::default(),
+            acknowledged_warnings: false,
+        }),
+    )
+    .await
+    .expect("second apply");
+
+    let resp = list_architecture_runs(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(ListApplyRunsRequest { id: arch_id }),
+    )
+    .await
+    .expect("list should succeed")
+    .0;
+
+    assert_eq!(
+        resp.runs.len(),
+        2,
+        "expected exactly two run rows for two distinct plans"
+    );
+    // Strict DESC ordering: most recent first.
+    assert!(
+        resp.runs[0].created_at > resp.runs[1].created_at,
+        "runs must be strict DESC by created_at: {} vs {}",
+        resp.runs[0].created_at,
+        resp.runs[1].created_at
+    );
+    // The mapped DTO must carry the run id and architecture id.
+    let first = &resp.runs[0];
+    assert!(!first.id.is_empty(), "run id should be set");
+    assert_eq!(
+        first.architecture_id, resp.runs[1].architecture_id,
+        "both runs must reference the same architecture"
+    );
+}
+
+#[tokio::test]
+async fn list_runs_unknown_architecture_returns_404() {
+    let clock = ManualClock::new(t0());
+    let state = build_state_with_clock(clock).await;
+
+    let err = list_architecture_runs(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(ListApplyRunsRequest {
+            id: "no-such-arch".to_string(),
+        }),
+    )
+    .await
+    .expect_err("unknown arch must error");
+    assert_eq!(err_status(&err), 404);
 }

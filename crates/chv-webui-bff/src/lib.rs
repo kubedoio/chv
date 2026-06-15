@@ -6,6 +6,7 @@ pub mod csrf_middleware;
 pub mod error;
 pub mod handlers;
 pub mod metrics_apply;
+pub mod metrics_drift;
 pub mod metrics_middleware;
 pub mod mutations;
 pub mod router;

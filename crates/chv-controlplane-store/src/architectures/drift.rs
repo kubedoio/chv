@@ -109,6 +109,29 @@ impl DriftReportRepository {
         rows.iter().map(row_to_drift).collect()
     }
 
+    /// Indexed point-query for the most recent drift report row for a given
+    /// architecture, leveraging
+    /// `architecture_drift_reports_architecture_id_created_at_idx`. Use this
+    /// for the cache-lookup hot path so we avoid the full-list scan that
+    /// `list_for_architecture` performs.
+    pub async fn most_recent_for_architecture(
+        &self,
+        architecture_id: &ArchitectureId,
+    ) -> Result<Option<ArchitectureDriftReport>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT * FROM architecture_drift_reports
+            WHERE architecture_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(architecture_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_drift).transpose()
+    }
+
     /// Drift detection workflow is a Phase 1+ concern.
     pub async fn detect(&self) -> Result<ArchitectureDriftReport, StoreError> {
         Err(StoreError::NotImplemented {
