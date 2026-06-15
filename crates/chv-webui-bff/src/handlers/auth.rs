@@ -422,6 +422,7 @@ mod tests {
             jwt_secret: "test-secret".to_string(),
             agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
             cache: crate::cache::BffCache::new(5),
+            clock: Arc::new(chv_common::SystemClock),
         }
     }
 
@@ -484,6 +485,8 @@ mod tests {
             BffError::NotImplemented(_) => 501,
             BffError::QuotaExceeded { .. } => 422,
             BffError::GraphEmpty => 422,
+            BffError::PlanExpired { .. } => 409,
+            BffError::PlanNotDiscardable { .. } => 409,
         }
     }
 

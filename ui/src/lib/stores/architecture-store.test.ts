@@ -32,7 +32,10 @@ vi.mock('$lib/bff/architectures', async () => {
 		validateYaml: vi.fn(),
 		generateYaml: vi.fn(),
 		importYaml: vi.fn(),
-		checkFleet: vi.fn()
+		checkFleet: vi.fn(),
+		plan: vi.fn(),
+		destroyPlan: vi.fn(),
+		discardPlan: vi.fn()
 	};
 });
 
@@ -47,11 +50,15 @@ import {
 	generateYaml as generateYamlBff,
 	importYaml as importYamlBff,
 	checkFleet as checkFleetBff,
+	plan as planBff,
+	destroyPlan as destroyPlanBff,
+	discardPlan as discardPlanBff,
 	StaleVersionError,
 	type Architecture,
 	type ArchitectureDetail,
 	type ArchitectureSummary,
 	type FleetCheckResult,
+	type PlanResult,
 	type ValidationResult
 } from '$lib/bff/architectures';
 import { liveState } from './live-state.svelte';
@@ -476,6 +483,143 @@ describe('architectureStore', () => {
 			await architectureStore.checkFleet('arch-1', { skipRefresh: true });
 
 			expect(refreshSpy).not.toHaveBeenCalled();
+		});
+	});
+
+	// ─── Phase 4: plan generation store methods ─────────────────────────────
+
+	const PLAN_READY: PlanResult = {
+		plan_id: 'plan_01HX',
+		architecture_id: 'arch-1',
+		architecture_version: 1,
+		architecture_version_id: 'ver_01HX',
+		status: 'ready_to_apply',
+		mode: 'apply',
+		summary: { create: 1, update: 0, delete: 0, replace: 0, no_op: 0, warnings: 0 },
+		changes: [
+			{
+				action: 'create',
+				resource_type: 'network',
+				resource_name: 'tenant-a',
+				resource_ref: 'network/tenant-a',
+				description: 'Create network tenant-a',
+				risk: 'low',
+				requires_confirmation: false
+			}
+		],
+		warnings: [],
+		expires_at: '2026-06-15T12:15:00Z',
+		created_at: '2026-06-15T12:00:00Z'
+	};
+
+	const PLAN_DESTROY: PlanResult = {
+		...PLAN_READY,
+		plan_id: 'plan_01HY',
+		status: 'requires_confirmation',
+		mode: 'destroy',
+		summary: { create: 0, update: 0, delete: 1, replace: 0, no_op: 0, warnings: 0 },
+		changes: [
+			{
+				action: 'delete',
+				resource_type: 'network',
+				resource_name: 'tenant-a',
+				resource_ref: 'network/tenant-a',
+				description: 'Delete network tenant-a',
+				risk: 'destructive',
+				requires_confirmation: true
+			}
+		]
+	};
+
+	describe('plan', () => {
+		it('calls plan() and refreshes the architectures: pattern with detailId', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(planBff).mockResolvedValue(PLAN_READY);
+
+			const res = await architectureStore.plan('arch-1');
+
+			expect(res).toEqual(PLAN_READY);
+			expect(planBff).toHaveBeenCalledWith(
+				{ id: 'arch-1', allow_warnings: undefined, refresh_inventory: undefined },
+				'test-token'
+			);
+			expect(refreshSpy).toHaveBeenCalledWith(
+				expect.objectContaining({ patterns: ['architectures:'], detailId: 'arch-1' })
+			);
+		});
+
+		it('forwards allowWarnings and refreshInventory into the BFF body', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			vi.mocked(planBff).mockResolvedValue(PLAN_READY);
+
+			await architectureStore.plan('arch-1', {
+				allowWarnings: true,
+				refreshInventory: true
+			});
+
+			expect(planBff).toHaveBeenCalledWith(
+				{ id: 'arch-1', allow_warnings: true, refresh_inventory: true },
+				'test-token'
+			);
+		});
+
+		it('rethrows BFF errors so the panel can surface them via the toast', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			const boom = new Error('plan failed');
+			vi.mocked(planBff).mockRejectedValue(boom);
+
+			await expect(architectureStore.plan('arch-1')).rejects.toBe(boom);
+		});
+	});
+
+	describe('destroyPlan', () => {
+		it('calls destroyPlan() and refreshes the architectures: pattern with detailId', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(destroyPlanBff).mockResolvedValue(PLAN_DESTROY);
+
+			const res = await architectureStore.destroyPlan('arch-1');
+
+			expect(res).toEqual(PLAN_DESTROY);
+			expect(destroyPlanBff).toHaveBeenCalledWith({ id: 'arch-1' }, 'test-token');
+			expect(refreshSpy).toHaveBeenCalledWith(
+				expect.objectContaining({ patterns: ['architectures:'], detailId: 'arch-1' })
+			);
+		});
+
+		it('rethrows BFF errors verbatim', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			const boom = new Error('destroy plan failed');
+			vi.mocked(destroyPlanBff).mockRejectedValue(boom);
+
+			await expect(architectureStore.destroyPlan('arch-1')).rejects.toBe(boom);
+		});
+	});
+
+	describe('discardPlan', () => {
+		it('calls discardPlan() and refreshes the architectures: pattern', async () => {
+			const refreshSpy = vi
+				.spyOn(liveState, 'invalidateAndRefresh')
+				.mockResolvedValue(undefined);
+			vi.mocked(discardPlanBff).mockResolvedValue({ status: 'discarded' });
+
+			await architectureStore.discardPlan('plan_01HX');
+
+			expect(discardPlanBff).toHaveBeenCalledWith({ plan_id: 'plan_01HX' }, 'test-token');
+			expect(refreshSpy).toHaveBeenCalledWith(
+				expect.objectContaining({ patterns: ['architectures:'] })
+			);
+		});
+
+		it('rethrows BFF errors so the panel keeps the prior plan visible', async () => {
+			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
+			const boom = new Error('discard failed');
+			vi.mocked(discardPlanBff).mockRejectedValue(boom);
+
+			await expect(architectureStore.discardPlan('plan_01HX')).rejects.toBe(boom);
 		});
 	});
 });

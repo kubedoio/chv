@@ -38,6 +38,11 @@ pub struct PlanStatusUpdateInput {
     pub confirmed_by: Option<String>,
     pub mark_confirmed: bool,
     pub mark_discarded: bool,
+    /// Subject of the actor that discarded the plan. Persisted only when
+    /// `mark_discarded == true`; ignored otherwise. Allows audit reviews
+    /// to identify the user that discarded a plan without joining
+    /// downstream audit tables.
+    pub discarded_by: Option<String>,
 }
 
 #[derive(Clone)]
@@ -137,7 +142,8 @@ impl PlanRepository {
                 status = $2,
                 confirmed_by = COALESCE($3, confirmed_by),
                 confirmed_at = CASE WHEN $4 = 1 THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE confirmed_at END,
-                discarded_at = CASE WHEN $5 = 1 THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE discarded_at END
+                discarded_at = CASE WHEN $5 = 1 THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE discarded_at END,
+                discarded_by = CASE WHEN $5 = 1 THEN COALESCE($6, discarded_by) ELSE discarded_by END
             WHERE id = $1
             "#,
         )
@@ -146,6 +152,7 @@ impl PlanRepository {
         .bind(&input.confirmed_by)
         .bind(if input.mark_confirmed { 1_i64 } else { 0_i64 })
         .bind(if input.mark_discarded { 1_i64 } else { 0_i64 })
+        .bind(&input.discarded_by)
         .execute(&self.pool)
         .await?;
 
@@ -173,6 +180,8 @@ fn parse_mode(s: &str) -> Result<PlanMode, StoreError> {
     match s {
         "dry_run" => Ok(PlanMode::DryRun),
         "confirm" => Ok(PlanMode::Confirm),
+        "apply" => Ok(PlanMode::Apply),
+        "destroy" => Ok(PlanMode::Destroy),
         other => Err(StoreError::InvalidConfiguration {
             reason: format!("unrecognized plan mode: {other}"),
         }),
@@ -252,5 +261,6 @@ fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitecturePlan, StoreE
         confirmed_at: parse_ts_opt(confirmed_at.as_deref(), "confirmed_at")?,
         confirmed_by: row.try_get("confirmed_by")?,
         discarded_at: parse_ts_opt(discarded_at.as_deref(), "discarded_at")?,
+        discarded_by: row.try_get("discarded_by")?,
     })
 }

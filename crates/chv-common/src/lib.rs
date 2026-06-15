@@ -2,7 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const OPERATION_ID_METADATA_KEY: &str = "x-operation-id";
 
+pub mod clock;
 pub mod hypervisor;
+
+pub use clock::{Clock, ManualClock, SystemClock};
 
 pub mod types {
     use std::collections::HashMap;

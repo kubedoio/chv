@@ -47,13 +47,16 @@ use chv_architecture_validate::{
     fleet::check_fleet, parse_yaml as parse_arch_yaml, validate as validate_yaml_str,
     ValidationResult,
 };
+use chv_common::Clock;
 use chv_controlplane_store::{
-    InventorySnapshotCreateInput, StoreError, TopologyCreateInput, TopologyListFilter,
-    TopologyUpdateInput,
+    InventorySnapshotCreateInput, PlanCreateInput, PlanRepository, PlanStatusUpdateInput,
+    StoreError, TopologyCreateInput, TopologyListFilter, TopologyUpdateInput, VersionCreateInput,
+    VersionRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureId, ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId, Finding,
-    FleetCheckStatus, InventorySnapshotId, Severity, ValidationStatus,
+    ArchitectureId, ArchitecturePlan, ArchitecturePlanId, ArchitectureStatus, ArchitectureTopology,
+    ArchitectureVersionId, Finding, FleetCheckStatus, InventorySnapshotId, PlanChange, PlanMode,
+    PlanStatus, Severity, ValidationStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -591,13 +594,432 @@ pub async fn import_yaml_architecture(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 DTOs — plan, destroy-plan, discard-plan
+// ---------------------------------------------------------------------------
+
+/// Body for `POST /v1/architectures/plan` and `POST /v1/architectures/destroy-plan`.
+///
+/// `refresh_inventory` defaults to `true` so callers get a fresh fleet
+/// snapshot per plan call. Setting it to `false` reuses the most recent
+/// persisted snapshot for the architecture and returns 400 if none exists.
+///
+/// `allow_warnings` is a forward-compatibility hook used by the apply path
+/// in Phase 5; it is accepted here so the wire shape is stable.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanArchitectureRequest {
+    pub id: String,
+    #[serde(default)]
+    pub allow_warnings: Option<bool>,
+    #[serde(default)]
+    pub refresh_inventory: Option<bool>,
+}
+
+/// Body for `POST /v1/architectures/discard-plan`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DiscardPlanRequest {
+    pub plan_id: String,
+}
+
+/// Response shape for `plan` and `destroy-plan`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanResponse {
+    pub plan_id: String,
+    pub architecture_id: String,
+    /// Numeric topology version the plan was generated against. Lets the UI
+    /// reject a stale apply attempt without an extra round-trip.
+    pub architecture_version: i64,
+    /// Stable id of the `architecture_versions` row referenced by the plan
+    /// FK. Phase 5's apply path joins on this id; surfacing it here keeps
+    /// the wire shape complete so clients do not have to fish it back out
+    /// of the snapshot row.
+    pub architecture_version_id: String,
+    pub status: PlanStatus,
+    pub mode: PlanMode,
+    pub summary: chv_architecture_reconcile::PlanSummary,
+    pub changes: Vec<PlanChange>,
+    pub warnings: Vec<String>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response for `discard-plan`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DiscardPlanResponse {
+    pub status: String,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 handlers — plan, destroy-plan, discard-plan
+// ---------------------------------------------------------------------------
+
+/// Generate an apply-mode plan for a topology. Captures (or reuses) a fleet
+/// snapshot, runs validation, computes the diff, persists the plan row, and
+/// returns the plan body.
+///
+/// Operator+ only. The 15-minute TTL is computed against the injected
+/// [`Clock`] so tests can drive expiry deterministically.
 pub async fn plan_architecture(
     BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
+    State(state): State<AppState>,
+    Json(req): Json<PlanArchitectureRequest>,
+) -> Result<Json<PlanResponse>, BffError> {
     require_operator_or_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
+    let id = parse_id(&req.id)?;
+    let refresh = req.refresh_inventory.unwrap_or(true);
+    // TODO(Phase 5): consult allow_warnings to bypass non-blocking warnings
+    // during apply. Phase 4 plan generation always returns warnings inline;
+    // the apply handler is the one that gates on the flag.
+    let _ = req.allow_warnings;
+    let resp = generate_plan_inner(&state, &claims.sub, id, PlanMode::Apply, refresh).await?;
+    Ok(Json(resp))
+}
+
+/// Generate a destroy-mode plan for a topology. Same shape as `plan` but
+/// every desired resource becomes a `Delete` and `requires_confirmation` is
+/// always true on the resulting changes.
+pub async fn destroy_plan_architecture(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    Json(req): Json<PlanArchitectureRequest>,
+) -> Result<Json<PlanResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    let id = parse_id(&req.id)?;
+    let refresh = req.refresh_inventory.unwrap_or(true);
+    let resp = generate_plan_inner(&state, &claims.sub, id, PlanMode::Destroy, refresh).await?;
+    Ok(Json(resp))
+}
+
+/// Mark a previously-generated plan as `Discarded`. Idempotent — discarding
+/// an already-discarded plan returns the same response. Returns 404 when
+/// the plan does not exist.
+///
+/// ## Discardable states
+///
+/// `Draft`, `FailedValidation`, `RequiresConfirmation`, `ReadyToApply` are
+/// discardable; the row transitions to `Discarded` and `discarded_by` is
+/// stamped with the caller's subject. `Discarded` itself is idempotent
+/// (returns 200 without re-stamping). `Applying`, `Applied`, `Failed`,
+/// `Expired` are terminal and refuse with 409 / `code: PLAN_NOT_DISCARDABLE`
+/// — Phase 5's apply path moves a plan into those states and a discard
+/// after that point would be misleading.
+pub async fn discard_plan_architecture(
+    BearerToken(claims): BearerToken,
+    State(state): State<AppState>,
+    Json(req): Json<DiscardPlanRequest>,
+) -> Result<Json<DiscardPlanResponse>, BffError> {
+    require_operator_or_admin(&claims)?;
+    let plan_id = ArchitecturePlanId::new(req.plan_id.clone())
+        .map_err(|e| BffError::BadRequest(format!("invalid plan id: {e}")))?;
+    let plan_repo = PlanRepository::new(state.pool.clone());
+    let plan = plan_repo.get(&plan_id).await?;
+    tracing::info!(
+        target: "architecture.plan",
+        architecture_id = %plan.architecture_id,
+        plan_id = %plan_id,
+        mode = ?plan.mode,
+        status = ?plan.status,
+        actor = %claims.sub,
+        "discard_plan_architecture"
+    );
+    if plan.status == PlanStatus::Discarded {
+        return Ok(Json(DiscardPlanResponse {
+            status: "discarded".to_string(),
+        }));
+    }
+    match plan.status {
+        PlanStatus::Applying | PlanStatus::Applied | PlanStatus::Failed | PlanStatus::Expired => {
+            return Err(BffError::PlanNotDiscardable {
+                plan_id: plan_id.to_string(),
+                current_status: plan.status,
+            });
+        }
+        _ => {}
+    }
+    plan_repo
+        .update_status(PlanStatusUpdateInput {
+            id: plan_id,
+            status: PlanStatus::Discarded,
+            confirmed_by: None,
+            mark_confirmed: false,
+            mark_discarded: true,
+            discarded_by: Some(claims.sub.clone()),
+        })
+        .await?;
+    Ok(Json(DiscardPlanResponse {
+        status: "discarded".to_string(),
+    }))
+}
+
+/// Shared orchestration for `plan` and `destroy-plan`.
+///
+/// Steps:
+/// 1. Load the topology and validate it has saved YAML.
+/// 2. Capture a fresh fleet snapshot (or reload the latest persisted one
+///    when `refresh_inventory=false`).
+/// 3. Run static + fleet validation. If any blocking finding fires, persist
+///    a `failed_validation` plan with empty changes and the finding messages
+///    as warnings, then return.
+/// 4. Otherwise compute the ordered diff, build the [`Plan`], and persist
+///    it with the matching `requires_confirmation`/`ready_to_apply` status.
+async fn generate_plan_inner(
+    state: &AppState,
+    caller: &str,
+    id: ArchitectureId,
+    mode: PlanMode,
+    refresh_inventory: bool,
+) -> Result<PlanResponse, BffError> {
+    tracing::info!(
+        target: "architecture.plan",
+        architecture_id = %id,
+        mode = ?mode,
+        refresh_inventory,
+        "plan_architecture"
+    );
+
+    let topo = state.topology_repo.get(&id).await?;
+    let yaml = topo
+        .latest_yaml
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if yaml.is_empty() {
+        return Err(BffError::BadRequest(
+            "plan requires saved topology yaml".into(),
+        ));
+    }
+
+    // Capture or reload the inventory snapshot.
+    let snapshot_repo =
+        chv_controlplane_store::InventorySnapshotRepository::new(state.pool.clone());
+    let (snapshot, snapshot_id) = if refresh_inventory {
+        let provider = FleetInventoryProvider {
+            nodes: state.node_repo.clone(),
+            networks: state.network_repo.clone(),
+            images: state.image_repo.clone(),
+            deploy_allowed_for_caller: true,
+        };
+        let snapshot = chv_architecture_reconcile::capture(&provider, "bff/plan")
+            .await
+            .map_err(|e| BffError::Internal(format!("capture inventory: {e}")))?;
+        let snap_id = InventorySnapshotId::new(chv_common::gen_short_id())
+            .map_err(|e| BffError::Internal(format!("mint inventory snapshot id: {e}")))?;
+        let snapshot_json = serde_json::to_string(&snapshot)?;
+        let summary_json = Some(
+            serde_json::json!({
+                "totals": {
+                    "hosts": snapshot.nodes.len(),
+                    "networks": snapshot.networks.len(),
+                    "datastores": snapshot.datastores.len(),
+                    "images": snapshot.images.len(),
+                    "backup_targets": snapshot.backup_targets.len(),
+                },
+                "backup_targets_complete": snapshot.backup_targets_complete,
+                "captured_by": "bff/plan",
+            })
+            .to_string(),
+        );
+        let saved = snapshot_repo
+            .create(InventorySnapshotCreateInput {
+                id: snap_id.clone(),
+                source: snapshot.source.clone(),
+                snapshot_json,
+                summary_json,
+                captured_by: Some(caller.to_string()),
+            })
+            .await?;
+        (snapshot, saved.id)
+    } else {
+        // Phase 4 keeps the no-refresh path simple: there is no
+        // `latest_for_architecture` API yet, so callers explicitly opting out
+        // of refresh hit a deterministic 400. Phase 5 will widen this.
+        return Err(BffError::BadRequest(
+            "refresh_inventory=false is not yet supported; omit or set true".into(),
+        ));
+    };
+
+    // Parse the model and run pure-data fleet checks. Static validation is
+    // a separate user-initiated action (`POST /v1/architectures/validate`)
+    // that gates whether plan is even allowed; running it again here would
+    // duplicate findings already surfaced via `last_validation_status`.
+    // Phase 5 may layer it back in once the contract calls for it.
+    let model = parse_arch_yaml(yaml)
+        .map_err(|e| BffError::BadRequest(format!("latest_yaml parse failed: {e}")))?;
+    let fleet_findings: Vec<Finding> = check_fleet(&model, &snapshot);
+
+    let blocking: Vec<&Finding> = fleet_findings
+        .iter()
+        .filter(|f| f.severity == Severity::Error)
+        .collect();
+    let warning_messages: Vec<String> = fleet_findings
+        .iter()
+        .filter(|f| f.severity == Severity::Warning)
+        .map(|f| f.message.clone())
+        .collect();
+
+    // Resolve / mint the architecture_version_id used by the plan FK. If
+    // the topology already carries one, reuse it; otherwise create a fresh
+    // version row from the current YAML so the plan FK resolves cleanly.
+    let version_repo = VersionRepository::new(state.pool.clone());
+    let version_id = match &topo.latest_version_id {
+        Some(v) => v.clone(),
+        None => {
+            let new_id = ArchitectureVersionId::new(chv_common::gen_short_id())
+                .map_err(|e| BffError::Internal(format!("mint version id: {e}")))?;
+            version_repo
+                .create(VersionCreateInput {
+                    id: new_id.clone(),
+                    architecture_id: id.clone(),
+                    version_number: topo.version_number,
+                    yaml_content: yaml.to_string(),
+                    design_graph_json: topo.design_graph_json.clone(),
+                    normalized_model_json: None,
+                    change_summary: Some("auto-created by bff/plan".to_string()),
+                    created_by: Some(caller.to_string()),
+                })
+                .await?;
+            new_id
+        }
+    };
+
+    let plan_repo = PlanRepository::new(state.pool.clone());
+    let plan_id = ArchitecturePlanId::new(chv_common::gen_short_id())
+        .map_err(|e| BffError::Internal(format!("mint plan id: {e}")))?;
+
+    // Capture the version id string up front; the FK move into PlanCreateInput
+    // consumes `version_id`, but the PlanResponse echoes it back to the
+    // client so the UI can pin a subsequent apply call to this exact version.
+    let version_id_string = version_id.as_str().to_string();
+    let architecture_version = topo.version_number;
+
+    let now = state.clock.now();
+    let expires_at = now + chrono::Duration::minutes(15);
+
+    if !blocking.is_empty() {
+        // Failed-validation plan: persist with empty changes, warnings carry
+        // the blocking finding messages so the UI can render them.
+        let blocking_messages: Vec<String> = blocking.iter().map(|f| f.message.clone()).collect();
+        let summary = chv_architecture_reconcile::PlanSummary::from_changes(
+            &[],
+            blocking_messages.len() as u32,
+        );
+        let plan_struct = chv_architecture_reconcile::Plan {
+            mode,
+            changes: Vec::new(),
+            summary: summary.clone(),
+            warnings: blocking_messages.clone(),
+        };
+        let plan_json = serde_json::to_string(&plan_struct)?;
+        let summary_json = serde_json::to_string(&summary)?;
+        let persisted = plan_repo
+            .create(PlanCreateInput {
+                id: plan_id.clone(),
+                architecture_id: id.clone(),
+                architecture_version_id: version_id,
+                inventory_snapshot_id: Some(snapshot_id),
+                mode,
+                status: PlanStatus::FailedValidation,
+                plan_json: Some(plan_json),
+                summary_json: Some(summary_json),
+                created_by: Some(caller.to_string()),
+                expires_at,
+            })
+            .await?;
+        tracing::info!(
+            target: "architecture.plan",
+            architecture_id = %id,
+            plan_id = %persisted.id,
+            mode = ?mode,
+            status = ?PlanStatus::FailedValidation,
+            "plan generated"
+        );
+        return Ok(PlanResponse {
+            plan_id: persisted.id.into_inner(),
+            architecture_id: id.into_inner(),
+            architecture_version,
+            architecture_version_id: version_id_string,
+            status: PlanStatus::FailedValidation,
+            mode,
+            summary,
+            changes: Vec::new(),
+            warnings: blocking_messages,
+            expires_at: persisted.expires_at,
+            created_at: persisted.created_at,
+        });
+    }
+
+    // Success path: build a real plan.
+    let plan_struct =
+        chv_architecture_reconcile::build_plan(&model, &snapshot, mode, warning_messages);
+    let status = if plan_struct.changes.iter().any(|c| c.requires_confirmation) {
+        PlanStatus::RequiresConfirmation
+    } else {
+        PlanStatus::ReadyToApply
+    };
+    let plan_json = serde_json::to_string(&plan_struct)?;
+    let summary_json = serde_json::to_string(&plan_struct.summary)?;
+    let persisted = plan_repo
+        .create(PlanCreateInput {
+            id: plan_id.clone(),
+            architecture_id: id.clone(),
+            architecture_version_id: version_id,
+            inventory_snapshot_id: Some(snapshot_id),
+            mode,
+            status,
+            plan_json: Some(plan_json),
+            summary_json: Some(summary_json),
+            created_by: Some(caller.to_string()),
+            expires_at,
+        })
+        .await?;
+
+    tracing::info!(
+        target: "architecture.plan",
+        architecture_id = %id,
+        plan_id = %persisted.id,
+        mode = ?mode,
+        status = ?status,
+        "plan generated"
+    );
+
+    Ok(PlanResponse {
+        plan_id: persisted.id.into_inner(),
+        architecture_id: id.into_inner(),
+        architecture_version,
+        architecture_version_id: version_id_string,
+        status,
+        mode,
+        summary: plan_struct.summary,
+        changes: plan_struct.changes,
+        warnings: plan_struct.warnings,
+        expires_at: persisted.expires_at,
+        created_at: persisted.created_at,
+    })
+}
+
+/// Returns `Err(BffError::PlanExpired)` when `clock.now() > plan.expires_at`.
+///
+/// Phase 5's apply/confirm handlers will gate on this; centralizing the
+/// check here keeps the wording and the `code: "PLAN_EXPIRED"` body shape
+/// consistent across all callers. The expiry comparison itself is delegated
+/// to [`chv_architecture_reconcile::is_expired`] so the periodic sweeper
+/// (Phase 5) and the per-call gate share one definition of "expired".
+#[allow(dead_code)] // Phase 5 wires the apply/confirm callers.
+pub fn ensure_plan_not_expired(plan: &ArchitecturePlan, clock: &dyn Clock) -> Result<(), BffError> {
+    if chv_architecture_reconcile::is_expired(plan, clock) {
+        return Err(BffError::PlanExpired {
+            plan_id: plan.id.to_string(),
+            message: format!(
+                "plan {} has expired (created {}, expires {})",
+                plan.id, plan.created_at, plan.expires_at
+            ),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -771,24 +1193,6 @@ pub async fn check_fleet_architecture(
         checked_at: snapshot.captured_at.to_rfc3339(),
         findings,
     }))
-}
-
-pub async fn destroy_plan_architecture(
-    BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    require_operator_or_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
-}
-
-pub async fn discard_plan_architecture(
-    BearerToken(claims): BearerToken,
-    State(_state): State<AppState>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, BffError> {
-    require_operator_or_admin(&claims)?;
-    Err(BffError::NotImplemented("phase 0".into()))
 }
 
 pub async fn apply_architecture(

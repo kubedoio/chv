@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 chv-architecture-validate = { path = "../chv-architecture-validate" }
+chv-common = { path = "../chv-common" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-errors = { path = "../chv-errors" }
@@ -21,3 +22,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }
+proptest = "1"

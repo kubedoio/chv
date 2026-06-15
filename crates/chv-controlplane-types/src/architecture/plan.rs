@@ -48,13 +48,24 @@ macro_rules! arch_id_newtype {
 arch_id_newtype!(ArchitecturePlanId, "architecture_plan_id");
 arch_id_newtype!(InventorySnapshotId, "inventory_snapshot_id");
 
-/// Plan execution mode. `dry_run` produces a plan without recording an
-/// apply intent; `confirm` produces a plan that may be confirmed-and-applied.
+/// Plan execution mode.
+///
+/// * `dry_run` produces a plan without recording an apply intent.
+/// * `confirm` produces a plan that may be confirmed-and-applied (legacy
+///   alias retained for Phase-0 store callers; Phase 4 prefers `apply`).
+/// * `apply` is the standard mode for [`POST /v1/architectures/plan`].
+///   It produces a plan that, after explicit confirmation, will reconcile
+///   the desired model into the fleet.
+/// * `destroy` is produced by `POST /v1/architectures/destroy-plan`. It
+///   inverts the diff so every desired resource becomes a `Delete` change,
+///   tearing down the architecture as a unit.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanMode {
     DryRun,
     Confirm,
+    Apply,
+    Destroy,
 }
 
 impl PlanMode {
@@ -62,6 +73,8 @@ impl PlanMode {
         match self {
             PlanMode::DryRun => "dry_run",
             PlanMode::Confirm => "confirm",
+            PlanMode::Apply => "apply",
+            PlanMode::Destroy => "destroy",
         }
     }
 }
@@ -171,6 +184,10 @@ pub struct ArchitecturePlan {
     pub confirmed_at: Option<DateTime<Utc>>,
     pub confirmed_by: Option<String>,
     pub discarded_at: Option<DateTime<Utc>>,
+    /// Subject (user id) that discarded the plan. Recorded by the
+    /// discard-plan handler in Phase 4 so audit logs and incident review
+    /// can identify the actor without joining against an external table.
+    pub discarded_by: Option<String>,
 }
 
 /// Captured fleet inventory used as the basis for a plan or drift report.
@@ -223,6 +240,22 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_round_trip_all() {
+        for (mode, expected) in [
+            (PlanMode::DryRun, "\"dry_run\""),
+            (PlanMode::Confirm, "\"confirm\""),
+            (PlanMode::Apply, "\"apply\""),
+            (PlanMode::Destroy, "\"destroy\""),
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, expected, "unexpected wire form for {mode:?}");
+            let back: PlanMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+            assert_eq!(mode.as_str(), expected.trim_matches('"'));
+        }
+    }
+
+    #[test]
     fn plan_change_round_trip() {
         let change = PlanChange {
             action: PlanAction::Create,
@@ -256,6 +289,7 @@ mod tests {
             confirmed_at: None,
             confirmed_by: None,
             discarded_at: None,
+            discarded_by: None,
         };
 
         let json = serde_json::to_string(&plan).unwrap();

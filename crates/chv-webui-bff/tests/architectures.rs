@@ -19,10 +19,9 @@ use chv_controlplane_store::{
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
     apply_architecture, archive_architecture, check_fleet_architecture, create_architecture,
-    destroy_architecture, destroy_plan_architecture, discard_plan_architecture,
-    generate_architecture_yaml, get_architecture, get_architecture_drift, import_yaml_architecture,
-    list_architecture_runs, list_architecture_versions, list_architectures, plan_architecture,
-    update_architecture, validate_architecture, validate_architecture_yaml,
+    destroy_architecture, generate_architecture_yaml, get_architecture, get_architecture_drift,
+    import_yaml_architecture, list_architecture_runs, list_architecture_versions,
+    list_architectures, update_architecture, validate_architecture, validate_architecture_yaml,
     ArchiveArchitectureRequest, CheckFleetRequest, CreateArchitectureRequest, GenerateYamlRequest,
     GetArchitectureRequest, ImportYamlRequest, ListArchitecturesRequest, UpdateArchitectureRequest,
     ValidateArchitectureRequest, ValidateArchitectureYamlRequest, ValidationStatusKind,
@@ -163,6 +162,7 @@ async fn build_state() -> AppState {
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
         cache: chv_webui_bff::BffCache::new(5),
+        clock: Arc::new(chv_common::SystemClock),
     }
 }
 
@@ -188,6 +188,8 @@ fn err_status(e: &BffError) -> u16 {
         BffError::NotImplemented(_) => 501,
         BffError::QuotaExceeded { .. } => 422,
         BffError::GraphEmpty => 422,
+        BffError::PlanExpired { .. } => 409,
+        BffError::PlanNotDiscardable { .. } => 409,
     }
 }
 
@@ -1141,35 +1143,10 @@ async fn import_yaml_forbids_viewer() {
     assert_eq!(err_status(&err), 403);
 }
 
-#[tokio::test]
-async fn plan_stub_returns_501_for_operator() {
-    let state = build_state().await;
-    let op = claims_for("operator");
-    let err = plan_architecture(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
-}
-
-#[tokio::test]
-async fn destroy_plan_stub_returns_501_for_operator() {
-    let state = build_state().await;
-    let op = claims_for("operator");
-    let err = destroy_plan_architecture(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
-}
-
-#[tokio::test]
-async fn discard_plan_stub_returns_501_for_operator() {
-    let state = build_state().await;
-    let op = claims_for("operator");
-    let err = discard_plan_architecture(BearerToken(op), State(state), Json(json!({})))
-        .await
-        .expect_err("stub must error");
-    assert_eq!(err_status(&err), 501);
-}
+// Plan / destroy-plan / discard-plan handlers are exercised in
+// `tests/architectures_plan.rs` against an injected `ManualClock`. The
+// Phase-0 stub tests that previously lived here have been removed; the
+// real surface no longer returns 501.
 
 #[tokio::test]
 async fn apply_stub_returns_501_for_admin() {

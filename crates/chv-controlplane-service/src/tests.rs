@@ -60,6 +60,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         jwt_secret: "test-secret".to_string(),
         agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
         cache: chv_webui_bff::BffCache::new(5),
+        clock: Arc::new(chv_common::SystemClock),
     }
 }
 
