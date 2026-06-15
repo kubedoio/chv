@@ -338,6 +338,7 @@
 				type="button"
 				class="toolbar-btn"
 				title="Copy terminal contents"
+				aria-label={copied ? 'Terminal contents copied' : 'Copy terminal contents'}
 				onclick={handleCopy}
 			>
 				{#if copied}
@@ -350,6 +351,7 @@
 				type="button"
 				class="toolbar-btn"
 				title="Download terminal contents"
+				aria-label="Download terminal contents"
 				onclick={handleDownload}
 			>
 				<Download size={14} />
@@ -359,6 +361,7 @@
 					<button type="button"
 						class="toolbar-btn"
 						title="Disconnect"
+						aria-label="Disconnect from console"
 						onclick={handleDisconnect}
 					>
 						<Unplug size={14} />
@@ -367,6 +370,7 @@
 					<button type="button"
 						class="toolbar-btn"
 						title="Reconnect"
+						aria-label="Reconnect to console"
 						onclick={() => handleReconnect()}
 					>
 						<PlugZap size={14} />
