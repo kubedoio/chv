@@ -36,6 +36,9 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
     let network_repo = NetworkRepository::new(pool.clone());
     let image_repo = ImageRepository::new(pool.clone());
     let apply_runs = Arc::new(ApplyRunRepository::new(pool.clone()));
+    let drift_reports = Arc::new(chv_controlplane_store::DriftReportRepository::new(
+        pool.clone(),
+    ));
     let lifecycle_service = Arc::new(crate::lifecycle::LifecycleServiceImplementation::new(
         node_repo.clone(),
         operation_repo.clone(),
@@ -55,6 +58,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         network_repo,
         image_repo,
         apply_runs,
+        drift_reports,
         mutations: Arc::new(crate::ControlPlaneMutationService::new(
             pool_for_mutations,
             lifecycle_service,

@@ -100,6 +100,18 @@ pub enum BffError {
         used: i64,
         requested: i64,
     },
+    /// 502 — Phase 6 drift detection failed *and* the BFF could not even
+    /// persist a `check_failed` drift report row (e.g. the store rejected
+    /// the insert). The normal compute-failure path returns 200 with
+    /// `status: check_failed` so the UI can render the failure inline; this
+    /// variant fires only when persistence itself fails. Surfaced as
+    /// `code: "DRIFT_CHECK_FAILED"` so callers distinguish "compute failed,
+    /// here is the report" (200) from "we could not even record the
+    /// failure" (502).
+    DriftCheckFailed {
+        architecture_id: String,
+        message: String,
+    },
 }
 
 impl IntoResponse for BffError {
@@ -240,6 +252,19 @@ impl IntoResponse for BffError {
                     "requested": requested,
                 }));
                 return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+            }
+            BffError::DriftCheckFailed {
+                architecture_id,
+                message,
+            } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "drift check failed for architecture {architecture_id}: {message}"
+                    ),
+                    "code": "DRIFT_CHECK_FAILED",
+                    "architecture_id": architecture_id,
+                }));
+                return (StatusCode::BAD_GATEWAY, body).into_response();
             }
         };
 

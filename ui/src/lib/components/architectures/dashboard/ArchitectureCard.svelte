@@ -1,7 +1,20 @@
 <script lang="ts">
-	import type { ArchitectureSummary } from '$lib/bff/architectures';
+	import type { ArchitectureSummary, DriftStatus } from '$lib/bff/architectures';
+	import DriftStatusBadge from '$lib/components/architectures/drift/DriftStatusBadge.svelte';
 
-	let { architecture }: { architecture: ArchitectureSummary } = $props();
+	interface Props {
+		architecture: ArchitectureSummary;
+		/**
+		 * Per-card drift status. The dashboard fans out a `getArchitectureDrift`
+		 * call per architecture on mount (Phase 6 carve-out: N round-trips, not
+		 * 1 — Phase 7 will denormalize this onto the topology row). `undefined`
+		 * means the fetch is still in flight or failed; we render nothing in
+		 * that case to keep the dashboard quiet.
+		 */
+		driftStatus?: DriftStatus | undefined;
+	}
+
+	let { architecture, driftStatus }: Props = $props();
 
 	function formatDate(iso: string | null): string {
 		if (!iso) return '—';
@@ -37,11 +50,18 @@
 		<div class="card-title" data-testid="architecture-card-name">
 			{heading}
 		</div>
-		{#if environment}
-			<span class="env-badge {envClass}" aria-label={`Environment ${environment}`}>
-				{environment}
-			</span>
-		{/if}
+		<div class="card-header-right">
+			{#if driftStatus && (driftStatus === 'drifted' || driftStatus === 'check_failed' || driftStatus === 'no_drift')}
+				<span data-testid="architecture-drift-badge">
+					<DriftStatusBadge status={driftStatus} compact />
+				</span>
+			{/if}
+			{#if environment}
+				<span class="env-badge {envClass}" aria-label={`Environment ${environment}`}>
+					{environment}
+				</span>
+			{/if}
+		</div>
 	</div>
 
 	{#if description}
@@ -80,6 +100,13 @@
 		justify-content: space-between;
 		gap: 0.5rem;
 		align-items: center;
+	}
+
+	.card-header-right {
+		display: inline-flex;
+		gap: 0.35rem;
+		align-items: center;
+		flex-wrap: wrap;
 	}
 
 	.card-title {

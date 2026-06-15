@@ -561,15 +561,14 @@ export async function discardPlan(
 //   - POST /v1/architectures/destroy         → ApplyRunResult
 //   - POST /v1/architectures/runs/list       → { runs: ApplyRunDetail[] }
 //
-// Endpoint fallback note (Phase 5 reality):
-//   Subagent B's contract ships the apply/destroy POSTs and a `runs/list`
-//   listing; it does NOT (yet) expose a per-run GET. The single-run page
-//   therefore fetches the full list and finds the run by id — which is
-//   correct under the current data model (runs are always scoped to an
-//   architecture, and the apply response carries `architecture_id`). When
-//   B/Phase 6 adds `/runs/get`, replace `getApplyRun`'s implementation —
-//   callers don't need to change because the function takes the run_id
-//   plus an architecture_id hint.
+// Endpoint coverage:
+//   The BFF ships POST /v1/architectures/apply, /destroy, and /runs/list.
+//   `listApplyRuns` calls `runs/list` directly — no fallback. There is still
+//   no per-run GET endpoint (`/runs/get`); for MVP the single-run page lists
+//   all runs for the architecture and plucks by id. This is correct under the
+//   current data model (runs are always architecture-scoped and the apply
+//   response carries `architecture_id`). When the BFF adds `/runs/get`,
+//   swap `getApplyRun`'s body — the public signature stays stable.
 
 /**
  * Lifecycle states for an `architecture_apply_runs` row. Mirrors the Rust
@@ -635,7 +634,12 @@ export interface ApplyArchitectureRequest {
 }
 
 export interface ListApplyRunsRequest {
-	architecture_id: string;
+	/**
+	 * Architecture id. Wire field is `id` (not `architecture_id`) for parity
+	 * with every other architecture-scoped DTO in this module — see review
+	 * note M1 in the Phase-6 fix-up.
+	 */
+	id: string;
 }
 
 export interface ListApplyRunsResponse {
@@ -700,15 +704,16 @@ export async function destroy(
 /**
  * List apply runs for a single architecture, newest first.
  *
- * Wire body is `{ architecture_id }`; the response is `{ runs: [...] }`.
- * Repository ordering already returns newest-first, so callers can render
- * straight to a table without re-sorting.
+ * Wire body is `{ id }` (matches the `{ id }` convention the rest of the
+ * architecture endpoints use); the response is `{ runs: [...] }`. Repository
+ * ordering already returns newest-first, so callers can render straight to a
+ * table without re-sorting.
  */
 export async function listApplyRuns(
 	architecture_id: string,
 	token?: string
 ): Promise<ApplyRunDetail[]> {
-	const req: ListApplyRunsRequest = { architecture_id };
+	const req: ListApplyRunsRequest = { id: architecture_id };
 	const res = await bffFetch<ListApplyRunsResponse>(BFFEndpoints.architecturesRunsList, {
 		method: 'POST',
 		body: JSON.stringify(req),
@@ -757,4 +762,177 @@ export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
 
 export function isTerminalRunStatus(status: RunStatus): boolean {
 	return TERMINAL_RUN_STATUSES.includes(status);
+}
+
+// ─── Phase 6: Drift detection wire types ─────────────────────────────────
+//
+// Source of truth: docs/plans/2026-06-13-architecture-designer-implementation-plan.md
+// §3 Phase 6 and crates/chv-architecture-reconcile/src/drift.rs.
+//
+// Drift = the diff between the architecture model (baseline) and the live
+// fleet snapshot, computed pure-data. The BFF endpoint caches results for
+// 5 minutes via `state.clock`; pass `force_refresh: true` to bypass.
+//
+// Wire response fields match the BFF (see handlers/architectures.rs):
+//   drift_report_id, status, findings, summary, baseline_version_id,
+//   computed_at, cache_hit, error_message.
+
+/**
+ * Status pill values for a drift report. `unknown` is the initial state when
+ * a topology has never been checked; `check_failed` is emitted when snapshot
+ * capture or compute itself errored (the report row is persisted with an
+ * `error_message` so the UI can banner the cause).
+ */
+export type DriftStatus = 'unknown' | 'no_drift' | 'drifted' | 'check_failed';
+
+/**
+ * Discriminated union over the 7 drift finding codes shipped by the Rust
+ * `compute_drift` function. Each variant carries enough data for the row
+ * renderer to label the change without an extra round-trip. `path` is a
+ * JSON-pointer-style string within the topology (e.g. `instances[0].cpu_cores`).
+ * `resource_ref` is the human-friendly handle (e.g. `instances/app-01`).
+ *
+ * Forward-compat: when Phase 7 adds new codes, callers should fall through
+ * to a generic row rather than crashing on an unknown discriminant.
+ */
+export type DriftFinding =
+	| {
+			code: 'DRIFT_MISSING_RESOURCE';
+			path: string;
+			resource_ref: string;
+			message: string;
+	  }
+	| {
+			code: 'DRIFT_UNEXPECTED_RESOURCE';
+			path: string;
+			resource_ref: string;
+			message: string;
+	  }
+	| {
+			code: 'DRIFT_FIELD_CHANGED';
+			path: string;
+			resource_ref: string;
+			field: string;
+			expected: string;
+			actual: string;
+			message: string;
+	  }
+	| {
+			code: 'DRIFT_CAPACITY_CHANGED';
+			path: string;
+			resource_ref: string;
+			field: string;
+			expected: number;
+			actual: number;
+			message: string;
+	  }
+	| {
+			code: 'DRIFT_NETWORK_CHANGED';
+			path: string;
+			resource_ref: string;
+			field: string;
+			expected: string | null;
+			actual: string | null;
+			message: string;
+	  }
+	| {
+			code: 'DRIFT_PERMISSION_CHANGED';
+			path: string;
+			resource_ref: string;
+			message: string;
+	  }
+	| {
+			code: 'DRIFT_ATTACHMENT_CHANGED';
+			path: string;
+			resource_ref: string;
+			message: string;
+	  };
+
+/**
+ * The seven stable codes — exported so the panel can iterate them when
+ * rendering empty per-type chips. Keep aligned with the Rust enum.
+ */
+export const DRIFT_FINDING_CODES = [
+	'DRIFT_MISSING_RESOURCE',
+	'DRIFT_UNEXPECTED_RESOURCE',
+	'DRIFT_FIELD_CHANGED',
+	'DRIFT_CAPACITY_CHANGED',
+	'DRIFT_NETWORK_CHANGED',
+	'DRIFT_PERMISSION_CHANGED',
+	'DRIFT_ATTACHMENT_CHANGED'
+] as const;
+
+export type DriftFindingCode = (typeof DRIFT_FINDING_CODES)[number];
+
+export interface DriftSummary {
+	total: number;
+	/**
+	 * Server emits one entry per code with a non-zero count. The UI
+	 * iterates `DRIFT_FINDING_CODES` and reads `by_type[code] ?? 0` so
+	 * a zero-count code shows a 0 chip rather than disappearing.
+	 */
+	by_type: Record<string, number>;
+}
+
+export interface DriftReport {
+	/** Stable id of the persisted drift_report row, or null when status===`unknown`. */
+	drift_report_id: string | null;
+	status: DriftStatus;
+	findings: DriftFinding[];
+	summary: DriftSummary;
+	/** Architecture version id the diff was computed against. */
+	baseline_version_id: string;
+	/** RFC3339 server timestamp; UI renders relative ("5s ago"). */
+	computed_at: string;
+	/** True when the BFF returned a cached row instead of recomputing. */
+	cache_hit: boolean;
+	/** Populated only on `check_failed`. */
+	error_message: string | null;
+}
+
+export interface GetDriftRequest {
+	id: string;
+	force_refresh?: boolean;
+}
+
+/**
+ * Fetch (or recompute) the drift report for an architecture.
+ *
+ * Pass `force_refresh: true` to bypass the BFF's 5-minute cache and trigger a
+ * fresh snapshot capture + recompute. The optional `fetch_` arg is accepted
+ * for parity with SvelteKit `load()` callsites; the underlying `bffFetch`
+ * uses the global `fetch` so the arg is currently ignored. The optional
+ * `signal` arg is forwarded to `bffFetch` so dashboard fan-out callers can
+ * abort in-flight requests when they are superseded by a newer effect.
+ * Wire-format fields match the BFF response: `drift_report_id`, `status`,
+ * `findings`, `summary`, `baseline_version_id`, `computed_at`, `cache_hit`,
+ * `error_message`.
+ *
+ * Throws BFFError when the BFF fails to respond; never throws on
+ * `status === 'check_failed'` — that comes back as a normal 200 with the
+ * failure status carried in the body.
+ */
+export async function getArchitectureDrift(
+	id: string,
+	force_refresh: boolean,
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	_fetch?: typeof fetch,
+	signal?: AbortSignal
+): Promise<DriftReport> {
+	const req: GetDriftRequest = { id, force_refresh };
+	return bffFetch<DriftReport>(BFFEndpoints.architecturesDrift, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		signal
+	});
+}
+
+/**
+ * Discriminator helper for the dashboard sidebar. The badge renders only
+ * when the architecture is in a state where drift is meaningful (i.e. it
+ * has a baseline). Drift on a `draft` topology is always `unknown` and we
+ * suppress the badge to keep the dashboard quiet.
+ */
+export function isDriftBadgeVisible(status: DriftStatus): boolean {
+	return status === 'drifted' || status === 'check_failed' || status === 'no_drift';
 }

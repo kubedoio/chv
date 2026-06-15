@@ -7,6 +7,7 @@
 	import FleetCheckPanel from '$lib/components/architectures/dashboard/FleetCheckPanel.svelte';
 	import PlanReviewPanel from '$lib/components/architectures/dashboard/PlanReviewPanel.svelte';
 	import YamlSidePanel from '$lib/components/architectures/dashboard/YamlSidePanel.svelte';
+	import DriftReportPanel from '$lib/components/architectures/drift/DriftReportPanel.svelte';
 	import Canvas from '$lib/components/architectures/canvas/Canvas.svelte';
 	import Inspector from '$lib/components/architectures/inspector/Inspector.svelte';
 	import { liveState } from '$lib/stores/live-state.svelte';
@@ -37,7 +38,7 @@
 	// Tab state. The Validation and YAML tabs are Phase 1 additions; the Fleet
 	// tab arrives in Phase 3. Overview remains the default so existing
 	// playwright tests stay green.
-	type Tab = 'overview' | 'yaml' | 'validation' | 'fleet' | 'plan';
+	type Tab = 'overview' | 'yaml' | 'validation' | 'fleet' | 'plan' | 'drift';
 	let activeTab = $state<Tab>('overview');
 
 	// Validation panel state. Findings are NOT persisted server-side; we keep
@@ -361,6 +362,18 @@
 			>
 				Plan
 			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'drift'}
+				aria-controls="tab-panel-drift"
+				class="tab"
+				class:tab-active={activeTab === 'drift'}
+				onclick={() => (activeTab = 'drift')}
+				data-testid="tab-drift"
+			>
+				Drift
+			</button>
 		</div>
 
 		{#if activeTab === 'overview'}
@@ -475,7 +488,7 @@
 					onRefresh={handleFleetRefresh}
 				/>
 			</div>
-		{:else}
+		{:else if activeTab === 'plan'}
 			<div id="tab-panel-plan" role="tabpanel" aria-labelledby="tab-plan">
 				<PlanReviewPanel
 					architecture={current}
@@ -487,6 +500,10 @@
 					onDiscard={handlePlanDiscard}
 					onApply={handlePlanApply}
 				/>
+			</div>
+		{:else}
+			<div id="tab-panel-drift" role="tabpanel" aria-labelledby="tab-drift">
+				<DriftReportPanel architectureId={current.id} />
 			</div>
 		{/if}
 	{/if}

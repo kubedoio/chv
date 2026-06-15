@@ -121,17 +121,21 @@ cancelled
 
 Compare last applied desired state to current resource state.
 
-Drift types:
+Drift types (wire codes — these strings appear verbatim in the
+`code` field of every `DriftFinding` JSON object):
 
 ```text
-missing_resource
-unexpected_resource
-field_changed
-capacity_changed
-network_changed
-permission_changed
-attachment_changed
+DRIFT_MISSING_RESOURCE
+DRIFT_UNEXPECTED_RESOURCE
+DRIFT_FIELD_CHANGED
+DRIFT_CAPACITY_CHANGED
+DRIFT_NETWORK_CHANGED
+DRIFT_PERMISSION_CHANGED
+DRIFT_ATTACHMENT_CHANGED
 ```
+
+Wire codes adopt the `DRIFT_` prefix for grep-friendliness and to distinguish
+them from validation `Finding.code` values.
 
 ## MVP implementation note
 

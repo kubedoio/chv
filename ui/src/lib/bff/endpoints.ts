@@ -90,5 +90,8 @@ export const BFFEndpoints = {
 	// Architecture Designer endpoints (Phase 5 — apply / runs)
 	architecturesApply: '/v1/architectures/apply',
 	architecturesDestroy: '/v1/architectures/destroy',
-	architecturesRunsList: '/v1/architectures/runs/list'
+	architecturesRunsList: '/v1/architectures/runs/list',
+
+	// Architecture Designer endpoints (Phase 6 — drift detection)
+	architecturesDrift: '/v1/architectures/drift'
 } as const;

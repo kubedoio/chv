@@ -3,10 +3,55 @@
 	import Button from '$lib/components/primitives/Button.svelte';
 	import ArchitectureCard from '$lib/components/architectures/dashboard/ArchitectureCard.svelte';
 	import EmptyState from '$lib/components/architectures/dashboard/EmptyState.svelte';
+	import { getArchitectureDrift, type DriftStatus } from '$lib/bff/architectures';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 	const model = $derived(data.architectures);
+
+	// Phase 6 carve-out: the dashboard fans out one drift fetch per topology
+	// on mount. Acceptable at MVP scale; Phase 7 will add a denormalized
+	// `architecture_topologies.last_drift_status` column so the list endpoint
+	// returns the badge data inline (single round-trip).
+	let driftByArch = $state<Record<string, DriftStatus>>({});
+
+	// Fan-out coordination state. We memoize on a stable id-set hash so the
+	// effect does not re-fire when sibling state (e.g. a row's
+	// `display_name`) changes without changing the id list. `currentGen`
+	// guards against stale-closure races: if a newer effect kicks off
+	// before the previous one's fetches resolve, the old result is dropped.
+	let currentGen = 0;
+	let lastIdsKey = '';
+	const idsKey = $derived(
+		model.state === 'ready' ? model.items.map((a) => a.id).sort().join(',') : ''
+	);
+
+	$effect(() => {
+		if (!idsKey || idsKey === lastIdsKey) return;
+		lastIdsKey = idsKey;
+		const myGen = ++currentGen;
+		const ids = idsKey.split(',');
+		const controller = new AbortController();
+		void Promise.all(
+			ids.map((id) =>
+				getArchitectureDrift(id, false, undefined, controller.signal).catch(
+					() => null
+				)
+			)
+		).then((results) => {
+			if (myGen !== currentGen) return; // newer effect ran; drop stale.
+			const next: Record<string, DriftStatus> = {};
+			ids.forEach((id, i) => {
+				const r = results[i];
+				if (r) next[id] = r.status;
+			});
+			driftByArch = next;
+		});
+
+		return () => {
+			controller.abort();
+		};
+	});
 </script>
 
 <svelte:head>
@@ -35,7 +80,10 @@
 		<div class="grid" role="list" data-testid="architectures-list">
 			{#each model.items as architecture (architecture.id)}
 				<div role="listitem">
-					<ArchitectureCard {architecture} />
+					<ArchitectureCard
+						{architecture}
+						driftStatus={driftByArch[architecture.id]}
+					/>
 				</div>
 			{/each}
 		</div>

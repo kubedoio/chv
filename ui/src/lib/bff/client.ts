@@ -71,6 +71,20 @@ export async function bffFetch<T>(
 	let response: Response;
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+	// If the caller passed an `init.signal`, abort our internal controller
+	// when it fires so the upstream fetch is cancelled too. This is what
+	// lets the dashboard fan-out drop superseded drift requests.
+	const externalSignal = init?.signal ?? null;
+	const onExternalAbort = () => controller.abort();
+	if (externalSignal) {
+		if (externalSignal.aborted) {
+			controller.abort();
+		} else {
+			externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+		}
+	}
+
 	try {
 		response = await fetch(`${baseUrl}${path}`, {
 			...init,
@@ -85,6 +99,9 @@ export async function bffFetch<T>(
 		throw new BFFError(message, 0, 'NETWORK_ERROR');
 	} finally {
 		clearTimeout(timeoutId);
+		if (externalSignal) {
+			externalSignal.removeEventListener('abort', onExternalAbort);
+		}
 	}
 
 	if (!response.ok) {

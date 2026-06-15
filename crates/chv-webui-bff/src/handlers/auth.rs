@@ -403,8 +403,8 @@ mod tests {
 
         use chv_controlplane_store::{
             AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository,
-            EventRepository, ImageRepository, NetworkRepository, NodeRepository,
-            ObservedStateRepository, OperationRepository, TopologyRepository,
+            DriftReportRepository, EventRepository, ImageRepository, NetworkRepository,
+            NodeRepository, ObservedStateRepository, OperationRepository, TopologyRepository,
         };
         AppState {
             pool: pool.clone(),
@@ -419,6 +419,7 @@ mod tests {
             network_repo: NetworkRepository::new(pool.clone()),
             image_repo: ImageRepository::new(pool.clone()),
             apply_runs: Arc::new(ApplyRunRepository::new(pool.clone())),
+            drift_reports: Arc::new(DriftReportRepository::new(pool.clone())),
             mutations: Arc::new(NoopMutations),
             jwt_secret: "test-secret".to_string(),
             agent_runtime_dir: std::path::PathBuf::from("/var/lib/chv/agent"),
@@ -494,6 +495,7 @@ mod tests {
             BffError::ProductionRequiresAdmin { .. } => 403,
             BffError::PlanModeMismatch { .. } => 400,
             BffError::InvalidResourceName { .. } => 400,
+            BffError::DriftCheckFailed { .. } => 502,
         }
     }
 
