@@ -664,6 +664,7 @@ async fn plan_update_status_marks_confirmed() {
             confirmed_by: Some("senol".to_string()),
             mark_confirmed: true,
             mark_discarded: false,
+            discarded_by: None,
         })
         .await
         .unwrap();

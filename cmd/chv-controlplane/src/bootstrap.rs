@@ -196,6 +196,7 @@ pub async fn build_service(
         jwt_secret: config.jwt_secret.clone(),
         agent_runtime_dir: config.agent_runtime_dir.clone(),
         cache: chv_webui_bff::BffCache::new(5),
+        clock: Arc::new(chv_common::SystemClock),
     };
 
     let convergence_metrics = chv_controlplane_service::convergence_metrics::new_shared();

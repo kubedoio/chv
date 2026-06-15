@@ -411,3 +411,142 @@ export async function checkFleet(
 		token
 	});
 }
+
+// ─── Phase 4: Plan generation wire types ─────────────────────────────────
+//
+// Source of truth: docs/specs/architecture-designer/contracts/validation-plan-contract.md
+// and docs/specs/architecture-designer/contracts/api-contract.md.
+//
+// The BFF computes a structured PlanResult — a unique plan_id, a status (one
+// of the documented plan states), a per-action summary, the ordered list of
+// PlanChange rows, optional warnings, and a TTL window (`expires_at`). Plans
+// are persisted server-side with a 15 minute TTL; the UI surfaces a live
+// countdown so operators don't act on a stale plan.
+
+export type PlanAction = 'create' | 'update' | 'delete' | 'replace' | 'no_op';
+
+export type PlanRisk = 'low' | 'medium' | 'high' | 'destructive';
+
+export type PlanMode = 'apply' | 'destroy';
+
+export type PlanStatus =
+	| 'draft'
+	| 'failed_validation'
+	| 'requires_confirmation'
+	| 'ready_to_apply'
+	| 'applying'
+	| 'applied'
+	| 'failed'
+	| 'expired'
+	| 'discarded';
+
+export interface PlanChange {
+	action: PlanAction;
+	resource_type: string;
+	resource_name: string;
+	resource_ref: string;
+	description: string;
+	risk: PlanRisk;
+	requires_confirmation: boolean;
+}
+
+export interface PlanSummary {
+	create: number;
+	update: number;
+	delete: number;
+	replace: number;
+	no_op: number;
+	warnings: number;
+}
+
+export interface PlanResult {
+	plan_id: string;
+	architecture_id: string;
+	/** Numeric topology version the plan was generated against. Apply must
+	 * pin to this version so a stale operator doesn't blast a divergent state. */
+	architecture_version: number;
+	/** Stable id of the `architecture_versions` row referenced by the plan. */
+	architecture_version_id: string;
+	status: PlanStatus;
+	mode: PlanMode;
+	summary: PlanSummary;
+	changes: PlanChange[];
+	warnings: string[];
+	/** ISO 8601 — UI compares against `Date.now()` to surface the expired state. */
+	expires_at: string;
+	created_at: string;
+}
+
+export interface PlanArchitectureRequest {
+	id: string;
+	allow_warnings?: boolean;
+	refresh_inventory?: boolean;
+}
+
+export interface DestroyPlanRequest {
+	id: string;
+}
+
+export interface DiscardPlanRequest {
+	plan_id: string;
+}
+
+export interface DiscardPlanResponse {
+	status: 'discarded';
+}
+
+/**
+ * Generate an apply-mode plan for a saved topology.
+ *
+ * The server validates the topology, captures (or reuses) an inventory
+ * snapshot, computes the desired-vs-actual diff, persists the resulting plan
+ * with a 15 minute TTL, and returns the structured PlanResult. The plan row
+ * also stamps `last_plan_status` on the architecture so the dashboard pill
+ * stays in sync after the call goes through `mutateWithRefresh`.
+ */
+export async function plan(
+	req: PlanArchitectureRequest,
+	token?: string
+): Promise<PlanResult> {
+	return bffFetch<PlanResult>(BFFEndpoints.architecturesPlan, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+/**
+ * Generate a destroy-mode plan for a saved topology.
+ *
+ * Same TTL semantics as {@link plan}. Every change in a destroy plan carries
+ * `requires_confirmation: true`; the UI gates the apply button behind a
+ * typed-name confirmation field.
+ */
+export async function destroyPlan(
+	req: DestroyPlanRequest,
+	token?: string
+): Promise<PlanResult> {
+	return bffFetch<PlanResult>(BFFEndpoints.architecturesDestroyPlan, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+/**
+ * Explicitly discard a plan before its TTL expires.
+ *
+ * Idempotent on the server side — discarding an already-discarded plan
+ * returns 200. Goes through `mutateWithRefresh` because the architecture's
+ * `last_plan_status` is updated.
+ */
+export async function discardPlan(
+	req: DiscardPlanRequest,
+	token?: string
+): Promise<DiscardPlanResponse> {
+	return bffFetch<DiscardPlanResponse>(BFFEndpoints.architecturesDiscardPlan, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}

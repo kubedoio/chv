@@ -5,6 +5,7 @@
 	import StaleVersionBanner from '$lib/components/architectures/dashboard/StaleVersionBanner.svelte';
 	import ValidationFindingsPanel from '$lib/components/architectures/dashboard/ValidationFindingsPanel.svelte';
 	import FleetCheckPanel from '$lib/components/architectures/dashboard/FleetCheckPanel.svelte';
+	import PlanReviewPanel from '$lib/components/architectures/dashboard/PlanReviewPanel.svelte';
 	import YamlSidePanel from '$lib/components/architectures/dashboard/YamlSidePanel.svelte';
 	import Canvas from '$lib/components/architectures/canvas/Canvas.svelte';
 	import Inspector from '$lib/components/architectures/inspector/Inspector.svelte';
@@ -16,7 +17,7 @@
 	} from '$lib/stores/architecture-canvas-store.svelte';
 	import { architectureDesignerCanvasEnabled } from '$lib/feature-flags';
 	import { BFFError } from '$lib/bff/client';
-	import type { Architecture, FleetCheckResult, ValidationResult } from '$lib/bff/architectures';
+	import type { Architecture, FleetCheckResult, PlanMode, PlanResult, ValidationResult } from '$lib/bff/architectures';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -35,7 +36,7 @@
 	// Tab state. The Validation and YAML tabs are Phase 1 additions; the Fleet
 	// tab arrives in Phase 3. Overview remains the default so existing
 	// playwright tests stay green.
-	type Tab = 'overview' | 'yaml' | 'validation' | 'fleet';
+	type Tab = 'overview' | 'yaml' | 'validation' | 'fleet' | 'plan';
 	let activeTab = $state<Tab>('overview');
 
 	// Validation panel state. Findings are NOT persisted server-side; we keep
@@ -50,6 +51,14 @@
 	// persists across reloads (refreshed via mutateWithRefresh).
 	let fleetResult = $state<FleetCheckResult | null>(null);
 	let fleetLoading = $state(false);
+
+	// Plan-review state (Phase 4). Plans are persisted server-side with a 15
+	// minute TTL but we don't auto-fetch here — the operator clicks Generate to
+	// produce one. State stays local so the tab is always interactive even on
+	// a freshly loaded page.
+	let planResult = $state<PlanResult | null>(null);
+	let planLoading = $state(false);
+	let planDiscarding = $state(false);
 
 	// YAML side panel state. We also lazy-load on first tab activation.
 	let yamlContent = $state<string | null>(null);
@@ -114,6 +123,35 @@
 			// inventory failure.
 		} finally {
 			fleetLoading = false;
+		}
+	}
+
+	async function handlePlanGenerate(mode: PlanMode) {
+		if (!current || planLoading) return;
+		planLoading = true;
+		try {
+			planResult =
+				mode === 'destroy'
+					? await architectureStore.destroyPlan(current.id)
+					: await architectureStore.plan(current.id);
+		} catch {
+			// mutateWithRefresh has already toasted the error; keep the previous
+			// planResult so the operator does not lose context.
+		} finally {
+			planLoading = false;
+		}
+	}
+
+	async function handlePlanDiscard(planId: string) {
+		if (planDiscarding) return;
+		planDiscarding = true;
+		try {
+			await architectureStore.discardPlan(planId);
+			planResult = null;
+		} catch {
+			// mutateWithRefresh has already toasted the error.
+		} finally {
+			planDiscarding = false;
 		}
 	}
 
@@ -272,6 +310,18 @@
 			>
 				Fleet check
 			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'plan'}
+				aria-controls="tab-panel-plan"
+				class="tab"
+				class:tab-active={activeTab === 'plan'}
+				onclick={() => (activeTab = 'plan')}
+				data-testid="tab-plan"
+			>
+				Plan
+			</button>
 		</div>
 
 		{#if activeTab === 'overview'}
@@ -360,12 +410,23 @@
 					onRevalidate={handleRevalidate}
 				/>
 			</div>
-		{:else}
+		{:else if activeTab === 'fleet'}
 			<div id="tab-panel-fleet" role="tabpanel" aria-labelledby="tab-fleet">
 				<FleetCheckPanel
 					result={fleetResult}
 					loading={fleetLoading}
 					onRefresh={handleFleetRefresh}
+				/>
+			</div>
+		{:else}
+			<div id="tab-panel-plan" role="tabpanel" aria-labelledby="tab-plan">
+				<PlanReviewPanel
+					architecture={current}
+					planResult={planResult}
+					loading={planLoading}
+					discarding={planDiscarding}
+					onGenerate={handlePlanGenerate}
+					onDiscard={handlePlanDiscard}
 				/>
 			</div>
 		{/if}

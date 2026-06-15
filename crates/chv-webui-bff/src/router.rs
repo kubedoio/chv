@@ -7,6 +7,7 @@ use axum::{
     routing::{delete, get, patch, post},
     Router,
 };
+use chv_common::Clock;
 use chv_controlplane_store::{
     AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, ImageRepository,
     NetworkRepository, NodeRepository, ObservedStateRepository, OperationRepository, StorePool,
@@ -37,6 +38,11 @@ pub struct AppState {
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
     pub cache: BffCache,
+    /// Wall-clock abstraction. Production wires `Arc::new(SystemClock)`; tests
+    /// inject `Arc::new(ManualClock::new(...))` to drive plan TTL/expiry
+    /// timing deterministically. Wired in Phase 4 of Architecture Designer for
+    /// `expires_at` computation on `POST /v1/architectures/plan`.
+    pub clock: Arc<dyn Clock>,
 }
 
 pub fn bff_router(state: AppState) -> Router<AppState> {

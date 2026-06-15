@@ -10,12 +10,16 @@ import {
 	generateYaml,
 	importYaml,
 	checkFleet,
+	plan,
+	destroyPlan,
+	discardPlan,
 	StaleVersionError,
 	type Architecture,
 	type ArchitectureSummary,
 	type ArchitectureDetail,
 	type CreateArchitectureRequest,
 	type FleetCheckResult,
+	type PlanResult,
 	type ValidationResult
 } from '$lib/bff/architectures';
 import type { MutateOpts } from './mutation.svelte';
@@ -42,6 +46,13 @@ export type {
 	ArchitectureSummary,
 	ArchitectureDetail,
 	FleetCheckResult,
+	PlanResult,
+	PlanChange,
+	PlanSummary,
+	PlanStatus,
+	PlanMode,
+	PlanAction,
+	PlanRisk,
 	ValidationResult,
 	ValidationSummary,
 	ValidationStatus,
@@ -257,6 +268,93 @@ class ArchitectureStore {
 				patterns: REFRESH_PATTERNS,
 				detailId: id,
 				errorMessage: 'Failed to run fleet check',
+				...opts
+			}
+		);
+	}
+
+	/**
+	 * Generate an apply-mode plan for a saved topology (Phase 4).
+	 *
+	 * Goes through `mutateWithRefresh` because the BFF persists
+	 * `last_plan_status` on the architecture row — the dashboard list must
+	 * refresh so the per-row plan pill stays in sync. We deliberately leave
+	 * `successMessage` undefined: the PlanReviewPanel itself surfaces the
+	 * outcome (status pill + summary chips + change list), so a toast on
+	 * every regeneration would just be noise.
+	 *
+	 * `opts.allowWarnings` lets callers proceed past `warning`-status
+	 * topologies; `opts.refreshInventory` forces a fresh inventory snapshot
+	 * instead of reusing the cached one.
+	 */
+	async plan(
+		id: string,
+		opts: { allowWarnings?: boolean; refreshInventory?: boolean } & MutateOpts<PlanResult> = {}
+	): Promise<PlanResult> {
+		const token = getStoredToken() ?? undefined;
+		const { allowWarnings, refreshInventory, ...mutateOpts } = opts;
+		return mutateWithRefresh<PlanResult>(
+			async () =>
+				plan(
+					{
+						id,
+						allow_warnings: allowWarnings,
+						refresh_inventory: refreshInventory
+					},
+					token
+				),
+			{
+				patterns: REFRESH_PATTERNS,
+				detailId: id,
+				errorMessage: 'Failed to generate plan',
+				...mutateOpts
+			}
+		);
+	}
+
+	/**
+	 * Generate a destroy-mode plan for a saved topology (Phase 4).
+	 *
+	 * Same refresh semantics as {@link plan}. Every change in a destroy plan
+	 * carries `requires_confirmation: true`; the panel gates the apply button
+	 * behind a typed-name confirmation field — we don't enforce that here
+	 * because the store is ignorant of UI state.
+	 */
+	async destroyPlan(
+		id: string,
+		opts: MutateOpts<PlanResult> = {}
+	): Promise<PlanResult> {
+		const token = getStoredToken() ?? undefined;
+		return mutateWithRefresh<PlanResult>(
+			async () => destroyPlan({ id }, token),
+			{
+				patterns: REFRESH_PATTERNS,
+				detailId: id,
+				errorMessage: 'Failed to generate destroy plan',
+				...opts
+			}
+		);
+	}
+
+	/**
+	 * Explicitly discard a plan before its TTL expires (Phase 4).
+	 *
+	 * Idempotent server-side. Goes through `mutateWithRefresh` because the
+	 * architecture's `last_plan_status` flips to `discarded` after success,
+	 * and the dashboard pill must refresh.
+	 */
+	async discardPlan(
+		planId: string,
+		opts: MutateOpts<void> = {}
+	): Promise<void> {
+		const token = getStoredToken() ?? undefined;
+		await mutateWithRefresh<void>(
+			async () => {
+				await discardPlan({ plan_id: planId }, token);
+			},
+			{
+				patterns: REFRESH_PATTERNS,
+				errorMessage: 'Failed to discard plan',
 				...opts
 			}
 		);

@@ -23,6 +23,23 @@ pub enum BffError {
     /// Surfaced as a stable code so the UI can render a deterministic
     /// "design something on the canvas first" state.
     GraphEmpty,
+    /// 409 — Phase 4 plan TTL has passed; an `apply` or `confirm` call
+    /// against the plan must be rejected with `code: "PLAN_EXPIRED"` so the
+    /// UI re-runs `plan` rather than silently widening the apply window.
+    PlanExpired {
+        plan_id: String,
+        message: String,
+    },
+    /// 409 — discard-plan was called against a plan in a terminal state
+    /// (`Applying`, `Applied`, `Failed`, `Expired`). The Phase-4 contract
+    /// only allows discard from non-terminal states (`Draft`,
+    /// `FailedValidation`, `RequiresConfirmation`, `ReadyToApply`). Surfaced
+    /// as `code: "PLAN_NOT_DISCARDABLE"` so the UI can render a clear
+    /// "this plan can no longer be discarded" message.
+    PlanNotDiscardable {
+        plan_id: String,
+        current_status: chv_controlplane_types::architecture::PlanStatus,
+    },
     QuotaExceeded {
         resource: String,
         limit: i64,
@@ -59,6 +76,29 @@ impl IntoResponse for BffError {
                     "code": "GRAPH_EMPTY",
                 }));
                 return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+            }
+            BffError::PlanExpired { plan_id, message } => {
+                let body = Json(json!({
+                    "message": message,
+                    "code": "PLAN_EXPIRED",
+                    "plan_id": plan_id,
+                }));
+                return (StatusCode::CONFLICT, body).into_response();
+            }
+            BffError::PlanNotDiscardable {
+                plan_id,
+                current_status,
+            } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "plan {plan_id} cannot be discarded from status {}",
+                        current_status.as_str()
+                    ),
+                    "code": "PLAN_NOT_DISCARDABLE",
+                    "plan_id": plan_id,
+                    "current_status": current_status.as_str(),
+                }));
+                return (StatusCode::CONFLICT, body).into_response();
             }
             BffError::QuotaExceeded {
                 resource,

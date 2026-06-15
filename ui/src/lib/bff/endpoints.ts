@@ -80,5 +80,10 @@ export const BFFEndpoints = {
 	importYaml: '/v1/architectures/import-yaml',
 
 	// Architecture Designer endpoints (Phase 3 — fleet consistency check)
-	architecturesCheckFleet: '/v1/architectures/check-fleet'
+	architecturesCheckFleet: '/v1/architectures/check-fleet',
+
+	// Architecture Designer endpoints (Phase 4 — plan generation)
+	architecturesPlan: '/v1/architectures/plan',
+	architecturesDestroyPlan: '/v1/architectures/destroy-plan',
+	architecturesDiscardPlan: '/v1/architectures/discard-plan'
 } as const;

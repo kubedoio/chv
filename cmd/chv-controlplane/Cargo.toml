@@ -14,6 +14,7 @@ chv-config = { path = "../../crates/chv-config" }
 chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
 chv-webui-bff = { path = "../../crates/chv-webui-bff" }
+chv-common = { path = "../../crates/chv-common" }
 chv-observability = { path = "../../crates/chv-observability" }
 sqlx = { workspace = true }
 libsqlite3-sys = { workspace = true }
