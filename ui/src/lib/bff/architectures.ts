@@ -550,3 +550,211 @@ export async function discardPlan(
 		token
 	});
 }
+
+// ─── Phase 5: Apply / runs wire types ────────────────────────────────────
+//
+// Source of truth: docs/plans/2026-06-13-architecture-designer-implementation-plan.md
+// §3 Phase 5 and crates/chv-webui-bff/src/handlers/architectures.rs.
+//
+// Wire endpoints exposed by the BFF in this phase:
+//   - POST /v1/architectures/apply           → ApplyRunResult
+//   - POST /v1/architectures/destroy         → ApplyRunResult
+//   - POST /v1/architectures/runs/list       → { runs: ApplyRunDetail[] }
+//
+// Endpoint fallback note (Phase 5 reality):
+//   Subagent B's contract ships the apply/destroy POSTs and a `runs/list`
+//   listing; it does NOT (yet) expose a per-run GET. The single-run page
+//   therefore fetches the full list and finds the run by id — which is
+//   correct under the current data model (runs are always scoped to an
+//   architecture, and the apply response carries `architecture_id`). When
+//   B/Phase 6 adds `/runs/get`, replace `getApplyRun`'s implementation —
+//   callers don't need to change because the function takes the run_id
+//   plus an architecture_id hint.
+
+/**
+ * Lifecycle states for an `architecture_apply_runs` row. Mirrors the Rust
+ * `RunStatus` enum so the UI can switch on a single discriminant. Terminal
+ * states are succeeded / partially_failed / failed / cancelled — the runs
+ * store stops polling once a run lands in any of them.
+ */
+export type RunStatus =
+	| 'queued'
+	| 'running'
+	| 'succeeded'
+	| 'partially_failed'
+	| 'failed'
+	| 'cancelled';
+
+/**
+ * Response shape for the apply/destroy endpoints. The BFF inserts the run
+ * synchronously and enqueues the first Operation; the orchestrator then
+ * advances the run through Running → terminal asynchronously. `task_id` is
+ * the first Operation's id and lets clients stream via /v1/operations/{id}.
+ */
+export interface ApplyRunResult {
+	run_id: string;
+	task_id: string | null;
+	status: RunStatus;
+	started_at: string | null;
+	architecture_id: string;
+	architecture_version_id: string;
+	plan_id: string;
+}
+
+/**
+ * Full row for an apply run. `result_json` is a stringified JSON payload
+ * (set by the orchestrator on terminal transitions) summarising per-op
+ * outcomes; the run page parses it lazily. `error_message` is populated
+ * for `failed`/`partially_failed` runs.
+ */
+export interface ApplyRunDetail {
+	id: string;
+	architecture_id: string;
+	architecture_version_id: string;
+	plan_id: string | null;
+	task_id: string | null;
+	status: RunStatus;
+	started_at: string | null;
+	finished_at: string | null;
+	requested_by: string | null;
+	result_json: string | null;
+	error_message: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ConfirmationToken {
+	typed_name?: string;
+}
+
+export interface ApplyArchitectureRequest {
+	id: string;
+	plan_id: string;
+	confirmation: ConfirmationToken;
+	acknowledged_warnings: boolean;
+}
+
+export interface ListApplyRunsRequest {
+	architecture_id: string;
+}
+
+export interface ListApplyRunsResponse {
+	runs: ApplyRunDetail[];
+}
+
+/**
+ * Apply a plan: queues an ApplyRun and returns its id + the first
+ * Operation's id (`task_id`). Caller is expected to navigate to
+ * `/architectures/{id}/runs/{run_id}` and poll for status. The BFF rejects
+ * with 400 `MISSING_CONFIRMATION` when typed-name is required but absent
+ * or wrong, 400 `WARNINGS_NOT_ACKNOWLEDGED` when warnings exist but
+ * `acknowledged_warnings` is false, 403 `INSUFFICIENT_PERMISSIONS` for
+ * non-admin against production, 409 `PLAN_EXPIRED` / `PLAN_NOT_APPLICABLE`
+ * for stale plan rows.
+ */
+export async function apply(
+	id: string,
+	plan_id: string,
+	confirmation: ConfirmationToken,
+	acknowledged_warnings: boolean,
+	token?: string
+): Promise<ApplyRunResult> {
+	const req: ApplyArchitectureRequest = {
+		id,
+		plan_id,
+		confirmation,
+		acknowledged_warnings
+	};
+	return bffFetch<ApplyRunResult>(BFFEndpoints.architecturesApply, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+/**
+ * Apply a destroy-mode plan. Same wire contract as {@link apply} but the
+ * BFF gates additionally on the destroy plan's `requires_confirmation`
+ * (typed-name is mandatory, regardless of risk).
+ */
+export async function destroy(
+	id: string,
+	plan_id: string,
+	confirmation: ConfirmationToken,
+	acknowledged_warnings: boolean,
+	token?: string
+): Promise<ApplyRunResult> {
+	const req: ApplyArchitectureRequest = {
+		id,
+		plan_id,
+		confirmation,
+		acknowledged_warnings
+	};
+	return bffFetch<ApplyRunResult>(BFFEndpoints.architecturesDestroy, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+}
+
+/**
+ * List apply runs for a single architecture, newest first.
+ *
+ * Wire body is `{ architecture_id }`; the response is `{ runs: [...] }`.
+ * Repository ordering already returns newest-first, so callers can render
+ * straight to a table without re-sorting.
+ */
+export async function listApplyRuns(
+	architecture_id: string,
+	token?: string
+): Promise<ApplyRunDetail[]> {
+	const req: ListApplyRunsRequest = { architecture_id };
+	const res = await bffFetch<ListApplyRunsResponse>(BFFEndpoints.architecturesRunsList, {
+		method: 'POST',
+		body: JSON.stringify(req),
+		token
+	});
+	return res.runs ?? [];
+}
+
+/**
+ * Fetch a single apply run by id.
+ *
+ * Implementation note: the BFF does not (yet) expose `/v1/architectures/runs/get`.
+ * We pull the architecture-scoped list and pluck by id. This is correct
+ * under the current data model — runs are always associated with an
+ * architecture, and the apply response carries `architecture_id`. When the
+ * BFF adds a per-run GET, swap this body for a single fetch; the public
+ * signature stays stable.
+ *
+ * Throws BFFError with `code: 'NOT_FOUND'` (status 404) when the run is
+ * not present in the list.
+ */
+export async function getApplyRun(
+	architecture_id: string,
+	run_id: string,
+	token?: string
+): Promise<ApplyRunDetail> {
+	const runs = await listApplyRuns(architecture_id, token);
+	const run = runs.find((r) => r.id === run_id);
+	if (!run) {
+		throw new BFFError(`Run ${run_id} not found for architecture ${architecture_id}`, 404, 'NOT_FOUND');
+	}
+	return run;
+}
+
+/**
+ * Discriminator for the terminal transition. The store uses this to stop
+ * its polling loop. `cancelled` is included because Phase 5 reserves it
+ * for future use (operator cancel).
+ */
+export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
+	'succeeded',
+	'partially_failed',
+	'failed',
+	'cancelled'
+];
+
+export function isTerminalRunStatus(status: RunStatus): boolean {
+	return TERMINAL_RUN_STATUSES.includes(status);
+}

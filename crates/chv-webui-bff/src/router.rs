@@ -9,9 +9,9 @@ use axum::{
 };
 use chv_common::Clock;
 use chv_controlplane_store::{
-    AlertRepository, BackupRepository, DesiredStateRepository, EventRepository, ImageRepository,
-    NetworkRepository, NodeRepository, ObservedStateRepository, OperationRepository, StorePool,
-    TopologyRepository,
+    AlertRepository, ApplyRunRepository, BackupRepository, DesiredStateRepository, EventRepository,
+    ImageRepository, NetworkRepository, NodeRepository, ObservedStateRepository,
+    OperationRepository, StorePool, TopologyRepository,
 };
 use tower_http::cors::CorsLayer;
 
@@ -34,6 +34,11 @@ pub struct AppState {
     pub network_repo: NetworkRepository,
     /// Read-only image rows for fleet checks (Phase 3).
     pub image_repo: ImageRepository,
+    /// Architecture Designer apply-run repository (Phase 5). Wraps the
+    /// `architecture_apply_runs` table; used by the apply / destroy
+    /// handlers to enqueue runs and propagate status. Stored as `Arc` so
+    /// `AppState` stays cheap to clone.
+    pub apply_runs: std::sync::Arc<ApplyRunRepository>,
     pub mutations: Arc<dyn MutationService>,
     pub jwt_secret: String,
     pub agent_runtime_dir: PathBuf,
@@ -417,6 +422,22 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/architectures/discard-plan",
             post(crate::handlers::architectures::discard_plan_architecture),
         )
+        // Architecture Designer (Phase 5) — apply / destroy. The
+        // production-environment guard inside the handler (see
+        // `enforce_production_guard`) escalates to Admin for `production`
+        // / `prod`; non-prod is applyable by any operator. We deliberately
+        // mount under operator middleware so the role check is fail-closed
+        // at the routing layer too: admin-only environments still produce
+        // 403 PRODUCTION_REQUIRES_ADMIN, all other operator apply attempts
+        // proceed normally.
+        .route(
+            "/v1/architectures/apply",
+            post(crate::handlers::architectures::apply_architecture),
+        )
+        .route(
+            "/v1/architectures/destroy",
+            post(crate::handlers::architectures::destroy_architecture),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::auth::operator_middleware,
@@ -465,15 +486,6 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
             "/v1/quotas/:user_id",
             patch(crate::handlers::quotas::update_quota)
                 .delete(crate::handlers::quotas::delete_quota),
-        )
-        // Architecture Designer (Phase 0) — admin-only mutating verbs.
-        .route(
-            "/v1/architectures/apply",
-            post(crate::handlers::architectures::apply_architecture),
-        )
-        .route(
-            "/v1/architectures/destroy",
-            post(crate::handlers::architectures::destroy_architecture),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

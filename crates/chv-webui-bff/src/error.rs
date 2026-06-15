@@ -40,6 +40,60 @@ pub enum BffError {
         plan_id: String,
         current_status: chv_controlplane_types::architecture::PlanStatus,
     },
+    /// 400 — Phase 5 apply was called against a destructive plan (any
+    /// `Delete`/`Replace` change, or destroy mode) without a typed-name
+    /// confirmation that matches the topology name. Surfaced as
+    /// `code: "MISSING_CONFIRMATION"` so the UI can pop the typed-name
+    /// dialog and resubmit.
+    MissingConfirmation {
+        plan_id: String,
+    },
+    /// 400 — Phase 5 apply was called against a plan with warnings while
+    /// `acknowledged_warnings=false`. Surfaced as
+    /// `code: "WARNINGS_NOT_ACKNOWLEDGED"` so the UI knows to surface the
+    /// warning list and re-submit with the flag set.
+    WarningsNotAcknowledged {
+        plan_id: String,
+        warnings: usize,
+    },
+    /// 409 — Phase 5 apply was called against a plan whose status does not
+    /// allow apply (anything other than `ready_to_apply`). Surfaced as
+    /// `code: "PLAN_NOT_APPLICABLE"`.
+    ///
+    /// `reason` distinguishes the underlying cause so the UI can branch
+    /// between "the plan moved on" (`plan_status_mismatch`), "the topology
+    /// moved on" (`version_drift`), and "the plan has no actionable
+    /// changes" (`empty_plan`). `current_status` always carries the actual
+    /// plan status string for diagnostics, regardless of `reason`.
+    PlanNotApplicable {
+        plan_id: String,
+        current_status: String,
+        reason: Option<String>,
+    },
+    /// 400 — Phase 5 apply or destroy was called against a plan whose
+    /// `mode` does not match the endpoint's contract (apply against a
+    /// destroy plan, or vice versa). Surfaced as
+    /// `code: "PLAN_MODE_MISMATCH"` so the UI can route to /destroy-plan
+    /// (or /plan) without string-matching error messages.
+    PlanModeMismatch {
+        plan_id: String,
+        expected: String,
+        actual: String,
+    },
+    /// 400 — A change in the plan referenced a `resource_name` containing
+    /// reserved separator characters (`::` or `/`). The reconcile crate
+    /// rejects these to keep the operations idempotency_key unambiguous.
+    /// Surfaced as `code: "INVALID_RESOURCE_NAME"`.
+    InvalidResourceName {
+        resource_name: String,
+    },
+    /// 403 — Phase 5 apply against an architecture in a `production` (or
+    /// `prod`) environment requires the Admin role. Operators see this
+    /// surface as `code: "PRODUCTION_REQUIRES_ADMIN"` so the UI can render
+    /// a clear "ask an admin to apply this" path instead of a generic 403.
+    ProductionRequiresAdmin {
+        environment: String,
+    },
     QuotaExceeded {
         resource: String,
         limit: i64,
@@ -99,6 +153,77 @@ impl IntoResponse for BffError {
                     "current_status": current_status.as_str(),
                 }));
                 return (StatusCode::CONFLICT, body).into_response();
+            }
+            BffError::MissingConfirmation { plan_id } => {
+                let body = Json(json!({
+                    "message": "apply confirmation missing or did not match topology name",
+                    "code": "MISSING_CONFIRMATION",
+                    "plan_id": plan_id,
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::WarningsNotAcknowledged { plan_id, warnings } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "plan {plan_id} has {warnings} warnings that must be explicitly acknowledged"
+                    ),
+                    "code": "WARNINGS_NOT_ACKNOWLEDGED",
+                    "plan_id": plan_id,
+                    "warnings": warnings,
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::PlanNotApplicable {
+                plan_id,
+                current_status,
+                reason,
+            } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "plan {plan_id} status {current_status} does not allow apply"
+                    ),
+                    "code": "PLAN_NOT_APPLICABLE",
+                    "plan_id": plan_id,
+                    "current_status": current_status,
+                    "reason": reason,
+                }));
+                return (StatusCode::CONFLICT, body).into_response();
+            }
+            BffError::PlanModeMismatch {
+                plan_id,
+                expected,
+                actual,
+            } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "plan {plan_id} has mode {actual}; endpoint requires mode {expected}"
+                    ),
+                    "code": "PLAN_MODE_MISMATCH",
+                    "plan_id": plan_id,
+                    "expected": expected,
+                    "actual": actual,
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::InvalidResourceName { resource_name } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "resource_name {resource_name:?} contains reserved separator characters (`::` or `/`)"
+                    ),
+                    "code": "INVALID_RESOURCE_NAME",
+                    "resource_name": resource_name,
+                }));
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
+            BffError::ProductionRequiresAdmin { environment } => {
+                let body = Json(json!({
+                    "message": format!(
+                        "environment {environment} requires admin role"
+                    ),
+                    "code": "PRODUCTION_REQUIRES_ADMIN",
+                    "environment": environment,
+                }));
+                return (StatusCode::FORBIDDEN, body).into_response();
             }
             BffError::QuotaExceeded {
                 resource,
@@ -162,5 +287,41 @@ impl From<chv_controlplane_store::StoreError> for BffError {
 impl From<serde_json::Error> for BffError {
     fn from(err: serde_json::Error) -> Self {
         BffError::Internal(err.to_string())
+    }
+}
+
+/// Translate the reconcile crate's `ApplyError` to the BFF's HTTP error
+/// surface. The two-tier split (pre-condition violations vs. store/identifier
+/// failures) is preserved: pre-condition variants map to dedicated 4xx codes
+/// the UI gates on, store/identifier failures collapse onto 500 INTERNAL.
+impl From<chv_architecture_reconcile::apply::ApplyError> for BffError {
+    fn from(err: chv_architecture_reconcile::apply::ApplyError) -> Self {
+        use chv_architecture_reconcile::apply::ApplyError as A;
+        match err {
+            A::MissingConfirmation { plan_id, .. } => BffError::MissingConfirmation { plan_id },
+            A::MissingWarningAck { plan_id, warnings } => {
+                BffError::WarningsNotAcknowledged { plan_id, warnings }
+            }
+            A::PlanNotApplicable {
+                plan_id,
+                current_status,
+            } => BffError::PlanNotApplicable {
+                plan_id,
+                current_status,
+                reason: Some("plan_status_mismatch".to_string()),
+            },
+            A::PlanExpired {
+                plan_id,
+                expires_at,
+            } => BffError::PlanExpired {
+                plan_id: plan_id.clone(),
+                message: format!("plan {plan_id} expired at {expires_at}"),
+            },
+            A::InvalidResourceName { resource_name, .. } => {
+                BffError::InvalidResourceName { resource_name }
+            }
+            A::Store(e) => BffError::from(e),
+            A::Identifier(e) => BffError::Internal(format!("identifier error: {e}")),
+        }
     }
 }

@@ -716,6 +716,7 @@ async fn apply_run_create_get_list_update() {
             task_id: None,
             status: RunStatus::Queued,
             requested_by: Some("senol".to_string()),
+            started_at: None,
         })
         .await
         .unwrap();

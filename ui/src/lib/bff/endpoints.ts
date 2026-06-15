@@ -85,5 +85,10 @@ export const BFFEndpoints = {
 	// Architecture Designer endpoints (Phase 4 — plan generation)
 	architecturesPlan: '/v1/architectures/plan',
 	architecturesDestroyPlan: '/v1/architectures/destroy-plan',
-	architecturesDiscardPlan: '/v1/architectures/discard-plan'
+	architecturesDiscardPlan: '/v1/architectures/discard-plan',
+
+	// Architecture Designer endpoints (Phase 5 — apply / runs)
+	architecturesApply: '/v1/architectures/apply',
+	architecturesDestroy: '/v1/architectures/destroy',
+	architecturesRunsList: '/v1/architectures/runs/list'
 } as const;

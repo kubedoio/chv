@@ -189,6 +189,9 @@ pub async fn build_service(
         topology_repo: topology_repo.clone(),
         network_repo: chv_controlplane_store::NetworkRepository::new(pool.clone()),
         image_repo: chv_controlplane_store::ImageRepository::new(pool.clone()),
+        apply_runs: Arc::new(chv_controlplane_store::ApplyRunRepository::new(
+            pool.clone(),
+        )),
         mutations: Arc::new(ControlPlaneMutationService::new(
             pool.clone(),
             lifecycle_service.clone(),

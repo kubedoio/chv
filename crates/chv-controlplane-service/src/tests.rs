@@ -35,6 +35,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
     let topology_repo = chv_controlplane_store::TopologyRepository::new(pool.clone());
     let network_repo = NetworkRepository::new(pool.clone());
     let image_repo = ImageRepository::new(pool.clone());
+    let apply_runs = Arc::new(ApplyRunRepository::new(pool.clone()));
     let lifecycle_service = Arc::new(crate::lifecycle::LifecycleServiceImplementation::new(
         node_repo.clone(),
         operation_repo.clone(),
@@ -53,6 +54,7 @@ fn test_app_state(pool: StorePool) -> chv_webui_bff::AppState {
         topology_repo,
         network_repo,
         image_repo,
+        apply_runs,
         mutations: Arc::new(crate::ControlPlaneMutationService::new(
             pool_for_mutations,
             lifecycle_service,

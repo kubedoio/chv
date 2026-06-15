@@ -865,6 +865,7 @@ dependencies = [
  "hex",
  "jsonwebtoken",
  "metrics",
+ "metrics-exporter-prometheus",
  "moka",
  "rand 0.9.4",
  "serde",
@@ -878,6 +879,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
