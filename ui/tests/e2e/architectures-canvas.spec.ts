@@ -9,10 +9,9 @@ import { loginAsAdmin } from './helpers';
  * reload), so this suite is wrapped in `test.describe.serial(...)`. The
  * tests share a single FakeBackend instance per run via beforeEach.
  *
- * Precondition: `playwright.config.ts` exports
- * `webServer.env.PUBLIC_ARCHITECTURE_DESIGNER_CANVAS = '1'` so the canvas
- * mounts. Without it the page renders the Phase-1 placeholder and these
- * tests will fail at the first canvas assertion.
+ * The canvas mounts by default as of Phase 4. Set
+ * `PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED=1` only to deliberately
+ * exercise the disabled-banner path — otherwise leave the env unset.
  *
  * Wire-shape parity with `architectures-skeleton.spec.ts`:
  *   - List  -> `{ architectures: [...] }`

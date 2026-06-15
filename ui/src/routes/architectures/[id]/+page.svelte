@@ -26,8 +26,8 @@
 	let current = $state<Architecture | null>(null);
 	let staleVersion = $state(false);
 
-	// Canvas wiring (Phase 2). The flag default is OFF so production keeps the
-	// Phase-1 placeholder; dev / e2e set PUBLIC_ARCHITECTURE_DESIGNER_CANVAS=1.
+	// Canvas wiring (Phase 2). The flag defaults ON as of Phase 4 — set
+	// PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED=1 only as an emergency opt-out.
 	const canvasEnabled = architectureDesignerCanvasEnabled();
 	let canvasDirty = $state(false);
 	let canvasSaving = $state(false);
@@ -377,19 +377,37 @@
 						<Inspector />
 					</div>
 				</div>
+			{:else if !canvasEnabled}
+				<div
+					id="tab-panel-overview"
+					class="canvas-placeholder"
+					role="tabpanel"
+					aria-labelledby="tab-overview"
+					aria-label="Designer canvas disabled"
+					data-testid="canvas-disabled-banner"
+				>
+					<div class="placeholder-title">Designer canvas disabled</div>
+					<p class="placeholder-text">
+						The Svelte Flow canvas has been disabled by an operator
+						(<code>PUBLIC_ARCHITECTURE_DESIGNER_CANVAS_DISABLED=1</code>). The
+						YAML and Validation tabs remain available; unset the env var or
+						restart the BFF to re-enable the canvas.
+					</p>
+				</div>
 			{:else}
 				<div
 					id="tab-panel-overview"
 					class="canvas-placeholder"
 					role="tabpanel"
 					aria-labelledby="tab-overview"
-					aria-label="Designer canvas placeholder"
+					aria-label="Architecture archived — canvas read-only"
+					data-testid="canvas-archived-banner"
 				>
-					<div class="placeholder-title">Designer canvas coming in Phase 2</div>
+					<div class="placeholder-title">Architecture archived</div>
 					<p class="placeholder-text">
-						This pane will host the Svelte Flow canvas, node palette and inspector
-						once the YAML model and validator land. For now, the YAML and Validation
-						tabs let you import topologies and see their findings.
+						This architecture has been archived and is read-only. Use the YAML
+						tab to inspect the saved topology, or restore the architecture to
+						resume editing.
 					</p>
 				</div>
 			{/if}
