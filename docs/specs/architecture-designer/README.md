@@ -1,6 +1,6 @@
 # CHV Architecture Designer
 
-> **Status:** Implemented (Phases 0–7 shipped 2026-06). The ADRs in this section are `Accepted`. See [`docs/plans/2026-06-13-architecture-designer-implementation-plan.md`](../../plans/2026-06-13-architecture-designer-implementation-plan.md) for the phased implementation history.
+> **Status:** Implemented (Phases 0–7 shipped 2026-06; **GO disposition recorded** 2026-06-16). The ADRs in this section are `Accepted`. See [`docs/plans/2026-06-13-architecture-designer-implementation-plan.md`](../../plans/2026-06-13-architecture-designer-implementation-plan.md) for the phased implementation history, [`docs/release/architecture-designer-release-notes.md`](../../release/architecture-designer-release-notes.md) for the consolidated release notes, and [`go-no-go-2026-06-16.md`](go-no-go-2026-06-16.md) for the recorded ship-gate decision.
 
 Date: 2026-06-13
 Project: CHV / CellHV
