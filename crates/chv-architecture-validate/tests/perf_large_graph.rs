@@ -73,10 +73,13 @@ fn validate_500_nodes_completes_under_2_seconds() {
         errors.iter().take(3).collect::<Vec<_>>()
     );
 
-    println!(
-        "perf: validate_static_checks(500 servers, 50 networks, 800 instances) took {:?}",
-        elapsed
-    );
+    // ADR-009 bans stdout writes from `crates/` (enforced by
+    // `scripts/check-no-println.sh`); the timing number is therefore
+    // omitted on green runs. The assertion message below surfaces
+    // `elapsed` when the budget is breached, which is the only case
+    // where the number actually matters for diagnosis. To inspect
+    // timings on green runs, use the Criterion bench instead:
+    //   cargo bench -p chv-architecture-validate large_graph
     assert!(
         elapsed < Duration::from_secs(2),
         "validation took {:?}, budget 2s — perf regression",
