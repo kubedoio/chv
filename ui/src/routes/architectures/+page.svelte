@@ -4,6 +4,7 @@
 	import ArchitectureCard from '$lib/components/architectures/dashboard/ArchitectureCard.svelte';
 	import EmptyState from '$lib/components/architectures/dashboard/EmptyState.svelte';
 	import { getArchitectureDrift, type DriftStatus } from '$lib/bff/architectures';
+	import { getStoredToken } from '$lib/api/client';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -32,9 +33,16 @@
 		const myGen = ++currentGen;
 		const ids = idsKey.split(',');
 		const controller = new AbortController();
+		// Read the token once per fan-out: every per-id call gets the same
+		// snapshot. Without this, a Viewer/Operator/Admin user would hit
+		// the operator-tier `/v1/architectures/drift` endpoint with no
+		// `Authorization` header and the BFF's 401 handler in `bffFetch`
+		// would force a logout — see fix-up commit referenced in Phase 8
+		// release notes.
+		const token = getStoredToken() ?? undefined;
 		void Promise.all(
 			ids.map((id) =>
-				getArchitectureDrift(id, false, undefined, controller.signal).catch(
+				getArchitectureDrift(id, false, token, controller.signal).catch(
 					() => null
 				)
 			)

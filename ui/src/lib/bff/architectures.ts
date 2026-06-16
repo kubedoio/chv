@@ -915,14 +915,14 @@ export interface GetDriftRequest {
 export async function getArchitectureDrift(
 	id: string,
 	force_refresh: boolean,
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
-	_fetch?: typeof fetch,
+	token?: string,
 	signal?: AbortSignal
 ): Promise<DriftReport> {
 	const req: GetDriftRequest = { id, force_refresh };
 	return bffFetch<DriftReport>(BFFEndpoints.architecturesDrift, {
 		method: 'POST',
 		body: JSON.stringify(req),
+		token,
 		signal
 	});
 }

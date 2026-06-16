@@ -3,6 +3,7 @@ import {
 	type DriftReport,
 	type DriftStatus
 } from '$lib/bff/architectures';
+import { getStoredToken } from '$lib/api/client';
 import { mutateWithRefresh } from './mutation.svelte';
 
 /**
@@ -90,7 +91,7 @@ class ArchitectureDriftStore {
 		this.state.error = null;
 		try {
 			const result = await mutateWithRefresh<DriftReport>(
-				async () => getArchitectureDrift(id, force),
+				async () => getArchitectureDrift(id, force, getStoredToken() ?? undefined),
 				{
 					patterns: REFRESH_PATTERNS,
 					detailId: id,
