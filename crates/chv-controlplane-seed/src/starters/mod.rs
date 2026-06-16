@@ -13,6 +13,7 @@
 //! All fixtures are embedded via `include_str!` so the binary is a
 //! self-contained seeder.
 
+mod graph;
 mod seeder;
 
 pub use seeder::{seed_if_first_deployment, seed_one, SeedOutcome};

@@ -102,6 +102,22 @@ async fn first_run_seeds_six_and_flips_sentinel() {
     .await
     .expect("count null owners");
     assert_eq!(null_owners, 6, "every starter must be system-owned (NULL)");
+
+    // The seeder must persist a v1.0 canvas graph payload, not the raw
+    // CHVArchitecture model JSON, so the designer overview renders starters.
+    let graph_blobs: Vec<String> =
+        sqlx::query_scalar("SELECT design_graph_json FROM architecture_topologies ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("read graph blobs");
+    assert_eq!(graph_blobs.len(), 6);
+    for blob in &graph_blobs {
+        let parsed: serde_json::Value =
+            serde_json::from_str(blob).expect("design_graph_json must be valid JSON");
+        assert_eq!(parsed["version"], "1.0");
+        assert!(parsed["nodes"].is_array());
+        assert!(parsed["edges"].is_array());
+    }
 }
 
 #[tokio::test]

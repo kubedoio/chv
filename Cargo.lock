@@ -665,6 +665,7 @@ dependencies = [
  "chv-architecture-validate",
  "chv-controlplane-store",
  "chv-controlplane-types",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",

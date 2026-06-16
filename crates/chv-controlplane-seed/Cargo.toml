@@ -10,6 +10,7 @@ chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-architecture-validate = { path = "../chv-architecture-validate" }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio", "macros"] }
+serde = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

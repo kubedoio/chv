@@ -19,6 +19,7 @@ use chv_controlplane_store::{TopologyCreateInput, TopologyRepository};
 use chv_controlplane_types::architecture::{ArchitectureId, ArchitectureStatus, Severity};
 
 use crate::error::SeedError;
+use crate::starters::graph::architecture_to_graph_json;
 use crate::starters::{StarterFixture, STARTER_FIXTURES};
 
 /// Outcome of a [`seed_if_first_deployment`] call.
@@ -152,11 +153,10 @@ pub async fn seed_one(
         });
     }
 
-    // `serde_json::to_string` cannot fail for a `CHVArchitecture` whose
-    // fields are all serde-derived plain data; treat a failure as a bug,
-    // not a runtime condition.
+    // Build a v1.0 canvas graph payload so the designer overview renders the
+    // starter without the UI having to re-parse YAML on every load.
     let design_graph_json =
-        serde_json::to_string(&model).map_err(|err| SeedError::FixtureParse {
+        architecture_to_graph_json(&model).map_err(|err| SeedError::FixtureParse {
             starter: fixture.name.to_string(),
             message: format!("design_graph_json serialization failed: {err}"),
         })?;
