@@ -129,7 +129,7 @@ groups:
       - alert: MigrationFailureRateHigh
         expr: |
           (
-            sum(increase(chv_migration_duration_seconds_count{result="failed"}[1h]))
+            sum(increase(chv_migration_duration_seconds_count{outcome="failed"}[1h]))
             /
             clamp_min(sum(increase(chv_migration_duration_seconds_count[1h])), 1)
           ) > 0.10
@@ -143,7 +143,11 @@ groups:
           description: >
             More than 10% of VM migrations have failed in the last hour. Check
             source and destination agent logs for network connectivity or
-            disk I/O errors during the precopy phase.
+            disk I/O errors during the precopy phase. The histogram is emitted
+            by `Metrics::record_migration_duration` with label `outcome` set
+            on each terminal call (one of `succeeded` / `failed` / `cancelled`
+            depending on which terminal handler invokes it); alert on
+            `outcome="failed"` only.
           runbook: "docs/runbooks/vm-snapshot-restore.md"
 
   # ---------------------------------------------------------------------------

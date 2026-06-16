@@ -626,17 +626,35 @@ Always take a backup before manual deletes.
 
 ### Monitoring
 
-The Architecture Designer exposes Prometheus metrics on the controlplane `:9901/metrics` endpoint:
+The Architecture Designer exposes Prometheus metrics on the controlplane `:9901/metrics` endpoint. The label vocabularies below match the actual emitter source (`crates/chv-webui-bff/src/metrics_apply.rs` and `metrics_drift.rs`); writing alerts against label values the emitter does not produce yields silent dead-on-arrival rules.
 
 ```
-# Apply outcomes (counter)
-chv_architecture_apply_total{status="succeeded|failed|partially_failed|cancelled"}
+# Apply attempts (counter)
+# status ∈ { started, enqueued, failed }
+#   - started:  incremented on every POST /v1/architectures/apply entry,
+#               before pre-condition guards run
+#   - enqueued: apply_plan returned Ok and the run was accepted for execution
+#   - failed:   apply_plan returned Err (4xx pre-condition or 5xx store)
+# Note: this counter records the BFF-side enqueue lifecycle. Terminal
+# orchestrator outcomes (succeeded / partially_failed / cancelled) are
+# recorded in the `architecture_apply_runs.status` column today; a future
+# emitter on the orchestrator terminal-state writeback can extend this
+# counter or introduce `chv_architecture_apply_terminal_total`.
+chv_architecture_apply_total{status="started|enqueued|failed"}
 
-# Apply latency (histogram)
+# Apply latency (histogram, BFF handler entry → response)
 chv_architecture_apply_duration_seconds_bucket{...}
 
 # Drift checks (counter)
-chv_architecture_drift_total{status="clean|drift_detected|check_failed"}
+# status ∈ { no_drift, drifted, unknown, check_failed, cache_hit }
+#   - no_drift:     fresh compute returned an empty findings list
+#   - drifted:      fresh compute returned at least one finding
+#   - unknown:      reserved for the wire enum's DriftStatus::Unknown variant
+#   - check_failed: snapshot capture or YAML parse failed; the BFF persisted
+#                   a check_failed report and returned 200
+#   - cache_hit:    the most recent persisted report was within the 5-minute
+#                   TTL and force_refresh was false
+chv_architecture_drift_total{status="no_drift|drifted|unknown|check_failed|cache_hit"}
 ```
 
 Recommended alert templates (Prometheus `for:` durations are starting points; tune per environment):
@@ -658,13 +676,25 @@ Recommended alert templates (Prometheus `for:` durations are starting points; tu
     summary: "Architecture apply p99 > 10 minutes"
     description: "Apply runs are taking longer than expected; investigate task-system backlog."
 
-- alert: ArchitectureApplyFailureRate
+- alert: ArchitectureApplyEnqueueFailureRate
+  # `failed` here is the BFF enqueue-time failure (pre-condition or store);
+  # it does NOT cover orchestrator-side terminal failures because those are
+  # not surfaced as a Prometheus counter today (see Monitoring note above).
   expr: |
-    sum(rate(chv_architecture_apply_total{status=~"failed|partially_failed"}[15m]))
-      / sum(rate(chv_architecture_apply_total[15m])) > 0.2
+    sum(rate(chv_architecture_apply_total{status="failed"}[15m]))
+      / clamp_min(sum(rate(chv_architecture_apply_total{status=~"started|failed"}[15m])), 1e-9) > 0.2
   for: 30m
   labels: { severity: ticket }
+  annotations:
+    summary: "Architecture apply enqueue failure rate > 20% over 15m"
+    description: >
+      More than 20% of POST /v1/architectures/apply requests are failing the
+      pre-condition or store guard. For terminal orchestrator outcomes
+      (succeeded / partially_failed / cancelled), query
+      `architecture_apply_runs` directly until a dedicated counter ships.
 ```
+
+> **Label-vocabulary contract**: the bundled rules in `monitoring/rules/chv.yml` and `recording.yml` reference only labels the emitter actually sets. CI runs `scripts/check-metric-labels.sh` on every push to enforce that contract — see [`docs/specs/adr/009-logging-and-observability.md`](specs/adr/009-logging-and-observability.md). If you extend an emitter to add a new label key, run the gate locally before opening the PR.
 
 ### Troubleshooting
 
