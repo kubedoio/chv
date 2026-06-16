@@ -1,0 +1,46 @@
+# AUTO-SEEDED STARTER — clone before editing.
+# Source of truth: crates/chv-controlplane-seed/src/starters/fixtures/
+# Edits to seeded copies are NOT propagated back; clone first via the UI.
+
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: starter-k3s-edge
+  display_name: "K3s single-node edge"
+  description: "Single-VM K3s with embedded SQLite — docs.k3s.io's canonical edge / branch-office topology. Demonstrates VLAN-tagged site segmentation."
+  environment: development
+  labels:
+    starter: "6"
+    archetype: "edge"
+servers:
+  - name: edge-host
+    role: compute
+    resources:
+      cpu_cores: 8
+      memory_gb: 16
+networks:
+  - name: site-vlan
+    type: vlan
+    bridge: br-trunk
+    vlan_id: 600
+    cidr: 10.60.0.0/24
+    gateway: 10.60.0.1
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+templates:
+  - name: k3s-edge
+    image: ubuntu-24.04
+    cpu: 4
+    memory_mb: 8192
+    disk_gb: 40
+    network: site-vlan
+instances:
+  - name: edge-01
+    template: k3s-edge
+    placement:
+      server: edge-host
+    networks:
+      - name: site-vlan
+        ip: 10.60.0.10

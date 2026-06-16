@@ -1,0 +1,44 @@
+# AUTO-SEEDED STARTER — clone before editing.
+# Source of truth: crates/chv-controlplane-seed/src/starters/fixtures/
+# Edits to seeded copies are NOT propagated back; clone first via the UI.
+
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: starter-single-vm
+  display_name: "Single Linux Dev VM"
+  description: "One Linux VM on a flat bridge network with local storage. The minimum useful topology — your first VM."
+  environment: development
+  labels:
+    starter: "1"
+    archetype: "dev-box"
+servers:
+  - name: host-01
+    role: compute
+    resources:
+      cpu_cores: 4
+      memory_gb: 8
+networks:
+  - name: lan
+    type: bridge
+    bridge: br0
+    cidr: 192.168.10.0/24
+    gateway: 192.168.10.1
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+templates:
+  - name: small-linux
+    image: ubuntu-24.04
+    cpu: 2
+    memory_mb: 4096
+    disk_gb: 20
+instances:
+  - name: dev-vm
+    template: small-linux
+    placement:
+      server: host-01
+    networks:
+      - name: lan
+        ip: 192.168.10.10

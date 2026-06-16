@@ -1,0 +1,51 @@
+# AUTO-SEEDED STARTER — clone before editing.
+# Source of truth: crates/chv-controlplane-seed/src/starters/fixtures/
+# Edits to seeded copies are NOT propagated back; clone first via the UI.
+
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: starter-lamp-wordpress
+  display_name: "LAMP / WordPress single-server"
+  description: "Apache/MariaDB/PHP + WordPress on one VM. The most-deployed self-host workload (Vultr, Hetzner, AWS WordPress whitepaper)."
+  environment: development
+  labels:
+    starter: "2"
+    archetype: "classic-web"
+servers:
+  - name: host-01
+    role: compute
+    resources:
+      cpu_cores: 8
+      memory_gb: 16
+networks:
+  - name: web
+    type: bridge
+    bridge: br-web
+    cidr: 10.20.0.0/24
+    gateway: 10.20.0.1
+datastores:
+  - name: local-nvme
+    type: qcow2-dir
+    path: /var/lib/chv/datastores/local-nvme
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+    datastore: local-nvme
+templates:
+  - name: lamp-host
+    image: ubuntu-24.04
+    cpu: 4
+    memory_mb: 8192
+    disk_gb: 60
+    datastore: local-nvme
+    network: web
+instances:
+  - name: wp-01
+    template: lamp-host
+    placement:
+      server: host-01
+    networks:
+      - name: web
+        ip: 10.20.0.10

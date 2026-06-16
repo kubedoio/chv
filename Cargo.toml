@@ -8,6 +8,7 @@ members = [
     "crates/chv-controlplane-types",
     "crates/chv-controlplane-store",
     "crates/chv-controlplane-service",
+    "crates/chv-controlplane-seed",
     "crates/chv-stord-core",
     "crates/chv-stord-backends",
     "gen/rust/chv-stord-api",

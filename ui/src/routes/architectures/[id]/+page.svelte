@@ -3,6 +3,8 @@
 	import Button from '$lib/components/primitives/Button.svelte';
 	import ArchitectureMetaPanel from '$lib/components/architectures/dashboard/ArchitectureMetaPanel.svelte';
 	import StaleVersionBanner from '$lib/components/architectures/dashboard/StaleVersionBanner.svelte';
+	import StarterBanner from '$lib/components/architectures/dashboard/StarterBanner.svelte';
+	import StarterCloneButton from '$lib/components/architectures/dashboard/StarterCloneButton.svelte';
 	import ValidationFindingsPanel from '$lib/components/architectures/dashboard/ValidationFindingsPanel.svelte';
 	import FleetCheckPanel from '$lib/components/architectures/dashboard/FleetCheckPanel.svelte';
 	import PlanReviewPanel from '$lib/components/architectures/dashboard/PlanReviewPanel.svelte';
@@ -10,6 +12,7 @@
 	import DriftReportPanel from '$lib/components/architectures/drift/DriftReportPanel.svelte';
 	import Canvas from '$lib/components/architectures/canvas/Canvas.svelte';
 	import Inspector from '$lib/components/architectures/inspector/Inspector.svelte';
+	import { isStarter, buildCloneNames } from '$lib/architectures/starter';
 	import { liveState } from '$lib/stores/live-state.svelte';
 	import { architectureStore, StaleVersionError } from '$lib/stores/architecture-store.svelte';
 	import { architectureRunsStore } from '$lib/stores/architecture-runs-store.svelte';
@@ -67,6 +70,14 @@
 	let yamlContent = $state<string | null>(null);
 	let yamlLoading = $state(false);
 	let yamlEmptyReason = $state<string | undefined>(undefined);
+
+	// Starter clone state. `isStarterArch` is derived from the current row's
+	// `name` + `owner_user_id` (the wire intentionally has no `labels`); see
+	// `$lib/architectures/starter`. `cloneError` surfaces inline next to the
+	// button on failure rather than logging the user out or navigating away.
+	const isStarterArch = $derived(current ? isStarter(current) : false);
+	let cloning = $state(false);
+	let cloneError = $state<string | null>(null);
 
 	$effect(() => {
 		if (detail.state === 'ready') {
@@ -216,6 +227,37 @@
 		return null;
 	}
 
+	async function handleClone() {
+		if (!current || cloning) return;
+		cloning = true;
+		cloneError = null;
+		try {
+			// Short id keeps the cloned slug tidy; the full UUID would dominate
+			// dashboard card titles. Collisions on the 8-char fragment are
+			// negligible for per-user manual clone flows.
+			const shortId = crypto.randomUUID().slice(0, 8);
+			const { name, display_name } = buildCloneNames(current, shortId);
+			// BFF createArchitecture accepts `design_graph_json` and `latest_yaml`
+			// directly (see CreateArchitectureRequest), so a deep clone is a
+			// single round-trip — no follow-up updateArchitecture needed.
+			const designGraphJson = detail.state === 'ready' ? detail.designGraphJson : null;
+			const latestYaml = detail.state === 'ready' ? detail.latestYaml : null;
+			const created = await architectureStore.create({
+				name,
+				display_name,
+				description: current.description ?? null,
+				environment: current.environment ?? null,
+				design_graph_json: designGraphJson,
+				latest_yaml: latestYaml
+			});
+			await goto(`/architectures/${created.id}`);
+		} catch (err) {
+			cloneError = err instanceof Error ? err.message : 'Failed to clone starter';
+		} finally {
+			cloning = false;
+		}
+	}
+
 	function handleCanvasChange() {
 		canvasDirty = true;
 	}
@@ -280,6 +322,9 @@
 				</p>
 			</div>
 			<div class="page-header-actions">
+				{#if isStarterArch}
+					<StarterCloneButton {cloning} onClone={handleClone} />
+				{/if}
 				<a
 					class="runs-link"
 					href={`/architectures/${current.id}/runs`}
@@ -291,8 +336,19 @@
 			</div>
 		</header>
 
+		{#if cloneError}
+			<div class="error-banner" role="alert" data-testid="clone-starter-error">
+				<strong>Could not clone starter.</strong>
+				<span>{cloneError}</span>
+			</div>
+		{/if}
+
 		{#if staleVersion}
 			<StaleVersionBanner onReload={handleReload} />
+		{/if}
+
+		{#if isStarterArch}
+			<StarterBanner />
 		{/if}
 
 		<ArchitectureMetaPanel
