@@ -1,0 +1,133 @@
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+
+metadata:
+  name: multi-tier
+  display_name: Multi-tier web/app/db
+  environment: staging
+
+servers:
+  - name: web-01
+    role: compute
+    resources:
+      cpu_cores: 8
+      memory_gb: 16
+  - name: web-02
+    role: compute
+    resources:
+      cpu_cores: 8
+      memory_gb: 16
+  - name: app-01
+    role: compute
+    resources:
+      cpu_cores: 16
+      memory_gb: 32
+  - name: app-02
+    role: compute
+    resources:
+      cpu_cores: 16
+      memory_gb: 32
+  - name: db-01
+    role: storage
+    resources:
+      cpu_cores: 16
+      memory_gb: 64
+  - name: db-02
+    role: storage
+    resources:
+      cpu_cores: 16
+      memory_gb: 64
+
+networks:
+  - name: web-net
+    type: bridge
+    bridge: br-web
+    cidr: 10.10.0.0/24
+    gateway: 10.10.0.1
+  - name: app-net
+    type: vlan
+    bridge: br-trunk
+    vlan_id: 200
+    cidr: 10.20.0.0/24
+    gateway: 10.20.0.1
+  - name: db-net
+    type: isolated
+    cidr: 10.30.0.0/24
+
+datastores:
+  - name: local-disks
+    type: qcow2-dir
+    path: /var/lib/chv/datastores/local
+    capabilities:
+      snapshots: true
+      thin_provisioning: true
+      online_resize: false
+
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+    datastore: local-disks
+
+templates:
+  - name: web-tmpl
+    image: ubuntu-24.04
+    cpu: 2
+    memory_mb: 2048
+    disk_gb: 20
+    datastore: local-disks
+    network: web-net
+  - name: app-tmpl
+    image: ubuntu-24.04
+    cpu: 4
+    memory_mb: 8192
+    disk_gb: 40
+    datastore: local-disks
+    network: app-net
+  - name: db-tmpl
+    image: ubuntu-24.04
+    cpu: 8
+    memory_mb: 32768
+    disk_gb: 200
+    datastore: local-disks
+    network: db-net
+
+instances:
+  - name: web-vm-01
+    template: web-tmpl
+    placement:
+      server: web-01
+    networks:
+      - name: web-net
+        ip: 10.10.0.11
+  - name: web-vm-02
+    template: web-tmpl
+    placement:
+      server: web-02
+    networks:
+      - name: web-net
+        ip: 10.10.0.12
+  - name: app-vm-01
+    template: app-tmpl
+    placement:
+      server: app-01
+    disks:
+      - name: data
+        size_gb: 50
+        datastore: local-disks
+    networks:
+      - name: app-net
+        ip: 10.20.0.11
+      - name: web-net
+        ip: 10.10.0.21
+  - name: db-vm-01
+    template: db-tmpl
+    placement:
+      server: db-01
+    disks:
+      - name: data
+        size_gb: 500
+        datastore: local-disks
+    networks:
+      - name: db-net
+        ip: 10.30.0.11

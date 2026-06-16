@@ -1,7 +1,7 @@
 # ADR-001-Designer Introduce Architecture Designer as a First-Class CHV Surface
 
 Date: 2026-06-13
-Status: Proposed
+Status: Accepted (2026-06-16, Phase 7)
 
 ## Context
 

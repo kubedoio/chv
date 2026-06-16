@@ -1,7 +1,7 @@
 # ADR-005-Designer Separate Desired Topology Designer from Live Fleet Topology
 
 Date: 2026-06-13
-Status: Proposed
+Status: Accepted (2026-06-16, Phase 7)
 
 ## Context
 

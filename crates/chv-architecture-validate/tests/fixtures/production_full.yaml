@@ -1,0 +1,287 @@
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+
+metadata:
+  name: prod-full
+  display_name: Production-grade full coverage
+  description: 8-server topology touching every CHVArchitecture resource kind.
+  environment: production
+  owner: senol@example.com
+  labels:
+    customer: acme
+    criticality: high
+
+servers:
+  - name: mgmt-01
+    management_ip: 10.0.0.10
+    role: management
+    resources:
+      cpu_cores: 8
+      memory_gb: 16
+  - name: net-01
+    role: network
+    resources:
+      cpu_cores: 16
+      memory_gb: 32
+  - name: compute-01
+    role: compute
+    labels:
+      zone: rack-a
+    resources:
+      cpu_cores: 32
+      memory_gb: 256
+    networks:
+      interfaces:
+        - name: eno1
+          purpose: management
+        - name: eno2
+          purpose: vm_trunk
+  - name: compute-02
+    role: compute
+    resources:
+      cpu_cores: 32
+      memory_gb: 256
+  - name: compute-03
+    role: mixed
+    resources:
+      cpu_cores: 32
+      memory_gb: 256
+  - name: storage-01
+    role: storage
+    resources:
+      cpu_cores: 16
+      memory_gb: 64
+  - name: storage-02
+    role: storage
+    resources:
+      cpu_cores: 16
+      memory_gb: 64
+  - name: storage-03
+    role: storage
+    resources:
+      cpu_cores: 16
+      memory_gb: 64
+
+networks:
+  - name: mgmt
+    type: bridge
+    bridge: chv-mgmt0
+    cidr: 10.0.0.0/24
+    gateway: 10.0.0.1
+    dhcp:
+      enabled: false
+  - name: tenant-a
+    type: vlan
+    bridge: chv-br0
+    vlan_id: 120
+    cidr: 10.120.0.0/24
+    gateway: 10.120.0.1
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    dhcp:
+      enabled: true
+      range_start: 10.120.0.100
+      range_end: 10.120.0.200
+  - name: tenant-b
+    type: nat
+    cidr: 192.168.50.0/24
+    gateway: 192.168.50.1
+  - name: storage-fabric
+    type: isolated
+    cidr: 10.200.0.0/24
+
+datastores:
+  - name: local-nvme
+    type: qcow2-dir
+    path: /var/lib/chv/datastores/local-nvme
+    capabilities:
+      snapshots: true
+      thin_provisioning: true
+      online_resize: true
+  - name: ceph-pool
+    type: ceph-rbd
+    pool: chv-rbd
+    secret_ref: ceph-key
+    capabilities:
+      snapshots: true
+      thin_provisioning: true
+      online_resize: true
+  - name: nfs-archive
+    type: nfs
+    path: /mnt/nfs/archive
+
+backup_targets:
+  - name: pbs-main
+    type: proxmox-backup-server
+    endpoint: https://pbs.example.com:8007
+    datastore: chv-backups
+    user: chv-backup@pbs
+    secret_ref: pbs-main-token
+  - name: s3-cold
+    type: s3
+    endpoint: https://s3.example.com
+    secret_ref: s3-key
+
+backup_policies:
+  - name: daily-retain-14
+    target: pbs-main
+    schedule: daily
+    retention:
+      daily: 14
+      weekly: 4
+      monthly: 3
+  - name: weekly-cold
+    target: s3-cold
+    schedule: weekly
+    retention:
+      weekly: 12
+      monthly: 6
+
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+    datastore: local-nvme
+  - name: debian-12-raw
+    source: local://images/debian-12.img
+    format: raw
+    datastore: ceph-pool
+
+ssh_keys:
+  - name: ops-key
+    public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA_example_ops_key
+  - name: backup-key
+    public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA_example_backup_key
+
+instance_users:
+  - name: admin
+    sudo: true
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ref: ops-key
+  - name: backup
+    sudo: false
+    shell: /bin/sh
+    ssh_authorized_keys:
+      - ref: backup-key
+
+templates:
+  - name: small-linux
+    image: ubuntu-24.04
+    cpu: 2
+    memory_mb: 4096
+    disk_gb: 40
+    datastore: local-nvme
+    network: tenant-a
+  - name: large-linux
+    image: ubuntu-24.04
+    cpu: 8
+    memory_mb: 32768
+    disk_gb: 200
+    datastore: ceph-pool
+    network: tenant-a
+  - name: debian-base
+    image: debian-12-raw
+    cpu: 4
+    memory_mb: 8192
+    disk_gb: 80
+    datastore: ceph-pool
+
+instances:
+  - name: app-01
+    template: small-linux
+    placement:
+      server: compute-01
+    resources:
+      cpu: 4
+      memory_mb: 8192
+    disks:
+      - name: root
+        size_gb: 60
+        datastore: local-nvme
+    networks:
+      - name: tenant-a
+        ip: 10.120.0.21
+      - name: mgmt
+        ip: 10.0.0.21
+    cloud_init:
+      hostname: app-01
+      users:
+        - ref: admin
+    backup:
+      enabled: true
+      policy: daily-retain-14
+    tags:
+      - app
+      - production
+  - name: app-02
+    template: large-linux
+    placement:
+      server: compute-02
+    disks:
+      - name: data
+        size_gb: 500
+        datastore: ceph-pool
+    networks:
+      - name: tenant-a
+        ip: 10.120.0.22
+    cloud_init:
+      hostname: app-02
+      users:
+        - ref: admin
+    backup:
+      enabled: true
+      policy: weekly-cold
+  - name: worker-01
+    template: debian-base
+    placement:
+      server: compute-03
+    networks:
+      - name: tenant-b
+        ip: 192.168.50.10
+
+roles:
+  - name: platform-admin
+    permissions:
+      - "*"
+  - name: project-operator
+    permissions:
+      - architecture:read
+      - instance:read
+      - instance:start
+      - instance:stop
+      - console:access
+  - name: backup-operator
+    permissions:
+      - backup:read
+      - backup:execute
+
+users:
+  - name: senol
+    display_name: Senol Colak
+    email: senol@example.com
+    auth:
+      type: oidc
+    roles:
+      - platform-admin
+  - name: ops-a
+    display_name: Operator A
+    email: ops-a@example.com
+    auth:
+      type: invite
+    roles:
+      - project-operator
+  - name: backup-svc
+    display_name: Backup Service Account
+    auth:
+      type: token
+    token: "redacted"
+    roles:
+      - backup-operator
+
+projects:
+  - name: customer-a
+    description: Acme primary tenant
+  - name: customer-b
+    description: Internal lab

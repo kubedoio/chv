@@ -557,3 +557,162 @@ sqlite3 /var/lib/chv/controlplane.db "DELETE FROM vtep_entries;"
 - Restrict `/etc/chv/certs/` to `root:chv` with `640` permissions
 - Run `chv-stord` under a dedicated service account with device/path allowlists
 - Enable firewall rules limiting gRPC port 8443 to known hypervisor IPs
+
+---
+
+## Architecture Designer day-2 operations
+
+The Architecture Designer (see [`docs/specs/architecture-designer/`](specs/architecture-designer/)) persists desired-state topologies, plans, apply runs, drift reports, and fleet inventory snapshots in the controlplane SQLite database. Day-2 ops mirror the rest of CHV: SQLite backups + targeted retention.
+
+### Backup
+
+The Architecture Designer ships six tables (migrations `0046`–`0051`):
+
+| Table | Purpose |
+|-------|---------|
+| `architecture_topologies` | Saved topology metadata (id, name, owner, latest version pointer) |
+| `architecture_versions` | Immutable, append-only history of every saved YAML revision |
+| `architecture_plans` | Generated plans pending or completed (apply / destroy modes) |
+| `architecture_apply_runs` | Apply / destroy execution records linked to CHV tasks |
+| `architecture_drift_reports` | Drift findings per architecture per check |
+| `inventory_snapshots` | Fleet observed state captured for plan determinism and drift baselines |
+
+The standard SQLite backup procedure documented earlier (`sqlite3 ... ".backup"`) covers all six tables — they live in `/var/lib/chv/controlplane.db` along with everything else. No separate dump is required.
+
+**Recommended cadence:**
+- Hourly online backup retained 24h.
+- Daily backup retained 30d.
+- Weekly off-host backup retained 12 months.
+
+**Recovery posture:**
+- **RPO** ≤ 1 hour (last hourly backup).
+- **RTO** ≤ 15 minutes for control-plane restore (stop service → copy file → start) on a single-node deployment.
+- A restored database loses any plans / apply runs created after the backup window. Topologies and accepted versions are unaffected if backups are taken before user-facing edits.
+
+### Retention
+
+Until the periodic pruner ships (tracked in [`docs/plans/2026-06-16-snapshot-pruner-followup.md`](plans/2026-06-16-snapshot-pruner-followup.md)), retention is best-effort and operator-driven. Recommended policy:
+
+| Table | Retention | Rationale |
+|-------|-----------|-----------|
+| `architecture_topologies` | Indefinite | Small, user-curated, no churn. |
+| `architecture_versions` | Indefinite | Append-only history of intent; per ADR-003-Designer the YAML is the source of truth. Small. |
+| `architecture_plans` | 30 days post-terminal status | Per ADR-005-Designer; expired/discarded plans are not re-runnable. Active plans never deleted. |
+| `architecture_apply_runs` | 90d for `succeeded`, indefinite for `failed`/`partially_failed` | Failed runs are audit material. Successful runs are operational telemetry. |
+| `architecture_drift_reports` | 14 days, **but** retain latest report per architecture indefinitely | Most recent report is the user-facing "current drift" view. |
+| `inventory_snapshots` | 7 days | High churn; only the recent ones drive plan determinism. |
+
+Operators who need to free space before the pruner ships can run targeted deletes:
+
+```bash
+# Drop drift reports older than 14 days, keeping the latest per architecture
+sqlite3 /var/lib/chv/controlplane.db <<'SQL'
+DELETE FROM architecture_drift_reports
+WHERE id NOT IN (
+    SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY architecture_id ORDER BY created_at DESC) AS rn
+        FROM architecture_drift_reports
+    ) WHERE rn = 1
+)
+AND created_at < datetime('now', '-14 days');
+SQL
+
+# Drop inventory snapshots older than 7 days
+sqlite3 /var/lib/chv/controlplane.db \
+  "DELETE FROM inventory_snapshots WHERE created_at < datetime('now', '-7 days');"
+```
+
+Always take a backup before manual deletes.
+
+### Monitoring
+
+The Architecture Designer exposes Prometheus metrics on the controlplane `:9901/metrics` endpoint:
+
+```
+# Apply outcomes (counter)
+chv_architecture_apply_total{status="succeeded|failed|partially_failed|cancelled"}
+
+# Apply latency (histogram)
+chv_architecture_apply_duration_seconds_bucket{...}
+
+# Drift checks (counter)
+chv_architecture_drift_total{status="clean|drift_detected|check_failed"}
+```
+
+Recommended alert templates (Prometheus `for:` durations are starting points; tune per environment):
+
+```yaml
+- alert: ArchitectureDriftCheckFailing
+  expr: increase(chv_architecture_drift_total{status="check_failed"}[5m]) > 0
+  for: 5m
+  labels: { severity: page }
+  annotations:
+    summary: "Architecture drift checker is failing"
+    description: "Drift checks have returned check_failed in the last 5 minutes — fleet visibility is degraded."
+
+- alert: ArchitectureApplySlow
+  expr: histogram_quantile(0.99, rate(chv_architecture_apply_duration_seconds_bucket[15m])) > 600
+  for: 15m
+  labels: { severity: ticket }
+  annotations:
+    summary: "Architecture apply p99 > 10 minutes"
+    description: "Apply runs are taking longer than expected; investigate task-system backlog."
+
+- alert: ArchitectureApplyFailureRate
+  expr: |
+    sum(rate(chv_architecture_apply_total{status=~"failed|partially_failed"}[15m]))
+      / sum(rate(chv_architecture_apply_total[15m])) > 0.2
+  for: 30m
+  labels: { severity: ticket }
+```
+
+### Troubleshooting
+
+**Drift checks return `CheckFailed` repeatedly**
+
+| Diagnostic | Resolution |
+|-----------|------------|
+| `journalctl -u chv-controlplane \| grep architecture_drift` for the underlying error | Most common cause: a referenced resource (network, datastore) was deleted out-of-band. Re-pin the architecture's baseline by re-running `apply` after editing the topology, or accept the current drift by writing a new version. |
+| Inventory snapshot stale (look for `inventory_snapshots.created_at` > 1h old) | Restart the controlplane snapshot loop: `systemctl restart chv-controlplane`. The next drift check uses a fresh snapshot. |
+
+**Apply stuck in `Applying` state**
+
+The apply state machine uses CAS guards (compare-and-set on `status`) to ensure exactly one writer. A stuck `Applying` row usually means the worker process died mid-run.
+
+```bash
+# Inspect the run
+sqlite3 /var/lib/chv/controlplane.db \
+  "SELECT id, architecture_id, plan_id, status, started_at, updated_at \
+   FROM architecture_apply_runs WHERE status = 'applying';"
+
+# Check that no live task is still in flight
+sqlite3 /var/lib/chv/controlplane.db \
+  "SELECT operation_id, kind, state FROM operations \
+   WHERE meta_json LIKE '%<APPLY_RUN_ID>%';"
+```
+
+If the linked task is `Failed` / `Cancelled` and no controlplane process is holding the row (no recent `updated_at`), reset the run to `failed` so a retry is possible:
+
+```bash
+sqlite3 /var/lib/chv/controlplane.db <<SQL
+UPDATE architecture_apply_runs
+SET status = 'failed',
+    error_summary = 'manual recovery: stuck applying',
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+WHERE id = '<APPLY_RUN_ID>' AND status = 'applying';
+SQL
+```
+
+The CAS guard makes this safe: if a live worker still owns the row, the `WHERE status = 'applying'` clause races the update without corrupting state. Always restart the controlplane first if there is any doubt.
+
+**Plan returns `PLAN_EXPIRED` on retry within 15 minutes**
+
+Plans expire 15 minutes after generation (per ADR-005-Designer). If a fresh plan is rejected as expired, suspect clock skew between the BFF process and the controlplane.
+
+| Diagnostic | Resolution |
+|-----------|------------|
+| `date -u` on each host running CHV components | Sync clocks: `sudo chronyc -a makestep` or `sudo systemctl restart systemd-timesyncd`. |
+| Inspect the plan row: `SELECT created_at, expires_at FROM architecture_plans WHERE id = '<PLAN_ID>';` | If `expires_at - created_at` is not 15 minutes, the issuing process has wrong wall-clock; restart that process after the clock fix. |
+| Container deployments with shared host clock | Verify NTP is enabled on the host; containers inherit host time, so a host-level fix propagates. |
+
+If clocks are correct and the plan still expires immediately, file a bug — the controlplane and BFF should always agree on plan expiry.

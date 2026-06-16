@@ -1,7 +1,7 @@
 # ADR-004-Designer Deployment Must Be Validation-, Plan- and Task-Gated
 
 Date: 2026-06-13
-Status: Proposed
+Status: Accepted (2026-06-16, Phase 7)
 
 ## Context
 
