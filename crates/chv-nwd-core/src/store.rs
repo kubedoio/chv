@@ -1,3 +1,4 @@
+use crate::migrations;
 use crate::state::TopologyState;
 use chv_errors::ChvError;
 use rusqlite::{params, Connection};
@@ -9,34 +10,16 @@ pub struct TopologyStore {
 
 impl TopologyStore {
     pub fn new(db_path: &Path) -> Result<Self, ChvError> {
-        let conn = Connection::open(db_path).map_err(|e| ChvError::Io {
+        let mut conn = Connection::open(db_path).map_err(|e| ChvError::Io {
             path: db_path.to_string_lossy().to_string(),
             source: std::io::Error::other(e),
         })?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS topologies (
-                network_id TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                bridge_name TEXT NOT NULL,
-                namespace_name TEXT NOT NULL,
-                subnet_cidr TEXT NOT NULL,
-                gateway_ip TEXT NOT NULL,
-                runtime_status TEXT NOT NULL,
-                vni INTEGER,
-                peer_vteps TEXT DEFAULT '[]'
-            )",
-            [],
-        )
-        .map_err(|e| ChvError::Internal {
-            reason: format!("sqlite init failed: {}", e),
-        })?;
-        // Migration: add vni column if missing (existing databases)
-        let _ = conn.execute("ALTER TABLE topologies ADD COLUMN vni INTEGER", []);
-        // Migration: add peer_vteps column if missing (existing databases)
-        let _ = conn.execute(
-            "ALTER TABLE topologies ADD COLUMN peer_vteps TEXT DEFAULT '[]'",
-            [],
-        );
+        // Versioned migrations (see crates/chv-nwd-core/src/migrations/mod.rs).
+        // Replaces the previous `let _ = conn.execute("ALTER TABLE …")`
+        // pattern that swallowed every error — including racing concurrent
+        // boots — and made ADR-007's rollback story structurally
+        // unimplementable for nwd.
+        migrations::run(&mut conn)?;
         Ok(Self { conn })
     }
 
@@ -158,5 +141,128 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].peer_vteps, vec!["10.0.1.1", "10.0.1.2"]);
         assert_eq!(list[0].vni, Some(100));
+    }
+
+    #[test]
+    fn migrations_run_to_completion_on_fresh_db() {
+        // Required test #1: applies all migrations to an empty SQLite,
+        // asserts schema_version table tracks them.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nwd.db");
+        let _store = TopologyStore::new(&path).unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let versions = crate::migrations::applied_versions(&conn).unwrap();
+        assert_eq!(
+            versions,
+            vec![1, 2, 3],
+            "every embedded migration must be recorded after first boot"
+        );
+
+        // Sanity-check that the version-tracking table itself is present.
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_chv_nwd_schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "version table must exist after migrations");
+    }
+
+    #[test]
+    fn migrations_idempotent_on_re_run() {
+        // Required test #2: runs migrations twice in a row; second run is a no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nwd.db");
+
+        let _store_first = TopologyStore::new(&path).unwrap();
+        // Re-opening the store re-runs migrations; this must not error and
+        // must not add duplicate version rows.
+        let _store_second = TopologyStore::new(&path).unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let versions = crate::migrations::applied_versions(&conn).unwrap();
+        assert_eq!(
+            versions,
+            vec![1, 2, 3],
+            "rerunning migrations must not duplicate version rows"
+        );
+    }
+
+    #[test]
+    fn migrations_propagate_real_errors() {
+        // Required test #3: simulate a hard error (bad SQL in a test-only
+        // migration vector) and assert it propagates as a typed error,
+        // NOT swallowed.
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let bad = [crate::migrations::test_support::migration(
+            42,
+            "intentionally_broken",
+            "THIS IS NOT VALID SQL;",
+        )];
+
+        let err = crate::migrations::run_with(&mut conn, &bad)
+            .expect_err("bad SQL must surface as ChvError, not be swallowed");
+
+        match err {
+            ChvError::Internal { reason } => {
+                assert!(
+                    reason.contains("intentionally_broken"),
+                    "error must name the failing migration; got: {reason}"
+                );
+            }
+            other => panic!("expected ChvError::Internal, got {other:?}"),
+        }
+
+        // Confirm the failing migration was NOT recorded; the transaction
+        // rolled back, so applied_versions stays empty.
+        let versions = crate::migrations::applied_versions(&conn).unwrap();
+        assert!(
+            versions.is_empty(),
+            "failed migration must not appear in version history"
+        );
+    }
+
+    #[test]
+    fn store_upgrades_legacy_unversioned_db_in_place() {
+        // Verifies the in-place upgrade contract: a database created by the
+        // prior unversioned `let _ = ALTER TABLE` code path must converge to
+        // schema_version=3 without erroring on the duplicate columns.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nwd.db");
+        {
+            let legacy = rusqlite::Connection::open(&path).unwrap();
+            legacy
+                .execute(
+                    "CREATE TABLE topologies (
+                        network_id TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL,
+                        bridge_name TEXT NOT NULL,
+                        namespace_name TEXT NOT NULL,
+                        subnet_cidr TEXT NOT NULL,
+                        gateway_ip TEXT NOT NULL,
+                        runtime_status TEXT NOT NULL,
+                        vni INTEGER,
+                        peer_vteps TEXT DEFAULT '[]'
+                    )",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let store = TopologyStore::new(&path).expect("legacy in-place upgrade must succeed");
+        // Round-trip works after the upgrade.
+        store
+            .upsert(&TopologyState {
+                vni: Some(7),
+                peer_vteps: vec!["10.0.0.9".to_string()],
+                ..dummy_state("net-legacy")
+            })
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let versions = crate::migrations::applied_versions(&conn).unwrap();
+        assert_eq!(versions, vec![1, 2, 3]);
     }
 }
