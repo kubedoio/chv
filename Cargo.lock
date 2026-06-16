@@ -723,6 +723,7 @@ dependencies = [
  "chv-common",
  "chv-controlplane-types",
  "hex",
+ "metrics",
  "rand 0.9.4",
  "serde",
  "serde_json",

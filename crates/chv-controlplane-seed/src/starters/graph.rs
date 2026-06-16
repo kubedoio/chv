@@ -415,7 +415,7 @@ mod tests {
             let parsed: serde_json::Value =
                 serde_json::from_str(&json).expect("graph deserializes");
             assert_eq!(parsed["version"], "1.0");
-            assert!(parsed["nodes"].as_array().unwrap().len() > 0);
+            assert!(!parsed["nodes"].as_array().unwrap().is_empty());
             assert!(parsed["nodes"]
                 .as_array()
                 .unwrap()

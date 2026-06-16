@@ -314,12 +314,46 @@ impl BackupRepository {
         }
     }
 
+    /// Decrypts the S3 credentials on a schedule row in place.
+    ///
+    /// Fail-closed: if a credential cannot be decrypted (wrong key, tampered
+    /// ciphertext, malformed payload, missing key) the field is set to `None`
+    /// and a structured error is logged. We deliberately do NOT fall back to
+    /// the ciphertext literal — passing `enc:hex...` to the S3 client would
+    /// surface as opaque AWS auth errors and silently break backups.
+    ///
+    /// A `None` credential propagates downstream where the backup worker
+    /// (or API handler) can return a clear "S3 credentials not configured
+    /// or undecryptable" error to the operator. Stale credential is better
+    /// than ciphertext-as-credential.
     fn decrypt_schedule_row(&self, row: &mut BackupScheduleRow) {
         if let Some(ref key) = row.s3_access_key {
-            row.s3_access_key = Some(self.crypto.decrypt(key));
+            row.s3_access_key = match self.crypto.decrypt(key) {
+                Ok(plain) => Some(plain),
+                Err(e) => {
+                    tracing::error!(
+                        schedule_id = %row.schedule_id,
+                        field = "s3_access_key",
+                        error = %e,
+                        "credential decrypt failed; setting field to None (fail-closed)"
+                    );
+                    None
+                }
+            };
         }
         if let Some(ref key) = row.s3_secret_key {
-            row.s3_secret_key = Some(self.crypto.decrypt(key));
+            row.s3_secret_key = match self.crypto.decrypt(key) {
+                Ok(plain) => Some(plain),
+                Err(e) => {
+                    tracing::error!(
+                        schedule_id = %row.schedule_id,
+                        field = "s3_secret_key",
+                        error = %e,
+                        "credential decrypt failed; setting field to None (fail-closed)"
+                    );
+                    None
+                }
+            };
         }
     }
 
