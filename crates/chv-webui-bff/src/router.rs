@@ -171,9 +171,9 @@ pub fn bff_router(state: AppState) -> Router<AppState> {
         )
         .route(
             "/v1/quotas/:user_id/usage",
-            post(crate::handlers::quotas::get_usage),
+            post(crate::handlers::quotas::get_user_usage),
         )
-        .route("/v1/usage", post(crate::handlers::quotas::get_usage))
+        .route("/v1/usage", post(crate::handlers::quotas::get_my_usage))
         .route(
             "/v1/quotas/check",
             post(crate::handlers::quotas::check_quota),

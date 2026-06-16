@@ -242,12 +242,12 @@ pub async fn delete_quota(
     })))
 }
 
-pub async fn get_usage(
-    crate::auth::BearerToken(claims): crate::auth::BearerToken,
-    State(state): State<AppState>,
-) -> Result<Json<Value>, BffError> {
-    let user_id = &claims.sub;
-
+/// Compute the `{user_id, usage, quota}` JSON shape for a single user.
+///
+/// Shared by the two `get_*_usage` handlers below so the SQL paths stay in one
+/// place. Returns the response body verbatim; HTTP authorization is the
+/// caller's responsibility.
+async fn compute_usage_payload(state: &AppState, user_id: &str) -> Result<Value, BffError> {
     // Count VMs owned by user
     let vm_count: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM vms v
@@ -297,7 +297,8 @@ pub async fn get_usage(
         })
     });
 
-    Ok(Json(json!({
+    Ok(json!({
+        "user_id": user_id,
         "usage": {
             "vms": vm_count,
             "cpu_cores": cpu_cores,
@@ -305,7 +306,49 @@ pub async fn get_usage(
             "disk_gb": storage_bytes / (1024 * 1024 * 1024),
         },
         "quota": quota,
-    })))
+    }))
+}
+
+/// `POST /v1/usage` — return the calling user's own usage.
+///
+/// Uses `claims.sub` unconditionally and takes no path parameter, so callers
+/// cannot leak other users' usage through this endpoint.
+pub async fn get_my_usage(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, BffError> {
+    let payload = compute_usage_payload(&state, &claims.sub).await?;
+    Ok(Json(payload))
+}
+
+/// `POST /v1/quotas/:user_id/usage` — return usage for `user_id`.
+///
+/// Authorization (CR1 fix): a caller may read their own usage (path matches
+/// `claims.sub`) or any user's usage if they hold the `admin` role. Operator
+/// and viewer roles cannot enumerate other users' usage; the request is
+/// rejected with 403 FORBIDDEN before any quota query runs.
+///
+/// This replaces the previous shared-handler shape, which ignored the `:user_id`
+/// path parameter entirely and silently returned the caller's own usage when
+/// the path named someone else — an authz-shape data correctness violation.
+pub async fn get_user_usage(
+    crate::auth::BearerToken(claims): crate::auth::BearerToken,
+    State(state): State<AppState>,
+    Path(target_user_id): Path<String>,
+) -> Result<Json<Value>, BffError> {
+    if target_user_id != claims.sub {
+        if let Err(err) = crate::auth::require_admin(&claims) {
+            tracing::warn!(
+                caller = %claims.sub,
+                caller_role = %claims.role,
+                target = %target_user_id,
+                "rejected non-admin attempt to read another user's usage"
+            );
+            return Err(err);
+        }
+    }
+    let payload = compute_usage_payload(&state, &target_user_id).await?;
+    Ok(Json(payload))
 }
 
 pub async fn check_quota(
