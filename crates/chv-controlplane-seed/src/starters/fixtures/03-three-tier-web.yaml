@@ -1,0 +1,99 @@
+# AUTO-SEEDED STARTER — clone before editing.
+# Source of truth: crates/chv-controlplane-seed/src/starters/fixtures/
+# Edits to seeded copies are NOT propagated back; clone first via the UI.
+
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: starter-three-tier-web
+  display_name: "Three-tier Web (Web / App / DB)"
+  description: "Public web tier, private app tier, isolated DB tier. Two networks (DMZ + internal) and a shared NFS datastore for the app tier."
+  environment: staging
+  labels:
+    starter: "3"
+    archetype: "n-tier"
+servers:
+  - name: host-web
+    role: compute
+    resources:
+      cpu_cores: 8
+      memory_gb: 16
+  - name: host-app
+    role: compute
+    resources:
+      cpu_cores: 16
+      memory_gb: 32
+  - name: host-db
+    role: storage
+    resources:
+      cpu_cores: 16
+      memory_gb: 64
+networks:
+  - name: dmz
+    type: bridge
+    bridge: br-dmz
+    cidr: 10.30.0.0/24
+    gateway: 10.30.0.1
+  - name: internal
+    type: vlan
+    bridge: br-trunk
+    vlan_id: 300
+    cidr: 10.30.10.0/24
+datastores:
+  - name: app-shared
+    type: nfs
+    path: /export/app
+  - name: db-local
+    type: qcow2-dir
+    path: /var/lib/chv/datastores/db-local
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+    datastore: db-local
+templates:
+  - name: web-tier
+    image: ubuntu-24.04
+    cpu: 4
+    memory_mb: 8192
+    disk_gb: 40
+    datastore: db-local
+    network: dmz
+  - name: app-tier
+    image: ubuntu-24.04
+    cpu: 8
+    memory_mb: 16384
+    disk_gb: 80
+    datastore: app-shared
+    network: internal
+  - name: db-tier
+    image: ubuntu-24.04
+    cpu: 16
+    memory_mb: 65536
+    disk_gb: 200
+    datastore: db-local
+    network: internal
+instances:
+  - name: web-01
+    template: web-tier
+    placement:
+      server: host-web
+    networks:
+      - name: dmz
+        ip: 10.30.0.10
+      - name: internal
+        ip: 10.30.10.10
+  - name: app-01
+    template: app-tier
+    placement:
+      server: host-app
+    networks:
+      - name: internal
+        ip: 10.30.10.20
+  - name: db-01
+    template: db-tier
+    placement:
+      server: host-db
+    networks:
+      - name: internal
+        ip: 10.30.10.30

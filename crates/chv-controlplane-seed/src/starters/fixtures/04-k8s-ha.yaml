@@ -1,0 +1,115 @@
+# AUTO-SEEDED STARTER — clone before editing.
+# Source of truth: crates/chv-controlplane-seed/src/starters/fixtures/
+# Edits to seeded copies are NOT propagated back; clone first via the UI.
+
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: starter-k8s-ha
+  display_name: "Kubernetes HA (3 control + 3 workers, stacked etcd)"
+  description: "kubernetes.io stacked-etcd HA topology. 3 control-plane VMs run kube-apiserver/scheduler/controller-manager + colocated etcd. 3 worker VMs run kubelet + container runtime. NFS for persistent volumes."
+  environment: staging
+  labels:
+    starter: "4"
+    archetype: "k8s-ha"
+servers:
+  - name: hv-01
+    role: compute
+    resources:
+      cpu_cores: 24
+      memory_gb: 64
+  - name: hv-02
+    role: compute
+    resources:
+      cpu_cores: 24
+      memory_gb: 64
+  - name: hv-03
+    role: compute
+    resources:
+      cpu_cores: 24
+      memory_gb: 64
+networks:
+  - name: cluster-mgmt
+    type: bridge
+    bridge: br-cp
+    cidr: 10.40.0.0/24
+    gateway: 10.40.0.1
+datastores:
+  - name: pv-nfs
+    type: nfs
+    path: /export/pv
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+    datastore: pv-nfs
+templates:
+  - name: k8s-control
+    image: ubuntu-24.04
+    cpu: 4
+    memory_mb: 8192
+    disk_gb: 80
+    datastore: pv-nfs
+    network: cluster-mgmt
+  - name: k8s-worker
+    image: ubuntu-24.04
+    cpu: 8
+    memory_mb: 16384
+    disk_gb: 100
+    datastore: pv-nfs
+    network: cluster-mgmt
+instances:
+  - name: cp-01
+    template: k8s-control
+    placement:
+      server: hv-01
+    networks:
+      - name: cluster-mgmt
+        ip: 10.40.0.11
+    tags:
+      - control-plane
+  - name: cp-02
+    template: k8s-control
+    placement:
+      server: hv-02
+    networks:
+      - name: cluster-mgmt
+        ip: 10.40.0.12
+    tags:
+      - control-plane
+  - name: cp-03
+    template: k8s-control
+    placement:
+      server: hv-03
+    networks:
+      - name: cluster-mgmt
+        ip: 10.40.0.13
+    tags:
+      - control-plane
+  - name: worker-01
+    template: k8s-worker
+    placement:
+      server: hv-01
+    networks:
+      - name: cluster-mgmt
+        ip: 10.40.0.21
+    tags:
+      - worker
+  - name: worker-02
+    template: k8s-worker
+    placement:
+      server: hv-02
+    networks:
+      - name: cluster-mgmt
+        ip: 10.40.0.22
+    tags:
+      - worker
+  - name: worker-03
+    template: k8s-worker
+    placement:
+      server: hv-03
+    networks:
+      - name: cluster-mgmt
+        ip: 10.40.0.23
+    tags:
+      - worker

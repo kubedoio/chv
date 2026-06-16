@@ -13,6 +13,7 @@ path = "src/main.rs"
 chv-config = { path = "../../crates/chv-config" }
 chv-controlplane-service = { path = "../../crates/chv-controlplane-service" }
 chv-controlplane-store = { path = "../../crates/chv-controlplane-store" }
+chv-controlplane-seed = { path = "../../crates/chv-controlplane-seed" }
 chv-webui-bff = { path = "../../crates/chv-webui-bff" }
 chv-common = { path = "../../crates/chv-common" }
 chv-observability = { path = "../../crates/chv-observability" }

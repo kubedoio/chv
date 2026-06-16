@@ -1,0 +1,65 @@
+# AUTO-SEEDED STARTER — clone before editing.
+# Source of truth: crates/chv-controlplane-seed/src/starters/fixtures/
+# Edits to seeded copies are NOT propagated back; clone first via the UI.
+
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: starter-observability
+  display_name: "Prometheus + Grafana observability stack"
+  description: "Two-VM observability stack: Prometheus on a TSDB-backed VM, Grafana fronting it. NFS-backed metrics retention. Pairs naturally with starter-04 (K8s)."
+  environment: staging
+  labels:
+    starter: "5"
+    archetype: "observability"
+servers:
+  - name: host-obs
+    role: compute
+    resources:
+      cpu_cores: 16
+      memory_gb: 32
+networks:
+  - name: monitoring
+    type: bridge
+    bridge: br-mon
+    cidr: 10.50.0.0/24
+    gateway: 10.50.0.1
+datastores:
+  - name: tsdb-nfs
+    type: nfs
+    path: /export/tsdb
+images:
+  - name: ubuntu-24.04
+    source: local://images/ubuntu-24.04.qcow2
+    format: qcow2
+    datastore: tsdb-nfs
+templates:
+  - name: prometheus-host
+    image: ubuntu-24.04
+    cpu: 8
+    memory_mb: 16384
+    disk_gb: 100
+    datastore: tsdb-nfs
+    network: monitoring
+  - name: grafana-host
+    image: ubuntu-24.04
+    cpu: 4
+    memory_mb: 8192
+    disk_gb: 40
+    datastore: tsdb-nfs
+    network: monitoring
+instances:
+  - name: prometheus-01
+    template: prometheus-host
+    placement:
+      server: host-obs
+    networks:
+      - name: monitoring
+        ip: 10.50.0.10
+  - name: grafana-01
+    template: grafana-host
+    placement:
+      server: host-obs
+    networks:
+      - name: monitoring
+        ip: 10.50.0.20

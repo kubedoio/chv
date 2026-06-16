@@ -645,6 +645,7 @@ dependencies = [
  "axum",
  "chv-common",
  "chv-config",
+ "chv-controlplane-seed",
  "chv-controlplane-service",
  "chv-controlplane-store",
  "chv-observability",
@@ -654,6 +655,20 @@ dependencies = [
  "sqlx",
  "tokio",
  "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "chv-controlplane-seed"
+version = "0.2.0"
+dependencies = [
+ "chv-architecture-validate",
+ "chv-controlplane-store",
+ "chv-controlplane-types",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

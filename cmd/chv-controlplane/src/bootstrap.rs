@@ -53,6 +53,35 @@ pub async fn build_service(
     let pool = connect_pool(&store_config).await?;
     run_migrations(&pool, Some(&store_config)).await?;
 
+    // Seed the six canonical starter topologies on first deployment so the
+    // operator lands on a populated /architectures dashboard. The seeder is
+    // idempotent — once `system_settings.seed_starters_completed = '1'` it
+    // is a cheap no-op on every subsequent boot. Per-fixture failures are
+    // logged and skipped (fail-open) so a malformed starter cannot block
+    // the control plane from coming up; only a failure to read or update
+    // the sentinel row itself propagates as a boot error.
+    //
+    // See `docs/plans/2026-06-16-starter-topologies-and-auto-seed.md` §4
+    // for the full design and `crates/chv-controlplane-seed` for the
+    // implementation.
+    let seed_topology_repo = chv_controlplane_store::TopologyRepository::new(pool.clone());
+    match chv_controlplane_seed::seed_if_first_deployment(&seed_topology_repo).await {
+        Ok(chv_controlplane_seed::SeedOutcome::Seeded { count }) => {
+            tracing::info!(count, "starter topologies seeded on first deployment");
+        }
+        Ok(chv_controlplane_seed::SeedOutcome::Skipped) => {
+            tracing::debug!("starter topology seeding already completed; skipping");
+        }
+        Err(err) => {
+            // Preserve structured fields for ops dashboards before the
+            // error is stringified into ControlPlaneServiceError::Internal.
+            tracing::error!(?err, "starter topology seed fatal");
+            return Err(ControlPlaneServiceError::Internal(format!(
+                "starter topology seed failed: {err}"
+            )));
+        }
+    }
+
     // --- Compatibility matrix check (hard gate on incompatibilities) ---
     if let Ok(matrix_path) = std::env::var("CHV_COMPAT_MATRIX_PATH") {
         let path = Path::new(&matrix_path);
