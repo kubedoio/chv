@@ -66,11 +66,31 @@ use chv_controlplane_types::architecture::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::auth::{require_operator_or_admin, BearerToken, Role};
+use crate::auth::{has_apply_permission, require_operator_or_admin, BearerToken, Claims, Role};
 use crate::metrics_apply::{record_apply_status, ApplyStatusLabel, ApplyTimer};
 use crate::metrics_drift::{record_drift_status, DriftStatusLabel};
 use crate::router::AppState;
 use crate::BffError;
+
+// ---------------------------------------------------------------------------
+// Permission plumbing for drift / inventory capture
+// ---------------------------------------------------------------------------
+
+/// Resolve the caller's `architecture:apply` permission for the drift /
+/// inventory capture path. Fail-closed on unrecognised role strings — an
+/// unknown role must NOT be granted apply (matches the security spirit of
+/// M14: silent permission grants are worse than spurious drift findings).
+///
+/// Centralised here because the drift `PermissionChanged` heuristic in
+/// `chv-architecture-reconcile` only fires when `snapshot.deploy_allowed`
+/// is `false`. Hardcoding `true` (the previous shape of all three call
+/// sites) made the heuristic dead code outside unit tests; this helper
+/// puts the truth back on the wire.
+fn caller_can_apply(claims: &Claims) -> bool {
+    Role::parse(&claims.role)
+        .map(|r| has_apply_permission(&r))
+        .unwrap_or(false)
+}
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -704,7 +724,15 @@ pub async fn plan_architecture(
     // during apply. Phase 4 plan generation always returns warnings inline;
     // the apply handler is the one that gates on the flag.
     let _ = req.allow_warnings;
-    let resp = generate_plan_inner(&state, &claims.sub, id, PlanMode::Apply, refresh).await?;
+    let resp = generate_plan_inner(
+        &state,
+        &claims.sub,
+        caller_can_apply(&claims),
+        id,
+        PlanMode::Apply,
+        refresh,
+    )
+    .await?;
     Ok(Json(resp))
 }
 
@@ -719,7 +747,15 @@ pub async fn destroy_plan_architecture(
     require_operator_or_admin(&claims)?;
     let id = parse_id(&req.id)?;
     let refresh = req.refresh_inventory.unwrap_or(true);
-    let resp = generate_plan_inner(&state, &claims.sub, id, PlanMode::Destroy, refresh).await?;
+    let resp = generate_plan_inner(
+        &state,
+        &claims.sub,
+        caller_can_apply(&claims),
+        id,
+        PlanMode::Destroy,
+        refresh,
+    )
+    .await?;
     Ok(Json(resp))
 }
 
@@ -798,6 +834,7 @@ pub async fn discard_plan_architecture(
 async fn generate_plan_inner(
     state: &AppState,
     caller: &str,
+    caller_can_apply: bool,
     id: ArchitectureId,
     mode: PlanMode,
     refresh_inventory: bool,
@@ -830,7 +867,7 @@ async fn generate_plan_inner(
             nodes: state.node_repo.clone(),
             networks: state.network_repo.clone(),
             images: state.image_repo.clone(),
-            deploy_allowed_for_caller: true,
+            deploy_allowed_for_caller: caller_can_apply,
         };
         let snapshot = chv_architecture_reconcile::capture(&provider, "bff/plan")
             .await
@@ -1112,14 +1149,15 @@ pub async fn check_fleet_architecture(
         ));
     }
 
-    // Capture the fleet snapshot. Phase 4 wires deploy_allowed_for_caller
-    // to the architecture:apply permission check; Phase 3 short-circuits
-    // to true so PERMISSION_DENIED_DEPLOY does not fire spuriously.
+    // Capture the fleet snapshot. `deploy_allowed_for_caller` is plumbed
+    // from the caller's role so the drift `PermissionChanged` heuristic in
+    // `chv-architecture-reconcile` reflects the live caller, not a hardcoded
+    // `true` (closes C3 — operators were getting false reassurance).
     let provider = FleetInventoryProvider {
         nodes: state.node_repo.clone(),
         networks: state.network_repo.clone(),
         images: state.image_repo.clone(),
-        deploy_allowed_for_caller: true,
+        deploy_allowed_for_caller: caller_can_apply(&claims),
     };
     let snapshot = chv_architecture_reconcile::capture(&provider, "bff/check-fleet")
         .await
@@ -1606,7 +1644,7 @@ pub const DRIFT_CACHE_TTL_SECS: i64 = 300;
 /// 5. On a successful compute, persist the report and return it with
 ///    `cache_hit = false`.
 pub async fn get_architecture_drift(
-    BearerToken(_claims): BearerToken,
+    BearerToken(claims): BearerToken,
     State(state): State<AppState>,
     Json(req): Json<DriftRequest>,
 ) -> Result<Json<DriftResponse>, BffError> {
@@ -1741,7 +1779,7 @@ pub async fn get_architecture_drift(
         nodes: state.node_repo.clone(),
         networks: state.network_repo.clone(),
         images: state.image_repo.clone(),
-        deploy_allowed_for_caller: true,
+        deploy_allowed_for_caller: caller_can_apply(&claims),
     };
 
     let yaml = topo

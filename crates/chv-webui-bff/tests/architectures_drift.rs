@@ -960,3 +960,114 @@ async fn drift_persists_check_failed_when_latest_yaml_is_empty() {
     assert!(resp.findings.is_empty());
     assert!(resp.drift_report_id.is_some(), "row must be persisted");
 }
+
+// ---------------------------------------------------------------------------
+// 13. C3 regression: PermissionChanged fires for viewer, not admin
+// ---------------------------------------------------------------------------
+//
+// Before this fix, all three production drift call sites in
+// `handlers::architectures` hardcoded `deploy_allowed_for_caller: true`,
+// which made the `DRIFT_PERMISSION_CHANGED` heuristic in
+// `chv-architecture-reconcile::drift::compute` dead code outside unit tests.
+// The fix plumbs the caller's role through `caller_can_apply(&claims)` so
+// the heuristic reflects the live caller. These two tests pin the contract:
+//
+//   * viewer hitting drift on a baseline that declares roles must see
+//     a `DRIFT_PERMISSION_CHANGED` finding
+//   * admin/operator must NOT see one
+//
+// `PERMISSION_BASELINE_YAML` declares an `operator` role with the
+// `architecture:apply` permission and binds it to a user — exactly the
+// shape `compute_drift` keys off via `baseline_expects_permissions`.
+
+const PERMISSION_BASELINE_YAML: &str = r#"apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+metadata:
+  name: perm-1
+roles:
+  - name: operator
+    permissions:
+      - architecture:apply
+users:
+  - name: alice
+    roles:
+      - operator
+"#;
+
+#[tokio::test]
+async fn drift_emits_permission_changed_for_viewer_when_baseline_declares_roles() {
+    use chv_architecture_reconcile::drift::DriftFinding;
+
+    let clock = ManualClock::new(t0());
+    let state = build_state_with_clock(clock).await;
+    let arch_id = create_arch_with_yaml(&state, "perm-viewer-1", PERMISSION_BASELINE_YAML).await;
+
+    let resp = get_architecture_drift(
+        BearerToken(claims_for("viewer")),
+        State(state),
+        Json(DriftRequest {
+            id: arch_id,
+            force_refresh: false,
+        }),
+    )
+    .await
+    .expect("drift should compute")
+    .0;
+
+    assert_eq!(
+        resp.status,
+        DriftStatus::Drifted,
+        "viewer with role-bearing baseline must drift on permission gap"
+    );
+    assert!(
+        resp.findings
+            .iter()
+            .any(|f| matches!(f, DriftFinding::PermissionChanged { .. })),
+        "viewer drift findings must include DRIFT_PERMISSION_CHANGED; got {:?}",
+        resp.findings.iter().map(|f| f.code()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        resp.summary
+            .by_type
+            .get("DRIFT_PERMISSION_CHANGED")
+            .copied(),
+        Some(1),
+        "summary.by_type must count exactly one PermissionChanged finding"
+    );
+}
+
+#[tokio::test]
+async fn drift_does_not_emit_permission_changed_for_admin() {
+    use chv_architecture_reconcile::drift::DriftFinding;
+
+    let clock = ManualClock::new(t0());
+    let state = build_state_with_clock(clock).await;
+    let arch_id = create_arch_with_yaml(&state, "perm-admin-1", PERMISSION_BASELINE_YAML).await;
+
+    let resp = get_architecture_drift(
+        BearerToken(claims_for("admin")),
+        State(state),
+        Json(DriftRequest {
+            id: arch_id,
+            force_refresh: false,
+        }),
+    )
+    .await
+    .expect("drift should compute")
+    .0;
+
+    assert!(
+        resp.findings
+            .iter()
+            .all(|f| !matches!(f, DriftFinding::PermissionChanged { .. })),
+        "admin drift findings must NOT include DRIFT_PERMISSION_CHANGED; got {:?}",
+        resp.findings.iter().map(|f| f.code()).collect::<Vec<_>>()
+    );
+    assert!(
+        !resp
+            .summary
+            .by_type
+            .contains_key("DRIFT_PERMISSION_CHANGED"),
+        "summary.by_type must not record PermissionChanged for an admin caller"
+    );
+}
