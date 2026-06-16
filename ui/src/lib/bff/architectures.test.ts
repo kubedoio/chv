@@ -20,6 +20,7 @@ import {
 	generateYaml,
 	importYaml,
 	checkFleet,
+	getArchitectureDrift,
 	type ArchitectureSummary,
 	type FleetCheckResult,
 	type ValidationResult
@@ -423,5 +424,90 @@ describe('architectures BFF wrapper — Phase 3 fleet check', () => {
 		vi.mocked(bffFetch).mockRejectedValue(boom);
 
 		await expect(checkFleet({ id: 'arch-1' })).rejects.toBe(boom);
+	});
+});
+
+// ----------------------------------------------------------------------
+// Regression — getArchitectureDrift token-forward.
+// ----------------------------------------------------------------------
+//
+// History: a user clicking a saved topology was being logged out. The
+// dashboard fan-out at `routes/architectures/+page.svelte` calls
+// `getArchitectureDrift(id, false, undefined, signal)` per card. The
+// third positional argument was a placeholder named `_fetch` and the
+// function ignored it — meaning the request went out with NO
+// Authorization header, the BFF (which gates `/v1/architectures/drift`
+// at operator tier) returned 401, and the global `bffFetch` 401 handler
+// in `client.ts` redirected to `/login`. The `.catch(() => null)` at
+// the call site does NOT suppress the redirect — it only suppresses
+// the rethrown BFFError.
+//
+// Fix: third positional is now `token?: string` and forwarded into
+// bffFetch's `init.token`. The dashboard and the runes store both pass
+// `getStoredToken() ?? undefined` from the call site.
+
+describe('architectures BFF wrapper — Phase 6 drift', () => {
+	beforeEach(() => {
+		vi.mocked(bffFetch).mockReset();
+	});
+
+	const NO_DRIFT = {
+		status: 'no_drift' as const,
+		findings: [],
+		summary: { total: 0, by_type: {} },
+		baseline_version_id: 'v-1',
+		snapshot_at: '2026-06-16T12:00:00Z',
+		computed_at: '2026-06-16T12:00:00Z',
+		drift_report_id: 'rpt-1'
+	};
+
+	it('forwards the token into bffFetch so the dashboard fan-out is authenticated', async () => {
+		vi.mocked(bffFetch).mockResolvedValue(NO_DRIFT);
+
+		await getArchitectureDrift('arch-1', false, 'tok-abc');
+
+		expect(bffFetch).toHaveBeenCalledWith(
+			expect.stringMatching(/architectures\/drift$/),
+			expect.objectContaining({
+				method: 'POST',
+				body: JSON.stringify({ id: 'arch-1', force_refresh: false }),
+				token: 'tok-abc'
+			})
+		);
+	});
+
+	it('forwards the AbortSignal as well as the token', async () => {
+		vi.mocked(bffFetch).mockResolvedValue(NO_DRIFT);
+		const ac = new AbortController();
+
+		await getArchitectureDrift('arch-1', true, 'tok-abc', ac.signal);
+
+		expect(bffFetch).toHaveBeenCalledWith(
+			expect.any(String),
+			expect.objectContaining({
+				token: 'tok-abc',
+				signal: ac.signal,
+				body: JSON.stringify({ id: 'arch-1', force_refresh: true })
+			})
+		);
+	});
+
+	it('omits Authorization when the caller passes undefined (server returns 401, the FIX is the call site, not this fn)', async () => {
+		// This test pins the behaviour change explicitly: when token is
+		// undefined, bffFetch's `init.token` is undefined and no
+		// Authorization header is set. The bug surfaced because callers
+		// were forced into this code path; the fix is to make sure
+		// callers DO pass a token. This test exists so a future
+		// "helpful" change to add `getStoredToken()` inside the fn
+		// itself (which would defeat the testability of token-forward
+		// in node tests) is reviewed deliberately.
+		vi.mocked(bffFetch).mockResolvedValue(NO_DRIFT);
+
+		await getArchitectureDrift('arch-1', false);
+
+		expect(bffFetch).toHaveBeenCalledWith(
+			expect.any(String),
+			expect.objectContaining({ token: undefined })
+		);
 	});
 });
