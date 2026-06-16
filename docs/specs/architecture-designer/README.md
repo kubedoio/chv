@@ -1,6 +1,6 @@
 # CHV Architecture Designer
 
-> **Status:** Proposed feature. The ADRs in this section are `Proposed`, not `Accepted`. No backend or UI implementation exists yet — see [`docs/plans/2026-06-13-architecture-designer-roadmap.md`](../../plans/2026-06-13-architecture-designer-roadmap.md) for the phased plan.
+> **Status:** Implemented (Phases 0–7 shipped 2026-06). The ADRs in this section are `Accepted`. See [`docs/plans/2026-06-13-architecture-designer-implementation-plan.md`](../../plans/2026-06-13-architecture-designer-implementation-plan.md) for the phased implementation history.
 
 Date: 2026-06-13
 Project: CHV / CellHV
@@ -33,7 +33,7 @@ docs/
     └── chvarchitecture-v1alpha1.schema.json          # JSON Schema for the YAML contract
 ```
 
-## ADRs (Proposed)
+## ADRs (Accepted)
 
 - [ADR-001-Designer](../adr/001-designer-first-class-surface.md) — Architecture Designer as a first-class CHV surface
 - [ADR-002-Designer](../adr/002-designer-svelte-flow.md) — Svelte Flow for the editable canvas

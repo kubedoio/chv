@@ -1087,3 +1087,162 @@ async fn list_runs_unknown_architecture_returns_404() {
     .expect_err("unknown arch must error");
     assert_eq!(err_status(&err), 404);
 }
+
+// ---------------------------------------------------------------------------
+// Phase-7 D2 — stale-plan E2E pinned to the actual TTL boundary.
+// ---------------------------------------------------------------------------
+//
+// `apply_expired_plan_returns_409_plan_expired` (test #6 above) jumps
+// +20 minutes — strictly past TTL, but doesn't pin the boundary. The
+// handler logic at `architectures.rs:1033` is `clock.now() > expires_at`
+// (strict inequality) with `expires_at = plan.created_at + 15 min`. So:
+//
+//   - At  T0 + 15 min  exactly → `now > expires_at` is false → ACCEPTED.
+//   - At  T0 + 15 min + 1 ms   → `now > expires_at` is true  → REJECTED.
+//
+// Phase 7 ships three tests that pin all three sides of that boundary,
+// plus the original +16 min "well past" case to assert the error envelope
+// (echoed plan_id). Boundary off-by-one regressions (e.g. flipping `>`
+// to `>=`) silently shift the contract by 60 s of grace; these tests
+// make that invisibly impossible. Reviewer test-analyzer #1.
+
+/// Just-under boundary: at T0 + 15 min - 1 ms the plan is still fresh.
+#[tokio::test]
+async fn architecture_apply_accepts_plan_at_just_under_ttl_boundary() {
+    let t0 = chrono::DateTime::parse_from_rfc3339("2026-06-16T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let clock = ManualClock::new(t0);
+    let state = build_state_with_clock(clock.clone()).await;
+    seed_capable_host(&state).await;
+
+    let arch_id = create_arch(
+        &state,
+        "stale-plan-just-under",
+        Some(HAPPY_YAML.to_string()),
+        None,
+    )
+    .await;
+    let plan = generate_ready_plan(&state, &arch_id).await;
+    let plan_id = plan.plan_id.clone();
+
+    // Advance to one millisecond *before* the TTL boundary.
+    clock.set(t0 + Duration::minutes(15) - Duration::milliseconds(1));
+
+    let result = apply_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(ApplyArchitectureRequest {
+            id: arch_id,
+            plan_id: plan_id.clone(),
+            confirmation: ConfirmationDto::default(),
+            acknowledged_warnings: false,
+        }),
+    )
+    .await;
+
+    // Whatever the result, it MUST NOT be `PlanExpired` — the plan is
+    // still inside TTL. Any other error surface (e.g. orchestrator mock
+    // path) is acceptable for this assertion; we're pinning ONE bit.
+    if let Err(BffError::PlanExpired { .. }) = result {
+        panic!("plan at T0+15min-1ms must NOT be rejected as expired");
+    }
+}
+
+/// At-exact boundary: at T0 + 15 min the plan is still fresh (strict `>`).
+#[tokio::test]
+async fn architecture_apply_accepts_plan_at_exact_ttl_boundary() {
+    let t0 = chrono::DateTime::parse_from_rfc3339("2026-06-16T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let clock = ManualClock::new(t0);
+    let state = build_state_with_clock(clock.clone()).await;
+    seed_capable_host(&state).await;
+
+    let arch_id = create_arch(
+        &state,
+        "stale-plan-at-boundary",
+        Some(HAPPY_YAML.to_string()),
+        None,
+    )
+    .await;
+    let plan = generate_ready_plan(&state, &arch_id).await;
+    let plan_id = plan.plan_id.clone();
+
+    // Set clock to *exactly* TTL: now == expires_at. Strict `>` says
+    // this is fresh.
+    clock.set(t0 + Duration::minutes(15));
+
+    let result = apply_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(ApplyArchitectureRequest {
+            id: arch_id,
+            plan_id: plan_id.clone(),
+            confirmation: ConfirmationDto::default(),
+            acknowledged_warnings: false,
+        }),
+    )
+    .await;
+
+    if let Err(BffError::PlanExpired { .. }) = result {
+        panic!(
+            "plan at exact T0+15min must NOT be rejected as expired \
+             (handler uses strict `>`)"
+        );
+    }
+}
+
+/// Just-over boundary: at T0 + 15 min + 1 ms the plan is expired.
+#[tokio::test]
+async fn architecture_apply_rejects_plan_one_ms_past_ttl_boundary() {
+    let t0 = chrono::DateTime::parse_from_rfc3339("2026-06-16T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let clock = ManualClock::new(t0);
+    let state = build_state_with_clock(clock.clone()).await;
+    seed_capable_host(&state).await;
+
+    let arch_id = create_arch(
+        &state,
+        "stale-plan-one-ms-over",
+        Some(HAPPY_YAML.to_string()),
+        None,
+    )
+    .await;
+    let plan = generate_ready_plan(&state, &arch_id).await;
+    let plan_id = plan.plan_id.clone();
+
+    // One millisecond *past* the TTL boundary. Strict `>` says expired.
+    clock.set(t0 + Duration::minutes(15) + Duration::milliseconds(1));
+
+    let err = apply_architecture(
+        BearerToken(claims_for("operator")),
+        State(state),
+        Json(ApplyArchitectureRequest {
+            id: arch_id,
+            plan_id: plan_id.clone(),
+            confirmation: ConfirmationDto::default(),
+            acknowledged_warnings: false,
+        }),
+    )
+    .await
+    .expect_err("plan one ms past TTL must be rejected as expired");
+
+    assert_eq!(
+        err_status(&err),
+        409,
+        "PLAN_EXPIRED must surface as HTTP 409 Conflict"
+    );
+    match err {
+        BffError::PlanExpired {
+            plan_id: echoed, ..
+        } => {
+            assert_eq!(
+                echoed, plan_id,
+                "PLAN_EXPIRED must echo the plan_id the caller submitted"
+            );
+        }
+        other => panic!("expected BffError::PlanExpired, got {other:?}"),
+    }
+}

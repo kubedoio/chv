@@ -1,0 +1,31 @@
+apiVersion: chv.kubedo.io/v1alpha1
+kind: CHVArchitecture
+
+metadata:
+  name: minimal-arch
+  environment: staging
+
+servers:
+  - name: host-01
+    role: compute
+    resources:
+      cpu_cores: 8
+      memory_gb: 16
+
+networks:
+  - name: lan
+    type: bridge
+    bridge: br0
+    cidr: 10.0.0.0/24
+    gateway: 10.0.0.1
+
+instances:
+  - name: vm-a
+    placement:
+      server: host-01
+    resources:
+      cpu: 1
+      memory_mb: 1024
+    networks:
+      - name: lan
+        ip: 10.0.0.10

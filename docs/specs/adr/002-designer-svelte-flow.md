@@ -1,7 +1,7 @@
 # ADR-002-Designer Use Svelte Flow for the Editable Designer Canvas
 
 Date: 2026-06-13
-Status: Proposed
+Status: Accepted (2026-06-16, Phase 7)
 
 ## Context
 

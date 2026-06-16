@@ -1,7 +1,7 @@
 # ADR-006-Designer Do Not Adopt a Generic Cloudify/TOSCA Engine in MVP
 
 Date: 2026-06-13
-Status: Proposed
+Status: Accepted (2026-06-16, Phase 7)
 
 ## Context
 

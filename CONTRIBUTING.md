@@ -148,3 +148,33 @@ Add quota enforcement to VM create path
 - Review existing ADRs in `docs/specs/adr/` for system boundaries and invariants
 - Check `docs/plans/` for the current sprint roadmap and gap analysis
 - Read `CLAUDE.md` for agent-oriented build and architecture guidance
+
+## Adding a new architecture resource kind
+
+The Architecture Designer (see [`docs/specs/architecture-designer/`](docs/specs/architecture-designer/) and [ADR-001-Designer](docs/specs/adr/001-designer-first-class-surface.md) through [ADR-006-Designer](docs/specs/adr/006-designer-no-tosca-engine.md)) ships a closed set of CHV-native resource kinds — by design, not as a TOSCA-style open type system. Adding a new kind is an end-to-end change that touches the YAML model, schema, validation, diff, UI, and reviewer ladder.
+
+Use this 8-step recipe. The `server` kind is a good reference: search `crates/chv-architecture-validate/src/model.rs` for `Server` to see every touchpoint.
+
+1. **Model** — Add the kind to `crates/chv-architecture-validate/src/model.rs`. Add a struct with `#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]`, attach it to the `CHVArchitecture` aggregate, and update any `enum ResourceKind`-style discriminator. Round-trip through `serde_yaml` MUST work (covered by `tests/yaml_roundtrip.rs`).
+
+2. **JSON Schema** — Update the embedded YAML schema in `crates/chv-architecture-validate/src/schema.rs`. The schema and the Rust type must drift together; the `schema_drift_test` CI gate catches mismatches.
+
+3. **Static checks** — Add validation rules in `crates/chv-architecture-validate/src/static_checks.rs`. At minimum: name uniqueness within the kind, references resolve (e.g. a NIC's `network` points to a defined network), capacity bounds (CPU / memory / disk in the project's accepted ranges). Findings carry stable `code` strings — register the new codes in `crates/chv-architecture-validate/src/codes.rs` (the registry is CI-snapshotted; renames are blocked).
+
+4. **Fleet check** — If the kind has a live counterpart on the running cluster (most do — networks, datastores, instances), wire it into the fleet consistency checker under `crates/chv-architecture-validate/src/fleet/`. The check compares the desired YAML against the latest `inventory_snapshot` and reports `BLOCKED_BY_FLEET` findings when prerequisites aren't satisfied.
+
+5. **Diff rules** — Update `crates/chv-architecture-reconcile/src/diff.rs` with the create / update / delete / replace / noop rules for the kind. Field-level rules decide which mutations are in-place vs. require replacement (e.g. CPU resize is in-place; storage backend change is replace). The diff feeds the planner and shapes the user-visible plan preview.
+
+6. **UI palette and inspector** — Add a draggable palette node under `ui/src/lib/components/architectures/palette/` with the canonical icon and label. Add a corresponding inspector pane (right-hand panel) that exposes every editable field. Keep components under ~300 lines; extract sub-components if the inspector grows. Wire the new kind into the YAML serializer in `ui/src/lib/architectures/yaml.ts` so canvas → YAML round-trips.
+
+7. **Fixtures** — Add at least three fixtures to `crates/chv-architecture-validate/tests/fixtures/`:
+   - **Positive** — a minimal valid topology that includes the new kind.
+   - **Edge case** — boundary values (max name length, max resources of this kind, sparse optional fields).
+   - **Negative** — a topology that violates a static check the new kind introduced; assert the expected `Finding.code`.
+
+8. **Reviewer checklist** — On the PR, request these reviewers (per the Phase 7 review ladder):
+   - `reviewer-api-contract` — confirms the schema change is backward-compatible (additive); flags any breaking field rename or type change.
+   - `reviewer-security` — required if the kind is RBAC-scoped (users, roles, permissions, secrets) or affects a production-environment guarded path.
+   - `reviewer-language-specialist` — Rust and TypeScript idiom and structure review.
+
+Reviewer-test-analyzer should also confirm fixtures cover the new code paths.
