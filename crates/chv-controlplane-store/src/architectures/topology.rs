@@ -292,6 +292,64 @@ impl TopologyRepository {
         tx.commit().await?;
         Ok(topology)
     }
+
+    /// Persist only the lifecycle `status` column of a topology row, with
+    /// the same optimistic-concurrency guarantee as [`Self::update`]. Bumps
+    /// `version_number` because the lifecycle status is part of the
+    /// observable topology state — clients caching the row need to re-read.
+    ///
+    /// This exists as a dedicated entry point because the lifecycle column
+    /// (`draft → applying → applied → drifted/failed`) is driven by the
+    /// apply / drift paths, not by the user-edit path. Going through
+    /// [`Self::update`] would force every caller to plumb a full
+    /// `TopologyUpdateInput` (every other field `None`) through, which is
+    /// what previously caused the column to sit at `draft` for the
+    /// topology's lifetime — no caller bothered. A focused method makes
+    /// the semantics — "record a lifecycle transition" — explicit at the
+    /// call site.
+    ///
+    /// The CAS (`WHERE id = ? AND version_number = expected_version`)
+    /// returns [`StoreError::StaleVersion`] when a concurrent writer bumped
+    /// the row out from under us; the apply path uses that signal to roll
+    /// back the plan-status claim instead of leaving the topology wedged
+    /// in an inconsistent state.
+    pub async fn set_lifecycle_status(
+        &self,
+        id: &ArchitectureId,
+        status: ArchitectureStatus,
+        expected_version: i64,
+    ) -> Result<ArchitectureTopology, StoreError> {
+        let mut tx = self.pool.begin().await?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE architecture_topologies SET
+                status = $2,
+                version_number = version_number + 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
+            "#,
+        )
+        .bind(id.as_str())
+        .bind(status.as_str())
+        .bind(expected_version)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            let probe = fetch_version_and_archived_in_tx(&mut tx, id).await?;
+            tx.rollback().await?;
+            return Err(stale_or_not_found(probe, id, expected_version));
+        }
+
+        let row = sqlx::query(r#"SELECT * FROM architecture_topologies WHERE id = $1"#)
+            .bind(id.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+        let topology = row_to_topology(&row)?;
+        tx.commit().await?;
+        Ok(topology)
+    }
 }
 
 /// Probe the current `(version_number, archived)` state of a topology row

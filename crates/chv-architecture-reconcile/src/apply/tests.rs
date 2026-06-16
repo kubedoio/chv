@@ -40,6 +40,7 @@ struct Fixture {
     ops_repo: OperationRepository,
     runs_repo: ApplyRunRepository,
     plans_repo: PlanRepository,
+    topo_repo: TopologyRepository,
     plan_record: ArchitecturePlan,
     ctx: ApplyContext,
     clock: ManualClock,
@@ -129,12 +130,14 @@ async fn fixture(plan_status: PlanStatus, plan_mode: PlanMode) -> Fixture {
         requested_by: Some("senol".to_string()),
         confirmation: ConfirmationToken::default(),
         acknowledged_warnings: false,
+        topology_version: 1,
     };
 
     Fixture {
         ops_repo: OperationRepository::new(db.pool.clone()),
         runs_repo: ApplyRunRepository::new(db.pool.clone()),
         plans_repo,
+        topo_repo: topo,
         plan_record,
         ctx,
         clock: ManualClock::new(now),
@@ -204,6 +207,7 @@ async fn apply_plan_inserts_one_operation_per_change() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -241,6 +245,7 @@ async fn apply_plan_idempotent_on_retry() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -278,6 +283,7 @@ async fn apply_plan_idempotent_on_retry() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -334,6 +340,7 @@ async fn apply_plan_rejects_missing_typed_name_on_destructive() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -370,6 +377,7 @@ async fn apply_plan_rejects_unacknowledged_warnings() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -406,6 +414,7 @@ async fn apply_plan_skips_no_op_changes() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -434,6 +443,7 @@ async fn apply_plan_marks_run_running_after_first_op() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -473,6 +483,7 @@ async fn apply_plan_rejects_expired_plan() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -509,6 +520,7 @@ async fn apply_plan_rejects_non_ready_to_apply_status() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -562,6 +574,7 @@ async fn apply_plan_rejects_resource_name_containing_double_colon() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -600,6 +613,7 @@ async fn apply_plan_rejects_resource_name_containing_slash() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -632,6 +646,7 @@ async fn apply_plan_transitions_plan_to_applying() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -672,6 +687,7 @@ async fn apply_plan_concurrent_discard_loses_race_returns_plan_not_applicable() 
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -719,6 +735,7 @@ async fn apply_plan_second_call_with_already_applying_plan_returns_plan_not_appl
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -734,6 +751,7 @@ async fn apply_plan_second_call_with_already_applying_plan_returns_plan_not_appl
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
@@ -780,6 +798,7 @@ async fn apply_plan_failure_preserves_started_at() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )

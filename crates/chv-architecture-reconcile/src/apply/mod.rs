@@ -21,10 +21,11 @@
 use chv_common::Clock;
 use chv_controlplane_store::{
     ApplyRunCreateInput, ApplyRunRepository, ApplyRunUpdateInput, OperationCreateInput,
-    OperationRepository, PlanRepository,
+    OperationRepository, PlanRepository, StoreError, TopologyRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureApplyRun, ArchitectureApplyRunId, PlanAction, PlanStatus, ResourceType, RunStatus,
+    ArchitectureApplyRun, ArchitectureApplyRunId, ArchitectureStatus, PlanAction, PlanStatus,
+    ResourceType, RunStatus,
 };
 use chv_controlplane_types::domain::{OperationId, OperationStatus, ResourceId, ResourceKind};
 
@@ -69,12 +70,14 @@ pub struct ApplyOutcome {
 /// plan TTL has elapsed; [`ApplyError::PlanNotApplicable`] when the plan
 /// is not in [`PlanStatus::ReadyToApply`]. All other failures bubble up
 /// from the store as [`ApplyError::Store`].
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_plan(
     plan: &Plan,
     plan_record: &ArchitecturePlan,
     ops_repo: &OperationRepository,
     runs_repo: &ApplyRunRepository,
     plan_repo: &PlanRepository,
+    topology_repo: &TopologyRepository,
     ctx: &ApplyContext,
     clock: &dyn Clock,
 ) -> Result<ApplyOutcome, ApplyError> {
@@ -221,6 +224,96 @@ pub async fn apply_plan(
                 plan_id: ctx.plan_id.to_string(),
                 current_status: current,
             });
+        }
+    }
+
+    // ── 5c. Topology lifecycle CAS: ${current} -> Applying ──────────────
+    //
+    // Move the topology row's `status` column to Applying so the dashboard
+    // badge reflects an in-flight apply. This is the column that previously
+    // sat at `draft` for the topology's lifetime — only set_validation_status
+    // wrote to the topology row, and it touched `last_validation_status`,
+    // not `status`.
+    //
+    // We do this AFTER the plan-status claim because that claim is the
+    // authoritative race-loser detector for concurrent applies. If the
+    // topology CAS itself loses (a concurrent /update bumped the row), we
+    // roll the plan back to ReadyToApply so the system is not wedged with
+    // a half-claimed apply.
+    //
+    // Skip when plan_record.status is already Applying — that path is the
+    // crash-and-resume retry, where the topology was already moved to
+    // Applying on the first attempt and a concurrent edit may have bumped
+    // its version_number since.
+    if plan_record.status == PlanStatus::ReadyToApply {
+        match topology_repo
+            .set_lifecycle_status(
+                &ctx.architecture_id,
+                ArchitectureStatus::Applying,
+                ctx.topology_version,
+            )
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    target: "architecture.apply",
+                    architecture_id = %ctx.architecture_id,
+                    from_status = "draft|valid|invalid|planned|applied|drifted|failed",
+                    to_status = ArchitectureStatus::Applying.as_str(),
+                    topology_version = ctx.topology_version,
+                    "topology lifecycle status transitioned to applying"
+                );
+            }
+            Err(err) => {
+                // Revert the plan-status claim so the next /apply attempt
+                // can re-acquire it cleanly. This is best-effort; if the
+                // revert itself fails we still surface the original error
+                // because the topology row is the durable source of truth
+                // for the dashboard badge.
+                let revert = plan_repo
+                    .update_status_if_current(
+                        &ctx.plan_id,
+                        PlanStatus::Applying,
+                        PlanStatus::ReadyToApply,
+                    )
+                    .await;
+                if let Err(revert_err) = revert {
+                    tracing::warn!(
+                        target: "architecture.apply",
+                        plan_id = %ctx.plan_id,
+                        error = %revert_err,
+                        "failed to revert plan status to ReadyToApply after topology lifecycle CAS failure"
+                    );
+                }
+                let cancel = runs_repo
+                    .update(ApplyRunUpdateInput {
+                        id: run_id.clone(),
+                        status: Some(RunStatus::Cancelled),
+                        started_at: Some(started_at),
+                        finished_at: Some(clock.now()),
+                        task_id: None,
+                        result_json: None,
+                        logs_ref: None,
+                        error_message: Some(format!("topology lifecycle CAS failed: {err}")),
+                    })
+                    .await;
+                if let Err(cancel_err) = cancel {
+                    tracing::warn!(
+                        target: "architecture.apply",
+                        run_id = %run_id,
+                        error = %cancel_err,
+                        "failed to record apply_run cancellation marker after topology CAS failure"
+                    );
+                }
+                tracing::warn!(
+                    target: "architecture.apply",
+                    architecture_id = %ctx.architecture_id,
+                    plan_id = %ctx.plan_id,
+                    error = %err,
+                    "topology lifecycle CAS to Applying failed; aborting apply"
+                );
+                return Err(map_topology_cas_err(err, &ctx.architecture_id));
+            }
         }
     }
 
@@ -438,4 +531,80 @@ fn map_resource_kind(resource_type: ResourceType) -> ResourceKind {
         | ResourceType::Project
         | ResourceType::BackupPolicy => ResourceKind::Vm,
     }
+}
+
+/// Translate a [`StoreError`] from a topology lifecycle CAS into the
+/// caller-visible [`ApplyError`]. A `StaleVersion` is reported as a 409
+/// `PlanNotApplicable` because the user-visible cause is the same as a
+/// concurrent plan-status race ("someone else changed the topology under
+/// you, retry"). Anything else flows through the existing `Store` variant.
+fn map_topology_cas_err(
+    err: StoreError,
+    architecture_id: &chv_controlplane_types::architecture::ArchitectureId,
+) -> ApplyError {
+    match err {
+        StoreError::StaleVersion { .. } => ApplyError::PlanNotApplicable {
+            plan_id: architecture_id.to_string(),
+            current_status: "topology_version_drift".to_string(),
+        },
+        other => ApplyError::Store(other),
+    }
+}
+
+/// Transition a topology row's lifecycle `status` column to a terminal
+/// state (`Applied`, `Failed`, or `Drifted`) after the orchestrator has
+/// resolved an apply run.
+///
+/// This is the second half of the lifecycle wiring: [`apply_plan`] moves
+/// the topology to `Applying` at apply time, and the orchestrator (or
+/// any other completion-time signal — drift writer, manual override)
+/// calls this helper to land the terminal value.
+///
+/// Re-reads the current `version_number` so the caller does not need to
+/// thread it through. The trade-off vs. a CAS on the stale version the
+/// caller saw is:
+///
+/// - the caller's apply context is stale by definition (the apply path
+///   bumped the version when it wrote `Applying`);
+/// - re-reading is a single indexed point query;
+/// - we accept that an interleaving user-edit between read and write
+///   silently overwrites the lifecycle column — that is the desired
+///   behaviour for completion writeback (the system-of-record signal
+///   wins over a user-edit racing with a finishing run).
+///
+/// Returns `Ok(())` on success and a structured [`StoreError`] otherwise.
+/// The `architecture_id`, `to_status`, and (best-effort) `from_status`
+/// are emitted as structured tracing fields per ADR-009.
+pub async fn set_topology_terminal_status(
+    topology_repo: &TopologyRepository,
+    architecture_id: &chv_controlplane_types::architecture::ArchitectureId,
+    status: ArchitectureStatus,
+) -> Result<(), StoreError> {
+    let current = topology_repo.get(architecture_id).await?;
+    let from_status = current.status.as_str().to_string();
+    if current.status == status {
+        // Idempotent: already at target. Skip the write so we do not bump
+        // version_number for a no-op transition (which would needlessly
+        // invalidate any UI cache reading by version).
+        tracing::debug!(
+            target: "architecture.apply",
+            architecture_id = %architecture_id,
+            from_status = %from_status,
+            to_status = status.as_str(),
+            "topology lifecycle already at terminal status; skipping CAS"
+        );
+        return Ok(());
+    }
+    topology_repo
+        .set_lifecycle_status(architecture_id, status, current.version_number)
+        .await?;
+    tracing::info!(
+        target: "architecture.apply",
+        architecture_id = %architecture_id,
+        from_status = %from_status,
+        to_status = status.as_str(),
+        topology_version = current.version_number,
+        "topology lifecycle status transitioned to terminal state"
+    );
+    Ok(())
 }
