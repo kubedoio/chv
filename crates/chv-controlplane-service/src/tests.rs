@@ -1240,6 +1240,11 @@ async fn test_rotate_certificate_returns_not_found_status() {
             request_unix_ms: 1000,
         }),
     });
+    // Bypass mTLS peer-id check for this storage-error focused test.
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(crate::peer_identity::InsecurePeer);
 
     let result = proto::enrollment_service_server::EnrollmentService::rotate_node_certificate(
         &server, request,

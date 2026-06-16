@@ -2,6 +2,7 @@ use crate::enrollment::EnrollmentServiceImplementation;
 use crate::error::ControlPlaneServiceError;
 use crate::inventory::InventoryServiceImplementation;
 use crate::lifecycle::LifecycleServiceImplementation;
+use crate::peer_identity::PeerIdentityInterceptor;
 use crate::reconcile::ReconcileServiceImplementation;
 use crate::telemetry::TelemetryServiceImplementation;
 use chv_controlplane_store::StorePool;
@@ -16,6 +17,9 @@ pub struct ControlPlaneRuntime {
     bind_addr: SocketAddr,
     runtime_dir: PathBuf,
     tls_config: Option<tonic::transport::ServerTlsConfig>,
+    /// When true, the peer-identity interceptor passes through and handlers
+    /// accept the wire-asserted node_id. Set from `CHV_ALLOW_INSECURE=1` only.
+    allow_insecure: bool,
     http_shutdown_tx: tokio::sync::watch::Sender<()>,
     http_join_handle:
         tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>>,
@@ -27,6 +31,7 @@ impl ControlPlaneRuntime {
         bind_addr: SocketAddr,
         runtime_dir: PathBuf,
         tls_config: Option<tonic::transport::ServerTlsConfig>,
+        allow_insecure: bool,
         http_shutdown_tx: tokio::sync::watch::Sender<()>,
         http_join_handle: tokio::task::JoinHandle<Result<(), std::io::Error>>,
         shutdown_rx: tokio::sync::watch::Receiver<()>,
@@ -35,6 +40,7 @@ impl ControlPlaneRuntime {
             bind_addr,
             runtime_dir,
             tls_config,
+            allow_insecure,
             http_shutdown_tx,
             http_join_handle: tokio::sync::Mutex::new(Some(http_join_handle)),
             shutdown_rx,
@@ -51,6 +57,10 @@ impl ControlPlaneRuntime {
 
     pub fn tls_config(&self) -> &Option<tonic::transport::ServerTlsConfig> {
         &self.tls_config
+    }
+
+    pub fn allow_insecure(&self) -> bool {
+        self.allow_insecure
     }
 }
 
@@ -173,29 +183,49 @@ impl ControlPlaneService {
     pub async fn run(&self) -> Result<(), ControlPlaneServiceError> {
         let addr = self.runtime.bind_addr();
 
-        let enrollment_server = proto::enrollment_service_server::EnrollmentServiceServer::new(
-            crate::server::EnrollmentServer::new(Arc::new(
-                self.components.enrollment_service.clone(),
-            )),
-        );
+        // Peer-identity interceptor: pins the wire-asserted node_id to the
+        // peer's mTLS leaf certificate (closes C1/H1 cross-node trust gap).
+        // In CHV_ALLOW_INSECURE=1 mode this is a no-op; in production it
+        // rejects requests without a parseable peer cert.
+        let interceptor = PeerIdentityInterceptor::new(self.runtime.allow_insecure());
+        let make_intercept = || {
+            let interceptor = interceptor.clone();
+            #[allow(clippy::result_large_err)]
+            // tonic::Status is the required error type for tonic interceptors.
+            move |req: tonic::Request<()>| interceptor.intercept(req)
+        };
 
-        let inventory_server = proto::inventory_service_server::InventoryServiceServer::new(
-            crate::server::InventoryServer::new(Arc::new(
-                self.components.inventory_service.clone(),
-            )),
-        );
+        let enrollment_server =
+            proto::enrollment_service_server::EnrollmentServiceServer::with_interceptor(
+                crate::server::EnrollmentServer::new(Arc::new(
+                    self.components.enrollment_service.clone(),
+                )),
+                make_intercept(),
+            );
 
-        let telemetry_server = proto::telemetry_service_server::TelemetryServiceServer::new(
-            crate::server::TelemetryServer::new(Arc::new(
-                self.components.telemetry_service.clone(),
-            )),
-        );
+        let inventory_server =
+            proto::inventory_service_server::InventoryServiceServer::with_interceptor(
+                crate::server::InventoryServer::new(Arc::new(
+                    self.components.inventory_service.clone(),
+                )),
+                make_intercept(),
+            );
 
-        let reconcile_server = proto::reconcile_service_server::ReconcileServiceServer::new(
-            crate::server::ReconcileServer::new(Arc::new(
-                self.components.reconcile_service.clone(),
-            )),
-        );
+        let telemetry_server =
+            proto::telemetry_service_server::TelemetryServiceServer::with_interceptor(
+                crate::server::TelemetryServer::new(Arc::new(
+                    self.components.telemetry_service.clone(),
+                )),
+                make_intercept(),
+            );
+
+        let reconcile_server =
+            proto::reconcile_service_server::ReconcileServiceServer::with_interceptor(
+                crate::server::ReconcileServer::new(Arc::new(
+                    self.components.reconcile_service.clone(),
+                )),
+                make_intercept(),
+            );
 
         let lifecycle_server = proto::lifecycle_service_server::LifecycleServiceServer::new(
             crate::server::LifecycleServer::new(Arc::new(

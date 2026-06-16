@@ -39,8 +39,14 @@ toml = { workspace = true }
 hex = { workspace = true }
 s3 = { workspace = true }
 sha2 = { workspace = true }
+x509-parser = "0.16"
 
 [dev-dependencies]
-x509-parser = "0.16"
 tempfile = "3"
 chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test-util"] }
+control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
+chv-controlplane-types = { path = "../chv-controlplane-types" }
+async-trait = { workspace = true }
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tonic = { workspace = true }

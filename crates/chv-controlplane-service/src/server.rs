@@ -1,8 +1,10 @@
 use crate::enrollment::EnrollmentService;
 use crate::inventory::InventoryService;
 use crate::lifecycle::LifecycleService;
+use crate::peer_identity::verify_peer_matches;
 use crate::reconcile::ReconcileService;
 use crate::telemetry::TelemetryService;
+use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -14,6 +16,28 @@ fn extract_op_id<T>(request: &Request<T>) -> Option<String> {
         .get(chv_common::OPERATION_ID_METADATA_KEY)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
+}
+
+/// Pin the wire-asserted `node_id` to the peer's mTLS-derived identity.
+///
+/// Used by every agent-side handler that accepts a `node_id` from an
+/// authenticated agent. Returns `permission_denied` if the peer's certificate
+/// CN/SAN does not match `requested_node_id`. Closes C1/H1: a compromised
+/// node holding a valid leaf cert can no longer impersonate another node by
+/// sending its `node_id` on the wire.
+///
+/// `enroll_node` is the one path that intentionally skips this — at enrollment
+/// time the agent has no leaf cert yet and is authenticated solely by
+/// bootstrap token.
+#[allow(clippy::result_large_err)] // tonic::Status is the lingua franca of every gRPC handler in this file.
+fn enforce_peer_node_id<T>(
+    request: &Request<T>,
+    requested_node_id: &str,
+    method: &'static str,
+) -> Result<(), Status> {
+    let node_id = NodeId::new(requested_node_id.to_string())
+        .map_err(|e| Status::invalid_argument(format!("invalid node_id: {}", e)))?;
+    verify_peer_matches(request.extensions(), &node_id, method).map_err(Status::from)
 }
 
 pub struct EnrollmentServer {
@@ -48,6 +72,11 @@ impl proto::enrollment_service_server::EnrollmentService for EnrollmentServer {
         request: Request<proto::RotateNodeCertificateRequest>,
     ) -> Result<Response<proto::RotateNodeCertificateResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(
+            &request,
+            &request.get_ref().node_id,
+            "rotate_node_certificate",
+        )?;
         let _span = tracing::info_span!("rotate_node_certificate", %op_id);
         let resp = self
             .service
@@ -63,6 +92,11 @@ impl proto::enrollment_service_server::EnrollmentService for EnrollmentServer {
         request: Request<proto::ReportBootstrapResultRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(
+            &request,
+            &request.get_ref().node_id,
+            "report_bootstrap_result",
+        )?;
         let _span = tracing::info_span!("report_bootstrap_result", %op_id);
         let resp = self
             .service
@@ -91,6 +125,13 @@ impl proto::inventory_service_server::InventoryService for InventoryServer {
         request: Request<proto::ReportNodeInventoryRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        let asserted = request
+            .get_ref()
+            .inventory
+            .as_ref()
+            .map(|i| i.node_id.as_str())
+            .unwrap_or_default();
+        enforce_peer_node_id(&request, asserted, "report_node_inventory")?;
         let _span = tracing::info_span!("report_node_inventory", %op_id);
         let resp = self
             .service
@@ -109,6 +150,13 @@ impl proto::inventory_service_server::InventoryService for InventoryServer {
         request: Request<proto::ReportServiceVersionsRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        let asserted = request
+            .get_ref()
+            .versions
+            .as_ref()
+            .map(|v| v.node_id.as_str())
+            .unwrap_or_default();
+        enforce_peer_node_id(&request, asserted, "report_service_versions")?;
         let _span = tracing::info_span!("report_service_versions", %op_id);
         let resp = self
             .service
@@ -140,6 +188,7 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         request: Request<proto::NodeStateReport>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(&request, &request.get_ref().node_id, "report_node_state")?;
         let _span = tracing::info_span!("report_node_state", %op_id);
         let resp = self
             .service
@@ -158,6 +207,7 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         request: Request<proto::VmStateReport>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(&request, &request.get_ref().node_id, "report_vm_state")?;
         let _span = tracing::info_span!("report_vm_state", %op_id);
         let resp = self
             .service
@@ -176,6 +226,7 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         request: Request<proto::VolumeStateReport>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(&request, &request.get_ref().node_id, "report_volume_state")?;
         let _span = tracing::info_span!("report_volume_state", %op_id);
         let resp = self
             .service
@@ -194,6 +245,7 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         request: Request<proto::NetworkStateReport>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(&request, &request.get_ref().node_id, "report_network_state")?;
         let _span = tracing::info_span!("report_network_state", %op_id);
         let resp = self
             .service
@@ -212,6 +264,7 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         request: Request<proto::PublishEventRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(&request, &request.get_ref().node_id, "publish_event")?;
         let _span = tracing::info_span!("publish_event", %op_id);
         let resp = self
             .service
@@ -230,6 +283,7 @@ impl proto::telemetry_service_server::TelemetryService for TelemetryServer {
         request: Request<proto::PublishAlertRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(&request, &request.get_ref().node_id, "publish_alert")?;
         let _span = tracing::info_span!("publish_alert", %op_id);
         let resp = self
             .service
@@ -871,6 +925,11 @@ impl proto::reconcile_service_server::ReconcileService for ReconcileServer {
         request: Request<proto::AcknowledgeDesiredStateVersionRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
+        enforce_peer_node_id(
+            &request,
+            &request.get_ref().node_id,
+            "acknowledge_desired_state_version",
+        )?;
         let _span = tracing::info_span!("acknowledge_desired_state_version", %op_id);
         let resp = self
             .service

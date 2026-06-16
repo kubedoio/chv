@@ -327,6 +327,7 @@ pub async fn build_service(
         config.grpc_bind,
         config.runtime_dir.clone(),
         tls_config,
+        allow_insecure,
         http_shutdown_tx,
         http_join_handle,
         shutdown_rx.clone(),
