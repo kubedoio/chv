@@ -55,6 +55,25 @@ Use `tracing` as the unified logging framework across all Rust code. Follow thes
   registry (`crates/chv-agent-core/src/migration_registry.rs`) is the
   canonical example; see ADR-008 §6 for the structural rule.
 
+### 7. `warn!` is not a substitute for failing closed
+A `tracing::warn!` line documents that something happened; it does not change
+program control flow. For boot-time gates the operator has opted into (see
+ADR-008 §7), `warn!` followed by `continue` is a category mismatch: it
+downgrades a security/safety boundary to a log line and lets the daemon proceed
+into a degraded state.
+
+When a security/safety gate fails:
+- emit `tracing::error!` with structured fields (path, error, operation),
+- return `Err(...)` to abort the boot or operation,
+- never use `warn!` and continue.
+
+The pattern that motivated this rule:
+- `cmd/chv-controlplane/src/bootstrap.rs::check_compat_matrix` previously logged
+  `warn!("failed to query node versions for compatibility check")` on a
+  `node_inventory` query error and continued boot, silently bypassing an
+  operator-opted-in version gate. That code now emits `tracing::error!` *and*
+  returns `Err`. See H8 in the security review notes.
+
 ## Alternatives Considered
 
 ### `log` crate + `env_logger`

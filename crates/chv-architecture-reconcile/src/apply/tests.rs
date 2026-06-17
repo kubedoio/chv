@@ -868,6 +868,7 @@ async fn apply_plan_rolls_back_to_failed_when_enqueue_errors_mid_apply() {
         &f.ops_repo,
         &f.runs_repo,
         &f.plans_repo,
+        &f.topo_repo,
         &f.ctx,
         &f.clock,
     )
