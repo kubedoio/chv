@@ -93,6 +93,7 @@ async fn topology_list_excludes_archived_by_default() {
     let all = repo
         .list(TopologyListFilter {
             include_archived: true,
+            visible_to_user: None,
         })
         .await
         .expect("list all");

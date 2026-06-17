@@ -222,19 +222,41 @@ pub struct ArchiveArchitectureResponse {
 // ---------------------------------------------------------------------------
 
 /// List topologies. Viewer-accessible. Default scope excludes archived.
+///
+/// **Ownership scoping (Security H5):** non-admin callers see only rows
+/// they own (`owner_user_id == claims.sub`) plus system-owned starter
+/// topologies (`owner_user_id IS NULL`). Admins see every row regardless
+/// of owner. Without this filter every viewer/operator would see every
+/// other operator's drafts and admins' production-tagged topologies —
+/// a multi-tenancy hole flagged by the Phase 7 review.
 pub async fn list_architectures(
-    BearerToken(_claims): BearerToken,
+    BearerToken(claims): BearerToken,
     State(state): State<AppState>,
     Json(req): Json<ListArchitecturesRequest>,
 ) -> Result<Json<ListArchitecturesResponse>, BffError> {
+    let role = Role::parse(&claims.role)
+        .ok_or_else(|| BffError::Internal("unparseable role on authenticated request".into()))?;
+    // Admin sees all rows (None lifts the ownership predicate). Operator and
+    // Viewer get scoped to their own user_id; system-owned starters
+    // (owner_user_id IS NULL) flow through to both via the OR-IS-NULL branch
+    // in the store-layer SQL.
+    let visible_to_user = if matches!(role, Role::Admin) {
+        None
+    } else {
+        Some(claims.sub.clone())
+    };
     tracing::info!(
         include_archived = req.include_archived,
+        actor = %claims.sub,
+        role = ?role,
+        scoped = visible_to_user.is_some(),
         "list_architectures"
     );
     let topologies = state
         .topology_repo
         .list(TopologyListFilter {
             include_archived: req.include_archived,
+            visible_to_user,
         })
         .await?;
     Ok(Json(ListArchitecturesResponse {
