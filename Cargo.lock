@@ -543,7 +543,7 @@ dependencies = [
  "libc",
  "lru",
  "nix 0.29.0",
- "prost 0.13.5",
+ "prost",
  "serde",
  "serde_json",
  "sysinfo 0.30.13",
@@ -769,8 +769,7 @@ dependencies = [
 name = "chv-nwd-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
- "prost-types 0.14.4",
+ "prost",
  "tonic",
  "tonic-build",
 ]
@@ -788,7 +787,7 @@ dependencies = [
  "hyper-util",
  "libbpf-rs",
  "libc",
- "prost 0.13.5",
+ "prost",
  "rusqlite",
  "serde",
  "serde_json",
@@ -835,8 +834,7 @@ dependencies = [
 name = "chv-stord-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
- "prost-types 0.14.4",
+ "prost",
  "tonic",
  "tonic-build",
 ]
@@ -868,7 +866,7 @@ dependencies = [
  "dashmap",
  "hyper-util",
  "nix 0.29.0",
- "prost 0.13.5",
+ "prost",
  "rusqlite",
  "tempfile",
  "tokio",
@@ -918,8 +916,7 @@ dependencies = [
 name = "chv-webui-bff-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
- "prost-types 0.14.4",
+ "prost",
  "tonic",
  "tonic-build",
 ]
@@ -1080,8 +1077,7 @@ dependencies = [
 name = "control-plane-node-api"
 version = "0.2.0"
 dependencies = [
- "prost 0.13.5",
- "prost-types 0.14.4",
+ "prost",
  "tonic",
  "tonic-build",
 ]
@@ -3299,17 +3295,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
 dependencies = [
  "bytes",
- "prost-derive 0.13.5",
-]
-
-[[package]]
-name = "prost"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
-dependencies = [
- "bytes",
- "prost-derive 0.14.4",
+ "prost-derive",
 ]
 
 [[package]]
@@ -3325,8 +3311,8 @@ dependencies = [
  "once_cell",
  "petgraph",
  "prettyplease",
- "prost 0.13.5",
- "prost-types 0.13.5",
+ "prost",
+ "prost-types",
  "regex",
  "syn 2.0.117",
  "tempfile",
@@ -3346,34 +3332,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "prost-derive"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
-dependencies = [
- "anyhow",
- "itertools 0.14.0",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "prost-types"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
- "prost 0.13.5",
-]
-
-[[package]]
-name = "prost-types"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
-dependencies = [
- "prost 0.14.4",
+ "prost",
 ]
 
 [[package]]
@@ -4866,7 +4830,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "prost 0.13.5",
+ "prost",
  "rustls-pemfile",
  "socket2 0.5.10",
  "tokio",
@@ -4887,7 +4851,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "prost-build",
- "prost-types 0.13.5",
+ "prost-types",
  "quote",
  "syn 2.0.117",
 ]
@@ -4899,7 +4863,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1eaf34ddb812120f5c601162d5429933c9b527d901ab0e7f930d3147e33a09b2"
 dependencies = [
  "async-stream",
- "prost 0.13.5",
+ "prost",
  "tokio",
  "tokio-stream",
  "tonic",

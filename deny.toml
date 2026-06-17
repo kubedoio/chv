@@ -169,6 +169,3 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Only the rust-lang GitHub org is allowed for git dependencies. Add other
 # trusted orgs here on a case-by-case basis (and document why in PR review).
 allow-git = []
-
-[sources.allow-org]
-github = ["rust-lang"]
