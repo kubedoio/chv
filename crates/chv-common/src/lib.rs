@@ -40,7 +40,7 @@ pub fn now_unix_ms() -> i64 {
 
 /// Generate a short 8-character lowercase hex resource ID (e.g. "3f7a2bc1").
 pub fn gen_short_id() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let bytes: [u8; 4] = rand::rng().random();
     hex::encode(bytes)
 }

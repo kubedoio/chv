@@ -1,5 +1,5 @@
 use axum::{extract::State, response::Json};
-use rand::Rng;
+use rand::RngExt;
 use serde_json::{json, Value};
 
 use crate::auth::BearerToken;
