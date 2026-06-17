@@ -41,6 +41,12 @@ jobs:
       - name: ADR-009 println!/eprintln! ban (library crates)
         run: ./scripts/check-no-println.sh
 
+      - name: Prometheus alert/emitter label drift gate
+        # Detects rules in monitoring/rules/*.yml that reference label keys
+        # the emitter source code never produces (recurrence guard for the
+        # `metric-label-drift-alert-vs-emitter` retro and PR #108 CR2).
+        run: ./scripts/check-metric-labels.sh
+
       - name: cargo test
         run: cargo test --workspace
 
