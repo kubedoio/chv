@@ -56,6 +56,7 @@ async fn read_sentinel(pool: &chv_controlplane_store::StorePool) -> Option<Strin
 async fn count_topologies(repo: &TopologyRepository) -> usize {
     repo.list(TopologyListFilter {
         include_archived: true,
+        visible_to_user: None,
     })
     .await
     .expect("list topologies")

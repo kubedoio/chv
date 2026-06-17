@@ -41,9 +41,19 @@ pub struct TopologyUpdateInput {
     pub last_fleet_check_status: Option<FleetCheckStatus>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// Filter for [`TopologyRepository::list`].
+///
+/// `visible_to_user` enforces ownership scoping at the data layer (Security
+/// H5: list_architectures was leaking every operator's drafts to every
+/// viewer). `None` means "no scoping — admin/internal callers see all rows";
+/// `Some(user_id)` means "only rows where `owner_user_id = user_id` OR
+/// `owner_user_id IS NULL`". The `IS NULL` half lets system-owned starter
+/// topologies (seeded with `owner_user_id = NULL`) remain universally
+/// visible without each user needing to claim them.
+#[derive(Clone, Debug, Default)]
 pub struct TopologyListFilter {
     pub include_archived: bool,
+    pub visible_to_user: Option<String>,
 }
 
 #[derive(Clone)]
@@ -113,24 +123,70 @@ impl TopologyRepository {
         row_to_topology(&row)
     }
 
+    /// List topologies subject to the supplied [`TopologyListFilter`].
+    ///
+    /// Two independent filters are AND-combined in the SQL:
+    ///
+    /// 1. `include_archived = false` adds `archived_at IS NULL`.
+    /// 2. `visible_to_user = Some(uid)` adds
+    ///    `(owner_user_id = uid OR owner_user_id IS NULL)` — the IS NULL
+    ///    branch is the system-owned-starters carve-out documented on
+    ///    [`TopologyListFilter::visible_to_user`].
+    ///
+    /// `visible_to_user = None` lifts the ownership filter entirely; admin
+    /// callers and intentionally-unscoped internal callers use this path.
     pub async fn list(
         &self,
         filter: TopologyListFilter,
     ) -> Result<Vec<ArchitectureTopology>, StoreError> {
-        let rows = if filter.include_archived {
-            sqlx::query(r#"SELECT * FROM architecture_topologies ORDER BY created_at DESC, id ASC"#)
+        // SQLite's sqlx bindings don't accept the same parameter twice in
+        // one statement reliably across versions, and the dynamic SQL would
+        // require a builder; instead we keep the four shapes static so the
+        // query plan and the parameter slots are obvious at the call site.
+        let rows = match (filter.include_archived, filter.visible_to_user.as_deref()) {
+            (true, None) => {
+                sqlx::query(
+                    r#"SELECT * FROM architecture_topologies ORDER BY created_at DESC, id ASC"#,
+                )
                 .fetch_all(&self.pool)
                 .await?
-        } else {
-            sqlx::query(
-                r#"
+            }
+            (false, None) => {
+                sqlx::query(
+                    r#"
                 SELECT * FROM architecture_topologies
                 WHERE archived_at IS NULL
                 ORDER BY created_at DESC, id ASC
                 "#,
-            )
-            .fetch_all(&self.pool)
-            .await?
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (true, Some(uid)) => {
+                sqlx::query(
+                    r#"
+                SELECT * FROM architecture_topologies
+                WHERE (owner_user_id = $1 OR owner_user_id IS NULL)
+                ORDER BY created_at DESC, id ASC
+                "#,
+                )
+                .bind(uid)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (false, Some(uid)) => {
+                sqlx::query(
+                    r#"
+                SELECT * FROM architecture_topologies
+                WHERE archived_at IS NULL
+                  AND (owner_user_id = $1 OR owner_user_id IS NULL)
+                ORDER BY created_at DESC, id ASC
+                "#,
+                )
+                .bind(uid)
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
 
         rows.iter().map(row_to_topology).collect()
