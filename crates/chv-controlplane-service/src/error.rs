@@ -18,6 +18,9 @@ pub enum ControlPlaneServiceError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
     #[error("conflict: {0}")]
     Conflict(String),
 
@@ -51,6 +54,7 @@ impl From<ControlPlaneServiceError> for tonic::Status {
             ControlPlaneServiceError::NotFound(msg) => Status::not_found(msg),
             ControlPlaneServiceError::InvalidArgument(msg) => Status::invalid_argument(msg),
             ControlPlaneServiceError::Unauthorized(msg) => Status::unauthenticated(msg),
+            ControlPlaneServiceError::PermissionDenied(msg) => Status::permission_denied(msg),
             ControlPlaneServiceError::Conflict(msg) => Status::already_exists(msg),
             ControlPlaneServiceError::StaleGeneration { expected, received } => {
                 Status::failed_precondition(format!(

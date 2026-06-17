@@ -16,6 +16,7 @@ mod node_client;
 mod node_client_pool;
 mod orchestrator;
 pub mod overlay;
+pub mod peer_identity;
 mod reconcile;
 mod server;
 pub mod systemd_upgrader;
@@ -39,6 +40,10 @@ pub use node_client::NodeClient;
 pub use node_client_pool::NodeClientPool;
 pub use orchestrator::Orchestrator;
 pub use overlay::OverlayManager;
+pub use peer_identity::{
+    extract_peer_node_id_from_extensions, parse_node_id_from_der, verify_peer_matches,
+    InsecurePeer, PeerIdentityError, PeerIdentityInterceptor, PeerNodeId,
+};
 pub use reconcile::{ReconcileService, ReconcileServiceImplementation};
 pub use server::{
     EnrollmentServer, InventoryServer, LifecycleServer, ReconcileServer, TelemetryServer,
