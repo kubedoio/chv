@@ -7,6 +7,7 @@ pub mod executor;
 pub mod firewall;
 pub mod handlers;
 pub mod link_monitor;
+pub mod migrations;
 pub mod reconcile;
 pub mod server;
 pub mod state;
