@@ -61,6 +61,20 @@ impl Role {
     }
 }
 
+/// True if `role` carries the implicit `architecture:apply` permission used
+/// by the drift heuristic in `chv-architecture-reconcile`. Admin and Operator
+/// hold the permission; Viewer does not.
+///
+/// Centralised so all drift call sites in `handlers::architectures` agree on
+/// the mapping. Co-located with `Role` so any future role addition has to
+/// make a deliberate decision here.
+pub fn has_apply_permission(role: &Role) -> bool {
+    match role {
+        Role::Admin | Role::Operator => true,
+        Role::Viewer => false,
+    }
+}
+
 fn forbidden_response() -> Response {
     (
         StatusCode::FORBIDDEN,
