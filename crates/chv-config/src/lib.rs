@@ -1,6 +1,6 @@
 pub mod cert_watcher;
 
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
