@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
+chv-controlplane-seed = { path = "../chv-controlplane-seed" }
 chv-errors = { path = "../chv-errors" }
 chv-webui-bff = { path = "../chv-webui-bff" }
 chv-webui-bff-api = { path = "../../gen/rust/chv-webui-bff-api" }

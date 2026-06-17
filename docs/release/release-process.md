@@ -44,7 +44,20 @@ Add a section for the new version:
 
 Stable releases **require** a changelog entry. The CI workflow will fail if it is missing.
 
-### 3. Commit and push
+### 3. Schema-bump checklist (architecture model)
+
+If this release adds, removes, or renames a required field on `chv_architecture_validate::model::CHVArchitecture`, the six embedded starter topology YAMLs in `crates/chv-controlplane-seed/fixtures/` must be updated atomically — the seeder fails closed on a fixture that doesn't parse, so a bumped schema with stale fixtures takes the controlplane down on first boot.
+
+Run the per-fixture round-trip suite as a release-cut gate:
+
+```bash
+cargo test -p chv-controlplane-seed --test fixtures_round_trip
+cargo test -p chv-controlplane-seed --test seed_idempotency
+```
+
+If `fixtures_round_trip` fails, update each affected starter YAML to satisfy the new schema, re-run, and only then proceed to the commit-and-push step. The starter YAMLs are checked-in source — never hand-edit a generated row in `architecture_topologies` to fix a bumped schema.
+
+### 4. Commit and push
 
 ```bash
 git add VERSION Cargo.toml ui/package.json CHANGELOG.md
