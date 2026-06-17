@@ -42,6 +42,19 @@ Use `tracing` as the unified logging framework across all Rust code. Follow thes
 - `debug!` — request/response details, reconciliation loop iterations
 - `trace!` — internal state dumps, per-packet details (use sparingly)
 
+### 6. Detached background tasks must surface terminal status
+- Any task spawned via `tokio::spawn` whose `JoinHandle` outlives the
+  spawning function **must** be reaped by a small follow-up task that:
+  1. `await`s the `JoinHandle`,
+  2. emits an `info!` (Ok), `error!` (Err), or `warn!` (cancelled) breadcrumb
+     tagged with `operation_id`,
+  3. removes the entry from any tracking registry.
+- Without this, terminal `Err` values from spawned futures are silently
+  swallowed and operators cannot tell whether a long-running operation
+  succeeded, failed, or was aborted. The agent-side migration task
+  registry (`crates/chv-agent-core/src/migration_registry.rs`) is the
+  canonical example; see ADR-008 §6 for the structural rule.
+
 ## Alternatives Considered
 
 ### `log` crate + `env_logger`

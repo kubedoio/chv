@@ -1,5 +1,6 @@
 use crate::cache::{NodeCache, VmNicAttachment};
 use crate::control_plane::ControlPlaneClient;
+use crate::migration_registry::MigrationTaskRegistry;
 use crate::reconcile::{bridge_name_for_network, cleanup_vm_resources, vm_runtime_dir};
 use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
@@ -11,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::warn;
 
@@ -22,6 +24,13 @@ pub struct AgentServer {
     pub nwd_socket: std::path::PathBuf,
     pub cache_path: Option<std::path::PathBuf>,
     pub runtime_dir: std::path::PathBuf,
+    /// Tracks in-flight migration tasks for cancellation and shutdown.
+    ///
+    /// Before this field existed, `migrate_vm` spawned a `JoinHandle` that
+    /// was dropped on the floor — meaning the agent could not abort, reap, or
+    /// observe failures of long-running migration tasks. The registry closes
+    /// that gap. See [`MigrationTaskRegistry`] and ADR-008 / ADR-009.
+    pub migration_tasks: Arc<MigrationTaskRegistry>,
 }
 
 impl AgentServer {
@@ -40,7 +49,23 @@ impl AgentServer {
             nwd_socket,
             cache_path,
             runtime_dir,
+            migration_tasks: Arc::new(MigrationTaskRegistry::new()),
         }
+    }
+
+    /// Cancel a tracked migration task by its `operation_id`.
+    ///
+    /// Triggers both the cooperative `CancellationToken` (so phase boundaries
+    /// in the migration future bail out cleanly) and the `AbortHandle` (so the
+    /// future is force-dropped at its next `.await` if it doesn't honor the
+    /// token quickly). Returns `true` if a task was found and signalled.
+    pub fn cancel_migration(&self, operation_id: &str) -> bool {
+        self.migration_tasks.cancel(operation_id)
+    }
+
+    /// Abort every in-flight migration task. Used on agent shutdown.
+    pub fn shutdown_migrations(&self) {
+        self.migration_tasks.abort_all();
     }
 
     async fn persist_cache(&self, cache: &NodeCache) {
@@ -1896,14 +1921,56 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     "source agent: ACKing migrate_vm, spawning disk+memory migration task"
                 );
 
-                crate::migration::spawn_source_migration_with_disk_precopy(
-                    vm_runtime,
-                    vm_id,
-                    operation_id.clone(),
-                    destination_url,
-                    disk_config,
-                    Some(progress_reporter),
-                );
+                // Track the spawned migration so it can be cancelled by
+                // operator request and aborted on agent shutdown. Without
+                // this, the JoinHandle was dropped on the floor and the agent
+                // had no way to abort, reap, or surface terminal failure.
+                let cancel_token = CancellationToken::new();
+                let registry = self.migration_tasks.clone();
+                let op_id_for_task = operation_id.clone();
+                let op_id_for_log = operation_id.clone();
+                let cancel_for_task = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    crate::migration::source_migration_with_disk_precopy(
+                        vm_runtime,
+                        vm_id,
+                        op_id_for_task,
+                        destination_url,
+                        disk_config,
+                        Some(progress_reporter),
+                        cancel_for_task,
+                    )
+                    .await
+                });
+                let abort_handle = handle.abort_handle();
+                self.migration_tasks
+                    .insert(operation_id.clone(), abort_handle, cancel_token);
+
+                // Reaper: await the task, log terminal status, remove from registry.
+                let reap_op = operation_id.clone();
+                tokio::spawn(async move {
+                    match handle.await {
+                        Ok(Ok(())) => tracing::info!(
+                            operation_id = %op_id_for_log,
+                            "source migration task completed"
+                        ),
+                        Ok(Err(e)) => tracing::error!(
+                            operation_id = %op_id_for_log,
+                            error = %e,
+                            "source migration task failed"
+                        ),
+                        Err(join_err) if join_err.is_cancelled() => tracing::warn!(
+                            operation_id = %op_id_for_log,
+                            "source migration task aborted"
+                        ),
+                        Err(join_err) => tracing::error!(
+                            operation_id = %op_id_for_log,
+                            error = %join_err,
+                            "source migration task panicked"
+                        ),
+                    }
+                    registry.remove(&reap_op);
+                });
             }
             crate::migration::MigrationRole::Destination => {
                 // Destination agent: open receive-migration socket.
@@ -1923,12 +1990,47 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     "destination agent: ACKing migrate_vm, spawning receive-migration task"
                 );
 
-                crate::migration::spawn_destination_migration(
+                // Destination side has no cooperative cancel-aware variant
+                // yet (CH receive-migration is a single blocking call). The
+                // cancel token is still tracked so the abort_handle path
+                // force-drops the future at its next .await point.
+                let cancel_token = CancellationToken::new();
+                let registry = self.migration_tasks.clone();
+                let op_id_for_log = operation_id.clone();
+                let handle = crate::migration::spawn_destination_migration(
                     vm_runtime,
                     vm_id,
                     operation_id.clone(),
                     receiver_url,
                 );
+                let abort_handle = handle.abort_handle();
+                self.migration_tasks
+                    .insert(operation_id.clone(), abort_handle, cancel_token);
+
+                let reap_op = operation_id.clone();
+                tokio::spawn(async move {
+                    match handle.await {
+                        Ok(Ok(())) => tracing::info!(
+                            operation_id = %op_id_for_log,
+                            "destination migration task completed"
+                        ),
+                        Ok(Err(e)) => tracing::error!(
+                            operation_id = %op_id_for_log,
+                            error = %e,
+                            "destination migration task failed"
+                        ),
+                        Err(join_err) if join_err.is_cancelled() => tracing::warn!(
+                            operation_id = %op_id_for_log,
+                            "destination migration task aborted"
+                        ),
+                        Err(join_err) => tracing::error!(
+                            operation_id = %op_id_for_log,
+                            error = %join_err,
+                            "destination migration task panicked"
+                        ),
+                    }
+                    registry.remove(&reap_op);
+                });
             }
         }
 
@@ -2053,6 +2155,24 @@ mod tests {
             None,
             std::path::PathBuf::from("/var/lib/chv/agent"),
         )
+    }
+
+    /// `cancel_migration` returns false when the op_id is unknown — proves
+    /// the public API doesn't accidentally swallow operator errors.
+    #[tokio::test]
+    async fn cancel_migration_returns_false_for_unknown_op_id() {
+        let server = test_server();
+        assert!(!server.cancel_migration("op-does-not-exist"));
+        assert_eq!(server.migration_tasks.len(), 0);
+    }
+
+    /// `shutdown_migrations` is a no-op on an empty registry — proves the
+    /// graceful-shutdown entry point is safe to call unconditionally.
+    #[tokio::test]
+    async fn shutdown_migrations_on_empty_registry_is_noop() {
+        let server = test_server();
+        server.shutdown_migrations();
+        assert_eq!(server.migration_tasks.len(), 0);
     }
 
     fn test_meta(desired_state_version: &str) -> proto::RequestMeta {

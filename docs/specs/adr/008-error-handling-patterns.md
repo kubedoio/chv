@@ -42,6 +42,23 @@ Use `chv-errors` as the single structured error crate across the entire Rust wor
 - `Internal` signals an invariant violation or bug (not retriably by default)
 - Callers decide retry policy based on the error variant, not string matching
 
+### 6. Detached background tasks must be tracked, not fire-and-forget
+- gRPC handlers that spawn long-running work (e.g. `migrate_vm` ACKing
+  immediately and running migration in the background) **must** retain a
+  handle to the spawned task so its terminal `Err` is observable.
+- Every detached task is registered in a per-service registry keyed by
+  `operation_id` and reaped when the task completes. The registry stores an
+  `AbortHandle` (force-drop at next `.await`) and a `CancellationToken`
+  (cooperative bail-out at phase boundaries).
+- The agent-side
+  [`MigrationTaskRegistry`](../../../crates/chv-agent-core/src/migration_registry.rs)
+  is the canonical example: `migrate_vm` registers the spawned future so
+  operator-issued cancel and agent shutdown can both abort it; the reaper
+  logs terminal status and removes the entry.
+- Plain `tokio::spawn(...);` with the `JoinHandle` dropped on the floor is
+  **forbidden** for any task that can outlive its caller. The compiler will
+  not catch this — code review and tests must.
+
 ## Alternatives Considered
 
 ### `anyhow` everywhere

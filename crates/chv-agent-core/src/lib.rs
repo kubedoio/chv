@@ -10,6 +10,7 @@ pub mod health;
 pub mod inventory;
 pub mod metrics_server;
 pub mod migration;
+pub mod migration_registry;
 pub mod reconcile;
 pub mod spec;
 pub mod state_machine;
