@@ -798,3 +798,87 @@ async fn apply_plan_failure_preserves_started_at() {
         chv_controlplane_types::architecture::RunStatus::Failed
     );
 }
+
+// ── H4: plan rolls back to Failed when enqueue errors mid-loop ─────────────
+//
+// Pre-fix bug: after the CAS to `Applying` succeeds, if `enqueue_change`
+// fails partway through the change list the apply_run is marked `Failed`
+// but the *plan* row stays in `Applying`. The BFF discard handler refuses
+// a plan in `Applying` (it is normally a transient state), so the
+// operator gets a ghost plan they can neither retry nor discard until the
+// 15-minute TTL expires the row out — and even then `Failed`/`Expired`
+// were non-discardable in the legacy handler.
+//
+// Post-fix contract: when the enqueue arm errors, we roll the plan row
+// back to `Failed` before returning so the operator has a clean retry
+// path (re-plan, re-apply) AND a clean abandon path (discard the now-
+// `Failed` plan). The apply_run continues to be marked `Failed` so the
+// run-history UI renders correctly. The original error is propagated
+// regardless of whether the rollback succeeds — masking it would hide
+// the real failure cause.
+
+#[tokio::test]
+async fn apply_plan_rolls_back_to_failed_when_enqueue_errors_mid_apply() {
+    let f = fixture(PlanStatus::ReadyToApply, PlanMode::Apply).await;
+
+    // Three Create changes: even if the first one were to succeed (it
+    // won't, because we drop the table) the second/third would also
+    // fail. We want the rollback to fire on the first iteration's error
+    // and leave the plan in `Failed`.
+    let plan = plan_with(
+        vec![
+            change(PlanAction::Create, ResourceType::Instance, "vm-1"),
+            change(PlanAction::Create, ResourceType::Network, "net-1"),
+            change(PlanAction::Update, ResourceType::Datastore, "ds-1"),
+        ],
+        PlanMode::Apply,
+        vec![],
+    );
+
+    // Drop the operations table so any `create_or_get` errors out from
+    // the store layer — same shape as a transient SQLite write failure
+    // mid-loop in production.
+    sqlx::query("DROP TABLE operations")
+        .execute(f.ops_repo.pool())
+        .await
+        .expect("drop operations");
+
+    let err = apply_plan(
+        &plan,
+        &f.plan_record,
+        &f.ops_repo,
+        &f.runs_repo,
+        &f.plans_repo,
+        &f.ctx,
+        &f.clock,
+    )
+    .await
+    .expect_err("enqueue failure must propagate");
+
+    // Original store error must surface unmasked.
+    assert!(
+        matches!(err, ApplyError::Store(_)),
+        "expected ApplyError::Store, got {err:?}"
+    );
+
+    // The apply_run row should be Failed (matches existing
+    // `apply_plan_failure_preserves_started_at` contract).
+    let runs = f.runs_repo.list_for_architecture(&aid()).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].status,
+        chv_controlplane_types::architecture::RunStatus::Failed,
+        "apply_run must be marked Failed when enqueue errors"
+    );
+
+    // The plan row must be rolled back to Failed — NOT stuck in Applying.
+    // This is the H4 regression: pre-fix the plan stayed in `Applying`
+    // forever (until 15-min TTL) and the operator could not discard it.
+    let plan_after = f.plans_repo.get(&pid()).await.unwrap();
+    assert_eq!(
+        plan_after.status,
+        PlanStatus::Failed,
+        "plan must be rolled back to Failed (not stuck in Applying) when enqueue errors mid-loop; got {:?}",
+        plan_after.status
+    );
+}

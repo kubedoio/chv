@@ -37,8 +37,9 @@ use chv_controlplane_types::architecture::{
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
     apply_architecture, create_architecture, destroy_architecture, destroy_plan_architecture,
-    list_architecture_runs, plan_architecture, ApplyArchitectureRequest, ConfirmationDto,
-    CreateArchitectureRequest, ListApplyRunsRequest, PlanArchitectureRequest,
+    discard_plan_architecture, list_architecture_runs, plan_architecture, ApplyArchitectureRequest,
+    ConfirmationDto, CreateArchitectureRequest, DiscardPlanRequest, ListApplyRunsRequest,
+    PlanArchitectureRequest,
 };
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};
@@ -1245,4 +1246,106 @@ async fn architecture_apply_rejects_plan_one_ms_past_ttl_boundary() {
         }
         other => panic!("expected BffError::PlanExpired, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// H4: enqueue failure mid-apply rolls plan back to Failed → discard succeeds
+//
+// Scenario: an operator clicks Apply, the apply handler claims the plan
+// (CAS ReadyToApply → Applying) and starts enqueueing per-change
+// operations, but a transient store failure errors mid-loop. Pre-fix the
+// plan stayed in `Applying` forever (until 15-minute TTL) and the
+// discard-plan handler refused with 409 PLAN_NOT_DISCARDABLE because
+// `Applying` and `Failed` were both non-discardable. Post-fix:
+//   1. apply_plan rolls the row back to `Failed` before returning the
+//      enqueue error;
+//   2. the discard handler accepts a `Failed` plan and returns 200 so
+//      the operator can clean up without waiting for the TTL.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn apply_enqueue_failure_rolls_plan_back_to_failed_and_discard_succeeds() {
+    let clock = ManualClock::new(t0());
+    let state = build_state_with_clock(clock).await;
+    seed_capable_host(&state).await;
+    let arch_id = create_arch(&state, "h4-rollback", Some(HAPPY_YAML.to_string()), None).await;
+    let plan = generate_ready_plan(&state, &arch_id).await;
+
+    // Force a mid-apply enqueue failure by dropping the operations table
+    // before the apply call lands. The reconcile crate's `create_or_get`
+    // hits a hard SQLite error on the very first change, exercising the
+    // `Err(err)` arm of the per-change loop in apply_plan — same shape
+    // as a transient write failure mid-apply in production.
+    sqlx::query("DROP TABLE operations")
+        .execute(&state.pool)
+        .await
+        .expect("drop operations");
+
+    let err = apply_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(ApplyArchitectureRequest {
+            id: arch_id.clone(),
+            plan_id: plan.plan_id.clone(),
+            confirmation: ConfirmationDto::default(),
+            acknowledged_warnings: false,
+        }),
+    )
+    .await
+    .expect_err("apply must surface the enqueue failure");
+    // The enqueue failure bubbles up as Internal — the BFF doesn't re-map
+    // store errors, and the test cares about the *side effects* (plan
+    // status + discard behaviour), not the precise HTTP code.
+    assert!(
+        matches!(err, BffError::Internal(_)),
+        "expected BffError::Internal from store failure, got {err:?}"
+    );
+
+    // The plan row must be `Failed` post-rollback — NOT `Applying`. This
+    // is the H4 contract: after enqueue failure the plan is a clean
+    // terminal state from which retry/discard both work.
+    let plan_repo = PlanRepository::new(state.pool.clone());
+    let plan_after = plan_repo
+        .get(&ArchitecturePlanId::new(plan.plan_id.clone()).unwrap())
+        .await
+        .expect("re-fetch plan");
+    assert_eq!(
+        plan_after.status,
+        PlanStatus::Failed,
+        "plan must be rolled back from Applying to Failed; got {:?}",
+        plan_after.status
+    );
+
+    // The apply_run row must record the failure with a started_at so the
+    // run-history UI renders a duration.
+    let runs_repo = ApplyRunRepository::new(state.pool.clone());
+    let arch = ArchitectureId::new(arch_id.clone()).unwrap();
+    let runs = runs_repo
+        .list_for_architecture(&arch)
+        .await
+        .expect("list runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert!(runs[0].started_at.is_some());
+
+    // The operator must now be able to discard the plan without waiting
+    // for the 15-minute TTL — pre-fix this returned 409
+    // PLAN_NOT_DISCARDABLE because the plan was stuck in `Applying`.
+    let discard_resp = discard_plan_architecture(
+        BearerToken(claims_for("operator")),
+        State(state.clone()),
+        Json(DiscardPlanRequest {
+            plan_id: plan.plan_id.clone(),
+        }),
+    )
+    .await
+    .expect("discard must succeed for a Failed plan after H4 rollback");
+    assert_eq!(discard_resp.0.status, "discarded");
+
+    // The plan row is now Discarded.
+    let plan_after_discard = plan_repo
+        .get(&ArchitecturePlanId::new(plan.plan_id.clone()).unwrap())
+        .await
+        .expect("re-fetch plan after discard");
+    assert_eq!(plan_after_discard.status, PlanStatus::Discarded);
 }

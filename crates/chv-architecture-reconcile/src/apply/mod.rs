@@ -269,6 +269,56 @@ pub async fn apply_plan(
                         "failed to record apply_run failure marker after enqueue failure"
                     );
                 }
+                // ── H4: roll the plan row back to Failed ─────────────────
+                //
+                // Without this rollback the plan stays in `Applying`
+                // (claimed by the CAS at step 5b) and the operator can
+                // neither retry nor discard it until the 15-minute TTL
+                // passes — and even then the row was non-discardable in
+                // the legacy BFF handler. Marking the plan `Failed`
+                // gives the operator a clean retry path (re-plan,
+                // re-apply) AND a clean abandon path (discard).
+                //
+                // We use a CAS (Applying -> Failed) to avoid clobbering
+                // a status the orchestrator may have already advanced
+                // out of `Applying` in the unlikely interleaving where
+                // an out-of-band actor moved the row. If the CAS is a
+                // no-op (`Ok(false)`) we leave the row alone.
+                //
+                // Failures here are logged but never mask the original
+                // store error — the caller needs the real cause to
+                // diagnose the underlying enqueue failure.
+                let rollback = plan_repo
+                    .update_status_if_current(
+                        &ctx.plan_id,
+                        PlanStatus::Applying,
+                        PlanStatus::Failed,
+                    )
+                    .await;
+                match rollback {
+                    Ok(true) => tracing::error!(
+                        target: "architecture.apply",
+                        plan_id = %ctx.plan_id,
+                        run_id = %run_id,
+                        error = %err,
+                        "enqueue failed mid-apply; plan rolled back from Applying to Failed"
+                    ),
+                    Ok(false) => tracing::warn!(
+                        target: "architecture.apply",
+                        plan_id = %ctx.plan_id,
+                        run_id = %run_id,
+                        error = %err,
+                        "enqueue failed mid-apply; plan was not in Applying so rollback CAS was a no-op"
+                    ),
+                    Err(rollback_err) => tracing::error!(
+                        target: "architecture.apply",
+                        plan_id = %ctx.plan_id,
+                        run_id = %run_id,
+                        error = %err,
+                        rollback_error = %rollback_err,
+                        "enqueue failed mid-apply; plan rollback to Failed also errored — plan may be wedged in Applying until TTL"
+                    ),
+                }
                 return Err(err);
             }
         }

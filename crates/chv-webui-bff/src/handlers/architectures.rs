@@ -761,7 +761,22 @@ pub async fn discard_plan_architecture(
         }));
     }
     match plan.status {
-        PlanStatus::Applying | PlanStatus::Applied | PlanStatus::Failed | PlanStatus::Expired => {
+        // `Applying` is transient by design: apply_plan rolls the row to
+        // `Failed` (H4 fix) before returning any error, so a plan
+        // observed as `Applying` is a real in-flight apply and the
+        // operator must wait for it to terminate.
+        //
+        // `Applied` is the success terminal state — discarding it would
+        // erase audit history.
+        //
+        // `Expired` is auto-set by the TTL sweeper; the row is no
+        // longer actionable but still kept for audit.
+        //
+        // `Failed` is *discardable*: the H4 contract is that an enqueue
+        // failure rolls the plan back to `Failed` so the operator has a
+        // clean abandon path. Allowing discard from `Failed` lets the
+        // UI clean up the row without waiting for the 15-minute TTL.
+        PlanStatus::Applying | PlanStatus::Applied | PlanStatus::Expired => {
             return Err(BffError::PlanNotDiscardable {
                 plan_id: plan_id.to_string(),
                 current_status: plan.status,

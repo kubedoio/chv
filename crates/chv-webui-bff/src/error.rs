@@ -30,11 +30,13 @@ pub enum BffError {
         plan_id: String,
         message: String,
     },
-    /// 409 — discard-plan was called against a plan in a terminal state
-    /// (`Applying`, `Applied`, `Failed`, `Expired`). The Phase-4 contract
-    /// only allows discard from non-terminal states (`Draft`,
-    /// `FailedValidation`, `RequiresConfirmation`, `ReadyToApply`). Surfaced
-    /// as `code: "PLAN_NOT_DISCARDABLE"` so the UI can render a clear
+    /// 409 — discard-plan was called against a plan in a non-discardable
+    /// state (`Applying`, `Applied`, `Expired`). Discard is allowed from
+    /// non-terminal states (`Draft`, `FailedValidation`,
+    /// `RequiresConfirmation`, `ReadyToApply`) AND from the `Failed`
+    /// terminal so the operator can abandon a plan whose apply errored
+    /// mid-loop (H4) without waiting for the 15-minute TTL. Surfaced as
+    /// `code: "PLAN_NOT_DISCARDABLE"` so the UI can render a clear
     /// "this plan can no longer be discarded" message.
     PlanNotDiscardable {
         plan_id: String,
