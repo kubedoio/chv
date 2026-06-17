@@ -15,6 +15,7 @@ chv-stord-api = { path = "../../gen/rust/chv-stord-api" }
 chv-nwd-api = { path = "../../gen/rust/chv-nwd-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 tokio = { workspace = true }
+tokio-util = "0.7"
 tonic = { workspace = true }
 prost = { workspace = true }
 tracing = { workspace = true }
