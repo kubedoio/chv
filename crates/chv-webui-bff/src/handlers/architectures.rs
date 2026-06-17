@@ -1567,6 +1567,7 @@ async fn apply_inner_core(
         requested_by: Some(claims.sub.clone()),
         confirmation: req.confirmation.into(),
         acknowledged_warnings: req.acknowledged_warnings,
+        topology_version: architecture.version_number,
     };
 
     let outcome: ApplyOutcome = apply_plan(
@@ -1575,6 +1576,7 @@ async fn apply_inner_core(
         &state.operation_repo,
         state.apply_runs.as_ref(),
         &plan_repo,
+        &state.topology_repo,
         &ctx,
         state.clock.as_ref(),
     )
@@ -1869,6 +1871,33 @@ pub async fn get_architecture_drift(
             };
             record_drift_status(label);
 
+            // Transition the topology row's lifecycle `status` column so
+            // the dashboard badge matches the freshly-persisted drift
+            // result. We only move the column for `NoDrift` (back to
+            // `applied`) and `Drifted` — `Unknown` and `CheckFailed` mean
+            // we genuinely do not know whether the deployed fleet matches
+            // the baseline, so leaving the existing badge alone is more
+            // honest than overwriting it with a guess. Best-effort: a
+            // failure here is logged but does not fail the drift response
+            // because the drift_report is the durable signal.
+            if let Some(target) = drift_status_to_topology_status(report.status) {
+                if let Err(err) = chv_architecture_reconcile::apply::set_topology_terminal_status(
+                    &state.topology_repo,
+                    &architecture_id,
+                    target,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        target: "architecture.drift",
+                        architecture_id = %architecture_id,
+                        to_status = target.as_str(),
+                        error = %err,
+                        "failed to transition topology lifecycle status from drift result"
+                    );
+                }
+            }
+
             tracing::info!(
                 target: "architecture.drift",
                 architecture_id = %architecture_id,
@@ -2049,6 +2078,24 @@ pub async fn list_architecture_versions(
 fn parse_id(id: &str) -> Result<ArchitectureId, BffError> {
     ArchitectureId::new(id)
         .map_err(|e| BffError::BadRequest(format!("invalid architecture id: {e}")))
+}
+
+/// Map a [`DriftStatus`] (per-report outcome) to the topology lifecycle
+/// `status` column the dashboard badge reads.
+///
+/// - `Drifted`  → `Drifted`    (the deployed fleet diverged from the baseline)
+/// - `NoDrift`  → `Applied`    (re-confirms the topology is in sync)
+/// - `Unknown`  → `None`       (do not overwrite — the previous status is more honest than a guess)
+/// - `CheckFailed` → `None`    (snapshot capture failed; same reasoning)
+///
+/// Returning `None` is the signal to the caller to leave the lifecycle
+/// column untouched rather than write a value that is misleading.
+fn drift_status_to_topology_status(status: DriftStatus) -> Option<ArchitectureStatus> {
+    match status {
+        DriftStatus::Drifted => Some(ArchitectureStatus::Drifted),
+        DriftStatus::NoDrift => Some(ArchitectureStatus::Applied),
+        DriftStatus::Unknown | DriftStatus::CheckFailed => None,
+    }
 }
 
 #[cfg(test)]

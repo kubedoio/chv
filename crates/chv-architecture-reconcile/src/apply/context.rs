@@ -21,6 +21,13 @@ pub struct ApplyContext {
     pub architecture_id: ArchitectureId,
     /// Concrete version of the architecture the plan was generated against.
     pub architecture_version_id: ArchitectureVersionId,
+    /// `version_number` of the topology row at the moment the BFF read it.
+    /// The apply path uses this for the topology lifecycle-status CAS
+    /// (`draft → applying`); a mismatch means a concurrent writer touched
+    /// the row and we treat the apply as advisory rather than wedging the
+    /// topology in an inconsistent state. Plumbed in from the BFF so the
+    /// reconcile crate does no I/O before its first store call.
+    pub topology_version: i64,
     /// Topology display name used for typed-name confirmation. The
     /// destructive-apply guard requires `confirmation.typed_name` to match
     /// this string verbatim.
