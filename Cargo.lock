@@ -684,6 +684,7 @@ dependencies = [
  "bcrypt",
  "chrono",
  "chv-common",
+ "chv-controlplane-seed",
  "chv-controlplane-store",
  "chv-controlplane-types",
  "chv-errors",

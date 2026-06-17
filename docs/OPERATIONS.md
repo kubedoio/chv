@@ -589,6 +589,40 @@ The standard SQLite backup procedure documented earlier (`sqlite3 ... ".backup"`
 - **RTO** ≤ 15 minutes for control-plane restore (stop service → copy file → start) on a single-node deployment.
 - A restored database loses any plans / apply runs created after the backup window. Topologies and accepted versions are unaffected if backups are taken before user-facing edits.
 
+### Starter topologies — opt-out and re-seed
+
+On first boot the controlplane seeds six canonical reference topologies into `architecture_topologies` (see [`docs/plans/2026-06-16-starter-topologies-and-auto-seed.md`](plans/2026-06-16-starter-topologies-and-auto-seed.md)). They land as `status = draft`, `owner_user_id = NULL`, named `starter-NN-<slug>`, and the dashboard never auto-applies them — operators clone, not edit, starters to make their own.
+
+The seed is gated by a sentinel row `seed_starters_completed` in `system_settings`. A single atomic `UPSERT … WHERE value = '0'` flips the sentinel to `'1'` and claims the seed; only the process whose UPDATE affects exactly one row owns the run. Subsequent boots see `value = '1'` and skip cleanly.
+
+**Opt out before first boot** (e.g. on a real production deployment where the operator does not want demo content):
+
+```bash
+sudo systemctl stop chv-controlplane
+sqlite3 /var/lib/chv/controlplane.db \
+  "INSERT OR REPLACE INTO system_settings (key, value, updated_at)
+   VALUES ('seed_starters_completed', '1', strftime('%Y-%m-%dT%H:%M:%fZ','now'));"
+sudo systemctl start chv-controlplane
+# verify: dashboard shows zero topologies; controlplane logs note "starter topologies already seeded; skipping"
+```
+
+**Re-seed missing starters** (operator deleted some starter rows and wants them back):
+
+```bash
+sudo systemctl stop chv-controlplane
+sqlite3 /var/lib/chv/controlplane.db \
+  "UPDATE system_settings SET value = '0',
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE key = 'seed_starters_completed';"
+sudo systemctl start chv-controlplane
+# the seeder's per-starter AlreadyExists branch means existing rows are left untouched;
+# only the missing ones get re-inserted. The sentinel flips back to '1' on success.
+```
+
+**Caveats:**
+- The sentinel must be exactly `'0'` to trigger re-seed. Trailing whitespace (`'0 '`) does NOT match — by design, to keep typo-resistant operator overrides idempotent.
+- A control plane that cannot read or write `system_settings` refuses to start. Sentinel-write failures are fail-closed; per-fixture parse/insert failures are fail-open and logged via `tracing::error!` so a single bad fixture does not block boot.
+
 ### Retention
 
 Until the periodic pruner ships (tracked in [`docs/plans/2026-06-16-snapshot-pruner-followup.md`](plans/2026-06-16-snapshot-pruner-followup.md)), retention is best-effort and operator-driven. Recommended policy:

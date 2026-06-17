@@ -12,6 +12,9 @@ pub enum ControlPlaneServiceError {
     #[error("internal error: {0}")]
     Internal(String),
 
+    #[error("starter seed failed: {0}")]
+    Seed(#[from] chv_controlplane_seed::SeedError),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -67,6 +70,10 @@ impl From<ControlPlaneServiceError> for tonic::Status {
             }
             ControlPlaneServiceError::Internal(ref msg) => {
                 tracing::error!(error = %msg, "internal error");
+                Status::internal("internal error")
+            }
+            ControlPlaneServiceError::Seed(ref e) => {
+                tracing::error!(error = %e, "starter seed error");
                 Status::internal("internal error")
             }
             ControlPlaneServiceError::Io(ref e) => {

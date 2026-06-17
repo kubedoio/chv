@@ -203,12 +203,11 @@ pub async fn build_service(
             tracing::debug!("starter topology seeding already completed; skipping");
         }
         Err(err) => {
-            // Preserve structured fields for ops dashboards before the
-            // error is stringified into ControlPlaneServiceError::Internal.
+            // Preserve structured fields for ops dashboards via the dedicated
+            // Seed(SeedError) variant — `?err` keeps thiserror's source chain
+            // intact for downstream `error = ?` consumers.
             tracing::error!(?err, "starter topology seed fatal");
-            return Err(ControlPlaneServiceError::Internal(format!(
-                "starter topology seed failed: {err}"
-            )));
+            return Err(ControlPlaneServiceError::Seed(err));
         }
     }
 
