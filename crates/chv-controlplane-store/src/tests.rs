@@ -584,3 +584,60 @@ async fn test_set_vm_resources_stale_vs_not_found() {
         other => panic!("Expected NotFound, got {:?}", other),
     }
 }
+
+/// Fail-closed regression for C4: a row with an undecryptable `enc:`-prefixed
+/// credential MUST surface as `None` (with an error log), not as the ciphertext
+/// literal. The previous fail-soft behavior wrote `enc:hex...` back into
+/// `s3_access_key`/`s3_secret_key`, which the worker passed to the S3 client
+/// as a credential — manifesting as opaque AWS auth errors.
+#[tokio::test]
+async fn decrypt_schedule_row_nulls_undecryptable_credential() {
+    let test_db = TestDb::new().await;
+    let pool = test_db.pool.clone();
+
+    // Insert a schedule row with deliberately-bad ciphertext directly. Bypass
+    // the repository's encrypt path so we can simulate a row written by a
+    // process running under a different (now-lost) key.
+    let bad_ciphertext = "enc:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    sqlx::query(
+        "INSERT INTO backup_schedules ( \
+             schedule_id, vm_id, name, cron_expression, retention_count, \
+             enabled, s3_access_key, s3_secret_key \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind("sched-c4-regression")
+    .bind("vm-x")
+    .bind("c4-test")
+    .bind("0 0 * * *")
+    .bind(1_i64)
+    .bind(true)
+    .bind(bad_ciphertext)
+    .bind(bad_ciphertext)
+    .execute(&pool)
+    .await
+    .expect("insert schedule row");
+
+    // BackupRepository::new picks up the *current* CHV_ENCRYPTION_KEY env.
+    // Whatever the test process has, the bad ciphertext will not authenticate
+    // under it (or KeyUnavailable / Malformed), so decrypt MUST fail.
+    let repo = BackupRepository::new(pool);
+    let row = repo
+        .get_schedule("sched-c4-regression")
+        .await
+        .expect("query succeeds")
+        .expect("row exists");
+
+    assert!(
+        row.s3_access_key.is_none(),
+        "fail-closed: undecryptable s3_access_key MUST be None, got {:?}",
+        row.s3_access_key
+    );
+    assert!(
+        row.s3_secret_key.is_none(),
+        "fail-closed: undecryptable s3_secret_key MUST be None, got {:?}",
+        row.s3_secret_key
+    );
+    // Critically, neither field may equal the ciphertext literal.
+    assert_ne!(row.s3_access_key.as_deref(), Some(bad_ciphertext));
+    assert_ne!(row.s3_secret_key.as_deref(), Some(bad_ciphertext));
+}
