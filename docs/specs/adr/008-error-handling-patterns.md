@@ -59,6 +59,22 @@ Use `chv-errors` as the single structured error crate across the entire Rust wor
   **forbidden** for any task that can outlive its caller. The compiler will
   not catch this — code review and tests must.
 
+### 7. Fail-closed for opt-in security/safety gates
+Boot-time gates that the operator has *explicitly opted into* (by setting an env
+var, config flag, or providing a policy file) MUST be fail-closed: if the gate
+cannot be evaluated due to a transient I/O or DB error, the daemon refuses to
+start rather than silently bypassing the check.
+
+- A `tracing::warn!` followed by "continue" is **not acceptable** for an
+  operator-opted-in gate. It silently downgrades a security/safety promise.
+- The fail-closed boundary is "operator opted in." When the gate is not
+  configured (env unset / file absent), warn-and-continue is acceptable —
+  the operator has not asked for the check.
+- Concrete instance: `cmd/chv-controlplane/src/bootstrap.rs::check_compat_matrix`.
+  Once `CHV_COMPAT_MATRIX_PATH` is set, a `node_inventory` query failure at boot
+  returns `ControlPlaneServiceError::Internal("compat matrix query failed: ...")`.
+  See H8 in the security review notes.
+
 ## Alternatives Considered
 
 ### `anyhow` everywhere
