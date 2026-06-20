@@ -162,6 +162,7 @@
 					<button
 						type="button"
 						class:dashboard-panel-toggle--active={panelVisible[panel.id]}
+						aria-pressed={panelVisible[panel.id]}
 						onclick={() => togglePanelVisibility(panel.id)}
 					>
 						{panel.label}

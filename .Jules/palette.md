@@ -9,3 +9,7 @@
 ## 2026-06-11 - [ARIA labels on Icon Buttons]
 **Learning:** [Many icon-only buttons in complex Svelte components lack `aria-label` or `title` attributes, making them inaccessible to screen readers and difficult for users to infer their action without context. Adding `title` provides a tooltip, while `aria-label` informs screen readers.]
 **Action:** [Consistently review newly added or existing icon-only buttons to ensure they have descriptive `aria-label` and `title` attributes.]
+
+## 2024-05-17 - ARIA pressed state for toggle buttons
+**Learning:** Custom UI toggle buttons that visually indicate active/inactive state using CSS classes (like `dashboard-panel-toggle--active`) often miss the programmatic equivalent for screen readers.
+**Action:** When creating or maintaining custom toggle buttons, always add an `aria-pressed` attribute bound to the same boolean state as the visual class indicator.
