@@ -13,3 +13,7 @@
 ## 2024-05-17 - ARIA pressed state for toggle buttons
 **Learning:** Custom UI toggle buttons that visually indicate active/inactive state using CSS classes (like `dashboard-panel-toggle--active`) often miss the programmatic equivalent for screen readers.
 **Action:** When creating or maintaining custom toggle buttons, always add an `aria-pressed` attribute bound to the same boolean state as the visual class indicator.
+
+## 2024-06-25 - Topology Canvas Controls Accessibility
+**Learning:** Found that the live topology canvas headers rely on icon/symbol buttons (+, -, Fit) that lacked hover tooltips and clear ARIA labeling. Sighted users wouldn't know the exact function without trial and error, and screen readers lacked context for actions like "Fit" vs "Focus".
+**Action:** Always ensure floating canvas or map control panels use both `title` (for sighted tooltips) and explicit `aria-label`s to describe their zoom/pan functions clearly, as symbols alone are ambiguous.

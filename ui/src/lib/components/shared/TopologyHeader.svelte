@@ -20,11 +20,11 @@
 	</div>
 	<div class="header-right">
 		<div class="zoom-controls">
-			<button class="btn-zoom" type="button" onclick={() => onZoom(1)}>{Math.round(zoom * 100)}%</button>
-			<button class="btn-zoom" type="button" aria-label="Zoom in" onclick={() => onZoom(zoom + 0.1)}>+</button>
-			<button class="btn-zoom" type="button" aria-label="Zoom out" onclick={() => onZoom(zoom - 0.1)}>-</button>
-			<button class="btn-zoom btn-zoom--text" type="button" onclick={onFitFleet}>Fit</button>
-			<button class="btn-zoom btn-zoom--text" type="button" onclick={onFitSelection}>Focus</button>
+			<button class="btn-zoom" type="button" aria-label="Reset zoom" title="Reset zoom" onclick={() => onZoom(1)}>{Math.round(zoom * 100)}%</button>
+			<button class="btn-zoom" type="button" aria-label="Zoom in" title="Zoom in" onclick={() => onZoom(zoom + 0.1)}>+</button>
+			<button class="btn-zoom" type="button" aria-label="Zoom out" title="Zoom out" onclick={() => onZoom(zoom - 0.1)}>-</button>
+			<button class="btn-zoom btn-zoom--text" type="button" aria-label="Fit topology to view" title="Fit topology to view" onclick={onFitFleet}>Fit</button>
+			<button class="btn-zoom btn-zoom--text" type="button" aria-label="Focus selected node" title="Focus selected node" onclick={onFitSelection}>Focus</button>
 		</div>
 	</div>
 </div>
