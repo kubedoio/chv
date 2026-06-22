@@ -17,9 +17,13 @@
     <span class="font-medium">Cloud-init Configuration</span>
   </div>
   
-  <div class="tabs flex gap-1 mb-3 border-b border-line">
+  <div class="tabs flex gap-1 mb-3 border-b border-line" role="tablist" aria-label="Cloud-init configuration files">
     <button 
       type="button"
+      role="tab"
+      id="tab-user-data"
+      aria-selected={activeTab === 'user-data'}
+      aria-controls="panel-cloud-init"
       onclick={() => activeTab = 'user-data'}
       class="px-3 py-2 text-sm {activeTab === 'user-data' ? 'border-b-2 border-primary font-medium' : 'text-muted'}"
     >
@@ -27,6 +31,10 @@
     </button>
     <button 
       type="button"
+      role="tab"
+      id="tab-meta-data"
+      aria-selected={activeTab === 'meta-data'}
+      aria-controls="panel-cloud-init"
       onclick={() => activeTab = 'meta-data'}
       class="px-3 py-2 text-sm {activeTab === 'meta-data' ? 'border-b-2 border-primary font-medium' : 'text-muted'}"
     >
@@ -34,6 +42,10 @@
     </button>
     <button 
       type="button"
+      role="tab"
+      id="tab-network-config"
+      aria-selected={activeTab === 'network-config'}
+      aria-controls="panel-cloud-init"
       onclick={() => activeTab = 'network-config'}
       class="px-3 py-2 text-sm {activeTab === 'network-config' ? 'border-b-2 border-primary font-medium' : 'text-muted'}"
     >
@@ -41,7 +53,7 @@
     </button>
   </div>
   
-  <div class="content bg-[#1a1a1a] text-[#d4d4d4] rounded p-4 font-mono text-sm overflow-x-auto">
+  <div id="panel-cloud-init" role="tabpanel" aria-labelledby="tab-{activeTab}" class="content bg-[#1a1a1a] text-[#d4d4d4] rounded p-4 font-mono text-sm overflow-x-auto">
     {#if activeTab === 'user-data'}
       <pre>{userData || '# No user-data configured'}</pre>
     {:else if activeTab === 'meta-data'}
