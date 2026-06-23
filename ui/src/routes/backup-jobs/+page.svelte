@@ -199,12 +199,12 @@ import Button from '$lib/components/primitives/Button.svelte';
   </div>
 
   <div class="inventory-controls-strip">
-    <div class="tab-registry">
-      <button type="button" class="tab-btn" class:is-active={activeTab === 'jobs'} onclick={() => activeTab = 'jobs'}>
+    <div class="tab-registry" role="tablist" aria-label="Backup job views">
+      <button type="button" role="tab" id="tab-jobs" aria-selected={activeTab === 'jobs'} aria-controls="panel-backup-jobs" class="tab-btn" class:is-active={activeTab === 'jobs'} onclick={() => activeTab = 'jobs'}>
         <Calendar size={12} />
         <span>SCHEDULED_SEQUENCES</span>
       </button>
-      <button type="button" class="tab-btn" class:is-active={activeTab === 'history'} onclick={() => activeTab = 'history'}>
+      <button type="button" role="tab" id="tab-history" aria-selected={activeTab === 'history'} aria-controls="panel-backup-jobs" class="tab-btn" class:is-active={activeTab === 'history'} onclick={() => activeTab = 'history'}>
         <Activity size={12} />
         <span>EXECUTION_TRACE_LOG</span>
       </button>
@@ -212,19 +212,21 @@ import Button from '$lib/components/primitives/Button.svelte';
   </div>
 
   <main class="inventory-main">
-    <BackupJobsTable
-      {activeTab}
-      {loading}
-      {error}
-      {backupJobs}
-      {backupHistory}
-      {jobColumns}
-      {historyColumns}
-      {formatBytes}
-      {runJobNow}
-      {toggleJob}
-    />
-    <BackupJobsSidebar {backupHistory} {formatBytes} />
+    <div id="panel-backup-jobs" role="tabpanel" aria-labelledby="tab-{activeTab}" class="contents">
+      <BackupJobsTable
+        {activeTab}
+        {loading}
+        {error}
+        {backupJobs}
+        {backupHistory}
+        {jobColumns}
+        {historyColumns}
+        {formatBytes}
+        {runJobNow}
+        {toggleJob}
+      />
+      <BackupJobsSidebar {backupHistory} {formatBytes} />
+    </div>
   </main>
 </div>
 

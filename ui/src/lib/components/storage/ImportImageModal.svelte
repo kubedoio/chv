@@ -113,9 +113,13 @@
 </script>
 
 <Modal bind:open title="Import Image">
-	<div class="tabs flex border-b border-line mb-4">
+	<div class="tabs flex border-b border-line mb-4" role="tablist" aria-label="Import method">
 		<button 
 			type="button"
+			role="tab"
+			id="tab-remote"
+			aria-selected={activeTab === 'remote'}
+			aria-controls="panel-import-image"
 			class="px-4 py-2 text-sm font-medium {activeTab === 'remote' ? 'border-b-2 border-accent text-accent' : 'text-muted'}"
 			onclick={() => activeTab = 'remote'}
 		>
@@ -123,6 +127,10 @@
 		</button>
 		<button 
 			type="button"
+			role="tab"
+			id="tab-local"
+			aria-selected={activeTab === 'local'}
+			aria-controls="panel-import-image"
 			class="px-4 py-2 text-sm font-medium {activeTab === 'local' ? 'border-b-2 border-accent text-accent' : 'text-muted'}"
 			onclick={() => activeTab = 'local'}
 		>
@@ -131,6 +139,7 @@
 	</div>
 
 	<form onsubmit={handleSubmit} class="space-y-4">
+		<div id="panel-import-image" role="tabpanel" aria-labelledby="tab-{activeTab}">
 		{#if formError}
 			<div class="error-banner">{formError}</div>
 		{/if}
@@ -177,6 +186,7 @@
 			<Input value="qcow2" disabled />
 			<p class="text-xs text-muted mt-1">Images are normalized to qcow2 for MVP-1</p>
 		</FormField>
+		</div>
 	</form>
 
 	{#snippet footer()}

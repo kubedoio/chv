@@ -176,30 +176,32 @@ import Button from '$lib/components/primitives/Button.svelte';
     />
   </div>
 
-  <div class="tabs-nav">
-    <button type="button" class="tab-item" class:active={activeTab === 'vm'} onclick={() => activeTab = 'vm'}>
+  <div class="tabs-nav" role="tablist" aria-label="Template types">
+    <button type="button" role="tab" id="tab-vm" aria-selected={activeTab === 'vm'} aria-controls="panel-templates" class="tab-item" class:active={activeTab === 'vm'} onclick={() => activeTab = 'vm'}>
       <Box size={14} />
       <span>Workload Blueprints</span>
     </button>
-    <button type="button" class="tab-item" class:active={activeTab === 'cloudinit'} onclick={() => activeTab = 'cloudinit'}>
+    <button type="button" role="tab" id="tab-cloudinit" aria-selected={activeTab === 'cloudinit'} aria-controls="panel-templates" class="tab-item" class:active={activeTab === 'cloudinit'} onclick={() => activeTab = 'cloudinit'}>
       <FileCode size={14} />
       <span>Init Registries</span>
     </button>
   </div>
 
   <main class="inventory-main">
-    <TemplatesTable
-      {activeTab}
-      {loading}
-      {error}
-      {vmTemplates}
-      {cloudInitTemplates}
-      {images}
-      {vmColumns}
-      {ciColumns}
-      {cloneTemplate}
-    />
-    <TemplatesSidebar />
+    <div id="panel-templates" role="tabpanel" aria-labelledby="tab-{activeTab}" class="contents">
+      <TemplatesTable
+        {activeTab}
+        {loading}
+        {error}
+        {vmTemplates}
+        {cloudInitTemplates}
+        {images}
+        {vmColumns}
+        {ciColumns}
+        {cloneTemplate}
+      />
+      <TemplatesSidebar />
+    </div>
   </main>
 </div>
 
