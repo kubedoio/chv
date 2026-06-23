@@ -20,7 +20,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 proptest = "1"
 pretty_assertions = "1"
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "large_graph"
