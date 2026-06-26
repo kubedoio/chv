@@ -1526,7 +1526,7 @@ async fn complete_migration_atomically(
 }
 
 /// Resolve agent socket path for a node.
-fn resolve_agent_socket(pattern: &str, node_id: &str) -> PathBuf {
+pub(crate) fn resolve_agent_socket(pattern: &str, node_id: &str) -> PathBuf {
     if pattern.contains("{node_id}") {
         PathBuf::from(pattern.replace("{node_id}", node_id))
     } else {

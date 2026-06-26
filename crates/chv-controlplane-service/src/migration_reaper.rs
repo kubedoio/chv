@@ -4,6 +4,7 @@
 //! indefinitely. The reaper scans every 60 seconds for migrations that have exceeded their
 //! total timeout, force-transitions them to Failed, and logs a warning for operator visibility.
 
+use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::StorePool;
 use chv_errors::ChvError;
@@ -253,15 +254,6 @@ impl MigrationReaper {
             "migration reaper: resumed source VM after migration timeout"
         );
         Ok(())
-    }
-}
-
-/// Resolve the agent Unix socket path for a node, expanding `{node_id}` if present.
-fn resolve_agent_socket(pattern: &str, node_id: &str) -> PathBuf {
-    if pattern.contains("{node_id}") {
-        PathBuf::from(pattern.replace("{node_id}", node_id))
-    } else {
-        PathBuf::from(pattern)
     }
 }
 
