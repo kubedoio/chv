@@ -6,6 +6,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+// Metric names for network daemon operations.
+const NWD_FDB_ERRORS_TOTAL: &str = "chv_nwd_fdb_errors_total";
+const NWD_NFT_ERRORS_TOTAL: &str = "chv_nwd_nft_errors_total";
+const NWD_DHCP_ERRORS_TOTAL: &str = "chv_nwd_dhcp_errors_total";
+
 #[derive(Debug, Clone)]
 pub struct TopologyApplyResult {
     pub namespace_handle: String,
@@ -896,7 +901,12 @@ impl NetworkExecutor for LinuxExecutor {
         policy_json: &[u8],
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
-        crate::firewall::apply_firewall_rules(&table, policy_json).await
+        crate::firewall::apply_firewall_rules(&table, policy_json)
+            .await
+            .map_err(|e| {
+                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall").increment(1);
+                e
+            })
     }
 
     async fn set_nat_policy(
@@ -906,7 +916,12 @@ impl NetworkExecutor for LinuxExecutor {
         policy_json: &[u8],
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
-        crate::firewall::apply_nat_rules(&table, policy_json).await
+        crate::firewall::apply_nat_rules(&table, policy_json)
+            .await
+            .map_err(|e| {
+                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_nat").increment(1);
+                e
+            })
     }
 
     async fn ensure_dhcp_scope(
@@ -917,7 +932,12 @@ impl NetworkExecutor for LinuxExecutor {
         range_end: &str,
         dns_servers: &[String],
     ) -> Result<(), ChvError> {
-        crate::dhcp::ensure_dhcp_scope(network_id, cidr, range_start, range_end, dns_servers).await
+        crate::dhcp::ensure_dhcp_scope(network_id, cidr, range_start, range_end, dns_servers)
+            .await
+            .map_err(|e| {
+                metrics::counter!(NWD_DHCP_ERRORS_TOTAL, "operation" => "ensure_scope").increment(1);
+                e
+            })
     }
 
     async fn ensure_dns_scope(
@@ -1110,8 +1130,11 @@ impl NetworkExecutor for LinuxExecutor {
             namespace,
             &["fdb", "append", mac_address, "dev", &iface, "dst", vtep_ip],
         )
-        .await?;
-        Ok(())
+        .await
+        .map_err(|e| {
+            metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "add").increment(1);
+            e
+        })
     }
 
     async fn delete_fdb_entry(
@@ -1126,8 +1149,11 @@ impl NetworkExecutor for LinuxExecutor {
             namespace,
             &["fdb", "del", mac_address, "dev", &iface, "dst", vtep_ip],
         )
-        .await?;
-        Ok(())
+        .await
+        .map_err(|e| {
+            metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "delete").increment(1);
+            e
+        })
     }
 
     async fn replace_fdb_entry(
@@ -1150,8 +1176,11 @@ impl NetworkExecutor for LinuxExecutor {
                 new_vtep_ip,
             ],
         )
-        .await?;
-        Ok(())
+        .await
+        .map_err(|e| {
+            metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "replace").increment(1);
+            e
+        })
     }
 
     async fn send_gratuitous_arp(
