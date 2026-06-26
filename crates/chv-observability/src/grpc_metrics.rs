@@ -13,9 +13,22 @@
 //! response headers for `grpc-status` and falls back to mapping the HTTP status
 //! code (non-200 → `"unknown"`). For unary handlers — which dominate CHV's
 //! gRPC surface — tonic emits `grpc-status` in the leading headers because the
-//! body is buffered, so the inspection is reliable. For streaming handlers
-//! that only set `grpc-status` in trailers, the recorded label degrades to
-//! `"unknown"`; this is documented and acceptable for a v1 RED layer.
+//! body is buffered, so the inspection is reliable.
+//!
+//! ### Known limitation: streaming responses always emit `grpc_status = "unknown"`
+//!
+//! gRPC streaming RPCs (serial console, migration block transfer) deliver the
+//! `grpc-status` code in HTTP/2 trailers, not headers. This layer inspects
+//! headers only; reading trailers requires consuming the response body, which
+//! breaks the middleware contract. As a result, every successful streaming
+//! response is classified as `grpc_status = "unknown"` in the RED metrics.
+//!
+//! Operators monitoring serial-console or migration RED metrics should filter
+//! on `grpc_status != "unknown"` to see real errors and treat `"unknown"` as
+//! "streaming response received" rather than "failure".
+//!
+//! A future version can fix this by wrapping the response body in a
+//! trailer-observing adapter (see tower-http's `TraceLayer` for the pattern).
 //!
 //! ### Service / method extraction
 //!
@@ -278,6 +291,19 @@ mod tests {
                 .get("grpc-status")
                 .and_then(|v| v.to_str().ok()),
             Some("0")
+        );
+    }
+
+    #[test]
+    fn classify_response_returns_unknown_for_streaming_success() {
+        // Streaming RPCs return grpc-status in trailers, not headers.
+        // HTTP 200 with no grpc-status header (the streaming shape) classifies as "unknown".
+        // This is expected — see module doc for operator guidance.
+        let headers = HeaderMap::new();
+        assert_eq!(
+            classify_response(&headers, 200),
+            "unknown",
+            "HTTP 200 with no grpc-status header must classify as 'unknown'"
         );
     }
 }
