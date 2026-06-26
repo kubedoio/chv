@@ -11,6 +11,10 @@ use tokio::sync::mpsc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{debug, error, info, warn};
 
+// Metric names for storage migration operations.
+const STORD_MIGRATION_BYTES_SENT_TOTAL: &str = "chv_stord_migration_bytes_sent_total";
+const STORD_MIGRATION_ERRORS_TOTAL: &str = "chv_stord_migration_errors_total";
+
 const DEFAULT_BLOCK_SIZE: u64 = 4_194_304; // 4 MB
 const DIRTY_THRESHOLD: u64 = 1024;
 const MAX_DIRTY_ROUNDS: u32 = 10;
@@ -306,6 +310,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                         error = %ack.error_message,
                         "migration finalization failed"
                     );
+                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "finalization_failed").increment(1);
                     return Err(tonic::Status::internal(format!(
                         "finalization failed: {}",
                         ack.error_message
@@ -489,6 +494,8 @@ impl<B: StorageBackend> MigrationSender<B> {
 
                 *sequence_num += 1;
                 bytes_sent += chunk_data.len() as u64;
+                metrics::counter!(STORD_MIGRATION_BYTES_SENT_TOTAL, "volume_id" => self.volume_id.clone())
+                    .increment(chunk_data.len() as u64);
 
                 let chunk_msg = MigrationMessage {
                     payload: Some(migration_message::Payload::Chunk(BlockChunk {
@@ -618,6 +625,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                         offset = ack.last_offset,
                         "receiver reported CRC mismatch"
                     );
+                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "crc_mismatch").increment(1);
                     return Err(tonic::Status::data_loss(
                         "CRC mismatch reported by receiver",
                     ));
@@ -628,6 +636,7 @@ impl<B: StorageBackend> MigrationSender<B> {
                         offset = ack.last_offset,
                         "receiver reported write error"
                     );
+                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "write_error").increment(1);
                     return Err(tonic::Status::internal("write error reported by receiver"));
                 }
                 self.send_window.acked(ack.last_sequence_num);
