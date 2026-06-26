@@ -426,6 +426,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(config.cache_path.clone()),
         config.runtime_dir.clone(),
     );
+    // Share the migration registry with the reconciler so drain evacuation
+    // can gate on in-flight migrations (see reconcile.rs Draining arm).
+    let migration_registry = agent_server.migration_tasks.clone();
     let server_socket = config.socket_path.clone();
     let mut agent_server_handle = tokio::spawn(async move {
         if let Err(e) = agent_server.serve(&server_socket).await {
@@ -479,6 +482,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
         config.runtime_dir.clone(),
+        migration_registry,
     )
     .await;
 

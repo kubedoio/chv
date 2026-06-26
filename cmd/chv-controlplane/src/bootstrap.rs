@@ -415,7 +415,11 @@ pub async fn build_service(
     );
     let backup_worker_handle = tokio::spawn(backup_worker.run(shutdown_rx.clone()));
 
-    let migration_reaper = chv_controlplane_service::MigrationReaper::new(pool.clone());
+    let migration_reaper = chv_controlplane_service::MigrationReaper::new(
+        pool.clone(),
+        node_client_pool.clone(),
+        config.agent_socket_pattern.clone(),
+    );
     let reaper_handle = tokio::spawn(migration_reaper.run(shutdown_rx));
 
     Ok(ControlPlaneService::new(

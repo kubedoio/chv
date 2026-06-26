@@ -51,6 +51,19 @@ pub async fn ensure_dhcp_scope(
     range_end: &str,
     dns_servers: &[String],
 ) -> Result<(), ChvError> {
+    // Reject network_id values that could escape the runtime directory or inject shell commands.
+    // Mirrors the allowlist in executor.rs::sanitize_id.
+    if network_id.is_empty()
+        || !network_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(ChvError::InvalidArgument {
+            field: "network_id".to_string(),
+            reason: format!("network_id contains invalid characters: {network_id}"),
+        });
+    }
+
     if cidr.is_empty() || range_start.is_empty() || range_end.is_empty() {
         return Err(ChvError::InvalidArgument {
             field: "dhcp_scope".to_string(),
@@ -357,6 +370,35 @@ mod tests {
         assert_eq!(
             derive_gateway("172.16.3.200/16"),
             Some("172.16.0.1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_dhcp_scope_rejects_path_traversal_network_id() {
+        let result = ensure_dhcp_scope(
+            "../../../etc",
+            "192.168.1.0/24",
+            "192.168.1.100",
+            "192.168.1.200",
+            &[],
+        )
+        .await;
+        assert!(result.is_err(), "path traversal network_id must be rejected");
+    }
+
+    #[tokio::test]
+    async fn ensure_dhcp_scope_rejects_semicolon_injection() {
+        let result = ensure_dhcp_scope(
+            "net1;rm -rf /",
+            "192.168.1.0/24",
+            "192.168.1.100",
+            "192.168.1.200",
+            &[],
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "shell-injection network_id must be rejected"
         );
     }
 }

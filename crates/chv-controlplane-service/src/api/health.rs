@@ -5,6 +5,7 @@ use std::time::Instant;
 use tokio::time::Duration;
 
 use crate::convergence_metrics::{ConvergenceSnapshot, SharedConvergenceMetrics};
+use crate::node_client::NodeClient;
 
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     match sqlx::query("SELECT 1").fetch_one(&state.pool).await {
@@ -98,33 +99,34 @@ pub async fn deep_health_handler(State(state): State<AppState>) -> impl IntoResp
         }
     }
 
-    // Agent connectivity check
+    // Agent connectivity check — establish a real gRPC transport channel so that
+    // a crashed agent whose socket file still exists is detected as failed.
     if agent_socket_dir_pass {
         match find_first_socket(&state.agent_runtime_dir).await {
             Some(socket_path) => {
                 match tokio::time::timeout(
                     Duration::from_secs(2),
-                    tokio::net::UnixStream::connect(&socket_path),
+                    NodeClient::connect(&socket_path),
                 )
                 .await
                 {
                     Ok(Ok(_)) => {
                         checks.insert(
                             "agent_connectivity".to_string(),
-                            json!({ "status": "pass", "detail": format!("connected to {}", socket_path.display()) }),
+                            json!({ "status": "pass", "detail": format!("gRPC channel established to {}", socket_path.display()) }),
                         );
                         agent_connectivity_pass = true;
                     }
                     Ok(Err(e)) => {
                         checks.insert(
                             "agent_connectivity".to_string(),
-                            json!({ "status": "fail", "detail": format!("failed to connect to {}: {}", socket_path.display(), e) }),
+                            json!({ "status": "fail", "detail": format!("gRPC connect to {} failed: {}", socket_path.display(), e) }),
                         );
                     }
                     Err(_) => {
                         checks.insert(
                             "agent_connectivity".to_string(),
-                            json!({ "status": "fail", "detail": format!("timeout connecting to {}", socket_path.display()) }),
+                            json!({ "status": "fail", "detail": format!("gRPC connect to {} timed out", socket_path.display()) }),
                         );
                     }
                 }

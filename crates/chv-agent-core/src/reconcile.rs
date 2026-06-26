@@ -1,5 +1,6 @@
 use crate::cache::{NodeCache, VmNicAttachment};
 use crate::daemon_clients::{NwdClient, StordClient};
+use crate::migration_registry::MigrationTaskRegistry;
 use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
 use chv_agent_runtime_ch::adapter::{VmConfig, VmDiskConfig, VmNicConfig};
@@ -56,6 +57,11 @@ pub struct Reconciler {
     /// Tracks VMs that have already been requested for drain migration
     /// to avoid re-requesting on every tick.
     drain_requested_vms: HashSet<String>,
+    /// Shared registry of in-flight migration tasks. The drain transition to
+    /// Maintenance must not fire while disk migrations are still in progress;
+    /// a VM handed off to chv-stord leaves vm_runtime.list() but the transfer
+    /// is ongoing.
+    migration_registry: Arc<MigrationTaskRegistry>,
 }
 
 /// Returns the per-VM runtime directory for the given VM.
@@ -97,6 +103,7 @@ impl Reconciler {
         stord_socket: PathBuf,
         nwd_socket: PathBuf,
         runtime_dir: PathBuf,
+        migration_registry: Arc<MigrationTaskRegistry>,
     ) -> Self {
         Self {
             cache,
@@ -107,6 +114,7 @@ impl Reconciler {
             reconcile_tick: 0,
             degraded_ticks: 0,
             drain_requested_vms: HashSet::new(),
+            migration_registry,
         }
     }
 
@@ -285,11 +293,11 @@ impl Reconciler {
                     .map(|r| r.vm_id)
                     .collect();
 
-                if running_vms.is_empty() {
-                    // All VMs evacuated — transition to Maintenance
+                if running_vms.is_empty() && self.migration_registry.is_empty() {
+                    // All VMs evacuated and no in-flight disk migrations — safe to Maintenance
                     info!(
                         operation_id = %operation_id,
-                        "drain complete, all VMs evacuated — transitioning to Maintenance"
+                        "drain complete, all VMs evacuated and no in-flight migrations — transitioning to Maintenance"
                     );
                     self.drain_requested_vms.clear();
                     self.transition_state(NodeState::Maintenance).await?;
@@ -1841,6 +1849,7 @@ mod tests {
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
         assert!(rec.run_once().await.is_ok());
@@ -1861,6 +1870,7 @@ mod tests {
             PathBuf::from("/tmp/fake-stord-discovered.sock"),
             PathBuf::from("/tmp/fake-nwd-discovered.sock"),
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
         assert!(rec.run_once().await.is_ok());
@@ -1879,6 +1889,7 @@ mod tests {
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -2403,6 +2414,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
         rec.reconcile_vms().await.unwrap();
@@ -2448,6 +2460,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
         rec.reconcile_vms().await.unwrap();
@@ -2514,6 +2527,7 @@ mod tests {
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -2555,6 +2569,7 @@ mod tests {
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -2605,6 +2620,7 @@ mod tests {
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -2660,6 +2676,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
         rec.reconcile_vms().await.unwrap();
@@ -2927,6 +2944,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -3196,6 +3214,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
         rec.reconcile_vms().await.expect("reconcile_vms");
@@ -3239,6 +3258,7 @@ mod tests {
             PathBuf::from("/tmp/chv-test-fake-stord-bootstrap.sock"),
             PathBuf::from("/tmp/chv-test-fake-nwd-bootstrap.sock"),
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -3305,6 +3325,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -3359,6 +3380,7 @@ mod tests {
             stord_socket,
             nwd_socket,
             dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
 
@@ -3378,5 +3400,39 @@ mod tests {
         );
         // And no real VM landed in the adapter.
         assert!(!mock.vms.lock().expect("mock lock").contains_key("vm-junk"));
+    }
+
+    /// Contract test: the Draining → Maintenance gate must also wait for
+    /// `migration_registry` to be empty. A VM handed off to chv-stord for disk
+    /// migration leaves `vm_runtime.list()` but the transfer is still in
+    /// progress. This test documents that invariant independently of the full
+    /// reconcile loop.
+    #[tokio::test]
+    async fn drain_gate_requires_empty_migration_registry() {
+        use crate::migration_registry::MigrationTaskRegistry;
+        use tokio_util::sync::CancellationToken;
+
+        let registry = Arc::new(MigrationTaskRegistry::new());
+        // Simulate an in-flight migration.
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await
+        });
+        registry.insert(
+            "drain-test-op".to_string(),
+            handle.abort_handle(),
+            CancellationToken::new(),
+        );
+
+        assert!(
+            !registry.is_empty(),
+            "drain must not complete with in-flight migrations"
+        );
+
+        handle.abort();
+        registry.remove("drain-test-op");
+        assert!(
+            registry.is_empty(),
+            "drain may complete when registry is empty"
+        );
     }
 }

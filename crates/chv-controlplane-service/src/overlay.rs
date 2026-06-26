@@ -6,6 +6,7 @@
 //! - VM destruction -> FDB cleanup across peers
 //! - Migration completion -> gratuitous ARP + FDB re-pointing
 
+use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::VtepRepository;
 use chv_errors::ChvError;
@@ -311,14 +312,6 @@ impl OverlayManager {
     }
 
     /// Resolve the Unix socket path for a given node.
-    fn resolve_agent_socket(&self, node_id: &str) -> PathBuf {
-        if self.agent_socket_pattern.contains("{node_id}") {
-            PathBuf::from(self.agent_socket_pattern.replace("{node_id}", node_id))
-        } else {
-            PathBuf::from(&self.agent_socket_pattern)
-        }
-    }
-
     /// Send an overlay update to a specific node via the node client pool.
     ///
     /// Uses the UpdateOverlay RPC on the agent's lifecycle service, which proxies
@@ -333,7 +326,7 @@ impl OverlayManager {
     ) -> Result<(), ChvError> {
         use control_plane_node_api::control_plane_node_api as proto;
 
-        let socket_path = self.resolve_agent_socket(node_id);
+        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id);
         let mut client = self.node_pool.get_or_connect(node_id, &socket_path).await?;
 
         let vtep_endpoints: Vec<proto::VtepEndpoint> = vteps

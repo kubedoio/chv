@@ -57,7 +57,7 @@ impl MigrationTaskRegistry {
     /// `operation_id` (and aborts the displaced task — duplicate operation_ids
     /// would otherwise leak the older handle).
     pub fn insert(&self, op_id: String, abort: AbortHandle, cancel_token: CancellationToken) {
-        let mut guard = self.inner.lock().expect("migration_tasks mutex poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(prev) = guard.insert(
             op_id,
             TrackedTask {
@@ -72,7 +72,7 @@ impl MigrationTaskRegistry {
 
     /// Remove the entry for `op_id` (called by the reaper when the task ends).
     pub fn remove(&self, op_id: &str) {
-        let mut guard = self.inner.lock().expect("migration_tasks mutex poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.remove(op_id);
     }
 
@@ -84,7 +84,7 @@ impl MigrationTaskRegistry {
     ///
     /// Returns `true` if a task was found and signalled.
     pub fn cancel(&self, op_id: &str) -> bool {
-        let guard = self.inner.lock().expect("migration_tasks mutex poisoned");
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(task) = guard.get(op_id) {
             task.cancel_token.cancel();
             task.abort.abort();
@@ -98,7 +98,7 @@ impl MigrationTaskRegistry {
     pub fn len(&self) -> usize {
         self.inner
             .lock()
-            .expect("migration_tasks mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .len()
     }
 
@@ -111,13 +111,13 @@ impl MigrationTaskRegistry {
     pub fn contains(&self, op_id: &str) -> bool {
         self.inner
             .lock()
-            .expect("migration_tasks mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .contains_key(op_id)
     }
 
     /// Abort every tracked task. Used on agent shutdown.
     pub fn abort_all(&self) {
-        let mut guard = self.inner.lock().expect("migration_tasks mutex poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for (op_id, task) in guard.drain() {
             tracing::warn!(
                 operation_id = %op_id,
@@ -304,6 +304,30 @@ mod tests {
             Some(&Err("test failure".to_string())),
             "task body actually ran to completion"
         );
+    }
+
+    #[test]
+    fn insert_survives_poisoned_mutex() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let registry = Arc::new(MigrationTaskRegistry::new());
+            let reg2 = registry.clone();
+
+            // Poison the mutex by panicking while holding it.
+            let _ = std::panic::catch_unwind(|| {
+                let _guard = reg2.inner.lock().unwrap();
+                panic!("intentional poison");
+            });
+
+            // Registry must still be usable after the mutex is poisoned.
+            // Obtain an AbortHandle from a real spawned task.
+            let handle = tokio::spawn(async {});
+            let abort_handle = handle.abort_handle();
+            let ct = CancellationToken::new();
+            // Should not panic:
+            registry.insert("op-poison-test".to_string(), abort_handle, ct);
+            assert_eq!(registry.len(), 1);
+        });
     }
 
     /// Helper: a tiny "send on drop" guard so a spawned task can signal

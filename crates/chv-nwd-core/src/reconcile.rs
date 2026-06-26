@@ -80,6 +80,8 @@ pub async fn reconcile_fdb_entries<E: NetworkExecutor>(
         removed = to_remove.len(),
         "FDB reconciliation complete"
     );
+    metrics::counter!("chv_nwd_fdb_entries_reconciled_total")
+        .increment((to_add.len() + to_remove.len()) as u64);
 
     Ok(FdbReconcileResult {
         added: to_add.len(),

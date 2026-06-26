@@ -11,6 +11,7 @@ chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }
 chv-stord-api = { path = "../../gen/rust/chv-stord-api" }
 chv-stord-backends = { path = "../chv-stord-backends" }
+metrics = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
