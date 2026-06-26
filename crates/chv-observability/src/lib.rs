@@ -128,20 +128,18 @@ impl Metrics {
     // -----------------------------------------------------------------------
 
     /// Record the current migration phase as a gauge (0=Pending .. 7=RolledBack).
-    pub fn set_migration_phase(&self, migration_id: &str, vm_id: &str, phase: f64) {
+    pub fn set_migration_phase(&self, vm_id: &str, phase: f64) {
         metrics::gauge!(
             CHV_MIGRATION_PHASE,
-            "migration_id" => migration_id.to_string(),
             "vm_id" => vm_id.to_string()
         )
         .set(phase);
     }
 
     /// Increment migration bytes transferred counter.
-    pub fn add_migration_bytes(&self, migration_id: &str, vm_id: &str, bytes: u64) {
+    pub fn add_migration_bytes(&self, vm_id: &str, bytes: u64) {
         metrics::counter!(
             CHV_MIGRATION_BYTES_TRANSFERRED,
-            "migration_id" => migration_id.to_string(),
             "vm_id" => vm_id.to_string()
         )
         .increment(bytes);
@@ -158,12 +156,9 @@ impl Metrics {
     }
 
     /// Set current dirty block count during migration convergence.
-    pub fn set_migration_dirty_blocks(&self, migration_id: &str, blocks: f64) {
-        metrics::gauge!(
-            CHV_MIGRATION_DIRTY_BLOCKS,
-            "migration_id" => migration_id.to_string()
-        )
-        .set(blocks);
+    pub fn set_migration_dirty_blocks(&self, blocks: f64) {
+        metrics::gauge!(CHV_MIGRATION_DIRTY_BLOCKS)
+            .set(blocks);
     }
 
     /// Set current FDB entry count for a VXLAN network.
