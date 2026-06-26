@@ -76,7 +76,28 @@ pub struct PeerIdentityInterceptor {
 }
 
 impl PeerIdentityInterceptor {
+    /// Construct the interceptor.
+    ///
+    /// # Panics
+    ///
+    /// Panics at startup if `allow_insecure` is `true` and the binary was **not**
+    /// compiled with the `dev` Cargo feature. This is an intentional deployment
+    /// guard: `CHV_ALLOW_INSECURE=1` disables all mTLS peer-identity enforcement,
+    /// and must never be usable in production builds.
+    ///
+    /// To build for local development:
+    /// ```text
+    /// cargo build --features dev
+    /// ```
     pub fn new(allow_insecure: bool) -> Self {
+        if allow_insecure && !cfg!(feature = "dev") {
+            panic!(
+                "CHV_ALLOW_INSECURE=1 is set but this binary was not compiled with the 'dev' \
+                 Cargo feature. This env var disables all mTLS peer-identity enforcement and \
+                 must never be enabled in production. \
+                 To use it for local development, rebuild with: cargo build --features dev"
+            );
+        }
         Self { allow_insecure }
     }
 
@@ -300,5 +321,16 @@ mod tests {
     fn rejects_garbage_der() {
         let err = parse_node_id_from_der(b"not a certificate").unwrap_err();
         assert!(matches!(err, PeerIdentityError::InvalidCertificate(_)));
+    }
+
+    /// Documents the compile-time invariant: production builds (no `dev` feature)
+    /// must never have the `dev` feature enabled.
+    #[test]
+    fn allow_insecure_is_gated_by_feature() {
+        #[cfg(not(feature = "dev"))]
+        assert!(
+            !cfg!(feature = "dev"),
+            "production builds must not have 'dev' feature enabled"
+        );
     }
 }
