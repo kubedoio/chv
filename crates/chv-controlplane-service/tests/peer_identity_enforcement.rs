@@ -276,7 +276,9 @@ fn cert_parser_round_trips_node_id() {
 
 /// Interceptor wiring smoke test: in insecure mode, the interceptor inserts
 /// `InsecurePeer` into request extensions and lets the request through.
+/// Only valid when compiled with the `dev` feature — production builds reject allow_insecure=true.
 #[test]
+#[cfg(feature = "dev")]
 fn interceptor_insecure_mode_marks_request() {
     let interceptor = PeerIdentityInterceptor::new(true);
     let req: Request<()> = Request::new(());
