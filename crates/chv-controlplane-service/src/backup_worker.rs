@@ -447,14 +447,6 @@ impl BackupWorker {
         })
     }
 
-    fn resolve_agent_socket(&self, node_id: &str) -> PathBuf {
-        if self.agent_socket_pattern.contains("{node_id}") {
-            PathBuf::from(self.agent_socket_pattern.replace("{node_id}", node_id))
-        } else {
-            PathBuf::from(&self.agent_socket_pattern)
-        }
-    }
-
     fn is_remote_destination(destination: &str) -> bool {
         destination.starts_with("s3://")
             || destination.starts_with("nfs://")

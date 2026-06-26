@@ -128,6 +128,9 @@ impl Metrics {
     // -----------------------------------------------------------------------
 
     /// Record the current migration phase as a gauge (0=Pending .. 7=RolledBack).
+    ///
+    /// NOTE: No call sites exist yet — wiring is deferred until dirty-sync rounds
+    /// are implemented in chv-stord (see docs/production-readiness-report.md P0 #7).
     pub fn set_migration_phase(&self, vm_id: &str, phase: f64) {
         metrics::gauge!(
             CHV_MIGRATION_PHASE,
@@ -137,6 +140,9 @@ impl Metrics {
     }
 
     /// Increment migration bytes transferred counter.
+    ///
+    /// NOTE: No call sites exist yet — wiring is deferred until dirty-sync rounds
+    /// are implemented in chv-stord (see docs/production-readiness-report.md P0 #7).
     pub fn add_migration_bytes(&self, vm_id: &str, bytes: u64) {
         metrics::counter!(
             CHV_MIGRATION_BYTES_TRANSFERRED,
@@ -156,6 +162,9 @@ impl Metrics {
     }
 
     /// Set current dirty block count during migration convergence.
+    ///
+    /// NOTE: No call sites exist yet — wiring is deferred until dirty-sync rounds
+    /// are implemented in chv-stord (see docs/production-readiness-report.md P0 #7).
     pub fn set_migration_dirty_blocks(&self, blocks: f64) {
         metrics::gauge!(CHV_MIGRATION_DIRTY_BLOCKS)
             .set(blocks);

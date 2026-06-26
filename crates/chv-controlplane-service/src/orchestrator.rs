@@ -1,4 +1,5 @@
 use crate::convergence_metrics::SharedConvergenceMetrics;
+use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use crate::overlay::OverlayManager;
 use chv_controlplane_store::{
@@ -445,7 +446,7 @@ impl Orchestrator {
             self.require_node_schedulable(node_id).await?;
         }
 
-        let socket_path = self.resolve_agent_socket(node_id);
+        let socket_path = resolve_agent_socket(&self.agent_socket_pattern, node_id);
         let mut client = self
             .node_client_pool
             .get_or_connect(node_id, &socket_path)
@@ -973,14 +974,6 @@ impl Orchestrator {
                     })?;
                 Err(e)
             }
-        }
-    }
-
-    fn resolve_agent_socket(&self, node_id: &str) -> PathBuf {
-        if self.agent_socket_pattern.contains("{node_id}") {
-            PathBuf::from(self.agent_socket_pattern.replace("{node_id}", node_id))
-        } else {
-            PathBuf::from(&self.agent_socket_pattern)
         }
     }
 
