@@ -4,8 +4,10 @@
 //! indefinitely. The reaper scans every 60 seconds for migrations that have exceeded their
 //! total timeout, force-transitions them to Failed, and logs a warning for operator visibility.
 
+use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::StorePool;
 use chv_errors::ChvError;
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -21,14 +23,18 @@ pub struct MigrationReaper {
     pool: StorePool,
     interval: Duration,
     timeout_secs: i64,
+    node_client_pool: NodeClientPool,
+    agent_socket_pattern: String,
 }
 
 impl MigrationReaper {
-    pub fn new(pool: StorePool) -> Self {
+    pub fn new(pool: StorePool, node_client_pool: NodeClientPool, agent_socket_pattern: String) -> Self {
         Self {
             pool,
             interval: Duration::from_secs(REAPER_INTERVAL_SECS),
             timeout_secs: DEFAULT_MIGRATION_TIMEOUT_SECS,
+            node_client_pool,
+            agent_socket_pattern,
         }
     }
 
@@ -65,6 +71,7 @@ impl MigrationReaper {
                 m.migration_id,
                 m.operation_id,
                 m.vm_id,
+                m.source_node_id,
                 m.phase,
                 m.started_at,
                 CAST(
@@ -113,6 +120,17 @@ impl MigrationReaper {
                     operation_id = %row.operation_id,
                     error = %e,
                     "migration reaper: failed to update operation record"
+                );
+            }
+
+            // Best-effort: resume the source VM so it doesn't stay permanently paused.
+            if let Err(e) = self.resume_source_vm(row).await {
+                warn!(
+                    migration_id = %row.migration_id,
+                    vm_id = %row.vm_id,
+                    source_node_id = %row.source_node_id,
+                    error = %e,
+                    "migration reaper: failed to resume source VM after timeout — VM may be stuck paused"
                 );
             }
         }
@@ -178,6 +196,73 @@ impl MigrationReaper {
 
         Ok(())
     }
+
+    /// Best-effort: resume the source VM after a migration timeout so it is not left
+    /// permanently paused. Failure is logged but non-fatal.
+    async fn resume_source_vm(&self, row: &StuckMigrationRow) -> Result<(), ChvError> {
+        // Fetch the current VM generation from the desired state store.
+        let generation: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT generation FROM vm_desired_state WHERE vm_id = ?")
+                .bind(&row.vm_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| ChvError::Internal {
+                    reason: format!(
+                        "reaper: failed to fetch generation for VM {}: {e}",
+                        row.vm_id
+                    ),
+                })?;
+        let generation = match generation {
+            Some((Some(g),)) => g.to_string(),
+            _ => "1".to_string(),
+        };
+
+        let socket = resolve_agent_socket(&self.agent_socket_pattern, &row.source_node_id);
+        let mut client = self
+            .node_client_pool
+            .get_or_connect(&row.source_node_id, &socket)
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!(
+                    "reaper: failed to connect to source node {}: {e}",
+                    row.source_node_id
+                ),
+            })?;
+
+        let op_id = format!("reaper-resume-{}", row.migration_id);
+        client
+            .resume_vm(
+                &row.source_node_id,
+                &row.vm_id,
+                &generation,
+                &op_id,
+                Some("migration_reaper"),
+            )
+            .await
+            .map_err(|e| ChvError::Internal {
+                reason: format!(
+                    "reaper: resume_vm failed for vm={} node={}: {e}",
+                    row.vm_id, row.source_node_id
+                ),
+            })?;
+
+        info!(
+            migration_id = %row.migration_id,
+            vm_id = %row.vm_id,
+            source_node_id = %row.source_node_id,
+            "migration reaper: resumed source VM after migration timeout"
+        );
+        Ok(())
+    }
+}
+
+/// Resolve the agent Unix socket path for a node, expanding `{node_id}` if present.
+fn resolve_agent_socket(pattern: &str, node_id: &str) -> PathBuf {
+    if pattern.contains("{node_id}") {
+        PathBuf::from(pattern.replace("{node_id}", node_id))
+    } else {
+        PathBuf::from(pattern)
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -185,6 +270,7 @@ struct StuckMigrationRow {
     migration_id: String,
     operation_id: String,
     vm_id: String,
+    source_node_id: String,
     phase: String,
     #[allow(dead_code)]
     started_at: String,
