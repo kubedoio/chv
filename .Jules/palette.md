@@ -17,3 +17,4 @@
 ## 2024-06-25 - Topology Canvas Controls Accessibility
 **Learning:** Found that the live topology canvas headers rely on icon/symbol buttons (+, -, Fit) that lacked hover tooltips and clear ARIA labeling. Sighted users wouldn't know the exact function without trial and error, and screen readers lacked context for actions like "Fit" vs "Focus".
 **Action:** Always ensure floating canvas or map control panels use both `title` (for sighted tooltips) and explicit `aria-label`s to describe their zoom/pan functions clearly, as symbols alone are ambiguous.
+## 2026-06-28 - Add aria-labels to collapsible groups\n**Learning:** Svelte tree components often use `<button>` tags for expand/collapse actions that lack descriptive text. Adding `aria-label`s with context like `aria-label="Toggle {node.name} group"` improves screen reader experience.\n**Action:** Always verify tree UI components have `aria-label` on group toggle buttons.

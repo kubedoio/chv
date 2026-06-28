@@ -99,6 +99,7 @@
 				<button
 					type="button"
 					class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+					aria-label="Toggle Default Cloud group"
 					aria-expanded={openGroups['cloud-1']}
 					aria-controls="group-cloud-1"
 					onclick={() => onToggleGroup('cloud-1')}
@@ -113,6 +114,7 @@
 						<div class="flex flex-col">
 							<button type="button"
 								class="flex items-center gap-2 text-[length:var(--text-sm)] text-[var(--color-neutral-400)] no-underline bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] text-left py-1 pr-2 pl-0 hover:bg-[var(--color-neutral-800)] hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+								aria-label="Toggle Hosts group"
 								aria-expanded={openGroups['hosts']}
 								aria-controls="group-hosts"
 								onclick={() => onToggleGroup('hosts')}
@@ -131,6 +133,7 @@
 												<button
 														type="button"
 														class="app-nav__tree-row app-nav__tree-row--host"
+														aria-label="Toggle node {node.name} group"
 														aria-expanded={hostExpanded}
 														aria-controls="group-{node.id}"
 														onclick={() => onToggleGroup(getNodeExpandedKey(node.id))}

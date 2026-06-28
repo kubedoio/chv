@@ -253,6 +253,7 @@
 			<button
 				type="button"
 				class="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-[var(--color-neutral-500)] bg-transparent border-none cursor-pointer rounded-[var(--radius-xs)] px-2 py-1 hover:text-[var(--color-sidebar-text-active,#ffffff)]"
+				aria-label="Toggle Design group"
 				aria-expanded={openGroups['design']}
 				aria-controls="group-design"
 				onclick={() => toggleGroup('design')}
