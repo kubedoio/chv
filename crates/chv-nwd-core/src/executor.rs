@@ -903,7 +903,7 @@ impl NetworkExecutor for LinuxExecutor {
         let table = Self::sanitized_nft_table(network_id)?;
         crate::firewall::apply_firewall_rules(&table, policy_json)
             .await
-            .inspect_err(|e| {
+            .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall")
                     .increment(1);
             })
@@ -918,7 +918,7 @@ impl NetworkExecutor for LinuxExecutor {
         let table = Self::sanitized_nft_table(network_id)?;
         crate::firewall::apply_nat_rules(&table, policy_json)
             .await
-            .inspect_err(|e| {
+            .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_nat").increment(1);
             })
     }
@@ -933,7 +933,7 @@ impl NetworkExecutor for LinuxExecutor {
     ) -> Result<(), ChvError> {
         crate::dhcp::ensure_dhcp_scope(network_id, cidr, range_start, range_end, dns_servers)
             .await
-            .inspect_err(|e| {
+            .inspect_err(|_e| {
                 metrics::counter!(NWD_DHCP_ERRORS_TOTAL, "operation" => "ensure_scope")
                     .increment(1);
             })
@@ -1130,7 +1130,7 @@ impl NetworkExecutor for LinuxExecutor {
             &["fdb", "append", mac_address, "dev", &iface, "dst", vtep_ip],
         )
         .await
-        .inspect_err(|e| {
+        .inspect_err(|_e| {
             metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "add").increment(1);
         })
     }
@@ -1148,7 +1148,7 @@ impl NetworkExecutor for LinuxExecutor {
             &["fdb", "del", mac_address, "dev", &iface, "dst", vtep_ip],
         )
         .await
-        .inspect_err(|e| {
+        .inspect_err(|_e| {
             metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "delete").increment(1);
         })
     }
@@ -1174,7 +1174,7 @@ impl NetworkExecutor for LinuxExecutor {
             ],
         )
         .await
-        .inspect_err(|e| {
+        .inspect_err(|_e| {
             metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "replace").increment(1);
         })
     }
