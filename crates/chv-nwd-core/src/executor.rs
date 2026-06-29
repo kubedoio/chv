@@ -904,7 +904,8 @@ impl NetworkExecutor for LinuxExecutor {
         crate::firewall::apply_firewall_rules(&table, policy_json)
             .await
             .map_err(|e| {
-                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall").increment(1);
+                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall")
+                    .increment(1);
                 e
             })
     }
@@ -935,7 +936,8 @@ impl NetworkExecutor for LinuxExecutor {
         crate::dhcp::ensure_dhcp_scope(network_id, cidr, range_start, range_end, dns_servers)
             .await
             .map_err(|e| {
-                metrics::counter!(NWD_DHCP_ERRORS_TOTAL, "operation" => "ensure_scope").increment(1);
+                metrics::counter!(NWD_DHCP_ERRORS_TOTAL, "operation" => "ensure_scope")
+                    .increment(1);
                 e
             })
     }

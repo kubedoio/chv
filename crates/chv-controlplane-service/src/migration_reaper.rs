@@ -29,7 +29,11 @@ pub struct MigrationReaper {
 }
 
 impl MigrationReaper {
-    pub fn new(pool: StorePool, node_client_pool: NodeClientPool, agent_socket_pattern: String) -> Self {
+    pub fn new(
+        pool: StorePool,
+        node_client_pool: NodeClientPool,
+        agent_socket_pattern: String,
+    ) -> Self {
         Self {
             pool,
             interval: Duration::from_secs(REAPER_INTERVAL_SECS),

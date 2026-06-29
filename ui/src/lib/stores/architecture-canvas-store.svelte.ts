@@ -1,4 +1,4 @@
-import yaml from 'js-yaml';
+import { dump as yamlDump } from 'js-yaml';
 
 import { architectureStore, type Architecture } from './architecture-store.svelte';
 import {
@@ -135,7 +135,7 @@ function graphToYaml(nodes: ReadonlyArray<CanvasNode>): string {
 		doc[section] = list;
 	}
 
-	return yaml.dump(doc, { noRefs: true, sortKeys: false });
+	return yamlDump(doc, { noRefs: true, sortKeys: false });
 }
 
 // ---------------------------------------------------------------------------

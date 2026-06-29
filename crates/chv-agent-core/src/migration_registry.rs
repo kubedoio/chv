@@ -96,10 +96,7 @@ impl MigrationTaskRegistry {
 
     /// Number of in-flight migration tasks.
     pub fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Whether there are no in-flight migration tasks.
