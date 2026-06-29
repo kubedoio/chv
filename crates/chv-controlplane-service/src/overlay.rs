@@ -10,7 +10,6 @@ use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::VtepRepository;
 use chv_errors::ChvError;
-use std::path::PathBuf;
 use tracing::{info, warn};
 
 /// Manages VXLAN overlay state across cluster nodes.

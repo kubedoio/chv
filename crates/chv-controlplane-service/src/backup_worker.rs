@@ -17,9 +17,9 @@ const MAX_RETRIES: i64 = 3;
 pub struct BackupWorker {
     pool: StorePool,
     backup_repo: BackupRepository,
-    agent_socket_pattern: String,
+    _agent_socket_pattern: String,
     tick_interval: Duration,
-    node_client_pool: NodeClientPool,
+    _node_client_pool: NodeClientPool,
     backup_staging_dir: PathBuf,
 }
 
@@ -34,9 +34,9 @@ impl BackupWorker {
         Self {
             pool,
             backup_repo,
-            agent_socket_pattern,
+            _agent_socket_pattern: agent_socket_pattern,
             tick_interval: Duration::from_secs(30),
-            node_client_pool,
+            _node_client_pool: node_client_pool,
             backup_staging_dir,
         }
     }
@@ -453,6 +453,7 @@ impl BackupWorker {
             || destination.eq_ignore_ascii_case("null")
     }
 
+    #[allow(dead_code)]
     fn storage_backend_from_destination(destination: &str) -> String {
         if destination.starts_with("s3://") {
             "s3".to_string()

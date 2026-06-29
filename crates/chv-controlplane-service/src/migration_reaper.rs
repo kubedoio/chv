@@ -8,7 +8,6 @@ use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::StorePool;
 use chv_errors::ChvError;
-use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
