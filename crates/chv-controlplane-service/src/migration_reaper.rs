@@ -8,7 +8,6 @@ use crate::migration::resolve_agent_socket;
 use crate::node_client_pool::NodeClientPool;
 use chv_controlplane_store::StorePool;
 use chv_errors::ChvError;
-use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -29,7 +28,11 @@ pub struct MigrationReaper {
 }
 
 impl MigrationReaper {
-    pub fn new(pool: StorePool, node_client_pool: NodeClientPool, agent_socket_pattern: String) -> Self {
+    pub fn new(
+        pool: StorePool,
+        node_client_pool: NodeClientPool,
+        agent_socket_pattern: String,
+    ) -> Self {
         Self {
             pool,
             interval: Duration::from_secs(REAPER_INTERVAL_SECS),

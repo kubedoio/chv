@@ -166,8 +166,7 @@ impl Metrics {
     /// NOTE: No call sites exist yet — wiring is deferred until dirty-sync rounds
     /// are implemented in chv-stord (see docs/production-readiness-report.md P0 #7).
     pub fn set_migration_dirty_blocks(&self, blocks: f64) {
-        metrics::gauge!(CHV_MIGRATION_DIRTY_BLOCKS)
-            .set(blocks);
+        metrics::gauge!(CHV_MIGRATION_DIRTY_BLOCKS).set(blocks);
     }
 
     /// Set current FDB entry count for a VXLAN network.

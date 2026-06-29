@@ -9,7 +9,6 @@ use chv_controlplane_store::{
 use chv_controlplane_types::domain::{OperationId, OperationStatus};
 use chv_errors::ChvError;
 use chv_observability::{CHV_NODES_READY, CHV_OPERATION_DURATION_SECONDS, CHV_VMS_TOTAL};
-use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
 

@@ -383,7 +383,10 @@ mod tests {
             &[],
         )
         .await;
-        assert!(result.is_err(), "path traversal network_id must be rejected");
+        assert!(
+            result.is_err(),
+            "path traversal network_id must be rejected"
+        );
     }
 
     #[tokio::test]

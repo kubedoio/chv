@@ -3414,9 +3414,8 @@ mod tests {
 
         let registry = Arc::new(MigrationTaskRegistry::new());
         // Simulate an in-flight migration.
-        let handle = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await
-        });
+        let handle =
+            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await });
         registry.insert(
             "drain-test-op".to_string(),
             handle.abort_handle(),

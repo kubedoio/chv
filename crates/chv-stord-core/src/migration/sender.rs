@@ -625,7 +625,8 @@ impl<B: StorageBackend> MigrationSender<B> {
                         offset = ack.last_offset,
                         "receiver reported CRC mismatch"
                     );
-                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "crc_mismatch").increment(1);
+                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "crc_mismatch")
+                        .increment(1);
                     return Err(tonic::Status::data_loss(
                         "CRC mismatch reported by receiver",
                     ));
@@ -636,7 +637,8 @@ impl<B: StorageBackend> MigrationSender<B> {
                         offset = ack.last_offset,
                         "receiver reported write error"
                     );
-                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "write_error").increment(1);
+                    metrics::counter!(STORD_MIGRATION_ERRORS_TOTAL, "reason" => "write_error")
+                        .increment(1);
                     return Err(tonic::Status::internal("write error reported by receiver"));
                 }
                 self.send_window.acked(ack.last_sequence_num);
