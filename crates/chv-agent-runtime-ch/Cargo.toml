@@ -19,4 +19,4 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-metrics-util = "0.19"
+metrics-util = "0.20"
