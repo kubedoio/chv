@@ -12,7 +12,7 @@ fn main() {
         .current_dir(&crate_root)
         .output()
         .ok()
-        .and_then(|o| if o.status.success() { Some(o) } else { None })
+        .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -21,7 +21,7 @@ fn main() {
         .args(["+%Y-%m-%d"])
         .output()
         .ok()
-        .and_then(|o| if o.status.success() { Some(o) } else { None })
+        .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
