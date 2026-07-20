@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "AGENT-CORE-001",
+      "tier": "T0",
+      "prerequisites": ["repository checkout"],
+      "required_evidence": ["architecture guard passes", "single-authority declaration validates"],
+      "forbidden_outcomes": ["cellhvd binary", "cellhvd service", "second VM authority"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "AGENT-CORE-006",
+      "tier": "T0",
+      "prerequisites": ["packaging tree"],
+      "required_evidence": ["service-name scan passes"],
+      "forbidden_outcomes": ["two runtime services"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "VMM-ID-001",
+      "tier": "T0",
+      "prerequisites": ["active source and packaging tree"],
+      "required_evidence": ["forbidden identity scan passes"],
+      "forbidden_outcomes": ["Cloud Hypervisor advertised as QEMU", "QMP compatibility identity"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "CLAIM-001",
+      "tier": "T0",
+      "prerequisites": ["compatibility claim schema", "proposed Phase A claim"],
+      "required_evidence": ["claim schema validation passes"],
+      "forbidden_outcomes": ["unqualified compatibility claim", "non-Cloud-Hypervisor VMM backend"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    }
+  ]
+}

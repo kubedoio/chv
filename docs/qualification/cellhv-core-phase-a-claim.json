@@ -1,0 +1,13 @@
+{
+  "cellhv_core": { "runtime_service": "chv-agent", "version": "0.2.0" },
+  "vmm": { "backend": "cloud-hypervisor", "version": "v43.0" },
+  "hypervisor_interface": { "type": "native-api", "version": "current-private-ch-api-adapter" },
+  "network": { "type": "existing-bridge", "profile": "proposed-not-qualified" },
+  "storage": { "type": "existing-file-block", "profile": "proposed-not-qualified" },
+  "platform": { "name": "none", "version": "not-applicable", "integration": "none" },
+  "workload": { "guest_os": "Ubuntu 24.04 LTS cloud image", "architecture": "x86_64", "firmware": "Ubuntu 24.04 ovmf build pending pin" },
+  "qualification": { "profile": "phase-a-proposed-tuple", "evidence_digest": "not-qualified-no-runtime-claim" },
+  "maintenance_owner": "CellHV virtualization engineering",
+  "unsupported": ["production compatibility claim", "OpenStack", "QEMU identity"],
+  "known_deviations": ["kernel, OVMF build, and guest image digest require Phase C lab pinning"]
+}

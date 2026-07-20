@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "runtime_service": "chv-agent",
+  "runtime_binary": "chv-agent",
+  "vm_authority_count": 1,
+  "vm_authority_implementation": "crates/chv-agent-core",
+  "vm_process_owner_count": 1,
+  "durable_vm_store_count": 0,
+  "durable_vm_store_status": "phase-b-not-implemented",
+  "operation_engine_count": 0,
+  "operation_engine_status": "phase-b-not-implemented",
+  "compatibility_entrypoint": "control-plane-node-api",
+  "vmm_backend": "cloud-hypervisor",
+  "vmm_implementation": "crates/chv-agent-runtime-ch",
+  "qemu_identity": false
+}

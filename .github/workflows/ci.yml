@@ -41,6 +41,11 @@ jobs:
       - name: ADR-009 println!/eprintln! ban (library crates)
         run: ./scripts/check-no-println.sh
 
+      - name: CellHV Core architecture and compatibility guards
+        run: |
+          python3 -B scripts/check-cellhv-core-architecture.py
+          python3 -B -m unittest tests/test_cellhv_core_architecture.py
+
       - name: Prometheus alert/emitter label drift gate
         # Detects rules in monitoring/rules/*.yml that reference label keys
         # the emitter source code never produces (recurrence guard for the
