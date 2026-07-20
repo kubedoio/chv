@@ -1,20 +1,21 @@
 # CellHV Core Acceptance Test Harness Implementation Plan
 
 **Status:** Proposed  
-**Date:** 2026-07-20  
-**Depends on:**
-
-- `docs/specs/cellhv-core-acceptance-test-spec.md`
-- `docs/specs/contracts/cellhv-libvirt-compatibility-profile-v1.md`
-- `docs/plans/2026-07-19-cellhv-core-foundation-implementation.md`
+**Date:** 2026-07-20
 
 ## 1. Objective
 
-Build the smallest harness that proves standalone Core behavior, `ch:///system` CellHV delegation, bounded upstream direct-mode preservation, and unchanged existing-platform integration paths.
+Build the smallest harness that proves:
 
-The harness MUST observe public interfaces and MUST NOT repair product state or write private databases.
+- standalone Core behavior;
+- truthful VMM identity;
+- independent network and storage profiles;
+- real cloud-platform integration paths;
+- compatibility claims backed by evidence.
 
-## 2. Initial commands
+The harness observes public interfaces and never repairs private product state.
+
+## 2. Commands
 
 ```text
 cellhv-test verify-host
@@ -23,272 +24,242 @@ cellhv-test run <scenario-id>
 cellhv-test collect <run-id>
 cellhv-test report <run-id>
 cellhv-test gap-report <run-id>
-cellhv-test mode-status
+cellhv-test claim <run-id>
 ```
-
-`mode-status` reads only trusted host-local diagnostics. It does not change the libvirt backend mode.
 
 ## 3. Environment classes
 
 | Environment | Purpose |
 |---|---|
-| normal CI | schemas, dependencies, unit/property, XML mapping, mode-selection validation |
-| privileged disposable Linux | daemons, sockets, SQLite, permissions, libvirt daemon integration, mode isolation |
-| qualified KVM host | real Core and libvirt VM lifecycle |
-| libvirt direct-mode baseline host | inventory upstream `ch:///system` behavior without CellHV delegation |
-| libvirt delegation host | `ch:///system` with CellHV delegation mode, `virsh`, bindings, restart tests |
-| OpenStack lab | upstream Nova LibvirtDriver with `ch:///system` |
-| CloudStack lab | standard KVM agent attempting `ch:///system` |
-| OpenNebula lab | standard KVM/VMM path with `LIBVIRT_URI = ch:///system` |
-| release lab | packages, upgrade/rollback, mode transition, soak |
+| normal CI | schema, dependency, identity, property tests |
+| privileged disposable Linux | services, SQLite, providers, permissions |
+| Cloud Hypervisor KVM host | real Core lifecycle and recovery |
+| libvirt discovery host | upstream `ch` inventory and optional profile |
+| OpenStack lab | compare generic libvirt and native adapter paths |
+| CloudStack lab | measure KVM-agent assumptions and candidate paths |
+| OpenNebula lab | compare integration paths |
+| provider lab | network and storage qualification |
+| release lab | upgrade, rollback, soak, packages |
 
-Cloud labs must use published upstream packages plus documented standard configuration. Any CellHV-specific platform driver, extension, or plugin invalidates the “unchanged path” profile and must be declared.
+## 4. Core modules
 
-## 4. Harness modules
-
-Initial modules:
-
-- scenario registry and schema validation;
+- scenario registry;
 - host safety guard;
 - native Core client;
-- libvirt client runner;
-- `virsh` runner;
-- trusted backend-mode inspector;
-- libvirt direct/delegated namespace inspector;
-- process/systemd inventory;
-- network/storage inventory;
+- process/systemd/socket inventory;
+- VMM identity verifier;
+- network inventory;
+- storage inventory;
 - operation/event collector;
-- Cloud Hypervisor socket/process audit;
+- provider contract runner;
+- libvirt discovery runner;
+- platform adapters for testing only;
 - leak checker;
-- JSON/JUnit output;
-- gap-report generator.
+- JSON/JUnit reports;
+- gap-report generator;
+- compatibility-claim generator.
 
-Deferred:
+The test harness may drive a product adapter but MUST NOT implement product behavior itself.
 
-- multi-host scheduler;
-- report portal;
-- automatic upstream patching;
-- full cloud-lab lifecycle management;
-- advanced Ceph/network chaos;
-- automatic backend-mode switching.
+## 5. VMM identity verification
 
-## 5. Libvirt conformance implementation
+The harness records:
 
-The harness must test:
+- expected VMM backend;
+- actual process executable and version;
+- libvirt URI where used;
+- reported hypervisor type;
+- VMM API sockets;
+- systemd units and ownership markers;
+- advertised capabilities.
 
-- connection through `ch:///system`;
-- preservation of the upstream driver identity;
-- trusted host-local direct/delegated mode selection;
-- capability XML;
-- domain XML acceptance/rejection;
-- identity and lookup;
-- lifecycle and persistence;
-- events;
-- statistics;
-- disk/NIC attach/detach;
-- driver/Core restart;
-- operation correlation;
-- security boundary;
-- mixed native/libvirt conflicts;
-- direct/delegated ownership conflicts;
-- bounded upstream direct-mode regression.
+It fails when:
 
-The harness captures each libvirt API call, return/error, active mode, related Core operation, and resulting process state.
+- Cloud Hypervisor is reported as QEMU;
+- QEMU/QMP functionality is advertised without actual support;
+- a future QEMU profile has no QEMU process;
+- two VMM authorities own the same VM.
 
-In delegation mode it also proves that the libvirt driver does not open Cloud Hypervisor API sockets, launch Cloud Hypervisor, or mutate Linux resources directly.
+## 6. Network and storage contracts
 
-## 6. Mode-isolation implementation
+Provider runners are independent from VM lifecycle tests.
 
-The harness records and compares:
+### Network evidence
 
-- active mode and configuration source;
-- VM UUIDs and names;
-- Cloud Hypervisor process IDs;
-- API socket paths;
-- systemd units;
-- runtime and state directories;
-- ownership markers;
-- network and storage attachment identities.
+- endpoint source and owner;
+- bridge/TAP/VLAN/namespace state;
+- guest connectivity;
+- firewall changes;
+- restart recovery;
+- cleanup and leak result.
 
-Required checks:
+### Storage evidence
 
-- client URI and domain XML cannot select mode;
-- mode cannot change while domains or owned runtime resources exist;
-- direct and delegated resources never overlap;
-- delegation mode sends mutations through Core;
-- direct mode does not contact Core;
-- restart preserves mode and VM runtime;
-- direct-mode regression uses an isolated host or clean runtime namespace.
+- endpoint source and owner;
+- file/block/provider identity;
+- lock/exclusivity state;
+- guest data integrity;
+- restart recovery;
+- cleanup and leak result.
 
-## 7. Platform lab rule
+## 7. Platform comparison labs
 
-The platform is driven through its own public API or CLI. The harness observes:
+Each platform discovery run may evaluate several integration candidates.
 
-- platform request;
-- requested libvirt URI and configuration;
-- libvirt call/XML;
-- active driver mode;
-- Core operation/event in delegation mode;
-- actual Linux/Cloud Hypervisor state.
-
-This correlation chain is mandatory evidence.
-
-A standard URI configuration change is permitted in the unchanged-path profile. Platform-specific CellHV code is not.
-
-## 8. Gap reports
-
-A failed unchanged-path scenario generates machine-readable and Markdown reports:
+Required report fields:
 
 ```yaml
 platform:
 platform_version:
-scenario:
+candidate:
+vmm_backend:
+hypervisor_interface:
+network_path:
+storage_path:
 configuration:
-requested_libvirt_uri:
-active_backend_mode:
-libvirt_api:
-domain_xml_fragment:
+platform_patches:
+cellhv_adapter:
 expected:
 observed:
-layer: core|ch-delegation|libvirt|platform
-classification: mode-configuration|missing-profile|generic-backend-assumption|qemu-specific|hard-coded-uri|configuration|defect
-generic_upstream_fix:
-fallback_adapter_required: unknown|no|yes
-separate_driver_uri_required: unknown|no|yes
-security_impact:
-maintenance_impact:
+qemu_specific_assumptions:
+generic_upstream_option:
+security_risk:
+maintenance_cost:
+result:
+recommended_path:
 ```
 
-A `yes` value is not sufficient to start an adapter or a separate `cellhv:///system` driver; an ADR is still required.
+### OpenStack
 
-## 9. Safety
+Compare:
 
-Destructive execution requires:
+- Nova LibvirtDriver with `ch`;
+- generic upstream changes;
+- native CellHV ComputeDriver.
 
-- test-host marker;
-- reserved resource prefixes;
-- disposable test VM/storage/network;
-- no production Core or libvirt domains;
-- explicit direct-mode or delegation-mode environment profile;
-- cleanup and leak check.
+### CloudStack
 
-The harness aborts when it cannot prove isolation.
+Compare:
 
-Direct-mode and delegation-mode tests MUST NOT run concurrently on shared runtime resources.
+- standard KVM agent with non-QEMU libvirt;
+- extension framework;
+- native hypervisor plugin;
+- future actual QEMU backend only if separately approved.
 
-## 10. Evidence profiles
+### OpenNebula
+
+Compare:
+
+- generic libvirt;
+- generic VMM changes;
+- native CellHV VMM driver.
+
+A candidate cannot be selected solely because it needs fewer initial code changes.
+
+## 8. Evidence profiles
 
 ### Minimal
 
-- versions and package digests;
 - scenario result;
-- requested URI and active backend mode;
-- operations/events where applicable;
-- libvirt calls;
+- exact versions;
+- VMM identity;
+- Core operations/events;
+- network/storage path identifiers;
 - leak result.
 
 ### Failure
 
 - minimal evidence;
-- Core, libvirt, and platform logs;
-- mode configuration and diagnostics;
-- XML/API payloads with secrets redacted;
-- process/network/storage/socket inventories;
+- logs;
+- API/XML payloads;
+- process/network/storage inventory;
 - correlation timeline;
 - gap report.
 
 ### Qualification
 
-- complete support matrices;
-- signed evidence manifest;
+- complete claim tuple;
 - package/configuration manifest;
-- active-mode configuration contract;
-- direct-mode regression result;
-- all required scenario results;
-- upgrade, mode-transition, rollback, and soak results.
+- all required scenarios;
+- upgrade and rollback;
+- security result;
+- signed evidence digest;
+- unsupported matrix.
 
-## 11. Phased harness plan
+## 9. Safety
 
-### H0 — registry and static checks
+Destructive tests require:
+
+- explicit test-host marker;
+- reserved resource prefixes;
+- disposable VM/network/storage;
+- no production domains;
+- approved provider namespaces;
+- cleanup and leak assertion.
+
+The harness aborts when isolation cannot be proven.
+
+## 10. Phased implementation
+
+### H0 — schemas and static checks
 
 - scenario schema;
-- gates and profiles;
-- API/contract lint;
-- dependency guard;
-- mode-selection threat-model tests;
+- compatibility-claim schema;
+- forbidden QEMU-identity checks;
 - report skeleton.
 
-### H1 — minimal Core
+### H1 — Core lifecycle
 
-- host verification;
 - native client;
-- Core lifecycle and leak checks;
-- recovery resume support.
+- KVM host verification;
+- lifecycle, recovery, and leak tests.
 
-### H2 — upstream `ch` direct-mode baseline
+### H2 — provider contracts
 
-- `ch:///system` connection runner;
-- upstream function and XML inventory;
-- direct lifecycle baseline;
-- process/socket/resource inventory;
-- support-matrix generator.
+- network runner;
+- storage runner;
+- restart and cleanup tests.
 
-### H3 — CellHV delegation profile
+### H3 — libvirt discovery
 
-- trusted mode inspector;
-- libvirt/virsh runners using the same URI;
-- XML fixtures;
-- API call tracing;
-- Core operation correlation;
-- Cloud Hypervisor socket/process boundary audit;
-- mixed-client and mode-conflict tests;
-- direct-mode regression comparison;
-- profile-v1 matrix generation.
+- upstream `ch` support inventory;
+- URI, XML, events, statistics, and process ownership;
+- optional bounded profile.
 
-### H4 — OpenStack
+### H4 — OpenStack comparison
 
-- deploy or connect to a supported lab;
-- configure upstream LibvirtDriver with `ch:///system`;
-- enable delegation only through host-local configuration;
-- run OS-LIBVIRT scenarios;
-- produce gap matrix.
+- run each candidate path;
+- collect common evidence;
+- compare reliability and maintenance.
 
-### H5 — CloudStack
+### H5 — CloudStack comparison
 
-- deploy/connect standard KVM agent;
-- attempt documented `ch:///system` configuration;
-- capture exact hard-coded URI, hooks, tools, and QEMU assumptions;
-- run CS-LIBVIRT scenarios where possible;
-- produce gap matrix.
+- capture URI, QEMU hook/tooling, storage, and network assumptions;
+- test viable candidate paths.
 
-### H6 — OpenNebula
+### H6 — OpenNebula comparison
 
-- configure existing KVM/VMM driver with `LIBVIRT_URI = ch:///system`;
-- run ONE-LIBVIRT scenarios;
-- produce gap matrix.
+- run and compare viable paths.
 
 ### H7 — qualification
 
-- package installation;
-- direct/delegated mode upgrade and rollback;
-- invalid mode-switch tests;
-- long soak;
-- signed evidence and published matrices.
+- packages;
+- upgrade/rollback;
+- soak;
+- signed claims and matrices.
 
-## 12. First harness PR sequence
+## 11. First harness PR sequence
 
-1. scenario registry and report schema;
+1. scenario and claim schemas;
 2. host safety guard;
-3. native Core runner;
-4. upstream `ch:///system` connection and support-matrix runner;
-5. direct-mode lifecycle and resource baseline;
-6. trusted mode-status and namespace inventory;
-7. delegation-mode XML and lifecycle fixture suite;
-8. operation-correlation and Cloud Hypervisor boundary checks;
-9. mode-conflict and direct-mode regression suite;
-10. gap-report generator;
-11. OpenStack lab runner;
-12. CloudStack lab runner;
-13. OpenNebula lab runner.
-
-No harness change may introduce product behavior, a platform-specific adapter, or a separate libvirt URI.
+3. VMM identity verifier;
+4. native Core runner;
+5. network contract runner;
+6. storage contract runner;
+7. recovery and leak suite;
+8. libvirt `ch` discovery runner;
+9. gap-report generator;
+10. OpenStack candidate comparison;
+11. CloudStack candidate comparison;
+12. OpenNebula candidate comparison;
+13. claim and evidence generator.
