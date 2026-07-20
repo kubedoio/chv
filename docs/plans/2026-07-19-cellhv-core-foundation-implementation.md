@@ -1,66 +1,63 @@
 # CellHV Core Foundation Implementation Plan
 
 **Status:** Proposed  
-**Date:** 2026-07-20  
-**Depends on:**
-
-- `docs/specs/cellhv-core-foundation-spec.md`
-- `docs/specs/adr/015-libvirt-first-ecosystem-compatibility.md`
-- `docs/specs/contracts/cellhv-libvirt-compatibility-profile-v1.md`
-- `docs/specs/cellhv-core-api-cloud-integration-spec.md`
+**Date:** 2026-07-20
 
 ## 1. Objective
 
-Extract a small autonomous Core from the current control-plane-led implementation, then add one libvirt compatibility bridge that can serve multiple existing cloud platforms through the existing `ch:///system` identity.
+Extract a small autonomous CellHV Core from the current control-plane-led implementation, qualify Cloud Hypervisor honestly, and choose cloud-platform integration paths from measured evidence.
 
-The implementation MUST avoid a flag-day rewrite, MUST keep one VM authority, and MUST avoid creating a new libvirt URI until the existing `ch` path has been proven unsuitable.
+The implementation MUST avoid:
+
+- a flag-day rewrite;
+- false QEMU identity;
+- making libvirt mandatory for standalone Core;
+- embedding cloud-platform models in Core;
+- assuming one URI solves networking, storage, and platform integration.
 
 ## 2. Repository mapping
 
 | Existing area | Direction |
 |---|---|
-| `chv-agent-runtime-ch` | source for Cloud Hypervisor runtime adapter |
-| `chv-agent-core` | source for lifecycle, console, telemetry, and recovery |
-| `chv-stord-*` | source for later storage providers |
-| `chv-nwd-*` | source for later network providers |
-| `chv-common`, `chv-errors`, `chv-observability` | reuse identifiers, errors, tracing, metrics |
-| current node cache | compatibility input only; never authoritative Core store |
-| existing gRPC | migration/internal compatibility; not the only public surface |
-| Controller, Web UI, Designer | remain above Core |
-| upstream libvirt `ch` driver | preferred compatibility identity, direct-mode baseline, and delegation-mode implementation target |
+| `chv-agent-runtime-ch` | source for Cloud Hypervisor VMM adapter |
+| `chv-agent-core` | source for lifecycle, console, telemetry, recovery |
+| `chv-stord-*` | source for storage providers |
+| `chv-nwd-*` | source for network providers |
+| `chv-common`, `chv-errors`, `chv-observability` | reuse |
+| node JSON cache | migration input only, never authoritative |
+| existing gRPC | compatibility/internal path during transition |
+| Controller, UI, Designer | remain above Core |
 
-## 3. Target shape
+Target structure:
 
 ```text
 api/openapi/cellhv-core-v1.yaml
 cmd/cellhvd/
 cmd/cellhv-hostd/
 crates/cellhv-core-*/
-crates/cellhv-runtime-cloud-hypervisor/
-crates/cellhv-*-provider-*/
-integrations/libvirt-ch-delegation/
-tests/libvirt-conformance/
-tests/platform-conformance/
+crates/cellhv-vmm-cloud-hypervisor/
+crates/cellhv-vmm-api/
+crates/cellhv-network-provider-*/
+crates/cellhv-storage-provider-*/
+integrations/libvirt-ch/
+integrations/openstack/
+integrations/cloudstack/
+integrations/opennebula/
+tests/qualification/
 ```
 
-The libvirt integration MUST depend on the public Core client/service boundary. Core MUST NOT depend on libvirt.
+## 3. Phase plan
 
-The preferred implementation changes or packages the existing libvirt Cloud Hypervisor driver so that `ch:///system` can operate in an explicit CellHV delegation mode. A new libvirt driver directory or URI is not part of the first implementation path.
+### Phase 0 — decision and claim lock
 
-## 4. Phase plan
+- approve authority invariants;
+- approve ADR-015;
+- publish compatibility-claims contract;
+- define initial host/VMM/guest matrix;
+- prohibit QEMU identity for Cloud Hypervisor;
+- create dependency guards.
 
-### Phase 0 — authority and compatibility lock
-
-- accept ADR-015;
-- review the libvirt v1 contract;
-- inventory current Core/runtime paths;
-- inventory upstream libvirt `ch` APIs, XML, events, statistics, storage/network interactions, and direct process ownership;
-- identify how existing `ch` driver code can delegate to Core without changing client URI identity;
-- identify all mode-selection, packaging, and upgrade implications;
-- establish dependency guards;
-- record current direct-mode resource and lifecycle baseline.
-
-Exit: no ambiguity about who launches, owns, and recovers a VM, and no assumption that URI compatibility equals platform compatibility.
+Exit: product and claim boundaries are machine-checkable.
 
 ### Phase 1 — Core M0
 
@@ -69,190 +66,176 @@ Exit: no ambiguity about who launches, owns, and recovers a VM, and no assumptio
 - operation journal;
 - idempotency and resource versions;
 - native OpenAPI skeleton;
-- generated Rust client;
-- no real VM required.
+- generated client;
+- VMM adapter trait.
 
-Exit: state and operation tests pass.
+Exit: state and contract tests pass.
 
 ### Phase 2 — Core M1
 
 - minimal `cellhvd`;
-- one Cloud Hypervisor adapter;
+- Cloud Hypervisor adapter;
 - one Linux VM;
-- pre-existing raw/block attachment;
-- pre-existing bridge/TAP;
+- pre-existing disk and bridge/TAP;
 - create, inspect, start, stop, delete;
-- compatibility adapter from current `chv-agent`.
+- compatibility path from current agent.
 
-Exit: minimal Core scenarios pass on real KVM.
+Exit: real-KVM minimal scenarios pass.
 
 ### Phase 3 — Core M2
 
 - daemon re-adoption;
 - host reboot;
-- fail-closed DB;
+- fail-closed database;
 - crash recovery;
-- leak tests;
-- ownership-conflict detection;
-- runtime namespace and ownership markers suitable for libvirt mode isolation.
+- leak testing;
+- ownership markers;
+- truthful capability reporting.
 
-Exit: recovery profile passes.
+Exit: recovery and VMM identity profiles pass.
 
-### Phase 4 — upstream `ch` discovery and delegation spike
+### Phase 4 — compatibility discovery
 
-Run two bounded experiments using the same public URI:
+Run independent workstreams:
 
-1. test upstream `ch:///system` direct mode with `virsh` and selected platform clients to measure the current baseline;
-2. prototype `ch:///system` CellHV delegation mode so every mutation reaches Core.
+#### Hypervisor interface
 
-The prototype MUST NOT expose a new `cellhv:///system` URI.
+- inventory upstream libvirt `ch` support;
+- test `virsh` and language bindings;
+- identify delegation or coexistence options;
+- do not assume support is worth implementing.
 
-Deliver:
+#### OpenStack
 
-- upstream `ch` function and XML support matrix;
-- direct-mode process, socket, storage, and network ownership map;
-- delegation seam options inside the existing driver;
-- trusted host-local mode-selection options;
-- direct/delegated namespace-isolation design;
-- code-sharing and patch-scope decision;
-- downstream-package versus upstream-proposal analysis;
-- security boundary review;
-- estimate for a separate driver only as a fallback.
+- run Nova LibvirtDriver against `ch`;
+- enumerate QEMU assumptions;
+- estimate a native CellHV ComputeDriver;
+- compare maintenance and reliability.
 
-Exit: prove or reject `ch:///system` delegation without weakening single authority or upstream direct mode.
+#### CloudStack
 
-### Phase 5 — `ch:///system` CellHV delegation profile v1
+- inventory URI, hook, QEMU-tool, storage, network, and agent assumptions;
+- evaluate extension and native-plugin paths.
 
-- connection and capability APIs using the existing URI;
-- preserve upstream driver identity;
-- explicit host-local delegation-mode configuration;
-- domain XML parser/translator;
-- identity and lookup;
-- lifecycle;
-- events;
-- basic statistics;
-- supported disk/NIC attachment;
-- explicit unsupported APIs;
-- Core operation correlation;
-- restart/rebuild behavior;
-- direct-mode regression profile;
-- mode-switch and ownership-conflict protection.
+#### OpenNebula
 
-Exit: LIBVIRT-001 through LIBVIRT-015 and CH-MODE-001 through CH-MODE-008 pass.
+- compare generic libvirt, generic VMM changes, and native driver.
 
-### Phase 6 — OpenStack unchanged-path experiment
+#### Network and storage
 
-- configure upstream Nova LibvirtDriver with `connection_uri = ch:///system` or the supported equivalent;
-- enable CellHV delegation mode through host-local configuration, not Nova-specific logic;
-- run supported lifecycle;
-- collect every generic, QEMU-specific, `virt_type`, capability, networking, storage, image, console, and migration assumption;
-- propose generic upstream fixes;
-- avoid a CellHV ComputeDriver.
+- map Neutron/Cinder, CloudStack, and OpenNebula outputs into Core attachment contracts separately.
 
-Exit: passing profile or a reviewed gap report.
+Exit: evidence-based path recommendation for each platform.
 
-### Phase 7 — CloudStack unchanged-path experiment
+### Phase 5 — first OpenStack integration
 
-- determine whether the standard KVM agent can configure `ch:///system`;
-- if connection is possible, test lifecycle, network, storage, hooks, image tooling, and monitoring;
-- if connection is not possible, record the exact hard-coded/configuration blocker;
-- classify QEMU-specific assumptions;
-- propose generic upstream changes;
-- avoid a CellHV extension/plugin.
+Implement the selected path:
 
-Exit: passing profile or a reviewed gap report.
+- generic `ch` path;
+- generic upstream changes;
+- or official CellHV Nova driver.
 
-### Phase 8 — OpenNebula unchanged-path experiment
+Requirements:
 
-- configure existing KVM/VMM driver with `LIBVIRT_URI = ch:///system`;
-- enable delegation through host-local configuration;
-- test lifecycle and monitoring;
-- classify template/QEMU assumptions.
+- Core authority remains unchanged;
+- Neutron and Cinder paths pass independent provider profiles;
+- retry, restart, upgrade, and rollback tests;
+- maintenance owner and version matrix.
 
-Exit: passing profile or reviewed gap report.
+Exit: OpenStack supported-profile tests pass.
 
-### Phase 9 — fallback decisions
+### Phase 6 — CloudStack integration decision
 
-For each platform that does not pass:
+Using the discovery report:
 
-- evaluate compatibility-profile extension;
-- evaluate generic libvirt or platform patch;
-- estimate long-term maintenance;
-- issue a new ADR only if a CellHV-specific platform adapter is necessary.
+- implement the selected generic or native integration;
+- or publish unsupported/preview status with exact blockers;
+- never masquerade Cloud Hypervisor as QEMU.
 
-For the libvirt URI/driver itself:
+Exit: support profile passes or a reviewed roadmap decision exists.
 
-- compare upstream `ch` delegation maintenance with a downstream package;
-- evaluate whether a separate `cellhv:///system` driver would actually improve safety or maintainability;
-- require a new ADR before implementing a separate driver or URI.
+### Phase 7 — OpenNebula integration
 
-No fallback adapter or separate URI begins without this gate.
+Implement only the selected smallest maintainable path and qualify datastore/network behavior separately.
 
-### Phase 10 — providers, managed endpoint, and Core 1.0
+### Phase 8 — standard providers and managed endpoint
 
-- privilege helper;
-- standard providers;
+- privileged helper;
+- bridge/VLAN/NAT providers;
+- raw/LVM/RBD providers;
 - HTTPS/mTLS and enrollment;
-- Controller and O3K native API integration;
-- packages, upgrades, rollback, soak, SBOM;
-- upstream libvirt submission or maintained downstream `ch` delegation package;
-- documented direct/delegated mode transition and rollback procedure.
+- Controller and O3K native API integration.
 
-## 5. Initial pull-request sequence
+### Phase 9 — optional compatibility profiles
 
-1. ADR-015 and v1 compatibility contract using `ch:///system`.
-2. Core dependency guard and authority types.
-3. SQLite state and operation journal.
-4. Native API skeleton and client.
-5. Minimal Cloud Hypervisor runtime.
-6. Recovery, runtime ownership markers, and conflict checks.
-7. Libvirt `ch` inventory and automated support-matrix extractor.
-8. Trusted direct/delegated mode configuration spike.
-9. `ch:///system` delegation proof of concept.
-10. Lifecycle and XML delegation profile.
-11. Events/statistics and attachment profile.
-12. Direct-mode regression and mode-conflict suite.
-13. OpenStack unchanged-path lab.
-14. CloudStack unchanged-path lab.
-15. OpenNebula unchanged-path lab.
-16. Fallback ADRs only where required.
+- bounded `ch:///system` profile if it has real consumers;
+- Terraform and Kubernetes integrations;
+- additional cloud platforms.
 
-## 6. Coding-agent rules
+### Phase 10 — future QEMU backend decision
 
-Every task must name:
+Only after an explicit business and compatibility case:
+
+- write separate ADR;
+- define real QEMU adapter;
+- decide libvirt ownership model;
+- qualify complete required semantics;
+- ensure Cloud Hypervisor and QEMU identities never mix.
+
+This phase is not required for Core 1.0.
+
+## 4. Initial PR sequence
+
+1. ADR-015 and compatibility-claims contract.
+2. Core dependency and identity guards.
+3. Core types, SQLite, and operation journal.
+4. Native API and generated client.
+5. VMM adapter contract.
+6. Minimal Cloud Hypervisor runtime.
+7. Recovery and ownership tests.
+8. Network attachment contract.
+9. Storage attachment contract.
+10. Libvirt `ch` support-matrix discovery.
+11. OpenStack path-comparison lab.
+12. Selected OpenStack implementation ADR and code.
+13. CloudStack path-comparison lab.
+14. Selected CloudStack decision.
+15. OpenNebula path-comparison lab.
+16. Standard provider qualification.
+
+## 5. Coding-agent rules
+
+Every task names:
 
 - phase;
-- affected authority boundary;
-- active libvirt mode where relevant;
-- contract APIs;
+- VMM backend;
+- authority boundary;
+- network and storage paths;
+- platform integration path if applicable;
 - acceptance IDs;
 - unsupported behavior;
 - rollback.
 
 Agents MUST NOT:
 
-- add platform models to Core;
-- introduce `cellhv:///system` without a new approved ADR;
-- let URI query data, domain XML, or cloud request data select backend mode;
-- call Cloud Hypervisor directly from the libvirt driver in CellHV delegation mode;
-- regress inventoried direct-mode behavior without an explicit upstream compatibility decision;
-- store a second authoritative VM definition;
-- silently accept unsupported domain XML;
-- start a platform-specific adapter before the fallback gate;
+- expose Cloud Hypervisor as `qemu:///system`;
+- add QMP emulation;
+- infer platform support from a connection test;
+- infer network/storage support from VM lifecycle;
+- write cloud-platform state into Core;
+- bypass public Core APIs;
+- fabricate capabilities;
+- silently accept unsupported XML/devices;
 - claim compatibility from mocks;
-- remove current paths before parity and rollback are proven.
+- implement a future QEMU backend without an ADR.
 
-## 7. Open decisions
+## 6. Open decisions
 
-- exact trusted host-local delegation-mode configuration;
-- generic upstream backend abstraction versus downstream libvirt patch/package;
-- exact libvirt version range;
-- code reuse and modification scope in the existing `ch` driver;
-- service and package topology;
-- direct/delegated runtime namespace separation;
-- standard storage/network driver coexistence;
-- Nova `virt_type` and connection configuration;
-- CloudStack agent connection configurability;
-- OpenNebula template restrictions;
-- first platform selected for Core 1.0 qualification;
-- separate `cellhv:///system` fallback only if the preferred path fails.
+- first OpenStack integration path;
+- first CloudStack integration path;
+- whether bounded `ch` support has enough consumer value;
+- standard libvirt network/storage coexistence;
+- exact provider process boundaries;
+- support distributions and versions;
+- future actual QEMU backend business case;
+- integration maintenance ownership.
