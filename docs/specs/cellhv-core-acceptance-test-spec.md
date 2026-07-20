@@ -1,261 +1,209 @@
 # CellHV Core Acceptance Test Specification
 
 **Status:** Proposed  
-**Date:** 2026-07-20  
-**Depends on:**
-
-- `docs/specs/cellhv-core-foundation-spec.md`
-- `docs/specs/adr/015-libvirt-first-ecosystem-compatibility.md`
-- `docs/specs/contracts/cellhv-libvirt-compatibility-profile-v1.md`
-- `docs/specs/cellhv-core-api-cloud-integration-spec.md`
+**Date:** 2026-07-20
 
 ## 1. Purpose
 
-This specification defines the evidence required to claim that CellHV is a trustworthy standalone runtime, a real libvirt-compatible Cloud Hypervisor backend, or compatible with an existing cloud platform.
+This specification prevents implementation progress from being confused with product compatibility.
 
-No API, platform, or provider claim is valid from schema, mock, or unit tests alone.
-
-Preserving the existing `ch:///system` URI reduces connection-level integration work. It does not by itself prove OpenStack, CloudStack, OpenNebula, or another platform compatible.
+Mocks and schemas can prove contracts. Only real KVM, provider, and platform tests can prove infrastructure claims.
 
 ## 2. Test tiers
 
-| Tier | Environment | May prove |
+| Tier | Environment | Proves |
 |---|---|---|
-| T0 | static CI | dependency boundaries, schemas, forbidden imports, support-matrix consistency |
-| T1 | unit/property | state machines, mappings, idempotency, XML validation, errors, mode selection |
-| T2 | privileged disposable Linux | sockets, SQLite, permissions, daemon restart, libvirt daemon integration, backend mode isolation |
-| T3 | qualified real KVM host | real VM lifecycle, recovery, attachments, events, statistics, direct/delegated-mode behavior, leaks |
-| T4 | multi-host/provider lab | shared providers and migration when advertised |
-| T5 | real external platform | OpenStack, CloudStack, OpenNebula, O3K, Controller compatibility |
-| T6 | release qualification | upgrade, rollback, soak, package, security, support matrix |
+| T0 | static CI | boundaries, schemas, forbidden identities, claim consistency |
+| T1 | unit/property | state machines, idempotency, mappings, validation |
+| T2 | privileged disposable Linux | services, SQLite, permissions, sockets, providers |
+| T3 | real KVM host | VM lifecycle, recovery, VMM behavior, leaks |
+| T4 | provider/multi-host lab | storage, networking, migration where advertised |
+| T5 | real external platform | OpenStack, CloudStack, OpenNebula, O3K |
+| T6 | release lab | upgrade, rollback, security, soak, packaging |
 
-Lower-tier evidence cannot qualify higher-tier claims.
+Lower tiers cannot qualify higher-tier claims.
 
-## 3. Profiles and gates
-
-Profiles:
+## 3. Profiles
 
 - `native-api`;
 - `minimal-core`;
 - `recovery`;
-- `libvirt-ch-delegation-v1`;
-- `libvirt-ch-direct-regression`;
-- `virsh`;
-- `openstack-libvirt`;
-- `cloudstack-libvirt`;
-- `opennebula-libvirt`;
-- `provider`;
+- `vmm-cloud-hypervisor`;
+- `libvirt-ch-experimental`;
+- `network-provider`;
+- `storage-provider`;
+- `openstack`;
+- `cloudstack`;
+- `opennebula`;
 - `managed-endpoint`;
 - `core-1.0`.
 
-Gates:
+A future QEMU backend receives its own `vmm-qemu` and `libvirt-qemu` profiles after a separate ADR.
 
-- `pull-request`;
-- `milestone-m0`;
-- `milestone-m1`;
-- `milestone-m2`;
-- `milestone-m3`;
-- `milestone-m4`;
-- `beta`;
-- `provider`;
-- `release-candidate`;
-- `core-1.0`.
-
-A scenario definition includes stable ID, claim, tier, gate, profiles, preconditions, actions, faults, observations, forbidden outcomes, evidence profile, cleanup assertions, and timeout.
-
-## 4. Minimal Core north-star scenarios
-
-| ID | Requirement | Tier | Gate |
-|---|---|---|---|
-| CORE-INSTALL-001 | Install and become healthy without Controller, libvirt, cloud platform, or external DB. | T2 | `milestone-m1` |
-| CORE-VM-001 | Create and start one qualified Linux VM through native API. | T3 | `milestone-m1` |
-| CORE-ATTACH-001 | Use one pre-existing network and storage endpoint. | T3 | `milestone-m1` |
-| CORE-IDEMP-001 | Repeated lifecycle requests do not duplicate resources. | T3 | `milestone-m1` |
-| CORE-RECOVERY-001 | Killing `cellhvd` leaves VM running and it is re-adopted. | T3 | `milestone-m2` |
-| CORE-RECOVERY-002 | Host reboot preserves identity and requested state. | T3 | `milestone-m2` |
-| CORE-STORE-001 | Corrupt DB fails closed and never creates an empty replacement. | T2 | `milestone-m2` |
-| CORE-OPS-001 | Crash after commit does not create a duplicate VM. | T3 | `milestone-m2` |
-| CORE-LEAK-001 | 100 lifecycle cycles leave no units, sockets, TAPs, files, or records. | T3 | `milestone-m2` |
-| CORE-AUTH-001 | Conflicting ownership is detected and destructive mutation is blocked. | T3 | `milestone-m2` |
-
-## 5. Native API scenarios
+## 4. Core north-star scenarios
 
 | ID | Requirement | Tier |
 |---|---|---|
-| API-001 | OpenAPI is valid and generated artifacts are reproducible. | T0 |
-| API-002 | Breaking `/v1` changes are rejected. | T0 |
-| API-003 | Mutations create durable operations and honor idempotency. | T1/T2 |
-| API-004 | Resource-version conflicts are rejected before host mutation. | T1/T2 |
-| API-005 | Capabilities describe only executable behavior. | T2/T3 |
-| API-006 | Core schema contains no cloud-platform model. | T0 |
+| CORE-INSTALL-001 | Core installs and becomes healthy without manager, libvirt, or external DB. | T2 |
+| CORE-VM-001 | One qualified Linux VM runs through the native API. | T3 |
+| CORE-ATTACH-001 | One pre-existing disk and network endpoint attach correctly. | T3 |
+| CORE-IDEMP-001 | Repeated requests do not duplicate resources. | T3 |
+| CORE-RECOVERY-001 | Killing `cellhvd` does not stop the VM; it is re-adopted. | T3 |
+| CORE-RECOVERY-002 | Host reboot preserves identity and requested state. | T3 |
+| CORE-STORE-001 | Database corruption fails closed without empty replacement. | T2 |
+| CORE-OPS-001 | Crash after commit does not duplicate a VM. | T3 |
+| CORE-LEAK-001 | 100 lifecycle cycles leave no resource leaks. | T3 |
+| CORE-AUTH-001 | Conflicting ownership blocks destructive mutation. | T3 |
 
-## 6. Libvirt `ch:///system` delegation scenarios
-
-| ID | Requirement | Tier | Gate |
-|---|---|---|---|
-| LIBVIRT-001 | `virConnectOpen("ch:///system")` succeeds with CellHV delegation mode enabled and preserves the upstream driver identity. | T2 | `milestone-m3` |
-| LIBVIRT-002 | Capability and domain-capability XML match the published profile and do not claim unsupported QEMU behavior. | T2 | `milestone-m3` |
-| LIBVIRT-003 | Define, list, lookup, start, shutdown, destroy, reboot, pause, resume, and undefine work through Core. | T3 | `milestone-m3` |
-| LIBVIRT-004 | Persistent UUID/name survive libvirt-driver, Core, and host restart. | T3 | `milestone-m3` |
-| LIBVIRT-005 | Supported raw/block virtio disk attach and detach use Core operations. | T3 | `milestone-m3` |
-| LIBVIRT-006 | Supported virtio NIC attach and detach use Core operations. | T3 | `milestone-m3` |
-| LIBVIRT-007 | Lifecycle events are emitted once and in valid order. | T3 | `milestone-m3` |
-| LIBVIRT-008 | Basic state and statistics are accurate or explicitly unavailable. | T3 | `milestone-m3` |
-| LIBVIRT-009 | Unsupported XML and APIs fail explicitly before host mutation. | T1/T3 | `milestone-m3` |
-| LIBVIRT-010 | Driver restart rebuilds projection from Core without workload change. | T3 | `milestone-m3` |
-| LIBVIRT-011 | Every mutating libvirt call has a corresponding Core operation and correlation ID. | T2/T3 | `milestone-m3` |
-| LIBVIRT-012 | Delegation mode has no Core DB, host-helper, Linux mutation, or Cloud Hypervisor socket access. | T0/T2 | `milestone-m3` |
-| LIBVIRT-013 | Conflicting native and libvirt writes are serialized or rejected. | T3 | `milestone-m3` |
-| LIBVIRT-014 | `virsh` and selected Python/Go bindings pass the profile without CellHV-specific client patches. | T3 | `milestone-m3` |
-| LIBVIRT-015 | Active delegation mode is observable in trusted diagnostics without changing the public URI. | T2/T3 | `milestone-m3` |
-
-## 7. Driver-mode and upstream-regression scenarios
-
-| ID | Requirement | Tier | Gate |
-|---|---|---|---|
-| CH-MODE-001 | Direct mode and CellHV delegation mode are selected only through trusted host-local configuration. | T1/T2 | `milestone-m3` |
-| CH-MODE-002 | Client URI, domain XML, or untrusted cloud input cannot switch backend mode. | T1/T2 | `milestone-m3` |
-| CH-MODE-003 | Direct mode and delegation mode cannot own the same VM UUID, process, socket, unit, or runtime directory. | T3 | `milestone-m3` |
-| CH-MODE-004 | Switching mode while domains exist fails closed and provides migration/cleanup guidance. | T2/T3 | `milestone-m3` |
-| CH-MODE-005 | One inventoried upstream direct-mode lifecycle still works when direct mode is explicitly configured. | T3 | `milestone-m3` |
-| CH-MODE-006 | Direct mode does not contact CellHV Core unless delegation is explicitly configured. | T2/T3 | `milestone-m3` |
-| CH-MODE-007 | Delegation mode never opens Cloud Hypervisor API sockets or launches VMs directly. | T2/T3 | `milestone-m3` |
-| CH-MODE-008 | Core or libvirt restart does not change the selected mode or stop existing workloads. | T3 | `milestone-m3` |
-
-## 8. Existing-platform compatibility experiments
-
-These begin as experiments. A platform is called supported only after all required scenarios pass on a published version matrix.
-
-The unchanged-path profile permits documented standard configuration changes, including setting a libvirt connection URI. It does not permit a CellHV-specific platform driver, extension, or plugin.
-
-### 8.1 OpenStack
-
-The first run uses the upstream Nova LibvirtDriver, with `connection_uri = ch:///system` or the equivalent supported configuration, and no CellHV-specific ComputeDriver.
+## 5. VMM identity and capability scenarios
 
 | ID | Requirement | Tier |
 |---|---|---|
-| OS-LIBVIRT-001 | Nova connects through `ch:///system` using documented configuration only. | T5 |
-| OS-LIBVIRT-002 | Host inventory and Placement reporting are accurate. | T5 |
-| OS-LIBVIRT-003 | Spawn, inspect, power, reboot, and destroy one qualified instance. | T5 |
-| OS-LIBVIRT-004 | Assigned NIC/MAC and block attachment map correctly. | T5 |
-| OS-LIBVIRT-005 | Retry or nova-compute restart does not duplicate or stop the VM. | T5 |
-| OS-LIBVIRT-006 | No CellHV-specific Nova driver/package is installed. | T0/T5 |
-| OS-LIBVIRT-007 | Every failure is classified as configuration, missing libvirt profile, generic Nova assumption, QEMU-specific assumption, or irreducible platform gap. | T5 |
-| OS-LIBVIRT-008 | Nova cannot bypass delegation mode or reach Cloud Hypervisor/Core-private interfaces. | T0/T5 |
+| VMM-ID-001 | Cloud Hypervisor backend never reports or exposes `qemu:///system`. | T0/T2 |
+| VMM-ID-002 | Reported VMM and capabilities match the running process. | T2/T3 |
+| VMM-ID-003 | Unsupported QEMU/QMP operations fail explicitly. | T1/T3 |
+| VMM-ID-004 | VMM process, socket, and systemd ownership are auditable. | T2/T3 |
+| VMM-ID-005 | A future QEMU profile cannot pass unless actual QEMU processes run. | T0/T3 |
 
-### 8.2 CloudStack
-
-The first run uses the standard KVM agent with no CellHV extension. It attempts `ch:///system` through supported configuration; if this is impossible, the exact blocker is part of the result.
+## 6. Compatibility-axis scenarios
 
 | ID | Requirement | Tier |
 |---|---|---|
-| CS-LIBVIRT-001 | KVM agent connects through `ch:///system` or records the exact hard-coded/configuration blocker. | T5 |
-| CS-LIBVIRT-002 | Deploy, inspect, power, reboot, and delete one qualified instance when connection succeeds. | T5 |
-| CS-LIBVIRT-003 | Network, MAC/VLAN, and storage mappings are correct. | T5 |
-| CS-LIBVIRT-004 | Agent/management restart does not stop or duplicate the VM. | T5 |
-| CS-LIBVIRT-005 | QEMU hooks, tools, URI assumptions, and host preparation are recorded in a gap matrix. | T5 |
-| CS-LIBVIRT-006 | No CellHV-specific CloudStack extension/plugin is installed. | T0/T5 |
-| CS-LIBVIRT-007 | CloudStack cannot bypass delegation mode or reach Cloud Hypervisor/Core-private interfaces. | T0/T5 |
+| CLAIM-001 | Every published claim validates against the compatibility-claims schema. | T0 |
+| CLAIM-002 | Platform, VMM, network, and storage results are recorded independently. | T0/T5 |
+| CLAIM-003 | A successful URI connection cannot mark a platform supported. | T0 |
+| CLAIM-004 | Unsupported features and known deviations are included in release artifacts. | T0/T6 |
+| CLAIM-005 | Evidence digest resolves to real scenario results. | T0/T6 |
 
-### 8.3 OpenNebula
+## 7. Optional `ch:///system` profile
 
-The first run uses the existing KVM/VMM path with `LIBVIRT_URI = ch:///system` and no CellHV-specific VMM driver.
+These scenarios apply only when CellHV advertises the profile.
 
 | ID | Requirement | Tier |
 |---|---|---|
-| ONE-LIBVIRT-001 | Existing KVM/VMM path connects through `ch:///system`. | T5 |
-| ONE-LIBVIRT-002 | Deploy, monitor, power, and delete one qualified instance. | T5 |
-| ONE-LIBVIRT-003 | QEMU-specific template/driver gaps are captured. | T5 |
-| ONE-LIBVIRT-004 | No CellHV-specific VMM driver is installed. | T0/T5 |
-| ONE-LIBVIRT-005 | OpenNebula cannot bypass delegation mode or reach Cloud Hypervisor/Core-private interfaces. | T0/T5 |
+| CH-001 | `virConnectOpen("ch:///system")` succeeds. | T2 |
+| CH-002 | Capabilities contain no unsupported QEMU claims. | T2 |
+| CH-003 | Supported lifecycle enters the Core operation journal. | T3 |
+| CH-004 | UUID and name survive Core/libvirt/host restart. | T3 |
+| CH-005 | Supported disk and NIC operations use qualified attachment paths. | T3 |
+| CH-006 | Events and statistics are accurate or explicitly unavailable. | T3 |
+| CH-007 | Unsupported XML fails before mutation. | T1/T3 |
+| CH-008 | Compatibility code cannot access VMM sockets or host mutation APIs directly. | T0/T2 |
+| CH-009 | Passing this profile does not set any platform-supported result automatically. | T0 |
 
-## 9. Gap and fallback acceptance
+## 8. Network provider contract
 
-Every failed platform scenario produces a gap record containing:
+Every advertised network path tests:
 
-- exact upstream version and configuration;
-- requested libvirt URI;
-- active backend mode;
-- API call or XML causing failure;
-- expected and observed behavior;
-- whether the gap belongs to Core, CellHV delegation, libvirt, platform configuration, or QEMU-specific platform behavior;
-- proposed generic upstream fix;
-- security and maintenance impact;
-- fallback-adapter estimate;
-- separate-URI estimate when relevant.
+- validate;
+- prepare or consume;
+- attach;
+- guest connectivity;
+- inspect;
+- daemon and host restart recovery;
+- detach;
+- repeated cleanup;
+- unrelated-rule preservation;
+- leak detection.
 
-A platform-specific adapter may not start until the fallback decision gate in the API specification passes.
+Required negative tests include deleting in-use networks, duplicate MAC/TAP ownership, and modification of unrelated nftables or bridge state.
 
-A separate `cellhv:///system` driver may not start until the separate-URI fallback gate passes and a new ADR is approved.
+## 9. Storage provider contract
 
-## 10. Fault strategy
+Every advertised storage path tests:
+
+- validate;
+- provision or consume;
+- attach;
+- data write/read;
+- exclusivity and locking where applicable;
+- daemon and host restart recovery;
+- detach;
+- repeated cleanup;
+- data integrity;
+- leak detection.
+
+A VMM-profile pass cannot substitute for a storage-profile pass.
+
+## 10. OpenStack qualification
+
+The discovery run compares all viable paths:
+
+- generic `ch` libvirt path;
+- generic upstream changes;
+- official CellHV Nova driver.
+
+Required scenarios:
+
+| ID | Requirement | Tier |
+|---|---|---|
+| OS-001 | Accurate host inventory and Placement reporting. | T5 |
+| OS-002 | Spawn, inspect, power, reboot, and destroy one instance. | T5 |
+| OS-003 | Neutron NIC/MAC mapping passes its network profile. | T5 |
+| OS-004 | Cinder block attachment passes its storage profile. | T5 |
+| OS-005 | Retry and nova-compute restart do not duplicate or stop VMs. | T5 |
+| OS-006 | Selected integration path and maintenance owner are published. | T0/T5 |
+| OS-007 | QEMU-specific assumptions are recorded for rejected paths. | T5 |
+| OS-008 | No path bypasses Core authority. | T0/T5 |
+
+OpenStack support requires all required scenarios for one selected path. It does not require the `ch` path to win.
+
+## 11. CloudStack qualification
+
+| ID | Requirement | Tier |
+|---|---|---|
+| CS-001 | Connection, hook, QEMU-tooling, and URI assumptions are inventoried. | T5 |
+| CS-002 | Selected path deploys, inspects, powers, reboots, and deletes one instance. | T5 |
+| CS-003 | Network and storage paths pass their independent profiles. | T5 |
+| CS-004 | Agent/management restart does not duplicate or stop the VM. | T5 |
+| CS-005 | Selected integration path and maintenance owner are published. | T0/T5 |
+| CS-006 | No Cloud Hypervisor path claims `qemu:///system`. | T0/T5 |
+| CS-007 | No path bypasses Core authority. | T0/T5 |
+
+A complete gap report is acceptable before CloudStack support is implemented, but it is not a support claim.
+
+## 12. OpenNebula qualification
+
+The same method compares generic libvirt, generic VMM changes, and a native CellHV VMM driver.
+
+Lifecycle, monitoring, network, datastore, restart, and Core-authority tests are mandatory for a supported claim.
+
+## 13. Fault strategy
 
 Use:
 
-1. property/model tests for generic operation, idempotency, mode-selection, and mapping logic;
-2. reusable driver-contract tests for every supported libvirt API;
-3. representative real-host faults around create, start, stop, attach, detach, and delete;
-4. libvirt/Core restart and mode-conflict tests;
-5. platform service restart, duplicate request, API timeout, and projection-rebuild tests.
+1. property tests for operation state and idempotency;
+2. reusable provider contracts;
+3. representative real-host failpoints;
+4. platform retry/restart tests;
+5. identity and capability-negative tests.
 
-Do not multiply every fault point across every consumer unless risk or a defect justifies it.
+Do not multiply every theoretical fault across every integration unless risk or defects justify it.
 
-## 11. Forbidden outcomes
+## 14. Forbidden outcomes
 
+- Cloud Hypervisor exposed as QEMU;
+- fabricated capabilities or statistics;
+- platform support inferred from URI connection;
+- network or storage support inferred from VM lifecycle alone;
 - VM identity loss;
-- empty replacement database after corruption;
-- libvirt bypass of Core operation journal in delegation mode;
-- direct platform access to Cloud Hypervisor sockets or host helper;
-- two authorities managing one VM;
-- client-controlled backend-mode selection;
-- silent mode switch while domains exist;
-- upstream direct-mode regression hidden by CellHV tests;
-- fabricated capability or statistic;
-- silent XML/device omission;
+- empty replacement database;
 - duplicate VM after retry;
-- management-plane outage stopping a VM;
-- leaked units, processes, TAPs, namespaces, mappings, files, or records.
+- two authorities for one VM;
+- management outage stopping workloads;
+- silent unsupported XML;
+- leaked units, processes, TAPs, namespaces, mappings, volumes, files, or records.
 
-## 12. Evidence
-
-### Minimal
-
-- result and environment versions;
-- Core/libvirt/platform package versions;
-- requested URI and active backend mode;
-- operations/events;
-- leak result;
-- relevant capability documents.
-
-### Failure
-
-- minimal evidence;
-- Core/libvirt/platform logs;
-- requested and accepted XML/API payloads with secrets redacted;
-- process/network/storage inventories;
-- correlation timeline;
-- gap record.
-
-### Qualification
-
-- complete support matrix;
-- package digests;
-- mode-selection configuration and version;
-- direct-mode regression result;
-- test results and logs;
-- upgrade/rollback result;
-- signed evidence manifest;
-- known unsupported functions.
-
-## 13. Core 1.0 gate
+## 15. Core 1.0 gate
 
 Core 1.0 requires:
 
 - minimal Core and recovery profiles;
-- `ch:///system` CellHV delegation profile v1;
-- bounded upstream direct-mode regression profile;
-- `virsh` and language-binding profile;
-- one existing cloud platform passing without a CellHV-specific adapter;
-- measured OpenStack and CloudStack gap reports or passing profiles;
-- advertised providers;
-- upgrade, rollback, security, package, and soak qualification.
+- Cloud Hypervisor VMM profile;
+- at least one supported OpenStack integration path;
+- a CloudStack discovery report and selected path;
+- all advertised network and storage profiles;
+- truthful compatibility claim tuples;
+- upgrade, rollback, package, security, and soak qualification.
+
+The `ch:///system` profile is required only when advertised. A QEMU profile is not part of Core 1.0 unless separately approved.
