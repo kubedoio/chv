@@ -15,12 +15,12 @@
 
 CellHV will be built around a small, autonomous, Linux-native virtualization runtime named **CellHV Core**.
 
-Core MUST work on one Linux host without CellHV Controller, OpenStack, CloudStack, OpenNebula, O3K, Kubernetes, Designer, Web UI, or an external database. It owns durable host and VM identity, accepted VM configuration, requested and observed state, operations, recovery, and adoption of Cloud Hypervisor processes.
+Core MUST work on one Linux host without CellHV Controller, libvirt, OpenStack, CloudStack, OpenNebula, O3K, Kubernetes, Designer, Web UI, or an external database. It owns durable host and VM identity, accepted VM configuration, requested and observed state, operations, recovery, and adoption of Cloud Hypervisor processes.
 
 CellHV has two deliberate integration surfaces:
 
 1. **Native CellHV API** — the canonical authority-facing API for CellHV Controller, O3K, Designer, Kubernetes, Terraform/OpenTofu, and new systems.
-2. **Libvirt compatibility surface** — the primary ecosystem bridge for existing cloud-management systems.
+2. **Libvirt compatibility surface** — the primary ecosystem bridge for established cloud-management systems, using the existing `ch:///system` identity wherever technically possible.
 
 The project will first attempt to integrate OpenStack, CloudStack, and OpenNebula through their existing libvirt-based paths. A platform-specific CellHV adapter is a fallback, not the default.
 
@@ -31,6 +31,9 @@ The project will first attempt to integrate OpenStack, CloudStack, and OpenNebul
 - Every successful mutation passes through the Core operation journal.
 - External systems MUST NOT access the Core database, Cloud Hypervisor sockets, or privileged helper APIs.
 - Libvirt compatibility MUST translate into Core operations; it MUST NOT create a second VM authority.
+- The preferred compatibility URI is `ch:///system`; the URI alone MUST NOT determine whether Core is bypassed.
+- In CellHV delegation mode, the libvirt Cloud Hypervisor driver MUST NOT launch or mutate Cloud Hypervisor directly.
+- Direct libvirt `ch` mode and CellHV delegation mode MUST NOT manage the same VM identity or runtime namespace.
 - Controller or cloud-platform loss MUST NOT stop existing workloads.
 - Ambiguous running workloads are preserved rather than deleted.
 - Root privilege is isolated behind narrow validated host operations.
@@ -56,12 +59,16 @@ The project will first attempt to integrate OpenStack, CloudStack, and OpenNebul
 - Optional managed access uses HTTPS with mTLS.
 - systemd and cgroups v2 provide supervision and accounting.
 - Cloud Hypervisor lifecycle is accessed through a narrow runtime adapter.
-- The libvirt compatibility target is a libvirt hypervisor driver that delegates to Core, provisionally exposed as `cellhv:///system`.
+- The preferred libvirt compatibility path preserves the existing `ch:///system` URI and existing Cloud Hypervisor driver identity.
+- In CellHV mode, the libvirt `ch` driver delegates mutations to Core rather than managing Cloud Hypervisor directly.
+- A new `cellhv:///system` driver is not part of the default architecture.
 
 ### 3.2 Candidates requiring spikes
 
-- upstream `cellhv` driver versus a downstream incubation package;
-- reuse or extension of the existing libvirt `ch` driver;
+- exact host-local configuration or packaging that selects direct versus CellHV delegation mode;
+- upstream acceptance of a generic delegating backend in the existing libvirt `ch` driver;
+- downstream libvirt package if upstreaming is rejected;
+- separate `cellhv:///system` driver as a last-resort fallback;
 - persistent versus transient systemd units;
 - exact helper boundary;
 - provider library versus helper-process model;
@@ -74,7 +81,7 @@ The project will first attempt to integrate OpenStack, CloudStack, and OpenNebul
 
 CellHV Core is:
 
-> A minimal Linux-native compute-node runtime for modern cloud and edge workloads, with a native API for new systems and a bounded libvirt compatibility profile for existing ecosystems.
+> A minimal Linux-native compute-node runtime for modern cloud and edge workloads, with a native API for new systems and a bounded libvirt Cloud Hypervisor compatibility profile for existing ecosystems.
 
 CellHV does not initially claim:
 
@@ -85,9 +92,10 @@ CellHV does not initially claim:
 - drop-in XCP-ng compatibility;
 - universal VMware compatibility;
 - legacy device emulation;
-- automatic compatibility with a cloud platform before qualification.
+- automatic compatibility with a cloud platform before qualification;
+- that `ch:///system` alone removes QEMU-specific assumptions from a management platform.
 
-“Libvirt compatible” means the published CellHV libvirt profile passes. It does not mean every libvirt API is supported.
+“Libvirt compatible” means the published CellHV libvirt profile passes in CellHV delegation mode. It does not mean every libvirt API is supported.
 
 ## 5. Topology
 
@@ -121,8 +129,9 @@ flowchart TB
     DSGN --> O3K
 
     subgraph LinuxHost[One Linux compute host]
-        LV[libvirt API<br/>cellhv:///system]
-        LVD[cellhv libvirt driver<br/>translation and compatibility only]
+        LV[libvirt API<br/>ch:///system]
+        LVD[libvirt Cloud Hypervisor driver<br/>CellHV delegation mode]
+        MODE[Trusted host-local mode configuration<br/>direct or CellHV delegation]
         API[CellHV native API<br/>HTTP/JSON over Unix socket<br/>optional HTTPS/mTLS]
 
         subgraph Core[CellHV Core]
@@ -150,6 +159,7 @@ flowchart TB
         CH[Cloud Hypervisor processes]
         HW[CPU / RAM / storage / NIC / devices]
 
+        MODE --> LVD
         LV --> LVD
         LVD --> API
         API --> STATE
@@ -172,7 +182,9 @@ flowchart TB
     end
 ```
 
-The libvirt driver is a compatibility facade. It MUST call the same Core service/API used by native clients and MUST NOT launch Cloud Hypervisor directly.
+The diagram shows CellHV delegation mode. The upstream libvirt `ch` direct mode remains valid for non-CellHV users, but it is outside the CellHV-owned VM authority path.
+
+The libvirt driver is a compatibility facade in CellHV delegation mode. It MUST call the same Core service/API used by native clients and MUST NOT launch Cloud Hypervisor directly.
 
 ## 6. Architecture layers
 
@@ -212,11 +224,17 @@ The compatibility layer maps a bounded subset of:
 
 into native Core resources and operations.
 
-The target URI is `cellhv:///system`. The existing `ch:///system` driver is a reference implementation and experimental baseline, not the final CellHV authority path, because it currently manages Cloud Hypervisor directly.
+The preferred target URI is `ch:///system`. CellHV first attempts to extend or package the existing libvirt Cloud Hypervisor driver with an explicit CellHV delegation mode while preserving the existing URI and driver identity.
+
+The mode-selection mechanism is host-local and trusted. Cloud-platform requests or guest data MUST NOT select direct versus delegated mode.
+
+A separate `cellhv:///system` driver is a fallback requiring a new ADR after the `ch:///system` path is proven unsafe, technically impossible, or unacceptable to maintain.
 
 ### 6.5 Management systems
 
-Existing platforms should first be tested unchanged, using their normal libvirt path plus configuration. Small upstream generalisations are preferred over CellHV-specific platform plugins. A dedicated adapter requires a separate ADR demonstrating that the libvirt path is insufficient or unsafe.
+Existing platforms should first be tested using their normal libvirt path plus documented URI/configuration changes. Small upstream generalisations are preferred over CellHV-specific platform plugins. A dedicated adapter requires a separate ADR demonstrating that the libvirt path is insufficient or unsafe.
+
+Using the existing URI reduces integration friction but does not guarantee success. Platform QEMU-specific behavior remains subject to conformance testing and gap analysis.
 
 ## 7. Authority and concurrency rules
 
@@ -225,7 +243,9 @@ Existing platforms should first be tested unchanged, using their normal libvirt 
 - Libvirt domain UUID is the Core VM UUID.
 - Repeated platform requests use stable idempotency mappings.
 - Concurrent conflicting writes are rejected through resource versions or operation conflicts.
-- Direct access to Cloud Hypervisor sockets by libvirt or platform agents is forbidden in CellHV mode.
+- In CellHV delegation mode, direct access to Cloud Hypervisor sockets by libvirt or platform agents is forbidden.
+- Direct mode and CellHV delegation mode cannot own the same VM UUID, runtime directory, systemd unit, API socket, or process.
+- The active driver mode is observable through trusted diagnostics and qualification evidence.
 - Manual changes outside Core are detected and classified; destructive reconciliation is never automatic when ownership is ambiguous.
 
 ## 8. Initial workload boundary
@@ -253,6 +273,7 @@ Selected modern Windows images follow after the Linux profile is stable.
 - native API skeleton;
 - ADR-015 accepted;
 - libvirt compatibility profile v1 published;
+- direct/delegated mode invariants defined;
 - no real VM required.
 
 ### M1 — Minimal standalone runtime
@@ -272,17 +293,20 @@ Selected modern Windows images follow after the Linux profile is stable.
 
 ### M3 — Libvirt compatibility preview
 
-- `cellhv:///system` prototype;
+- upstream `ch` direct-mode support matrix recorded;
+- `ch:///system` CellHV delegation-mode prototype;
+- direct-mode regression tests for non-CellHV usage;
 - `virsh` and standard libvirt bindings;
 - lifecycle, XML, events, statistics, disk, and NIC profile;
-- all mutations visible in the Core operation journal;
+- all delegated mutations visible in the Core operation journal;
 - explicit unsupported matrix.
 
 ### M4 — Existing-cloud compatibility preview
 
-- unchanged OpenStack Nova LibvirtDriver experiment;
-- unchanged CloudStack KVM-agent experiment;
-- unchanged OpenNebula KVM/VMM experiment;
+- OpenStack Nova LibvirtDriver experiment with `ch:///system`;
+- CloudStack KVM-agent experiment with `ch:///system` or an exact connection blocker;
+- OpenNebula KVM/VMM experiment with `ch:///system`;
+- required configuration documented separately from code changes;
 - gap matrices and upstream-generalisation proposals;
 - no CellHV-specific platform adapter unless separately approved.
 
@@ -296,7 +320,7 @@ Selected modern Windows images follow after the Linux profile is stable.
 ### 1.0 — Qualification
 
 - standalone and recovery profiles;
-- libvirt compatibility profile;
+- libvirt compatibility profile through `ch:///system` CellHV delegation mode;
 - at least one existing cloud platform qualified without a CellHV-specific adapter;
 - a documented decision for OpenStack and CloudStack based on measured gaps;
 - upgrade/rollback, soak, signed packages, checksums, and SBOM.
@@ -312,14 +336,16 @@ Selected modern Windows images follow after the Linux profile is stable.
 - billing, tenants, and quotas;
 - Designer execution inside Core;
 - built-in Ceph deployment;
-- automatic fallback adapters without an ADR.
+- automatic fallback adapters without an ADR;
+- a new `cellhv:///system` URI unless separately approved.
 
 ## 11. Change control
 
-Changes affecting authority, libvirt mapping, platform compatibility, or Core public APIs require:
+Changes affecting authority, libvirt mode selection, URI identity, platform compatibility, or Core public APIs require:
 
 - linked ADR or contract change;
 - compatibility and migration analysis;
 - acceptance scenario updates;
+- direct-mode regression analysis where libvirt `ch` is changed;
 - explicit unsupported behavior;
 - proof that Core remains standalone and single-authority.
