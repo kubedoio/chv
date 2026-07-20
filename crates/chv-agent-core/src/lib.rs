@@ -9,6 +9,7 @@ pub use cellhv_core_types as domain;
 pub mod enrollment;
 pub mod health;
 pub mod inventory;
+pub mod legacy_core_adapter;
 pub mod metrics_server;
 pub mod migration;
 pub mod migration_registry;

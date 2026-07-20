@@ -9,7 +9,7 @@
 | Gate | Command or artifact | Result |
 |---|---|---|
 | Focused operation tests | `cargo test -p cellhv-core-operations` | pass: 12 tests |
-| Combined focused regression | `cargo test -p cellhv-core-operations -p cellhv-core-store -p cellhv-core-types -p chv-agent-core -p chv-config` | pass: 193 tests (12 operations, 15 store, 10 types, 147 agent, 9 config) |
+| Combined focused regression | `cargo test -p cellhv-core-operations -p cellhv-core-store -p cellhv-core-types -p chv-agent-core -p chv-config` | pass: 202 tests (12 operations, 18 store, 10 types, 153 agent, 9 config) |
 | Deterministic request identity | `fingerprint_is_deterministic_and_command_sensitive` | pass |
 | Replay before current-state read | replay after version reservation and tombstone tests | pass; original operation is returned |
 | Idempotency conflict | changed command or expected version under the same scoped key | pass; conflict and no second acceptance |
@@ -18,7 +18,7 @@
 | Restart reconstruction | stable incomplete-journal ordering and retry-boundary tests | pass |
 | Architecture authority guard | `python3 -B scripts/check-cellhv-core-architecture.py` | pass |
 | Architecture negative tests | `python3 -B -m unittest tests/test_cellhv_core_architecture.py` | pass: 15 tests |
-| Full workspace compile/lint/regression | `cargo check --workspace`; `cargo clippy --workspace -- -D warnings`; `cargo test --workspace` | pass: 906 tests, 0 failed, 3 documented release/environment-dependent ignores |
+| Full workspace compile/lint/regression | `cargo check --workspace`; `cargo clippy --workspace -- -D warnings`; `cargo test --workspace` | pass: 928 tests, 0 failed, 3 documented release/environment-dependent ignores |
 
 ## What the tests prove
 

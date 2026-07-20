@@ -88,9 +88,13 @@ CREATE TABLE migration_state (
     source TEXT PRIMARY KEY NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'imported', 'cutover')),
     source_checksum TEXT NOT NULL,
+    imported_host_id TEXT,
+    imported_vm_ids_json TEXT CHECK (imported_vm_ids_json IS NULL OR json_valid(imported_vm_ids_json)),
     imported_at TEXT,
     cutover_at TEXT,
-    CHECK (state != 'cutover' OR imported_at IS NOT NULL),
+    CHECK (length(trim(source)) > 0),
+    CHECK (length(trim(source_checksum)) > 0),
+    CHECK (state = 'pending' OR (imported_at IS NOT NULL AND imported_host_id IS NOT NULL AND imported_vm_ids_json IS NOT NULL)),
     CHECK (cutover_at IS NULL OR state = 'cutover')
 ) STRICT;
 

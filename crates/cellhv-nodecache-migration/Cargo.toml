@@ -1,15 +1,15 @@
 [package]
-name = "cellhv-core-store"
+name = "cellhv-nodecache-migration"
 version = "0.1.0"
 license = "Apache-2.0"
 edition = "2021"
 publish = false
 
 [dependencies]
+cellhv-core-operations = { path = "../cellhv-core-operations" }
 cellhv-core-types = { path = "../cellhv-core-types" }
-rusqlite = { workspace = true }
-serde_json = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 

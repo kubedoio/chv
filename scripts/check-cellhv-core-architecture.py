@@ -25,6 +25,8 @@ CORE_MANIFESTS = (
     "crates/cellhv-core-types/Cargo.toml",
     "crates/cellhv-core-store/Cargo.toml",
     "crates/cellhv-core-operations/Cargo.toml",
+    "crates/cellhv-core-api/Cargo.toml",
+    "crates/cellhv-nodecache-migration/Cargo.toml",
     "crates/chv-agent-runtime-ch/Cargo.toml",
 )
 ACTIVE_CODE_ROOTS = ("cmd", "crates", "gen", "proto", "packaging", "scripts")

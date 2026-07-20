@@ -65,6 +65,14 @@ pub enum Acceptance {
     Replay,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationDisposition {
+    Imported,
+    Replay,
+    Cutover,
+    RolledBack,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedOperation {
     pub disposition: Acceptance,
@@ -85,7 +93,7 @@ pub struct AcceptOperation<'a> {
     pub expected_vm_version: ResourceVersion,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct OperationJournalEntry {
     pub operation: Operation,
     pub request: serde_json::Value,
@@ -110,6 +118,199 @@ pub struct CoreStore {
 }
 
 impl CoreStore {
+    /// Imports a validated legacy snapshot without changing the source file.
+    /// The marker, host identity, and VM definitions commit atomically.
+    pub fn import_legacy_snapshot(
+        &mut self,
+        source: &str,
+        source_checksum: &str,
+        host: &HostIdentity,
+        capabilities: &HostCapabilities,
+        definitions: &[VmDefinition],
+    ) -> Result<MigrationDisposition> {
+        if source.trim().is_empty() || source_checksum.trim().is_empty() {
+            return Err(StoreError::InvalidDomain(
+                "migration source and checksum must not be empty".to_owned(),
+            ));
+        }
+        for definition in definitions {
+            validate_definition(definition)?;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT state,source_checksum FROM migration_state WHERE source=?1",
+                [source],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((state, checksum)) = existing {
+            if checksum != source_checksum {
+                return Err(StoreError::Conflict {
+                    kind: "migration",
+                    id: source.to_owned(),
+                });
+            }
+            let disposition = match state.as_str() {
+                "imported" => MigrationDisposition::Replay,
+                "cutover" => MigrationDisposition::Cutover,
+                _ => {
+                    return Err(StoreError::Conflict {
+                        kind: "migration",
+                        id: source.to_owned(),
+                    })
+                }
+            };
+            tx.commit()?;
+            return Ok(disposition);
+        }
+        let occupied: i64 = tx.query_row(
+            "SELECT (SELECT count(*) FROM host_identity) + (SELECT count(*) FROM vms)",
+            [],
+            |row| row.get(0),
+        )?;
+        if occupied != 0 {
+            return Err(StoreError::Conflict {
+                kind: "migration_target",
+                id: source.to_owned(),
+            });
+        }
+        tx.execute(
+            "INSERT INTO host_identity (singleton_key,host_id,capabilities_json,resource_version) VALUES (1,?1,?2,?3)",
+            params![host.id.as_str(), serde_json::to_string(capabilities)?, version_i64(host.resource_version)?],
+        )?;
+        for definition in definitions {
+            tx.execute(
+                "INSERT INTO vms (vm_id,definition_json,requested_power_state,observed_power_state,resource_version) VALUES (?1,?2,?3,?4,?5)",
+                params![definition.id.as_str(), serde_json::to_string(definition)?, requested_text(definition.requested_power_state), observed_text(definition.observed_power_state), version_i64(definition.resource_version)?],
+            ).map_err(|error| map_constraint(error, "vm", definition.id.as_str()))?;
+            insert_attachments(&tx, definition)?;
+        }
+        let mut imported_vm_ids = definitions
+            .iter()
+            .map(|definition| definition.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        imported_vm_ids.sort();
+        tx.execute(
+            "INSERT INTO migration_state (source,state,source_checksum,imported_host_id,imported_vm_ids_json,imported_at) VALUES (?1,'imported',?2,?3,?4,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            params![source, source_checksum, host.id.as_str(), canonical_json(&serde_json::json!(imported_vm_ids))?],
+        )?;
+        tx.commit()?;
+        Ok(MigrationDisposition::Imported)
+    }
+
+    /// Activates Core authority only after an exact imported-source match.
+    pub fn cutover_legacy_snapshot(
+        &mut self,
+        source: &str,
+        checksum: &str,
+    ) -> Result<MigrationDisposition> {
+        let changed = self.conn.execute(
+            "UPDATE migration_state SET state='cutover',cutover_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE source=?1 AND source_checksum=?2 AND state='imported'",
+            params![source, checksum],
+        )?;
+        if changed == 1 {
+            return Ok(MigrationDisposition::Cutover);
+        }
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT state,source_checksum FROM migration_state WHERE source=?1",
+                [source],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((state, actual)) if actual == checksum && state == "cutover" => {
+                Ok(MigrationDisposition::Cutover)
+            }
+            Some(_) => Err(StoreError::Conflict {
+                kind: "migration",
+                id: source.to_owned(),
+            }),
+            None => Err(StoreError::NotFound {
+                kind: "migration",
+                id: source.to_owned(),
+            }),
+        }
+    }
+
+    /// Removes an unactivated import. Cutover is deliberately irreversible.
+    pub fn rollback_legacy_import(
+        &mut self,
+        source: &str,
+        checksum: &str,
+    ) -> Result<MigrationDisposition> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state: Option<(String, String, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT state,source_checksum,imported_host_id,imported_vm_ids_json FROM migration_state WHERE source=?1",
+                [source],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        match state {
+            Some((state, actual, Some(imported_host), Some(imported_vms)))
+                if state == "imported" && actual == checksum =>
+            {
+                let actual_host: Option<String> = tx
+                    .query_row(
+                        "SELECT host_id FROM host_identity WHERE singleton_key=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let mut statement = tx.prepare("SELECT vm_id FROM vms ORDER BY vm_id")?;
+                let actual_vms = statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let expected_vms: Vec<String> =
+                    serde_json::from_str(&imported_vms).map_err(|error| {
+                        StoreError::Integrity(format!("migration VM manifest is invalid: {error}"))
+                    })?;
+                if actual_host.as_deref() != Some(imported_host.as_str())
+                    || actual_vms != expected_vms
+                {
+                    return Err(StoreError::Conflict {
+                        kind: "migration_rollback_drift",
+                        id: source.to_owned(),
+                    });
+                }
+            }
+            Some(_) => {
+                return Err(StoreError::Conflict {
+                    kind: "migration",
+                    id: source.to_owned(),
+                })
+            }
+            None => {
+                return Err(StoreError::NotFound {
+                    kind: "migration",
+                    id: source.to_owned(),
+                })
+            }
+        }
+        let journal_count: i64 =
+            tx.query_row("SELECT count(*) FROM operations", [], |row| row.get(0))?;
+        if journal_count != 0 {
+            return Err(StoreError::Conflict {
+                kind: "migration_rollback",
+                id: source.to_owned(),
+            });
+        }
+        tx.execute("DELETE FROM attachments", [])?;
+        tx.execute("DELETE FROM ownership_markers", [])?;
+        tx.execute("DELETE FROM vms", [])?;
+        tx.execute("DELETE FROM host_identity", [])?;
+        tx.execute("DELETE FROM migration_state WHERE source=?1", [source])?;
+        tx.commit()?;
+        Ok(MigrationDisposition::RolledBack)
+    }
+
     /// Atomically reserve a new file and initialize it. Parent directories
     /// must already exist; a pre-existing file is never opened or removed.
     pub fn create_new(path: &Path) -> Result<Self> {
@@ -431,6 +632,68 @@ impl CoreStore {
             .collect()
     }
 
+    pub fn list_operations(&self) -> Result<Vec<OperationJournalEntry>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT operation_id FROM operations ORDER BY accepted_at,operation_id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.iter()
+            .map(|id| read_operation_entry(&self.conn, id))
+            .collect()
+    }
+
+    pub fn list_events_after(
+        &self,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<OperationEvent>> {
+        let limit = limit.clamp(1, 1_000);
+        let after = i64::try_from(after_sequence).map_err(|_| {
+            StoreError::InvalidDomain("event sequence exceeds SQLite range".to_owned())
+        })?;
+        let mut statement = self.conn.prepare(
+            "SELECT event_id,sequence,operation_id,vm_id,kind,payload_json FROM events WHERE sequence>?1 ORDER BY sequence LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after, i64::from(limit)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (id, sequence, operation_id, vm_id, kind, payload) = row?;
+            let event = OperationEvent {
+                id: cellhv_core_types::EventId::new(id)
+                    .map_err(|error| StoreError::InvalidDomain(error.to_string()))?,
+                sequence: u64::try_from(sequence).map_err(|_| {
+                    StoreError::Integrity(format!("invalid event sequence {sequence}"))
+                })?,
+                operation_id: operation_id
+                    .map(OperationId::new)
+                    .transpose()
+                    .map_err(|error| StoreError::InvalidDomain(error.to_string()))?,
+                vm_id: vm_id
+                    .map(VmId::new)
+                    .transpose()
+                    .map_err(|error| StoreError::InvalidDomain(error.to_string()))?,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            };
+            event
+                .validate()
+                .map_err(|error| StoreError::InvalidDomain(error.to_string()))?;
+            events.push(event);
+        }
+        Ok(events)
+    }
+
     /// Persistence primitive for the application service. Callers must not
     /// perform side effects until this transition has committed.
     #[doc(hidden)]
@@ -654,6 +917,117 @@ fn validate(conn: &Connection) -> Result<()> {
     validate_host_rows(conn)?;
     validate_vm_rows(conn)?;
     validate_journal_rows(conn)?;
+    validate_migration_rows(conn)?;
+    Ok(())
+}
+
+fn validate_migration_rows(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT source,state,source_checksum,imported_host_id,imported_vm_ids_json,imported_at,cutover_at FROM migration_state",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (source, state, checksum, host, vm_ids, imported_at, cutover_at) = row?;
+        if source.trim().is_empty() || checksum.trim().is_empty() {
+            return Err(StoreError::Integrity(
+                "migration source/checksum is empty".to_owned(),
+            ));
+        }
+        match state.as_str() {
+            "pending"
+                if host.is_none()
+                    && vm_ids.is_none()
+                    && imported_at.is_none()
+                    && cutover_at.is_none() => {}
+            "imported" | "cutover" => {
+                if host.as_deref().is_none_or(|value| value.trim().is_empty())
+                    || imported_at
+                        .as_deref()
+                        .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err(StoreError::Integrity(format!(
+                        "migration {source} has incomplete import metadata"
+                    )));
+                }
+                let ids: Vec<String> = serde_json::from_str(vm_ids.as_deref().unwrap_or(""))
+                    .map_err(|error| {
+                        StoreError::Integrity(format!(
+                            "migration {source} VM manifest is invalid: {error}"
+                        ))
+                    })?;
+                if ids.iter().any(|id| id.trim().is_empty())
+                    || !ids.windows(2).all(|pair| pair[0] < pair[1])
+                {
+                    return Err(StoreError::Integrity(format!(
+                        "migration {source} VM manifest is not sorted and unique"
+                    )));
+                }
+                let imported_valid: i64 = conn.query_row(
+                    "SELECT julianday(?1) IS NOT NULL",
+                    [imported_at.as_deref().unwrap_or("")],
+                    |row| row.get(0),
+                )?;
+                if imported_valid != 1 {
+                    return Err(StoreError::Integrity(format!(
+                        "migration {source} imported timestamp is invalid"
+                    )));
+                }
+                if (state == "cutover")
+                    != cutover_at
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return Err(StoreError::Integrity(format!(
+                        "migration {source} cutover timestamp disagrees with state"
+                    )));
+                }
+                if let Some(cutover_at) = cutover_at.as_deref() {
+                    let cutover_valid: i64 =
+                        conn.query_row("SELECT julianday(?1) IS NOT NULL", [cutover_at], |row| {
+                            row.get(0)
+                        })?;
+                    if cutover_valid != 1 {
+                        return Err(StoreError::Integrity(format!(
+                            "migration {source} cutover timestamp is invalid"
+                        )));
+                    }
+                }
+                if state == "imported" {
+                    let actual_host: Option<String> = conn
+                        .query_row(
+                            "SELECT host_id FROM host_identity WHERE singleton_key=1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let mut vm_statement = conn.prepare("SELECT vm_id FROM vms ORDER BY vm_id")?;
+                    let actual_ids = vm_statement
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    if actual_host.as_deref() != host.as_deref() || actual_ids != ids {
+                        return Err(StoreError::Integrity(format!(
+                            "migration {source} import manifest disagrees with authority state"
+                        )));
+                    }
+                }
+            }
+            _ => {
+                return Err(StoreError::Integrity(format!(
+                    "migration {source} state is invalid"
+                )))
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1880,5 +2254,118 @@ mod tests {
                 .status,
             OperationStatus::Succeeded
         );
+    }
+
+    #[test]
+    fn imported_and_cutover_migration_markers_survive_validation() {
+        let (_directory, path, mut store) = new_store();
+        let host = HostIdentity {
+            id: HostId::new("legacy-host").unwrap(),
+            resource_version: version(1),
+        };
+        let definitions = vec![vm("vm-b", 2), vm("vm-a", 3)];
+        assert_eq!(
+            store
+                .import_legacy_snapshot(
+                    "node-cache-v1",
+                    "checksum",
+                    &host,
+                    &HostCapabilities::default(),
+                    &definitions
+                )
+                .unwrap(),
+            MigrationDisposition::Imported
+        );
+        drop(store);
+        let mut reopened = CoreStore::open_existing(&path).unwrap();
+        assert_eq!(
+            reopened
+                .cutover_legacy_snapshot("node-cache-v1", "checksum")
+                .unwrap(),
+            MigrationDisposition::Cutover
+        );
+        drop(reopened);
+        CoreStore::open_existing(&path).unwrap();
+    }
+
+    #[test]
+    fn migration_marker_semantic_tampering_fails_reopen() {
+        let (_directory, path, mut store) = new_store();
+        let host = HostIdentity {
+            id: HostId::new("legacy-host").unwrap(),
+            resource_version: version(1),
+        };
+        store
+            .import_legacy_snapshot(
+                "node-cache-v1",
+                "checksum",
+                &host,
+                &HostCapabilities::default(),
+                &[vm("vm-a", 1)],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE migration_state SET imported_vm_ids_json='[\"z\",\"a\"]'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        assert!(matches!(
+            CoreStore::open_existing(&path),
+            Err(StoreError::Integrity(_))
+        ));
+
+        let (_directory, path, mut store) = new_store();
+        let host = HostIdentity {
+            id: HostId::new("legacy-host").unwrap(),
+            resource_version: version(1),
+        };
+        store
+            .import_legacy_snapshot(
+                "node-cache-v1",
+                "checksum",
+                &host,
+                &HostCapabilities::default(),
+                &[vm("vm-a", 1)],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE migration_state SET imported_at='not-a-time'", [])
+            .unwrap();
+        drop(store);
+        assert!(matches!(
+            CoreStore::open_existing(&path),
+            Err(StoreError::Integrity(_))
+        ));
+    }
+
+    #[test]
+    fn rollback_refuses_authority_drift() {
+        let (_directory, _path, mut store) = new_store();
+        let host = HostIdentity {
+            id: HostId::new("legacy-host").unwrap(),
+            resource_version: version(1),
+        };
+        store
+            .import_legacy_snapshot(
+                "node-cache-v1",
+                "checksum",
+                &host,
+                &HostCapabilities::default(),
+                &[vm("vm-a", 1)],
+            )
+            .unwrap();
+        store.create_vm(&vm("post-import", 1)).unwrap();
+        assert!(matches!(
+            store.rollback_legacy_import("node-cache-v1", "checksum"),
+            Err(StoreError::Conflict {
+                kind: "migration_rollback_drift",
+                ..
+            })
+        ));
+        assert_eq!(store.list_vms().unwrap().len(), 2);
     }
 }

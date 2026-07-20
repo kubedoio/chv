@@ -1,0 +1,21 @@
+[package]
+name = "cellhv-core-api"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+cellhv-core-operations = { path = "../cellhv-core-operations" }
+cellhv-core-types = { path = "../cellhv-core-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+nix = { workspace = true, features = ["user"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = { workspace = true }
+tower = { workspace = true }

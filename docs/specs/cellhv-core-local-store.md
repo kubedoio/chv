@@ -168,12 +168,14 @@ authority.
 
 ## 8. NodeCache migration boundary
 
-This slice does not cut over existing `NodeCache` data. A later Phase B slice
-must define and test:
+This store slice does not cut over existing `NodeCache` data. The separate
+`cellhv-nodecache-migration` component now defines and tests the import marker,
+but production startup still must enforce:
 
-- deterministic mapping from current node and VM identifiers;
-- validation and explicit rejection of malformed cache data;
-- an idempotent import marker and recorded cutover state;
+- use of its deterministic mapping from current node and VM identifiers;
+- explicit handling of malformed or unsupported cache data;
+- archival of the exact source bytes before activating its idempotent cutover
+  marker;
 - one-way authority activation with no dual writes that can diverge;
 - rollback behavior that preserves a single authority;
 - reconciliation of control-plane compatibility requests through the same

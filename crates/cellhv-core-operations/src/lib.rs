@@ -3,12 +3,17 @@
 //! This crate accepts and journals desired-state mutations. It deliberately has
 //! no runtime or provider dependencies and performs no external side effects.
 
-use cellhv_core_store::{AcceptOperation, AcceptedOperation, CoreStore, OperationJournalEntry};
+use cellhv_core_store::{AcceptOperation, CoreStore};
+pub use cellhv_core_store::{
+    Acceptance, AcceptedOperation, HostRecord, MigrationDisposition, OperationJournalEntry,
+};
 use cellhv_core_types::{
-    canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationId,
-    OperationKind, OperationStatus, RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+    canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
+    OperationId, OperationKind, OperationStatus, RequestedPowerState, ResourceVersion,
+    VmDefinition, VmId,
 };
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use thiserror::Error;
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
@@ -89,6 +94,34 @@ pub enum OperationServiceError {
     Json(#[from] serde_json::Error),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    Invalid,
+    Unsupported,
+    NotFound,
+    Conflict,
+    Precondition,
+    Internal,
+}
+
+impl OperationServiceError {
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Invalid(_) => ErrorClass::Invalid,
+            Self::Unsupported(_) => ErrorClass::Unsupported,
+            Self::Store(cellhv_core_store::StoreError::NotFound { .. }) => ErrorClass::NotFound,
+            Self::Store(
+                cellhv_core_store::StoreError::Conflict { .. }
+                | cellhv_core_store::StoreError::IdempotencyConflict { .. },
+            ) => ErrorClass::Conflict,
+            Self::Store(cellhv_core_store::StoreError::StaleVersion { .. }) => {
+                ErrorClass::Precondition
+            }
+            Self::Store(_) | Self::Json(_) => ErrorClass::Internal,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, OperationServiceError>;
 
 pub struct OperationService {
@@ -96,6 +129,21 @@ pub struct OperationService {
 }
 
 impl OperationService {
+    /// Creates an empty authority exclusively for a validated legacy import.
+    pub fn create_migration_target(path: &Path) -> Result<Self> {
+        Ok(Self::new(CoreStore::create_new(path)?))
+    }
+
+    pub fn create_new(path: &Path, host: &cellhv_core_types::HostIdentity) -> Result<Self> {
+        let store = CoreStore::create_new(path)?;
+        store.create_host(host, &cellhv_core_types::HostCapabilities::default())?;
+        Ok(Self::new(store))
+    }
+
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        Ok(Self::new(CoreStore::open_existing(path)?))
+    }
+
     pub fn new(store: CoreStore) -> Self {
         Self { store }
     }
@@ -140,6 +188,22 @@ impl OperationService {
         Ok(self.store.operation_entry(id)?)
     }
 
+    pub fn host(&self) -> Result<HostRecord> {
+        Ok(self.store.host()?)
+    }
+
+    pub fn vms(&self) -> Result<Vec<VmDefinition>> {
+        Ok(self.store.list_vms()?)
+    }
+
+    pub fn operations(&self) -> Result<Vec<OperationJournalEntry>> {
+        Ok(self.store.list_operations()?)
+    }
+
+    pub fn events_after(&self, sequence: u64, limit: u32) -> Result<Vec<OperationEvent>> {
+        Ok(self.store.list_events_after(sequence, limit)?)
+    }
+
     /// Durably claims the next bounded attempt before any external side effect.
     pub fn claim_attempt(&mut self, id: &OperationId) -> Result<OperationJournalEntry> {
         Ok(self.store.claim_operation(id)?)
@@ -179,6 +243,38 @@ impl OperationService {
 
     pub fn vm(&self, id: &VmId) -> Result<VmDefinition> {
         Ok(self.store.get_vm(id)?)
+    }
+
+    pub fn import_legacy_snapshot(
+        &mut self,
+        source: &str,
+        source_checksum: &str,
+        host: &cellhv_core_types::HostIdentity,
+        definitions: &[VmDefinition],
+    ) -> Result<MigrationDisposition> {
+        Ok(self.store.import_legacy_snapshot(
+            source,
+            source_checksum,
+            host,
+            &cellhv_core_types::HostCapabilities::default(),
+            definitions,
+        )?)
+    }
+
+    pub fn cutover_legacy_snapshot(
+        &mut self,
+        source: &str,
+        checksum: &str,
+    ) -> Result<MigrationDisposition> {
+        Ok(self.store.cutover_legacy_snapshot(source, checksum)?)
+    }
+
+    pub fn rollback_legacy_import(
+        &mut self,
+        source: &str,
+        checksum: &str,
+    ) -> Result<MigrationDisposition> {
+        Ok(self.store.rollback_legacy_import(source, checksum)?)
     }
 
     fn desired_state(&self, submission: &SubmitMutation) -> Result<Option<VmDefinition>> {

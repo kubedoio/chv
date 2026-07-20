@@ -15,7 +15,7 @@ cutover slice passes its migration and rollback gates.
 
 | Gate | Command or artifact | Result |
 |---|---|---|
-| Store/domain/agent/config tests | `cargo test -p cellhv-core-types -p cellhv-core-store -p chv-agent-core -p chv-config` | pass: 181 tests (15 store, 10 types, 147 agent, 9 config) |
+| Store/domain/agent/config tests | `cargo test -p cellhv-core-types -p cellhv-core-store -p chv-agent-core -p chv-config` | pass: 190 tests (18 store, 10 types, 153 agent, 9 config) |
 | Fresh v1 schema, checksum, and deterministic reopen validation | targeted `cellhv-core-store` tests | pass |
 | Foreign-key and constraint enforcement | `migration_checksum_and_foreign_keys_are_enforced` | pass |
 | Reopen and newer-version rejection | CRUD reopen and future-schema tests | pass |
@@ -27,7 +27,7 @@ cutover slice passes its migration and rollback gates.
 | Focused lint | `cargo clippy -p cellhv-core-types -p cellhv-core-store -p chv-agent-core -p chv-config --all-targets -- -D warnings` | pass |
 | Architecture authority guard | `python3 -B scripts/check-cellhv-core-architecture.py` | pass |
 | Architecture negative tests | `python3 -B -m unittest tests/test_cellhv_core_architecture.py` | pass: 15 tests |
-| Full workspace compile/lint/regression | `cargo check --workspace`; `cargo clippy --workspace -- -D warnings`; `cargo test --workspace` | pass: 906 tests, 0 failed, 3 documented release/environment-dependent ignores |
+| Full workspace compile/lint/regression | `cargo check --workspace`; `cargo clippy --workspace -- -D warnings`; `cargo test --workspace` | pass: 928 tests, 0 failed, 3 documented release/environment-dependent ignores |
 
 The schema and domain types also define aligned operation-step, event,
 ownership, and recovery representations. Slice 1 writes the initial
@@ -72,7 +72,8 @@ creation and validation-only reopen of that same schema.
 
 ## Residual risks
 
-- NodeCache import and authority cutover are not implemented in this slice.
+- The separate NodeCache import component is implemented at T1, but startup
+  archival, write exclusion, and authority cutover are not wired.
 - Operation acceptance and idempotency are exercised by the application
   service, but no legacy or native request is routed through it yet.
 - Raw store methods are internal persistence primitives; their tests are not

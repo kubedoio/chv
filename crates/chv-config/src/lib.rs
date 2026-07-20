@@ -352,6 +352,8 @@ pub struct AgentConfig {
     pub cache_path: PathBuf,
     #[serde(default = "default_core_store_path")]
     pub core_store_path: PathBuf,
+    #[serde(default = "default_core_api_socket_path")]
+    pub core_api_socket_path: PathBuf,
     pub node_id: String,
     pub metrics_bind: Option<String>,
     pub tls_cert_path: Option<PathBuf>,
@@ -380,6 +382,7 @@ impl Default for AgentConfig {
             nwd_binary_path: PathBuf::from("/usr/bin/chv-nwd"),
             cache_path: PathBuf::from("/var/lib/chv/cache/agent-cache.json"),
             core_store_path: default_core_store_path(),
+            core_api_socket_path: default_core_api_socket_path(),
             node_id: String::new(),
             metrics_bind: None,
             tls_cert_path: None,
@@ -395,6 +398,10 @@ impl Default for AgentConfig {
 
 fn default_core_store_path() -> PathBuf {
     PathBuf::from("/var/lib/chv/agent/core.db")
+}
+
+fn default_core_api_socket_path() -> PathBuf {
+    PathBuf::from("/run/chv/agent/core-v1.sock")
 }
 
 fn default_storage_base_dir() -> PathBuf {
@@ -628,6 +635,10 @@ jwt_secret = "tooshort"
         assert_eq!(
             cfg.core_store_path,
             PathBuf::from("/var/lib/chv/agent/core.db")
+        );
+        assert_eq!(
+            cfg.core_api_socket_path,
+            PathBuf::from("/run/chv/agent/core-v1.sock")
         );
     }
 
