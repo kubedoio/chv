@@ -793,7 +793,7 @@ impl Orchestrator {
                     });
                 }
 
-                let migration_id = format!("mig-{}", &row.operation_id);
+                let migration_id = format!("mig-{}", row.operation_id);
                 let mut state = crate::migration::MigrationState {
                     migration_id: migration_id.clone(),
                     operation_id: row.operation_id.clone(),
