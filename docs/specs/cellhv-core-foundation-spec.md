@@ -1,13 +1,16 @@
 # CellHV Core Foundation Specification
 
 **Status:** Proposed  
-**Date:** 2026-07-20  
-**Scope:** Core product boundary, authority, Linux topology, VMM policy, and ecosystem integration  
-**Related issues:** #183, #184, #185, #186
+**Date:** 2026-07-21  
+**Scope:** Core product boundary, authority, Linux topology, migration from the existing node runtime, and staged ecosystem integration  
+**Related issues:** #183, #184, #185, #186  
+**Decisions:** ADR-015, ADR-016
 
 ## 1. Product decision
 
-CellHV will be built around **CellHV Core**, a small autonomous Linux-native virtualization runtime.
+CellHV will be built around **CellHV Core**, a self-contained Linux-native compute runtime with optional ecosystem bridges.
+
+The existing `chv-agent` evolves in place into CellHV Core. `cellhvd` is not a second daemon, binary, state store, or runtime authority. Until a separate naming ADR is accepted, the executable and systemd service remain `chv-agent`.
 
 Core MUST operate on one Linux host without Controller, libvirt, OpenStack, CloudStack, OpenNebula, O3K, Kubernetes, Designer, Web UI, or an external database.
 
@@ -17,18 +20,46 @@ Core owns:
 - accepted VM configuration;
 - requested and observed runtime state;
 - operation journal and idempotency;
-- process supervision and re-adoption;
+- Cloud Hypervisor process supervision and re-adoption;
 - attachment records;
 - crash and reboot recovery;
-- public native API, events, health, and metrics.
+- native API, events, health, and metrics.
 
-Cloud Hypervisor is the primary Core 1.0 VMM. Core is designed around a narrow internal VMM interface so another real VMM may be added later without changing Core authority.
+Cloud Hypervisor is the only active VMM target for Core 1.0.
 
-## 2. Non-negotiable invariants
+## 2. Locked decisions and provisional work
+
+The architecture distinguishes decisions that are locked now from integration hypotheses that require evidence.
+
+### Locked
+
+- `chv-agent` becomes the Core runtime in place.
+- Core is useful without a management plane.
+- Core is the single mutation authority for CellHV-managed VMs.
+- Every mutation passes through one durable operation engine.
+- Cloud Hypervisor is represented truthfully and never as QEMU.
+- Hypervisor, network, storage, and cloud-platform compatibility are separate claim axes.
+- Cloud-platform code remains outside Core and uses public contracts.
+- Management-plane loss does not stop existing workloads.
+
+### Provisional until tested
+
+- exact native API transport and endpoint details beyond the required semantics;
+- whether the bounded `ch:///system` profile provides enough value to maintain;
+- the first OpenStack integration path;
+- the first CloudStack and OpenNebula integration paths;
+- exact privileged-helper and provider process boundaries;
+- final binary/package branding;
+- exact supported host, VMM, firmware, and guest versions.
+
+A provisional item MUST NOT become a support claim without the required discovery or acceptance evidence.
+
+## 3. Non-negotiable invariants
 
 - Core is useful and recoverable without a management plane.
-- Core is the single mutation authority for CellHV-managed VMs.
-- Every mutation passes through the operation journal.
+- `chv-agent` and CellHV Core are the same runtime authority.
+- No parallel `cellhvd` runtime is introduced.
+- Every mutation is durably recorded before host-side effects.
 - External systems do not access the Core database, privileged helper, or VMM sockets.
 - Management-plane loss does not stop existing workloads.
 - Ambiguous running workloads are preserved.
@@ -36,44 +67,24 @@ Cloud Hypervisor is the primary Core 1.0 VMM. Core is designed around a narrow i
 - Capabilities describe only executable behavior.
 - Cloud-platform models do not enter Core.
 - Cloud Hypervisor MUST NOT be advertised as QEMU.
-- Hypervisor, network, storage, and platform compatibility are qualified separately.
+- Network, storage, VMM, and platform compatibility are qualified separately.
 - Unsupported behavior fails explicitly.
 
-## 3. Normative classes
+## 4. Default architecture
 
-| Class | Meaning | Change process |
-|---|---|---|
-| Invariant | Product or safety boundary | superseding ADR |
-| Default architecture | selected implementation | ADR before replacement |
-| Candidate | requires experiment | spike and review |
-
-### Default architecture
-
-- `cellhvd` owns state, operations, recovery, and native API.
+- `chv-agent` owns local state, operations, recovery, and the native API.
 - SQLite is the first local durable store.
-- `cellhv-hostd` is a narrow privileged helper.
-- Native API is HTTP/JSON with OpenAPI 3.1.
-- Local access is HTTP over a Unix socket.
-- Managed remote access is optional HTTPS/mTLS.
+- Existing `chv-agent` gRPC/control-plane compatibility is retained during migration and routed into the same operation engine.
+- Native local access uses a versioned API over a Unix socket; HTTP/JSON with OpenAPI 3.1 is the current default, subject to implementation validation.
+- Managed remote access is optional and added after standalone recovery is proven.
 - systemd and cgroups v2 provide process supervision and accounting.
-- Cloud Hypervisor is the first VMM adapter.
-- network and storage are provider contracts, not VMM identity.
+- Cloud Hypervisor is the Core 1.0 VMM.
+- `chv-stord` and `chv-nwd` remain existing provider services until a later bounded decision changes their role.
+- Network and storage are attachment/provider contracts, not properties of a VMM URI.
 
-### Candidates
+## 5. Product position
 
-- bounded `ch:///system` compatibility profile;
-- OpenStack native ComputeDriver;
-- CloudStack extension or hypervisor plugin;
-- OpenNebula VMM driver;
-- future actual QEMU VMM adapter;
-- standard libvirt network/storage coexistence;
-- provider process model;
-- exact systemd unit model;
-- TPM-backed identity.
-
-## 4. Product position
-
-> CellHV Core is a minimal Linux-native compute runtime for building cloud and edge platforms, with a stable native API and evidence-driven compatibility integrations.
+> CellHV Core is a self-contained compute runtime for modern cloud and edge workloads, built by evolving `chv-agent` into a locally authoritative, recoverable Linux service with optional ecosystem bridges.
 
 CellHV does not claim:
 
@@ -81,11 +92,14 @@ CellHV does not claim:
 - QEMU identity while using Cloud Hypervisor;
 - XAPI compatibility;
 - universal VMware compatibility;
-- automatic compatibility from a URI;
+- automatic cloud compatibility from a URI;
 - complete legacy device emulation;
-- zero-change integration with every cloud platform.
+- zero-change integration with every cloud platform;
+- loose coupling in the sense of implementation independence from Linux, Cloud Hypervisor, or the selected provider contracts.
 
-## 5. Topology
+Core is deliberately opinionated about Linux, KVM, Cloud Hypervisor, durable local authority, and explicit attachment semantics.
+
+## 6. Topology
 
 ```mermaid
 flowchart TB
@@ -100,9 +114,9 @@ flowchart TB
         DSGN[Designer]
     end
 
-    subgraph Integration[Integration layer outside Core]
-        NATIVE[Native CellHV adapters]
-        CHLIB[Optional libvirt ch profile]
+    subgraph Bridges[Optional ecosystem bridges outside Core]
+        NATIVE[Native CellHV clients and adapters]
+        CHLIB[Optional bounded libvirt ch profile]
         PADAPT[Platform-specific adapters]
         NETINT[Network / SDN integrations]
         STORINT[Storage integrations]
@@ -122,28 +136,27 @@ flowchart TB
     ONE --> PADAPT
 
     subgraph Host[Linux compute host]
-        API[CellHV native API]
-        subgraph Core[CellHV Core authority]
-            STATE[Durable VM state]
-            OPS[Operation engine]
-            REC[Recovery / re-adoption]
-            VMM[VMM adapter interface]
+        subgraph Agent[chv-agent evolving into CellHV Core]
+            API[Native and legacy-compatible APIs]
+            STATE[Durable local VM state]
+            OPS[Single operation engine]
+            REC[Recovery and re-adoption]
+            VMM[Cloud Hypervisor adapter]
             ATT[Attachment contracts]
             EVT[Events / health / metrics]
         end
 
-        subgraph Providers[Linux providers]
-            NET[Bridge / TAP / VLAN / NAT]
-            STOR[File / block / LVM / RBD]
+        subgraph ExistingProviders[Existing node provider services]
+            NWD[chv-nwd]
+            STORD[chv-stord]
         end
 
-        subgraph Runtime[Linux runtime]
+        subgraph Linux[Linux runtime]
             SYSTEMD[systemd / cgroups v2]
             CH[Cloud Hypervisor]
-            QEMU[Future actual QEMU backend]
             KVM[KVM]
-            NL[netlink / namespaces / nftables]
-            BLOCK[block / filesystem stack]
+            NET[netlink / bridge / TAP / VLAN / namespaces / nftables]
+            BLOCK[file / block / LVM / RBD paths]
         end
 
         NATIVE --> API
@@ -159,161 +172,133 @@ flowchart TB
         OPS --> EVT
         VMM --> SYSTEMD
         SYSTEMD --> CH
-        SYSTEMD -. future ADR .-> QEMU
         CH --> KVM
-        QEMU -. future .-> KVM
-        ATT --> NET
-        ATT --> STOR
-        NET --> NL
-        STOR --> BLOCK
+        ATT --> NWD
+        ATT --> STORD
+        NWD --> NET
+        STORD --> BLOCK
     end
 ```
 
-The optional libvirt compatibility layer and platform adapters are clients of public Core APIs. They do not become runtime authorities.
+No bridge becomes a second VM authority. `chv-agent` remains the only CellHV runtime owner.
 
-## 6. Compatibility model
+## 7. Compatibility model
 
-Compatibility is a tuple, not one boolean.
-
-Every claim identifies:
+Compatibility is a tuple, not a boolean. Every claim identifies:
 
 - VMM backend;
-- hypervisor interface;
+- hypervisor management interface;
 - network path;
 - storage path;
 - cloud-platform integration path;
 - workload and version matrix.
 
-The normative claim format is defined in `docs/specs/contracts/cellhv-compatibility-claims-v1.md`.
+The normative format is `docs/specs/contracts/cellhv-compatibility-claims-v1.md`.
 
-### Cloud Hypervisor/libvirt
+### Libvirt
 
-`ch:///system` is evaluated as an optional bounded profile. It is useful for generic libvirt clients but is not assumed to be widely accepted by cloud platforms.
-
-### QEMU
-
-CellHV does not emulate QEMU or QMP around Cloud Hypervisor.
-
-A future QEMU backend may use the existing QEMU/libvirt ecosystem only when it actually runs QEMU and passes a separate qualification profile.
+`ch:///system` is an optional bounded discovery and compatibility profile. It is not assumed to be accepted by OpenStack, CloudStack, or OpenNebula. Passing the libvirt profile proves only that profile.
 
 ### Network and storage
 
-Network and storage providers are independent from the VMM. A cloud integration may use CellHV providers, standard libvirt drivers, or external systems, provided ownership and recovery are explicit.
+Network and storage are qualified independently from VM lifecycle. A platform may use existing CellHV services, platform-prepared endpoints, or future qualified providers, provided ownership, recovery, and cleanup are explicit.
 
-## 7. Architecture layers
+### Other VMMs
 
-### Minimal Core
+Other VMM backends are outside the active Core 1.0 roadmap. They must not appear in implementation prompts, milestone commitments, or topology diagrams. Any future proposal requires a separate business case and ADR.
 
-- VM identity and specification;
-- lifecycle and operation journal;
-- Cloud Hypervisor adapter;
-- pre-existing disk and network attachments;
-- restart/reboot recovery;
-- local native API.
+## 8. Active delivery milestones
 
-### Standard providers
+### Phase A — migration baseline and OpenStack discovery
 
-- managed bridge and VLAN;
-- isolated and NAT networks;
-- raw-file and LVM provisioning;
-- Ceph RBD and later providers.
+- map current `chv-agent` authority and dependencies;
+- lock the in-place evolution path;
+- add dependency and identity guards;
+- run a time-boxed OpenStack/`ch:///system` discovery spike;
+- publish evidence and unresolved gaps.
 
-### Managed endpoint
+### Phase B — local authority in `chv-agent`
 
-- HTTPS/mTLS;
-- enrollment;
-- certificate rotation;
-- management leases;
-- Controller connector.
+- durable SQLite state;
+- one operation engine for legacy and native requests;
+- idempotency and resource versions;
+- native local API skeleton;
+- no second daemon.
 
-### Management products
+### Phase C — standalone runtime and recovery
 
-- CellHV Controller and Web UI;
-- O3K;
-- Designer;
-- cloud-platform integrations;
-- Kubernetes and Terraform integrations.
+- one qualified Linux VM through Cloud Hypervisor;
+- pre-existing disk and network endpoints;
+- daemon restart and process re-adoption;
+- host reboot and fail-closed database behavior;
+- real-KVM leak and fault testing.
 
-## 8. Milestones
+### Phase D — minimum provider and privilege hardening
 
-### M0 — Authority and contracts
+- preserve and narrow `chv-stord`/`chv-nwd` boundaries;
+- validate attachment ownership;
+- restrict privileged host mutations;
+- qualify only the minimum providers required by the first OpenStack path.
 
-- Core domain model;
-- operation journal;
-- SQLite schema;
-- native API contract;
-- compatibility-claims contract;
-- no real VM required.
+### Phase E — first supported OpenStack path
 
-### M1 — Minimal standalone runtime
+- select generic libvirt, generic upstream change, or native adapter from evidence;
+- qualify Nova lifecycle, Neutron network, and Cinder storage separately;
+- publish version matrix, limitations, and maintainer ownership.
 
-- one Linux VM on Cloud Hypervisor;
-- pre-existing disk and bridge/TAP;
-- create, inspect, start, stop, delete;
-- no Controller or libvirt.
+### Phase F — Controller/O3K integration and Core 1.0 qualification
 
-### M2 — Recovery
+- migrate Controller and O3K to the public Core authority path;
+- prove manager removal and projection rebuild;
+- package, upgrade, rollback, security, and soak qualification;
+- publish Core 1.0 support claims.
 
-- daemon re-adoption;
-- host reboot;
-- fail-closed database;
-- crash-after-commit recovery;
-- resource-leak tests.
+CloudStack and OpenNebula remain strategic targets, but their implementation programmes begin only after the OpenStack path and Core authority are stable.
 
-### M3 — Compatibility discovery
+## 9. Planning assumptions
 
-- upstream `ch` support matrix;
-- OpenStack, CloudStack, and OpenNebula integration discovery;
-- separate network/storage gap analysis;
-- no assumption that one URI solves platform compatibility.
+This is a planning estimate, not a delivery promise.
 
-### M4 — First supported cloud integration
+Assumed minimum capacity:
 
-Select and implement the safest maintainable path for OpenStack first:
+- one dedicated senior Rust/Linux virtualization engineer;
+- half-time infrastructure/test engineering support;
+- access to disposable KVM and OpenStack labs;
+- architecture review availability at each phase gate.
 
-- generic libvirt `ch` path;
-- generic upstream change;
-- official native CellHV adapter.
+Indicative schedule from July 2026:
 
-CloudStack follows with its selected path. Each path requires a published claim tuple and conformance profile.
+| Period | Target |
+|---|---|
+| Q3 2026 | Phase A and start Phase B |
+| Q4 2026 | complete Phase B and Phase C minimal runtime |
+| Q1 2027 | recovery hardening and Phase D |
+| Q2 2027 | Phase E OpenStack integration |
+| Q3 2027 | Phase F and Core 1.0 qualification |
 
-### Beta — Providers and managed endpoint
+With less than one dedicated senior engineer, the schedule must be extended rather than reducing recovery or acceptance requirements.
 
-- privileged helper;
-- standard network and storage providers;
-- mTLS and enrollment;
-- Controller and O3K native API integration.
+## 10. Explicit non-goals for Core 1.0
 
-### 1.0 — Qualification
-
-- standalone and recovery profiles;
-- one supported OpenStack integration path;
-- documented CloudStack gap report and selected implementation path;
-- advertised network/storage providers;
-- upgrade/rollback, security, soak, packages, checksums, and SBOM.
-
-The optional `ch` profile is required only when advertised.
-
-## 9. Explicit non-goals for Core 1.0
-
-- QEMU impersonation;
-- QMP emulation;
+- a new parallel `cellhvd` service;
+- flag-day rewrite of `chv-agent`;
+- QEMU impersonation or QMP emulation;
+- another VMM backend;
 - complete libvirt API;
 - mandatory `ch:///system`;
-- mandatory platform-specific adapters for every cloud;
-- actual QEMU backend unless separately approved;
+- support for every cloud platform;
 - distributed cluster consensus;
 - fleet scheduling;
 - tenant, billing, or quota models;
 - Designer execution inside Core;
 - built-in Ceph cluster deployment.
 
-## 10. Change control
+## 11. Change control
 
-Changes affecting VMM identity, Core authority, public APIs, compatibility claims, provider ownership, or platform paths require:
+Changes affecting agent/Core identity, VMM identity, local authority, public APIs, compatibility claims, provider ownership, or platform paths require:
 
 - ADR or contract update;
 - acceptance scenario update;
 - migration and rollback analysis;
 - explicit unsupported behavior;
-- proof that Core remains standalone and single-authority.
+- proof that `chv-agent` remains the single standalone runtime authority.
