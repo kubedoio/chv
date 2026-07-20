@@ -1,21 +1,23 @@
 # CellHV Core Acceptance Test Harness Implementation Plan
 
 **Status:** Proposed  
-**Date:** 2026-07-20
+**Date:** 2026-07-21  
+**Authority:** ADR-016 and ADR-017
 
 ## 1. Objective
 
 Build the smallest harness that proves:
 
-- standalone Core behavior;
-- truthful VMM identity;
-- independent network and storage profiles;
-- real cloud-platform integration paths;
-- compatibility claims backed by evidence.
+- `chv-agent` evolves into one standalone Core authority;
+- Cloud Hypervisor identity and capabilities are truthful;
+- local VM lifecycle and recovery work on real KVM;
+- advertised network and storage paths pass independent contracts;
+- the selected OpenStack integration works on a real platform;
+- published compatibility claims resolve to evidence.
 
-The harness observes public interfaces and never repairs private product state.
+The harness observes public interfaces and host state. It never repairs private product state or implements missing product behavior.
 
-## 2. Commands
+## 2. Active commands
 
 ```text
 cellhv-test verify-host
@@ -27,166 +29,195 @@ cellhv-test gap-report <run-id>
 cellhv-test claim <run-id>
 ```
 
-## 3. Environment classes
+Implement commands incrementally. Do not build a report portal or distributed scheduler as part of Core 1.0.
+
+## 3. Active environment classes
 
 | Environment | Purpose |
 |---|---|
-| normal CI | schema, dependency, identity, property tests |
-| privileged disposable Linux | services, SQLite, providers, permissions |
-| Cloud Hypervisor KVM host | real Core lifecycle and recovery |
-| libvirt discovery host | upstream `ch` inventory and optional profile |
-| OpenStack lab | compare generic libvirt and native adapter paths |
-| CloudStack lab | measure KVM-agent assumptions and candidate paths |
-| OpenNebula lab | compare integration paths |
-| provider lab | network and storage qualification |
-| release lab | upgrade, rollback, soak, packages |
+| normal CI | schemas, dependencies, identity, property tests |
+| privileged disposable Linux | `chv-agent`, SQLite, sockets, permissions, provider contracts |
+| Cloud Hypervisor KVM host | real lifecycle, recovery, ownership, and leaks |
+| libvirt discovery host | bounded upstream `ch` inventory only |
+| OpenStack lab | Path A/B/C discovery and selected-path qualification |
+| provider lab | minimum network and storage paths required by OpenStack |
+| release lab | package, upgrade, rollback, security, and soak |
 
-## 4. Core modules
+CloudStack and OpenNebula labs are deferred and are not built by this plan.
 
-- scenario registry;
-- host safety guard;
-- native Core client;
+## 4. Minimal harness modules
+
+### Initial modules
+
+- scenario registry and validator;
+- test-host safety guard;
+- public `chv-agent` Core client;
+- legacy gRPC client where migration comparison is required;
 - process/systemd/socket inventory;
 - VMM identity verifier;
-- network inventory;
-- storage inventory;
 - operation/event collector;
-- provider contract runner;
-- libvirt discovery runner;
-- platform adapters for testing only;
 - leak checker;
-- JSON/JUnit reports;
-- gap-report generator;
+- JSON/JUnit report output.
+
+### Added only when required
+
+- network provider runner;
+- storage provider runner;
+- libvirt discovery runner;
+- OpenStack discovery/qualification runner;
+- upgrade/rollback runner;
 - compatibility-claim generator.
 
-The test harness may drive a product adapter but MUST NOT implement product behavior itself.
+The test harness may drive a product adapter but MUST NOT contain lifecycle, recovery, or provider logic that belongs in the product.
 
-## 5. VMM identity verification
+## 5. Agent/Core migration verification
 
 The harness records:
 
-- expected VMM backend;
-- actual process executable and version;
-- libvirt URI where used;
-- reported hypervisor type;
-- VMM API sockets;
-- systemd units and ownership markers;
-- advertised capabilities.
+- active runtime binary and service;
+- durable database identity;
+- legacy and native request correlation;
+- VM UUID and operation IDs;
+- Cloud Hypervisor process, unit, socket, and runtime directory;
+- Controller presence/absence;
+- ownership conflicts.
 
 It fails when:
 
-- Cloud Hypervisor is reported as QEMU;
-- QEMU/QMP functionality is advertised without actual support;
-- a future QEMU profile has no QEMU process;
-- two VMM authorities own the same VM.
+- a parallel `cellhvd` service exists;
+- old and new request paths create separate operations for one intended mutation;
+- two services own one VM;
+- a future rename activates both old and new services;
+- Controller removal erases local VM identity.
 
-## 6. Network and storage contracts
+## 6. VMM identity verification
+
+Record:
+
+- expected and actual VMM backend/version;
+- process executable;
+- reported hypervisor type;
+- API sockets;
+- systemd units and ownership markers;
+- advertised capabilities.
+
+Fail when:
+
+- Cloud Hypervisor is reported as QEMU;
+- QEMU/QMP functions are advertised;
+- capabilities cannot be executed;
+- two authorities own the same VMM process.
+
+Other VMMs are outside the active harness scope.
+
+## 7. Network and storage contracts
 
 Provider runners are independent from VM lifecycle tests.
 
 ### Network evidence
 
-- endpoint source and owner;
-- bridge/TAP/VLAN/namespace state;
+- endpoint source, type, and owner;
+- bridge/TAP/VLAN/namespace state for the advertised path;
 - guest connectivity;
 - firewall changes;
-- restart recovery;
-- cleanup and leak result.
+- agent/provider/host restart behavior;
+- cleanup and leak result;
+- proof unrelated host state is unchanged.
 
 ### Storage evidence
 
-- endpoint source and owner;
+- endpoint source, type, and owner;
 - file/block/provider identity;
 - lock/exclusivity state;
 - guest data integrity;
-- restart recovery;
-- cleanup and leak result.
+- agent/provider/host restart behavior;
+- cleanup and leak result;
+- proof unowned data is not deleted.
 
-## 7. Platform comparison labs
+Only providers required by the first OpenStack path are implemented in the active programme.
 
-Each platform discovery run may evaluate several integration candidates.
+## 8. OpenStack discovery runner
+
+The discovery runner compares:
+
+- Nova `LibvirtDriver` with upstream `ch`;
+- small generic upstream changes;
+- native CellHV Nova driver.
 
 Required report fields:
 
 ```yaml
-platform:
-platform_version:
+openstack_version:
+nova_version:
+libvirt_version:
+cloud_hypervisor_version:
+host_kernel:
 candidate:
-vmm_backend:
-hypervisor_interface:
-network_path:
-storage_path:
 configuration:
-platform_patches:
-cellhv_adapter:
-expected:
-observed:
+first_success:
+first_failure:
 qemu_specific_assumptions:
+network_expectation:
+storage_expectation:
+core_authority_impact:
 generic_upstream_option:
+native_driver_effort:
 security_risk:
-maintenance_cost:
+maintenance_risk:
 result:
 recommended_path:
 ```
 
-### OpenStack
+The discovery runner must stop at the time-box boundary and report partial evidence honestly.
 
-Compare:
+## 9. Selected OpenStack path qualification
 
-- Nova LibvirtDriver with `ch`;
-- generic upstream changes;
-- native CellHV ComputeDriver.
+Once a focused ADR selects a path, the harness proves:
 
-### CloudStack
+- Placement/resource reporting;
+- spawn, inspect, power, reboot, and destroy;
+- Neutron mapping through an independent network profile;
+- Cinder mapping through an independent storage profile;
+- duplicate-request and timeout behavior;
+- nova-compute, `chv-agent`, and host restart;
+- OpenStack management outage without workload loss;
+- exact version and unsupported-feature matrix;
+- no Core-authority bypass.
 
-Compare:
+## 10. Evidence profiles
 
-- standard KVM agent with non-QEMU libvirt;
-- extension framework;
-- native hypervisor plugin;
-- future actual QEMU backend only if separately approved.
-
-### OpenNebula
-
-Compare:
-
-- generic libvirt;
-- generic VMM changes;
-- native CellHV VMM driver.
-
-A candidate cannot be selected solely because it needs fewer initial code changes.
-
-## 8. Evidence profiles
-
-### Minimal
+### Minimal successful run
 
 - scenario result;
 - exact versions;
+- active runtime service;
 - VMM identity;
 - Core operations/events;
-- network/storage path identifiers;
+- network/storage path identifiers where applicable;
 - leak result.
 
-### Failure
+### Failure run
 
 - minimal evidence;
-- logs;
+- relevant logs;
 - API/XML payloads;
 - process/network/storage inventory;
 - correlation timeline;
-- gap report.
+- gap report;
+- database integrity result where relevant.
 
-### Qualification
+### Qualification run
 
 - complete claim tuple;
 - package/configuration manifest;
 - all required scenarios;
-- upgrade and rollback;
+- upgrade/rollback result;
 - security result;
+- soak result;
 - signed evidence digest;
 - unsupported matrix.
 
-## 9. Safety
+## 11. Safety
 
 Destructive tests require:
 
@@ -199,67 +230,82 @@ Destructive tests require:
 
 The harness aborts when isolation cannot be proven.
 
-## 10. Phased implementation
+## 12. Phased harness implementation
 
-### H0 — schemas and static checks
+### H0 — migration and static guards
 
-- scenario schema;
-- compatibility-claim schema;
+- scenario and claim schemas;
+- `chv-agent`/no-`cellhvd` identity checks;
 - forbidden QEMU-identity checks;
-- report skeleton.
+- minimal report skeleton.
 
-### H1 — Core lifecycle
+### H1 — real Core lifecycle
 
-- native client;
-- KVM host verification;
-- lifecycle, recovery, and leak tests.
+- host verifier;
+- native and legacy clients;
+- real-KVM lifecycle;
+- operation correlation;
+- process/unit/socket inventory.
 
-### H2 — provider contracts
+### H2 — recovery and leaks
 
-- network runner;
-- storage runner;
-- restart and cleanup tests.
+- agent restart;
+- host reboot continuation;
+- database integrity;
+- representative failpoints;
+- 100-cycle leak suite.
 
-### H3 — libvirt discovery
+### H3 — minimum providers
 
-- upstream `ch` support inventory;
-- URI, XML, events, statistics, and process ownership;
-- optional bounded profile.
+- network contract runner;
+- storage contract runner;
+- restart, integrity, cleanup, and unrelated-state tests.
 
-### H4 — OpenStack comparison
+### H4 — OpenStack discovery
 
-- run each candidate path;
-- collect common evidence;
-- compare reliability and maintenance.
+- time-boxed Path A/B/C comparison;
+- common evidence and gap report;
+- no support claim.
 
-### H5 — CloudStack comparison
+### H5 — selected OpenStack qualification
 
-- capture URI, QEMU hook/tooling, storage, and network assumptions;
-- test viable candidate paths.
+- selected adapter/path runner;
+- Nova/Placement, Neutron, Cinder, retry, and restart tests;
+- compatibility claim generation.
 
-### H6 — OpenNebula comparison
+### H6 — release qualification
 
-- run and compare viable paths.
-
-### H7 — qualification
-
-- packages;
-- upgrade/rollback;
-- soak;
+- package install/upgrade/rollback;
+- security checks;
+- soak and resource budgets;
 - signed claims and matrices.
 
-## 11. First harness PR sequence
+## 13. First harness PR sequence
 
 1. scenario and claim schemas;
 2. host safety guard;
-3. VMM identity verifier;
-4. native Core runner;
-5. network contract runner;
-6. storage contract runner;
+3. agent/Core identity verifier;
+4. VMM identity verifier;
+5. native/legacy request correlation;
+6. real lifecycle runner;
 7. recovery and leak suite;
-8. libvirt `ch` discovery runner;
-9. gap-report generator;
-10. OpenStack candidate comparison;
-11. CloudStack candidate comparison;
-12. OpenNebula candidate comparison;
-13. claim and evidence generator.
+8. network contract runner;
+9. storage contract runner;
+10. OpenStack discovery runner;
+11. gap-report generator;
+12. selected OpenStack qualification;
+13. claim and evidence generator;
+14. package/upgrade/soak runners.
+
+## 14. Deferred harness work
+
+Do not implement in this programme:
+
+- CloudStack comparison runner;
+- OpenNebula comparison runner;
+- additional VMM verification;
+- Kubernetes/Terraform/Designer labs;
+- multi-region test scheduler;
+- report portal.
+
+Those receive separate plans after Core 1.0 and first OpenStack stability.
