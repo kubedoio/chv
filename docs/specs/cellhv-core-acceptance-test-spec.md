@@ -1,11 +1,14 @@
 # CellHV Core Acceptance Test Specification
 
 **Status:** Proposed  
-**Date:** 2026-07-20
+**Date:** 2026-07-21  
+**Authority:** ADR-015 and ADR-016
 
 ## 1. Purpose
 
-This specification prevents implementation progress from being confused with product compatibility.
+This specification prevents implementation progress from being confused with runtime safety or ecosystem compatibility.
+
+`chv-agent` is the CellHV Core implementation. Tests must prove an in-place migration to local authority, not the coexistence of two runtime daemons.
 
 Mocks and schemas can prove contracts. Only real KVM, provider, and platform tests can prove infrastructure claims.
 
@@ -15,16 +18,17 @@ Mocks and schemas can prove contracts. Only real KVM, provider, and platform tes
 |---|---|---|
 | T0 | static CI | boundaries, schemas, forbidden identities, claim consistency |
 | T1 | unit/property | state machines, idempotency, mappings, validation |
-| T2 | privileged disposable Linux | services, SQLite, permissions, sockets, providers |
+| T2 | privileged disposable Linux | services, SQLite, permissions, sockets, provider contracts |
 | T3 | real KVM host | VM lifecycle, recovery, VMM behavior, leaks |
-| T4 | provider/multi-host lab | storage, networking, migration where advertised |
-| T5 | real external platform | OpenStack, CloudStack, OpenNebula, O3K |
+| T4 | provider/multi-host lab | advertised storage/network behavior |
+| T5 | real external platform | OpenStack and later cloud integrations |
 | T6 | release lab | upgrade, rollback, security, soak, packaging |
 
 Lower tiers cannot qualify higher-tier claims.
 
-## 3. Profiles
+## 3. Active profiles
 
+- `agent-core-migration`;
 - `native-api`;
 - `minimal-core`;
 - `recovery`;
@@ -32,40 +36,51 @@ Lower tiers cannot qualify higher-tier claims.
 - `libvirt-ch-experimental`;
 - `network-provider`;
 - `storage-provider`;
+- `openstack-discovery`;
 - `openstack`;
-- `cloudstack`;
-- `opennebula`;
 - `managed-endpoint`;
 - `core-1.0`.
 
-A future QEMU backend receives its own `vmm-qemu` and `libvirt-qemu` profiles after a separate ADR.
+CloudStack and OpenNebula profiles remain defined as follow-on work but do not gate the active Core 1.0 programme.
 
-## 4. Core north-star scenarios
+## 4. `chv-agent` migration scenarios
 
 | ID | Requirement | Tier |
 |---|---|---|
-| CORE-INSTALL-001 | Core installs and becomes healthy without manager, libvirt, or external DB. | T2 |
+| AGENT-CORE-001 | No parallel `cellhvd` binary, service, store, or VM authority exists. | T0/T2 |
+| AGENT-CORE-002 | Legacy control-plane gRPC and native local API mutations enter the same durable operation engine. | T1/T2 |
+| AGENT-CORE-003 | Existing `chv-agent` VM/runtime identifiers map deterministically into durable Core identity. | T1/T2 |
+| AGENT-CORE-004 | During migration, one VM cannot be controlled through independent old and new paths. | T2/T3 |
+| AGENT-CORE-005 | Controller removal does not stop running workloads or erase local identity. | T3 |
+| AGENT-CORE-006 | A future binary rename cannot activate two runtime services simultaneously. | T0/T2 |
+
+## 5. Core north-star scenarios
+
+| ID | Requirement | Tier |
+|---|---|---|
+| CORE-INSTALL-001 | `chv-agent` Core mode installs and becomes healthy without manager, libvirt, or external DB. | T2 |
 | CORE-VM-001 | One qualified Linux VM runs through the native API. | T3 |
 | CORE-ATTACH-001 | One pre-existing disk and network endpoint attach correctly. | T3 |
 | CORE-IDEMP-001 | Repeated requests do not duplicate resources. | T3 |
-| CORE-RECOVERY-001 | Killing `cellhvd` does not stop the VM; it is re-adopted. | T3 |
-| CORE-RECOVERY-002 | Host reboot preserves identity and requested state. | T3 |
+| CORE-RECOVERY-001 | Killing `chv-agent` does not stop the VM; the restarted agent re-adopts it. | T3 |
+| CORE-RECOVERY-002 | Host reboot preserves identity and requested-state policy. | T3 |
 | CORE-STORE-001 | Database corruption fails closed without empty replacement. | T2 |
 | CORE-OPS-001 | Crash after commit does not duplicate a VM. | T3 |
 | CORE-LEAK-001 | 100 lifecycle cycles leave no resource leaks. | T3 |
 | CORE-AUTH-001 | Conflicting ownership blocks destructive mutation. | T3 |
 
-## 5. VMM identity and capability scenarios
+## 6. VMM identity and capability scenarios
 
 | ID | Requirement | Tier |
 |---|---|---|
 | VMM-ID-001 | Cloud Hypervisor backend never reports or exposes `qemu:///system`. | T0/T2 |
 | VMM-ID-002 | Reported VMM and capabilities match the running process. | T2/T3 |
 | VMM-ID-003 | Unsupported QEMU/QMP operations fail explicitly. | T1/T3 |
-| VMM-ID-004 | VMM process, socket, and systemd ownership are auditable. | T2/T3 |
-| VMM-ID-005 | A future QEMU profile cannot pass unless actual QEMU processes run. | T0/T3 |
+| VMM-ID-004 | VMM process, socket, systemd unit, and agent ownership are auditable. | T2/T3 |
 
-## 6. Compatibility-axis scenarios
+Other VMM backends are outside the active test programme.
+
+## 7. Compatibility-claim scenarios
 
 | ID | Requirement | Tier |
 |---|---|---|
@@ -75,7 +90,7 @@ A future QEMU backend receives its own `vmm-qemu` and `libvirt-qemu` profiles af
 | CLAIM-004 | Unsupported features and known deviations are included in release artifacts. | T0/T6 |
 | CLAIM-005 | Evidence digest resolves to real scenario results. | T0/T6 |
 
-## 7. Optional `ch:///system` profile
+## 8. Optional `ch:///system` profile
 
 These scenarios apply only when CellHV advertises the profile.
 
@@ -83,57 +98,67 @@ These scenarios apply only when CellHV advertises the profile.
 |---|---|---|
 | CH-001 | `virConnectOpen("ch:///system")` succeeds. | T2 |
 | CH-002 | Capabilities contain no unsupported QEMU claims. | T2 |
-| CH-003 | Supported lifecycle enters the Core operation journal. | T3 |
-| CH-004 | UUID and name survive Core/libvirt/host restart. | T3 |
+| CH-003 | Supported lifecycle enters the `chv-agent` Core operation journal. | T3 |
+| CH-004 | UUID and name survive agent/libvirt/host restart. | T3 |
 | CH-005 | Supported disk and NIC operations use qualified attachment paths. | T3 |
 | CH-006 | Events and statistics are accurate or explicitly unavailable. | T3 |
 | CH-007 | Unsupported XML fails before mutation. | T1/T3 |
 | CH-008 | Compatibility code cannot access VMM sockets or host mutation APIs directly. | T0/T2 |
 | CH-009 | Passing this profile does not set any platform-supported result automatically. | T0 |
 
-## 8. Network provider contract
+## 9. Network provider contract
 
 Every advertised network path tests:
 
-- validate;
+- validate and ownership;
 - prepare or consume;
-- attach;
-- guest connectivity;
+- attach and guest connectivity;
 - inspect;
-- daemon and host restart recovery;
-- detach;
-- repeated cleanup;
+- agent and host restart recovery;
+- detach and repeated cleanup;
 - unrelated-rule preservation;
 - leak detection.
 
 Required negative tests include deleting in-use networks, duplicate MAC/TAP ownership, and modification of unrelated nftables or bridge state.
 
-## 9. Storage provider contract
+## 10. Storage provider contract
 
 Every advertised storage path tests:
 
-- validate;
+- validate and ownership;
 - provision or consume;
-- attach;
-- data write/read;
+- attach and guest data write/read;
 - exclusivity and locking where applicable;
-- daemon and host restart recovery;
-- detach;
-- repeated cleanup;
+- agent and host restart recovery;
+- detach and repeated cleanup;
 - data integrity;
 - leak detection.
 
 A VMM-profile pass cannot substitute for a storage-profile pass.
 
-## 10. OpenStack qualification
+## 11. OpenStack discovery gate
 
-The discovery run compares all viable paths:
+The discovery spike is time-boxed and compares:
 
-- generic `ch` libvirt path;
-- generic upstream changes;
-- official CellHV Nova driver.
+- Nova LibvirtDriver with upstream `ch:///system`;
+- small generic upstream improvements;
+- an official CellHV Nova driver using the native API.
 
-Required scenarios:
+Discovery scenarios:
+
+| ID | Requirement | Tier |
+|---|---|---|
+| OSD-001 | DevStack/Nova reaches the selected libvirt connection and records the first exact failure. | T5 |
+| OSD-002 | QEMU-specific Nova/libvirt assumptions are catalogued with code/config references. | T5 |
+| OSD-003 | Neutron and Cinder expectations are catalogued separately from VM lifecycle. | T5 |
+| OSD-004 | Native Nova driver effort, security boundary, and maintenance cost are estimated. | T0/T5 |
+| OSD-005 | A recommendation selects Path A, B, or C with evidence and residual risk. | T0/T5 |
+
+Passing discovery does not claim OpenStack support.
+
+## 12. OpenStack qualification
+
+Once a path is selected, support requires:
 
 | ID | Requirement | Tier |
 |---|---|---|
@@ -142,33 +167,19 @@ Required scenarios:
 | OS-003 | Neutron NIC/MAC mapping passes its network profile. | T5 |
 | OS-004 | Cinder block attachment passes its storage profile. | T5 |
 | OS-005 | Retry and nova-compute restart do not duplicate or stop VMs. | T5 |
-| OS-006 | Selected integration path and maintenance owner are published. | T0/T5 |
-| OS-007 | QEMU-specific assumptions are recorded for rejected paths. | T5 |
-| OS-008 | No path bypasses Core authority. | T0/T5 |
+| OS-006 | Selected integration path, versions, unsupported features, and maintenance owner are published. | T0/T5 |
+| OS-007 | Rejected paths and QEMU-specific assumptions are retained as evidence. | T5 |
+| OS-008 | No path bypasses `chv-agent` Core authority. | T0/T5 |
 
-OpenStack support requires all required scenarios for one selected path. It does not require the `ch` path to win.
+The `ch` path is not required to win.
 
-## 11. CloudStack qualification
+## 13. Deferred platform profiles
 
-| ID | Requirement | Tier |
-|---|---|---|
-| CS-001 | Connection, hook, QEMU-tooling, and URI assumptions are inventoried. | T5 |
-| CS-002 | Selected path deploys, inspects, powers, reboots, and deletes one instance. | T5 |
-| CS-003 | Network and storage paths pass their independent profiles. | T5 |
-| CS-004 | Agent/management restart does not duplicate or stop the VM. | T5 |
-| CS-005 | Selected integration path and maintenance owner are published. | T0/T5 |
-| CS-006 | No Cloud Hypervisor path claims `qemu:///system`. | T0/T5 |
-| CS-007 | No path bypasses Core authority. | T0/T5 |
+CloudStack and OpenNebula remain strategic targets. Their discovery and qualification scenarios are retained in the compatibility plan, but implementation begins only after the Core authority and first OpenStack path are stable.
 
-A complete gap report is acceptable before CloudStack support is implemented, but it is not a support claim.
+No Core 1.0 claim may imply CloudStack or OpenNebula support without separate T5 evidence.
 
-## 12. OpenNebula qualification
-
-The same method compares generic libvirt, generic VMM changes, and a native CellHV VMM driver.
-
-Lifecycle, monitoring, network, datastore, restart, and Core-authority tests are mandatory for a supported claim.
-
-## 13. Fault strategy
+## 14. Fault strategy
 
 Use:
 
@@ -180,8 +191,9 @@ Use:
 
 Do not multiply every theoretical fault across every integration unless risk or defects justify it.
 
-## 14. Forbidden outcomes
+## 15. Forbidden outcomes
 
+- a parallel `cellhvd` runtime;
 - Cloud Hypervisor exposed as QEMU;
 - fabricated capabilities or statistics;
 - platform support inferred from URI connection;
@@ -194,16 +206,15 @@ Do not multiply every theoretical fault across every integration unless risk or 
 - silent unsupported XML;
 - leaked units, processes, TAPs, namespaces, mappings, volumes, files, or records.
 
-## 15. Core 1.0 gate
+## 16. Core 1.0 gate
 
 Core 1.0 requires:
 
-- minimal Core and recovery profiles;
+- `agent-core-migration`, minimal Core, and recovery profiles;
 - Cloud Hypervisor VMM profile;
-- at least one supported OpenStack integration path;
-- a CloudStack discovery report and selected path;
+- one OpenStack integration at least at the published Preview level;
 - all advertised network and storage profiles;
 - truthful compatibility claim tuples;
 - upgrade, rollback, package, security, and soak qualification.
 
-The `ch:///system` profile is required only when advertised. A QEMU profile is not part of Core 1.0 unless separately approved.
+The `ch:///system` profile is required only when advertised. CloudStack, OpenNebula, and other VMMs are not Core 1.0 gates.
