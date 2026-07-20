@@ -1,13 +1,29 @@
 # CellHV Core Phased Implementation Prompts
 
-These prompts turn the CellHV Core specifications into bounded implementation handoffs for coding agents and human contributors.
+These prompts turn the CellHV Core decisions into bounded implementation handoffs.
+
+## Critical identity rule
+
+`chv-agent` is the CellHV Core runtime implementation.
+
+- Evolve `chv-agent` in place.
+- Do not create a parallel `cellhvd` binary or service.
+- Keep the existing binary/service name until a separate naming ADR is accepted.
+- Legacy control-plane gRPC and the native local API must enter one operation engine and one durable store.
+
+See ADR-016.
+
+## Product framing
+
+CellHV Core is a **self-contained compute runtime with optional ecosystem bridges**. It is not loosely coupled from Linux, KVM, Cloud Hypervisor, or its selected provider contracts. It is independent from any mandatory upper management plane.
 
 ## Source of truth
 
-Before executing any phase, read and obey:
+Before executing any phase, read:
 
-- `docs/specs/cellhv-core-foundation-spec.md`
+- `docs/specs/adr/016-evolve-chv-agent-into-cellhv-core.md`
 - `docs/specs/adr/015-layered-ecosystem-compatibility.md`
+- `docs/specs/cellhv-core-foundation-spec.md`
 - `docs/specs/cellhv-core-api-cloud-integration-spec.md`
 - `docs/specs/cellhv-core-acceptance-test-spec.md`
 - `docs/specs/contracts/cellhv-compatibility-claims-v1.md`
@@ -15,58 +31,74 @@ Before executing any phase, read and obey:
 - `docs/plans/2026-07-19-cellhv-core-foundation-implementation.md`
 - `docs/plans/2026-07-19-cellhv-core-test-harness-implementation.md`
 
-If a prompt conflicts with an accepted ADR or contract, the ADR or contract wins. Stop and report the contradiction rather than inventing a resolution.
+ADR-016 and the Core-authority, truthful-VMM-identity, and multi-axis compatibility rules are locked. Cloud-platform integration choices remain provisional until discovery evidence exists.
 
-## Execution order
+## Active execution order
 
 1. [`00-execution-policy.md`](00-execution-policy.md)
-2. [`01-phase-0-baseline-and-architecture-guards.md`](01-phase-0-baseline-and-architecture-guards.md)
-3. [`02-phase-1-core-domain-state-and-api.md`](02-phase-1-core-domain-state-and-api.md)
-4. [`03-phase-2-minimal-cloud-hypervisor-runtime.md`](03-phase-2-minimal-cloud-hypervisor-runtime.md)
-5. [`04-phase-3-recovery-and-single-authority.md`](04-phase-3-recovery-and-single-authority.md)
-6. [`05-phase-4-network-and-storage-contracts.md`](05-phase-4-network-and-storage-contracts.md)
-7. [`06-phase-5-privileged-helper-and-standard-providers.md`](06-phase-5-privileged-helper-and-standard-providers.md)
-8. [`07-phase-6-compatibility-discovery.md`](07-phase-6-compatibility-discovery.md)
-9. [`08-phase-7-openstack-integration.md`](08-phase-7-openstack-integration.md)
-10. [`09-phase-8-cloudstack-and-opennebula.md`](09-phase-8-cloudstack-and-opennebula.md)
-11. [`10-phase-9-managed-endpoint-controller-and-o3k.md`](10-phase-9-managed-endpoint-controller-and-o3k.md)
-12. [`11-phase-10-release-qualification.md`](11-phase-10-release-qualification.md)
+2. [`01-phase-a-baseline-agent-migration.md`](01-phase-a-baseline-agent-migration.md)
+3. [`02-phase-a-openstack-discovery.md`](02-phase-a-openstack-discovery.md)
+4. [`03-phase-b-agent-local-authority.md`](03-phase-b-agent-local-authority.md)
+5. [`04-phase-c-standalone-runtime-and-recovery.md`](04-phase-c-standalone-runtime-and-recovery.md)
+6. [`05-phase-d-provider-and-privilege-hardening.md`](05-phase-d-provider-and-privilege-hardening.md)
+7. [`06-phase-e-openstack-integration.md`](06-phase-e-openstack-integration.md)
+8. [`07-phase-f-controller-o3k-and-qualification.md`](07-phase-f-controller-o3k-and-qualification.md)
+
+CloudStack, OpenNebula, broad libvirt productisation, additional VMMs, Kubernetes, Terraform, and Designer receive separate prompt packs after Core authority and the first OpenStack path are stable.
+
+## Planning assumptions
+
+These are planning estimates, not promises.
+
+Minimum capacity:
+
+- one dedicated senior Rust/Linux virtualization engineer;
+- half-time infrastructure/test engineer;
+- disposable KVM and OpenStack labs;
+- regular architecture review.
+
+Indicative sequence:
+
+| Period | Target |
+|---|---|
+| Q3 2026 | Phase A and start Phase B |
+| Q4 2026 | complete Phase B; begin Phase C |
+| Q1 2027 | complete Phase C and Phase D |
+| Q2 2027 | Phase E OpenStack integration |
+| Q3 2027 | Phase F and Core 1.0 qualification |
+
+With less capacity, extend the timeline rather than weakening recovery or test gates.
 
 ## Mandatory workflow
 
-- Run one phase per branch and pull request.
-- Do not begin a phase until the previous phase's exit evidence is committed and reviewed.
-- Every implementation PR must name the affected acceptance IDs.
-- Every implementation PR must include rollback instructions.
-- Mock tests may prove contracts but never infrastructure or compatibility claims.
-- Cloud Hypervisor must never be advertised as QEMU.
-- Network, storage, VMM, and cloud-platform compatibility are separate claims.
-- A platform adapter remains outside Core and uses only public Core contracts.
+- Each prompt runs on a dedicated branch and PR.
+- A phase may use multiple narrow PRs; do not bundle unrelated decisions.
+- Verify the previous prompt's evidence before coding.
+- Every PR names acceptance IDs, explicit non-scope, rollback, evidence, and residual risk.
+- Update provisional specifications only when implementation evidence changes the decision.
+- Mock tests do not prove KVM, provider, or cloud-platform behavior.
+- Never infer OpenStack support from `ch:///system` connection success.
+- Never expose Cloud Hypervisor as QEMU.
 
 ## Branch naming
 
-Use:
-
 ```text
-agent/cellhv-core-p00-baseline
-agent/cellhv-core-p01-state-api
-agent/cellhv-core-p02-runtime
-agent/cellhv-core-p03-recovery
-agent/cellhv-core-p04-attachments
-agent/cellhv-core-p05-providers
-agent/cellhv-core-p06-compatibility-discovery
-agent/cellhv-core-p07-openstack
-agent/cellhv-core-p08-cloud-platforms
-agent/cellhv-core-p09-managed-endpoint
-agent/cellhv-core-p10-qualification
+agent/cellhv-core-pa-baseline
+agent/cellhv-core-pa-openstack-discovery
+agent/cellhv-core-pb-local-authority
+agent/cellhv-core-pc-runtime-recovery
+agent/cellhv-core-pd-providers
+agent/cellhv-core-pe-openstack
+agent/cellhv-core-pf-qualification
 ```
 
 ## Completion rule
 
-A phase is complete only when:
+A prompt is complete only when:
 
-- implementation, tests, documentation, and evidence are present;
-- all phase acceptance scenarios pass at the required tier;
+- code, tests, documentation, and evidence are committed;
+- required acceptance scenarios pass at the stated tier;
 - unsupported behavior is explicit;
-- no architectural boundary has been weakened;
-- the PR contains a concise residual-risk section.
+- `chv-agent` remains the single runtime authority;
+- the PR contains a residual-risk section;
+- no future programme was pulled into the current scope.
