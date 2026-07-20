@@ -52,7 +52,7 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       should_release: ${{ steps.version.outputs.should_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Parse version
         id: version
@@ -191,7 +191,7 @@ jobs:
       pkg_version_deb: ${{ steps.pkg.outputs.pkg_version_deb }}
       pkg_version_rpm: ${{ steps.pkg.outputs.pkg_version_rpm }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release binaries
         uses: actions/download-artifact@v8
@@ -328,7 +328,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release tarball
         uses: actions/download-artifact@v8
@@ -457,7 +457,7 @@ jobs:
       needs.build.outputs.channel != ''
     environment: ${{ needs.build.outputs.is_prerelease == 'true' && 'rc-repo' || 'production-repo' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download packages
         uses: actions/download-artifact@v8
