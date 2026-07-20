@@ -1,0 +1,23 @@
+[[local|localrc]]
+HOST_IP=CHANGE_ME_DISPOSABLE_PRIVATE_IPV4
+ADMIN_PASSWORD=CHANGE_ME
+DATABASE_PASSWORD=CHANGE_ME
+RABBIT_PASSWORD=CHANGE_ME
+SERVICE_PASSWORD=CHANGE_ME
+
+# Phase A2 discovery services: Nova, Placement, and minimal Neutron only.
+disable_all_services
+enable_service key mysql rabbit
+enable_service n-api n-cpu n-cond n-sch n-api-meta
+enable_service placement-api placement-client
+enable_service q-svc q-agt q-dhcp q-l3 q-meta
+disable_service c-api c-bak c-sch c-vol
+
+LOGFILE=/var/log/stack/stack.sh.log
+LOG_COLOR=False
+RECLONE=no
+
+[[post-config|$NOVA_CONF]]
+[libvirt]
+# Discovery only. A successful connection is not an OpenStack support claim.
+connection_uri = ch:///system

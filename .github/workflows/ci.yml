@@ -46,6 +46,16 @@ jobs:
           python3 -B scripts/check-cellhv-core-architecture.py
           python3 -B -m unittest tests/test_cellhv_core_architecture.py
 
+      - name: CellHV OpenStack discovery evidence guards
+        run: |
+          python3 -B scripts/check-cellhv-openstack-discovery.py
+          python3 -B scripts/check-cellhv-openstack-discovery.py \
+            --report docs/evidence/cellhv-openstack-discovery/report.json
+          python3 -B -m unittest \
+            tests/test_cellhv_openstack_discovery.py \
+            tests/test_openstack_discovery_lab.py
+          bash -n scripts/openstack-discovery/*.sh
+
       - name: Prometheus alert/emitter label drift gate
         # Detects rules in monitoring/rules/*.yml that reference label keys
         # the emitter source code never produces (recurrence guard for the

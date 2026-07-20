@@ -36,6 +36,51 @@
       "forbidden_outcomes": ["unqualified compatibility claim", "non-Cloud-Hypervisor VMM backend"],
       "cleanup": [],
       "timeout_seconds": 30
+    },
+    {
+      "id": "OSD-001",
+      "tier": "T5",
+      "prerequisites": ["disposable version-recorded OpenStack lab", "upstream libvirt Cloud Hypervisor driver", "pinned Cloud Hypervisor binary"],
+      "required_evidence": ["candidate connection result or exact first blocker", "redacted configuration and command logs", "exact component versions"],
+      "forbidden_outcomes": ["connection success reported as OpenStack compatibility", "Cloud Hypervisor advertised as QEMU", "production infrastructure mutation"],
+      "cleanup": ["destroy disposable lab", "verify no test resources or credentials remain"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-002",
+      "tier": "T5",
+      "prerequisites": ["OSD-001 candidate execution", "exact Nova and libvirt source revisions"],
+      "required_evidence": ["catalogue of QEMU-specific assumptions", "source or configuration reference for every assumption"],
+      "forbidden_outcomes": ["unsupported QEMU or QMP semantics implemented", "unsourced compatibility inference"],
+      "cleanup": ["remove disposable source worktrees and lab artifacts outside the evidence bundle"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-003",
+      "tier": "T5",
+      "prerequisites": ["minimal Neutron lab path", "compute lifecycle discovery attempted before optional Cinder"],
+      "required_evidence": ["Neutron expectations recorded independently", "Cinder expectations or explicit not-exercised status recorded independently", "VM lifecycle result recorded separately"],
+      "forbidden_outcomes": ["network support inferred from VM lifecycle", "storage support inferred from VM lifecycle", "unrelated host resources modified or deleted"],
+      "cleanup": ["remove test ports, networks, volumes, and instances", "verify unrelated resources remain"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-004",
+      "tier": "T5",
+      "prerequisites": ["Path A blocker inventory", "Nova ComputeDriver contract and reusable-driver source review"],
+      "required_evidence": ["bounded native driver effort estimate", "security boundary assessment", "maintenance ownership and cost estimate", "unsupported operation list"],
+      "forbidden_outcomes": ["production Nova driver implemented during discovery", "platform models introduced into chv-agent Core", "unsupported operations silently accepted"],
+      "cleanup": ["remove disposable source worktrees and lab artifacts outside the evidence bundle"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-005",
+      "tier": "T5",
+      "prerequisites": ["OSD-001 through OSD-004 evidence", "Path A, B, and C comparison"],
+      "required_evidence": ["evidence-based Path A, B, C, or focused-discovery recommendation", "rejected alternatives", "residual risks", "Phase E owner and effort range"],
+      "forbidden_outcomes": ["OpenStack support declared", "recommendation based only on URI connection", "integration path bypasses chv-agent authority"],
+      "cleanup": ["destroy disposable lab", "retain only redacted content-addressed evidence"],
+      "timeout_seconds": 144000
     }
   ]
 }

@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "evidence_status": "proposed-not-run",
+  "run_id": "phase-a2-proposed-path-a",
+  "recorded_at": "2026-07-21T00:00:00Z",
+  "started_at": "2026-07-21T00:00:00Z",
+  "completed_at": "2026-07-21T00:00:00Z",
+  "openstack_version": "unresolved-by-lab-owner",
+  "nova_version": "unresolved-by-lab-owner",
+  "libvirt_version": "unresolved-by-lab-owner",
+  "cloud_hypervisor_version": "v43.0-proposed",
+  "host_kernel": "Ubuntu-24.04-6.8.x-proposed",
+  "candidate": "path-a",
+  "configuration": [
+    {
+      "summary": "Configure upstream Nova LibvirtDriver against the upstream Cloud Hypervisor libvirt URI in a disposable lab.",
+      "evidence_refs": []
+    }
+  ],
+  "first_success": {
+    "observed": false,
+    "summary": "No lab run has been performed.",
+    "evidence_refs": []
+  },
+  "first_failure": {
+    "observed": false,
+    "summary": "No blocker has been observed because the lab run has not started.",
+    "evidence_refs": []
+  },
+  "libvirt_api_or_xml": [],
+  "qemu_specific_assumptions": [],
+  "network_expectation": {
+    "summary": "Must be recorded independently from VM lifecycle during the lab run.",
+    "evidence_refs": []
+  },
+  "storage_expectation": {
+    "summary": "Must be recorded independently from VM lifecycle during the lab run.",
+    "evidence_refs": []
+  },
+  "core_authority_impact": {
+    "summary": "The candidate must be rejected if it bypasses chv-agent as the VM runtime authority.",
+    "evidence_refs": []
+  },
+  "generic_upstream_option": {
+    "summary": "Assess only after Path A produces a concrete blocker.",
+    "evidence_refs": []
+  },
+  "native_driver_effort": {
+    "engineer_weeks": "unestimated-pending-source-and-lab-evidence",
+    "maintained_components": ["Nova ComputeDriver compatibility adapter outside CellHV Core"],
+    "unsupported_operations": ["migration", "resize", "snapshot", "evacuation", "passthrough"],
+    "basis": {
+      "summary": "Estimate spawn, destroy, power, get_info, image, Neutron, Cinder, console, retry, and nova-compute restart after discovery.",
+      "evidence_refs": []
+    }
+  },
+  "security_risk": {
+    "summary": "Unassessed until the disposable lab records process and privilege boundaries.",
+    "evidence_refs": []
+  },
+  "maintenance_risk": {
+    "summary": "Unassessed until exact upstream assumptions and maintained components are identified.",
+    "evidence_refs": []
+  },
+  "result": "not-run",
+  "recommended_next_step": {
+    "recommendation": "focused-discovery",
+    "rationale": "Execute the bounded Path A lab before selecting an integration architecture.",
+    "rejected_alternatives": ["Declaring OpenStack support from a connection test"],
+    "residual_risks": ["No T5 OpenStack evidence exists"]
+  },
+  "evidence": [],
+  "unsupported": ["OpenStack support", "production Nova integration", "T5 qualification"],
+  "cleanup": ["Destroy the disposable DevStack lab and verify no test resources or credentials remain"]
+}

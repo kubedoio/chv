@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "evidence_status": "partial",
+  "run_id": "phase-a2-20260721-source-and-preflight",
+  "recorded_at": "2026-07-21T00:45:00+02:00",
+  "started_at": "2026-07-21T00:20:00+02:00",
+  "completed_at": "2026-07-21T00:45:00+02:00",
+  "openstack_version": "not-installed-host-rejected-by-preflight",
+  "nova_version": "source-revision-9d1dd3b8acd2df19d83692e0cade3911c17032b0-not-run",
+  "libvirt_version": "source-revision-624f1391ef58f59afdedb42da6635d80504e402b-not-run",
+  "cloud_hypervisor_version": "v51.1-host-installed-not-qualified",
+  "host_kernel": "Ubuntu-24.04.4-host-not-qualified",
+  "candidate": "path-a",
+  "configuration": [
+    {
+      "summary": "No OpenStack configuration was applied because the workspace host failed the disposable-lab safety gate.",
+      "evidence_refs": ["host-preflight"]
+    }
+  ],
+  "first_success": {
+    "observed": false,
+    "summary": "No Nova or libvirt connection was attempted.",
+    "evidence_refs": ["host-preflight"]
+  },
+  "first_failure": {
+    "observed": true,
+    "summary": "The discovery preflight rejected the non-disposable host before any OpenStack operation; this is not the OSD-001 Nova blocker.",
+    "evidence_refs": ["host-preflight"]
+  },
+  "libvirt_api_or_xml": [
+    {
+      "summary": "No libvirt API call or generated domain XML was observed; source inspection confirms that libvirt has a distinct stateful Cloud Hypervisor driver.",
+      "evidence_refs": ["upstream-source-audit"]
+    }
+  ],
+  "qemu_specific_assumptions": [
+    {
+      "summary": "Nova constrains libvirt virtualization type to kvm, lxc, qemu, or parallels and defaults other configured types to the QEMU system URI unless connection_uri is overridden.",
+      "evidence_refs": ["upstream-source-audit"],
+      "source_refs": [
+        {
+          "repository": "https://opendev.org/openstack/nova.git",
+          "revision": "9d1dd3b8acd2df19d83692e0cade3911c17032b0",
+          "path": "nova/conf/libvirt.py",
+          "line_start": 105,
+          "line_end": 140
+        },
+        {
+          "repository": "https://opendev.org/openstack/nova.git",
+          "revision": "9d1dd3b8acd2df19d83692e0cade3911c17032b0",
+          "path": "nova/virt/libvirt/driver.py",
+          "line_start": 1565,
+          "line_end": 1573
+        }
+      ]
+    }
+  ],
+  "network_expectation": {
+    "summary": "No Neutron behavior was tested. A later isolated probe must record VIF XML and tap ownership independently from VM lifecycle.",
+    "evidence_refs": ["upstream-source-audit"]
+  },
+  "storage_expectation": {
+    "summary": "No Cinder behavior was tested. A later isolated probe must record block mapping independently and only after the basic compute result.",
+    "evidence_refs": ["upstream-source-audit"]
+  },
+  "core_authority_impact": {
+    "summary": "The inspected libvirt ch driver is a state driver that starts and monitors Cloud Hypervisor, which would create a lifecycle authority outside chv-agent and violate ADR-016.",
+    "evidence_refs": ["upstream-source-audit"]
+  },
+  "generic_upstream_option": {
+    "summary": "Generic Nova backend capability work does not resolve libvirt process authority; no bounded upstream patch is justified by this partial evidence.",
+    "evidence_refs": ["upstream-source-audit"]
+  },
+  "native_driver_effort": {
+    "engineer_weeks": "12-18 after CellHV Core Phases B-D",
+    "maintained_components": [
+      "Nova ComputeDriver compatibility adapter outside CellHV Core",
+      "OpenStack packaging and functional tests"
+    ],
+    "unsupported_operations": ["migration", "resize", "snapshot", "evacuation", "passthrough"],
+    "basis": {
+      "summary": "The source audit maps host reporting, lifecycle, image, Neutron, Cinder, console, retry, restart, and explicit unsupported behavior.",
+      "evidence_refs": ["upstream-source-audit"]
+    }
+  },
+  "security_risk": {
+    "summary": "Using libvirt as a second process authority violates the Core authority boundary; running DevStack on this shared host could mutate unrelated network resources.",
+    "evidence_refs": ["upstream-source-audit", "host-preflight"]
+  },
+  "maintenance_risk": {
+    "summary": "Nova's distributed QEMU/KVM assumptions make generic libvirt backend expansion a broad, high-test-burden change.",
+    "evidence_refs": ["upstream-source-audit"]
+  },
+  "result": "blocked",
+  "recommended_next_step": {
+    "recommendation": "focused-discovery",
+    "rationale": "Run the pinned Path A connection probe on a dedicated disposable host to capture the exact first Nova/libvirt blocker; do not begin Phase B before review of that evidence.",
+    "rejected_alternatives": [
+      "Run DevStack on the shared workspace host",
+      "Treat source inspection as T5 evidence",
+      "Select a production OpenStack integration before OSD-001"
+    ],
+    "residual_risks": [
+      "The exact first Nova/libvirt runtime blocker is unknown",
+      "Generated domain XML is unavailable",
+      "Neutron and Cinder behavior remains untested",
+      "No T5 acceptance scenario has passed"
+    ]
+  },
+  "evidence": [
+    {
+      "id": "upstream-source-audit",
+      "kind": "report",
+      "path": "docs/analysis/cellhv-openstack-discovery-source-audit.md",
+      "sha256": "eebd2912e69bab3ef185e55e6cd53d8d8b8374b0efcf28ec2a83a03721ab0db3",
+      "redacted": true
+    },
+    {
+      "id": "host-preflight",
+      "kind": "command-output",
+      "path": "docs/evidence/cellhv-openstack-discovery/20260721-host-preflight.md",
+      "sha256": "7c1d911e23aec72c5cb4e3b63e720f7449c3ee580b11ee42f10178d814b1b666",
+      "redacted": true
+    }
+  ],
+  "unsupported": [
+    "OpenStack support",
+    "production Nova integration",
+    "T5 qualification",
+    "Phase B precondition satisfaction"
+  ],
+  "cleanup": [
+    "No lab resources were created because preflight failed before mutation",
+    "The workspace host was left unchanged"
+  ]
+}
