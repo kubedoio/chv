@@ -1,4 +1,4 @@
-# ADR-015: Layered Ecosystem Compatibility and Honest VMM Identity
+# ADR-015: Evidence-Driven Ecosystem Integration Strategy
 
 ## Status
 
@@ -6,153 +6,98 @@ Proposed
 
 ## Date
 
-2026-07-20
+2026-07-21
+
+## Related decisions
+
+- ADR-016: `chv-agent` evolves into CellHV Core.
+- ADR-017: Core compatibility invariants are accepted and authoritative.
 
 ## Context
 
-CellHV Core is intended to be a small, autonomous Linux-native compute runtime beneath CellHV Controller, O3K, OpenStack, CloudStack, OpenNebula, Kubernetes, and other management systems.
+CellHV Core is intended to support management systems such as OpenStack, CellHV Controller, O3K, and later CloudStack and OpenNebula.
 
-The major Linux cloud platforms have mature QEMU/KVM integrations, usually through libvirt. The upstream libvirt Cloud Hypervisor driver exposes `ch:///system`, but this URI is not widely qualified as a production backend by those platforms. It has a much smaller feature surface than the libvirt QEMU driver, and platform code frequently contains QEMU-specific assumptions that are independent of the URI.
+The major Linux cloud platforms have mature QEMU/KVM assumptions, usually through libvirt. The upstream libvirt Cloud Hypervisor driver exposes `ch:///system`, but upstream recognition does not prove that a cloud platform supports it. Networking and storage also have independent assumptions that cannot be solved by choosing a hypervisor URI.
 
-Using `qemu:///system` would improve superficial recognition, but the URI selects the libvirt QEMU hypervisor driver and implies QEMU process, QMP, device, migration, block-job, guest-agent, capability, and error semantics. Advertising that identity while actually running Cloud Hypervisor would create false compatibility and unsafe failure modes.
+The project needs an integration-selection process, but the actual paths remain unproven.
 
-Networking and storage are separate compatibility concerns. Libvirt has distinct hypervisor, network, storage, interface, node-device, secret, and filtering drivers. CellHV's network and storage capabilities therefore do not justify identifying the VMM as QEMU.
+## Proposed strategy
 
-The project needs an evidence-driven compatibility strategy that preserves a small Core without making false compatibility claims.
+1. OpenStack is the first external cloud-platform discovery and implementation target.
+2. A time-boxed OpenStack discovery compares:
+   - upstream Nova `LibvirtDriver` with `ch:///system`;
+   - small generic Nova/libvirt generalisation;
+   - an official CellHV Nova `ComputeDriver` using the native Core API.
+3. The selected OpenStack path is based on real lab evidence, security, maintenance cost, upstream viability, and preservation of `chv-agent` Core authority.
+4. `ch:///system` remains an optional bounded compatibility profile. It is not presumed to be the winning OpenStack path.
+5. Platform-specific adapters are acceptable when they are safer and smaller than importing or emulating QEMU/libvirt semantics.
+6. Network and storage mappings are selected and qualified independently from VM lifecycle.
+7. CloudStack and OpenNebula remain strategic follow-on programmes after the Core authority and first OpenStack path are stable.
+8. CellHV Controller and O3K use the native Core API because they are CellHV-controlled integrations.
+9. Every supported platform path publishes exact versions, network/storage profiles, unsupported features, maintainer ownership, and evidence.
 
-## Decision
+## Explicit non-decisions
 
-1. The native CellHV REST/OpenAPI API is the canonical Core contract.
-2. Cloud Hypervisor remains the primary VMM for CellHV Core 1.0.
-3. CellHV MUST NOT impersonate `qemu:///system` while running Cloud Hypervisor.
-4. The existing `ch:///system` path is an optional libvirt compatibility profile and experiment, not a universal or mandatory cloud-platform integration strategy.
-5. `ch:///system` compatibility is claimed only for the explicitly published CellHV Cloud Hypervisor libvirt profile.
-6. OpenStack, CloudStack, and OpenNebula compatibility is qualified independently from libvirt URI compatibility.
-7. Platform-specific adapters are permitted when real conformance testing proves that generic libvirt integration is insufficient or unsafe.
-8. Platform-specific code remains outside Core and communicates through public Core APIs.
-9. Network compatibility, storage compatibility, VMM compatibility, and cloud-platform compatibility are separate claim axes.
-10. A future actual QEMU backend may be added behind the same Core operation and recovery model, but only through a separate ADR, implementation profile, and complete qualification.
-11. A future QEMU backend MUST use real QEMU/libvirt QEMU semantics. It is not a protocol-emulation shim around Cloud Hypervisor.
-12. XenAPI and XAPI compatibility are not Core 1.0 targets.
-13. No compatibility claim may be inferred from a URI, schema, mock, or successful connection alone.
+This ADR does not yet decide:
+
+- whether OpenStack uses generic libvirt, generic upstream changes, or a native driver;
+- whether the bounded `ch:///system` profile becomes a supported product feature;
+- the CloudStack integration path;
+- the OpenNebula integration path;
+- long-term libvirt network/storage coexistence;
+- support for Kubernetes, Terraform, or Designer;
+- any additional VMM backend.
 
 ## Rationale
 
-CellHV's differentiator is a small autonomous compute runtime with durable local authority and modern Linux integration. False QEMU identity would exchange that clarity for fragile compatibility.
+One universal API or URI would reduce maintenance only if the upper platforms genuinely support its semantics. Implementing large compatibility surfaces before testing those assumptions creates more risk than a focused adapter.
 
-`ch:///system` remains useful for:
-
-- `virsh` and libvirt language bindings;
-- understanding the upstream Cloud Hypervisor/libvirt gap;
-- platforms that already support configurable non-QEMU libvirt backends;
-- contributing generic Cloud Hypervisor improvements upstream.
-
-It is not treated as the sole route to cloud adoption.
-
-Platform adapters are not considered architectural failure. A small maintained adapter can be safer and cheaper than emulating QEMU or importing the complete libvirt QEMU surface.
-
-## Compatibility axes
-
-Every published compatibility claim MUST identify all applicable axes:
-
-### VMM backend
-
-- Cloud Hypervisor;
-- future qualified QEMU backend;
-- other future backend approved by ADR.
-
-### Hypervisor management interface
-
-- native CellHV API;
-- bounded `ch:///system` libvirt profile;
-- future real `qemu:///system` profile only with the actual QEMU backend;
-- platform-specific adapter.
-
-### Network path
-
-- pre-existing bridge/TAP;
-- CellHV Linux network provider;
-- standard libvirt network driver;
-- external SDN integration.
-
-### Storage path
-
-- pre-existing file or block device;
-- CellHV storage provider;
-- standard libvirt storage driver;
-- external storage integration.
-
-### Cloud-platform path
-
-- native CellHV adapter;
-- generic libvirt path;
-- generic upstream platform change;
-- future actual QEMU backend;
-- unsupported.
-
-A platform is compatible only for a published tuple of these axes.
+The discovery-first approach produces evidence before implementation commitments and allows the project to choose the smallest maintainable path for each platform without weakening the accepted invariants in ADR-017.
 
 ## Consequences
 
 ### Positive
 
-- Core stays small and VMM identity remains truthful.
-- Cloud Hypervisor differentiation is preserved.
-- Network and storage work can evolve independently.
-- Platform-specific integrations are allowed when they are the lowest-risk solution.
-- A future QEMU backend remains possible without contaminating the Cloud Hypervisor path.
-- Compatibility claims become measurable and supportable.
+- OpenStack integration begins with evidence instead of speculation;
+- broad cloud work no longer blocks Core authority and recovery;
+- a native adapter is not treated as architectural failure;
+- `ch:///system` can be evaluated without becoming mandatory;
+- CloudStack and OpenNebula scope is deferred until the first path is stable.
 
 ### Negative
 
-- No single URI guarantees broad cloud-platform compatibility.
-- OpenStack, CloudStack, and OpenNebula may each require separate work.
-- More than one integration package may eventually be maintained.
-- Cloud Hypervisor adoption depends partly on upstream platform generalisation.
-- A future QEMU backend would add a second runtime qualification burden.
+- the project cannot promise zero-change integration in advance;
+- OpenStack may require a CellHV-maintained adapter;
+- cloud-platform laboratories and maintenance ownership are required;
+- different platforms may ultimately use different bridges.
 
-## Rejected alternatives
+## Required discovery evidence
 
-### Treat `ch:///system` as a universal compatibility standard
+The OpenStack discovery must record:
 
-Rejected because upstream libvirt recognition does not equal platform qualification, and major platforms contain QEMU-specific assumptions.
+- exact platform, libvirt, Cloud Hypervisor, kernel, and guest versions;
+- configuration required;
+- first successful and failing actions;
+- generated domain XML or API payloads;
+- QEMU-specific assumptions;
+- Neutron and Cinder expectations;
+- effect on Core authority;
+- generic upstream option;
+- native-driver effort estimate;
+- security and maintenance risk;
+- recommended next step.
 
-### Present Cloud Hypervisor through `qemu:///system`
-
-Rejected because it would falsely promise QEMU process and feature semantics and require either invasive libvirt changes or a large QEMU/QMP emulation layer.
-
-### Reimplement QEMU/QMP compatibility around Cloud Hypervisor
-
-Rejected because it would become a second VMM project and contradict the small-Core goal.
-
-### Require one CellHV adapter for every platform from the start
-
-Rejected as a default roadmap. Adapters are implemented only after measured gap analysis and maintenance ownership.
-
-### Make libvirt authoritative
-
-Rejected because CellHV Core must own VM identity, operations, recovery, and process adoption.
+A connection or VM boot alone is not a support result.
 
 ## Acceptance conditions
 
-This ADR can move to Accepted when:
+This ADR may move to Accepted when:
 
-- the compatibility-claims contract is reviewed;
-- the native Core authority path is demonstrated;
-- the upstream `ch` support matrix is measured;
-- one real OpenStack and one real CloudStack discovery run produce gap reports;
-- the project selects the first supported integration path for each target;
-- no code path advertises QEMU identity while using Cloud Hypervisor;
-- network and storage compatibility are tested separately from VM lifecycle;
-- maintenance ownership is named for every advertised integration.
+- the time-boxed OpenStack discovery is complete;
+- a focused follow-up ADR selects the first OpenStack path;
+- network and storage requirements for that path are identified separately;
+- maintenance ownership and version policy are named;
+- no selected path bypasses `chv-agent` Core authority;
+- the implementation and qualification schedule is resourced.
 
-## Follow-up decisions
-
-- whether to implement and maintain the bounded `ch:///system` profile;
-- OpenStack integration path;
-- CloudStack integration path;
-- OpenNebula integration path;
-- future actual QEMU backend business case;
-- libvirt network/storage coexistence model;
-- supported version matrices;
-- integration package ownership and upstreaming strategy.
+CloudStack and OpenNebula evidence is not required to accept the first OpenStack strategy.
