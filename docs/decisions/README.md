@@ -20,6 +20,7 @@ This directory indexes all Architecture Decision Records for CHV. The canonical 
 | [ADR-012](../specs/adr/012-disk-migration-precopy.md) | Block-Level Disk Migration (Pre-Copy) | **Accepted** | Live VM migration uses block-level pre-copy disk replication coordinated with Cloud Hypervisor's memory migration. Defines phases, convergence criteria, and rollback. |
 | [ADR-013](../specs/adr/013-network-overlay-vxlan-ebpf.md) | Network Overlay (VXLAN + eBPF Policy) | **Accepted** | Multi-node networking uses VXLAN overlay with kernel datapath and eBPF for security policy. Extends ADR-005's host-side `chv-nwd` model with `TopologySpec`, `VtepEndpoint`, `SecurityPolicy`, `RateLimitPolicy`. |
 | [ADR-014](../specs/adr/014-api-evolution.md) | API Evolution and Compatibility | **Accepted** | Proto/gRPC compatibility rules (no field-number reuse, additive evolution), `buf` lint/breaking CI gate, naming-rule deferrals tracked, pagination and error contract. |
+| [ADR-015](../specs/adr/015-layered-ecosystem-compatibility.md) | Layered Ecosystem Compatibility and Honest VMM Identity | **Proposed** | Keeps CellHV Core native and authoritative, treats `ch:///system` as an optional bounded profile, forbids Cloud Hypervisor from impersonating `qemu:///system`, and qualifies VMM, network, storage, and cloud-platform compatibility independently. |
 
 ## Web UI ADRs
 
