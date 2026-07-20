@@ -1,21 +1,28 @@
 # CellHV Core API and Cloud Integration Specification
 
 **Status:** Proposed  
-**Date:** 2026-07-20  
-**Depends on:**
+**Date:** 2026-07-21  
+**Depends on:** ADR-015, ADR-016, ADR-017, and the compatibility-claims contract
 
-- `docs/specs/adr/015-layered-ecosystem-compatibility.md`
-- `docs/specs/contracts/cellhv-compatibility-claims-v1.md`
-- `docs/specs/contracts/cellhv-libvirt-compatibility-profile-v1.md`
+## 1. Runtime identity
 
-## 1. Canonical API
+The existing `chv-agent` evolves into CellHV Core and remains the single runtime authority.
 
-The native CellHV API is the authoritative integration contract.
+- no parallel `cellhvd` service is introduced;
+- current control-plane gRPC compatibility and the native local API enter one operation engine;
+- integrations never access the agent database, VMM sockets, or provider private APIs;
+- Controller and cloud platforms remain optional clients.
+
+## 2. Canonical API semantics
+
+The native CellHV API is the canonical contract for CellHV-controlled clients and platform adapters.
+
+Current default:
 
 - HTTP/JSON;
 - OpenAPI 3.1;
 - local Unix-socket transport;
-- optional HTTPS/mTLS;
+- optional HTTPS/mTLS after standalone recovery is proven;
 - durable asynchronous operations;
 - idempotency keys;
 - resource versions;
@@ -39,157 +46,135 @@ GET    /v1/operations/{id}
 GET    /v1/events
 ```
 
-Every integration path converges on the same Core operation service.
+The exact transport remains subject to prototype validation, but the semantics above and the single-operation-authority rule are required.
 
-## 2. VMM backend policy
+## 3. VMM policy
 
-Cloud Hypervisor is the first backend.
+Cloud Hypervisor is the only active Core 1.0 VMM target.
 
-The internal VMM adapter exposes only Core-required operations. It does not expose the complete Cloud Hypervisor or QEMU feature surface.
+The internal VMM boundary exposes only required Core operations. CellHV MUST NOT:
 
-A future QEMU backend:
+- route Cloud Hypervisor through `qemu:///system`;
+- emulate QMP or QEMU monitor behavior;
+- advertise QEMU capabilities;
+- include another VMM in the active Core 1.0 implementation plan.
 
-- requires a separate ADR;
-- runs actual QEMU;
-- may use libvirt QEMU APIs where appropriate;
-- must preserve Core authority and recovery;
-- receives a separate support and test matrix.
+Other VMMs are outside this specification and require a separate future programme.
 
-CellHV MUST NOT route Cloud Hypervisor through `qemu:///system` or emulate QMP.
+## 4. Libvirt policy
 
-## 3. Libvirt policy
+The upstream `ch:///system` path is an optional bounded experiment and compatibility profile.
 
-The upstream `ch:///system` driver is evaluated as an optional compatibility profile.
+Possible discovery outcomes:
 
-Possible outcomes:
+1. useful without CellHV-specific platform code;
+2. useful after small generic upstream changes;
+3. useful only for `virsh` or SDK clients;
+4. too limited or costly to productise.
 
-1. useful for `virsh`, SDKs, or a cloud platform through configuration;
-2. useful after generic upstream changes;
-3. too limited or costly for a specific platform;
-4. not implemented as a supported CellHV profile.
+A successful connection proves only the libvirt-interface profile. It does not prove OpenStack, network, storage, recovery, or platform support.
 
-A successful libvirt connection proves only the hypervisor-interface axis. Network, storage, platform, and recovery claims require separate tests.
+## 5. Network integration
 
-## 4. Network integration
-
-Core network attachments accept concrete endpoints such as:
+Core network attachments consume concrete, owned endpoints such as:
 
 - existing bridge;
 - existing TAP;
-- managed CellHV network endpoint;
+- selected `chv-nwd` managed endpoint;
 - external SDN-prepared endpoint.
 
-Network orchestration may come from:
+For the active programme, only the minimum path required by the selected OpenStack integration is implemented and qualified.
 
-- CellHV providers;
-- standard libvirt network services;
-- Neutron or another cloud SDN;
-- CloudStack/OpenNebula network orchestration;
-- Kubernetes networking integrations.
+Ownership, recovery, detach, cleanup, and unrelated-host-state preservation are mandatory.
 
-Ownership, cleanup, and restart recovery are explicit.
+## 6. Storage integration
 
-## 5. Storage integration
-
-Core storage attachments accept concrete endpoints such as:
+Core storage attachments consume concrete, owned endpoints such as:
 
 - file path;
 - block device;
 - read-only block device;
-- provider handle.
+- selected `chv-stord` provider handle;
+- external platform-prepared handle.
 
-Provisioning may come from:
+For the active programme, only the minimum path required by the selected OpenStack integration is implemented and qualified.
 
-- CellHV providers;
-- standard libvirt storage;
-- Cinder;
-- CloudStack primary storage;
-- OpenNebula datastore drivers;
-- external storage systems.
+Core never infers storage ownership from the VMM URI.
 
-Core does not infer storage ownership from the VMM URI.
+## 7. OpenStack discovery and integration
 
-## 6. OpenStack strategy
+OpenStack is the first external cloud target.
 
-OpenStack is the first cloud target.
+### Discovery candidates
 
-The discovery programme evaluates:
+#### Path A — generic libvirt Cloud Hypervisor
 
-### Path A — generic libvirt Cloud Hypervisor
-
-- upstream Nova LibvirtDriver;
+- upstream Nova `LibvirtDriver`;
 - `ch:///system`;
-- no CellHV-specific ComputeDriver;
-- measure QEMU-specific assumptions.
+- no CellHV-specific Nova driver;
+- measure QEMU-specific assumptions and Core-authority impact.
 
-### Path B — generic upstream generalisation
+#### Path B — generic upstream generalisation
 
-- small non-CellHV-specific improvements to Nova/libvirt;
-- maintainable by the relevant communities;
-- still uses the generic libvirt path.
+- small non-CellHV-specific Nova/libvirt changes;
+- realistic upstream maintenance path;
+- no Core authority bypass.
 
-### Path C — official CellHV Nova driver
+#### Path C — official CellHV Nova driver
 
-- a bounded Nova `ComputeDriver`;
-- uses the native CellHV API;
+- bounded Nova `ComputeDriver`;
+- uses the public `chv-agent` Core API;
 - maintained and conformance-tested by CellHV;
-- selected when it is safer or smaller than forcing libvirt compatibility.
+- selected when safer and smaller than reproducing libvirt/QEMU behavior.
 
-The selected supported path is based on evidence, not preference. A native adapter is acceptable.
+The time-boxed discovery produces evidence before selecting a path.
 
-OpenStack networking and storage are qualified through Neutron and Cinder mappings independently from VM lifecycle.
+### Qualification requirements
 
-## 7. CloudStack strategy
+The selected path must qualify independently:
 
-CloudStack's standard KVM agent is strongly QEMU-oriented. Discovery must measure:
+- Nova lifecycle and Placement reporting;
+- Neutron network mapping;
+- Cinder storage mapping;
+- retries and nova-compute restart;
+- `chv-agent` restart and host reboot;
+- manager outage without workload loss;
+- exact versions and unsupported features;
+- maintenance ownership.
 
-- connection URI configurability;
-- QEMU hooks;
-- QEMU image tooling;
-- storage-pool assumptions;
-- CPU/device XML assumptions;
-- migration and snapshot behavior;
-- network scripts and bridge handling.
+## 8. CellHV Controller and O3K
 
-Candidate supported paths:
+These are CellHV-controlled integrations and use the native Core authority path.
 
-- generic non-QEMU libvirt support;
-- CloudStack extension framework;
-- native CellHV hypervisor plugin;
-- future actual QEMU backend.
+- Controller stores fleet projections, not the only VM record.
+- O3K is a lightweight OpenStack-compatible control plane and is distinct from standalone OpenStack Nova integration.
+- Both must tolerate `chv-agent` and management-plane restarts without duplicate VM actions.
+- Neither may access private Core state or VMM/provider sockets.
 
-CellHV MUST NOT claim CloudStack compatibility merely because the agent can connect to libvirt.
+## 9. Deferred integrations
 
-## 8. OpenNebula strategy
+The following are strategic targets but outside the active Core 1.0 implementation sequence:
 
-Evaluate:
+- CloudStack;
+- OpenNebula;
+- Kubernetes;
+- Terraform/OpenTofu;
+- Designer execution integration;
+- broad libvirt productisation;
+- additional VMMs.
 
-- existing KVM/VMM path with `ch:///system`;
-- generic VMM generalisation;
-- official CellHV VMM driver using the native API.
-
-Network and datastore paths are qualified independently.
-
-## 9. O3K, Controller, Kubernetes, Terraform, Designer
-
-These are CellHV-controlled integrations and SHOULD use the native API.
-
-- O3K is a lightweight OpenStack-compatible control plane.
-- Controller manages fleets through the public API.
-- Kubernetes uses an operator or controller.
-- Terraform/OpenTofu use a provider generated around the native API.
-- Designer targets Controller or O3K, never Core private state.
+Each deferred target requires its own discovery evidence, resource commitment, prompts, acceptance profile, and maintenance owner.
 
 ## 10. Platform adapter rules
 
 A platform adapter:
 
-- remains outside Core;
+- remains outside `chv-agent` Core;
 - uses public Core APIs;
-- has named maintenance ownership;
-- publishes a version matrix;
 - maps platform idempotency and identity into Core;
-- cannot bypass network/storage ownership rules;
+- has named maintenance ownership;
+- publishes an exact version matrix;
+- cannot bypass provider ownership rules;
 - has real platform conformance tests;
 - is preferred over false VMM identity or unsafe protocol emulation.
 
@@ -200,6 +185,7 @@ Every platform evaluation publishes:
 ```yaml
 platform:
 platform_version:
+core_version:
 vmm_backend:
 hypervisor_interface:
 network_path:
@@ -209,6 +195,7 @@ configuration_changes:
 platform_code_changes:
 generic_upstream_option:
 qemu_specific_assumptions:
+core_authority_impact:
 security_risk:
 maintenance_cost:
 recommended_path:
@@ -225,4 +212,5 @@ A supported integration release publishes:
 - network/storage profiles;
 - platform matrix;
 - known unsupported features;
-- installation, upgrade, rollback, and troubleshooting guides.
+- installation, upgrade, rollback, and troubleshooting guides;
+- maintenance owner and evidence digest.
