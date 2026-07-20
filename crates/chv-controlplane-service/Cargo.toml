@@ -31,7 +31,7 @@ metrics-exporter-prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt.workspace = true
 chrono = "0.4"
-cron = "0.16"
+cron = "0.17"
 dashmap = { workspace = true }
 metrics = { workspace = true }
 futures = "0.3"

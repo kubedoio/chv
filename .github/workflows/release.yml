@@ -52,7 +52,7 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       should_release: ${{ steps.version.outputs.should_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Parse version
         id: version
@@ -124,7 +124,7 @@ jobs:
         run: cargo build --workspace --release
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -158,7 +158,7 @@ jobs:
           tar -czf "dist/${TARBALL_NAME}" -C dist "${RELEASE_NAME}"
 
       - name: Upload release binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-binaries
           path: |
@@ -169,13 +169,13 @@ jobs:
             target/release/chv-stord
 
       - name: Upload UI build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ui-build
           path: ui/build/**
 
       - name: Upload release tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-tarball
           path: dist/${{ env.TARBALL_NAME }}
@@ -191,7 +191,7 @@ jobs:
       pkg_version_deb: ${{ steps.pkg.outputs.pkg_version_deb }}
       pkg_version_rpm: ${{ steps.pkg.outputs.pkg_version_rpm }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release binaries
         uses: actions/download-artifact@v8
@@ -306,7 +306,7 @@ jobs:
           CHV_RELEASE_COSIGN_PASSWORD: ${{ secrets.CHV_RELEASE_COSIGN_PASSWORD }}
 
       - name: Upload packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-packages
           path: |
@@ -328,7 +328,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release tarball
         uses: actions/download-artifact@v8
@@ -364,7 +364,7 @@ jobs:
           upload-release-assets: false
 
       - name: Generate build provenance attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/chv-*.tar.gz
@@ -457,7 +457,7 @@ jobs:
       needs.build.outputs.channel != ''
     environment: ${{ needs.build.outputs.is_prerelease == 'true' && 'rc-repo' || 'production-repo' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download packages
         uses: actions/download-artifact@v8
