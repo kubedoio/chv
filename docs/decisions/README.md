@@ -20,7 +20,7 @@ This directory indexes all Architecture Decision Records for CHV. The canonical 
 | [ADR-012](../specs/adr/012-disk-migration-precopy.md) | Block-Level Disk Migration (Pre-Copy) | **Accepted** | Live VM migration uses block-level pre-copy disk replication coordinated with Cloud Hypervisor's memory migration. Defines phases, convergence criteria, and rollback. |
 | [ADR-013](../specs/adr/013-network-overlay-vxlan-ebpf.md) | Network Overlay (VXLAN + eBPF Policy) | **Accepted** | Multi-node networking uses VXLAN overlay with kernel datapath and eBPF for security policy. Extends ADR-005's host-side `chv-nwd` model with `TopologySpec`, `VtepEndpoint`, `SecurityPolicy`, `RateLimitPolicy`. |
 | [ADR-014](../specs/adr/014-api-evolution.md) | API Evolution and Compatibility | **Accepted** | Proto/gRPC compatibility rules (no field-number reuse, additive evolution), `buf` lint/breaking CI gate, naming-rule deferrals tracked, pagination and error contract. |
-| [ADR-015](../specs/adr/015-libvirt-first-ecosystem-compatibility.md) | Libvirt-First Ecosystem Compatibility | **Proposed** | Keeps the native CellHV API authoritative while using a bounded libvirt driver as the primary compatibility bridge for OpenStack, CloudStack, OpenNebula, `virsh`, and existing libvirt clients. Platform-specific adapters are fallback decisions. |
+| [ADR-015](../specs/adr/015-libvirt-first-ecosystem-compatibility.md) | Libvirt-First Ecosystem Compatibility | **Proposed** | Keeps the native CellHV API authoritative while preserving `ch:///system` as the preferred compatibility identity. The libvirt Cloud Hypervisor driver delegates to Core in CellHV mode; platform-specific adapters and `cellhv:///system` are fallback decisions. |
 
 ## Web UI ADRs
 
