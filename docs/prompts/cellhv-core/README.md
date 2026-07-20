@@ -22,6 +22,7 @@ CellHV Core is a **self-contained compute runtime with optional ecosystem bridge
 Before executing any phase, read:
 
 - `docs/specs/adr/016-evolve-chv-agent-into-cellhv-core.md`
+- `docs/specs/adr/017-core-compatibility-invariants.md`
 - `docs/specs/adr/015-layered-ecosystem-compatibility.md`
 - `docs/specs/cellhv-core-foundation-spec.md`
 - `docs/specs/cellhv-core-api-cloud-integration-spec.md`
@@ -31,7 +32,7 @@ Before executing any phase, read:
 - `docs/plans/2026-07-19-cellhv-core-foundation-implementation.md`
 - `docs/plans/2026-07-19-cellhv-core-test-harness-implementation.md`
 
-ADR-016 and the Core-authority, truthful-VMM-identity, and multi-axis compatibility rules are locked. Cloud-platform integration choices remain provisional until discovery evidence exists.
+ADR-016 and ADR-017 are locked. ADR-015 and cloud-platform path choices remain provisional until discovery evidence exists.
 
 ## Active execution order
 
