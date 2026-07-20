@@ -2,7 +2,11 @@
 
 **Status:** Proposed  
 **Date:** 2026-07-20  
-**Depends on:** ADR-015 and the compatibility-claims contract
+**Depends on:**
+
+- `docs/specs/adr/015-layered-ecosystem-compatibility.md`
+- `docs/specs/contracts/cellhv-compatibility-claims-v1.md`
+- `docs/specs/contracts/cellhv-libvirt-compatibility-profile-v1.md`
 
 ## 1. Canonical API
 
