@@ -22,6 +22,9 @@ FORBIDDEN_CORE_DEPENDENCIES = {
 CORE_MANIFESTS = (
     "cmd/chv-agent/Cargo.toml",
     "crates/chv-agent-core/Cargo.toml",
+    "crates/cellhv-core-types/Cargo.toml",
+    "crates/cellhv-core-store/Cargo.toml",
+    "crates/cellhv-core-operations/Cargo.toml",
     "crates/chv-agent-runtime-ch/Cargo.toml",
 )
 ACTIVE_CODE_ROOTS = ("cmd", "crates", "gen", "proto", "packaging", "scripts")
@@ -33,6 +36,18 @@ ALLOWED_PACKAGED_SERVICES = {
     "chv-stord.service",
 }
 STORE_DEPENDENCIES = {"rusqlite", "sqlx", "libsqlite3-sys"}
+CORE_STORE_PACKAGE = "cellhv-core-store"
+CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
+STORE_ALLOWED_CORE_DEPENDENCIES = {"cellhv-core-types"}
+OPERATION_AUTHORITY_DECLARATION = re.compile(
+    r"\b(?:struct|enum|trait|type)\s+"
+    r"(?:Operation(?:Engine|Service|Executor|Processor|Manager|Coordinator)|"
+    r"OperationJournal|Journal(?:Engine|Service|Executor|Processor|Manager))\b"
+)
+OPERATION_MODULE_NAME = re.compile(
+    r"(?:^|[_-])(?:operation(?:s|[_-](?:engine|service|executor|processor|manager))?|"
+    r"journal(?:[_-](?:engine|service|executor|processor|manager))?)(?:$|[_-])"
+)
 
 
 def load_json(path: Path) -> object:
@@ -123,7 +138,10 @@ def check(root: Path) -> list[str]:
         for target in manifest.get("target", {}).values():
             dependency_tables.extend((target.get("dependencies", {}), target.get("build-dependencies", {})))
         for table in dependency_tables:
-            dependency_names.update(table)
+            for dependency_name, declaration in table.items():
+                dependency_names.add(dependency_name)
+                if isinstance(declaration, dict) and isinstance(declaration.get("package"), str):
+                    dependency_names.add(declaration["package"])
         dependency_graph[name] = dependency_names
         if name in core_packages and dependency_names & STORE_DEPENDENCIES:
             store_packages.add(name)
@@ -142,6 +160,28 @@ def check(root: Path) -> list[str]:
     if forbidden_reachable:
         errors.append(f"Core dependency graph reaches forbidden package(s): {', '.join(forbidden_reachable)}")
 
+    store_dependents = sorted(
+        name for name, dependencies in dependency_graph.items() if CORE_STORE_PACKAGE in dependencies
+    )
+    unexpected_store_dependents = [name for name in store_dependents if name != CORE_OPERATIONS_PACKAGE]
+    if unexpected_store_dependents:
+        errors.append(
+            f"{CORE_STORE_PACKAGE}: may only be depended on by {CORE_OPERATIONS_PACKAGE}; "
+            f"bypassed by {unexpected_store_dependents}"
+        )
+    if CORE_OPERATIONS_PACKAGE in manifests and CORE_STORE_PACKAGE not in dependency_graph.get(
+        CORE_OPERATIONS_PACKAGE, set()
+    ):
+        errors.append(f"{CORE_OPERATIONS_PACKAGE}: must directly depend on {CORE_STORE_PACKAGE}")
+
+    store_core_dependencies = dependency_graph.get(CORE_STORE_PACKAGE, set()) & core_packages
+    unexpected_store_dependencies = sorted(store_core_dependencies - STORE_ALLOWED_CORE_DEPENDENCIES)
+    if unexpected_store_dependencies:
+        errors.append(
+            f"{CORE_STORE_PACKAGE}: forbidden Core dependency(s) {unexpected_store_dependencies}; "
+            f"only {sorted(STORE_ALLOWED_CORE_DEPENDENCIES)} are allowed"
+        )
+
     for relative in CORE_MANIFESTS:
         path = root / relative
         if not path.exists():
@@ -159,8 +199,8 @@ def check(root: Path) -> list[str]:
             "runtime_service": "chv-agent",
             "runtime_binary": "chv-agent",
             "vm_authority_count": 1,
-            "durable_vm_store_count": 0,
-            "operation_engine_count": 0,
+            "durable_vm_store_count": 1,
+            "operation_engine_count": 1,
             "vmm_backend": "cloud-hypervisor",
             "qemu_identity": False,
         }
@@ -173,20 +213,37 @@ def check(root: Path) -> list[str]:
                 f"store-bearing Core packages {sorted(store_packages)}"
             )
 
-        operation_modules = []
+        operation_engines = [
+            manifests[name][0].parent.relative_to(root).as_posix()
+            for name in core_packages
+            if name == CORE_OPERATIONS_PACKAGE
+        ]
+        escaped_operation_authorities = []
         process_owners = []
         for name in core_packages:
             package_root = manifests[name][0].parent
+            if name != CORE_OPERATIONS_PACKAGE and (
+                OPERATION_MODULE_NAME.search(name) or OPERATION_MODULE_NAME.search(package_root.name)
+            ):
+                escaped_operation_authorities.append(package_root.relative_to(root).as_posix())
             for source in package_root.glob("src/**/*.rs"):
-                if re.search(r"(?:^|_)(?:operation|journal|operation_engine)s?\.rs$", source.name):
-                    operation_modules.append(source.relative_to(root).as_posix())
                 text = source.read_text(encoding="utf-8", errors="replace")
+                if name != CORE_OPERATIONS_PACKAGE and (
+                    OPERATION_MODULE_NAME.search(source.stem)
+                    or OPERATION_AUTHORITY_DECLARATION.search(text)
+                ):
+                    escaped_operation_authorities.append(source.relative_to(root).as_posix())
                 if re.search(r"HashMap\s*<\s*String\s*,\s*VmProcess\s*>", text):
                     process_owners.append(source.relative_to(root).as_posix())
-        if authority.get("operation_engine_count") != len(operation_modules):
+        if authority.get("operation_engine_count") != len(operation_engines):
             errors.append(
                 "config/cellhv-core-authority-v1.json: operation_engine_count does not match "
-                f"operation modules {operation_modules}"
+                f"operation engines {operation_engines}"
+            )
+        if escaped_operation_authorities:
+            errors.append(
+                f"operation authority must be owned by {CORE_OPERATIONS_PACKAGE}; found "
+                f"{sorted(set(escaped_operation_authorities))}"
             )
         if authority.get("vm_process_owner_count") != len(process_owners):
             errors.append(

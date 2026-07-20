@@ -1,0 +1,762 @@
+//! Transport-neutral mutation application service for the `chv-agent` authority.
+//!
+//! This crate accepts and journals desired-state mutations. It deliberately has
+//! no runtime or provider dependencies and performs no external side effects.
+
+use cellhv_core_store::{AcceptOperation, AcceptedOperation, CoreStore, OperationJournalEntry};
+use cellhv_core_types::{
+    canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationId,
+    OperationKind, OperationStatus, RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MutationCommand {
+    CreateVm { definition: VmDefinition },
+    UpdateVm { definition: VmDefinition },
+    DeleteVm { vm_id: VmId },
+    StartVm { vm_id: VmId },
+    StopVm { vm_id: VmId },
+    RebootVm { vm_id: VmId },
+}
+
+impl MutationCommand {
+    pub fn vm_id(&self) -> &VmId {
+        match self {
+            Self::CreateVm { definition } | Self::UpdateVm { definition } => &definition.id,
+            Self::DeleteVm { vm_id }
+            | Self::StartVm { vm_id }
+            | Self::StopVm { vm_id }
+            | Self::RebootVm { vm_id } => vm_id,
+        }
+    }
+
+    pub fn kind(&self) -> OperationKind {
+        match self {
+            Self::CreateVm { .. } => OperationKind::CreateVm,
+            Self::UpdateVm { .. } => OperationKind::UpdateVm,
+            Self::DeleteVm { .. } => OperationKind::DeleteVm,
+            Self::StartVm { .. } => OperationKind::StartVm,
+            Self::StopVm { .. } => OperationKind::StopVm,
+            Self::RebootVm { .. } => OperationKind::RebootVm,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitMutation {
+    pub operation_id: OperationId,
+    pub idempotency_scope: String,
+    pub idempotency_key: IdempotencyKey,
+    pub expected_vm_version: ResourceVersion,
+    pub command: MutationCommand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartDisposition {
+    Ready,
+    Retryable,
+    RetryBudgetExhausted,
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestartOperation {
+    pub entry: OperationJournalEntry,
+    pub disposition: RestartDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerminalOutcome {
+    Succeeded(Option<serde_json::Value>),
+    Failed(serde_json::Value),
+    Unsupported(serde_json::Value),
+}
+
+#[derive(Debug, Error)]
+pub enum OperationServiceError {
+    #[error("invalid mutation: {0}")]
+    Invalid(String),
+    #[error("unsupported mutation feature: {0}")]
+    Unsupported(&'static str),
+    #[error(transparent)]
+    Store(#[from] cellhv_core_store::StoreError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+pub type Result<T> = std::result::Result<T, OperationServiceError>;
+
+pub struct OperationService {
+    store: CoreStore,
+}
+
+impl OperationService {
+    pub fn new(store: CoreStore) -> Self {
+        Self { store }
+    }
+
+    pub fn submit(&mut self, submission: SubmitMutation) -> Result<AcceptedOperation> {
+        if submission.idempotency_scope.trim().is_empty() {
+            return Err(OperationServiceError::Invalid(
+                "idempotency scope must not be empty".to_owned(),
+            ));
+        }
+        let request = canonical_request(&submission.command, submission.expected_vm_version);
+        let fingerprint = canonical_request_fingerprint(&request)?;
+        if let Some(replay) = self.store.resolve_idempotency(
+            &submission.idempotency_scope,
+            &submission.idempotency_key,
+            &fingerprint,
+            &request,
+        )? {
+            return Ok(replay);
+        }
+        let desired = self.desired_state(&submission)?;
+        let operation = Operation {
+            id: submission.operation_id,
+            kind: submission.command.kind(),
+            vm_id: submission.command.vm_id().clone(),
+            status: OperationStatus::Accepted,
+            request_fingerprint: fingerprint,
+            attempt_count: 0,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+        };
+        Ok(self.store.accept_operation(&AcceptOperation {
+            operation: &operation,
+            request: &request,
+            desired_vm: desired.as_ref(),
+            idempotency_scope: &submission.idempotency_scope,
+            idempotency_key: &submission.idempotency_key,
+            expected_vm_version: submission.expected_vm_version,
+        })?)
+    }
+
+    pub fn operation(&self, id: &OperationId) -> Result<OperationJournalEntry> {
+        Ok(self.store.operation_entry(id)?)
+    }
+
+    /// Durably claims the next bounded attempt before any external side effect.
+    pub fn claim_attempt(&mut self, id: &OperationId) -> Result<OperationJournalEntry> {
+        Ok(self.store.claim_operation(id)?)
+    }
+
+    /// Durably records one terminal outcome and its correlated event.
+    pub fn finish(
+        &mut self,
+        id: &OperationId,
+        outcome: TerminalOutcome,
+    ) -> Result<OperationJournalEntry> {
+        let (status, result, error) = match &outcome {
+            TerminalOutcome::Succeeded(result) => {
+                (OperationStatus::Succeeded, result.as_ref(), None)
+            }
+            TerminalOutcome::Failed(error) => (OperationStatus::Failed, None, Some(error)),
+            TerminalOutcome::Unsupported(error) => {
+                (OperationStatus::Unsupported, None, Some(error))
+            }
+        };
+        Ok(self
+            .store
+            .persist_terminal_operation(id, status, result, error)?)
+    }
+
+    pub fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
+        Ok(self
+            .store
+            .list_incomplete_operations()?
+            .into_iter()
+            .map(|entry| RestartOperation {
+                disposition: classify_restart(&entry.operation),
+                entry,
+            })
+            .collect())
+    }
+
+    pub fn vm(&self, id: &VmId) -> Result<VmDefinition> {
+        Ok(self.store.get_vm(id)?)
+    }
+
+    fn desired_state(&self, submission: &SubmitMutation) -> Result<Option<VmDefinition>> {
+        let expected = submission.expected_vm_version;
+        match &submission.command {
+            MutationCommand::CreateVm { definition } => {
+                definition
+                    .validate()
+                    .map_err(|error| OperationServiceError::Invalid(error.to_string()))?;
+                if expected.get() != 1 || definition.resource_version != expected {
+                    return Err(OperationServiceError::Invalid(
+                        "create definition and expected resource version must both be one"
+                            .to_owned(),
+                    ));
+                }
+                if definition.observed_power_state != ObservedPowerState::Unknown {
+                    return Err(OperationServiceError::Invalid(
+                        "create definition observed power state must be unknown".to_owned(),
+                    ));
+                }
+                Ok(Some(definition.clone()))
+            }
+            MutationCommand::UpdateVm { definition } => {
+                definition
+                    .validate()
+                    .map_err(|error| OperationServiceError::Invalid(error.to_string()))?;
+                let current = self.store.get_vm(&definition.id)?;
+                if definition.resource_version != expected_next(expected)? {
+                    return Err(OperationServiceError::Invalid(
+                        "update definition must carry expected resource version + 1".to_owned(),
+                    ));
+                }
+                if definition.observed_power_state != current.observed_power_state {
+                    return Err(OperationServiceError::Invalid(
+                        "mutations cannot set observed power state".to_owned(),
+                    ));
+                }
+                if current.resource_version == expected
+                    && definition.requested_power_state != current.requested_power_state
+                {
+                    return Err(OperationServiceError::Invalid(
+                        "use a power action to change requested power state".to_owned(),
+                    ));
+                }
+                if current.resource_version == expected
+                    && (definition.storage != current.storage
+                        || definition.networks != current.networks)
+                {
+                    return Err(OperationServiceError::Unsupported(
+                        "attachment topology updates",
+                    ));
+                }
+                Ok(Some(definition.clone()))
+            }
+            MutationCommand::DeleteVm { vm_id } => {
+                // The store performs the conditional tombstone write after its
+                // atomic idempotency replay check.
+                let _ = vm_id;
+                Ok(None)
+            }
+            MutationCommand::StartVm { vm_id } => Ok(Some(power_desired(
+                &self.store,
+                vm_id,
+                expected,
+                RequestedPowerState::Running,
+            )?)),
+            MutationCommand::StopVm { vm_id } => Ok(Some(power_desired(
+                &self.store,
+                vm_id,
+                expected,
+                RequestedPowerState::Stopped,
+            )?)),
+            MutationCommand::RebootVm { vm_id } => {
+                let current =
+                    power_desired(&self.store, vm_id, expected, RequestedPowerState::Running)?;
+                Ok(Some(current))
+            }
+        }
+    }
+}
+
+pub fn request_fingerprint(
+    command: &MutationCommand,
+    expected_vm_version: ResourceVersion,
+) -> Result<String> {
+    Ok(canonical_request_fingerprint(&canonical_request(
+        command,
+        expected_vm_version,
+    ))?)
+}
+
+pub fn classify_restart(operation: &Operation) -> RestartDisposition {
+    match operation.status {
+        OperationStatus::Accepted => RestartDisposition::Ready,
+        OperationStatus::Running if operation.attempt_count < operation.max_attempts => {
+            RestartDisposition::Retryable
+        }
+        OperationStatus::Running => RestartDisposition::RetryBudgetExhausted,
+        OperationStatus::Succeeded | OperationStatus::Failed | OperationStatus::Unsupported => {
+            RestartDisposition::Terminal
+        }
+    }
+}
+
+fn canonical_request(
+    command: &MutationCommand,
+    expected_vm_version: ResourceVersion,
+) -> serde_json::Value {
+    serde_json::json!({
+        "command": command,
+        "expected_vm_version": expected_vm_version,
+    })
+}
+
+fn expected_next(version: ResourceVersion) -> Result<ResourceVersion> {
+    version
+        .next()
+        .map_err(|error| OperationServiceError::Invalid(error.to_string()))
+}
+
+fn power_desired(
+    store: &CoreStore,
+    vm_id: &VmId,
+    expected: ResourceVersion,
+    requested: RequestedPowerState,
+) -> Result<VmDefinition> {
+    let mut current = store.get_vm(vm_id)?;
+    current.requested_power_state = requested;
+    current.resource_version = expected_next(expected)?;
+    Ok(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cellhv_core_store::{Acceptance, StoreError};
+    use cellhv_core_types::{BootSpec, ComputeSpec, ObservedPowerState};
+    use tempfile::TempDir;
+
+    fn version(value: u64) -> ResourceVersion {
+        ResourceVersion::new(value).unwrap()
+    }
+
+    fn vm(id: &str) -> VmDefinition {
+        VmDefinition {
+            id: VmId::new(id).unwrap(),
+            name: format!("vm-{id}"),
+            boot: BootSpec::new("/kernel").unwrap(),
+            compute: ComputeSpec::new(2, 1024).unwrap(),
+            storage: vec![],
+            networks: vec![],
+            requested_power_state: RequestedPowerState::Stopped,
+            observed_power_state: ObservedPowerState::Unknown,
+            resource_version: version(1),
+        }
+    }
+
+    fn submission(
+        command: MutationCommand,
+        operation: &str,
+        key: &str,
+        expected: u64,
+    ) -> SubmitMutation {
+        SubmitMutation {
+            operation_id: OperationId::new(operation).unwrap(),
+            idempotency_scope: "local-api".to_owned(),
+            idempotency_key: IdempotencyKey::new(key).unwrap(),
+            expected_vm_version: version(expected),
+            command,
+        }
+    }
+
+    fn service() -> (TempDir, std::path::PathBuf, OperationService) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core.db");
+        let store = CoreStore::create_new(&path).unwrap();
+        (dir, path, OperationService::new(store))
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_and_command_sensitive() {
+        let command = MutationCommand::CreateVm {
+            definition: vm("a"),
+        };
+        let expected = request_fingerprint(&command, version(1)).unwrap();
+        for _ in 0..100 {
+            assert_eq!(request_fingerprint(&command, version(1)).unwrap(), expected);
+        }
+        assert_ne!(
+            expected,
+            request_fingerprint(
+                &MutationCommand::CreateVm {
+                    definition: vm("b")
+                },
+                version(1)
+            )
+            .unwrap()
+        );
+        assert_ne!(expected, request_fingerprint(&command, version(2)).unwrap());
+    }
+
+    #[test]
+    fn create_is_durable_before_returning() {
+        let (_dir, path, mut service) = service();
+        let accepted = service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "key-1",
+                1,
+            ))
+            .unwrap();
+        assert_eq!(accepted.disposition, Acceptance::Accepted);
+        drop(service);
+        let reopened = CoreStore::open_existing(&path).unwrap();
+        assert_eq!(reopened.get_vm(&VmId::new("a").unwrap()).unwrap(), vm("a"));
+        assert_eq!(
+            reopened
+                .operation(&OperationId::new("op-1").unwrap())
+                .unwrap()
+                .status,
+            OperationStatus::Accepted
+        );
+    }
+
+    #[test]
+    fn replay_returns_original_and_changed_request_conflicts() {
+        let (_dir, _path, mut service) = service();
+        let first = submission(
+            MutationCommand::CreateVm {
+                definition: vm("a"),
+            },
+            "op-1",
+            "key",
+            1,
+        );
+        service.submit(first).unwrap();
+        let replay = service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-2",
+                "key",
+                1,
+            ))
+            .unwrap();
+        assert_eq!(replay.disposition, Acceptance::Replay);
+        assert_eq!(replay.operation.id.as_str(), "op-1");
+        let error = service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("b"),
+                },
+                "op-3",
+                "key",
+                1,
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::Store(StoreError::IdempotencyConflict { .. })
+        ));
+        let precondition_conflict = service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-4",
+                "key",
+                2,
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            precondition_conflict,
+            OperationServiceError::Store(StoreError::IdempotencyConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn stale_power_request_does_not_reserve_state_or_journal() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let error = service
+            .submit(submission(
+                MutationCommand::StartVm {
+                    vm_id: VmId::new("a").unwrap(),
+                },
+                "op-2",
+                "start",
+                2,
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::Store(StoreError::StaleVersion { .. })
+        ));
+        assert!(matches!(
+            service.operation(&OperationId::new("op-2").unwrap()),
+            Err(OperationServiceError::Store(StoreError::NotFound { .. }))
+        ));
+        assert_eq!(
+            service
+                .vm(&VmId::new("a").unwrap())
+                .unwrap()
+                .resource_version,
+            version(1)
+        );
+    }
+
+    #[test]
+    fn power_actions_update_only_requested_state_and_version() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        service
+            .submit(submission(
+                MutationCommand::StartVm {
+                    vm_id: VmId::new("a").unwrap(),
+                },
+                "op-2",
+                "start",
+                1,
+            ))
+            .unwrap();
+        let current = service.vm(&VmId::new("a").unwrap()).unwrap();
+        assert_eq!(current.requested_power_state, RequestedPowerState::Running);
+        assert_eq!(current.observed_power_state, ObservedPowerState::Unknown);
+        assert_eq!(current.resource_version, version(2));
+    }
+
+    #[test]
+    fn power_replay_survives_the_version_reserved_by_first_acceptance() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let command = MutationCommand::StartVm {
+            vm_id: VmId::new("a").unwrap(),
+        };
+        service
+            .submit(submission(command.clone(), "op-2", "start", 1))
+            .unwrap();
+        let replay = service
+            .submit(submission(command, "op-3", "start", 1))
+            .unwrap();
+        assert_eq!(replay.disposition, Acceptance::Replay);
+        assert_eq!(replay.operation.id.as_str(), "op-2");
+    }
+
+    #[test]
+    fn exact_replay_resolves_after_vm_is_tombstoned() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let start = MutationCommand::StartVm {
+            vm_id: VmId::new("a").unwrap(),
+        };
+        service
+            .submit(submission(start.clone(), "op-2", "start", 1))
+            .unwrap();
+        service
+            .submit(submission(
+                MutationCommand::DeleteVm {
+                    vm_id: VmId::new("a").unwrap(),
+                },
+                "op-3",
+                "delete",
+                2,
+            ))
+            .unwrap();
+        let replay = service
+            .submit(submission(start, "ignored", "start", 1))
+            .unwrap();
+        assert_eq!(replay.disposition, Acceptance::Replay);
+        assert_eq!(replay.operation.id.as_str(), "op-2");
+    }
+
+    #[test]
+    fn observed_state_is_never_client_controlled() {
+        let (_dir, _path, mut service) = service();
+        let mut invalid_create = vm("a");
+        invalid_create.observed_power_state = ObservedPowerState::Running;
+        assert!(matches!(
+            service.submit(submission(
+                MutationCommand::CreateVm {
+                    definition: invalid_create,
+                },
+                "op-1",
+                "create-invalid",
+                1,
+            )),
+            Err(OperationServiceError::Invalid(_))
+        ));
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-2",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let mut stale_update = vm("a");
+        stale_update.resource_version = version(3);
+        stale_update.observed_power_state = ObservedPowerState::Running;
+        assert!(matches!(
+            service.submit(submission(
+                MutationCommand::UpdateVm {
+                    definition: stale_update,
+                },
+                "op-3",
+                "stale-update",
+                2,
+            )),
+            Err(OperationServiceError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn attachment_topology_update_is_explicitly_unsupported() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let mut changed = vm("a");
+        changed.resource_version = version(2);
+        changed
+            .networks
+            .push(cellhv_core_types::NetworkAttachmentRef {
+                attachment_id: "nic-1".to_owned(),
+                network_ref: "network-1".to_owned(),
+                mac_address: None,
+            });
+        let error = service
+            .submit(submission(
+                MutationCommand::UpdateVm {
+                    definition: changed,
+                },
+                "op-2",
+                "update",
+                1,
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::Unsupported("attachment topology updates")
+        ));
+    }
+
+    #[test]
+    fn restart_reconstructs_incomplete_journal_in_stable_order() {
+        let (_dir, path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        drop(service);
+        let service = OperationService::new(CoreStore::open_existing(&path).unwrap());
+        let pending = service.restart_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entry.operation.id.as_str(), "op-1");
+        assert_eq!(pending[0].disposition, RestartDisposition::Ready);
+    }
+
+    #[test]
+    fn restart_classification_covers_retry_boundaries() {
+        let mut operation = Operation {
+            id: OperationId::new("op").unwrap(),
+            kind: OperationKind::StartVm,
+            vm_id: VmId::new("vm").unwrap(),
+            status: OperationStatus::Accepted,
+            request_fingerprint: "fingerprint".to_owned(),
+            attempt_count: 0,
+            max_attempts: 3,
+        };
+        assert_eq!(classify_restart(&operation), RestartDisposition::Ready);
+        operation.status = OperationStatus::Running;
+        operation.attempt_count = 2;
+        assert_eq!(classify_restart(&operation), RestartDisposition::Retryable);
+        operation.attempt_count = 3;
+        assert_eq!(
+            classify_restart(&operation),
+            RestartDisposition::RetryBudgetExhausted
+        );
+        operation.status = OperationStatus::Succeeded;
+        assert_eq!(classify_restart(&operation), RestartDisposition::Terminal);
+    }
+
+    #[test]
+    fn execution_transitions_are_bounded_and_terminal_is_immutable() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+        let id = OperationId::new("op-1").unwrap();
+        assert!(matches!(
+            service.finish(&id, TerminalOutcome::Succeeded(None)),
+            Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+        for attempt in 1..=3 {
+            let entry = service.claim_attempt(&id).unwrap();
+            assert_eq!(entry.operation.status, OperationStatus::Running);
+            assert_eq!(entry.operation.attempt_count, attempt);
+        }
+        assert!(matches!(
+            service.claim_attempt(&id),
+            Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+        let terminal = service
+            .finish(
+                &id,
+                TerminalOutcome::Failed(serde_json::json!({"code":"exhausted"})),
+            )
+            .unwrap();
+        assert_eq!(terminal.operation.status, OperationStatus::Failed);
+        assert!(matches!(
+            service.claim_attempt(&id),
+            Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+        assert!(matches!(
+            service.finish(&id, TerminalOutcome::Succeeded(None)),
+            Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+    }
+}

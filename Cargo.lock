@@ -489,6 +489,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellhv-core-operations"
+version = "0.1.0"
+dependencies = [
+ "cellhv-core-store",
+ "cellhv-core-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cellhv-core-store"
+version = "0.1.0"
+dependencies = [
+ "cellhv-core-types",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cellhv-core-types"
+version = "0.1.0"
+dependencies = [
+ "chv-errors",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -548,6 +582,7 @@ name = "chv-agent-core"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "cellhv-core-types",
  "chv-agent-runtime-ch",
  "chv-common",
  "chv-config",

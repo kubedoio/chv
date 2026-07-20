@@ -96,6 +96,62 @@ class ArchitectureGuardTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
             self.assertTrue(any("durable_vm_store_count" in error for error in GUARD.check(root)))
 
+    def test_agent_cannot_bypass_operations_to_depend_on_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-core/Cargo.toml"
+            text = path.read_text().replace(
+                "[dependencies]\n",
+                '[dependencies]\ncellhv-core-store = { path = "../cellhv-core-store" }\n',
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("may only be depended on" in error for error in errors))
+
+    def test_provider_cannot_bypass_operations_to_depend_on_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-provider-test/Cargo.toml"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                '[package]\nname = "chv-agent-provider-test"\nversion = "0.1.0"\n'
+                '[dependencies]\ncellhv-core-store = { path = "../cellhv-core-store" }\n',
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("chv-agent-provider-test" in error for error in errors))
+
+    def test_aliased_store_dependency_cannot_bypass_operations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-runtime-ch/Cargo.toml"
+            text = path.read_text().replace(
+                "[dependencies]\n",
+                '[dependencies]\nauthority = { package = "cellhv-core-store", path = "../cellhv-core-store" }\n',
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("chv-agent-runtime-ch" in error for error in errors))
+
+    def test_store_cannot_depend_on_runtime_core_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-store/Cargo.toml"
+            text = path.read_text().replace(
+                "[dependencies]\n",
+                '[dependencies]\nchv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }\n',
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("forbidden Core dependency" in error for error in errors))
+
     def test_second_operation_engine_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -103,7 +159,30 @@ class ArchitectureGuardTests(unittest.TestCase):
             path = root / "crates/chv-agent-core/src/operation_engine.rs"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("pub struct OperationEngine;\n", encoding="utf-8")
-            self.assertTrue(any("operation_engine_count" in error for error in GUARD.check(root)))
+            self.assertTrue(any("operation authority must be owned" in error for error in GUARD.check(root)))
+
+    def test_operation_engine_in_innocuously_named_module_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-core/src/executor.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("pub struct OperationExecutor;\n", encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("operation authority must be owned" in error for error in errors))
+
+    def test_alternate_core_operation_package_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-operation-runner/Cargo.toml"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                '[package]\nname = "cellhv-core-operation-runner"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("operation authority must be owned" in error for error in errors))
 
     def test_second_process_owner_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

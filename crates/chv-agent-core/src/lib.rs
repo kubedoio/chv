@@ -5,6 +5,7 @@ pub mod connectivity;
 pub mod console_server;
 pub mod control_plane;
 pub mod daemon_clients;
+pub use cellhv_core_types as domain;
 pub mod enrollment;
 pub mod health;
 pub mod inventory;
