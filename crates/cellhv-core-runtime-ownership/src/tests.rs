@@ -265,6 +265,38 @@ mod linux_tests {
         store.remove_if(&value).unwrap();
         assert!(!directory.path().join("owner-v1.json").exists());
     }
+    #[test]
+    fn supersede_replaces_active_marker() {
+        let (_dir, store) = store();
+        let expected = super::marker("publication-0001");
+
+        let replacement = super::marker("publication-0002");
+
+        store.publish(&expected).unwrap();
+
+        store
+            .supersede(
+                &expected,
+                &replacement,
+                crate::RecoveryDecision::SupersedeActive,
+            )
+            .unwrap();
+
+        let actual = store.read().unwrap();
+        assert_eq!(actual.publication_nonce, "publication-0002");
+
+        let mut different_host = replacement.clone();
+        different_host.host_id = crate::HostId::new("host-other").unwrap();
+        different_host.publication_nonce = "publication-0003".into();
+        assert!(matches!(
+            store.supersede(
+                &replacement,
+                &different_host,
+                crate::RecoveryDecision::SupersedeActive
+            ),
+            Err(StoreError::IdentityChanged)
+        ));
+    }
 }
 
 #[derive(Clone)]

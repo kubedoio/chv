@@ -286,10 +286,114 @@ pub mod linux {
             self.root.sync_all()?;
             Ok(())
         }
+
+        pub fn supersede(
+            &self,
+            expected: &OwnerMarkerV1,
+            replacement: &OwnerMarkerV1,
+            decision: RecoveryDecision,
+        ) -> Result<(), StoreError> {
+            expected.validate()?;
+            replacement.validate()?;
+            if expected == replacement {
+                return Ok(());
+            }
+
+            let (actual, _) = self.read_named("owner-v1.json")?;
+            if &actual != expected {
+                return Err(StoreError::IdentityChanged);
+            }
+
+            match decision {
+                RecoveryDecision::SupersedeExited => {}
+                RecoveryDecision::SupersedeActive => {
+                    if expected.host_id != replacement.host_id {
+                        return Err(StoreError::IdentityChanged);
+                    }
+                }
+            }
+
+            let bytes = serde_json::to_vec(replacement)?;
+            if bytes.len() as u64 > MAX_MARKER_BYTES {
+                return Err(StoreError::UnsafeMarker);
+            }
+
+            let temp = format!(".owner-v1.{}.tmp", replacement.publication_nonce);
+            let mut file =
+                match self.open_marker(libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600, &temp)
+                {
+                    Ok(file) => file,
+                    Err(StoreError::Io(error)) if error.raw_os_error() == Some(libc::EEXIST) => {
+                        return Err(StoreError::Exists)
+                    }
+                    Err(error) => return Err(error),
+                };
+
+            if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+                let name = CString::new(temp).expect("validated nonce produces a C string");
+                unsafe { libc::unlinkat(self.root.as_raw_fd(), name.as_ptr(), 0) };
+                return Err(error.into());
+            }
+
+            let from = CString::new(temp.clone()).unwrap();
+            let to = CString::new("owner-v1.json").unwrap();
+
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    self.root.as_raw_fd(),
+                    from.as_ptr(),
+                    self.root.as_raw_fd(),
+                    to.as_ptr(),
+                    libc::RENAME_EXCHANGE,
+                )
+            };
+
+            if rc < 0 {
+                let error = std::io::Error::last_os_error();
+                unsafe { libc::unlinkat(self.root.as_raw_fd(), from.as_ptr(), 0) };
+                return Err(error.into());
+            }
+
+            let moved_matches = self
+                .read_named(&temp)
+                .map(|(marker, _)| marker == *expected)
+                .unwrap_or(false);
+
+            if !moved_matches {
+                let restored = unsafe {
+                    libc::syscall(
+                        libc::SYS_renameat2,
+                        self.root.as_raw_fd(),
+                        to.as_ptr(),
+                        self.root.as_raw_fd(),
+                        from.as_ptr(),
+                        libc::RENAME_EXCHANGE,
+                    )
+                };
+                if restored < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                unsafe { libc::unlinkat(self.root.as_raw_fd(), from.as_ptr(), 0) };
+                return Err(StoreError::IdentityChanged);
+            }
+
+            unsafe { libc::unlinkat(self.root.as_raw_fd(), from.as_ptr(), 0) };
+            self.root.sync_all()?;
+            Ok(())
+        }
     }
 }
 
 pub const MARKER_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryDecision {
+    /// Safe to overwrite because the existing attempt has definitely terminated.
+    SupersedeExited,
+    /// Overwrite an attempt that may still be active. Requires ownership intent.
+    SupersedeActive,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -579,6 +683,28 @@ pub fn inspect<O: Observation>(
                 Classification::AmbiguousPreserve
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptedRuntime {
+    pub marker: OwnerMarkerV1,
+}
+
+pub fn adopt<O: Observation>(
+    requested: &RequestedOwner,
+    marker: Result<OwnerMarkerV1, MarkerError>,
+    observations: &O,
+) -> Result<AdoptedRuntime, Classification> {
+    let m = match marker {
+        Ok(m) => m,
+        Err(_) => return Err(Classification::CorruptOwnership),
+    };
+    let classification = inspect(requested, Ok(m.clone()), observations);
+    if classification == Classification::OwnershipMatched {
+        Ok(AdoptedRuntime { marker: m })
+    } else {
+        Err(classification)
     }
 }
 
