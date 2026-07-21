@@ -76,6 +76,8 @@ OPERATION_MODULE_NAME = re.compile(
     r"(?:^|[_-])(?:operation(?:s|[_-](?:engine|service|executor|processor|manager))?|"
     r"journal(?:[_-](?:engine|service|executor|processor|manager))?)(?:$|[_-])"
 )
+EXECUTION_CAPABILITY = re.compile(r"\b(?:ExecutionHandle|spawn_with_execution)\b")
+EXECUTION_CAPABILITY_OWNER = Path("crates/cellhv-core-operations")
 
 
 def load_json(path: Path) -> object:
@@ -234,6 +236,20 @@ def check(root: Path) -> list[str]:
             f"{CORE_OPERATIONS_PACKAGE}: dependency boundary forbids "
             f"{unexpected_operations_dependencies}"
         )
+
+    for source_root in (root / "cmd", root / "crates"):
+        if not source_root.exists():
+            continue
+        for source in source_root.rglob("*.rs"):
+            relative = source.relative_to(root)
+            if relative.is_relative_to(EXECUTION_CAPABILITY_OWNER):
+                continue
+            text = source.read_text(encoding="utf-8", errors="replace")
+            if EXECUTION_CAPABILITY.search(text):
+                errors.append(
+                    f"{relative}: execution capability is restricted to "
+                    f"{EXECUTION_CAPABILITY_OWNER} until an executor boundary is approved"
+                )
 
     api_source_root = root / "crates/cellhv-core-api/src"
     api_sources = sorted(api_source_root.rglob("*.rs")) if api_source_root.exists() else []

@@ -106,16 +106,18 @@ pub struct RestartOperation {
     pub active_attempt_token: Option<AttemptToken>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimDisposition {
-    Acquired,
-    Replay,
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimResult {
+    Acquired(OperationJournalEntry),
+    Replay(OperationJournalEntry),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClaimResult {
-    pub disposition: ClaimDisposition,
-    pub entry: OperationJournalEntry,
+impl ClaimResult {
+    pub fn entry(&self) -> &OperationJournalEntry {
+        match self {
+            Self::Acquired(entry) | Self::Replay(entry) => entry,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,12 +282,9 @@ impl OperationService {
         attempt_token: &AttemptToken,
     ) -> Result<ClaimResult> {
         let claimed = self.store.claim_operation(id, attempt_token.as_str())?;
-        Ok(ClaimResult {
-            disposition: match claimed.disposition {
-                cellhv_core_store::ClaimDisposition::Acquired => ClaimDisposition::Acquired,
-                cellhv_core_store::ClaimDisposition::Replay => ClaimDisposition::Replay,
-            },
-            entry: claimed.entry,
+        Ok(match claimed.disposition {
+            cellhv_core_store::ClaimDisposition::Acquired => ClaimResult::Acquired(claimed.entry),
+            cellhv_core_store::ClaimDisposition::Replay => ClaimResult::Replay(claimed.entry),
         })
     }
 
@@ -322,8 +321,7 @@ impl OperationService {
     }
 
     pub(crate) fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
-        Ok(self
-            .store
+        self.store
             .list_incomplete_execution_operations()?
             .into_iter()
             .map(|record| {
@@ -336,7 +334,7 @@ impl OperationService {
                         .transpose()?,
                 })
             })
-            .collect::<Result<Vec<_>>>()?)
+            .collect::<Result<Vec<_>>>()
     }
 
     pub fn vm(&self, id: &VmId) -> Result<VmDefinition> {
@@ -526,6 +524,20 @@ mod tests {
 
     fn version(value: u64) -> ResourceVersion {
         ResourceVersion::new(value).unwrap()
+    }
+
+    #[test]
+    fn attempt_tokens_have_one_canonical_visible_ascii_form() {
+        assert_eq!(
+            AttemptToken::new("token-._:~").unwrap().as_str(),
+            "token-._:~"
+        );
+        for invalid in ["", " leading", "trailing ", "line\nbreak"] {
+            assert!(AttemptToken::new(invalid).is_err(), "accepted {invalid:?}");
+        }
+        assert!(AttemptToken::new("x".repeat(128)).is_ok());
+        assert!(AttemptToken::new("x".repeat(129)).is_err());
+        assert!(AttemptToken::new("café").is_err());
     }
 
     fn vm(id: &str) -> VmDefinition {
@@ -946,12 +958,12 @@ mod tests {
             Err(OperationServiceError::Store(StoreError::Conflict { .. }))
         ));
         let entry = service.claim_attempt(&id, &token).unwrap();
-        assert_eq!(entry.disposition, ClaimDisposition::Acquired);
-        assert_eq!(entry.entry.operation.status, OperationStatus::Running);
-        assert_eq!(entry.entry.operation.attempt_count, 1);
+        assert!(matches!(entry, ClaimResult::Acquired(_)));
+        assert_eq!(entry.entry().operation.status, OperationStatus::Running);
+        assert_eq!(entry.entry().operation.attempt_count, 1);
         let replay = service.claim_attempt(&id, &token).unwrap();
-        assert_eq!(replay.disposition, ClaimDisposition::Replay);
-        assert_eq!(replay.entry.operation.attempt_count, 1);
+        assert!(matches!(replay, ClaimResult::Replay(_)));
+        assert_eq!(replay.entry().operation.attempt_count, 1);
         assert!(matches!(
             service.claim_attempt(&id, &other),
             Err(OperationServiceError::Store(StoreError::Conflict { .. }))

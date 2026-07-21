@@ -600,19 +600,16 @@ mod tests {
         let mut attempts = Vec::new();
         for claim in claims {
             match claim.await.unwrap() {
-                Ok(result) => {
-                    attempts.push((result.disposition, result.entry.operation.attempt_count))
+                Ok(ClaimResult::Acquired(entry)) => {
+                    attempts.push((true, entry.operation.attempt_count))
+                }
+                Ok(ClaimResult::Replay(entry)) => {
+                    attempts.push((false, entry.operation.attempt_count))
                 }
                 other => panic!("unexpected claim result: {other:?}"),
             }
         }
-        assert_eq!(
-            attempts
-                .iter()
-                .filter(|(disposition, _)| *disposition == crate::ClaimDisposition::Acquired)
-                .count(),
-            1
-        );
+        assert_eq!(attempts.iter().filter(|(acquired, _)| *acquired).count(), 1);
         assert!(attempts.iter().all(|(_, attempt)| *attempt == 1));
         assert!(matches!(
             execution
@@ -687,7 +684,7 @@ mod tests {
                 )
                 .await
                 .unwrap()
-                .entry
+                .entry()
                 .operation
                 .attempt_count,
             1
@@ -699,6 +696,80 @@ mod tests {
             )
             .await
             .is_err());
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_finish_reply_is_resolved_only_by_exact_completion_replay() {
+        let (_directory, path, service) = service();
+        let (handle, execution, join) = AuthorityActor::spawn_with_execution(service, 2).unwrap();
+        handle
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op",
+                "key",
+                1,
+            ))
+            .await
+            .unwrap();
+        let token = AttemptToken::new("attempt-1").unwrap();
+        assert!(matches!(
+            execution
+                .claim_attempt(OperationId::new("op").unwrap(), token.clone())
+                .await
+                .unwrap(),
+            ClaimResult::Acquired(_)
+        ));
+        let outcome = TerminalOutcome::Succeeded(Some(serde_json::json!({"pid": 42})));
+        let (reply, receive) = oneshot::channel();
+        execution
+            .sender
+            .send(Request::Finish(
+                OperationId::new("op").unwrap(),
+                token.clone(),
+                Box::new(outcome.clone()),
+                reply,
+            ))
+            .await
+            .unwrap();
+        drop(receive);
+
+        let replay = execution
+            .finish(
+                OperationId::new("op").unwrap(),
+                token.clone(),
+                outcome.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.disposition, crate::CompletionDisposition::Replay);
+        assert!(execution
+            .finish(
+                OperationId::new("op").unwrap(),
+                token.clone(),
+                TerminalOutcome::Succeeded(Some(serde_json::json!({"pid": 43}))),
+            )
+            .await
+            .is_err());
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+
+        let (handle, execution, join) = AuthorityActor::spawn_with_execution(
+            OperationService::open_existing(&path).unwrap(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            execution
+                .finish(OperationId::new("op").unwrap(), token, outcome)
+                .await
+                .unwrap()
+                .disposition,
+            crate::CompletionDisposition::Replay
+        );
         handle.shutdown().await.unwrap();
         join.join().await.unwrap();
     }
@@ -726,18 +797,28 @@ mod tests {
             .await
             .unwrap();
 
-        let finish = execution.finish(
-            OperationId::new("op").unwrap(),
-            AttemptToken::new("attempt-1").unwrap(),
-            TerminalOutcome::Succeeded(Some(serde_json::json!({"runtime": "created"}))),
-        );
-        let shutdown = handle.shutdown();
-        let (finished, shutdown) = tokio::join!(finish, shutdown);
+        let release = gate_actor(&handle).await;
+        let finish_execution = execution.clone();
+        let finish = tokio::spawn(async move {
+            finish_execution
+                .finish(
+                    OperationId::new("op").unwrap(),
+                    AttemptToken::new("attempt-1").unwrap(),
+                    TerminalOutcome::Succeeded(Some(serde_json::json!({"runtime": "created"}))),
+                )
+                .await
+        });
+        wait_for_queue_len(&handle, 1).await;
+        let shutdown_handle = handle.clone();
+        let shutdown = tokio::spawn(async move { shutdown_handle.shutdown().await });
+        wait_for_queue_len(&handle, 2).await;
+        release.send(()).unwrap();
+        let finished = finish.await.unwrap();
         assert_eq!(
             finished.unwrap().entry.operation.status,
             OperationStatus::Succeeded
         );
-        shutdown.unwrap();
+        shutdown.await.unwrap().unwrap();
         join.join().await.unwrap();
 
         let (handle, reopened_join) =

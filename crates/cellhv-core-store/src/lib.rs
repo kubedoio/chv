@@ -138,6 +138,15 @@ pub struct CompletedOperation {
     pub entry: OperationJournalEntry,
 }
 
+struct StoredOperationColumns {
+    request: String,
+    result: Option<String>,
+    error: Option<String>,
+    active_attempt_token: Option<String>,
+    completed_attempt_token: Option<String>,
+    completed_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyMigrationState {
     pub source: String,
@@ -1721,30 +1730,34 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
         conn.prepare("SELECT operation_id FROM operations ORDER BY operation_id")?;
     for id in operations.query_map([], |row| row.get::<_, String>(0))? {
         let entry = read_operation_entry(conn, &id?)?;
-        let stored: (
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = conn.query_row(
+        let stored = conn.query_row(
             "SELECT request_json,result_json,error_json,active_attempt_token,completed_attempt_token,completed_at FROM operations WHERE operation_id=?1",
             [entry.operation.id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            |row| Ok(StoredOperationColumns {
+                request: row.get(0)?,
+                result: row.get(1)?,
+                error: row.get(2)?,
+                active_attempt_token: row.get(3)?,
+                completed_attempt_token: row.get(4)?,
+                completed_at: row.get(5)?,
+            }),
         )?;
         let canonical_result = entry.result.as_ref().map(canonical_json).transpose()?;
         let canonical_error = entry.error.as_ref().map(canonical_json).transpose()?;
-        if stored.0 != canonical_json(&entry.request)?
-            || stored.1 != canonical_result
-            || stored.2 != canonical_error
+        if stored.request != canonical_json(&entry.request)?
+            || stored.result != canonical_result
+            || stored.error != canonical_error
         {
             return Err(StoreError::Integrity(format!(
                 "operation {} request/result/error JSON is not canonical",
                 entry.operation.id
             )));
         }
-        if let Some(token) = stored.3.as_deref().or(stored.4.as_deref()) {
+        if let Some(token) = stored
+            .active_attempt_token
+            .as_deref()
+            .or(stored.completed_attempt_token.as_deref())
+        {
             validate_attempt_token(token).map_err(|_| {
                 StoreError::Integrity(format!(
                     "operation {} has a non-canonical attempt token",
@@ -1755,20 +1768,20 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
         let execution_columns_valid = match entry.operation.status {
             OperationStatus::Accepted => {
                 entry.operation.attempt_count == 0
-                    && stored.3.is_none()
-                    && stored.4.is_none()
-                    && stored.5.is_none()
+                    && stored.active_attempt_token.is_none()
+                    && stored.completed_attempt_token.is_none()
+                    && stored.completed_at.is_none()
             }
             OperationStatus::Running => {
                 entry.operation.attempt_count > 0
-                    && stored.3.is_some()
-                    && stored.4.is_none()
-                    && stored.5.is_none()
+                    && stored.active_attempt_token.is_some()
+                    && stored.completed_attempt_token.is_none()
+                    && stored.completed_at.is_none()
             }
-            OperationStatus::Succeeded
-            | OperationStatus::Failed
-            | OperationStatus::Unsupported => {
-                stored.3.is_none() && stored.4.is_some() && stored.5.is_some()
+            OperationStatus::Succeeded | OperationStatus::Failed | OperationStatus::Unsupported => {
+                stored.active_attempt_token.is_none()
+                    && stored.completed_attempt_token.is_some()
+                    && stored.completed_at.is_some()
             }
         };
         if !execution_columns_valid {
@@ -2384,7 +2397,8 @@ mod tests {
             )
             .unwrap();
         }
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
         drop(conn);
 
         let store = CoreStore::open_existing(&path).unwrap();
@@ -2428,6 +2442,49 @@ mod tests {
         );
         drop(store);
         CoreStore::open_existing(&path).unwrap();
+    }
+
+    #[test]
+    fn invalid_v1_execution_state_rolls_back_the_entire_upgrade() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        create_v1_store(&path);
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let definition = vm("vm-1", 1);
+        conn.execute(
+            "INSERT INTO vms (vm_id,definition_json,requested_power_state,observed_power_state,resource_version) VALUES (?1,?2,'stopped','unknown',1)",
+            params![definition.id.as_str(), serde_json::to_string(&definition).unwrap()],
+        )
+        .unwrap();
+        insert_attachments(&conn, &definition).unwrap();
+        let request = serde_json::json!({"legacy":"invalid-running"});
+        conn.execute(
+            "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES ('invalid-running','start_vm','vm-1',?1,?2,'running',0,3)",
+            params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        assert!(matches!(
+            CoreStore::open_existing(&path),
+            Err(StoreError::Integrity(_))
+        ));
+        let conn = Connection::open(&path).unwrap();
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 1);
+        let fencing_columns: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('operations') WHERE name IN ('active_attempt_token','completed_attempt_token')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fencing_columns, 0);
     }
 
     #[test]
@@ -3153,7 +3210,21 @@ mod tests {
                 None,
             )
             .unwrap();
+        assert_eq!(entry.disposition, CompletionDisposition::Applied);
         assert_eq!(entry.entry.result, Some(result));
+        assert_eq!(
+            store
+                .persist_terminal_operation(
+                    &op.id,
+                    "attempt-1",
+                    OperationStatus::Succeeded,
+                    entry.entry.result.as_ref(),
+                    None,
+                )
+                .unwrap()
+                .disposition,
+            CompletionDisposition::Replay
+        );
         let event_kinds: String = store
             .conn
             .query_row(
@@ -3185,6 +3256,57 @@ mod tests {
                 .status,
             OperationStatus::Succeeded
         );
+    }
+
+    #[test]
+    fn attempt_token_sql_constraints_and_cross_column_reopen_checks_fail_closed() {
+        let (_directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let mut desired = vm("vm-1", 2);
+        desired.requested_power_state = RequestedPowerState::Running;
+        let request = serde_json::json!({"command":"start"});
+        let op = operation(
+            "op-token",
+            &canonical_request_fingerprint(&request).unwrap(),
+        );
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &op,
+                request: &request,
+                desired_vm: Some(&desired),
+                idempotency_scope: "token-test",
+                idempotency_key: &IdempotencyKey::new("token-test").unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        for invalid in ["", "has space", "line\nbreak"] {
+            assert!(store
+                .conn
+                .execute(
+                    "UPDATE operations SET active_attempt_token=?1 WHERE operation_id='op-token'",
+                    [invalid],
+                )
+                .is_err());
+        }
+        assert!(store
+            .conn
+            .execute(
+                "UPDATE operations SET active_attempt_token=?1 WHERE operation_id='op-token'",
+                ["x".repeat(129)],
+            )
+            .is_err());
+        store
+            .conn
+            .execute(
+                "UPDATE operations SET active_attempt_token='valid-token' WHERE operation_id='op-token'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        assert!(matches!(
+            CoreStore::open_existing(&path),
+            Err(StoreError::Integrity(_))
+        ));
     }
 
     #[test]

@@ -75,7 +75,6 @@ The implemented operation transition graph is:
 accepted -> running(token T) -> succeeded (fenced by T)
                              -> failed (fenced by T)
                              -> unsupported (fenced by T)
-accepted --------------------> unsupported
 ```
 
 An accepted operation starts with attempt count zero and a fixed maximum of
@@ -87,9 +86,9 @@ cannot claim a running operation. Success, failure, and post-claim unsupported
 outcomes compare-and-set against the active token, so a stale worker cannot
 finish another worker's attempt. Terminal operations reject every claim.
 
-Success and failure require a prior running claim. Unsupported may be recorded
-from accepted or running because capability rejection need not perform a side
-effect. A terminal write commits exactly one status and correlated event:
+Success, failure, and unsupported require a prior running claim. Requests whose
+capability is known to be unsupported must be rejected before durable
+acceptance. A terminal write commits exactly one status and correlated event:
 `operation.succeeded`, `operation.failed`, or `operation.unsupported`. Success
 may have a canonical result and no error; failed and unsupported require a
 canonical error and have no result. Terminal states are immutable.
@@ -102,15 +101,23 @@ On restart, the store returns only accepted and running operations in stable
 | Durable state | Classification | Meaning |
 |---|---|---|
 | accepted | `Ready` | no attempt was claimed |
-| running, attempts below maximum | `Retryable` | ownership inspection may plan a bounded recovery; direct execution is forbidden |
-| running, attempts at maximum | `RetryBudgetExhausted` | recovery must choose and persist a terminal policy |
+| running | `InspectRequired` | ownership inspection must resolve the active attempt; direct execution is forbidden |
 | any terminal state | `Terminal` | classifier result for an explicitly supplied operation; terminal rows are omitted from the incomplete list |
 
 Classification does not itself retry, inspect runtime reality, mark failure,
 or assume whether a prior side effect occurred. Re-adoption and ambiguous
 outcome policy belong to Phase C recovery and must use ownership evidence.
-No API currently supersedes an active attempt token. Such an API may be added
-only with the Phase C ownership-inspection proof in the same bounded change.
+The restart capability returns the opaque active token to the recovery layer;
+transport handles and ordinary operation responses do not expose it. No API
+currently supersedes an active attempt token. Such an API may be added only
+with the Phase C ownership-inspection proof in the same bounded change.
+
+A claim result distinguishes `Acquired` from `Replay`. Only `Acquired`
+authorizes the caller to cross the external side-effect boundary. `Replay`
+resolves a previously ambiguous claim response and never authorizes another
+effect. Terminal writes persist the completing token; replaying the exact token,
+status, result, and error returns a completion replay, while every mismatch
+conflicts.
 
 ## 7. Dependencies and authority guards
 

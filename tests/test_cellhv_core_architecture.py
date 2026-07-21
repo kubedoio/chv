@@ -337,6 +337,31 @@ class ArchitectureGuardTests(unittest.TestCase):
             errors = GUARD.check(root)
             self.assertTrue(any("must not construct, alias, or own" in error for error in errors))
 
+    def test_transport_cannot_receive_execution_handle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/lib.rs"
+            path.write_text(
+                path.read_text() + "\npub fn leak(_: ExecutionHandle) {}\n",
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("execution capability is restricted" in error for error in errors))
+
+    def test_runtime_cannot_construct_execution_capability_before_executor_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-runtime-ch/src/process.rs"
+            path.write_text(
+                path.read_text()
+                + "\nfn bypass() { AuthorityActor::spawn_with_execution(); }\n",
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("execution capability is restricted" in error for error in errors))
+
     def test_native_api_operation_service_alias_in_another_module_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
