@@ -349,6 +349,63 @@ class ArchitectureGuardTests(unittest.TestCase):
                 )
             )
 
+    def test_recovery_cannot_depend_on_executor_or_runtime(self):
+        for dependency in ("cellhv-core-executor", "chv-agent-runtime-ch"):
+            with self.subTest(dependency=dependency), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.copy_baseline(root)
+                path = root / "crates/cellhv-core-recovery/Cargo.toml"
+                text = path.read_text().replace(
+                    "[dependencies]\n",
+                    f'[dependencies]\n{dependency} = {{ path = "../{dependency}" }}\n',
+                    1,
+                )
+                path.write_text(text, encoding="utf-8")
+                self.assertTrue(
+                    any(
+                        "cellhv-core-recovery: dependency boundary forbids" in error
+                        for error in GUARD.check(root)
+                    )
+                )
+
+    def test_agent_cannot_wire_recovery_assessment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "cmd/chv-agent/Cargo.toml"
+            path.write_text(
+                path.read_text().replace(
+                    "[dependencies]\n",
+                    '[dependencies]\nrecovery = { package = "cellhv-core-recovery", '
+                    'path = "../../crates/cellhv-core-recovery" }\n',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("assessment-only recovery must remain production-unwired" in error
+                    for error in GUARD.check(root))
+            )
+
+    def test_executor_cannot_wire_recovery_assessment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-executor/Cargo.toml"
+            path.write_text(
+                path.read_text().replace(
+                    "[dependencies]\n",
+                    '[dependencies]\ncellhv-core-recovery = '
+                    '{ path = "../cellhv-core-recovery" }\n',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("assessment-only recovery must remain production-unwired" in error
+                    for error in GUARD.check(root))
+            )
+
     def test_api_cannot_depend_on_runtime_ownership(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

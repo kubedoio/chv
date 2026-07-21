@@ -7,7 +7,9 @@
 //! Duplicate proof therefore remains unavailable and classification preserves
 //! ambiguity instead of permitting adoption.
 
-use cellhv_core_runtime_ownership::{FileIdentity, Observation, ProcessIdentity, SocketIdentity};
+use cellhv_core_runtime_ownership::{
+    DuplicateEvidence, FileIdentity, Observation, ProcessIdentity, SocketIdentity,
+};
 use cellhv_core_types::VmId;
 use nix::libc;
 use std::ffi::{CStr, CString};
@@ -254,12 +256,12 @@ impl Observation for LinuxOwnershipObservation {
         Ok(result == 0)
     }
 
-    fn duplicate_candidates(&self, vm: &VmId) -> Result<bool, Self::Error> {
+    fn duplicate_evidence(&self, vm: &VmId) -> Result<DuplicateEvidence, Self::Error> {
         if vm != &self.expected_vm {
             return Err(LinuxObservationError::IdentityChanged);
         }
-        self.transition(SessionState::Initial, SessionState::Terminal)?;
-        Err(LinuxObservationError::CapabilityUnavailable)
+        self.transition(SessionState::Initial, SessionState::DuplicateChecked)?;
+        Ok(DuplicateEvidence::Indeterminate)
     }
 }
 
@@ -560,6 +562,7 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
+    use std::process::{Command, Stdio};
     use std::thread;
     use tempfile::TempDir;
 
@@ -640,17 +643,28 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_proof_is_deliberately_unavailable() {
+    fn duplicate_step_is_indeterminate_but_preserves_future_inspection_order() {
         let temp = trusted_tempdir();
         let vm = VmId::new("vm-1").unwrap();
         let observer =
             LinuxOwnershipObservation::open(temp.path(), std::process::id(), vm.clone()).unwrap();
         assert!(matches!(
-            observer.duplicate_candidates(&vm),
-            Err(LinuxObservationError::CapabilityUnavailable)
+            observer.duplicate_evidence(&vm),
+            Ok(DuplicateEvidence::Indeterminate)
+        ));
+        assert!(observer
+            .process_before(std::process::id())
+            .unwrap()
+            .is_some());
+
+        let repeated =
+            LinuxOwnershipObservation::open(temp.path(), std::process::id(), vm.clone()).unwrap();
+        assert!(matches!(
+            repeated.duplicate_evidence(&vm),
+            Ok(DuplicateEvidence::Indeterminate)
         ));
         assert!(matches!(
-            observer.duplicate_candidates(&vm),
+            repeated.duplicate_evidence(&vm),
             Err(LinuxObservationError::IdentityChanged)
         ));
     }
@@ -800,6 +814,90 @@ mod tests {
             observer.process(123),
             Err(LinuxObservationError::InvalidProcess)
         ));
+    }
+
+    #[test]
+    fn oversized_proc_stat_fails_before_parsing() {
+        let runtime = trusted_tempdir();
+        let proc = trusted_tempdir();
+        fs::create_dir(proc.path().join("123")).unwrap();
+        fs::write(proc.path().join("123/stat"), vec![b'x'; MAX_PROC_BYTES + 1]).unwrap();
+        let observer = LinuxOwnershipObservation::open_with_proc(
+            runtime.path(),
+            proc.path(),
+            123,
+            VmId::new("vm-1").unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            observer.process(123),
+            Err(LinuxObservationError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn pidfd_reports_subprocess_exit_during_ordered_observation() {
+        let temp = trusted_tempdir();
+        let vm_dir = temp.path().join("vm-1");
+        fs::create_dir(&vm_dir).unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let observer =
+            LinuxOwnershipObservation::open(temp.path(), pid, VmId::new("vm-1").unwrap()).unwrap();
+
+        assert_eq!(
+            observer
+                .duplicate_evidence(&VmId::new("vm-1").unwrap())
+                .unwrap(),
+            DuplicateEvidence::Indeterminate
+        );
+        assert!(observer.process_before(pid).unwrap().is_some());
+        assert!(observer
+            .socket(&VmId::new("vm-1").unwrap())
+            .unwrap()
+            .is_none());
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(observer.process_after(pid).unwrap().is_none());
+        assert!(!observer.pidfd_alive(pid).unwrap());
+    }
+
+    #[test]
+    fn symlinked_runtime_root_ancestor_is_rejected() {
+        let parent = trusted_tempdir();
+        let target = trusted_tempdir();
+        fs::create_dir(target.path().join("runtime")).unwrap();
+        symlink(target.path(), parent.path().join("redirect")).unwrap();
+        assert!(LinuxOwnershipObservation::open(
+            &parent.path().join("redirect/runtime"),
+            std::process::id(),
+            VmId::new("vm-1").unwrap(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn writable_runtime_root_ancestor_is_rejected() {
+        let parent = trusted_tempdir();
+        let runtime = parent.path().join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(parent.path()).unwrap().permissions();
+        permissions.set_mode(0o770);
+        fs::set_permissions(parent.path(), permissions).unwrap();
+        assert!(LinuxOwnershipObservation::open(
+            &runtime,
+            std::process::id(),
+            VmId::new("vm-1").unwrap(),
+        )
+        .is_err());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 # CellHV Core Native Runtime Owner
 
-Status: Phase B native-only library slice; not wired into `cmd/chv-agent`.
+Status: Phase B native-only slice; wired only by `cmd/chv-agent`'s explicit,
+default-off `core-native` authority mode.
 
 `cellhv-core-runtime-owner::CoreRuntimeOwner` is the bounded composition root
 for a fresh native Core database and its later native restart. It consumes an
@@ -38,4 +39,5 @@ production integration must await explicit shutdown to release the lease.
 The public `OperationService` and lower-level actor/listener constructors remain
 available for existing tests and libraries. Therefore this slice is positive
 evidence for the `CoreRuntimeOwner` path only, not proof that production has no
-other construction path.
+other construction path. It also does not compose the journal executor, Cloud
+Hypervisor runtime, ownership observation, or recovery assessment path.

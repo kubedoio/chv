@@ -273,7 +273,7 @@ struct FakeObservation {
     after: Result<Option<ProcessIdentity>, ()>,
     alive: Result<bool, ()>,
     socket: Result<Option<SocketIdentity>, ()>,
-    duplicate: Result<bool, ()>,
+    duplicate: Result<DuplicateEvidence, ()>,
 }
 
 impl Observation for FakeObservation {
@@ -290,7 +290,7 @@ impl Observation for FakeObservation {
     fn pidfd_alive(&self, _: u32) -> Result<bool, Self::Error> {
         self.alive
     }
-    fn duplicate_candidates(&self, _: &VmId) -> Result<bool, Self::Error> {
+    fn duplicate_evidence(&self, _: &VmId) -> Result<DuplicateEvidence, Self::Error> {
         self.duplicate
     }
 }
@@ -327,7 +327,7 @@ fn observation(value: &OwnerMarkerV1) -> FakeObservation {
             peer_uid: value.uid,
             api_live: true,
         })),
-        duplicate: Ok(false),
+        duplicate: Ok(DuplicateEvidence::Exclusive),
     }
 }
 
@@ -476,10 +476,22 @@ fn classification_requires_revalidated_process_socket_peer_and_liveness_identity
         Classification::AmbiguousPreserve
     );
     let mut duplicate = observation(&value);
-    duplicate.duplicate = Ok(true);
+    duplicate.duplicate = Ok(DuplicateEvidence::Conflict);
     assert_eq!(
         inspect(&requested(), Ok(value.clone()), &duplicate),
         Classification::DuplicateConflict
+    );
+    let mut indeterminate = observation(&value);
+    indeterminate.duplicate = Ok(DuplicateEvidence::Indeterminate);
+    assert_eq!(
+        inspect(&requested(), Ok(value.clone()), &indeterminate),
+        Classification::AmbiguousPreserve
+    );
+    let mut duplicate_error = observation(&value);
+    duplicate_error.duplicate = Err(());
+    assert_eq!(
+        inspect(&requested(), Ok(value.clone()), &duplicate_error),
+        Classification::AmbiguousPreserve
     );
     let mut failed = observation(&value);
     failed.before = Err(());

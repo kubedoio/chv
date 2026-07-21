@@ -557,6 +557,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellhv-core-recovery"
+version = "0.1.0"
+dependencies = [
+ "cellhv-core-operations",
+ "cellhv-core-runtime-ownership",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cellhv-core-runtime-owner"
 version = "0.1.0"
 dependencies = [

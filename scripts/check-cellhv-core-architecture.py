@@ -27,6 +27,7 @@ CORE_MANIFESTS = (
     "crates/cellhv-core-operations/Cargo.toml",
     "crates/cellhv-core-executor/Cargo.toml",
     "crates/cellhv-core-runtime-ownership/Cargo.toml",
+    "crates/cellhv-core-recovery/Cargo.toml",
     "crates/cellhv-core-api/Cargo.toml",
     "crates/cellhv-nodecache-migration/Cargo.toml",
     "crates/cellhv-core-startup/Cargo.toml",
@@ -61,6 +62,7 @@ CORE_STORE_PACKAGE = "cellhv-core-store"
 CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
 CORE_EXECUTOR_PACKAGE = "cellhv-core-executor"
 CORE_RUNTIME_OWNERSHIP_PACKAGE = "cellhv-core-runtime-ownership"
+CORE_RECOVERY_PACKAGE = "cellhv-core-recovery"
 LINUX_OBSERVATION_OWNER = Path("crates/chv-agent-runtime-ch")
 LINUX_OBSERVATION_MODULE = Path("crates/chv-agent-runtime-ch/src/lib.rs")
 AGENT_COMMAND_PACKAGE = "chv-agent"
@@ -96,6 +98,12 @@ RUNTIME_OWNERSHIP_ALLOWED_DEPENDENCIES = {
     "cellhv-core-types",
     "libc",
     "serde",
+    "serde_json",
+    "thiserror",
+}
+RECOVERY_ALLOWED_DEPENDENCIES = {
+    "cellhv-core-operations",
+    "cellhv-core-runtime-ownership",
     "serde_json",
     "thiserror",
 }
@@ -291,6 +299,22 @@ def check(root: Path) -> list[str]:
         errors.append(
             f"{CORE_RUNTIME_OWNERSHIP_PACKAGE}: dependency boundary forbids "
             f"{unexpected_ownership_dependencies}"
+        )
+    unexpected_recovery_dependencies = sorted(
+        dependency_graph.get(CORE_RECOVERY_PACKAGE, set()) - RECOVERY_ALLOWED_DEPENDENCIES
+    )
+    if unexpected_recovery_dependencies:
+        errors.append(
+            f"{CORE_RECOVERY_PACKAGE}: dependency boundary forbids "
+            f"{unexpected_recovery_dependencies}"
+        )
+    recovery_dependents = sorted(
+        name for name, dependencies in dependency_graph.items() if CORE_RECOVERY_PACKAGE in dependencies
+    )
+    if recovery_dependents:
+        errors.append(
+            f"{CORE_RECOVERY_PACKAGE}: assessment-only recovery must remain production-unwired; "
+            f"depended on by {recovery_dependents}"
         )
 
     # Process identity is a runtime-backend capability. Transports,

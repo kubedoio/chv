@@ -11,7 +11,8 @@ pub use authority_actor::{
 
 use cellhv_core_store::{AcceptOperation, CoreStore};
 pub use cellhv_core_store::{
-    Acceptance, AcceptedOperation, HostRecord, MigrationDisposition, OperationJournalEntry,
+    Acceptance, AcceptedOperation, AssessmentDisposition, HostRecord, MigrationDisposition,
+    OperationJournalEntry, RecoveryAssessmentRecord, RecoveryClassification, RecoveryDisposition,
 };
 use cellhv_core_types::{
     canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
@@ -104,6 +105,15 @@ pub struct RestartOperation {
     pub entry: OperationJournalEntry,
     pub disposition: RestartDisposition,
     pub active_attempt_token: Option<AttemptToken>,
+    pub recovery_assessment: Option<RecoveryAssessmentRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveryAssessment {
+    pub expected_assessment_revision: u64,
+    pub classification: RecoveryClassification,
+    pub disposition: RecoveryDisposition,
+    pub evidence: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -325,6 +335,7 @@ impl OperationService {
             .list_incomplete_execution_operations()?
             .into_iter()
             .map(|record| {
+                let operation_id = record.entry.operation.id.clone();
                 Ok(RestartOperation {
                     disposition: classify_restart(&record.entry.operation),
                     entry: record.entry,
@@ -332,9 +343,27 @@ impl OperationService {
                         .active_attempt_token
                         .map(AttemptToken::new)
                         .transpose()?,
+                    recovery_assessment: self.store.latest_recovery_assessment(&operation_id)?,
                 })
             })
             .collect::<Result<Vec<_>>>()
+    }
+
+    #[allow(dead_code)] // Compiler-inaccessible outside this production-unwired crate.
+    pub(crate) fn record_recovery_assessment(
+        &mut self,
+        id: &OperationId,
+        attempt_token: &AttemptToken,
+        assessment: RecoveryAssessment,
+    ) -> Result<cellhv_core_store::RecordedRecoveryAssessment> {
+        Ok(self.store.record_recovery_assessment(
+            id,
+            attempt_token.as_str(),
+            assessment.expected_assessment_revision,
+            assessment.classification,
+            assessment.disposition,
+            &assessment.evidence,
+        )?)
     }
 
     pub fn vm(&self, id: &VmId) -> Result<VmDefinition> {
@@ -1003,6 +1032,140 @@ mod tests {
         assert!(matches!(
             service.finish(&id, &token, TerminalOutcome::Succeeded(None)),
             Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+    }
+
+    #[test]
+    fn recovery_assessments_append_replay_and_never_resolve_running() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("recovery"),
+                },
+                "op-recovery",
+                "create-recovery",
+                1,
+            ))
+            .unwrap();
+        let id = OperationId::new("op-recovery").unwrap();
+        let token = AttemptToken::new("attempt-recovery").unwrap();
+        service.claim_attempt(&id, &token).unwrap();
+        let first = RecoveryAssessment {
+            expected_assessment_revision: 0,
+            classification: RecoveryClassification::AmbiguousPreserve,
+            disposition: RecoveryDisposition::Quarantined,
+            evidence: serde_json::json!({"reason":"duplicate proof unavailable"}),
+        };
+        let applied = service
+            .record_recovery_assessment(&id, &token, first.clone())
+            .unwrap();
+        assert_eq!(applied.disposition, AssessmentDisposition::Applied);
+        assert_eq!(applied.record.revision, 1);
+        let replay = service
+            .record_recovery_assessment(&id, &token, first)
+            .unwrap();
+        assert_eq!(replay.disposition, AssessmentDisposition::Replay);
+
+        let second = RecoveryAssessment {
+            expected_assessment_revision: 1,
+            classification: RecoveryClassification::ExitedOwned,
+            disposition: RecoveryDisposition::ExitedPendingPolicy,
+            evidence: serde_json::json!({"process":"absent","pidfd_alive":false}),
+        };
+        let appended = service
+            .record_recovery_assessment(&id, &token, second)
+            .unwrap();
+        assert_eq!(appended.record.revision, 2);
+        let restart = service.restart_operations().unwrap();
+        assert_eq!(restart[0].disposition, RestartDisposition::InspectRequired);
+        assert_eq!(restart[0].active_attempt_token.as_ref().unwrap(), &token);
+        assert_eq!(restart[0].recovery_assessment.as_ref().unwrap().revision, 2);
+        assert_eq!(
+            service.operation(&id).unwrap().operation.status,
+            OperationStatus::Running
+        );
+        let recovery_events = service
+            .events_after(0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "operation.recovery_assessed")
+            .count();
+        assert_eq!(recovery_events, 2);
+    }
+
+    #[test]
+    fn recovery_assessment_rejects_wrong_token_stale_revision_and_invalid_mapping() {
+        let (_dir, _path, mut service) = service();
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("fenced"),
+                },
+                "op-fenced",
+                "create-fenced",
+                1,
+            ))
+            .unwrap();
+        let id = OperationId::new("op-fenced").unwrap();
+        let token = AttemptToken::new("attempt-fenced").unwrap();
+        service.claim_attempt(&id, &token).unwrap();
+        let assessment = RecoveryAssessment {
+            expected_assessment_revision: 0,
+            classification: RecoveryClassification::ForeignConflict,
+            disposition: RecoveryDisposition::Quarantined,
+            evidence: serde_json::json!({"host":"different"}),
+        };
+        assert!(matches!(
+            service.record_recovery_assessment(
+                &id,
+                &AttemptToken::new("wrong").unwrap(),
+                assessment.clone()
+            ),
+            Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+        service
+            .record_recovery_assessment(&id, &token, assessment)
+            .unwrap();
+        let stale = RecoveryAssessment {
+            expected_assessment_revision: 0,
+            classification: RecoveryClassification::ExitedOwned,
+            disposition: RecoveryDisposition::ExitedPendingPolicy,
+            evidence: serde_json::json!({"process":"absent"}),
+        };
+        assert!(matches!(
+            service.record_recovery_assessment(&id, &token, stale),
+            Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+        let invalid = RecoveryAssessment {
+            expected_assessment_revision: 1,
+            classification: RecoveryClassification::OwnershipMatched,
+            disposition: RecoveryDisposition::Quarantined,
+            evidence: serde_json::json!({}),
+        };
+        assert!(matches!(
+            service.record_recovery_assessment(&id, &token, invalid),
+            Err(OperationServiceError::Store(StoreError::InvalidDomain(_)))
+        ));
+        let oversized = RecoveryAssessment {
+            expected_assessment_revision: 1,
+            classification: RecoveryClassification::AmbiguousPreserve,
+            disposition: RecoveryDisposition::Quarantined,
+            evidence: serde_json::json!({"detail":"x".repeat(17 * 1024)}),
+        };
+        assert!(matches!(
+            service.record_recovery_assessment(&id, &token, oversized),
+            Err(OperationServiceError::Store(StoreError::InvalidDomain(_)))
+        ));
+        let scalar = RecoveryAssessment {
+            expected_assessment_revision: 1,
+            classification: RecoveryClassification::AmbiguousPreserve,
+            disposition: RecoveryDisposition::Quarantined,
+            evidence: serde_json::json!("not-structured"),
+        };
+        assert!(matches!(
+            service.record_recovery_assessment(&id, &token, scalar),
+            Err(OperationServiceError::Store(StoreError::InvalidDomain(_)))
         ));
     }
 }

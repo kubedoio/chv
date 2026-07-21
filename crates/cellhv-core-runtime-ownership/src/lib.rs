@@ -479,13 +479,25 @@ pub struct RequestedOwner {
     pub config_fingerprint: String,
 }
 
+/// Result of checking whether another process may own the VM.
+///
+/// `Exclusive` is a positive proof, not merely the absence of a candidate in
+/// a best-effort process scan. Implementations that cannot establish that
+/// proof must return `Indeterminate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateEvidence {
+    Conflict,
+    Exclusive,
+    Indeterminate,
+}
+
 pub trait Observation {
     type Error;
     fn process_before(&self, pid: u32) -> Result<Option<ProcessIdentity>, Self::Error>;
     fn socket(&self, vm: &VmId) -> Result<Option<SocketIdentity>, Self::Error>;
     fn process_after(&self, pid: u32) -> Result<Option<ProcessIdentity>, Self::Error>;
     fn pidfd_alive(&self, pid: u32) -> Result<bool, Self::Error>;
-    fn duplicate_candidates(&self, vm: &VmId) -> Result<bool, Self::Error>;
+    fn duplicate_evidence(&self, vm: &VmId) -> Result<DuplicateEvidence, Self::Error>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -518,9 +530,10 @@ pub fn inspect<O: Observation>(
     {
         return Classification::ForeignConflict;
     }
-    match observations.duplicate_candidates(&marker.vm_id) {
-        Ok(true) => return Classification::DuplicateConflict,
-        Ok(false) => {}
+    match observations.duplicate_evidence(&marker.vm_id) {
+        Ok(DuplicateEvidence::Conflict) => return Classification::DuplicateConflict,
+        Ok(DuplicateEvidence::Exclusive) => {}
+        Ok(DuplicateEvidence::Indeterminate) => return Classification::AmbiguousPreserve,
         Err(_) => return Classification::AmbiguousPreserve,
     }
     let process_before = match observations.process_before(marker.pid) {

@@ -1,6 +1,6 @@
 # CellHV Core Runtime Ownership Recovery Boundary
 
-**Status:** Phase C design baseline; not production-wired  
+**Status:** Phase C evidence library; runtime inspection and recovery remain production-unwired
 **Authority:** `chv-agent` remains the sole VM lifecycle authority
 
 This boundary verifies whether an existing Cloud Hypervisor process may be
@@ -112,7 +112,7 @@ trait Observation {
     fn socket(&self, vm: &VmId) -> Result<Option<SocketIdentity>, Self::Error>;
     fn process_after(&self, pid: u32) -> Result<Option<ProcessIdentity>, Self::Error>;
     fn pidfd_alive(&self, pid: u32) -> Result<bool, Self::Error>;
-    fn duplicate_candidates(&self, vm: &VmId) -> Result<bool, Self::Error>;
+    fn duplicate_evidence(&self, vm: &VmId) -> Result<DuplicateEvidence, Self::Error>;
 }
 ```
 
@@ -127,6 +127,11 @@ re-adopted process handle behind one control interface. The current launch path 
 its `HashMap<Uuid, VmProcess>` remain unchanged in this slice. No executor or
 production composition may call inspection until durable recovery transitions
 and their acceptance evidence are reviewed.
+
+The explicit, default-off `core-native` authority mode is now wired into
+`cmd/chv-agent`, but it composes only durable authority and the native API.
+It does not compose this ownership observer, a VM runtime, the executor, or a
+recovery transition.
 
 ## Machine-enforced boundary and evidence level
 
@@ -145,9 +150,9 @@ visibility declaration, transitive dependency rule, implementation location,
 aliases, and non-main agent modules.
 
 An unwired `LinuxOwnershipObservation` now collects bounded process, pidfd,
-socket, peer-credential, and API-probe evidence. Its duplicate-candidate method
-returns `CapabilityUnavailable`; because the classifier treats unavailable
-duplicate proof as ambiguity, it cannot currently yield a positive real-world
+socket, peer-credential, and API-probe evidence. Its duplicate-evidence method
+returns `Indeterminate`; because the classifier requires `Exclusive` to
+continue, it cannot currently yield a positive real-world
 ownership classification. This is intentional fail-closed incompleteness, not
 recovery readiness.
 

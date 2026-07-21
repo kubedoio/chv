@@ -1,6 +1,7 @@
 # CellHV Core Startup Authority Coordinator
 
-Status: Phase B library and fault-injection tests; not wired into production.
+Status: Phase B library and fault-injection tests; wired only by the explicit,
+default-off `core-native` authority mode.
 
 ## Boundary
 
@@ -10,7 +11,10 @@ process, storage attachment, or network attachment. All database access passes
 through `cellhv-core-operations::OperationService`; NodeCache conversion passes
 through `cellhv-nodecache-migration`.
 
-Neither `cmd/chv-agent` nor its current launch/reconcile paths call this crate.
+`cmd/chv-agent` calls this boundary only when the operator explicitly selects
+`core-native` authority mode. The default legacy launch/reconcile path remains
+unchanged, and the Core-native path does not launch, inspect, recover, or
+manage a VM process.
 
 `StartupTransaction::begin` is the activation boundary intended for that
 wiring. It acquires the non-blocking process-lifetime `RuntimeAuthorityLease`
@@ -28,8 +32,9 @@ For agent composition, `prepare_activation` returns an opaque
 `chv-agent-core::AgentCoreActivation::from_pending` verifies the checksum,
 parses those bytes, constructs the crate-private Core-mode cache facade, and
 only then calls `finish` to release the lock. With no live cache it returns no
-facade and never synthesizes a replacement JSON file. This composition remains
-unwired in production.
+facade and never synthesizes a replacement JSON file. This composition is
+wired only into the explicit `core-native` authority mode. VM runtime,
+executor, and recovery composition remain unwired.
 
 The direct `activate` boundary activates only the Core database. It does not
 construct or authorize `NodeCacheAuthority`, select a process-wide cache mode, wire
@@ -112,5 +117,6 @@ that an apparently empty JSON document is disposable.
 
 The pure resolution and explicit fresh-create primitives now exist in
 `cellhv-core-startup` and are specified in
-`docs/specs/cellhv-core-host-identity-resolution.md`. They remain unwired;
-`InitializeFreshCore` itself still neither selects an ID nor creates a store.
+`docs/specs/cellhv-core-host-identity-resolution.md`. The explicit
+`core-native` composition uses them; `InitializeFreshCore` itself still
+neither selects an ID nor creates a store.
