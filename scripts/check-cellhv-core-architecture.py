@@ -26,6 +26,7 @@ CORE_MANIFESTS = (
     "crates/cellhv-core-store/Cargo.toml",
     "crates/cellhv-core-operations/Cargo.toml",
     "crates/cellhv-core-executor/Cargo.toml",
+    "crates/cellhv-core-runtime-ownership/Cargo.toml",
     "crates/cellhv-core-api/Cargo.toml",
     "crates/cellhv-nodecache-migration/Cargo.toml",
     "crates/cellhv-core-startup/Cargo.toml",
@@ -59,6 +60,7 @@ STORE_DEPENDENCIES = {"rusqlite", "sqlx", "libsqlite3-sys"}
 CORE_STORE_PACKAGE = "cellhv-core-store"
 CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
 CORE_EXECUTOR_PACKAGE = "cellhv-core-executor"
+CORE_RUNTIME_OWNERSHIP_PACKAGE = "cellhv-core-runtime-ownership"
 STORE_ALLOWED_CORE_DEPENDENCIES = {"cellhv-core-types"}
 OPERATIONS_ALLOWED_DEPENDENCIES = {
     "async-channel",
@@ -77,6 +79,13 @@ EXECUTOR_ALLOWED_DEPENDENCIES = {
     "thiserror",
     "tokio",
     "uuid",
+}
+RUNTIME_OWNERSHIP_ALLOWED_DEPENDENCIES = {
+    "cellhv-core-types",
+    "libc",
+    "serde",
+    "serde_json",
+    "thiserror",
 }
 OPERATION_AUTHORITY_DECLARATION = re.compile(
     r"\b(?:struct|enum|trait|type)\s+"
@@ -261,6 +270,15 @@ def check(root: Path) -> list[str]:
         errors.append(
             f"{CORE_EXECUTOR_PACKAGE}: dependency boundary forbids "
             f"{unexpected_executor_dependencies}"
+        )
+    unexpected_ownership_dependencies = sorted(
+        dependency_graph.get(CORE_RUNTIME_OWNERSHIP_PACKAGE, set())
+        - RUNTIME_OWNERSHIP_ALLOWED_DEPENDENCIES
+    )
+    if unexpected_ownership_dependencies:
+        errors.append(
+            f"{CORE_RUNTIME_OWNERSHIP_PACKAGE}: dependency boundary forbids "
+            f"{unexpected_ownership_dependencies}"
         )
 
     for source_root in (root / "cmd", root / "crates"):
