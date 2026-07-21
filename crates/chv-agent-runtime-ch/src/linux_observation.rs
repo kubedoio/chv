@@ -264,7 +264,7 @@ impl Observation for LinuxOwnershipObservation {
 
         let mut count = 0;
         let start = Instant::now();
-        let vm_sock_suffix = format!("{}/vm.sock", vm.as_str());
+        let vm_sock_suffix = format!("/{}/vm.sock", vm.as_str());
         let vm_sock_suffix_bytes = vm_sock_suffix.as_bytes();
 
         let proc_fd = self.proc_root.as_raw_fd();
