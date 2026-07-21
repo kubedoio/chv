@@ -338,8 +338,18 @@ pub fn load_nwd_config(path: Option<&Path>) -> Result<NwdConfig, ConfigError> {
     Ok(cfg)
 }
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentAuthorityMode {
+    #[default]
+    Legacy,
+    CoreNative,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
+    #[serde(default)]
+    pub authority_mode: AgentAuthorityMode,
     pub socket_path: PathBuf,
     pub runtime_dir: PathBuf,
     pub log_level: String,
@@ -350,6 +360,12 @@ pub struct AgentConfig {
     pub stord_binary_path: PathBuf,
     pub nwd_binary_path: PathBuf,
     pub cache_path: PathBuf,
+    #[serde(default = "default_core_store_path")]
+    pub core_store_path: PathBuf,
+    #[serde(default = "default_core_api_socket_path")]
+    pub core_api_socket_path: PathBuf,
+    #[serde(default = "default_core_archive_path")]
+    pub core_archive_path: PathBuf,
     pub node_id: String,
     pub metrics_bind: Option<String>,
     pub tls_cert_path: Option<PathBuf>,
@@ -367,6 +383,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            authority_mode: AgentAuthorityMode::Legacy,
             socket_path: PathBuf::from("/run/chv/agent/api.sock"),
             runtime_dir: PathBuf::from("/var/lib/chv/agent"),
             log_level: "info".to_string(),
@@ -377,6 +394,9 @@ impl Default for AgentConfig {
             stord_binary_path: PathBuf::from("/usr/bin/chv-stord"),
             nwd_binary_path: PathBuf::from("/usr/bin/chv-nwd"),
             cache_path: PathBuf::from("/var/lib/chv/cache/agent-cache.json"),
+            core_store_path: default_core_store_path(),
+            core_api_socket_path: default_core_api_socket_path(),
+            core_archive_path: default_core_archive_path(),
             node_id: String::new(),
             metrics_bind: None,
             tls_cert_path: None,
@@ -388,6 +408,18 @@ impl Default for AgentConfig {
             jwt_secret: default_agent_jwt_secret(),
         }
     }
+}
+
+fn default_core_store_path() -> PathBuf {
+    PathBuf::from("/var/lib/chv/agent/core.db")
+}
+
+fn default_core_api_socket_path() -> PathBuf {
+    PathBuf::from("/run/chv/core/core-v1.sock")
+}
+
+fn default_core_archive_path() -> PathBuf {
+    PathBuf::from("/var/lib/chv/agent/node-cache-v1.archive")
 }
 
 fn default_storage_base_dir() -> PathBuf {
@@ -408,10 +440,16 @@ pub fn load_agent_config(path: Option<&Path>) -> Result<AgentConfig, ConfigError
         let text = std::fs::read_to_string(p)?;
         cfg = toml::from_str(&text)?;
     }
-    if cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32 {
+    materialize_agent_jwt_secret(&mut cfg);
+    Ok(cfg)
+}
+
+fn materialize_agent_jwt_secret(cfg: &mut AgentConfig) {
+    if cfg.authority_mode == AgentAuthorityMode::Legacy
+        && (cfg.jwt_secret == "chv-dev-secret-change-in-production" || cfg.jwt_secret.len() < 32)
+    {
         cfg.jwt_secret = resolve_jwt_secret(&cfg.jwt_secret, "agent");
     }
-    Ok(cfg)
 }
 
 const DEFAULT_CONTROLPLANE_GRPC_BIND: &str = "127.0.0.1:8443";
@@ -618,6 +656,14 @@ jwt_secret = "tooshort"
             .expect("should succeed with auto-generated secret");
         assert_ne!(cfg.jwt_secret, "tooshort");
         assert!(cfg.jwt_secret.len() >= 32);
+        assert_eq!(
+            cfg.core_store_path,
+            PathBuf::from("/var/lib/chv/agent/core.db")
+        );
+        assert_eq!(
+            cfg.core_api_socket_path,
+            PathBuf::from("/run/chv/core/core-v1.sock")
+        );
     }
 
     #[test]
@@ -691,5 +737,31 @@ max_lifetime_secs = 1200
             config.tls.client_ca_path,
             Some(PathBuf::from("/tmp/ca.crt"))
         );
+    }
+
+    #[test]
+    fn agent_authority_mode_is_strict_and_defaults_legacy() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            authority_mode: AgentAuthorityMode,
+        }
+        let defaulted: Wrapper = toml::from_str("").unwrap();
+        assert_eq!(defaulted.authority_mode, AgentAuthorityMode::Legacy);
+        let native: Wrapper = toml::from_str("authority_mode = 'core-native'").unwrap();
+        assert_eq!(native.authority_mode, AgentAuthorityMode::CoreNative);
+        assert!(toml::from_str::<Wrapper>("authority_mode = 'core'").is_err());
+    }
+
+    #[test]
+    fn core_native_does_not_materialize_unused_jwt_secret() {
+        let mut config = AgentConfig {
+            authority_mode: AgentAuthorityMode::CoreNative,
+            jwt_secret: "short".to_owned(),
+            ..AgentConfig::default()
+        };
+        materialize_agent_jwt_secret(&mut config);
+        assert_eq!(config.authority_mode, AgentAuthorityMode::CoreNative);
+        assert_eq!(config.jwt_secret, "short");
     }
 }

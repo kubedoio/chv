@@ -1,1 +1,1 @@
-pub use chv_config::{load_agent_config, AgentConfig};
+pub use chv_config::{load_agent_config, AgentAuthorityMode, AgentConfig};

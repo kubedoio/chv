@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CellHV O3K Core Client T1 Contract Registration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile", "evidence_status", "result", "maximum_evidence_tier", "t5_eligible", "o3k_repository", "o3k_revision", "o3k_module", "core_api_contract", "scenarios", "executed_scenarios", "non_claims", "implementation_prerequisites"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "profile": {"type": "string", "enum": ["o3k-core-client-t1"]},
+    "evidence_status": {"type": "string", "enum": ["proposed-not-run"]},
+    "result": {"type": "string", "enum": ["not-run"]},
+    "maximum_evidence_tier": {"type": "string", "enum": ["T1"]},
+    "t5_eligible": {"type": "boolean"},
+    "o3k_repository": {"type": "string", "enum": ["https://github.com/kubedoio/o3k"]},
+    "o3k_revision": {"type": "string", "enum": ["53fd2cb36ee79f42da49c8181d6ceed12b41b3aa"]},
+    "o3k_module": {"type": "string", "enum": ["github.com/cobaltcore-dev/o3k"]},
+    "core_api_contract": {"type": "string", "enum": ["crates/cellhv-core-api/contract/cellhv-core-api-v1.json"]},
+    "scenarios": {"type": "array", "minItems": 5, "items": {"type": "string", "enum": ["OCORE-001", "OCORE-002", "OCORE-003", "OCORE-004", "OCORE-005"]}},
+    "executed_scenarios": {"type": "array", "items": {"type": "string"}},
+    "non_claims": {"type": "array", "minItems": 3, "items": {"type": "string", "minLength": 1}},
+    "implementation_prerequisites": {"type": "array", "minItems": 3, "items": {"type": "string", "minLength": 1}}
+  }
+}

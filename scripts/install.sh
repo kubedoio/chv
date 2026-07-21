@@ -214,6 +214,8 @@ setup_user_and_dirs() {
 
     mkdir -p "$CHV_CONFIG_DIR"/certs
     mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk,storage/lvm}
+    install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/agent" "$CHV_DATA_DIR/cache" "$CHV_RUN_DIR/core"
+    install -d -m 0775 -o "$CHV_USER" -g "$CHV_USER" "$CHV_RUN_DIR/agent"
     mkdir -p "$CHV_LOG_DIR"
     mkdir -p "$CHV_RUN_DIR"/{controlplane,agent,stord,nwd}
     mkdir -p "$CHV_UI_DIR"
@@ -874,6 +876,10 @@ chv_binary_path = "/usr/bin/cloud-hypervisor"
 stord_binary_path = "/usr/bin/chv-stord"
 nwd_binary_path = "/usr/bin/chv-nwd"
 cache_path = "${CHV_DATA_DIR}/cache/agent-cache.json"
+authority_mode = "legacy"
+core_store_path = "${CHV_DATA_DIR}/agent/core.db"
+core_api_socket_path = "${CHV_RUN_DIR}/core/core-v1.sock"
+core_archive_path = "${CHV_DATA_DIR}/agent/node-cache-v1.archive"
 node_id = "${CHV_NODE_ID}"
 metrics_bind = "127.0.0.1:9901"
 storage_base_dir = "${CHV_DATA_DIR}/storage"
@@ -1007,17 +1013,20 @@ Wants=chv-controlplane.service
 
 [Service]
 Type=simple
+User=chv
 Group=chv
 UMask=002
-ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
-ExecStartPre=/bin/chown -R root:chv /run/chv
-ExecStartPre=/bin/chmod -R 775 /run/chv
+ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent /var/lib/chv/cache
 ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
 TimeoutStopSec=5
 RuntimeDirectory=chv
+RuntimeDirectoryMode=0775
+StateDirectory=chv/agent
+StateDirectoryMode=0700
+ExecStopPost=-/bin/rm -f /run/chv/agent/api.sock
 LogsDirectory=chv
 
 [Install]
@@ -1189,7 +1198,8 @@ start_services() {
         fi
     fi
 
-    # Ensure agent cache is cleared so reinstall triggers fresh enrollment
+    # Delete only the legacy enrollment cache. Core prerequisites, core.db, and
+    # its persistent runtime lease are deliberately retained.
     rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
 
     # Pre-place agent client cert so mTLS works immediately
@@ -1327,7 +1337,7 @@ BANNER
 }
 
 # -----------------------------------------------------------------------------
-# Wipe Deployment (--wipe flag: full teardown including certs, data, network)
+# Wipe Deployment (--wipe flag: teardown while preserving agent authority state)
 # -----------------------------------------------------------------------------
 wipe_deployment() {
     info "Wiping previous CHV deployment (--wipe)..."
@@ -1340,9 +1350,12 @@ wipe_deployment() {
     # Remove systemd units
     rm -f /etc/systemd/system/chv-*.service
     systemctl daemon-reload
-    # Remove ALL data, config, certs, runtime
+    # Remove replaceable deployment state. Agent authority state is persistent:
+    # deleting its database or runtime lease could orphan VM identity or create
+    # two independent lock namespaces on a concurrent-start failure.
     rm -rf "${CHV_CONFIG_DIR}"
-    rm -rf "${CHV_DATA_DIR}"
+    rm -rf "${CHV_DATA_DIR}/cache" "${CHV_DATA_DIR}/storage"
+    rm -f "${CHV_DATA_DIR}/controlplane.db"*
     rm -rf "${CHV_RUN_DIR}"
     rm -rf "${CHV_LOG_DIR}"
     rm -rf "${CHV_UI_DIR}"
@@ -1361,7 +1374,7 @@ wipe_deployment() {
     local bridge_subnet
     bridge_subnet=$(echo "${INSTALL_CHV_BRIDGE_CIDR}" | sed 's|/[0-9]*$||' | sed 's|\.[0-9]*$|.0/24|')
     iptables -t nat -D POSTROUTING -s "${bridge_subnet}" ! -o "${INSTALL_CHV_BRIDGE_NAME}" -j MASQUERADE 2>/dev/null || true
-    info "Wipe complete. Starting fresh install."
+    info "Wipe complete; persistent agent authority state was retained. Starting fresh install."
 }
 
 # -----------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 use chv_agent_core::{
     agent_server::AgentServer,
     cache::{NodeCache, PendingControlPlaneMessage},
-    config::{load_agent_config, AgentConfig},
+    config::{load_agent_config, AgentAuthorityMode, AgentConfig},
     connectivity::{ConnectivityState, ConnectivityTracker},
     console_server::ConsoleServer,
     control_plane::ControlPlaneClient,
@@ -27,6 +27,42 @@ use tracing::{info, warn};
 
 const FAILED_THRESHOLD: u32 = 6; // 6 ticks * 5s = 30s
 const CERT_ROTATION_INTERVAL_SECS: i64 = 12 * 60 * 60;
+
+async fn start_core_native(
+    config: &AgentConfig,
+) -> Result<cellhv_core_runtime_owner::CoreRuntimeOwner, Box<dyn std::error::Error>> {
+    let paths = cellhv_core_startup::StartupPaths {
+        node_cache: config.cache_path.clone(),
+        core_database: config.core_store_path.clone(),
+        node_cache_archive: config.core_archive_path.clone(),
+    };
+    let configured_seed = match config.node_id.trim() {
+        "" => None,
+        node_id => Some(node_id.to_owned()),
+    };
+    let activated = cellhv_core_startup::StartupTransaction::begin(&paths)?
+        .activate_native_only(configured_seed)?;
+    Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
+        activated,
+        &config.core_api_socket_path,
+        128,
+        Duration::from_secs(2),
+    )
+    .await?)
+}
+
+async fn run_core_native(config: &AgentConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let owner = start_core_native(config).await?;
+    info!(socket = %owner.socket_path().display(), "core-native authority ready");
+    tokio::select! {
+        _ = sigterm.recv() => info!("received SIGTERM, shutting down core-native authority"),
+        _ = sigint.recv() => info!("received SIGINT, shutting down core-native authority"),
+    }
+    owner.shutdown().await?;
+    Ok(())
+}
 
 fn initial_node_id(config: &AgentConfig) -> String {
     if config.node_id.is_empty() {
@@ -240,6 +276,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env!("CHV_GIT_SHA"),
         env!("CHV_RELEASE_CHANNEL"),
     );
+
+    if config.authority_mode == AgentAuthorityMode::CoreNative {
+        return run_core_native(&config).await;
+    }
 
     let mut cache = load_or_initialize_cache(&config).await;
 
@@ -965,6 +1005,116 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn core_config(directory: &tempfile::TempDir) -> AgentConfig {
+        let cache = directory.path().join("cache");
+        let core = directory.path().join("core");
+        let run = directory.path().join("run");
+        for path in [&cache, &core, &run] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        AgentConfig {
+            authority_mode: AgentAuthorityMode::CoreNative,
+            cache_path: cache.join("agent-cache.json"),
+            core_store_path: core.join("core.db"),
+            core_archive_path: core.join("node-cache.archive"),
+            core_api_socket_path: run.join("core.sock"),
+            node_id: "native-test-host".to_owned(),
+            ..AgentConfig::default()
+        }
+    }
+
+    async fn unix_http(config: &AgentConfig, request: &str) -> String {
+        let mut stream = tokio::net::UnixStream::connect(&config.core_api_socket_path)
+            .await
+            .unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn core_native_http_create_survives_restart_and_excludes_second_instance() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = core_config(&directory);
+        let owner = start_core_native(&config).await.unwrap();
+        assert!(start_core_native(&config).await.is_err());
+        let body = serde_json::json!({"request_id":"create-1","definition":{
+            "id":"vm-1","name":"vm-1","boot":{"kernel":"/kernel","firmware":null,"initial_disk":null},
+            "compute":{"vcpus":1,"memory_bytes":1048576},"storage":[],"networks":[],
+            "requested_power_state":"stopped","observed_power_state":"unknown","resource_version":1
+        }}).to_string();
+        let response = unix_http(
+            &config,
+            &format!("POST /v1/vms HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nIdempotency-Key: create-vm-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body),
+        ).await;
+        assert!(response.starts_with("HTTP/1.1 202"), "{response}");
+        owner.shutdown().await.unwrap();
+
+        let owner = start_core_native(&config).await.unwrap();
+        let response = unix_http(
+            &config,
+            "GET /v1/vms HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("vm-1"));
+        owner.shutdown().await.unwrap();
+        assert!(!config.cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn core_native_refuses_legacy_cache_without_creating_core_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = core_config(&directory);
+        std::fs::write(&config.cache_path, b"{}").unwrap();
+        std::fs::set_permissions(&config.cache_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert!(start_core_native(&config).await.is_err());
+        assert!(!config.core_store_path.exists());
+        assert!(!config.core_api_socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn core_native_treats_whitespace_node_id_as_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = core_config(&directory);
+        config.node_id = "  \t ".to_owned();
+        let owner = start_core_native(&config).await.unwrap();
+        let response = unix_http(
+            &config,
+            "GET /v1/host HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let body = response.split("\r\n\r\n").nth(1).unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        let id = body["identity"]["id"].as_str().unwrap();
+        assert!(!id.trim().is_empty());
+        assert_ne!(id, config.node_id);
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn core_native_listener_start_failure_releases_runtime_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = core_config(&directory);
+        std::fs::write(&config.core_api_socket_path, b"occupied").unwrap();
+        assert!(start_core_native(&config).await.is_err());
+        std::fs::remove_file(&config.core_api_socket_path).unwrap();
+        let owner = start_core_native(&config).await.unwrap();
+        owner.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn omitted_authority_mode_is_legacy_and_does_not_select_core_paths() {
+        let config = AgentConfig::default();
+        assert_eq!(config.authority_mode, AgentAuthorityMode::Legacy);
+    }
 
     #[tokio::test]
     async fn load_or_initialize_cache_preserves_persisted_state() {

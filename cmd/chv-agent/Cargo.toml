@@ -16,6 +16,8 @@ chv-observability = { path = "../../crates/chv-observability" }
 chv-agent-core = { path = "../../crates/chv-agent-core" }
 chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
 chv-errors = { path = "../../crates/chv-errors" }
+cellhv-core-startup = { path = "../../crates/cellhv-core-startup" }
+cellhv-core-runtime-owner = { path = "../../crates/cellhv-core-runtime-owner" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -23,4 +25,5 @@ axum = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = { workspace = true }

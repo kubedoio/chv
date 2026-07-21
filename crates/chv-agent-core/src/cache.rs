@@ -5,11 +5,221 @@ use control_plane_node_api::control_plane_node_api as proto;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const CACHE_VERSION: u32 = 1;
+const CACHE_FILE_MODE: u32 = 0o600;
+type SaveHook = Arc<dyn Fn() -> io::Result<()> + Send + Sync>;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Default)]
+struct SaveOrder {
+    next: u64,
+    last_committed: u64,
+}
+
+fn save_order(path: &Path) -> io::Result<Arc<Mutex<SaveOrder>>> {
+    static ORDERS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<SaveOrder>>>>> = OnceLock::new();
+    let key = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    {
+        let mut orders = ORDERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| io::Error::other("cache save order registry poisoned"))?;
+        Ok(Arc::clone(orders.entry(key).or_insert_with(|| {
+            Arc::new(Mutex::new(SaveOrder::default()))
+        })))
+    }
+}
+
+fn reserve_save(path: &Path) -> io::Result<(Arc<Mutex<SaveOrder>>, u64)> {
+    let order = save_order(path)?;
+    let sequence = {
+        let mut state = order
+            .lock()
+            .map_err(|_| io::Error::other("cache save order poisoned"))?;
+        state.next = state
+            .next
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("cache save sequence exhausted"))?;
+        state.next
+    };
+    Ok((order, sequence))
+}
+
+fn validate_cache_parent(parent: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cache parent must be a real directory, not a symlink or special file",
+        ));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cache parent must be owned by the service user",
+        ));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cache parent must not be group- or world-writable",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cache_destination(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o777 == CACHE_FILE_MODE
+                && metadata.nlink() == 1 =>
+        {
+            Ok(())
+        }
+        Ok(metadata) if metadata.file_type().is_file() => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cache destination must be owner-owned 0600 with one link",
+        )),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cache destination must be a regular file, not a symlink or special file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn validated_cache_path(path: &Path) -> Result<PathBuf, ChvError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| ChvError::InvalidArgument {
+        field: "cache_path".to_owned(),
+        reason: "must name a cache file".to_owned(),
+    })?;
+    validate_cache_parent(parent).map_err(|source| ChvError::Io {
+        path: parent.to_string_lossy().into_owned(),
+        source,
+    })?;
+    validate_cache_destination(path).map_err(|source| ChvError::Io {
+        path: path.to_string_lossy().into_owned(),
+        source,
+    })?;
+    let canonical_parent = parent.canonicalize().map_err(|source| ChvError::Io {
+        path: parent.to_string_lossy().into_owned(),
+        source,
+    })?;
+    let canonical_path = canonical_parent.join(file_name);
+    validate_cache_parent(&canonical_parent).map_err(|source| ChvError::Io {
+        path: canonical_parent.to_string_lossy().into_owned(),
+        source,
+    })?;
+    validate_cache_destination(&canonical_path).map_err(|source| ChvError::Io {
+        path: canonical_path.to_string_lossy().into_owned(),
+        source,
+    })?;
+    Ok(canonical_path)
+}
+
+fn atomic_replace_cache_inner<F, G>(
+    path: &Path,
+    contents: &[u8],
+    before_rename: F,
+    after_rename: G,
+) -> io::Result<()>
+where
+    F: FnOnce() -> io::Result<bool>,
+    G: FnOnce() -> io::Result<()>,
+{
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    validate_cache_parent(parent)?;
+    validate_cache_destination(path)?;
+
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "cache path has no file name")
+    })?;
+    let mut temp_path = PathBuf::from(parent);
+    temp_path.push(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+
+    let mut renamed = false;
+    let result = (|| {
+        let mut temp = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(CACHE_FILE_MODE)
+            .open(&temp_path)?;
+        temp.write_all(contents)?;
+        temp.flush()?;
+        temp.sync_all()?;
+        if !before_rename()? {
+            return Ok(());
+        }
+
+        // Recheck after writing to narrow the replacement race and reject a
+        // symlink or special file introduced while the temporary file was built.
+        validate_cache_destination(path)?;
+        fs::rename(&temp_path, path)?;
+        renamed = true;
+        after_rename()?;
+        fs::File::open(parent)?.sync_all()
+    })();
+
+    if !renamed {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn atomic_replace_cache(
+    path: &Path,
+    contents: &[u8],
+    order: &Mutex<SaveOrder>,
+    sequence: u64,
+    before_rename: Option<&SaveHook>,
+) -> io::Result<()> {
+    let _authority_lock = cellhv_core_fs::AuthorityLock::acquire(path)?;
+    atomic_replace_cache_inner(
+        path,
+        contents,
+        || {
+            if let Some(hook) = before_rename {
+                hook()?;
+            }
+            let state = order
+                .lock()
+                .map_err(|_| io::Error::other("cache save order poisoned"))?;
+            Ok(sequence >= state.last_committed)
+        },
+        || {
+            let mut state = order
+                .lock()
+                .map_err(|_| io::Error::other("cache save order poisoned"))?;
+            state.last_committed = state.last_committed.max(sequence);
+            Ok(())
+        },
+    )
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredStateFragment {
     pub id: String,
     pub kind: String,
@@ -238,23 +448,40 @@ impl NodeCache {
     }
 
     pub async fn save(&self, path: &Path) -> Result<(), ChvError> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ChvError::Io {
-                    path: parent.to_string_lossy().to_string(),
-                    source: e,
-                })?;
-        }
-        let text = serde_json::to_string_pretty(self).map_err(|e| ChvError::Internal {
+        self.save_ordered(path, None).await
+    }
+
+    async fn save_ordered(
+        &self,
+        path: &Path,
+        before_rename: Option<SaveHook>,
+    ) -> Result<(), ChvError> {
+        let contents = serde_json::to_vec_pretty(self).map_err(|e| ChvError::Internal {
             reason: format!("serialize error: {}", e),
         })?;
-        tokio::fs::write(path, text)
-            .await
-            .map_err(|e| ChvError::Io {
-                path: path.to_string_lossy().to_string(),
-                source: e,
-            })
+        let (order, sequence) = reserve_save(path).map_err(|e| ChvError::Io {
+            path: path.to_string_lossy().to_string(),
+            source: e,
+        })?;
+        let owned_path = path.to_path_buf();
+        let error_path = path.to_string_lossy().to_string();
+        tokio::task::spawn_blocking(move || {
+            atomic_replace_cache(
+                &owned_path,
+                &contents,
+                &order,
+                sequence,
+                before_rename.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| ChvError::Internal {
+            reason: format!("cache persistence task failed: {e}"),
+        })?
+        .map_err(|e| ChvError::Io {
+            path: error_path,
+            source: e,
+        })
     }
 
     pub fn observe_generation(&mut self, kind: &str, id: &str, generation: impl Into<String>) {
@@ -463,6 +690,7 @@ impl NodeCache {
 mod tests {
     use super::*;
     use control_plane_node_api::control_plane_node_api as proto;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     #[tokio::test]
     async fn cache_roundtrip() {
@@ -475,6 +703,240 @@ mod tests {
         let loaded = NodeCache::load(&path).await.unwrap();
         assert_eq!(loaded.node_id, "node-1");
         assert_eq!(loaded.vm_generations.get("vm-1"), Some(&"5".to_string()));
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            CACHE_FILE_MODE
+        );
+    }
+
+    #[test]
+    fn interrupted_atomic_replace_preserves_last_good_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let original = serde_json::to_vec_pretty(&NodeCache::new("node-original")).unwrap();
+        atomic_replace_cache_inner(&path, &original, || Ok(true), || Ok(())).unwrap();
+
+        let replacement = serde_json::to_vec_pretty(&NodeCache::new("node-replacement")).unwrap();
+        let error = atomic_replace_cache_inner(
+            &path,
+            &replacement,
+            || Err(io::Error::other("injected failure before rename")),
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_older_save_cannot_overwrite_newer_snapshot() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let hook: SaveHook = Arc::new(move || {
+            entered_tx
+                .lock()
+                .map_err(|_| io::Error::other("test entered lock poisoned"))?
+                .take()
+                .ok_or_else(|| io::Error::other("test hook entered more than once"))?
+                .send(())
+                .map_err(|_| io::Error::other("test entered receiver dropped"))?;
+            release_rx
+                .lock()
+                .map_err(|_| io::Error::other("test release lock poisoned"))?
+                .recv()
+                .map_err(|_| io::Error::other("test release sender dropped"))?;
+            Ok(())
+        });
+
+        let old_path = path.clone();
+        let old = tokio::spawn(async move {
+            NodeCache::new("node-old")
+                .save_ordered(&old_path, Some(hook))
+                .await
+        });
+        entered_rx.await.unwrap();
+        old.abort();
+
+        let new_path = path.clone();
+        let new = tokio::spawn(async move { NodeCache::new("node-new").save(&new_path).await });
+        let order = save_order(&path).unwrap();
+        for _ in 0..100 {
+            if order.lock().unwrap().next >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(order.lock().unwrap().next, 2);
+        release_tx.send(()).unwrap();
+        new.await.unwrap().unwrap();
+
+        assert_eq!(NodeCache::load(&path).await.unwrap().node_id, "node-new");
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+    }
+
+    #[tokio::test]
+    async fn newer_reservation_without_a_job_does_not_suppress_older_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let hook: SaveHook = Arc::new(move || {
+            entered_tx
+                .lock()
+                .map_err(|_| io::Error::other("test entered lock poisoned"))?
+                .take()
+                .ok_or_else(|| io::Error::other("test hook entered more than once"))?
+                .send(())
+                .map_err(|_| io::Error::other("test entered receiver dropped"))?;
+            release_rx
+                .lock()
+                .map_err(|_| io::Error::other("test release lock poisoned"))?
+                .recv()
+                .map_err(|_| io::Error::other("test release sender dropped"))?;
+            Ok(())
+        });
+
+        let old_path = path.clone();
+        let old = tokio::spawn(async move {
+            NodeCache::new("node-old")
+                .save_ordered(&old_path, Some(hook))
+                .await
+        });
+        entered_rx.await.unwrap();
+
+        let (_, reserved_but_never_started) = reserve_save(&path).unwrap();
+        assert_eq!(reserved_but_never_started, 2);
+        release_tx.send(()).unwrap();
+        old.await.unwrap().unwrap();
+
+        assert_eq!(NodeCache::load(&path).await.unwrap().node_id, "node-old");
+        assert_eq!(save_order(&path).unwrap().lock().unwrap().last_committed, 1);
+    }
+
+    #[tokio::test]
+    async fn cache_save_rejects_symlink_destination_without_touching_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        let path = dir.path().join("cache.json");
+        fs::write(&target, b"last-good").unwrap();
+        symlink(&target, &path).unwrap();
+
+        let result = NodeCache::new("node-1").save(&path).await;
+
+        assert!(matches!(result, Err(ChvError::Io { .. })));
+        assert_eq!(fs::read(&target).unwrap(), b"last-good");
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[tokio::test]
+    async fn cache_save_rejects_unsafe_mode_and_hardlinked_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        fs::write(&path, b"last-good").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        assert!(matches!(
+            NodeCache::new("node-1").save(&path).await,
+            Err(ChvError::Io { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"last-good");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let external = dir.path().join("external-link.json");
+        fs::hard_link(&path, &external).unwrap();
+        assert!(matches!(
+            NodeCache::new("node-1").save(&path).await,
+            Err(ChvError::Io { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"last-good");
+        assert_eq!(fs::read(&external).unwrap(), b"last-good");
+    }
+
+    #[tokio::test]
+    async fn cache_save_rejects_symlink_authority_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let lock_path = cellhv_core_fs::lock_path(&path).unwrap();
+        let target = dir.path().join("lock-target");
+        fs::write(&target, b"do-not-touch").unwrap();
+        symlink(&target, &lock_path).unwrap();
+
+        let result = NodeCache::new("node-1").save(&path).await;
+
+        assert!(matches!(result, Err(ChvError::Io { .. })));
+        assert_eq!(fs::read(&target).unwrap(), b"do-not-touch");
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn cache_save_rejects_writable_service_parent_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let unsafe_parent = dir.path().join("unsafe");
+        fs::create_dir(&unsafe_parent).unwrap();
+        fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o777)).unwrap();
+        let path = unsafe_parent.join("cache.json");
+
+        let result = NodeCache::new("node-1").save(&path).await;
+
+        assert!(matches!(result, Err(ChvError::Io { .. })));
+        assert_eq!(fs::read_dir(&unsafe_parent).unwrap().count(), 0);
+        fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_save_requires_pre_existing_service_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_parent = dir.path().join("not-created");
+        let path = missing_parent.join("cache.json");
+
+        let result = NodeCache::new("node-1").save(&path).await;
+
+        assert!(matches!(result, Err(ChvError::Io { .. })));
+        assert!(!missing_parent.exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_cache_saves_leave_one_complete_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let mut saves = Vec::new();
+        for index in 0..32 {
+            let path = path.clone();
+            saves.push(tokio::spawn(async move {
+                NodeCache::new(format!("node-{index}"))
+                    .save(&path)
+                    .await
+                    .unwrap();
+            }));
+        }
+        for save in saves {
+            save.await.unwrap();
+        }
+
+        let loaded = NodeCache::load(&path).await.unwrap();
+        assert!(loaded.node_id.starts_with("node-"));
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
     }
 
     #[test]

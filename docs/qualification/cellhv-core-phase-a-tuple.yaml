@@ -1,0 +1,14 @@
+schema_version: 1
+status: proposed-not-qualified
+host_distribution: Ubuntu Server 24.04 LTS
+architecture: x86_64
+kernel: "6.8.x Ubuntu generic; owner: virtualization engineering; resolve by: 2026-08-31"
+vmm:
+  backend: cloud-hypervisor
+  version: v43.0
+firmware: "Ubuntu ovmf package build for 24.04; owner: release engineering; resolve by: 2026-08-31"
+guest: "Ubuntu 24.04 LTS cloud image release 20260718; owner: test engineering; resolve by: 2026-08-31"
+network: existing-linux-bridge-or-tap
+storage: existing-raw-file-or-block-device
+runtime_service: chv-agent
+manager: absent

@@ -9,6 +9,8 @@ publish = false
 chv-common = { path = "../chv-common" }
 chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }
+cellhv-core-runtime-ownership = { path = "../cellhv-core-runtime-ownership" }
+cellhv-core-types = { path = "../cellhv-core-types" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
@@ -16,6 +18,7 @@ metrics = { workspace = true }
 nix = { version = "0.29", features = ["term", "fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

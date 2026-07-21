@@ -11,6 +11,11 @@ chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }
 chv-config = { path = "../chv-config" }
 chv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }
+cellhv-core-types = { path = "../cellhv-core-types" }
+cellhv-core-operations = { path = "../cellhv-core-operations" }
+cellhv-nodecache-migration = { path = "../cellhv-nodecache-migration" }
+cellhv-core-fs = { path = "../cellhv-core-fs" }
+cellhv-core-startup = { path = "../cellhv-core-startup" }
 chv-stord-api = { path = "../../gen/rust/chv-stord-api" }
 chv-nwd-api = { path = "../../gen/rust/chv-nwd-api" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
@@ -21,6 +26,7 @@ prost = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 dashmap = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
@@ -35,4 +41,6 @@ lru = "0.18"
 sysinfo = "0.30"
 
 [dev-dependencies]
+cellhv-core-api = { path = "../cellhv-core-api" }
+http-body-util = "0.1"
 tempfile = { workspace = true }

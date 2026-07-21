@@ -8,14 +8,18 @@ Type=simple
 User=chv
 Group=chv
 UMask=002
-ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
+ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent /var/lib/chv/cache
 ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
+# UMask protects Core state. chv-agent explicitly sets its legacy API socket
+# mode after bind; no timing-dependent unit chmod is required.
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
 TimeoutStopSec=5
 RuntimeDirectory=chv
-StateDirectory=chv
+RuntimeDirectoryMode=0775
+StateDirectory=chv/agent
+StateDirectoryMode=0700
 LogsDirectory=chv
 
 # Device access for KVM
@@ -29,7 +33,8 @@ ProtectHome=true
 ReadWritePaths=/run/chv /var/lib/chv
 ReadOnlyPaths=/etc/chv /usr/bin
 
-# Clean up stale sockets if the agent exits uncleanly
+# Legacy cleanup retains its established behavior. Only the native Core
+# listener uses inode-safe cleanup. The persistent Core lease is never removed.
 ExecStopPost=-/bin/rm -f /run/chv/agent/api.sock
 
 [Install]

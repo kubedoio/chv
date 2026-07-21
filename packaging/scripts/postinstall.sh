@@ -36,6 +36,8 @@ fi
 # Ensure state and runtime directories exist and are owned by chv
 mkdir -p /var/lib/chv /var/log/chv /run/chv
 chown chv:chv /var/lib/chv /var/log/chv /run/chv || true
+install -d -m 0700 -o chv -g chv /var/lib/chv/agent /var/lib/chv/cache /run/chv/core
+install -d -m 0775 -o chv -g chv /run/chv/agent
 
 # Ensure storage directories exist and are owned by chv-stord
 mkdir -p /var/lib/chv/storage/localdisk /var/lib/chv/storage/lvm /run/chv/stord

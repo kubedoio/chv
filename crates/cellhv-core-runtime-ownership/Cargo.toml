@@ -1,0 +1,16 @@
+[package]
+name = "cellhv-core-runtime-ownership"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+cellhv-core-types = { path = "../cellhv-core-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

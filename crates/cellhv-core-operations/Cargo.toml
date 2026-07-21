@@ -1,0 +1,18 @@
+[package]
+name = "cellhv-core-operations"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cellhv-core-store = { path = "../cellhv-core-store" }
+cellhv-core-types = { path = "../cellhv-core-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+async-channel = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

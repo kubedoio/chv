@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "adr_status": "proposed",
+  "production_startup_enforced": false,
+  "host_identity_resolver_enforced": true,
+  "fresh_store_initializer_enforced": true,
+  "importer_reserved_host_ids_enforced": true,
+  "nodecache_authority_facade_enforced": true,
+  "nodecache_authority_mode_enforced": false,
+  "durable_identity_precedence": [
+    "existing-core-database",
+    "importable-nodecache",
+    "configured-fresh-seed",
+    "identity-preserving-precreation-enrollment",
+    "persisted-one-time-uuid"
+  ],
+  "reserved_host_ids": [
+    "unknown",
+    "unset",
+    "none",
+    "null"
+  ],
+  "machine_id_is_host_id_source": false,
+  "configured_node_id_can_override_durable_identity": false,
+  "enrollment_can_replace_core_host_id": false,
+  "unreadable_database_can_be_reinitialized": false,
+  "nodecache_authority_modes": [
+    "legacy-vm-authority",
+    "core-vm-authority",
+    "blocked"
+  ],
+  "post_cutover_vm_writable_store": "core-sqlite-only"
+}

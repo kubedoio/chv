@@ -1,13 +1,16 @@
 pub mod agent_server;
 pub mod cache;
+pub mod cache_authority;
 pub mod config;
 pub mod connectivity;
 pub mod console_server;
 pub mod control_plane;
 pub mod daemon_clients;
+pub use cellhv_core_types as domain;
 pub mod enrollment;
 pub mod health;
 pub mod inventory;
+pub mod legacy_core_adapter;
 pub mod metrics_server;
 pub mod migration;
 pub mod migration_registry;
@@ -20,6 +23,10 @@ pub mod vm_runtime;
 
 pub use agent_server::AgentServer;
 pub use cache::NodeCache;
+pub use cache_authority::{
+    AgentCoreActivation, Blocked, CoreVmAuthority, EnrollmentMetadata, LegacyVmAuthority,
+    NodeCacheAuthority, NodeCacheAuthorityMode, NodeCacheCompatibilitySnapshot,
+};
 pub use config::AgentConfig;
 pub use connectivity::{ConnectivityMetrics, ConnectivityState, ConnectivityTracker};
 pub use console_server::ConsoleServer;

@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chv.kubedo.io/schemas/cellhv-openstack-path-a-execution-manifest-v1.schema.json",
+  "title": "CellHV OpenStack Path A structural execution manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "scenario_id", "candidate", "evidence_class",
+    "attestation", "test_mode", "lab_attestation", "started_at", "completed_at",
+    "immutable_inputs_sha256", "checks", "initial_service_state", "commands",
+    "observations", "restoration", "cleanup", "result", "error",
+    "failed_preconditions"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$" },
+    "scenario_id": { "const": "OSD-001" },
+    "candidate": { "const": "path-a" },
+    "evidence_class": { "const": "structural-candidate" },
+    "attestation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "trusted"],
+      "properties": { "type": { "const": "unsigned" }, "trusted": { "const": false } }
+    },
+    "test_mode": { "type": "boolean" },
+    "lab_attestation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["marker", "lab_id", "credential_class"],
+      "properties": {
+        "marker": { "const": "cellhv-openstack-discovery-disposable-v1" },
+        "lab_id": { "type": "string", "pattern": "^cellhv-osd-[a-z0-9._-]+$" },
+        "credential_class": { "const": "disposable" }
+      }
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "immutable_inputs_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "checks": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "nova_connection_uri", "devstack_revision", "nova_revision",
+        "cloud_hypervisor_sha256", "cloud_hypervisor_version", "libvirt_package_version",
+        "ovmf_package_version", "host_distribution", "architecture", "openstack_release",
+        "guest_image_name", "guest_image_sha256"
+      ],
+      "properties": {
+        "nova_connection_uri": { "type": "string" },
+        "devstack_revision": { "type": "string" },
+        "nova_revision": { "type": "string" },
+        "cloud_hypervisor_sha256": { "type": "string" },
+        "cloud_hypervisor_version": { "type": "string" },
+        "libvirt_package_version": { "type": "string" },
+        "ovmf_package_version": { "type": "string" },
+        "host_distribution": { "type": "string" },
+        "architecture": { "type": "string" },
+        "openstack_release": { "type": "string" },
+        "guest_image_name": { "type": "string" },
+        "guest_image_sha256": { "type": "string" }
+      }
+    },
+    "initial_service_state": { "type": "string", "enum": ["unknown", "active", "inactive"] },
+    "commands": {
+      "type": "array", "uniqueItems": true,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "evidence_id", "argv", "started_at", "completed_at", "duration_ms", "exit_status", "timed_out", "artifact", "sha256"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+          "evidence_id": { "type": "string", "pattern": "^path-a-command-[a-z0-9-]+$" },
+          "argv": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "started_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": "string", "format": "date-time" },
+          "duration_ms": { "type": "integer", "minimum": 0 },
+          "exit_status": { "type": "integer" },
+          "timed_out": { "type": "boolean" },
+          "artifact": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+\\.log$" },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "observations": {
+      "type": "object", "additionalProperties": false,
+      "required": ["libvirt_connection_reached", "nova_compute_active_after_restart", "restart_succeeded", "correlated_nova_libvirt_event"],
+      "properties": {
+        "libvirt_connection_reached": { "type": "boolean" },
+        "nova_compute_active_after_restart": { "type": "boolean" },
+        "restart_succeeded": { "type": "boolean" },
+        "correlated_nova_libvirt_event": { "type": "boolean" }
+      }
+    },
+    "restoration": { "$ref": "#/$defs/outcome" },
+    "cleanup": { "$ref": "#/$defs/outcome" },
+    "result": { "type": "string", "enum": ["blocked", "candidate-observed"] },
+    "error": { "type": "string" },
+    "failed_preconditions": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+  },
+  "$defs": {
+    "outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempted", "succeeded", "command_id"],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "succeeded": { "type": "boolean" },
+        "command_id": { "type": "string" }
+      }
+    }
+  }
+}

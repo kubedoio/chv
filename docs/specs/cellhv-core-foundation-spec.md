@@ -4,7 +4,8 @@
 **Date:** 2026-07-21  
 **Scope:** Core product boundary, authority, Linux topology, migration from the existing node runtime, and staged ecosystem integration  
 **Related issues:** #183, #184, #185, #186  
-**Decisions:** ADR-015, ADR-016
+**Decisions:** ADR-015, ADR-016, ADR-017
+**Proposed decisions:** ADR-019
 
 ## 1. Product decision
 

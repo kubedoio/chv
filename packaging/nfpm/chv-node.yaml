@@ -23,6 +23,8 @@ contents:
     dst: /lib/systemd/system/chv-stord.service
   - src: packaging/systemd/chv-nwd.service
     dst: /lib/systemd/system/chv-nwd.service
+  - src: packaging/tmpfiles/chv-node.conf
+    dst: /usr/lib/tmpfiles.d/chv-node.conf
   - src: ${TMPDIR}/configs/agent.toml
     dst: /etc/chv/agent.toml
     type: config|noreplace

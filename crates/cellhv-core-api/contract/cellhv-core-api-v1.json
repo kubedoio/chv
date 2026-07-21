@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "transport": "http-json-unix",
+  "unknown_method_status": 405,
+  "routes": [
+    "GET /v1/host",
+    "GET /v1/host/capabilities",
+    "GET /v1/vms",
+    "POST /v1/vms",
+    "GET /v1/vms/{vm_id}",
+    "PATCH /v1/vms/{vm_id}",
+    "DELETE /v1/vms/{vm_id}",
+    "POST /v1/vms/{vm_id}/actions/start",
+    "POST /v1/vms/{vm_id}/actions/stop",
+    "POST /v1/vms/{vm_id}/actions/reboot",
+    "GET /v1/operations",
+    "GET /v1/operations/{operation_id}",
+    "GET /v1/events"
+  ]
+}

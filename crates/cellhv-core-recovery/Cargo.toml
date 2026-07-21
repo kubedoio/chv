@@ -1,0 +1,13 @@
+[package]
+name = "cellhv-core-recovery"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cellhv-core-operations = { path = "../cellhv-core-operations" }
+cellhv-core-runtime-ownership = { path = "../cellhv-core-runtime-ownership" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+

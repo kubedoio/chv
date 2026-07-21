@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chv.kubedo.io/schemas/cellhv-acceptance-registry-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scenarios"],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "tier", "prerequisites", "required_evidence", "forbidden_outcomes", "cleanup", "timeout_seconds"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z]+(?:-[A-Z]+)*-[0-9]{3}$" },
+          "tier": { "type": "string", "enum": ["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T0/T5"] },
+          "prerequisites": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "required_evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "forbidden_outcomes": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "cleanup": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "timeout_seconds": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "AGENT-CORE-001",
+      "tier": "T0",
+      "prerequisites": ["repository checkout"],
+      "required_evidence": ["architecture guard passes", "single-authority declaration validates"],
+      "forbidden_outcomes": ["cellhvd binary", "cellhvd service", "second VM authority"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "AGENT-CORE-006",
+      "tier": "T0",
+      "prerequisites": ["packaging tree"],
+      "required_evidence": ["service-name scan passes"],
+      "forbidden_outcomes": ["two runtime services"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "VMM-ID-001",
+      "tier": "T0",
+      "prerequisites": ["active source and packaging tree"],
+      "required_evidence": ["forbidden identity scan passes"],
+      "forbidden_outcomes": ["Cloud Hypervisor advertised as QEMU", "QMP compatibility identity"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "CLAIM-001",
+      "tier": "T0",
+      "prerequisites": ["compatibility claim schema", "proposed Phase A claim"],
+      "required_evidence": ["claim schema validation passes"],
+      "forbidden_outcomes": ["unqualified compatibility claim", "non-Cloud-Hypervisor VMM backend"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "OCORE-001",
+      "tier": "T1",
+      "prerequisites": ["pinned O3K source revision", "CellHV Core native API v1 contract"],
+      "required_evidence": ["source-to-contract responsibility crosswalk", "exact O3K repository and revision"],
+      "forbidden_outcomes": ["O3K integration reported as executed", "second VM lifecycle authority", "T5 compatibility claim"],
+      "cleanup": [],
+      "timeout_seconds": 30
+    },
+    {
+      "id": "OCORE-002",
+      "tier": "T1",
+      "prerequisites": ["O3K-owned Core client implementation", "deterministic identity translation"],
+      "required_evidence": ["same durable intent replays the same request", "changed payload conflicts without duplicate VM identity"],
+      "forbidden_outcomes": ["generic client presented as O3K", "random idempotency identity", "O3K-owned authoritative VM database"],
+      "cleanup": ["remove isolated test state"],
+      "timeout_seconds": 300
+    },
+    {
+      "id": "OCORE-003",
+      "tier": "T1",
+      "prerequisites": ["isolated real chv-agent process", "O3K-owned Core client implementation"],
+      "required_evidence": ["definition operation accepted once", "journal replay survives chv-agent restart"],
+      "forbidden_outcomes": ["Cloud Hypervisor process launched", "production state modified", "lifecycle capability advertised"],
+      "cleanup": ["stop isolated chv-agent", "remove isolated socket and database"],
+      "timeout_seconds": 600
+    },
+    {
+      "id": "OCORE-004",
+      "tier": "T1",
+      "prerequisites": ["isolated real chv-agent process", "capabilities endpoint"],
+      "required_evidence": ["false capabilities block executable compute claims", "unsupported power action is preserved"],
+      "forbidden_outcomes": ["Nova compatibility inferred", "libvirt compatibility inferred", "T5 compatibility claim"],
+      "cleanup": ["stop isolated chv-agent", "remove isolated socket and database"],
+      "timeout_seconds": 300
+    },
+    {
+      "id": "OCORE-005",
+      "tier": "T1",
+      "prerequisites": ["OCORE-003 evidence", "management-client restart fixture"],
+      "required_evidence": ["durable operation projection is recovered after client restart", "chv-agent remains sole runtime authority"],
+      "forbidden_outcomes": ["client-side operation engine", "client-side VM lifecycle authority", "T5 compatibility claim"],
+      "cleanup": ["stop isolated processes", "remove isolated socket and database"],
+      "timeout_seconds": 600
+    },
+    {
+      "id": "OSD-001",
+      "tier": "T5",
+      "prerequisites": ["disposable version-recorded OpenStack lab", "upstream libvirt Cloud Hypervisor driver", "pinned Cloud Hypervisor binary"],
+      "required_evidence": ["candidate connection result or exact first blocker", "redacted configuration and command logs", "exact component versions"],
+      "forbidden_outcomes": ["connection success reported as OpenStack compatibility", "Cloud Hypervisor advertised as QEMU", "production infrastructure mutation"],
+      "cleanup": ["destroy disposable lab", "verify no test resources or credentials remain"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-002",
+      "tier": "T5",
+      "prerequisites": ["OSD-001 candidate execution", "exact Nova and libvirt source revisions"],
+      "required_evidence": ["catalogue of QEMU-specific assumptions", "source or configuration reference for every assumption"],
+      "forbidden_outcomes": ["unsupported QEMU or QMP semantics implemented", "unsourced compatibility inference"],
+      "cleanup": ["remove disposable source worktrees and lab artifacts outside the evidence bundle"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-003",
+      "tier": "T5",
+      "prerequisites": ["minimal Neutron lab path", "compute lifecycle discovery attempted before optional Cinder"],
+      "required_evidence": ["Neutron expectations recorded independently", "Cinder expectations or explicit not-exercised status recorded independently", "VM lifecycle result recorded separately"],
+      "forbidden_outcomes": ["network support inferred from VM lifecycle", "storage support inferred from VM lifecycle", "unrelated host resources modified or deleted"],
+      "cleanup": ["remove test ports, networks, volumes, and instances", "verify unrelated resources remain"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-004",
+      "tier": "T0/T5",
+      "prerequisites": ["Path A blocker inventory", "Nova ComputeDriver contract and reusable-driver source review"],
+      "required_evidence": ["bounded native driver effort estimate", "security boundary assessment", "maintenance ownership and cost estimate", "unsupported operation list"],
+      "forbidden_outcomes": ["production Nova driver implemented during discovery", "platform models introduced into chv-agent Core", "unsupported operations silently accepted"],
+      "cleanup": ["remove disposable source worktrees and lab artifacts outside the evidence bundle"],
+      "timeout_seconds": 144000
+    },
+    {
+      "id": "OSD-005",
+      "tier": "T0/T5",
+      "prerequisites": ["OSD-001 through OSD-004 evidence", "Path A, B, and C comparison"],
+      "required_evidence": ["evidence-based Path A, B, C, or focused-discovery recommendation", "rejected alternatives", "residual risks", "Phase E owner and effort range"],
+      "forbidden_outcomes": ["OpenStack support declared", "recommendation based only on URI connection", "integration path bypasses chv-agent authority"],
+      "cleanup": ["destroy disposable lab", "retain only redacted content-addressed evidence"],
+      "timeout_seconds": 144000
+    }
+  ]
+}
