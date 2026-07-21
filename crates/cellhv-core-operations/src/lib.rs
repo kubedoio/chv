@@ -3,6 +3,12 @@
 //! This crate accepts and journals desired-state mutations. It deliberately has
 //! no runtime or provider dependencies and performs no external side effects.
 
+mod authority_actor;
+
+pub use authority_actor::{
+    AuthorityActor, AuthorityActorError, AuthorityActorJoin, AuthorityHandle,
+};
+
 use cellhv_core_store::{AcceptOperation, CoreStore};
 pub use cellhv_core_store::{
     Acceptance, AcceptedOperation, HostRecord, MigrationDisposition, OperationJournalEntry,

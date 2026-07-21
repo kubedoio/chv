@@ -241,6 +241,8 @@ fn unsupported<T>(feature: &str) -> Result<T, ChvError> {
 mod tests {
     use super::*;
     use crate::{DiskSpec, NicSpec};
+    use cellhv_core_operations::{Acceptance, AuthorityActor, OperationService};
+    use cellhv_core_types::{HostId, HostIdentity};
 
     fn meta() -> LegacyRequestMeta {
         LegacyRequestMeta {
@@ -446,5 +448,38 @@ mod tests {
             definition.networks[0].attachment_id,
             legacy_network_attachment_id("vm-a", "network-a")
         );
+    }
+
+    #[tokio::test]
+    async fn translated_legacy_mutation_can_enter_shared_unwired_actor() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = OperationService::create_new(
+            &directory.path().join("core.db"),
+            &HostIdentity {
+                id: HostId::new("node-a").unwrap(),
+                resource_version: version(1),
+            },
+        )
+        .unwrap();
+        let (authority, join) = AuthorityActor::spawn(service, 1).unwrap();
+        let mut create_meta = meta();
+        create_meta.desired_state_version = "1".into();
+        let intent = adapt_legacy_vm_mutation(
+            &create_meta,
+            "node-a",
+            LegacyVmMutation::Create {
+                vm_id: "vm-a".into(),
+                spec: Box::new(minimal_spec()),
+            },
+            version(1),
+        )
+        .unwrap();
+
+        let accepted = authority.submit(intent.submission).await.unwrap();
+        assert_eq!(accepted.disposition, Acceptance::Accepted);
+        assert_eq!(authority.operations().await.unwrap().len(), 1);
+        assert_eq!(authority.vms().await.unwrap().len(), 1);
+        authority.shutdown().await.unwrap();
+        join.join().await.unwrap();
     }
 }

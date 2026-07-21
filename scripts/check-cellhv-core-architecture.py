@@ -43,6 +43,15 @@ STORE_DEPENDENCIES = {"rusqlite", "sqlx", "libsqlite3-sys"}
 CORE_STORE_PACKAGE = "cellhv-core-store"
 CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
 STORE_ALLOWED_CORE_DEPENDENCIES = {"cellhv-core-types"}
+OPERATIONS_ALLOWED_DEPENDENCIES = {
+    "async-channel",
+    "cellhv-core-store",
+    "cellhv-core-types",
+    "serde",
+    "serde_json",
+    "thiserror",
+    "tokio",
+}
 OPERATION_AUTHORITY_DECLARATION = re.compile(
     r"\b(?:struct|enum|trait|type)\s+"
     r"(?:Operation(?:Engine|Service|Executor|Processor|Manager|Coordinator)|"
@@ -177,6 +186,14 @@ def check(root: Path) -> list[str]:
         CORE_OPERATIONS_PACKAGE, set()
     ):
         errors.append(f"{CORE_OPERATIONS_PACKAGE}: must directly depend on {CORE_STORE_PACKAGE}")
+    unexpected_operations_dependencies = sorted(
+        dependency_graph.get(CORE_OPERATIONS_PACKAGE, set()) - OPERATIONS_ALLOWED_DEPENDENCIES
+    )
+    if unexpected_operations_dependencies:
+        errors.append(
+            f"{CORE_OPERATIONS_PACKAGE}: dependency boundary forbids "
+            f"{unexpected_operations_dependencies}"
+        )
 
     store_core_dependencies = dependency_graph.get(CORE_STORE_PACKAGE, set()) & core_packages
     unexpected_store_dependencies = sorted(store_core_dependencies - STORE_ALLOWED_CORE_DEPENDENCIES)

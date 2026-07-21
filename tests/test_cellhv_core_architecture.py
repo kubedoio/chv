@@ -152,6 +152,20 @@ class ArchitectureGuardTests(unittest.TestCase):
             errors = GUARD.check(root)
             self.assertTrue(any("forbidden Core dependency" in error for error in errors))
 
+    def test_operations_cannot_depend_on_runtime_or_provider_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-operations/Cargo.toml"
+            text = path.read_text().replace(
+                "[dependencies]\n",
+                '[dependencies]\nchv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }\n',
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("dependency boundary forbids" in error for error in errors))
+
     def test_second_operation_engine_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
