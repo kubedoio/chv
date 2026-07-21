@@ -12,14 +12,18 @@ use cellhv_core_types::{
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
 const APPLICATION_ID: i32 = 0x4348_5643; // CHVC
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_SQL: &str = include_str!("../migrations/0001_core_authority.sql");
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -376,6 +380,78 @@ impl CoreStore {
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(path);
+        }
+        result
+    }
+
+    /// Creates a complete fresh authority and publishes it atomically.
+    ///
+    /// The externally visible path is never an identity-empty database: schema
+    /// and host identity commit together in a private sibling file, which is
+    /// fsynced and renamed into place without replacing an existing authority.
+    pub fn create_new_with_host(
+        path: &Path,
+        identity: &HostIdentity,
+        capabilities: &HostCapabilities,
+    ) -> Result<Self> {
+        Self::create_new_with_host_inner(path, identity, capabilities, || Ok(()), |_| Ok(()))
+    }
+
+    fn create_new_with_host_inner(
+        path: &Path,
+        identity: &HostIdentity,
+        capabilities: &HostCapabilities,
+        before_host_insert: impl FnOnce() -> Result<()>,
+        after_publish: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<Self> {
+        validate_fresh_host(identity)?;
+        validate_fresh_parent(path)?;
+        let staging = staging_path(path)?;
+        let mut published = false;
+        let result = (|| {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&staging)
+                .map_err(|error| {
+                    StoreError::Integrity(format!(
+                        "cannot create fresh Core staging file {}: {error}",
+                        staging.display()
+                    ))
+                })?;
+            drop(file);
+
+            let mut conn = Connection::open_with_flags(
+                &staging,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            configure(&conn)?;
+            enforce_database_modes(&staging)?;
+            apply_migrations_with_host(&mut conn, identity, capabilities, before_host_insert)?;
+            validate(&conn)?;
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            drop(conn);
+            remove_sidecars(&staging)?;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(&staging)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| {
+                    StoreError::Integrity(format!(
+                        "cannot sync fresh Core store {}: {error}",
+                        staging.display()
+                    ))
+                })?;
+            rename_noreplace(&staging, path)?;
+            published = true;
+            after_publish(path)?;
+            sync_parent(path)?;
+            Self::open_existing(path)
+        })();
+
+        if result.is_err() && !published {
+            let _ = remove_database_files(&staging);
         }
         result
     }
@@ -948,6 +1024,34 @@ fn checksum(sql: &str) -> String {
     format!("{:x}", Sha256::digest(sql.as_bytes()))
 }
 
+fn apply_migrations_with_host(
+    conn: &mut Connection,
+    identity: &HostIdentity,
+    capabilities: &HostCapabilities,
+    before_host_insert: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+    tx.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,schema_fingerprint TEXT NOT NULL,applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))) STRICT;")?;
+    for migration in MIGRATIONS {
+        tx.execute_batch(migration.sql)?;
+        tx.pragma_update(None, "user_version", migration.version)?;
+        let fingerprint = schema_fingerprint(&tx)?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version,name,checksum,schema_fingerprint) VALUES (?1,?2,?3,?4)",
+            params![migration.version, migration.name, checksum(migration.sql), fingerprint],
+        )?;
+    }
+    before_host_insert()?;
+    tx.execute(
+        "INSERT INTO host_identity (singleton_key,host_id,capabilities_json,resource_version) VALUES (1,?1,?2,?3)",
+        params![identity.id.as_str(), serde_json::to_string(capabilities)?, version_i64(identity.resource_version)?],
+    )
+    .map_err(|error| map_constraint(error, "host", identity.id.as_str()))?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(&format!("PRAGMA application_id={APPLICATION_ID};"))?;
     conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,schema_fingerprint TEXT NOT NULL,applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))) STRICT;")?;
@@ -963,6 +1067,152 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+fn validate_fresh_host(identity: &HostIdentity) -> Result<()> {
+    if identity.resource_version.get() != 1 {
+        return Err(StoreError::InvalidDomain(
+            "fresh host identity resource_version must be 1".to_owned(),
+        ));
+    }
+    let id = identity.id.as_str().trim();
+    if id.is_empty()
+        || ["unknown", "unset", "none", "null"]
+            .iter()
+            .any(|reserved| id.eq_ignore_ascii_case(reserved))
+    {
+        return Err(StoreError::InvalidDomain(
+            "fresh host identity must not be empty or reserved".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fresh_parent(path: &Path) -> Result<()> {
+    if path.as_os_str().to_str().is_none() {
+        return Err(StoreError::Integrity(
+            "fresh Core authority path must be valid UTF-8".to_owned(),
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        StoreError::Integrity(format!("{} has no parent directory", path.display()))
+    })?;
+    let metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+        StoreError::Integrity(format!(
+            "cannot inspect fresh Core parent {}: {error}",
+            parent.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(StoreError::Integrity(format!(
+            "fresh Core parent {} must be a real euid-owned 0700 directory",
+            parent.display()
+        )));
+    }
+    Ok(())
+}
+
+fn staging_path(path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        StoreError::Integrity(format!("{} has no parent directory", path.display()))
+    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| StoreError::Integrity(format!("{} has no file name", path.display())))?;
+    let name = name.to_str().ok_or_else(|| {
+        StoreError::Integrity("fresh Core authority file name must be valid UTF-8".to_owned())
+    })?;
+    for _ in 0..64 {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{}.fresh-{}-{sequence}", name, std::process::id()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(StoreError::Integrity(format!(
+        "cannot allocate a fresh Core staging path beside {}",
+        path.display()
+    )))
+}
+
+fn remove_database_files(path: &Path) -> std::io::Result<()> {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        match std::fs::remove_file(candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn remove_sidecars(path: &Path) -> Result<()> {
+    for candidate in [
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(StoreError::Integrity(format!(
+                    "cannot remove staging sidecar {}: {error}",
+                    candidate.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rename_noreplace(source: &Path, destination: &Path) -> Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| StoreError::Integrity("fresh Core staging path contains NUL".to_owned()))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| StoreError::Integrity("fresh Core authority path contains NUL".to_owned()))?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        Err(StoreError::AlreadyExists(PathBuf::from(
+            destination.to_string_lossy().into_owned(),
+        )))
+    } else {
+        Err(StoreError::Integrity(format!(
+            "cannot publish fresh Core authority: {error}"
+        )))
+    }
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        StoreError::Integrity(format!("{} has no parent directory", path.display()))
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            StoreError::Integrity(format!(
+                "cannot sync Core authority directory {}: {error}",
+                parent.display()
+            ))
+        })
 }
 
 fn validate(conn: &Connection) -> Result<()> {
@@ -1795,6 +2045,183 @@ mod tests {
         let path = directory.path().join("core.db");
         let store = CoreStore::create_new(&path).unwrap();
         (directory, path, store)
+    }
+
+    fn host(id: &str, resource_version: u64) -> HostIdentity {
+        HostIdentity {
+            id: HostId::new(id).unwrap(),
+            resource_version: version(resource_version),
+        }
+    }
+
+    #[test]
+    fn fresh_authority_is_published_with_identity_and_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("core.db");
+        let store = CoreStore::create_new_with_host(
+            &path,
+            &host("host-fresh", 1),
+            &HostCapabilities::default(),
+        )
+        .unwrap();
+        assert_eq!(store.host().unwrap().identity.id.as_str(), "host-fresh");
+        drop(store);
+        assert_eq!(
+            CoreStore::open_existing(&path)
+                .unwrap()
+                .host()
+                .unwrap()
+                .identity
+                .id
+                .as_str(),
+            "host-fresh"
+        );
+    }
+
+    #[test]
+    fn host_insert_failure_leaves_no_authority_or_staging_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        let result = CoreStore::create_new_with_host_inner(
+            &path,
+            &host("host-fresh", 1),
+            &HostCapabilities::default(),
+            || {
+                Err(StoreError::Integrity(
+                    "injected host insertion failure".to_owned(),
+                ))
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(result, Err(StoreError::Integrity(_))));
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn post_publish_error_preserves_complete_observable_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("core.db");
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = std::sync::Arc::clone(&observed);
+        let result = CoreStore::create_new_with_host_inner(
+            &path,
+            &host("host-published", 1),
+            &HostCapabilities::default(),
+            || Ok(()),
+            move |published| {
+                let store = CoreStore::open_existing(published)?;
+                observer.store(
+                    store.host()?.identity.id.as_str() == "host-published",
+                    Ordering::SeqCst,
+                );
+                Err(StoreError::Integrity(
+                    "injected post-publication failure".to_owned(),
+                ))
+            },
+        );
+        assert!(matches!(result, Err(StoreError::Integrity(_))));
+        assert!(observed.load(Ordering::SeqCst));
+        assert_eq!(
+            CoreStore::open_existing(&path)
+                .unwrap()
+                .host()
+                .unwrap()
+                .identity
+                .id
+                .as_str(),
+            "host-published"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn fresh_authority_rejects_unsafe_parent_and_non_utf8_path_before_mutation() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        let path = directory.path().join("core.db");
+        assert!(matches!(
+            CoreStore::create_new_with_host(
+                &path,
+                &host("host-fresh", 1),
+                &HostCapabilities::default()
+            ),
+            Err(StoreError::Integrity(_))
+        ));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let invalid = directory
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b'c', 0xff, b'v']));
+        assert!(matches!(
+            CoreStore::create_new_with_host(
+                &invalid,
+                &host("host-fresh", 1),
+                &HostCapabilities::default()
+            ),
+            Err(StoreError::Integrity(_))
+        ));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn invalid_fresh_identity_never_creates_a_file() {
+        for identity in [host("reserved", 2), host("unknown", 1)] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("core.db");
+            assert!(matches!(
+                CoreStore::create_new_with_host(&path, &identity, &HostCapabilities::default()),
+                Err(StoreError::InvalidDomain(_))
+            ));
+            assert!(!path.exists());
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn concurrent_fresh_creators_publish_exactly_one_authority() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = Arc::new(directory.path().join("core.db"));
+        let barrier = Arc::new(Barrier::new(2));
+        let mut joins = Vec::new();
+        for id in ["host-a", "host-b"] {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                CoreStore::create_new_with_host(&path, &host(id, 1), &HostCapabilities::default())
+                    .map(|store| store.host().unwrap().identity.id.to_string())
+            }));
+        }
+        let results: Vec<_> = joins.into_iter().map(|join| join.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(StoreError::AlreadyExists(_))))
+                .count(),
+            1
+        );
+        let winner = results.into_iter().find_map(Result::ok).unwrap();
+        assert_eq!(
+            CoreStore::open_existing(&path)
+                .unwrap()
+                .host()
+                .unwrap()
+                .identity
+                .id
+                .as_str(),
+            winner
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -247,6 +247,7 @@ mod tests {
     use cellhv_core_operations::{Acceptance, AuthorityActor, OperationService};
     use cellhv_core_types::{HostId, HostIdentity};
     use http_body_util::BodyExt;
+    use std::os::unix::fs::PermissionsExt;
     use tower::ServiceExt;
 
     fn meta() -> LegacyRequestMeta {
@@ -458,6 +459,7 @@ mod tests {
     #[tokio::test]
     async fn translated_legacy_mutation_can_enter_shared_unwired_actor() {
         let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let service = OperationService::create_new(
             &directory.path().join("core.db"),
             &HostIdentity {
@@ -491,6 +493,7 @@ mod tests {
     #[tokio::test]
     async fn native_and_legacy_adapter_share_one_operation_journal() {
         let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let service = OperationService::create_new(
             &directory.path().join("core.db"),
             &HostIdentity {

@@ -29,6 +29,14 @@ class ArchitectureGuardTests(unittest.TestCase):
         target = root / api_source
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text((ROOT / api_source).read_text(), encoding="utf-8")
+        authority_source = GUARD.NODECACHE_AUTHORITY_SOURCE
+        target = root / authority_source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / authority_source).read_text(), encoding="utf-8")
+        identity_source = GUARD.FRESH_IDENTITY_SOURCE
+        target = root / identity_source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / identity_source).read_text(), encoding="utf-8")
         for service in (ROOT / "packaging/systemd").glob("*.service"):
             target = root / "packaging/systemd" / service.name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +56,69 @@ class ArchitectureGuardTests(unittest.TestCase):
 
     def test_repository_passes(self):
         self.assertEqual(GUARD.check(ROOT), [])
+
+    def test_nodecache_authority_cannot_expose_raw_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / GUARD.NODECACHE_AUTHORITY_SOURCE
+            path.write_text(
+                path.read_text()
+                + "\nimpl NodeCacheAuthority { pub fn leak(&self) -> &NodeCache { todo!() } }\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("public facade signature exposes" in error for error in GUARD.check(root))
+            )
+
+    def test_fresh_identity_authorization_fields_cannot_be_public(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / GUARD.FRESH_IDENTITY_SOURCE
+            path.write_text(
+                path.read_text().replace(
+                    "    identity: HostIdentity,", "    pub identity: HostIdentity,", 1
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("opaque resolver-issued" in error for error in GUARD.check(root))
+            )
+
+    def test_nodecache_authority_cannot_accept_mutation_closure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / GUARD.NODECACHE_AUTHORITY_SOURCE
+            path.write_text(
+                path.read_text()
+                + "\nimpl NodeCacheAuthority { pub fn leak(&mut self, f: impl FnOnce()) { f() } }\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("public facade signature exposes" in error for error in GUARD.check(root))
+            )
+
+    def test_nodecache_authority_rejects_indirect_raw_cache_escapes(self):
+        fixtures = (
+            "pub type LeakedCache = NodeCache;\n",
+            "pub struct Leak { pub cache: NodeCache }\n",
+            "impl AsRef<NodeCache> for NodeCacheAuthority { fn as_ref(&self) -> &NodeCache { todo!() } }\n",
+            "impl From<NodeCacheAuthority> for NodeCache { fn from(_: NodeCacheAuthority) -> Self { todo!() } }\n",
+            "#[derive(Clone)] pub struct NodeCacheAuthority { cache: NodeCache }\n",
+            "pub trait CacheExposure { fn cache(&self) -> &NodeCache; } impl CacheExposure for NodeCacheAuthority { fn cache(&self) -> &NodeCache { &self.cache } }\n",
+            "impl NodeCacheAuthority { pub const LEAK: fn(&Self) -> &NodeCache = |authority| &authority.cache; }\n",
+        )
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.copy_baseline(root)
+                path = root / GUARD.NODECACHE_AUTHORITY_SOURCE
+                path.write_text(path.read_text() + "\n" + fixture, encoding="utf-8")
+                self.assertTrue(
+                    any("facade containment" in error for error in GUARD.check(root))
+                )
 
     def test_parallel_binary_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -77,7 +148,7 @@ class ArchitectureGuardTests(unittest.TestCase):
             root = Path(directory)
             self.copy_baseline(root)
             path = root / "crates/chv-agent-core/src/identity.rs"
-            path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('const URI: &str = "qemu:///system";\n', encoding="utf-8")
             self.assertTrue(any("QEMU/QMP identity" in error for error in GUARD.check(root)))
 

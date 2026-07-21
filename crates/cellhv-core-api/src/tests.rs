@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use tower::ServiceExt;
 
 fn service(dir: &tempfile::TempDir) -> OperationService {
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     OperationService::create_new(
         &dir.path().join("core.db"),
         &HostIdentity {

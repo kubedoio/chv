@@ -2,7 +2,10 @@
   "version": 1,
   "adr_status": "proposed",
   "production_startup_enforced": false,
+  "host_identity_resolver_enforced": true,
+  "fresh_store_initializer_enforced": true,
   "importer_reserved_host_ids_enforced": true,
+  "nodecache_authority_facade_enforced": true,
   "nodecache_authority_mode_enforced": false,
   "durable_identity_precedence": [
     "existing-core-database",

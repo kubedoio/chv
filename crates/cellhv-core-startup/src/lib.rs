@@ -4,6 +4,13 @@
 //! which persistence authority a future startup path may activate and performs
 //! only durable migration bookkeeping; it has no VM or provider side effects.
 
+mod identity;
+
+pub use identity::{
+    create_fresh_authority, resolve_host_identity, resolve_host_identity_with, FreshHostIdentity,
+    FreshIdentitySource, HostIdentityDecision, HostIdentityError, HostIdentityInputs,
+};
+
 use cellhv_core_operations::{MigrationDisposition, OperationService, OperationServiceError};
 use cellhv_nodecache_migration::{plan, MigrationError, SOURCE_NAME};
 use sha2::{Digest, Sha256};

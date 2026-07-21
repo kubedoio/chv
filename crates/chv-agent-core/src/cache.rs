@@ -100,6 +100,39 @@ fn validate_cache_destination(path: &Path) -> io::Result<()> {
     }
 }
 
+pub(crate) fn validated_cache_path(path: &Path) -> Result<PathBuf, ChvError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| ChvError::InvalidArgument {
+        field: "cache_path".to_owned(),
+        reason: "must name a cache file".to_owned(),
+    })?;
+    validate_cache_parent(parent).map_err(|source| ChvError::Io {
+        path: parent.to_string_lossy().into_owned(),
+        source,
+    })?;
+    validate_cache_destination(path).map_err(|source| ChvError::Io {
+        path: path.to_string_lossy().into_owned(),
+        source,
+    })?;
+    let canonical_parent = parent.canonicalize().map_err(|source| ChvError::Io {
+        path: parent.to_string_lossy().into_owned(),
+        source,
+    })?;
+    let canonical_path = canonical_parent.join(file_name);
+    validate_cache_parent(&canonical_parent).map_err(|source| ChvError::Io {
+        path: canonical_parent.to_string_lossy().into_owned(),
+        source,
+    })?;
+    validate_cache_destination(&canonical_path).map_err(|source| ChvError::Io {
+        path: canonical_path.to_string_lossy().into_owned(),
+        source,
+    })?;
+    Ok(canonical_path)
+}
+
 fn atomic_replace_cache_inner<F, G>(
     path: &Path,
     contents: &[u8],
@@ -186,7 +219,7 @@ fn atomic_replace_cache(
     )
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredStateFragment {
     pub id: String,
     pub kind: String,

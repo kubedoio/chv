@@ -18,20 +18,29 @@ Implemented now:
 
 - the Core store persists one host identity and does not expose an identity
   replacement operation;
+- `cellhv-core-startup` resolves existing Core, importable NodeCache,
+  configured-seed, and pre-creation enrollment identities with strict
+  precedence and conflict checks, and generates a UUID only when all supplied
+  sources are absent;
+- its explicit fresh initializer accepts only a resolved fresh decision and
+  delegates the sole filesystem mutation to `OperationService::create_new`;
 - NodeCache import preserves its source ID exactly and rejects the reserved
   placeholders in this ADR before producing an import plan;
 - migration markers bind the source checksum, imported host ID, VM manifest,
   and irreversible cutover state;
 - the startup coordinator validates migration checksum/archive evidence, but
-  remains an unwired library.
+  remains an unwired library;
+- an unwired `NodeCacheAuthority` facade owns one cache, models legacy, Core,
+  and blocked authority modes, freezes the VM-authoritative projection in Core
+  mode, and guards every current VM mutator and whole-cache save.
 
 Not implemented now:
 
-- production startup selection in `cmd/chv-agent`;
-- configured-seed assertions, one-time UUID generation, and durable fresh
-  initialization;
+- production startup selection or invocation of the resolver/initializer in
+  `cmd/chv-agent`;
 - identity-preserving enrollment or a separate Controller binding;
-- the process-wide NodeCache authority mode and frozen VM projection check;
+- production construction of the authority-mode facade, process-wide mode
+  selection, and exclusion of direct mutable `NodeCache` access;
 - production handler/reconciler exclusion in `core-vm-authority` and `blocked`.
 
 The repository currently contradicts the proposed end state in known, visible
@@ -128,8 +137,11 @@ In `core-vm-authority` mode:
 - Core SQLite is the only source for accepted VM definitions and requested
   state;
 - compatibility-only fields may remain writable, including enrollment
-  material, certificate metadata, node health/telemetry state, queued outbound
-  reports, and non-VM auxiliary fragments;
+  material, certificate metadata, observed connectivity/telemetry data, and
+  queued outbound reports;
+- lifecycle-gating `node_state`, including `Draining` and `Maintenance`, is
+  frozen with the VM-authoritative projection and cannot transition in Core
+  mode until those effects enter the durable Core operation journal;
 - a whole-cache save is allowed only if the VM-authoritative projection is
   byte-for-byte equivalent to the frozen post-import projection; otherwise it
   fails before replacing the cache file;

@@ -1,5 +1,6 @@
 pub mod agent_server;
 pub mod cache;
+pub mod cache_authority;
 pub mod config;
 pub mod connectivity;
 pub mod console_server;
@@ -22,6 +23,10 @@ pub mod vm_runtime;
 
 pub use agent_server::AgentServer;
 pub use cache::NodeCache;
+pub use cache_authority::{
+    Blocked, CoreVmAuthority, EnrollmentMetadata, LegacyVmAuthority, NodeCacheAuthority,
+    NodeCacheAuthorityMode, NodeCacheCompatibilitySnapshot,
+};
 pub use config::AgentConfig;
 pub use connectivity::{ConnectivityMetrics, ConnectivityState, ConnectivityTracker};
 pub use console_server::ConsoleServer;

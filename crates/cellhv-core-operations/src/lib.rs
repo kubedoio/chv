@@ -148,8 +148,11 @@ impl OperationService {
     }
 
     pub fn create_new(path: &Path, host: &cellhv_core_types::HostIdentity) -> Result<Self> {
-        let store = CoreStore::create_new(path)?;
-        store.create_host(host, &cellhv_core_types::HostCapabilities::default())?;
+        let store = CoreStore::create_new_with_host(
+            path,
+            host,
+            &cellhv_core_types::HostCapabilities::default(),
+        )?;
         Ok(Self::new(store))
     }
 

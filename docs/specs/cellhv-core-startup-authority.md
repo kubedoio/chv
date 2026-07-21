@@ -70,3 +70,8 @@ mode policy. `InitializeFreshCore` does not authorize a placeholder identity or 
 in-memory/fallback authority. Production wiring must persist either a valid
 fresh seed or a one-time generated UUID before publishing the authority. It
 must select `core-vm-authority` only after that durable creation succeeds.
+
+The pure resolution and explicit fresh-create primitives now exist in
+`cellhv-core-startup` and are specified in
+`docs/specs/cellhv-core-host-identity-resolution.md`. They remain unwired;
+`InitializeFreshCore` itself still neither selects an ID nor creates a store.
