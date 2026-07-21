@@ -1,6 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::http::Request;
+use cellhv_core_operations::{AuthorityActor, AuthorityActorJoin, OperationService};
 use cellhv_core_types::{HostId, HostIdentity};
 use http_body_util::BodyExt;
 use std::os::unix::fs::PermissionsExt;
@@ -15,6 +16,14 @@ fn service(dir: &tempfile::TempDir) -> OperationService {
         },
     )
     .unwrap()
+}
+fn app(dir: &tempfile::TempDir) -> (Router, AuthorityActorJoin) {
+    let (authority, owner) = AuthorityActor::spawn(service(dir), 16).unwrap();
+    (router(authority), owner)
+}
+async fn join_app(app: Router, owner: AuthorityActorJoin) {
+    drop(app);
+    owner.join().await.unwrap();
 }
 fn vm_request(request_id: &str, version: u64) -> serde_json::Value {
     serde_json::json!({"request_id":request_id,"definition":{
@@ -51,8 +60,9 @@ async fn contract_snapshot_is_exact_and_capabilities_are_false() {
         ])
     );
     let dir = tempfile::tempdir().unwrap();
-    let response = router(service(&dir))
-        .unwrap()
+    let (app, owner) = app(&dir);
+    let response = app
+        .clone()
         .oneshot(
             Request::get("/v1/host/capabilities")
                 .body(Body::empty())
@@ -65,12 +75,13 @@ async fn contract_snapshot_is_exact_and_capabilities_are_false() {
         body_json(response).await,
         serde_json::to_value(HostCapabilities::default()).unwrap()
     );
+    join_app(app, owner).await;
 }
 
 #[tokio::test]
 async fn definition_mutations_reject_invalid_request_ids_as_structured_400() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(service(&dir)).unwrap();
+    let (app, owner) = app(&dir);
     let mut invalid = vm_request("   ", 1);
     let create = Request::post("/v1/vms")
         .header("content-type", "application/json")
@@ -95,25 +106,28 @@ async fn definition_mutations_reject_invalid_request_ids_as_structured_400() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(body_json(response).await["code"], "invalid_request");
     }
+    join_app(app, owner).await;
 }
 
 #[tokio::test]
 async fn wrong_method_is_structured_405() {
     let dir = tempfile::tempdir().unwrap();
-    let response = router(service(&dir))
-        .unwrap()
+    let (app, owner) = app(&dir);
+    let response = app
+        .clone()
         .oneshot(Request::put("/v1/host").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     let body = body_json(response).await;
     assert_eq!(body["code"], "method_not_allowed");
+    join_app(app, owner).await;
 }
 
 #[tokio::test]
 async fn create_is_namespaced_durable_idempotent_and_readable() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(service(&dir)).unwrap();
+    let (app, owner) = app(&dir);
     let create = |request_id: &str| {
         Request::post("/v1/vms")
             .header("content-type", "application/json")
@@ -149,12 +163,13 @@ async fn create_is_namespaced_durable_idempotent_and_readable() {
             StatusCode::OK
         );
     }
+    join_app(app, owner).await;
 }
 
 #[tokio::test]
 async fn lifecycle_validates_complete_request_before_unsupported_and_never_journals() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(service(&dir)).unwrap();
+    let (app, owner) = app(&dir);
     let action = |path: &str, key: Option<&str>, etag: Option<&str>, body: &str| {
         let mut request = Request::post(path).header("content-type", "application/json");
         if let Some(value) = key {
@@ -229,16 +244,18 @@ async fn lifecycle_validates_complete_request_before_unsupported_and_never_journ
         .unwrap();
     assert_eq!(valid.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let operations = app
+        .clone()
         .oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(body_json(operations).await, serde_json::json!([]));
+    join_app(app, owner).await;
 }
 
 #[tokio::test]
 async fn malformed_inputs_and_internal_failures_are_structured_and_redacted() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(service(&dir)).unwrap();
+    let (app, owner) = app(&dir);
     for request in [
         Request::post("/v1/vms")
             .header("content-type", "application/json")
@@ -259,12 +276,37 @@ async fn malformed_inputs_and_internal_failures_are_structured_and_redacted() {
     let body = body_json(response).await;
     assert_eq!(body["message"], "Core authority request failed");
     assert!(!body.to_string().contains("line 1"));
+    join_app(app, owner).await;
+}
+
+#[tokio::test]
+async fn stopped_shared_authority_is_structured_503() {
+    let dir = tempfile::tempdir().unwrap();
+    let (authority, owner) = AuthorityActor::spawn(service(&dir), 1).unwrap();
+    let app = router(authority.clone());
+    authority.shutdown().await.unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(Request::get("/v1/host").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body_json(response).await,
+        serde_json::json!({
+            "code": "authority_unavailable",
+            "message": "Core authority is unavailable"
+        })
+    );
+    drop(app);
+    owner.join().await.unwrap();
 }
 
 #[tokio::test]
 async fn strict_preconditions_use_412_for_stale_versions() {
     let dir = tempfile::tempdir().unwrap();
-    let app = router(service(&dir)).unwrap();
+    let (app, owner) = app(&dir);
     let create = Request::post("/v1/vms")
         .header("content-type", "application/json")
         .header("idempotency-key", "create")
@@ -299,9 +341,10 @@ async fn strict_preconditions_use_412_for_stale_versions() {
         ))
         .unwrap();
     assert_eq!(
-        app.oneshot(stale).await.unwrap().status(),
+        app.clone().oneshot(stale).await.unwrap().status(),
         StatusCode::PRECONDITION_FAILED
     );
+    join_app(app, owner).await;
 }
 
 #[tokio::test]

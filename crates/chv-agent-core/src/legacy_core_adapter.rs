@@ -241,8 +241,13 @@ fn unsupported<T>(feature: &str) -> Result<T, ChvError> {
 mod tests {
     use super::*;
     use crate::{DiskSpec, NicSpec};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use cellhv_core_api::router;
     use cellhv_core_operations::{Acceptance, AuthorityActor, OperationService};
     use cellhv_core_types::{HostId, HostIdentity};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
 
     fn meta() -> LegacyRequestMeta {
         LegacyRequestMeta {
@@ -481,5 +486,78 @@ mod tests {
         assert_eq!(authority.vms().await.unwrap().len(), 1);
         authority.shutdown().await.unwrap();
         join.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_and_legacy_adapter_share_one_operation_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = OperationService::create_new(
+            &directory.path().join("core.db"),
+            &HostIdentity {
+                id: HostId::new("node-a").unwrap(),
+                resource_version: version(1),
+            },
+        )
+        .unwrap();
+        let (authority, owner) = AuthorityActor::spawn(service, 16).unwrap();
+        let app = router(authority.clone());
+        let native_create = serde_json::json!({
+            "request_id": "native-create",
+            "definition": {
+                "id": "vm-a",
+                "name": "guest",
+                "boot": {"kernel": "/kernel", "firmware": null, "initial_disk": null},
+                "compute": {"vcpus": 1, "memory_bytes": 1048576},
+                "storage": [],
+                "networks": [],
+                "requested_power_state": "stopped",
+                "observed_power_state": "unknown",
+                "resource_version": 1
+            }
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/vms")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "native-create")
+                    .body(Body::from(serde_json::to_vec(&native_create).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let mut legacy_meta = meta();
+        legacy_meta.operation_id = "legacy-start".to_owned();
+        legacy_meta.desired_state_version = "2".to_owned();
+        let legacy = adapt_legacy_vm_mutation(
+            &legacy_meta,
+            "node-a",
+            LegacyVmMutation::Start {
+                vm_id: "vm-a".to_owned(),
+            },
+            version(1),
+        )
+        .unwrap();
+        authority.submit(legacy.submission).await.unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let operations: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(operations.as_array().unwrap().len(), 2);
+        assert_eq!(operations[0]["operation"]["id"], "native:v1:native-create");
+        assert!(operations[1]["operation"]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("legacy:control-plane-node.v1:"));
+
+        drop(app);
+        authority.shutdown().await.unwrap();
+        owner.join().await.unwrap();
     }
 }

@@ -39,6 +39,19 @@ ALLOWED_PACKAGED_SERVICES = {
     "chv-nwd.service",
     "chv-stord.service",
 }
+PERSISTENT_LEASE_TOKEN = "cellhv-runtime-authority.lease"
+AUTHORITY_CLEANUP_PATHS = (
+    "packaging/scripts",
+    "packaging/systemd",
+    "scripts/install.sh",
+    "scripts/dev-install.sh",
+)
+DESTRUCTIVE_CLEANUP = re.compile(r"\b(?:rm|unlink)\b|\bfind\b.*\s-delete(?:\s|$)")
+LEASE_GLOB = re.compile(r"(?=[^\n]*[*?])(?=[^\n]*(?:\.lease|runtime-authority|\.cellhv-))")
+LEASE_PARENT_TARGET = re.compile(
+    r"(?:\$\{?CHV_DATA_DIR\}?|/var/lib/chv)"
+    r"(?:/agent)?(?:/(?:\.\*|\*))?(?=[\s'\"]|$)"
+)
 STORE_DEPENDENCIES = {"rusqlite", "sqlx", "libsqlite3-sys"}
 CORE_STORE_PACKAGE = "cellhv-core-store"
 CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
@@ -139,6 +152,31 @@ def check(root: Path) -> list[str]:
     if agent_units != ["chv-agent.service"]:
         errors.append(f"packaging/systemd: exactly chv-agent.service must start the Core runtime; got {agent_units}")
 
+    for relative in AUTHORITY_CLEANUP_PATHS:
+        source = root / relative
+        if not source.exists():
+            continue
+        paths = [source] if source.is_file() else source.rglob("*")
+        for path in paths:
+            if not path.is_file():
+                continue
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+            ):
+                if line.lstrip().startswith("#"):
+                    continue
+                if not DESTRUCTIVE_CLEANUP.search(line):
+                    continue
+                if (
+                    PERSISTENT_LEASE_TOKEN in line
+                    or LEASE_GLOB.search(line)
+                    or LEASE_PARENT_TARGET.search(line)
+                ):
+                    errors.append(
+                        f"{path.relative_to(root)}:{line_number}: package cleanup must preserve "
+                        "the persistent Core runtime authority lease and its parent namespace"
+                    )
+
     core_packages: set[str] = set()
     for name in manifests:
         if name == "chv-agent" or name.startswith("chv-agent-") or name.startswith("cellhv-core"):
@@ -194,6 +232,67 @@ def check(root: Path) -> list[str]:
             f"{CORE_OPERATIONS_PACKAGE}: dependency boundary forbids "
             f"{unexpected_operations_dependencies}"
         )
+
+    api_source_root = root / "crates/cellhv-core-api/src"
+    api_sources = sorted(api_source_root.rglob("*.rs")) if api_source_root.exists() else []
+    production_api_sources = [path for path in api_sources if path.name != "tests.rs"]
+    combined_api_source = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace") for path in production_api_sources
+    )
+    router_declarations = re.findall(
+        r"pub\s+fn\s+router\s*\((.*?)\)\s*(?:->|where|\{)",
+        combined_api_source,
+        re.DOTALL,
+    )
+    if not router_declarations or not any(
+        re.search(
+            r"\b[A-Za-z_][A-Za-z0-9_]*\s*:\s*"
+            r"(?:cellhv_core_operations\s*::\s*)?AuthorityHandle\b",
+            parameters,
+        )
+        for parameters in router_declarations
+    ):
+        errors.append("crates/cellhv-core-api: router must receive the shared AuthorityHandle")
+    for source in api_sources:
+        text = source.read_text(encoding="utf-8", errors="replace")
+        relative = source.relative_to(root)
+        if re.search(r"\b(?:struct|enum|type)\s+DbActor\b", text):
+            errors.append(f"{relative}: private DbActor is forbidden")
+    for source in production_api_sources:
+        text = source.read_text(encoding="utf-8", errors="replace")
+        relative = source.relative_to(root)
+        if re.search(r"\bOperationService\b", text):
+            errors.append(
+                f"{relative}: transport must not construct, alias, or own OperationService"
+            )
+
+    api_manifest_entry = manifests.get("cellhv-core-api")
+    if api_manifest_entry is not None:
+        _, api_manifest = api_manifest_entry
+        api_dependency_tables = [
+            api_manifest.get("dependencies", {}),
+            api_manifest.get("dev-dependencies", {}),
+            api_manifest.get("build-dependencies", {}),
+        ]
+        for target in api_manifest.get("target", {}).values():
+            api_dependency_tables.extend(
+                (
+                    target.get("dependencies", {}),
+                    target.get("dev-dependencies", {}),
+                    target.get("build-dependencies", {}),
+                )
+            )
+        api_dependency_packages = set()
+        for table in api_dependency_tables:
+            for dependency_name, declaration in table.items():
+                api_dependency_packages.add(dependency_name)
+                if isinstance(declaration, dict) and isinstance(declaration.get("package"), str):
+                    api_dependency_packages.add(declaration["package"])
+        if "chv-agent-core" in api_dependency_packages:
+            errors.append(
+                "crates/cellhv-core-api: dependency direction forbids chv-agent-core "
+                "in normal, build, target, and dev dependencies"
+            )
 
     store_core_dependencies = dependency_graph.get(CORE_STORE_PACKAGE, set()) & core_packages
     unexpected_store_dependencies = sorted(store_core_dependencies - STORE_ALLOWED_CORE_DEPENDENCIES)
@@ -270,6 +369,55 @@ def check(root: Path) -> list[str]:
             errors.append(
                 "config/cellhv-core-authority-v1.json: vm_process_owner_count does not match "
                 f"process owners {process_owners}"
+            )
+
+    identity_policy_path = root / "config/cellhv-core-identity-policy-v1.json"
+    try:
+        identity_policy = load_json(identity_policy_path)
+    except (OSError, ValueError) as exc:
+        errors.append(f"config/cellhv-core-identity-policy-v1.json: {exc}")
+    else:
+        expected_identity_policy = {
+            "version": 1,
+            "adr_status": "proposed",
+            "production_startup_enforced": False,
+            "importer_reserved_host_ids_enforced": True,
+            "nodecache_authority_mode_enforced": False,
+            "durable_identity_precedence": [
+                "existing-core-database",
+                "importable-nodecache",
+                "configured-fresh-seed",
+                "identity-preserving-precreation-enrollment",
+                "persisted-one-time-uuid",
+            ],
+            "reserved_host_ids": ["unknown", "unset", "none", "null"],
+            "machine_id_is_host_id_source": False,
+            "configured_node_id_can_override_durable_identity": False,
+            "enrollment_can_replace_core_host_id": False,
+            "unreadable_database_can_be_reinitialized": False,
+            "nodecache_authority_modes": [
+                "legacy-vm-authority",
+                "core-vm-authority",
+                "blocked",
+            ],
+            "post_cutover_vm_writable_store": "core-sqlite-only",
+        }
+        if identity_policy != expected_identity_policy:
+            errors.append(
+                "config/cellhv-core-identity-policy-v1.json: policy must exactly match ADR-019"
+            )
+
+    identity_adr_path = root / "docs/specs/adr/019-stable-core-host-identity-and-nodecache-authority.md"
+    try:
+        identity_adr = identity_adr_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"{identity_adr_path.relative_to(root)}: {exc}")
+    else:
+        status = re.search(r"^## Status\s+^(\S+)\s*$", identity_adr, re.MULTILINE)
+        if status is None or status.group(1) != "Proposed":
+            errors.append(
+                "docs/specs/adr/019-stable-core-host-identity-and-nodecache-authority.md: "
+                "status must remain Proposed until production startup and cache modes are enforced"
             )
 
     forbidden_identity = re.compile(r"\bqmp\b|qemu:///system|\bqemu(?!-(?:img|utils|kvm))\b", re.IGNORECASE)

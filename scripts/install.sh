@@ -1327,7 +1327,7 @@ BANNER
 }
 
 # -----------------------------------------------------------------------------
-# Wipe Deployment (--wipe flag: full teardown including certs, data, network)
+# Wipe Deployment (--wipe flag: teardown while preserving agent authority state)
 # -----------------------------------------------------------------------------
 wipe_deployment() {
     info "Wiping previous CHV deployment (--wipe)..."
@@ -1340,9 +1340,12 @@ wipe_deployment() {
     # Remove systemd units
     rm -f /etc/systemd/system/chv-*.service
     systemctl daemon-reload
-    # Remove ALL data, config, certs, runtime
+    # Remove replaceable deployment state. Agent authority state is persistent:
+    # deleting its database or runtime lease could orphan VM identity or create
+    # two independent lock namespaces on a concurrent-start failure.
     rm -rf "${CHV_CONFIG_DIR}"
-    rm -rf "${CHV_DATA_DIR}"
+    rm -rf "${CHV_DATA_DIR}/cache" "${CHV_DATA_DIR}/storage"
+    rm -f "${CHV_DATA_DIR}/controlplane.db"*
     rm -rf "${CHV_RUN_DIR}"
     rm -rf "${CHV_LOG_DIR}"
     rm -rf "${CHV_UI_DIR}"
@@ -1361,7 +1364,7 @@ wipe_deployment() {
     local bridge_subnet
     bridge_subnet=$(echo "${INSTALL_CHV_BRIDGE_CIDR}" | sed 's|/[0-9]*$||' | sed 's|\.[0-9]*$|.0/24|')
     iptables -t nat -D POSTROUTING -s "${bridge_subnet}" ! -o "${INSTALL_CHV_BRIDGE_NAME}" -j MASQUERADE 2>/dev/null || true
-    info "Wipe complete. Starting fresh install."
+    info "Wipe complete; persistent agent authority state was retained. Starting fresh install."
 }
 
 # -----------------------------------------------------------------------------

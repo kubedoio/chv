@@ -45,6 +45,11 @@ operation, event, and restart inspection. It intentionally does not expose
 `claim_attempt` or `finish`: those belong to a later bounded executor slice and
 would create an accidental runtime execution boundary here.
 
+The native router is a pure transport constructor over an injected
+`AuthorityHandle`. It does not accept `OperationService`, open a store, or
+start a private actor. Handler reads and mutations therefore enter the same
+bounded, queue-ordered authority surface intended for compatibility adapters.
+
 ## Required Future Wiring
 
 Production construction must occur once in `chv-agent` after
@@ -56,6 +61,6 @@ then be prevented.
 Until that wiring exists, multiple independently constructed actors remain
 possible at the library API level. Therefore this slice is not evidence of
 process-wide exclusivity, production cutover, or `AGENT-CORE-002` completion.
-The existing private `cellhv-core-api::DbActor` must be retired and the API must
-receive this shared handle during that wiring; both actors must not remain as
-independent production paths.
+The former private `cellhv-core-api::DbActor` has been retired; production
+wiring must inject a clone of the one process-wide handle and retain its
+`AuthorityActorJoin` owner until ordered shutdown completes.

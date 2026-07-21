@@ -25,12 +25,18 @@ class ArchitectureGuardTests(unittest.TestCase):
         target = root / process_source
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text((ROOT / process_source).read_text(), encoding="utf-8")
+        api_source = "crates/cellhv-core-api/src/lib.rs"
+        target = root / api_source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / api_source).read_text(), encoding="utf-8")
         for service in (ROOT / "packaging/systemd").glob("*.service"):
             target = root / "packaging/systemd" / service.name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(service.read_text(), encoding="utf-8")
         for relative in (
             "config/cellhv-core-authority-v1.json",
+            "config/cellhv-core-identity-policy-v1.json",
+            "docs/specs/adr/019-stable-core-host-identity-and-nodecache-authority.md",
             "docs/acceptance/cellhv-core-registry-v1.json",
             "docs/schemas/cellhv-acceptance-registry-v1.schema.json",
             "docs/qualification/cellhv-core-phase-a-claim.json",
@@ -86,6 +92,41 @@ class ArchitectureGuardTests(unittest.TestCase):
                 (service_dir / name).write_text(f"[Service]\nExecStart=/usr/bin/{executable}\n")
             (service_dir / "chv-core.service").write_text("[Service]\nExecStart=/usr/bin/chv-core\n")
             self.assertTrue(any("unclassified service" in error for error in GUARD.check(root)))
+
+    def test_authoritative_cleanup_cannot_remove_runtime_authority_lease(self):
+        for path_name, command in (
+            (
+                "scripts/install.sh",
+                "rm -f /var/lib/chv/agent/.core.db.cellhv-runtime-authority.lease\n",
+            ),
+            ("packaging/scripts/postremove.sh", "rm -f /var/lib/chv/agent/*.lease\n"),
+            ("scripts/dev-install.sh", 'rm -rf "${CHV_DATA_DIR}/agent"\n'),
+            ("scripts/install.sh", 'rm -rf "${CHV_DATA_DIR}/agent/.*"\n'),
+            ("scripts/install.sh", 'find "${CHV_DATA_DIR}/agent" -delete\n'),
+            ("scripts/install.sh", 'rm -rf "${CHV_DATA_DIR}"\n'),
+        ):
+            with self.subTest(path=path_name, command=command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.copy_baseline(root)
+                path = root / path_name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(command, encoding="utf-8")
+                errors = GUARD.check(root)
+                self.assertTrue(any("persistent Core runtime authority lease" in error for error in errors))
+
+    def test_safe_authority_parent_setup_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "scripts/install.sh"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                'mkdir -p "${CHV_DATA_DIR}/agent"\nchmod 0700 "${CHV_DATA_DIR}/agent"\n',
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                any("persistent Core runtime authority lease" in error for error in GUARD.check(root))
+            )
 
     def test_undeclared_store_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -166,6 +207,102 @@ class ArchitectureGuardTests(unittest.TestCase):
             errors = GUARD.check(root)
             self.assertTrue(any("dependency boundary forbids" in error for error in errors))
 
+    def test_native_api_must_receive_shared_authority_handle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/lib.rs"
+            text = path.read_text().replace(
+                "pub fn router(authority: AuthorityHandle)",
+                "pub fn router(service: OtherHandle)",
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("shared AuthorityHandle" in error for error in errors))
+
+    def test_native_api_router_parameter_name_and_qualified_handle_are_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/lib.rs"
+            text = path.read_text().replace(
+                "pub fn router(authority: AuthorityHandle)",
+                "pub fn router(shared: cellhv_core_operations::AuthorityHandle)",
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            self.assertFalse(
+                any("shared AuthorityHandle" in error for error in GUARD.check(root))
+            )
+
+    def test_native_api_private_actor_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/lib.rs"
+            path.write_text(path.read_text() + "\nstruct DbActor;\n", encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("private DbActor" in error for error in errors))
+
+    def test_native_api_private_actor_in_another_module_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/actor.rs"
+            path.write_text("pub struct DbActor;\n", encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("actor.rs: private DbActor" in error for error in errors))
+
+    def test_native_api_direct_operation_service_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/lib.rs"
+            path.write_text(
+                path.read_text() + "\nfn bypass(_: OperationService) {}\n",
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("must not construct, alias, or own" in error for error in errors))
+
+    def test_native_api_operation_service_alias_in_another_module_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/database.rs"
+            path.write_text(
+                "use cellhv_core_operations::OperationService as Database;\n",
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("database.rs: transport must not" in error for error in errors))
+
+    def test_native_api_qualified_operation_service_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/src/database.rs"
+            path.write_text(
+                "fn bypass(_: cellhv_core_operations::OperationService) {}\n",
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("database.rs: transport must not" in error for error in errors))
+
+    def test_native_api_cannot_depend_upward_on_agent_even_for_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/Cargo.toml"
+            path.write_text(
+                path.read_text()
+                + '\n[dev-dependencies.agent]\npackage = "chv-agent-core"\npath = "../chv-agent-core"\n',
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("dependency direction forbids" in error for error in errors))
+
     def test_second_operation_engine_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -216,6 +353,50 @@ class ArchitectureGuardTests(unittest.TestCase):
             value["vm_authority_count"] = 2
             path.write_text(json.dumps(value), encoding="utf-8")
             self.assertTrue(any("vm_authority_count" in error for error in GUARD.check(root)))
+
+    def test_machine_id_identity_source_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "config/cellhv-core-identity-policy-v1.json"
+            value = json.loads(path.read_text())
+            value["machine_id_is_host_id_source"] = True
+            path.write_text(json.dumps(value), encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("exactly match ADR-019" in error for error in errors))
+
+    def test_identity_policy_cannot_claim_unimplemented_runtime_enforcement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "config/cellhv-core-identity-policy-v1.json"
+            value = json.loads(path.read_text())
+            value["adr_status"] = "accepted"
+            value["production_startup_enforced"] = True
+            value["nodecache_authority_mode_enforced"] = True
+            path.write_text(json.dumps(value), encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("exactly match ADR-019" in error for error in errors))
+
+    def test_identity_adr_cannot_be_accepted_before_runtime_enforcement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "docs/specs/adr/019-stable-core-host-identity-and-nodecache-authority.md"
+            path.write_text(path.read_text().replace("## Status\n\nProposed", "## Status\n\nAccepted", 1))
+            errors = GUARD.check(root)
+            self.assertTrue(any("status must remain Proposed" in error for error in errors))
+
+    def test_post_cutover_nodecache_vm_authority_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "config/cellhv-core-identity-policy-v1.json"
+            value = json.loads(path.read_text())
+            value["post_cutover_vm_writable_store"] = "core-and-nodecache"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("exactly match ADR-019" in error for error in errors))
 
 
 if __name__ == "__main__":

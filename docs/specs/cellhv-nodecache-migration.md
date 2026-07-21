@@ -62,7 +62,8 @@ absent --import--> imported --cutover--> cutover
   processes.
 - Cutover is idempotent for the exact checksum and irreversible through this
   API. After cutover the JSON cache MUST NOT be independently writable for VM
-  state. A future startup coordinator must enforce that ownership switch.
+  state. ADR-019 proposes the process-wide `legacy-vm-authority`,
+  `core-vm-authority`, and `blocked` modes that enforce that ownership switch.
 
 ## Deterministic Mapping
 
@@ -76,6 +77,11 @@ absent --import--> imported --cutover--> cutover
 | NIC network and MAC | network reference and MAC; attachment ID is the existing `VM-ID-NETWORK-ID` convention |
 | desired `Running` / `Stopped` | requested power state |
 | no durable legacy observation | observed state `unknown` |
+
+The legacy `node_id` must also satisfy ADR-019's Core host-ID policy. In
+particular, a literal placeholder such as `unknown` is not an importable Core
+identity. It is never silently rewritten; startup either establishes a valid
+fresh identity under the ADR-019 decision table or enters `blocked`.
 
 Input maps are normalized through sorted maps and output definitions are sorted
 by VM identity. Identifiers are never regenerated.
@@ -107,3 +113,8 @@ following in one reviewed change:
 3. legacy requests routed through the single Core operation engine;
 4. explicit operator recovery for unsupported or malformed caches;
 5. restart tests proving that a cutover marker cannot reactivate JSON authority.
+
+In `core-vm-authority` mode, compatibility-only cache fields may still be
+persisted, but a save must first prove that the complete VM-authoritative JSON
+projection is unchanged from the frozen post-import projection. This permits
+enrollment and telemetry compatibility without restoring JSON VM authority.

@@ -39,4 +39,6 @@ lru = "0.18"
 sysinfo = "0.30"
 
 [dev-dependencies]
+cellhv-core-api = { path = "../cellhv-core-api" }
+http-body-util = "0.1"
 tempfile = { workspace = true }

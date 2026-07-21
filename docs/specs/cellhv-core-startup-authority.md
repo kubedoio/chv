@@ -64,3 +64,9 @@ boundary is later broadened.
 Future production wiring must treat `ActivateCore` as an exclusion rule: it
 must not construct a VM-writable NodeCache. The retained JSON and archive are
 compatibility/recovery evidence only.
+
+ADR-019 proposes the pending fresh-host identity and process-wide compatibility
+mode policy. `InitializeFreshCore` does not authorize a placeholder identity or an
+in-memory/fallback authority. Production wiring must persist either a valid
+fresh seed or a one-time generated UUID before publishing the authority. It
+must select `core-vm-authority` only after that durable creation succeeds.

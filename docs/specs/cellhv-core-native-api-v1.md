@@ -4,8 +4,8 @@ Status: Phase B contract skeleton, production startup disabled
 
 ## Boundary
 
-`cellhv-core-api` is an HTTP/JSON transport around the single
-`cellhv-core-operations::OperationService`. It has no SQLite, provider,
+`cellhv-core-api` is an HTTP/JSON transport around an injected clone of the
+single `cellhv-core-operations::AuthorityHandle`. It has no SQLite, provider,
 Cloud Hypervisor, control-plane, or cloud model dependency. It is intended to
 run inside `chv-agent`; it is not a daemon or a second lifecycle authority.
 
@@ -59,9 +59,11 @@ gone.
 - event streaming (v1 exposes deterministic polling);
 - lifecycle execution and corresponding capability enablement.
 
-SQLite work runs only on one named database actor thread. Async handlers send
-typed requests over a channel and await typed replies, preserving authority
-ordering without blocking Tokio workers.
+The router cannot construct an `OperationService` or actor. Async handlers send
+typed requests through the bounded shared authority queue and await typed
+replies, preserving authority ordering without blocking Tokio workers. The
+future `chv-agent` composition root must retain the actor owner for the whole
+listener lifetime and perform ordered shutdown.
 
 `vm_definitions=false` currently describes executable production availability:
 the router is not started. Its CRUD contract is implemented and tested, but the

@@ -11,97 +11,28 @@ use axum::{
     Json, Router,
 };
 use cellhv_core_operations::{
-    Acceptance, AcceptedOperation, ErrorClass, MutationCommand, OperationJournalEntry,
-    OperationService, OperationServiceError, SubmitMutation,
+    Acceptance, AcceptedOperation, AuthorityActorError, AuthorityHandle, ErrorClass,
+    MutationCommand, OperationJournalEntry, OperationServiceError, SubmitMutation,
 };
 use cellhv_core_types::{
     HostCapabilities, HostIdentity, IdempotencyKey, OperationEvent, OperationId, ResourceVersion,
     VmDefinition, VmId,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path as FsPath, sync::mpsc};
+use std::path::Path as FsPath;
 use thiserror::Error;
-use tokio::sync::oneshot;
 
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 const IF_MATCH_HEADER: &str = "if-match";
 const LOCAL_SCOPE: &str = "core-api-v1";
 pub const CONTRACT_V1: &str = include_str!("../contract/cellhv-core-api-v1.json");
 
-type Reply<T> = oneshot::Sender<Result<T, OperationServiceError>>;
-
-enum DbRequest {
-    Host(Reply<cellhv_core_operations::HostRecord>),
-    Vms(Reply<Vec<VmDefinition>>),
-    Vm(VmId, Reply<VmDefinition>),
-    Submit(Box<SubmitMutation>, Reply<AcceptedOperation>),
-    Operations(Reply<Vec<OperationJournalEntry>>),
-    Operation(OperationId, Reply<OperationJournalEntry>),
-    Events(u64, u32, Reply<Vec<OperationEvent>>),
-}
-
-#[derive(Clone)]
-struct DbActor {
-    sender: mpsc::Sender<DbRequest>,
-}
-
-impl DbActor {
-    fn start(mut service: OperationService) -> Result<Self, ApiStartError> {
-        let (sender, receiver) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("cellhv-core-db".to_owned())
-            .spawn(move || {
-                while let Ok(request) = receiver.recv() {
-                    match request {
-                        DbRequest::Host(reply) => {
-                            let _ = reply.send(service.host());
-                        }
-                        DbRequest::Vms(reply) => {
-                            let _ = reply.send(service.vms());
-                        }
-                        DbRequest::Vm(id, reply) => {
-                            let _ = reply.send(service.vm(&id));
-                        }
-                        DbRequest::Submit(value, reply) => {
-                            let _ = reply.send(service.submit(*value));
-                        }
-                        DbRequest::Operations(reply) => {
-                            let _ = reply.send(service.operations());
-                        }
-                        DbRequest::Operation(id, reply) => {
-                            let _ = reply.send(service.operation(&id));
-                        }
-                        DbRequest::Events(after, limit, reply) => {
-                            let _ = reply.send(service.events_after(after, limit));
-                        }
-                    }
-                }
-            })
-            .map_err(ApiStartError::Thread)?;
-        Ok(Self { sender })
-    }
-
-    async fn call<T>(&self, build: impl FnOnce(Reply<T>) -> DbRequest) -> Result<T, ApiError> {
-        let (reply, receive) = oneshot::channel();
-        self.sender
-            .send(build(reply))
-            .map_err(|_| ApiError::Unavailable)?;
-        receive
-            .await
-            .map_err(|_| ApiError::Unavailable)?
-            .map_err(ApiError::Service)
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum ApiStartError {
-    #[error("cannot start the Core database actor: {0}")]
-    Thread(std::io::Error),
-}
-
-pub fn router(service: OperationService) -> Result<Router, ApiStartError> {
-    let db = DbActor::start(service)?;
-    Ok(Router::new()
+/// Builds the native transport over the process-wide Core authority.
+///
+/// The caller owns actor startup and shutdown. This constructor neither opens
+/// a database nor creates another serialization boundary.
+pub fn router(authority: AuthorityHandle) -> Router {
+    Router::new()
         .route("/v1/host", get(get_host))
         .route("/v1/host/capabilities", get(get_capabilities))
         .route("/v1/vms", get(list_vms).post(create_vm))
@@ -117,7 +48,7 @@ pub fn router(service: OperationService) -> Result<Router, ApiStartError> {
         .route("/v1/events", get(list_events))
         .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed.into_response() })
         .fallback(|| async { ApiError::NotFound.into_response() })
-        .with_state(db))
+        .with_state(authority)
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +104,19 @@ enum ApiError {
     NotFound,
     #[error("method is not allowed for this resource")]
     MethodNotAllowed,
+}
+
+impl From<AuthorityActorError> for ApiError {
+    fn from(error: AuthorityActorError) -> Self {
+        match error {
+            AuthorityActorError::Service(error) => Self::Service(error),
+            AuthorityActorError::InvalidCapacity
+            | AuthorityActorError::Unavailable
+            | AuthorityActorError::Join(_)
+            | AuthorityActorError::Spawn(_)
+            | AuthorityActorError::ThreadPanicked => Self::Unavailable,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -244,34 +188,40 @@ fn path(value: Result<Path<String>, PathRejection>) -> Result<String, ApiError> 
         .map_err(|error| ApiError::Invalid(error.body_text()))
 }
 
-async fn get_host(State(db): State<DbActor>) -> Result<Json<HostResponse>, ApiError> {
-    let host = db.call(DbRequest::Host).await?;
+async fn get_host(
+    State(authority): State<AuthorityHandle>,
+) -> Result<Json<HostResponse>, ApiError> {
+    let host = authority.host().await?;
     Ok(Json(HostResponse {
         identity: host.identity,
         capabilities: host.capabilities,
     }))
 }
-async fn get_capabilities(State(db): State<DbActor>) -> Result<Json<HostCapabilities>, ApiError> {
-    Ok(Json(db.call(DbRequest::Host).await?.capabilities))
+async fn get_capabilities(
+    State(authority): State<AuthorityHandle>,
+) -> Result<Json<HostCapabilities>, ApiError> {
+    Ok(Json(authority.host().await?.capabilities))
 }
-async fn list_vms(State(db): State<DbActor>) -> Result<Json<Vec<VmDefinition>>, ApiError> {
-    Ok(Json(db.call(DbRequest::Vms).await?))
+async fn list_vms(
+    State(authority): State<AuthorityHandle>,
+) -> Result<Json<Vec<VmDefinition>>, ApiError> {
+    Ok(Json(authority.vms().await?))
 }
 async fn get_vm(
-    State(db): State<DbActor>,
+    State(authority): State<AuthorityHandle>,
     id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<VmDefinition>, ApiError> {
     let id = VmId::new(path(id)?).map_err(|error| ApiError::Invalid(error.to_string()))?;
-    Ok(Json(db.call(|reply| DbRequest::Vm(id, reply)).await?))
+    Ok(Json(authority.vm(id).await?))
 }
 async fn create_vm(
-    State(db): State<DbActor>,
+    State(authority): State<AuthorityHandle>,
     headers: HeaderMap,
     body: Result<Json<VmMutationBody>, JsonRejection>,
 ) -> Result<(StatusCode, Json<AcceptanceResponse>), ApiError> {
     let body = json(body)?;
     let accepted = submit(
-        &db,
+        &authority,
         body.request_id,
         idempotency_key(&headers)?,
         ResourceVersion::new(1).expect("valid"),
@@ -283,7 +233,7 @@ async fn create_vm(
     Ok((StatusCode::ACCEPTED, Json(response(accepted))))
 }
 async fn update_vm(
-    State(db): State<DbActor>,
+    State(authority): State<AuthorityHandle>,
     id: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<VmMutationBody>, JsonRejection>,
@@ -296,7 +246,7 @@ async fn update_vm(
         ));
     }
     let accepted = submit(
-        &db,
+        &authority,
         body.request_id,
         idempotency_key(&headers)?,
         expected_version(&headers)?,
@@ -308,7 +258,7 @@ async fn update_vm(
     Ok((StatusCode::ACCEPTED, Json(response(accepted))))
 }
 async fn delete_vm(
-    State(db): State<DbActor>,
+    State(authority): State<AuthorityHandle>,
     id: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<MutationBody>, JsonRejection>,
@@ -316,7 +266,7 @@ async fn delete_vm(
     let id = VmId::new(path(id)?).map_err(|error| ApiError::Invalid(error.to_string()))?;
     let body = json(body)?;
     let accepted = submit(
-        &db,
+        &authority,
         body.request_id,
         idempotency_key(&headers)?,
         expected_version(&headers)?,
@@ -326,7 +276,7 @@ async fn delete_vm(
     Ok((StatusCode::ACCEPTED, Json(response(accepted))))
 }
 async fn start_vm(
-    State(_): State<DbActor>,
+    State(_): State<AuthorityHandle>,
     id: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<MutationBody>, JsonRejection>,
@@ -334,7 +284,7 @@ async fn start_vm(
     unsupported_action(id, headers, body, "power start execution")
 }
 async fn stop_vm(
-    State(_): State<DbActor>,
+    State(_): State<AuthorityHandle>,
     id: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<MutationBody>, JsonRejection>,
@@ -342,7 +292,7 @@ async fn stop_vm(
     unsupported_action(id, headers, body, "power stop execution")
 }
 async fn reboot_vm(
-    State(_): State<DbActor>,
+    State(_): State<AuthorityHandle>,
     id: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<MutationBody>, JsonRejection>,
@@ -367,26 +317,22 @@ fn unsupported_action(
 }
 
 async fn submit(
-    db: &DbActor,
+    authority: &AuthorityHandle,
     request_id: String,
     key: IdempotencyKey,
     expected_vm_version: ResourceVersion,
     command: MutationCommand,
 ) -> Result<AcceptedOperation, ApiError> {
     let operation_id = native_operation_id(&request_id)?;
-    db.call(|reply| {
-        DbRequest::Submit(
-            Box::new(SubmitMutation {
-                operation_id,
-                idempotency_scope: LOCAL_SCOPE.to_owned(),
-                idempotency_key: key,
-                expected_vm_version,
-                command,
-            }),
-            reply,
-        )
-    })
-    .await
+    Ok(authority
+        .submit(SubmitMutation {
+            operation_id,
+            idempotency_scope: LOCAL_SCOPE.to_owned(),
+            idempotency_key: key,
+            expected_vm_version,
+            command,
+        })
+        .await?)
 }
 fn native_operation_id(request_id: &str) -> Result<OperationId, ApiError> {
     if request_id.trim().is_empty() || request_id.len() > 200 {
@@ -398,21 +344,19 @@ fn native_operation_id(request_id: &str) -> Result<OperationId, ApiError> {
         .map_err(|error| ApiError::Invalid(error.to_string()))
 }
 async fn get_operation(
-    State(db): State<DbActor>,
+    State(authority): State<AuthorityHandle>,
     id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<OperationJournalEntry>, ApiError> {
     let id = OperationId::new(path(id)?).map_err(|error| ApiError::Invalid(error.to_string()))?;
-    Ok(Json(
-        db.call(|reply| DbRequest::Operation(id, reply)).await?,
-    ))
+    Ok(Json(authority.operation(id).await?))
 }
 async fn list_operations(
-    State(db): State<DbActor>,
+    State(authority): State<AuthorityHandle>,
 ) -> Result<Json<Vec<OperationJournalEntry>>, ApiError> {
-    Ok(Json(db.call(DbRequest::Operations).await?))
+    Ok(Json(authority.operations().await?))
 }
 async fn list_events(
-    State(db): State<DbActor>,
+    State(authority): State<AuthorityHandle>,
     query: Result<Query<EventQuery>, QueryRejection>,
 ) -> Result<Json<Vec<OperationEvent>>, ApiError> {
     let Query(query) = query.map_err(|error| ApiError::Invalid(error.body_text()))?;
@@ -422,8 +366,7 @@ async fn list_events(
         ));
     }
     Ok(Json(
-        db.call(|reply| DbRequest::Events(query.after, query.limit, reply))
-            .await?,
+        authority.events_after(query.after, query.limit).await?,
     ))
 }
 fn idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, ApiError> {

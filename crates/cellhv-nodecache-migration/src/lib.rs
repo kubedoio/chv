@@ -78,7 +78,7 @@ pub fn plan(source: &[u8]) -> Result<ImportPlan> {
     if cache.cache_version != 1 {
         return Err(malformed("cache_version must equal 1"));
     }
-    nonempty("node_id", &cache.node_id)?;
+    validate_core_host_id(&cache.node_id)?;
     nonempty("observed_generation", &cache.observed_generation)?;
     nonempty("node_state", &cache.node_state)?;
     validate_optional_path("certificate_path", cache.certificate_path.as_deref())?;
@@ -302,6 +302,16 @@ fn nonempty(field: &str, value: &str) -> Result<()> {
         Ok(())
     }
 }
+fn validate_core_host_id(value: &str) -> Result<()> {
+    nonempty("node_id", value)?;
+    if matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "unknown" | "unset" | "none" | "null"
+    ) {
+        return Err(malformed("node_id is a reserved Core identity placeholder"));
+    }
+    Ok(())
+}
 fn validate_optional_path(field: &str, value: Option<&str>) -> Result<()> {
     if value.is_some_and(|item| item.trim().is_empty()) {
         Err(malformed(&format!(
@@ -503,6 +513,30 @@ mod tests {
         assert_eq!(first.host().id.as_str(), "node-a");
         assert_eq!(first.definitions()[0].id.as_str(), "vm-a");
         assert_eq!(first.definitions()[0].resource_version.get(), 9);
+    }
+
+    #[test]
+    fn reserved_host_identity_placeholders_fail_before_import() {
+        for placeholder in ["unknown", " UNKNOWN ", "Unset", "none", "NULL"] {
+            let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+            value["node_id"] = json!(placeholder);
+            let error = plan(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+            assert!(matches!(error, MigrationError::Malformed(_)));
+            assert!(error
+                .to_string()
+                .contains("reserved Core identity placeholder"));
+        }
+
+        let mut value: serde_json::Value = serde_json::from_slice(&source("1")).unwrap();
+        value["node_id"] = json!("unknown-host");
+        assert_eq!(
+            plan(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .host()
+                .id
+                .as_str(),
+            "unknown-host"
+        );
     }
 
     #[test]

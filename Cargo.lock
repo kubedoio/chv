@@ -650,6 +650,7 @@ name = "chv-agent-core"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "cellhv-core-api",
  "cellhv-core-fs",
  "cellhv-core-operations",
  "cellhv-core-types",
@@ -664,6 +665,7 @@ dependencies = [
  "control-plane-node-api",
  "dashmap",
  "futures-util",
+ "http-body-util",
  "hyper-util",
  "jsonwebtoken",
  "libc",

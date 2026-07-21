@@ -14,24 +14,24 @@ runtime behavior are unchanged.
 - separate, checksum-bound cutover;
 - pre-cutover rollback with journal and exact import-manifest drift guards;
 - explicit rejection of malformed and non-lossless data;
+- preflight rejection of reserved Core host identity placeholders;
 - no daemon, database, operation engine, provider, or VMM dependency.
 
 ## Verification
 
 ```text
 cargo test -p cellhv-nodecache-migration -p cellhv-core-store
-  cellhv-nodecache-migration: 5 passed
-  cellhv-core-store: 18 passed
+  cellhv-nodecache-migration: 6 passed
+  cellhv-core-store: 19 passed
 
 cargo clippy -p cellhv-nodecache-migration -p cellhv-core-store --all-targets -- -D warnings
   passed
 
-full workspace check, strict clippy, and tests
-  928 passed, 0 failed, 3 documented release/environment-dependent ignores
 ```
 
 The fixtures cover stable identity/checksum mapping, representative defaults,
-multi-VM preflight atomicity, malformed input, unrepresentable input, exact
+multi-VM preflight atomicity, reserved host placeholders, malformed input,
+unrepresentable input, exact
 replay, changed-source conflict, marker tampering on reopen, imported and
 cutover reopen, rollback drift, cutover, repeated cutover, and refusal to roll
 back after cutover.

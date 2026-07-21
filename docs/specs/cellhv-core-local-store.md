@@ -2,7 +2,8 @@
 
 **Status:** Proposed  
 **Date:** 2026-07-21  
-**Authority:** ADR-016 and ADR-017  
+**Authority:** ADR-016 and ADR-017
+**Related proposal:** ADR-019
 **Phase:** B, slices 1-2 - platform-neutral domain, SQLite store, and operation persistence
 
 ## 1. Purpose
