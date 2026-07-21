@@ -687,8 +687,6 @@ name = "chv-agent"
 version = "0.2.0"
 dependencies = [
  "axum",
- "cellhv-core-executor",
- "cellhv-core-operations",
  "cellhv-core-runtime-owner",
  "cellhv-core-startup",
  "chv-agent-core",
@@ -752,8 +750,6 @@ name = "chv-agent-runtime-ch"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "cellhv-core-executor",
- "cellhv-core-operations",
  "cellhv-core-runtime-ownership",
  "cellhv-core-types",
  "chv-common",

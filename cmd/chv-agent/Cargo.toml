@@ -10,8 +10,6 @@ name = "chv-agent"
 path = "src/main.rs"
 
 [dependencies]
-cellhv-core-operations = { path = "../../crates/cellhv-core-operations" }
-cellhv-core-executor = { path = "../../crates/cellhv-core-executor" }
 chv-common = { path = "../../crates/chv-common" }
 chv-config = { path = "../../crates/chv-config" }
 chv-observability = { path = "../../crates/chv-observability" }

@@ -6,7 +6,7 @@
 
 use cellhv_core_api::{CoreApiListener, ListenerError};
 use cellhv_core_operations::{
-    AuthorityActor, AuthorityActorError, AuthorityActorJoin, AuthorityHandle, ExecutionHandle,
+    AuthorityActor, AuthorityActorError, AuthorityActorJoin, AuthorityHandle,
 };
 use cellhv_core_startup::{
     ActivatedStore, ActivationKind, ActivationProvenance, RuntimeAuthorityGuard,
@@ -58,11 +58,10 @@ impl CoreRuntimeOwner {
         socket: &Path,
         queue_capacity: usize,
         drain_timeout: Duration,
-    ) -> Result<(Self, ExecutionHandle)> {
+    ) -> Result<Self> {
         let (service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
         validate_native_only(kind, &provenance)?;
-        let (authority, execution, actor_join) =
-            AuthorityActor::spawn_with_execution(service, queue_capacity)?;
+        let (authority, actor_join) = AuthorityActor::spawn(service, queue_capacity)?;
         let listener = match CoreApiListener::start_authority_owned_with_drain_timeout(
             socket,
             authority.clone(),
@@ -86,17 +85,14 @@ impl CoreRuntimeOwner {
                 });
             }
         };
-        Ok((
-            Self {
-                listener: Some(listener),
-                authority: Some(authority),
-                actor_join: Some(actor_join),
-                kind,
-                provenance,
-                runtime_guard: Some(runtime_guard),
-            },
-            execution,
-        ))
+        Ok(Self {
+            listener: Some(listener),
+            authority: Some(authority),
+            actor_join: Some(actor_join),
+            kind,
+            provenance,
+            runtime_guard: Some(runtime_guard),
+        })
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -234,7 +230,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let paths = paths(&directory);
         let socket = directory.path().join("core.sock");
-        let (owner, _execution) = CoreRuntimeOwner::start(
+        let owner = CoreRuntimeOwner::start(
             fresh(&paths, "native-host"),
             &socket,
             16,
@@ -253,10 +249,9 @@ mod tests {
             .activate(Some("native-host".to_owned()), None)
             .unwrap();
         assert_eq!(restarted.kind(), ActivationKind::Existing);
-        let (owner, _execution) =
-            CoreRuntimeOwner::start(restarted, &socket, 16, Duration::from_secs(1))
-                .await
-                .unwrap();
+        let owner = CoreRuntimeOwner::start(restarted, &socket, 16, Duration::from_secs(1))
+            .await
+            .unwrap();
         assert!(request(&socket, "/v1/host").await.contains("native-host"));
         owner.shutdown().await.unwrap();
     }
@@ -310,7 +305,7 @@ mod tests {
         let stale = tokio::net::UnixListener::bind(&socket).unwrap();
         drop(stale);
 
-        let (owner, _execution) = CoreRuntimeOwner::start(
+        let owner = CoreRuntimeOwner::start(
             fresh(&paths, "recovered-host"),
             &socket,
             16,
@@ -396,7 +391,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let paths = paths(&directory);
         let socket = directory.path().join("core.sock");
-        let (owner, _execution) = CoreRuntimeOwner::start(
+        let owner = CoreRuntimeOwner::start(
             fresh(&paths, "abandoned-runtime"),
             &socket,
             16,
