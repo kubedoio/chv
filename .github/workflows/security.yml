@@ -70,7 +70,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           # Fail CI on any advisory, including warnings (yanked, unmaintained).
           # Tune in deny.toml if a specific class needs to be downgraded.
-          arguments: --deny warnings
+          arguments: --deny warnings --config deny.toml
 
   cargo-deny:
     name: cargo deny
