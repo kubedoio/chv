@@ -30,6 +30,15 @@ yanked = "deny"
 #
 # See docs/specs/adr/ for the broader supply-chain posture.
 ignore = [
+    # RUSTSEC-2023-0071 — `rsa` Marvin Attack (no upstream patch).
+    #   (a) Non-applicable: CHV uses sqlx with only the `sqlite` feature.
+    #       The `rsa` crate enters the lockfile because sqlx 0.8's top-level
+    #       Cargo.toml unconditionally lists `sqlx-mysql` as a dep, which
+    #       depends on `rsa`. None of that code is compiled into CHV binaries.
+    #   (b) Upstream: https://github.com/RustCrypto/RSA/issues/19 (no patch).
+    #       sqlx side: https://github.com/launchbadge/sqlx/issues/2911
+    #   (c) Remove when sqlx makes sqlx-mysql/-postgres optional.
+    "RUSTSEC-2023-0071",
     # RUSTSEC-2026-0173 — `proc-macro-error2` 2.x unmaintained.
     #   (a) Non-applicable at runtime: this is a proc-macro build dep pulled
     #       by `tabled_derive` 0.11 (used by `chvctl` for CLI table rendering).
