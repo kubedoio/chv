@@ -55,6 +55,25 @@ ignore = [
     #   (c) Remove when CHV upgrades tonic 0.12 -> 0.14 (tracked separately —
     #       gRPC stack-wide change deferred from this supply-chain PR).
     "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2026-0204 — `crossbeam-epoch` v0.9.18 Display pointer dereference.
+    #   (a) Non-applicable: pulled transitively via rayon-core / criterion
+    #       (dev/benchmark dependency). Never used or shipped in production binaries.
+    #   (b) Upstream: https://github.com/crossbeam-rs/crossbeam/pull/1276
+    #   (c) Remove when criterion/rayon updates crossbeam-epoch dependency.
+    "RUSTSEC-2026-0204",
+
+    # RUSTSEC-2026-0194 — `quick-xml` attribute duplicate check linear scan O(N^2).
+    #   (a) Non-applicable: CHV does not parse untrusted XML with duplicate check enabled.
+    #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0194
+    #   (c) Remove on next quick-xml dependency update.
+    "RUSTSEC-2026-0194",
+
+    # RUSTSEC-2026-0195 — `quick-xml` NsReader unbounded namespace allocation.
+    #   (a) Non-applicable: CHV does not use NsReader namespace resolution on untrusted XML.
+    #   (b) Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0195
+    #   (c) Remove on next quick-xml dependency update.
+    "RUSTSEC-2026-0195",
 ]
 
 # -----------------------------------------------------------------------------
