@@ -23,6 +23,8 @@ use thiserror::Error;
 const APPLICATION_ID: i32 = 0x4348_5643; // CHVC
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_SQL: &str = include_str!("../migrations/0001_core_authority.sql");
+const EXECUTION_FENCING_MIGRATION_SQL: &str =
+    include_str!("../migrations/0002_operation_execution_fencing.sql");
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
@@ -106,6 +108,36 @@ pub struct OperationJournalEntry {
     pub error: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimDisposition {
+    Acquired,
+    Replay,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimedOperation {
+    pub disposition: ClaimDisposition,
+    pub entry: OperationJournalEntry,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncompleteExecutionOperation {
+    pub entry: OperationJournalEntry,
+    pub active_attempt_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionDisposition {
+    Applied,
+    Replay,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletedOperation {
+    pub disposition: CompletionDisposition,
+    pub entry: OperationJournalEntry,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyMigrationState {
     pub source: String,
@@ -119,11 +151,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "core_authority",
-    sql: MIGRATION_SQL,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "core_authority",
+        sql: MIGRATION_SQL,
+    },
+    Migration {
+        version: 2,
+        name: "operation_execution_fencing",
+        sql: EXECUTION_FENCING_MIGRATION_SQL,
+    },
+];
 
 pub struct CoreStore {
     conn: Connection,
@@ -476,14 +515,17 @@ impl CoreStore {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         read_only.busy_timeout(BUSY_TIMEOUT)?;
-        validate(&read_only)?;
+        let requires_upgrade = validate_openable_schema(&read_only)?;
         drop(read_only);
-        let conn = Connection::open_with_flags(
+        let mut conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         configure(&conn)?;
         enforce_database_modes(path)?;
+        if requires_upgrade {
+            apply_pending_migrations(&mut conn)?;
+        }
         validate(&conn)?;
         Ok(Self { conn })
     }
@@ -754,6 +796,26 @@ impl CoreStore {
             .collect()
     }
 
+    #[doc(hidden)]
+    pub fn list_incomplete_execution_operations(
+        &self,
+    ) -> Result<Vec<IncompleteExecutionOperation>> {
+        let mut statement = self.conn.prepare(
+            "SELECT operation_id,active_attempt_token FROM operations WHERE status IN ('accepted','running') ORDER BY accepted_at,operation_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        rows.map(|row| {
+            let (id, active_attempt_token) = row?;
+            Ok(IncompleteExecutionOperation {
+                entry: read_operation_entry(&self.conn, &id)?,
+                active_attempt_token,
+            })
+        })
+        .collect()
+    }
+
     pub fn list_operations(&self) -> Result<Vec<OperationJournalEntry>> {
         let mut statement = self
             .conn
@@ -819,15 +881,33 @@ impl CoreStore {
     /// Persistence primitive for the application service. Callers must not
     /// perform side effects until this transition has committed.
     #[doc(hidden)]
-    pub fn claim_operation(&mut self, id: &OperationId) -> Result<OperationJournalEntry> {
+    pub fn claim_operation(
+        &mut self,
+        id: &OperationId,
+        attempt_token: &str,
+    ) -> Result<ClaimedOperation> {
+        validate_attempt_token(attempt_token)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = read_operation(&tx, id.as_str())?;
-        if !matches!(
-            current.status,
-            OperationStatus::Accepted | OperationStatus::Running
-        ) || current.attempt_count >= current.max_attempts
+        let active_token: Option<String> = tx.query_row(
+            "SELECT active_attempt_token FROM operations WHERE operation_id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        if current.status == OperationStatus::Running
+            && active_token.as_deref() == Some(attempt_token)
+        {
+            tx.commit()?;
+            return Ok(ClaimedOperation {
+                disposition: ClaimDisposition::Replay,
+                entry: self.operation_entry(id)?,
+            });
+        }
+        if current.status != OperationStatus::Accepted
+            || active_token.is_some()
+            || current.attempt_count >= current.max_attempts
         {
             return Err(StoreError::Conflict {
                 kind: "operation",
@@ -836,8 +916,8 @@ impl CoreStore {
         }
         let attempt = current.attempt_count + 1;
         let changed = tx.execute(
-            "UPDATE operations SET status='running',retry_count=?1 WHERE operation_id=?2 AND status=?3 AND retry_count=?4",
-            params![i64::from(attempt), id.as_str(), operation_status_text(current.status), i64::from(current.attempt_count)],
+            "UPDATE operations SET status='running',retry_count=?1,active_attempt_token=?2 WHERE operation_id=?3 AND status='accepted' AND retry_count=?4 AND active_attempt_token IS NULL",
+            params![i64::from(attempt), attempt_token, id.as_str(), i64::from(current.attempt_count)],
         )?;
         if changed != 1 {
             return Err(StoreError::Conflict {
@@ -851,7 +931,10 @@ impl CoreStore {
         )?;
         let entry = read_operation_entry(&tx, id.as_str())?;
         tx.commit()?;
-        Ok(entry)
+        Ok(ClaimedOperation {
+            disposition: ClaimDisposition::Acquired,
+            entry,
+        })
     }
 
     /// Persistence primitive used by the single operation application service.
@@ -859,10 +942,12 @@ impl CoreStore {
     pub fn persist_terminal_operation(
         &mut self,
         id: &OperationId,
+        attempt_token: &str,
         status: OperationStatus,
         result: Option<&serde_json::Value>,
         error: Option<&serde_json::Value>,
-    ) -> Result<OperationJournalEntry> {
+    ) -> Result<CompletedOperation> {
+        validate_attempt_token(attempt_token)?;
         if !matches!(
             status,
             OperationStatus::Succeeded | OperationStatus::Failed | OperationStatus::Unsupported
@@ -882,23 +967,32 @@ impl CoreStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let allowed_source = if status == OperationStatus::Unsupported {
-            "status IN ('accepted','running')"
-        } else {
-            "status='running'"
-        };
         let changed = tx.execute(
-            &format!("UPDATE operations SET status=?1,result_json=?2,error_json=?3,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE operation_id=?4 AND {allowed_source}"),
-            params![operation_status_text(status), result, error, id.as_str()],
+            "UPDATE operations SET status=?1,result_json=?2,error_json=?3,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),active_attempt_token=NULL,completed_attempt_token=?5 WHERE operation_id=?4 AND status='running' AND active_attempt_token=?5 AND completed_attempt_token IS NULL",
+            params![operation_status_text(status), result, error, id.as_str(), attempt_token],
         )?;
         if changed != 1 {
-            return match read_operation(&tx, id.as_str()) {
-                Ok(_) => Err(StoreError::Conflict {
-                    kind: "operation",
-                    id: id.to_string(),
-                }),
-                Err(error) => Err(error),
-            };
+            let existing = read_operation_entry(&tx, id.as_str())?;
+            let completed_token: Option<String> = tx.query_row(
+                "SELECT completed_attempt_token FROM operations WHERE operation_id=?1",
+                [id.as_str()],
+                |row| row.get(0),
+            )?;
+            let exact_replay = completed_token.as_deref() == Some(attempt_token)
+                && existing.operation.status == status
+                && existing.result.as_ref().map(canonical_json).transpose()? == result
+                && existing.error.as_ref().map(canonical_json).transpose()? == error;
+            if exact_replay {
+                tx.commit()?;
+                return Ok(CompletedOperation {
+                    disposition: CompletionDisposition::Replay,
+                    entry: self.operation_entry(id)?,
+                });
+            }
+            return Err(StoreError::Conflict {
+                kind: "operation",
+                id: id.to_string(),
+            });
         }
         let operation = read_operation(&tx, id.as_str())?;
         tx.execute(
@@ -907,7 +1001,10 @@ impl CoreStore {
         )?;
         let entry = read_operation_entry(&tx, id.as_str())?;
         tx.commit()?;
-        Ok(entry)
+        Ok(CompletedOperation {
+            disposition: CompletionDisposition::Applied,
+            entry,
+        })
     }
 
     fn host_version_error(&self, expected: ResourceVersion) -> Result<StoreError> {
@@ -1076,6 +1173,97 @@ fn apply_migrations(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+fn apply_pending_migrations(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version > current)
+    {
+        tx.execute_batch(migration.sql)?;
+        tx.pragma_update(None, "user_version", migration.version)?;
+        let fingerprint = schema_fingerprint(&tx)?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version,name,checksum,schema_fingerprint) VALUES (?1,?2,?3,?4)",
+            params![migration.version, migration.name, checksum(migration.sql), fingerprint],
+        )?;
+    }
+    validate(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Verifies that an existing database is either current or an exact,
+/// registered schema prefix that can be upgraded transactionally.
+fn validate_openable_schema(conn: &Connection) -> Result<bool> {
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    if integrity != "ok" {
+        return Err(StoreError::Integrity(integrity));
+    }
+    let application_id: i32 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::Schema(format!(
+            "application_id {application_id} is not CellHV Core"
+        )));
+    }
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let latest = MIGRATIONS
+        .last()
+        .expect("migration registry nonempty")
+        .version;
+    if user_version == latest {
+        validate(conn)?;
+        return Ok(false);
+    }
+    if user_version <= 0 || user_version >= latest {
+        return Err(StoreError::Schema(format!(
+            "user_version {user_version} is unsupported; expected at most {latest}"
+        )));
+    }
+    let expected = MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version <= user_version)
+        .collect::<Vec<_>>();
+    let mut statement = conn
+        .prepare("SELECT version,name,checksum FROM schema_migrations ORDER BY version")
+        .map_err(|error| StoreError::Schema(format!("migration ledger unavailable: {error}")))?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if actual.len() != expected.len()
+        || actual.iter().zip(expected.iter()).any(|(row, migration)| {
+            row != &(
+                migration.version,
+                migration.name.to_owned(),
+                checksum(migration.sql),
+            )
+        })
+    {
+        return Err(StoreError::Schema(
+            "upgrade source migration ledger mismatch".to_owned(),
+        ));
+    }
+    let recorded_fingerprint: String = conn.query_row(
+        "SELECT schema_fingerprint FROM schema_migrations WHERE version=?1",
+        [user_version],
+        |row| row.get(0),
+    )?;
+    if recorded_fingerprint != schema_fingerprint(conn)? {
+        return Err(StoreError::Schema(
+            "upgrade source schema fingerprint mismatch".to_owned(),
+        ));
+    }
+    Ok(true)
 }
 
 fn validate_fresh_host(identity: &HostIdentity) -> Result<()> {
@@ -1533,10 +1721,17 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
         conn.prepare("SELECT operation_id FROM operations ORDER BY operation_id")?;
     for id in operations.query_map([], |row| row.get::<_, String>(0))? {
         let entry = read_operation_entry(conn, &id?)?;
-        let stored: (String, Option<String>, Option<String>) = conn.query_row(
-            "SELECT request_json,result_json,error_json FROM operations WHERE operation_id=?1",
+        let stored: (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn.query_row(
+            "SELECT request_json,result_json,error_json,active_attempt_token,completed_attempt_token,completed_at FROM operations WHERE operation_id=?1",
             [entry.operation.id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )?;
         let canonical_result = entry.result.as_ref().map(canonical_json).transpose()?;
         let canonical_error = entry.error.as_ref().map(canonical_json).transpose()?;
@@ -1546,6 +1741,39 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
         {
             return Err(StoreError::Integrity(format!(
                 "operation {} request/result/error JSON is not canonical",
+                entry.operation.id
+            )));
+        }
+        if let Some(token) = stored.3.as_deref().or(stored.4.as_deref()) {
+            validate_attempt_token(token).map_err(|_| {
+                StoreError::Integrity(format!(
+                    "operation {} has a non-canonical attempt token",
+                    entry.operation.id
+                ))
+            })?;
+        }
+        let execution_columns_valid = match entry.operation.status {
+            OperationStatus::Accepted => {
+                entry.operation.attempt_count == 0
+                    && stored.3.is_none()
+                    && stored.4.is_none()
+                    && stored.5.is_none()
+            }
+            OperationStatus::Running => {
+                entry.operation.attempt_count > 0
+                    && stored.3.is_some()
+                    && stored.4.is_none()
+                    && stored.5.is_none()
+            }
+            OperationStatus::Succeeded
+            | OperationStatus::Failed
+            | OperationStatus::Unsupported => {
+                stored.3.is_none() && stored.4.is_some() && stored.5.is_some()
+            }
+        };
+        if !execution_columns_valid {
+            return Err(StoreError::Integrity(format!(
+                "operation {} execution columns disagree with status",
                 entry.operation.id
             )));
         }
@@ -1996,6 +2224,21 @@ fn operation_status_text(value: OperationStatus) -> &'static str {
         OperationStatus::Unsupported => "unsupported",
     }
 }
+
+fn validate_attempt_token(token: &str) -> Result<()> {
+    if token.is_empty()
+        || token.len() > 128
+        || !token
+            .as_bytes()
+            .iter()
+            .all(|byte| (b'!'..=b'~').contains(byte))
+    {
+        return Err(StoreError::InvalidDomain(
+            "attempt token must be 1..=128 visible ASCII bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
 fn parse_operation_status(value: &str) -> Result<OperationStatus> {
     match value {
         "accepted" => Ok(OperationStatus::Accepted),
@@ -2056,6 +2299,33 @@ mod tests {
         (directory, path, store)
     }
 
+    fn create_v1_store(path: &Path) {
+        let mut conn = Connection::open(path).unwrap();
+        configure(&conn).unwrap();
+        conn.execute_batch(&format!("PRAGMA application_id={APPLICATION_ID};"))
+            .unwrap();
+        conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,schema_fingerprint TEXT NOT NULL,applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))) STRICT;")
+            .unwrap();
+        let migration = &MIGRATIONS[0];
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute_batch(migration.sql).unwrap();
+        tx.pragma_update(None, "user_version", migration.version)
+            .unwrap();
+        let fingerprint = schema_fingerprint(&tx).unwrap();
+        tx.execute(
+            "INSERT INTO schema_migrations (version,name,checksum,schema_fingerprint) VALUES (?1,?2,?3,?4)",
+            params![migration.version, migration.name, checksum(migration.sql), fingerprint],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     fn host(id: &str, resource_version: u64) -> HostIdentity {
         HostIdentity {
             id: HostId::new(id).unwrap(),
@@ -2086,6 +2356,78 @@ mod tests {
                 .as_str(),
             "host-fresh"
         );
+    }
+
+    #[test]
+    fn exact_v1_authority_upgrades_transactionally_to_execution_fencing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        create_v1_store(&path);
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let definition = vm("vm-1", 1);
+        conn.execute(
+            "INSERT INTO vms (vm_id,definition_json,requested_power_state,observed_power_state,resource_version) VALUES (?1,?2,'stopped','unknown',1)",
+            params![definition.id.as_str(), serde_json::to_string(&definition).unwrap()],
+        )
+        .unwrap();
+        insert_attachments(&conn, &definition).unwrap();
+        for (id, status, retries, completed_at) in [
+            ("accepted-v1", "accepted", 0, None),
+            ("running-v1", "running", 1, None),
+            ("succeeded-v1", "succeeded", 1, Some("2026-01-01T00:00:00Z")),
+        ] {
+            let request = serde_json::json!({"legacy": id});
+            conn.execute(
+                "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,completed_at) VALUES (?1,'start_vm','vm-1',?2,?3,?4,?5,3,?6)",
+                params![id, canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap(), status, retries, completed_at],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(conn);
+
+        let store = CoreStore::open_existing(&path).unwrap();
+        let user_version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 2);
+        let fencing_column: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('operations') WHERE name='active_attempt_token'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fencing_column, 1);
+        let running_token: String = store
+            .conn
+            .query_row(
+                "SELECT active_attempt_token FROM operations WHERE operation_id='running-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(running_token, "legacy-ambiguous-v1");
+        let terminal_token: String = store
+            .conn
+            .query_row(
+                "SELECT completed_attempt_token FROM operations WHERE operation_id='succeeded-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_token, "legacy-completed-v1");
+        let incomplete = store.list_incomplete_execution_operations().unwrap();
+        assert_eq!(incomplete.len(), 2);
+        assert_eq!(
+            incomplete[1].active_attempt_token.as_deref(),
+            Some("legacy-ambiguous-v1")
+        );
+        drop(store);
+        CoreStore::open_existing(&path).unwrap();
     }
 
     #[test]
@@ -2777,12 +3119,41 @@ mod tests {
                 expected_vm_version: version(1),
             })
             .unwrap();
-        store.claim_operation(&op.id).unwrap();
+        store.claim_operation(&op.id, "attempt-1").unwrap();
+        assert_eq!(
+            store
+                .claim_operation(&op.id, "attempt-1")
+                .unwrap()
+                .entry
+                .operation
+                .attempt_count,
+            1
+        );
+        assert!(matches!(
+            store.claim_operation(&op.id, "attempt-2"),
+            Err(StoreError::Conflict { .. })
+        ));
         let result = serde_json::json!({"z":true,"a":1});
+        assert!(matches!(
+            store.persist_terminal_operation(
+                &op.id,
+                "attempt-2",
+                OperationStatus::Succeeded,
+                Some(&result),
+                None,
+            ),
+            Err(StoreError::Conflict { .. })
+        ));
         let entry = store
-            .persist_terminal_operation(&op.id, OperationStatus::Succeeded, Some(&result), None)
+            .persist_terminal_operation(
+                &op.id,
+                "attempt-1",
+                OperationStatus::Succeeded,
+                Some(&result),
+                None,
+            )
             .unwrap();
-        assert_eq!(entry.result, Some(result));
+        assert_eq!(entry.entry.result, Some(result));
         let event_kinds: String = store
             .conn
             .query_row(
@@ -2798,6 +3169,7 @@ mod tests {
         assert!(matches!(
             store.persist_terminal_operation(
                 &op.id,
+                "attempt-1",
                 OperationStatus::Failed,
                 None,
                 Some(&serde_json::json!({"message":"late"})),

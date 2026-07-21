@@ -1,10 +1,51 @@
 # CellHV Core Current-State Inventory
 
-**Baseline:** `main` at Phase A1, inspected 2026-07-20. **Scope:** facts about the active Rust implementation; proposed Core behavior is not presented as implemented.
+**Baseline:** `main` at Phase A1, inspected 2026-07-20. **Current-state
+update:** `e4448a6c`, inspected 2026-07-21. **Scope:** the detailed legacy
+inventory remains the factual migration input; the update below records later
+default-off Core wiring without rewriting that historical baseline as if it had
+already existed.
+
+## Post-baseline Core wiring
+
+Commit `e4448a6c` adds an explicit `AgentAuthorityMode::CoreNative` configuration
+and dispatches it in `cmd/chv-agent/src/main.rs:280-282` before NodeCache load,
+enrollment, provider supervision, `VmRuntime`, or `AgentServer` construction.
+`start_core_native` (`:31-51`) uses `StartupTransaction::activate_native_only`,
+then `CoreRuntimeOwner::start` composes exactly one durable Core store,
+`AuthorityActor`, and private native API listener under one process-lifetime
+authority lease. Signal handling performs ordered listener, actor, and lease
+shutdown (`:54-64`). The process acceptance harness is
+`scripts/integration/core-native-agent-smoke.py`.
+
+This is a default-off, definition-authority mode, not the completed migration.
+An omitted or explicit `legacy` mode still follows the baseline path described
+below and directly constructs `ProcessCloudHypervisorAdapter`, `VmRuntime`, and
+`AgentServer` (`cmd/chv-agent/src/main.rs:455-468`). Native mode refuses a live
+NodeCache or migration provenance; it does not import or cut over the cache.
+Native and legacy requests therefore do not yet share one production operation
+engine. Native create/update/delete requests are durably accepted, but native
+start/stop/reboot return HTTP 422 before journaling because no Core VM executor
+is wired (`crates/cellhv-core-api/src/lib.rs:282-320`). Production VM launch and
+management behavior remains exclusive to the legacy path.
+
+| Concern | Default `legacy` mode | Explicit `core-native` mode |
+|---|---|---|
+| Host and VM identity | Controller identity copied into NodeCache and runtime maps | Host identity and accepted VM definitions are authoritative in the Core SQLite store |
+| Mutation journal | Control-plane operation repository | Node-local `OperationService` behind one `AuthorityActor` |
+| Public node API | Legacy control-plane gRPC | Versioned HTTP/JSON over the private Core Unix socket |
+| VM side effects | Existing `VmRuntime` and `ProcessCloudHypervisorAdapter` | None; lifecycle actions fail explicitly before journal acceptance |
+| Providers | Existing stord/nwd clients and supervisors | Not constructed |
+| Recovery | Existing legacy reconcile behavior; no process re-adoption | Durable definition/journal reopen only; no VM process recovery |
+
+The modes are mutually exclusive at startup, which prevents simultaneous
+control inside one process but is not the final `AGENT-CORE-002` convergence
+proof. There is not yet a production path that translates legacy gRPC intent
+into the same actor used by the native API.
 
 ## Runtime and crate graph
 
-The only node VM-runtime binary is `chv-agent`: `cmd/chv-agent/Cargo.toml` declares the `chv-agent` binary and depends on `chv-agent-core` and `chv-agent-runtime-ch`. `cmd/chv-agent/src/main.rs:415-428` constructs `ProcessCloudHypervisorAdapter`, `VmRuntime`, and `AgentServer` in that process. `crates/chv-agent-core/Cargo.toml` depends on the Cloud Hypervisor adapter plus the stord, nwd, and control-plane proto crates. Neither the agent crates nor binary depend on control-plane store/service, UI, or Designer crates.
+The only node VM-runtime binary is `chv-agent`: `cmd/chv-agent/Cargo.toml` declares the `chv-agent` binary and depends on `chv-agent-core` and `chv-agent-runtime-ch`. In default legacy mode, `cmd/chv-agent/src/main.rs:455-468` constructs `ProcessCloudHypervisorAdapter`, `VmRuntime`, and `AgentServer` in that process. In explicit `core-native` mode, the same binary instead constructs the Core authority owner described above. `crates/chv-agent-core/Cargo.toml` depends on the Cloud Hypervisor adapter plus the stord, nwd, and control-plane proto crates. Neither the agent crates nor binary depend on control-plane store/service, UI, or Designer crates.
 
 `chv-stord` and `chv-nwd` are provider processes, not VM authorities. `chv-agent-core::supervisor::DaemonSupervisor` starts and monitors them (`crates/chv-agent-core/src/supervisor.rs:10-20,43-84,158-201`). Packaging contains exactly `chv-agent`, `chv-stord`, and `chv-nwd` as node binaries and services (`packaging/nfpm/chv-node.yaml:8-25`).
 
@@ -57,12 +98,24 @@ Unit and mock coverage exists throughout the three agent crates. stord has Unix-
 
 That workflow is evidence of a real-KVM-capable test path, not evidence for the Core acceptance profile: the smoke script starts the control plane, tests installation/health, and does not prove VM boot, agent-death survival, process re-adoption, host reboot, identity conflict, corruption failure, 100-cycle leaks, or manager absence. No checked-in run digest demonstrates those outcomes.
 
-Currently impossible acceptance scenarios are `AGENT-CORE-002` through `005`, all `CORE-*` standalone/durability/recovery scenarios, `VMM-ID-002` through `004` after restart, optional libvirt mutation correlation, and OpenStack/provider T4/T5 qualification. They require the Phase B store/operation engine, native API, Phase C recovery ownership, and real disposable labs respectively.
+The default-off native process harness now supplies bounded evidence toward
+`CORE-INSTALL-001`, durable definition identity, idempotent replay, clean/killed
+agent restart, and single-process authority exclusion. It does not meet the
+specified T2/T3 tiers: it uses trap executables to prove absence of VMM/provider
+side effects and does not boot a guest.
+
+Still impossible with the production composition are `AGENT-CORE-002` through
+`005`; `CORE-VM-001`, `CORE-ATTACH-001`, `CORE-RECOVERY-001` and `002`,
+`CORE-OPS-001`, `CORE-LEAK-001`, and `CORE-AUTH-001`; `VMM-ID-002` through `004`
+after restart; optional libvirt mutation correlation; and provider/OpenStack
+T4/T5 qualification. These require legacy/native authority convergence, a Core
+executor, process ownership and re-adoption, qualified attachment paths, and
+real disposable KVM/provider/platform labs.
 
 ## Documentation contradictions
 
-1. `docs/ARCHITECTURE.md:53` labels SQLite desired state/operation journal in the architecture, while the current agent uses JSON `NodeCache` and has no local journal. Those SQLite tables are control-plane state today.
-2. `docs/specs/cellhv-core-foundation-spec.md` describes durable identity, recovery, and re-adoption as Core ownership. These are target requirements, not current behavior; constructors discard runtime knowledge on restart as shown above.
-3. `packaging/systemd/chv-agent.service:3-4` wants/starts after the control plane and `packaging/nfpm/chv-node.yaml:11-12` makes the node package depend on `chv-controlplane`. This conflicts with the target requirement that Core install and run with manager absent. Changing packaging is deferred because this slice must not change production behavior.
+1. `docs/ARCHITECTURE.md:53` labels SQLite desired state/operation journal in the architecture. This is now accurate for explicit `core-native` definition authority, but default legacy mode still uses JSON `NodeCache` and its control-plane operation store. The diagram does not yet express that transitional split.
+2. `docs/specs/cellhv-core-foundation-spec.md` describes durable identity, recovery, and re-adoption as Core ownership. Durable identity and definition acceptance now exist in default-off native mode; VM execution, observed-state recovery, and process re-adoption remain target requirements. Legacy runtime constructors still discard runtime knowledge on restart as shown above.
+3. Packaging now creates the private Core state/runtime directories and the same `chv-agent` binary can run without a manager when explicitly configured for `core-native`. The shipped default remains legacy and the node package/control-plane service relationships remain compatibility constraints; this is not yet evidence that a default package installation satisfies `CORE-INSTALL-001` at T2.
 4. The acceptance specification says ambiguous workloads are preserved, but current recovery of an in-memory `Failed` record deletes/recreates it (`crates/chv-agent-core/src/reconcile.rs:1446-1457`), and unknown surviving processes are not classified. Phase C needs ownership markers and fail-closed inspection before this can meet the specification.
 5. The compatibility contract's tuple permits platform integration `none` (`docs/specs/contracts/cellhv-compatibility-claims-v1.md:47`), while its allowed-label section omits `none` and lists `unsupported` (`:99-105`). The Phase A schema uses `none` because the checked-in manager-absent tuple needs that literal; architecture review must reconcile the contract before a platform claim is published.

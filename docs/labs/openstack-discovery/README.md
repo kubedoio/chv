@@ -178,3 +178,35 @@ Verify a transferred evidence directory with:
 
 Checksums prove only that collected files did not change. They do not prove the
 discovery result, infrastructure compatibility, or qualification.
+
+## Bounded Path A runner
+
+After provisioning the pinned lab, the fail-closed runner verifies the
+effective `ch:///system` configuration, source revisions, Cloud Hypervisor
+digest, package versions, and bounded command outcomes. The explicit flag
+acknowledges that the probe restarts `nova-compute`:
+
+```bash
+scripts/openstack-discovery/run-path-a.py \
+  --execute /secure/cellhv-osd/lab-inputs.env \
+  /secure/cellhv-osd/path-a-run-id
+```
+
+The private output directory contains an `execution-manifest.json` with
+ordered commands, exit statuses, timestamps, and artifact digests. Command
+output is redacted before it is written; collection redacts it again. The
+runner snapshots OpenStack resources, records the initial Nova compute service
+state, restores that state in `finally`, compares the after-run inventory, and
+runs the host cleanup verifier. Any missing restoration or cleanup result
+keeps the probe blocked. Add every file to an explicit `collect.sh` allowlist
+and inspect the redacted result before publication. A failed connection is
+valid discovery evidence and must not be patched through into a demonstration.
+
+Runner output is an unsigned `structural-candidate`, not T5 proof. The report
+validator deliberately makes `complete` impossible from this unsigned
+manifest. A separate trusted lab-attestation design and trust root must be
+accepted before real-lab output can satisfy that gate.
+
+`CELLHV_PREFLIGHT_TEST_MODE=1` permits path overrides only for unit fixtures.
+Fixture manifests are permanently labeled `fixture`; the report validator
+rejects them as complete T5 evidence.

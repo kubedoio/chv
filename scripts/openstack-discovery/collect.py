@@ -22,6 +22,10 @@ SECRET_RE = re.compile(
     r"((?:password|passwd|secret|token|api[_-]?key|auth[_-]?key)\s*[:=]\s*)[^\s,;]+",
     re.IGNORECASE,
 )
+JSON_SECRET_RE = re.compile(
+    r'("(?:password|passwd|secret|token|api[_-]?key|auth[_-]?key)"\s*:\s*")[^"]*(")',
+    re.IGNORECASE,
+)
 AUTH_RE = re.compile(r"(Authorization:\s*(?:Bearer|Basic))\s+\S+", re.IGNORECASE)
 USERINFO_RE = re.compile(r"(https?://)[^/@\s]+:[^/@\s]+@")
 ALLOWED_INPUT_KEYS = (
@@ -158,6 +162,7 @@ def write_file(directory_fd: int, relative: str, content: bytes) -> None:
 def redact(text: str) -> str:
     if re.search(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----", text):
         fail("source contains private-key material and cannot be collected")
+    text = JSON_SECRET_RE.sub(r"\1[REDACTED]\2", text)
     text = SECRET_RE.sub(r"\1[REDACTED]", text)
     text = AUTH_RE.sub(r"\1 [REDACTED]", text)
     return USERINFO_RE.sub(r"\1[REDACTED]@", text)

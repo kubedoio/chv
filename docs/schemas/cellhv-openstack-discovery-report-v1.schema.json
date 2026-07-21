@@ -274,11 +274,12 @@
         "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$" },
         "kind": {
           "type": "string",
-          "enum": ["configuration", "log", "api-payload", "domain-xml", "source-excerpt", "command-output", "report"]
+          "enum": ["configuration", "log", "api-payload", "domain-xml", "source-excerpt", "command-output", "execution-manifest", "report"]
         },
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "redacted": { "type": "boolean" }
+        "redacted": { "type": "boolean" },
+        "source_artifact": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+\\.log$" }
       }
     }
   }

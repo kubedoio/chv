@@ -6,7 +6,7 @@
 mod authority_actor;
 
 pub use authority_actor::{
-    AuthorityActor, AuthorityActorError, AuthorityActorJoin, AuthorityHandle,
+    AuthorityActor, AuthorityActorError, AuthorityActorJoin, AuthorityHandle, ExecutionHandle,
 };
 
 use cellhv_core_store::{AcceptOperation, CoreStore};
@@ -23,6 +23,31 @@ use std::path::Path;
 use thiserror::Error;
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AttemptToken(String);
+
+impl AttemptToken {
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .as_bytes()
+                .iter()
+                .all(|byte| (b'!'..=b'~').contains(byte))
+        {
+            return Err(OperationServiceError::Invalid(
+                "attempt token must be 1..=128 visible ASCII bytes".to_owned(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -70,8 +95,7 @@ pub struct SubmitMutation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartDisposition {
     Ready,
-    Retryable,
-    RetryBudgetExhausted,
+    InspectRequired,
     Terminal,
 }
 
@@ -79,6 +103,31 @@ pub enum RestartDisposition {
 pub struct RestartOperation {
     pub entry: OperationJournalEntry,
     pub disposition: RestartDisposition,
+    pub active_attempt_token: Option<AttemptToken>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimDisposition {
+    Acquired,
+    Replay,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimResult {
+    pub disposition: ClaimDisposition,
+    pub entry: OperationJournalEntry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionDisposition {
+    Applied,
+    Replay,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionResult {
+    pub disposition: CompletionDisposition,
+    pub entry: OperationJournalEntry,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,16 +274,28 @@ impl OperationService {
     }
 
     /// Durably claims the next bounded attempt before any external side effect.
-    pub fn claim_attempt(&mut self, id: &OperationId) -> Result<OperationJournalEntry> {
-        Ok(self.store.claim_operation(id)?)
+    pub(crate) fn claim_attempt(
+        &mut self,
+        id: &OperationId,
+        attempt_token: &AttemptToken,
+    ) -> Result<ClaimResult> {
+        let claimed = self.store.claim_operation(id, attempt_token.as_str())?;
+        Ok(ClaimResult {
+            disposition: match claimed.disposition {
+                cellhv_core_store::ClaimDisposition::Acquired => ClaimDisposition::Acquired,
+                cellhv_core_store::ClaimDisposition::Replay => ClaimDisposition::Replay,
+            },
+            entry: claimed.entry,
+        })
     }
 
     /// Durably records one terminal outcome and its correlated event.
-    pub fn finish(
+    pub(crate) fn finish(
         &mut self,
         id: &OperationId,
+        attempt_token: &AttemptToken,
         outcome: TerminalOutcome,
-    ) -> Result<OperationJournalEntry> {
+    ) -> Result<CompletionResult> {
         let (status, result, error) = match &outcome {
             TerminalOutcome::Succeeded(result) => {
                 (OperationStatus::Succeeded, result.as_ref(), None)
@@ -244,21 +305,38 @@ impl OperationService {
                 (OperationStatus::Unsupported, None, Some(error))
             }
         };
-        Ok(self
-            .store
-            .persist_terminal_operation(id, status, result, error)?)
+        let completed = self.store.persist_terminal_operation(
+            id,
+            attempt_token.as_str(),
+            status,
+            result,
+            error,
+        )?;
+        Ok(CompletionResult {
+            disposition: match completed.disposition {
+                cellhv_core_store::CompletionDisposition::Applied => CompletionDisposition::Applied,
+                cellhv_core_store::CompletionDisposition::Replay => CompletionDisposition::Replay,
+            },
+            entry: completed.entry,
+        })
     }
 
-    pub fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
+    pub(crate) fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
         Ok(self
             .store
-            .list_incomplete_operations()?
+            .list_incomplete_execution_operations()?
             .into_iter()
-            .map(|entry| RestartOperation {
-                disposition: classify_restart(&entry.operation),
-                entry,
+            .map(|record| {
+                Ok(RestartOperation {
+                    disposition: classify_restart(&record.entry.operation),
+                    entry: record.entry,
+                    active_attempt_token: record
+                        .active_attempt_token
+                        .map(AttemptToken::new)
+                        .transpose()?,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>>>()?)
     }
 
     pub fn vm(&self, id: &VmId) -> Result<VmDefinition> {
@@ -404,10 +482,7 @@ pub fn request_fingerprint(
 pub fn classify_restart(operation: &Operation) -> RestartDisposition {
     match operation.status {
         OperationStatus::Accepted => RestartDisposition::Ready,
-        OperationStatus::Running if operation.attempt_count < operation.max_attempts => {
-            RestartDisposition::Retryable
-        }
-        OperationStatus::Running => RestartDisposition::RetryBudgetExhausted,
+        OperationStatus::Running => RestartDisposition::InspectRequired,
         OperationStatus::Succeeded | OperationStatus::Failed | OperationStatus::Unsupported => {
             RestartDisposition::Terminal
         }
@@ -837,18 +912,21 @@ mod tests {
         assert_eq!(classify_restart(&operation), RestartDisposition::Ready);
         operation.status = OperationStatus::Running;
         operation.attempt_count = 2;
-        assert_eq!(classify_restart(&operation), RestartDisposition::Retryable);
+        assert_eq!(
+            classify_restart(&operation),
+            RestartDisposition::InspectRequired
+        );
         operation.attempt_count = 3;
         assert_eq!(
             classify_restart(&operation),
-            RestartDisposition::RetryBudgetExhausted
+            RestartDisposition::InspectRequired
         );
         operation.status = OperationStatus::Succeeded;
         assert_eq!(classify_restart(&operation), RestartDisposition::Terminal);
     }
 
     #[test]
-    fn execution_transitions_are_bounded_and_terminal_is_immutable() {
+    fn execution_transitions_are_token_fenced_and_terminal_is_immutable() {
         let (_dir, _path, mut service) = service();
         service
             .submit(submission(
@@ -861,32 +939,57 @@ mod tests {
             ))
             .unwrap();
         let id = OperationId::new("op-1").unwrap();
+        let token = AttemptToken::new("attempt-1").unwrap();
+        let other = AttemptToken::new("attempt-2").unwrap();
         assert!(matches!(
-            service.finish(&id, TerminalOutcome::Succeeded(None)),
+            service.finish(&id, &token, TerminalOutcome::Succeeded(None)),
             Err(OperationServiceError::Store(StoreError::Conflict { .. }))
         ));
-        for attempt in 1..=3 {
-            let entry = service.claim_attempt(&id).unwrap();
-            assert_eq!(entry.operation.status, OperationStatus::Running);
-            assert_eq!(entry.operation.attempt_count, attempt);
-        }
+        let entry = service.claim_attempt(&id, &token).unwrap();
+        assert_eq!(entry.disposition, ClaimDisposition::Acquired);
+        assert_eq!(entry.entry.operation.status, OperationStatus::Running);
+        assert_eq!(entry.entry.operation.attempt_count, 1);
+        let replay = service.claim_attempt(&id, &token).unwrap();
+        assert_eq!(replay.disposition, ClaimDisposition::Replay);
+        assert_eq!(replay.entry.operation.attempt_count, 1);
         assert!(matches!(
-            service.claim_attempt(&id),
+            service.claim_attempt(&id, &other),
+            Err(OperationServiceError::Store(StoreError::Conflict { .. }))
+        ));
+        assert!(matches!(
+            service.finish(
+                &id,
+                &other,
+                TerminalOutcome::Failed(serde_json::json!({"code":"stale"})),
+            ),
             Err(OperationServiceError::Store(StoreError::Conflict { .. }))
         ));
         let terminal = service
             .finish(
                 &id,
+                &token,
                 TerminalOutcome::Failed(serde_json::json!({"code":"exhausted"})),
             )
             .unwrap();
-        assert_eq!(terminal.operation.status, OperationStatus::Failed);
+        assert_eq!(terminal.disposition, CompletionDisposition::Applied);
+        assert_eq!(terminal.entry.operation.status, OperationStatus::Failed);
+        assert_eq!(
+            service
+                .finish(
+                    &id,
+                    &token,
+                    TerminalOutcome::Failed(serde_json::json!({"code":"exhausted"})),
+                )
+                .unwrap()
+                .disposition,
+            CompletionDisposition::Replay
+        );
         assert!(matches!(
-            service.claim_attempt(&id),
+            service.claim_attempt(&id, &token),
             Err(OperationServiceError::Store(StoreError::Conflict { .. }))
         ));
         assert!(matches!(
-            service.finish(&id, TerminalOutcome::Succeeded(None)),
+            service.finish(&id, &token, TerminalOutcome::Succeeded(None)),
             Err(OperationServiceError::Store(StoreError::Conflict { .. }))
         ));
     }

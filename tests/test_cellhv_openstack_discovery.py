@@ -18,12 +18,16 @@ SPEC.loader.exec_module(VALIDATOR)
 class OpenStackDiscoveryValidatorTests(unittest.TestCase):
     def setUp(self):
         self.schema = json.loads((ROOT / VALIDATOR.SCHEMA_PATH).read_text())
+        self.execution_schema = json.loads((ROOT / VALIDATOR.EXECUTION_SCHEMA_PATH).read_text())
         self.proposal = json.loads((ROOT / VALIDATOR.REPORT_PATH).read_text())
 
     def write_fixture(self, root: Path, report: dict) -> None:
         schema = root / VALIDATOR.SCHEMA_PATH
         schema.parent.mkdir(parents=True)
         schema.write_text(json.dumps(self.schema), encoding="utf-8")
+        execution_schema = root / VALIDATOR.EXECUTION_SCHEMA_PATH
+        execution_schema.parent.mkdir(parents=True, exist_ok=True)
+        execution_schema.write_text(json.dumps(self.execution_schema), encoding="utf-8")
         target = root / VALIDATOR.REPORT_PATH
         target.parent.mkdir(parents=True)
         target.write_text(json.dumps(report), encoding="utf-8")
@@ -191,6 +195,38 @@ class OpenStackDiscoveryValidatorTests(unittest.TestCase):
             report["evidence_status"] = "complete"
             report["result"] = "inconclusive"
         self.assertTrue(any("terminal result" in error for error in self.errors_for(mutate)))
+
+    def test_complete_requires_t5_execution_manifest(self):
+        def mutate(report, root, text):
+            self.attach_artifact(report, root, text)
+            report["evidence_status"] = "complete"
+            report["result"] = "rejected"
+        self.assertTrue(any("exactly one execution-manifest" in error for error in self.errors_for(mutate)))
+
+    def test_fixture_execution_manifest_can_never_prove_t5(self):
+        def mutate(report, root, _text):
+            manifest = {
+                "schema_version": 1,
+                "scenario_id": "OSD-001",
+                "candidate": "path-a",
+                "evidence_tier": "fixture",
+                "test_mode": True,
+            }
+            path = "docs/evidence/openstack/execution-manifest.json"
+            target = root / path
+            target.parent.mkdir(parents=True)
+            target.write_text(json.dumps(manifest), encoding="utf-8")
+            report["evidence_status"] = "complete"
+            report["result"] = "rejected"
+            report["evidence"] = [{
+                "id": "path-a-execution-manifest",
+                "kind": "execution-manifest",
+                "path": path,
+                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                "redacted": True,
+            }]
+        errors = self.errors_for(mutate)
+        self.assertTrue(any("unsigned structural execution manifest" in error for error in errors))
 
     def test_source_reference_rejects_unpinned_revision_and_unsafe_path(self):
         def mutate(report, _root, _text):

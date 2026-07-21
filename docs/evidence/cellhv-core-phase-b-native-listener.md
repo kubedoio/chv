@@ -2,8 +2,10 @@
 
 Date: 2026-07-21
 
-Scope: unwired Unix HTTP transport lifecycle around the existing Core router.
-Production startup and VM runtime behavior are unchanged.
+Original slice scope: Unix HTTP transport lifecycle around the existing Core
+router, initially unwired. Commit `e4448a6c` subsequently wired the listener
+into the explicit, default-off `core-native` path. Default `legacy` startup and
+VM runtime behavior remain unchanged.
 
 Machine tests prove:
 
@@ -27,5 +29,8 @@ cargo clippy -p cellhv-core-api --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-This evidence makes no production-listener, recovery, VM lifecycle, real-KVM,
-libvirt, or cloud compatibility claim.
+The `core-native` process harness subsequently proves production-binary listener
+startup, bounded signal drain, owned-socket cleanup, stale owned-socket restart,
+and refusal of a second authority. It does not prove a default-mode listener,
+legacy/native convergence, VM lifecycle, process re-adoption, real KVM,
+libvirt, or cloud compatibility.

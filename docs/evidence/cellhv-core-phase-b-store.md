@@ -72,10 +72,12 @@ creation and validation-only reopen of that same schema.
 
 ## Residual risks
 
-- The separate NodeCache import component is implemented at T1, but startup
-  archival, write exclusion, and authority cutover are not wired.
-- Operation acceptance and idempotency are exercised by the application
-  service, but no legacy or native request is routed through it yet.
+- The separate NodeCache import component is implemented at T1, but production
+  import/cutover is not wired. The later `core-native` path instead refuses a
+  live NodeCache and uses this store only as native authority.
+- Native definition requests are now routed through the application service in
+  explicit `core-native` mode. Legacy requests are not, so one cross-surface
+  production authority is still unproven.
 - Raw store methods are internal persistence primitives; their tests are not
   evidence that direct CRUD or operation completion is a supported Core API.
 - Durable operation-step execution and ownership and recovery transitions are

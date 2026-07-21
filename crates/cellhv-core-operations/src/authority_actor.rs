@@ -6,8 +6,9 @@
 //! deliberately transport-neutral and has no VMM or provider execution hooks.
 
 use crate::{
-    AcceptedOperation, HostRecord, OperationJournalEntry, OperationService, OperationServiceError,
-    RestartOperation, SubmitMutation,
+    AcceptedOperation, AttemptToken, ClaimResult, CompletionResult, HostRecord,
+    OperationJournalEntry, OperationService, OperationServiceError, RestartOperation,
+    SubmitMutation, TerminalOutcome,
 };
 use async_channel::Sender;
 use cellhv_core_types::{OperationEvent, OperationId, VmDefinition, VmId};
@@ -46,6 +47,13 @@ enum Request {
     EventsAfter(u64, u32, Reply<Vec<OperationEvent>>),
     Host(Reply<HostRecord>),
     RestartOperations(Reply<Vec<RestartOperation>>),
+    ClaimAttempt(OperationId, AttemptToken, Reply<ClaimResult>),
+    Finish(
+        OperationId,
+        AttemptToken,
+        Box<TerminalOutcome>,
+        Reply<CompletionResult>,
+    ),
     Shutdown(oneshot::Sender<()>),
     #[cfg(test)]
     Gate(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>),
@@ -96,11 +104,6 @@ impl AuthorityHandle {
         self.send(Request::Host(reply), receive).await
     }
 
-    pub async fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
-        let (reply, receive) = oneshot::channel();
-        self.send(Request::RestartOperations(reply), receive).await
-    }
-
     async fn send<T>(
         &self,
         request: Request,
@@ -128,6 +131,65 @@ impl AuthorityHandle {
     }
 }
 
+/// Capability reserved for a journal executor. Protocol transports receive
+/// only [`AuthorityHandle`] and therefore cannot claim or finish execution.
+#[derive(Clone)]
+pub struct ExecutionHandle {
+    sender: Sender<Request>,
+}
+
+impl ExecutionHandle {
+    pub async fn claim_attempt(
+        &self,
+        id: OperationId,
+        attempt_token: AttemptToken,
+    ) -> Result<ClaimResult> {
+        let (reply, receive) = oneshot::channel();
+        send_request(
+            &self.sender,
+            Request::ClaimAttempt(id, attempt_token, reply),
+            receive,
+        )
+        .await
+    }
+
+    pub async fn finish(
+        &self,
+        id: OperationId,
+        attempt_token: AttemptToken,
+        outcome: TerminalOutcome,
+    ) -> Result<CompletionResult> {
+        let (reply, receive) = oneshot::channel();
+        send_request(
+            &self.sender,
+            Request::Finish(id, attempt_token, Box::new(outcome), reply),
+            receive,
+        )
+        .await
+    }
+
+    /// Returns active attempt tokens only to the recovery/executor capability.
+    pub async fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
+        let (reply, receive) = oneshot::channel();
+        send_request(&self.sender, Request::RestartOperations(reply), receive).await
+    }
+}
+
+async fn send_request<T>(
+    sender: &Sender<Request>,
+    request: Request,
+    receive: oneshot::Receiver<crate::Result<T>>,
+) -> Result<T> {
+    sender
+        .send(request)
+        .await
+        .map_err(|_| AuthorityActorError::Unavailable)?;
+    receive
+        .await
+        .map_err(|_| AuthorityActorError::Unavailable)?
+        .map_err(AuthorityActorError::Service)
+}
+
 pub struct AuthorityActor;
 
 impl AuthorityActor {
@@ -138,6 +200,16 @@ impl AuthorityActor {
         service: OperationService,
         queue_capacity: usize,
     ) -> Result<(AuthorityHandle, AuthorityActorJoin)> {
+        let (authority, _execution, join) = Self::spawn_with_execution(service, queue_capacity)?;
+        Ok((authority, join))
+    }
+
+    /// Starts one actor and returns a separately typed execution capability.
+    /// Runtime composition must keep this handle away from protocol adapters.
+    pub fn spawn_with_execution(
+        service: OperationService,
+        queue_capacity: usize,
+    ) -> Result<(AuthorityHandle, ExecutionHandle, AuthorityActorJoin)> {
         if queue_capacity == 0 {
             return Err(AuthorityActorError::InvalidCapacity);
         }
@@ -172,6 +244,12 @@ impl AuthorityActor {
                         Request::RestartOperations(reply) => {
                             let _ = reply.send(service.restart_operations());
                         }
+                        Request::ClaimAttempt(id, attempt_token, reply) => {
+                            let _ = reply.send(service.claim_attempt(&id, &attempt_token));
+                        }
+                        Request::Finish(id, attempt_token, outcome, reply) => {
+                            let _ = reply.send(service.finish(&id, &attempt_token, *outcome));
+                        }
                         Request::Shutdown(reply) => {
                             receiver.close();
                             while receiver.try_recv().is_ok() {}
@@ -189,6 +267,9 @@ impl AuthorityActor {
             .map_err(AuthorityActorError::Spawn)?;
         Ok((
             AuthorityHandle {
+                sender: sender.clone(),
+            },
+            ExecutionHandle {
                 sender: sender.clone(),
             },
             AuthorityActorJoin {
@@ -250,10 +331,10 @@ fn authority_reaper() -> &'static std::sync::mpsc::Sender<thread::JoinHandle<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Acceptance, MutationCommand};
+    use crate::{Acceptance, MutationCommand, RestartDisposition};
     use cellhv_core_store::{CoreStore, StoreError};
     use cellhv_core_types::{
-        BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, OperationId,
+        BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, OperationId, OperationStatus,
         RequestedPowerState, ResourceVersion, VmDefinition, VmId,
     };
     use std::sync::Arc;
@@ -481,6 +562,198 @@ mod tests {
         assert_eq!(replay.operation.id.as_str(), "original");
         handle.shutdown().await.unwrap();
         join.join().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_token_claims_are_idempotent_and_differently_fenced() {
+        let (_directory, _path, service) = service();
+        let (handle, execution, join) = AuthorityActor::spawn_with_execution(service, 4).unwrap();
+        handle
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op",
+                "key",
+                1,
+            ))
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(5));
+        let mut claims = Vec::new();
+        for _ in 0..4 {
+            let execution = execution.clone();
+            let barrier = barrier.clone();
+            claims.push(tokio::spawn(async move {
+                barrier.wait().await;
+                execution
+                    .claim_attempt(
+                        OperationId::new("op").unwrap(),
+                        AttemptToken::new("attempt-1").unwrap(),
+                    )
+                    .await
+            }));
+        }
+        barrier.wait().await;
+
+        let mut attempts = Vec::new();
+        for claim in claims {
+            match claim.await.unwrap() {
+                Ok(result) => {
+                    attempts.push((result.disposition, result.entry.operation.attempt_count))
+                }
+                other => panic!("unexpected claim result: {other:?}"),
+            }
+        }
+        assert_eq!(
+            attempts
+                .iter()
+                .filter(|(disposition, _)| *disposition == crate::ClaimDisposition::Acquired)
+                .count(),
+            1
+        );
+        assert!(attempts.iter().all(|(_, attempt)| *attempt == 1));
+        assert!(matches!(
+            execution
+                .claim_attempt(
+                    OperationId::new("op").unwrap(),
+                    AttemptToken::new("attempt-2").unwrap(),
+                )
+                .await,
+            Err(AuthorityActorError::Service(OperationServiceError::Store(
+                StoreError::Conflict { .. }
+            )))
+        ));
+        let operation = handle
+            .operation(OperationId::new("op").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(operation.operation.status, OperationStatus::Running);
+        assert_eq!(operation.operation.attempt_count, 1);
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_claim_reply_remains_durable_across_actor_restart() {
+        let (_directory, path, service) = service();
+        let (handle, _execution, join) = AuthorityActor::spawn_with_execution(service, 1).unwrap();
+        handle
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op",
+                "key",
+                1,
+            ))
+            .await
+            .unwrap();
+
+        let (reply, receive) = oneshot::channel();
+        handle
+            .sender
+            .send(Request::ClaimAttempt(
+                OperationId::new("op").unwrap(),
+                AttemptToken::new("attempt-1").unwrap(),
+                reply,
+            ))
+            .await
+            .unwrap();
+        drop(receive);
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+
+        let (handle, execution, join) = AuthorityActor::spawn_with_execution(
+            OperationService::open_existing(&path).unwrap(),
+            1,
+        )
+        .unwrap();
+        let restart = execution.restart_operations().await.unwrap();
+        assert_eq!(restart.len(), 1);
+        assert_eq!(restart[0].disposition, RestartDisposition::InspectRequired);
+        assert_eq!(
+            restart[0].active_attempt_token.as_ref().unwrap().as_str(),
+            "attempt-1"
+        );
+        assert_eq!(restart[0].entry.operation.status, OperationStatus::Running);
+        assert_eq!(restart[0].entry.operation.attempt_count, 1);
+        assert_eq!(
+            execution
+                .claim_attempt(
+                    OperationId::new("op").unwrap(),
+                    AttemptToken::new("attempt-1").unwrap(),
+                )
+                .await
+                .unwrap()
+                .entry
+                .operation
+                .attempt_count,
+            1
+        );
+        assert!(execution
+            .claim_attempt(
+                OperationId::new("op").unwrap(),
+                AttemptToken::new("attempt-2").unwrap(),
+            )
+            .await
+            .is_err());
+        handle.shutdown().await.unwrap();
+        join.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn finish_is_ordered_before_shutdown_and_persists_terminal_event() {
+        let (_directory, path, service) = service();
+        let (handle, execution, join) = AuthorityActor::spawn_with_execution(service, 2).unwrap();
+        handle
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op",
+                "key",
+                1,
+            ))
+            .await
+            .unwrap();
+        execution
+            .claim_attempt(
+                OperationId::new("op").unwrap(),
+                AttemptToken::new("attempt-1").unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let finish = execution.finish(
+            OperationId::new("op").unwrap(),
+            AttemptToken::new("attempt-1").unwrap(),
+            TerminalOutcome::Succeeded(Some(serde_json::json!({"runtime": "created"}))),
+        );
+        let shutdown = handle.shutdown();
+        let (finished, shutdown) = tokio::join!(finish, shutdown);
+        assert_eq!(
+            finished.unwrap().entry.operation.status,
+            OperationStatus::Succeeded
+        );
+        shutdown.unwrap();
+        join.join().await.unwrap();
+
+        let (handle, reopened_join) =
+            AuthorityActor::spawn(OperationService::open_existing(&path).unwrap(), 2).unwrap();
+        let operation = handle
+            .operation(OperationId::new("op").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(operation.operation.status, OperationStatus::Succeeded);
+        let events = handle.events_after(0, 100).await.unwrap();
+        assert!(events.iter().any(|event| event.kind == "operation.running"));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "operation.succeeded"));
+        handle.shutdown().await.unwrap();
+        reopened_join.join().await.unwrap();
     }
 
     #[tokio::test]

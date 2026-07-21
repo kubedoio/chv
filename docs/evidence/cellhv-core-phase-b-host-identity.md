@@ -2,8 +2,18 @@
 
 Date: 2026-07-21
 
-Scope: pure host identity resolution and explicit fresh-store initialization;
-production startup and VM runtime behavior are unchanged.
+Original slice scope: pure host identity resolution and explicit fresh-store
+initialization. At the time of this slice, production startup and VM runtime
+behavior were unchanged.
+
+## Subsequent Production Wiring
+
+Commit `e4448a6c` wired this resolver into the explicit, default-off
+`core-native` startup path in `cmd/chv-agent/src/main.rs`. That path trims an
+empty configured node identifier to no seed, resolves or creates the durable
+Core host identity, and starts without enrollment or Controller access. The
+default and omitted authority mode remains `legacy`, whose enrollment identity
+path is unchanged.
 
 ## Machine evidence
 
@@ -44,6 +54,10 @@ cargo fmt --all -- --check
 
 ## Non-claims
 
-The resolver is not called by `cmd/chv-agent`. This evidence does not prove
-production lease ordering, enrollment integration, NodeCache write exclusion,
-native listener startup, recovery, real KVM, libvirt, or cloud compatibility.
+The original unit evidence does not by itself prove production lease ordering.
+The later `core-native` process acceptance harness covers resolver composition,
+restart identity, and process exclusion, but does not prove enrollment
+integration or legacy-to-Core identity convergence. Native mode refuses a live
+NodeCache rather than importing it. Neither this evidence nor the later wiring
+proves VM lifecycle, process re-adoption, host-reboot recovery, real KVM,
+libvirt, or cloud compatibility.

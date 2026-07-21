@@ -2,8 +2,9 @@
 
 Date: 2026-07-21
 
-Scope: library-only startup migration/cutover coordinator. Production
-`chv-agent` startup and Cloud Hypervisor lifecycle behavior are unchanged.
+Original slice scope: library-only startup migration/cutover coordinator. At
+the time of this slice, production `chv-agent` startup and Cloud Hypervisor
+lifecycle behavior were unchanged.
 
 ## Machine Evidence
 
@@ -39,6 +40,13 @@ architecture unit tests passed.
 
 ## Non-Claims
 
-This is not production cutover evidence, real-KVM evidence, recovery/re-adoption
-evidence, or acceptance-test qualification. `cmd/chv-agent` does not use the
-decision yet, so existing VM launch and management behavior is unchanged.
+Commit `e4448a6c` subsequently wired `StartupTransaction::activate_native_only`
+into `cmd/chv-agent` when `authority_mode = "core-native"`. That policy accepts
+only a fresh or existing native Core store and refuses a live NodeCache or any
+legacy migration provenance before starting the API owner. It does not activate
+the import/cutover path. Omitted/default `legacy` mode retains existing VM
+launch and management behavior.
+
+This remains non-evidence for production NodeCache cutover, legacy/native
+operation convergence, real KVM, VM recovery/re-adoption, or acceptance-test
+qualification.

@@ -41,10 +41,11 @@ python3 -B -m unittest tests/test_cellhv_core_architecture.py
 
 ## Non-Claims
 
-This does not wire legacy gRPC or the native API into Core, complete
-`AGENT-CORE-002`, establish a process-wide singleton, execute VMM/provider side
-effects, alter production VM behavior, or provide T2/T3 evidence. It is partial
-T1 evidence for the future shared mutation path, idempotency, and resource
-version requirements.
-The existing native API database actor remains separate and must be replaced by
-this handle during production wiring; this unit slice is not shared-path proof.
+Commit `e4448a6c` subsequently wired the native API to this actor under the
+explicit `core-native` mode and made one runtime owner retain the actor, API,
+and authority lease. The old separate native database actor no longer exists.
+
+Legacy gRPC remains unwired to this actor, so this does not complete
+`AGENT-CORE-002`, execute VMM/provider side effects, alter default legacy VM
+behavior, or provide T2/T3 evidence. It remains partial evidence for the future
+shared mutation path; native-only process composition is not shared-path proof.

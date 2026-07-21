@@ -7,6 +7,32 @@ readonly PREFIX="cellhv-osd-"
 export PREFIX
 residual=0
 
+[[ $# -eq 0 || ( $# -eq 2 && "$1" == --runner-pid && "$2" =~ ^[1-9][0-9]*$ ) ]] || {
+    printf '[FAIL] usage: %s [--runner-pid PID]\n' "$0" >&2
+    exit 2
+}
+ignore_pids=""
+if [[ $# -eq 2 ]]; then
+    runner_pid="$2"
+    [[ -r "/proc/${runner_pid}/cmdline" ]] || {
+        printf '[FAIL] runner PID does not exist\n' >&2
+        exit 2
+    }
+    runner_command="$(tr '\0' ' ' < "/proc/${runner_pid}/cmdline")"
+    [[ "$runner_command" == *"scripts/openstack-discovery/run-path-a.py"* ]] || {
+        printf '[FAIL] runner PID is not the Path A runner\n' >&2
+        exit 2
+    }
+    current="$runner_pid"
+    while [[ "$current" =~ ^[1-9][0-9]*$ ]]; do
+        ignore_pids+="${ignore_pids:+,}${current}"
+        parent="$(ps -o ppid= -p "$current" | awk '{print $1}')"
+        [[ -n "$parent" && "$parent" != "$current" ]] || break
+        current="$parent"
+    done
+fi
+export CELLHV_CLEANUP_IGNORE_PIDS="$ignore_pids"
+
 report_matches() {
     local label="$1"
     local output="$2"
@@ -18,7 +44,10 @@ report_matches() {
     fi
 }
 
-processes="$(ps -eo pid=,comm=,args= | awk 'index($0, ENVIRON["PREFIX"]) { print $1, $2 }')"
+processes="$(ps -eo pid=,comm=,args= | awk '
+    BEGIN { count=split(ENVIRON["CELLHV_CLEANUP_IGNORE_PIDS"], values, ","); for (i=1; i<=count; i++) ignored[values[i]]=1 }
+    index($0, ENVIRON["PREFIX"]) && !($1 in ignored) { print $1, $2 }
+')"
 report_matches "processes" "$processes"
 
 if command -v ip >/dev/null 2>&1; then

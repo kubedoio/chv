@@ -72,19 +72,20 @@ operation, idempotency mapping, and `operation.accepted` event.
 The implemented operation transition graph is:
 
 ```text
-accepted -> running -> succeeded
-                    -> failed
-running -----------> running (bounded retry claim)
-accepted ----------> unsupported
-running -----------> unsupported
+accepted -> running(token T) -> succeeded (fenced by T)
+                             -> failed (fenced by T)
+                             -> unsupported (fenced by T)
+accepted --------------------> unsupported
 ```
 
 An accepted operation starts with attempt count zero and a fixed maximum of
 three attempts. `claim_attempt` commits `running`, increments the attempt count,
-and emits `operation.running` before any future executor may perform an external
-side effect. A running operation may be claimed again only while its count is
-below the maximum. Claims after exhaustion and all claims of terminal
-operations fail with a conflict.
+persists a caller-supplied attempt token, and emits `operation.running` before
+any future executor may perform an external side effect. Replaying the same
+token is idempotent and does not increment the attempt count. A different token
+cannot claim a running operation. Success, failure, and post-claim unsupported
+outcomes compare-and-set against the active token, so a stale worker cannot
+finish another worker's attempt. Terminal operations reject every claim.
 
 Success and failure require a prior running claim. Unsupported may be recorded
 from accepted or running because capability rejection need not perform a side
@@ -101,13 +102,15 @@ On restart, the store returns only accepted and running operations in stable
 | Durable state | Classification | Meaning |
 |---|---|---|
 | accepted | `Ready` | no attempt was claimed |
-| running, attempts below maximum | `Retryable` | a bounded retry may be planned |
+| running, attempts below maximum | `Retryable` | ownership inspection may plan a bounded recovery; direct execution is forbidden |
 | running, attempts at maximum | `RetryBudgetExhausted` | recovery must choose and persist a terminal policy |
 | any terminal state | `Terminal` | classifier result for an explicitly supplied operation; terminal rows are omitted from the incomplete list |
 
 Classification does not itself retry, inspect runtime reality, mark failure,
 or assume whether a prior side effect occurred. Re-adoption and ambiguous
 outcome policy belong to Phase C recovery and must use ownership evidence.
+No API currently supersedes an active attempt token. Such an API may be added
+only with the Phase C ownership-inspection proof in the same bounded change.
 
 ## 7. Dependencies and authority guards
 

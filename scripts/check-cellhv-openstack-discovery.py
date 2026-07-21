@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 sys.dont_write_bytecode = True
 
 SCHEMA_PATH = Path("docs/schemas/cellhv-openstack-discovery-report-v1.schema.json")
+EXECUTION_SCHEMA_PATH = Path("docs/schemas/cellhv-openstack-path-a-execution-manifest-v1.schema.json")
 REPORT_PATH = Path("docs/acceptance/cellhv-openstack-discovery-report-proposed-v1.json")
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -216,6 +217,133 @@ def _complete_report_errors(report: dict) -> list[str]:
     return errors
 
 
+def _t5_provenance_errors(root: Path, report: dict) -> list[str]:
+    """Validate structural manifests without treating unsigned output as T5 proof."""
+    errors: list[str] = []
+    evidence = [item for item in report.get("evidence", []) if isinstance(item, dict)]
+    manifests = [item for item in evidence if item.get("kind") == "execution-manifest"]
+    complete = report.get("evidence_status") == "complete"
+    if not manifests:
+        return ["report: complete T5 evidence requires exactly one execution-manifest artifact"] if complete else []
+    if len(manifests) != 1:
+        return ["report: evidence requires exactly one execution-manifest artifact"]
+    manifest_path = root / manifests[0].get("path", "")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return [f"report: execution manifest is not valid JSON: {error}"]
+    if not isinstance(manifest, dict):
+        return ["report: execution manifest must be an object"]
+    try:
+        execution_schema = json.loads((root / EXECUTION_SCHEMA_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return [f"report: cannot load execution manifest schema: {error}"]
+    errors.extend(
+        f"execution manifest: {error}"
+        for error in _schema_errors(manifest, execution_schema, execution_schema)
+    )
+    expected = {
+        "schema_version": 1,
+        "run_id": report.get("run_id"),
+        "scenario_id": "OSD-001",
+        "candidate": report.get("candidate"),
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            errors.append(f"report: execution manifest {key} must equal {value!r}")
+    attestation = manifest.get("lab_attestation")
+    if not isinstance(attestation, dict):
+        errors.append("report: execution manifest requires a lab attestation")
+    else:
+        if attestation.get("marker") != "cellhv-openstack-discovery-disposable-v1":
+            errors.append("report: execution manifest has no disposable-lab marker attestation")
+        if attestation.get("credential_class") != "disposable":
+            errors.append("report: execution manifest credential class must be disposable")
+        if not re.fullmatch(r"cellhv-osd-[a-z0-9._-]+", str(attestation.get("lab_id", ""))):
+            errors.append("report: execution manifest lab ID is invalid")
+    checks = manifest.get("checks")
+    if not isinstance(checks, dict):
+        errors.append("report: execution manifest requires immutable-state checks")
+    else:
+        if checks.get("nova_connection_uri") != "ch:///system":
+            errors.append("report: execution manifest did not verify ch:///system")
+        for key in ("devstack_revision", "nova_revision"):
+            if not re.fullmatch(r"[a-f0-9]{40}", str(checks.get(key, ""))):
+                errors.append(f"report: execution manifest {key} is not pinned")
+        if not re.fullmatch(r"[a-f0-9]{64}", str(checks.get("cloud_hypervisor_sha256", ""))):
+            errors.append("report: execution manifest Cloud Hypervisor digest is not pinned")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(manifest.get("immutable_inputs_sha256", ""))):
+        errors.append("report: execution manifest immutable input digest is invalid")
+    required_commands = {
+        "cloud-hypervisor-version", "host-kernel", "architecture",
+        "openstack-client-version", "nova-version", "libvirt-version",
+        "libvirt-package-version", "ovmf-package-version", "libvirt-uri",
+        "libvirt-capabilities", "nova-compute-initial-state",
+        "nova-compute-restart", "nova-compute-active", "nova-compute-log",
+        "nova-compute-restore", "nova-compute-restored-state",
+        "cleanup-verifier",
+        *(f"inventory-{when}-{resource}" for when in ("before", "after") for resource in ("servers", "ports", "networks", "volumes")),
+    }
+    commands = manifest.get("commands")
+    if not isinstance(commands, list):
+        commands = []
+        errors.append("report: execution manifest commands must be an array")
+    command_ids = [item.get("id") for item in commands if isinstance(item, dict)]
+    if len(command_ids) != len(set(command_ids)):
+        errors.append("report: execution manifest contains duplicate command IDs")
+    missing = sorted(required_commands - set(command_ids))
+    if missing and (complete or manifest.get("result") == "candidate-observed"):
+        errors.append("report: execution manifest is missing commands: " + ", ".join(missing))
+    command_evidence = [item for item in evidence if item.get("kind") == "command-output"]
+    command_evidence_ids = {item.get("id") for item in command_evidence}
+    for index, command in enumerate(commands):
+        if not isinstance(command, dict):
+            errors.append(f"report: execution manifest command {index} is invalid")
+            continue
+        if command.get("timed_out") is not False or not isinstance(command.get("exit_status"), int):
+            errors.append(f"report: execution manifest command {command.get('id', index)!r} lacks a bounded outcome")
+        argv = command.get("argv")
+        if not isinstance(argv, list) or not argv or not Path(str(argv[0])).is_absolute():
+            errors.append(f"report: execution manifest command {command.get('id')!r} lacks an absolute executable")
+        digest = command.get("sha256")
+        matches = [item for item in command_evidence if item.get("id") == command.get("evidence_id")]
+        if len(matches) != 1:
+            errors.append(f"report: command {command.get('id', index)!r} lacks an exact evidence ID binding")
+        elif matches[0].get("sha256") != digest or matches[0].get("source_artifact") != command.get("artifact"):
+            errors.append(f"report: command {command.get('id', index)!r} has a path/digest binding mismatch")
+    if not any(item.get("kind") == "configuration" for item in evidence):
+        errors.append("report: complete T5 evidence requires redacted effective configuration")
+    observed_refs: set[str] = set()
+    for field in ("first_success", "first_failure"):
+        event = report.get(field)
+        if isinstance(event, dict) and event.get("observed") is True:
+            observed_refs.update(event.get("evidence_refs", []))
+    if (complete or observed_refs) and not observed_refs.intersection(command_evidence_ids):
+        errors.append("report: observed first result must reference a digest-linked command-output artifact")
+    observations = manifest.get("observations", {})
+    positive = isinstance(observations, dict) and all(observations.get(key) is True for key in (
+        "libvirt_connection_reached", "nova_compute_active_after_restart",
+        "restart_succeeded", "correlated_nova_libvirt_event",
+    ))
+    restored = isinstance(manifest.get("restoration"), dict) and manifest["restoration"].get("succeeded") is True
+    cleaned = isinstance(manifest.get("cleanup"), dict) and manifest["cleanup"].get("succeeded") is True
+    if manifest.get("result") == "candidate-observed" and not (positive and restored and cleaned):
+        errors.append("report: candidate-observed requires correlated restart, restoration, and cleanup evidence")
+    if manifest.get("result") == "blocked" and report.get("result") == "viable":
+        errors.append("report: a blocked execution manifest cannot support a viable result")
+    if complete:
+        errors.append("report: unsigned structural execution manifest cannot prove complete T5 evidence")
+    try:
+        started = datetime.fromisoformat(manifest["started_at"].replace("Z", "+00:00"))
+        completed = datetime.fromisoformat(manifest["completed_at"].replace("Z", "+00:00"))
+        duration = (completed - started).total_seconds()
+        if started.tzinfo is None or completed.tzinfo is None or duration < 0 or duration > 144000:
+            raise ValueError
+    except (KeyError, AttributeError, TypeError, ValueError):
+        errors.append("report: execution manifest timestamps are invalid or exceed the OSD-001 timeout")
+    return errors
+
+
 def _source_reference_errors(report: dict) -> list[str]:
     errors: list[str] = []
     assumptions = report.get("qemu_specific_assumptions", [])
@@ -249,6 +377,7 @@ def check(root: Path, report_path: Path = REPORT_PATH, schema_path: Path = SCHEM
     if isinstance(report, dict):
         errors.extend(_evidence_errors(root, report))
         errors.extend(_complete_report_errors(report))
+        errors.extend(_t5_provenance_errors(root, report))
         errors.extend(_source_reference_errors(report))
         _scan_text(json.dumps(report, sort_keys=True), str(report_path), errors)
         status, result = report.get("evidence_status"), report.get("result")

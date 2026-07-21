@@ -2,8 +2,9 @@
 
 Date: 2026-07-21
 
-Scope: library-only process-lifetime authority exclusion. Production
-`chv-agent` and Cloud Hypervisor behavior are unchanged.
+Original slice scope: library-only process-lifetime authority exclusion. At the
+time of this slice, production `chv-agent` and Cloud Hypervisor behavior were
+unchanged.
 
 ## Machine Evidence
 
@@ -36,9 +37,15 @@ cargo fmt --all -- --check
 
 ## Non-Claims
 
-This is not production startup, crash-recovery, real-KVM, libvirt, or platform
-qualification evidence. The runtime lease is not yet constructed by
-`cmd/chv-agent`.
+Commit `e4448a6c` subsequently made `cmd/chv-agent` acquire and retain this lease
+for the explicit `core-native` process lifetime. Process tests prove a second
+native instance is refused and that clean or killed-process restart can
+reacquire the lease. Omitted/default `legacy` mode does not use the Core lease,
+and native mode refuses legacy NodeCache state, so this is not yet proof that
+old and new request paths share one authority.
+
+This is not Cloud Hypervisor process recovery, host-reboot recovery, real-KVM,
+libvirt, or platform qualification evidence.
 The evidence assumes cooperative service-UID processes in an owner-only
 directory. It does not prove exclusion against a malicious same-UID process
 that replaces the pathname after acquisition has returned.

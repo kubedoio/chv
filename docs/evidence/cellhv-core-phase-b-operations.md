@@ -32,8 +32,11 @@ execution result.
 
 ## Non-claims and residual risk
 
-- No production native or legacy handler calls this service.
-- No provider, Cloud Hypervisor process, VM API socket, runtime directory,
+- The later default-off `core-native` listener calls this service through the
+  shared authority actor. Production legacy gRPC handlers still do not; the two
+  surfaces therefore do not yet prove one production operation authority.
+- No accepted Core operation drives a provider, Cloud Hypervisor process, VM
+  API socket, or per-VM runtime directory;
   storage attachment, or network attachment is touched.
 - No executor consumes claimed work; tests call transition methods directly.
 - A running operation after restart is classified, not reconciled with runtime
