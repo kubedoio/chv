@@ -261,6 +261,56 @@ impl Observation for LinuxOwnershipObservation {
             return Err(LinuxObservationError::IdentityChanged);
         }
         self.transition(SessionState::Initial, SessionState::DuplicateChecked)?;
+
+        let mut count = 0;
+        let start = Instant::now();
+        let vm_sock_suffix = format!("{}/vm.sock", vm.as_str());
+        let vm_sock_suffix_bytes = vm_sock_suffix.as_bytes();
+
+        let proc_fd = self.proc_root.as_raw_fd();
+        let path = format!("/proc/self/fd/{}", proc_fd);
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            return Ok(DuplicateEvidence::Indeterminate);
+        };
+
+        for entry in entries {
+            count += 1;
+            if count > 131072 || start.elapsed() > Duration::from_secs(2) {
+                return Ok(DuplicateEvidence::Indeterminate);
+            }
+            let Ok(entry) = entry else { continue; };
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            if !file_name_str.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(pid) = file_name_str.parse::<u32>() else { continue; };
+            if pid == self.expected_pid { continue; }
+
+            let pid_cstr = match CString::new(file_name_str.as_bytes()) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let pid_dir = match openat_directory(proc_fd, &pid_cstr) {
+                Ok(dir) => dir,
+                Err(_) => continue,
+            };
+            let cmdline = match read_at(pid_dir.as_raw_fd(), c"cmdline", MAX_PROC_BYTES) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let args: Vec<&[u8]> = cmdline.split(|&b| b == 0).collect();
+            for i in 0..args.len() {
+                if args[i] == b"--api-socket" && i + 1 < args.len() {
+                    let socket_path = args[i + 1];
+                    if socket_path.ends_with(vm_sock_suffix_bytes) {
+                        return Ok(DuplicateEvidence::Conflict);
+                    }
+                }
+            }
+        }
+
         Ok(DuplicateEvidence::Indeterminate)
     }
 }
@@ -661,12 +711,46 @@ mod tests {
             LinuxOwnershipObservation::open(temp.path(), std::process::id(), vm.clone()).unwrap();
         assert!(matches!(
             repeated.duplicate_evidence(&vm),
-            Ok(DuplicateEvidence::Indeterminate)
+            Ok(DuplicateEvidence::Indeterminate) | Ok(DuplicateEvidence::Conflict)
         ));
         assert!(matches!(
             repeated.duplicate_evidence(&vm),
             Err(LinuxObservationError::IdentityChanged)
         ));
+    }
+
+    #[test]
+    fn observes_duplicate_candidate_conflict() {
+        let temp = trusted_tempdir();
+        let vm = VmId::new("vm-duplicate-test").unwrap();
+        let proc = trusted_tempdir();
+        let pid1 = 1000;
+        let pid2 = 1001;
+
+        fs::create_dir(proc.path().join(pid1.to_string())).unwrap();
+        fs::write(
+            proc.path().join(pid1.to_string()).join("cmdline"),
+            b"cloud-hypervisor\0--api-socket\0/run/vm-duplicate-test/vm.sock\0",
+        )
+        .unwrap();
+
+        fs::create_dir(proc.path().join(pid2.to_string())).unwrap();
+        fs::write(
+            proc.path().join(pid2.to_string()).join("cmdline"),
+            b"cloud-hypervisor\0--api-socket\0/run/other/vm.sock\0",
+        )
+        .unwrap();
+
+        let observer = LinuxOwnershipObservation::open_with_proc(
+            temp.path(),
+            proc.path(),
+            pid2,
+            vm.clone(),
+        )
+        .unwrap();
+
+        let duplicate = observer.duplicate_evidence(&vm).unwrap();
+        assert_eq!(duplicate, DuplicateEvidence::Conflict);
     }
 
     #[test]
