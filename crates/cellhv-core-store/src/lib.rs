@@ -126,7 +126,6 @@ pub struct ClaimedOperation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncompleteExecutionOperation {
     pub entry: OperationJournalEntry,
-    pub active_attempt_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,11 +161,14 @@ pub enum RecoveryDisposition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryAssessmentRecord {
     pub revision: u64,
-    pub active_attempt_token: String,
     pub classification: RecoveryClassification,
     pub disposition: RecoveryDisposition,
     pub evidence_fingerprint: String,
     pub evidence: serde_json::Value,
+}
+
+struct StoredRecoveryAssessment {
+    record: RecoveryAssessmentRecord,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -858,16 +860,13 @@ impl CoreStore {
         &self,
     ) -> Result<Vec<IncompleteExecutionOperation>> {
         let mut statement = self.conn.prepare(
-            "SELECT operation_id,active_attempt_token FROM operations WHERE status IN ('accepted','running') ORDER BY accepted_at,operation_id",
+            "SELECT operation_id FROM operations WHERE status IN ('accepted','running') ORDER BY accepted_at,operation_id",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| {
-            let (id, active_attempt_token) = row?;
+            let id = row?;
             Ok(IncompleteExecutionOperation {
                 entry: read_operation_entry(&self.conn, &id)?,
-                active_attempt_token,
             })
         })
         .collect()
@@ -877,7 +876,7 @@ impl CoreStore {
         &self,
         id: &OperationId,
     ) -> Result<Option<RecoveryAssessmentRecord>> {
-        read_latest_recovery_assessment(&self.conn, id.as_str())
+        Ok(read_latest_recovery_assessment(&self.conn, id.as_str())?.map(|stored| stored.record))
     }
 
     /// Appends evidence about one fenced running attempt without resolving it.
@@ -931,14 +930,14 @@ impl CoreStore {
             attempt_token,
             &evidence_fingerprint,
         )? {
-            if existing.classification == classification
-                && existing.disposition == disposition
-                && canonical_json(&existing.evidence)? == evidence_json
+            if existing.record.classification == classification
+                && existing.record.disposition == disposition
+                && canonical_json(&existing.record.evidence)? == evidence_json
             {
                 tx.commit()?;
                 return Ok(RecordedRecoveryAssessment {
                     disposition: AssessmentDisposition::Replay,
-                    record: existing,
+                    record: existing.record,
                 });
             }
             return Err(StoreError::Integrity(format!(
@@ -946,7 +945,7 @@ impl CoreStore {
             )));
         }
         let latest = read_latest_recovery_assessment(&tx, id.as_str())?;
-        let actual_revision = latest.as_ref().map_or(0, |record| record.revision);
+        let actual_revision = latest.as_ref().map_or(0, |stored| stored.record.revision);
         if actual_revision != expected_revision {
             return Err(StoreError::Conflict {
                 kind: "recovery assessment",
@@ -971,7 +970,7 @@ impl CoreStore {
         tx.commit()?;
         Ok(RecordedRecoveryAssessment {
             disposition: AssessmentDisposition::Applied,
-            record,
+            record: record.record,
         })
     }
 
@@ -1652,8 +1651,9 @@ fn validate(conn: &Connection) -> Result<()> {
 }
 
 fn validate_recovery_assessment_rows(conn: &Connection) -> Result<()> {
+    let mut expected_events = Vec::new();
     let mut statement = conn.prepare(
-        "SELECT a.operation_id,a.revision,a.active_attempt_token,a.classification,a.disposition,a.evidence_fingerprint,a.evidence_json,o.status,o.active_attempt_token FROM operation_recovery_assessments a JOIN operations o ON o.operation_id=a.operation_id ORDER BY a.operation_id,a.revision",
+        "SELECT a.operation_id,a.revision,a.active_attempt_token,a.classification,a.disposition,a.evidence_fingerprint,a.evidence_json,o.status,o.active_attempt_token,o.completed_attempt_token,o.vm_id FROM operation_recovery_assessments a JOIN operations o ON o.operation_id=a.operation_id ORDER BY a.operation_id,a.revision",
     )?;
     let rows = statement.query_map([], |row| {
         Ok((
@@ -1666,6 +1666,8 @@ fn validate_recovery_assessment_rows(conn: &Connection) -> Result<()> {
             row.get::<_, String>(6)?,
             row.get::<_, String>(7)?,
             row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, String>(10)?,
         ))
     })?;
     let mut previous: Option<(String, u64)> = None;
@@ -1680,8 +1682,17 @@ fn validate_recovery_assessment_rows(conn: &Connection) -> Result<()> {
             evidence,
             operation_status,
             operation_token,
+            completed_token,
+            vm_id,
         ) = row?;
-        if operation_status != "running" || operation_token.as_deref() != Some(token.as_str()) {
+        let correlated = match operation_status.as_str() {
+            "running" => operation_token.as_deref() == Some(token.as_str()),
+            "succeeded" | "failed" | "unsupported" => {
+                operation_token.is_none() && completed_token.as_deref() == Some(token.as_str())
+            }
+            _ => false,
+        };
+        if !correlated {
             return Err(StoreError::Integrity(format!(
                 "recovery assessment for {operation_id} is not fenced to its running operation"
             )));
@@ -1694,19 +1705,75 @@ fn validate_recovery_assessment_rows(conn: &Connection) -> Result<()> {
             fingerprint,
             evidence,
         ))?;
-        validate_recovery_mapping(record.classification, record.disposition)?;
+        validate_recovery_mapping(record.record.classification, record.record.disposition)
+            .map_err(|error| StoreError::Integrity(error.to_string()))?;
         let expected = match &previous {
             Some((previous_id, previous_revision)) if previous_id == &operation_id => {
                 previous_revision + 1
             }
             _ => 1,
         };
-        if record.revision != expected {
+        if record.record.revision != expected {
             return Err(StoreError::Integrity(format!(
                 "recovery assessment revisions for {operation_id} are not contiguous"
             )));
         }
-        previous = Some((operation_id, record.revision));
+        expected_events.push((
+            operation_id.clone(),
+            vm_id,
+            record.record.revision,
+            record.record.classification,
+            record.record.disposition,
+            record.record.evidence_fingerprint.clone(),
+        ));
+        previous = Some((operation_id, record.record.revision));
+    }
+    drop(statement);
+
+    let mut recovery_events = conn.prepare(
+        "SELECT event_id,operation_id,vm_id,payload_json FROM events WHERE kind='operation.recovery_assessed' ORDER BY operation_id,event_id",
+    )?;
+    let actual_events = recovery_events
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if actual_events.len() != expected_events.len() {
+        return Err(StoreError::Integrity(
+            "recovery assessments and recovery events are not one-to-one".to_owned(),
+        ));
+    }
+    for (operation_id, vm_id, revision, classification, disposition, fingerprint) in expected_events
+    {
+        let expected_id = format!("{operation_id}:recovery-assessed:{revision}");
+        let event = actual_events
+            .iter()
+            .find(|event| event.0 == expected_id)
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "recovery event is missing for assessment {operation_id}/{revision}"
+                ))
+            })?;
+        let expected_payload = serde_json::json!({
+            "revision": revision,
+            "classification": recovery_classification_text(classification),
+            "disposition": recovery_disposition_text(disposition),
+            "evidence_fingerprint": fingerprint,
+        });
+        let payload: serde_json::Value = serde_json::from_str(&event.3)?;
+        if event.1.as_deref() != Some(operation_id.as_str())
+            || event.2.as_deref() != Some(vm_id.as_str())
+            || payload != expected_payload
+        {
+            return Err(StoreError::Integrity(format!(
+                "recovery event does not correlate with assessment {operation_id}/{revision}"
+            )));
+        }
     }
     Ok(())
 }
@@ -1965,7 +2032,7 @@ fn validate_recovery_mapping(
 fn read_latest_recovery_assessment(
     conn: &Connection,
     operation_id: &str,
-) -> Result<Option<RecoveryAssessmentRecord>> {
+) -> Result<Option<StoredRecoveryAssessment>> {
     conn.query_row(
         "SELECT revision,active_attempt_token,classification,disposition,evidence_fingerprint,evidence_json FROM operation_recovery_assessments WHERE operation_id=?1 ORDER BY revision DESC LIMIT 1",
         [operation_id],
@@ -1978,7 +2045,7 @@ fn read_recovery_assessment_by_fingerprint(
     operation_id: &str,
     attempt_token: &str,
     fingerprint: &str,
-) -> Result<Option<RecoveryAssessmentRecord>> {
+) -> Result<Option<StoredRecoveryAssessment>> {
     conn.query_row(
         "SELECT revision,active_attempt_token,classification,disposition,evidence_fingerprint,evidence_json FROM operation_recovery_assessments WHERE operation_id=?1 AND active_attempt_token=?2 AND evidence_fingerprint=?3",
         params![operation_id, attempt_token, fingerprint],
@@ -1988,7 +2055,7 @@ fn read_recovery_assessment_by_fingerprint(
 
 fn recovery_record(
     raw: (i64, String, String, String, String, String),
-) -> Result<RecoveryAssessmentRecord> {
+) -> Result<StoredRecoveryAssessment> {
     let (revision, active_attempt_token, classification, disposition, fingerprint, evidence) = raw;
     validate_attempt_token(&active_attempt_token)?;
     if fingerprint.len() != 64
@@ -2020,14 +2087,15 @@ fn recovery_record(
             "recovery evidence fingerprint mismatch".to_owned(),
         ));
     }
-    Ok(RecoveryAssessmentRecord {
-        revision: u64::try_from(revision)
-            .map_err(|_| StoreError::Integrity("invalid recovery revision".to_owned()))?,
-        active_attempt_token,
-        classification: recovery_classification(&classification)?,
-        disposition: recovery_disposition(&disposition)?,
-        evidence_fingerprint: fingerprint,
-        evidence,
+    Ok(StoredRecoveryAssessment {
+        record: RecoveryAssessmentRecord {
+            revision: u64::try_from(revision)
+                .map_err(|_| StoreError::Integrity("invalid recovery revision".to_owned()))?,
+            classification: recovery_classification(&classification)?,
+            disposition: recovery_disposition(&disposition)?,
+            evidence_fingerprint: fingerprint,
+            evidence,
+        },
     })
 }
 
@@ -2203,6 +2271,7 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
     }
 
     let mut events = conn.prepare("SELECT event_id,sequence,operation_id,vm_id,kind,payload_json FROM events ORDER BY sequence")?;
+    let mut expected_event_sequence = 1_i64;
     for row in events.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -2214,6 +2283,14 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
         ))
     })? {
         let (id, sequence, operation_id, vm_id, kind, payload) = row?;
+        if sequence != expected_event_sequence {
+            return Err(StoreError::Integrity(format!(
+                "event sequence {sequence} is not contiguous; expected {expected_event_sequence}"
+            )));
+        }
+        expected_event_sequence = expected_event_sequence
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Integrity("event sequence overflow".to_owned()))?;
         let value = serde_json::json!({
             "id": id, "sequence": sequence, "operation_id": operation_id,
             "vm_id": vm_id, "kind": kind,
@@ -2680,6 +2757,34 @@ mod tests {
         (directory, path, store)
     }
 
+    fn running_recovery_store(
+        operation_id: &str,
+    ) -> (tempfile::TempDir, PathBuf, CoreStore, OperationId) {
+        let (directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let mut desired = vm("vm-1", 2);
+        desired.requested_power_state = RequestedPowerState::Running;
+        let request = serde_json::json!({"command":"start"});
+        let operation = operation(
+            operation_id,
+            &canonical_request_fingerprint(&request).unwrap(),
+        );
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &operation,
+                request: &request,
+                desired_vm: Some(&desired),
+                idempotency_scope: "recovery-tests",
+                idempotency_key: &IdempotencyKey::new(operation_id).unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        store
+            .claim_operation(&operation.id, "attempt-recovery")
+            .unwrap();
+        (directory, path, store, operation.id)
+    }
+
     fn create_v1_store(path: &Path) {
         let mut conn = Connection::open(path).unwrap();
         configure(&conn).unwrap();
@@ -2813,10 +2918,6 @@ mod tests {
         assert_eq!(terminal_token, "legacy-completed-v1");
         let incomplete = store.list_incomplete_execution_operations().unwrap();
         assert_eq!(incomplete.len(), 2);
-        assert_eq!(
-            incomplete[1].active_attempt_token.as_deref(),
-            Some("legacy-ambiguous-v1")
-        );
         drop(store);
         CoreStore::open_existing(&path).unwrap();
     }
@@ -3636,6 +3737,257 @@ mod tests {
     }
 
     #[test]
+    fn recovery_assessment_cas_serializes_concurrent_writers_and_replays_canonical_json() {
+        let (_directory, path, store, id) = running_recovery_store("op-recovery-cas");
+        drop(store);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut writers = Vec::new();
+        for proof in ["first", "second"] {
+            let path = path.clone();
+            let id = id.clone();
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                let mut store = CoreStore::open_existing(&path).unwrap();
+                barrier.wait();
+                store.record_recovery_assessment(
+                    &id,
+                    "attempt-recovery",
+                    0,
+                    RecoveryClassification::AmbiguousPreserve,
+                    RecoveryDisposition::Quarantined,
+                    &serde_json::json!({"proof": proof}),
+                )
+            }));
+        }
+        barrier.wait();
+        let outcomes = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(record) if record.disposition == AssessmentDisposition::Applied))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    Err(StoreError::Conflict {
+                        kind: "recovery assessment",
+                        ..
+                    })
+                ))
+                .count(),
+            1
+        );
+
+        let mut store = CoreStore::open_existing(&path).unwrap();
+        let applied = outcomes.into_iter().find_map(Result::ok).unwrap();
+        let reordered = match applied.record.evidence["proof"].as_str().unwrap() {
+            "first" => serde_json::json!({"z": 1, "proof": "first"}),
+            _ => serde_json::json!({"z": 1, "proof": "second"}),
+        };
+        let appended = store
+            .record_recovery_assessment(
+                &id,
+                "attempt-recovery",
+                1,
+                RecoveryClassification::AmbiguousPreserve,
+                RecoveryDisposition::Quarantined,
+                &reordered,
+            )
+            .unwrap();
+        let replay = store
+            .record_recovery_assessment(
+                &id,
+                "attempt-recovery",
+                0,
+                RecoveryClassification::AmbiguousPreserve,
+                RecoveryDisposition::Quarantined,
+                &serde_json::json!({"proof": reordered["proof"], "z": 1}),
+            )
+            .unwrap();
+        assert_eq!(appended.disposition, AssessmentDisposition::Applied);
+        assert_eq!(replay.disposition, AssessmentDisposition::Replay);
+        assert_eq!(replay.record.revision, 2);
+    }
+
+    #[test]
+    fn recovery_evidence_limit_counts_exact_utf8_bytes() {
+        let (_directory, _path, mut store, id) = running_recovery_store("op-recovery-boundary");
+        let exact = serde_json::json!({"x": "é".repeat((MAX_RECOVERY_EVIDENCE_BYTES - 8) / 2)});
+        assert_eq!(canonical_json(&exact).unwrap().len(), 16 * 1024);
+        assert!(store
+            .record_recovery_assessment(
+                &id,
+                "attempt-recovery",
+                0,
+                RecoveryClassification::AmbiguousPreserve,
+                RecoveryDisposition::Quarantined,
+                &exact,
+            )
+            .is_ok());
+        let oversized =
+            serde_json::json!({"x": "é".repeat((MAX_RECOVERY_EVIDENCE_BYTES - 8) / 2 + 1)});
+        assert!(matches!(
+            store.record_recovery_assessment(
+                &id,
+                "attempt-recovery",
+                1,
+                RecoveryClassification::AmbiguousPreserve,
+                RecoveryDisposition::Quarantined,
+                &oversized,
+            ),
+            Err(StoreError::InvalidDomain(message)) if message.contains("16 KiB")
+        ));
+    }
+
+    #[test]
+    fn recovery_assessment_and_event_commit_atomically() {
+        let (_directory, _path, mut store, id) = running_recovery_store("op-recovery-atomic");
+        store
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_recovery_event BEFORE INSERT ON events
+             WHEN NEW.kind='operation.recovery_assessed'
+             BEGIN SELECT RAISE(ABORT, 'injected recovery event failure'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .record_recovery_assessment(
+                &id,
+                "attempt-recovery",
+                0,
+                RecoveryClassification::AmbiguousPreserve,
+                RecoveryDisposition::Quarantined,
+                &serde_json::json!({"proof":"rollback"}),
+            )
+            .is_err());
+        let assessments: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM operation_recovery_assessments",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let events: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind='operation.recovery_assessed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((assessments, events), (0, 0));
+    }
+
+    #[test]
+    fn recovery_revision_beyond_sqlite_range_is_rejected_without_partial_write() {
+        let (_directory, _path, mut store, id) = running_recovery_store("op-recovery-overflow");
+        let evidence = canonical_json(&serde_json::json!({"seed":true})).unwrap();
+        let fingerprint = format!("{:x}", Sha256::digest(evidence.as_bytes()));
+        store.conn.execute(
+            "INSERT INTO operation_recovery_assessments (operation_id,revision,active_attempt_token,classification,disposition,evidence_fingerprint,evidence_json) VALUES (?1,?2,'attempt-recovery','ambiguous_preserve','quarantined',?3,?4)",
+            params![id.as_str(), i64::MAX, fingerprint, evidence],
+        ).unwrap();
+        assert!(matches!(
+            store.record_recovery_assessment(
+                &id,
+                "attempt-recovery",
+                i64::MAX as u64,
+                RecoveryClassification::AmbiguousPreserve,
+                RecoveryDisposition::Quarantined,
+                &serde_json::json!({"next":true}),
+            ),
+            Err(StoreError::InvalidDomain(message)) if message.contains("SQLite range")
+        ));
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM operation_recovery_assessments",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn recovery_reopen_rejects_event_correlation_gap_fingerprint_and_mapping_corruption() {
+        fn assessed() -> (tempfile::TempDir, PathBuf) {
+            let (directory, path, mut store, id) = running_recovery_store("op-recovery-integrity");
+            store
+                .record_recovery_assessment(
+                    &id,
+                    "attempt-recovery",
+                    0,
+                    RecoveryClassification::AmbiguousPreserve,
+                    RecoveryDisposition::Quarantined,
+                    &serde_json::json!({"proof":"integrity"}),
+                )
+                .unwrap();
+            drop(store);
+            (directory, path)
+        }
+        fn corrupt(path: &Path, sql: &str) {
+            let connection = Connection::open(path).unwrap();
+            connection.execute_batch(sql).unwrap();
+        }
+        fn rejected(path: &Path) {
+            assert!(matches!(
+                CoreStore::open_existing(path),
+                Err(StoreError::Integrity(_))
+            ));
+        }
+
+        let (_directory, path) = assessed();
+        corrupt(
+            &path,
+            "DELETE FROM events WHERE kind='operation.recovery_assessed'",
+        );
+        rejected(&path);
+
+        let (_directory, path) = assessed();
+        corrupt(
+            &path,
+            "UPDATE events SET payload_json='{}' WHERE kind='operation.recovery_assessed'",
+        );
+        rejected(&path);
+
+        let (_directory, path) = assessed();
+        corrupt(
+            &path,
+            "UPDATE events SET sequence=sequence+10 WHERE kind='operation.recovery_assessed'",
+        );
+        rejected(&path);
+
+        let (_directory, path) = assessed();
+        corrupt(&path, "UPDATE operation_recovery_assessments SET evidence_fingerprint=lower(hex(randomblob(32)))");
+        rejected(&path);
+
+        let (_directory, path) = assessed();
+        corrupt(
+            &path,
+            "UPDATE operation_recovery_assessments SET classification='ownership_matched'",
+        );
+        rejected(&path);
+
+        let (_directory, path) = assessed();
+        corrupt(
+            &path,
+            "INSERT INTO events (event_id,sequence,operation_id,vm_id,kind,payload_json)
+             SELECT event_id || ':duplicate',(SELECT max(sequence)+1 FROM events),operation_id,vm_id,kind,payload_json
+             FROM events WHERE kind='operation.recovery_assessed'",
+        );
+        rejected(&path);
+    }
+
+    #[test]
     fn recovery_assessment_reopen_requires_running_operation_and_matching_token() {
         fn assessed_store() -> (tempfile::TempDir, PathBuf) {
             let (directory, path, mut store) = new_store();
@@ -3702,6 +4054,16 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute(
             "UPDATE operations SET status='failed',active_attempt_token=NULL,completed_attempt_token='attempt-original',error_json='{}',completed_at='2026-07-21T00:00:00Z' WHERE operation_id='op-recovery-corrupt'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        CoreStore::open_existing(&path).unwrap();
+
+        let (_directory, path) = assessed_store();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE operations SET status='failed',active_attempt_token=NULL,completed_attempt_token='attempt-other',error_json='{}',completed_at='2026-07-21T00:00:00Z' WHERE operation_id='op-recovery-corrupt'",
             [],
         )
         .unwrap();

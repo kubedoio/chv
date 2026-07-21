@@ -58,6 +58,13 @@ evidence rather than overwriting history, while an exact retry replays its
 existing row and event. Persistence failure returns an error
 and cannot be treated as a successful assessment.
 
+Reopen validation retains token correlation without exposing the token: an
+assessment must belong either to a running operation with the matching active
+attempt or to a terminal operation with the matching completed attempt.
+Accepted operations and token mismatches fail closed. This permits later
+token-fenced terminalization to preserve assessment history without relaxing
+the assessment-only behavior of this slice.
+
 ## Deferred Decisions
 
 This slice deliberately provides no transition from `InspectRequired`. A later

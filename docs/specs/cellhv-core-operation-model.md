@@ -107,8 +107,10 @@ On restart, the store returns only accepted and running operations in stable
 Classification does not itself retry, inspect runtime reality, mark failure,
 or assume whether a prior side effect occurred. Re-adoption and ambiguous
 outcome policy belong to Phase C recovery and must use ownership evidence.
-The restart capability returns the opaque active token to the recovery layer;
-transport handles and ordinary operation responses do not expose it. No API
+The restart projection does not expose the opaque active token. The store uses
+it only inside token-fenced execution and assessment transactions; transport
+handles, restart records, events, and ordinary operation responses do not
+expose it. No API
 currently supersedes an active attempt token. Such an API may be added only
 with the Phase C ownership-inspection proof in the same bounded change.
 

@@ -9,10 +9,10 @@ pub use authority_actor::{
     AuthorityActor, AuthorityActorError, AuthorityActorJoin, AuthorityHandle, ExecutionHandle,
 };
 
-use cellhv_core_store::{AcceptOperation, CoreStore};
+use cellhv_core_store::{AcceptOperation, CoreStore, RecoveryAssessmentRecord};
 pub use cellhv_core_store::{
     Acceptance, AcceptedOperation, AssessmentDisposition, HostRecord, MigrationDisposition,
-    OperationJournalEntry, RecoveryAssessmentRecord, RecoveryClassification, RecoveryDisposition,
+    OperationJournalEntry, RecoveryClassification, RecoveryDisposition,
 };
 use cellhv_core_types::{
     canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
@@ -104,7 +104,6 @@ pub enum RestartDisposition {
 pub struct RestartOperation {
     pub entry: OperationJournalEntry,
     pub disposition: RestartDisposition,
-    pub active_attempt_token: Option<AttemptToken>,
     pub recovery_assessment: Option<RecoveryAssessmentRecord>,
 }
 
@@ -339,10 +338,6 @@ impl OperationService {
                 Ok(RestartOperation {
                     disposition: classify_restart(&record.entry.operation),
                     entry: record.entry,
-                    active_attempt_token: record
-                        .active_attempt_token
-                        .map(AttemptToken::new)
-                        .transpose()?,
                     recovery_assessment: self.store.latest_recovery_assessment(&operation_id)?,
                 })
             })
@@ -1079,7 +1074,6 @@ mod tests {
         assert_eq!(appended.record.revision, 2);
         let restart = service.restart_operations().unwrap();
         assert_eq!(restart[0].disposition, RestartDisposition::InspectRequired);
-        assert_eq!(restart[0].active_attempt_token.as_ref().unwrap(), &token);
         assert_eq!(restart[0].recovery_assessment.as_ref().unwrap().revision, 2);
         assert_eq!(
             service.operation(&id).unwrap().operation.status,
@@ -1090,8 +1084,13 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter(|event| event.kind == "operation.recovery_assessed")
-            .count();
-        assert_eq!(recovery_events, 2);
+            .collect::<Vec<_>>();
+        assert_eq!(recovery_events.len(), 2);
+        for event in recovery_events {
+            let serialized = serde_json::to_string(&event.payload).unwrap();
+            assert!(!serialized.contains(token.as_str()));
+            assert!(!serialized.contains("attempt_token"));
+        }
     }
 
     #[test]

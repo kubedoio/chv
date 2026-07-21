@@ -670,10 +670,6 @@ mod tests {
         let restart = execution.restart_operations().await.unwrap();
         assert_eq!(restart.len(), 1);
         assert_eq!(restart[0].disposition, RestartDisposition::InspectRequired);
-        assert_eq!(
-            restart[0].active_attempt_token.as_ref().unwrap().as_str(),
-            "attempt-1"
-        );
         assert_eq!(restart[0].entry.operation.status, OperationStatus::Running);
         assert_eq!(restart[0].entry.operation.attempt_count, 1);
         assert_eq!(

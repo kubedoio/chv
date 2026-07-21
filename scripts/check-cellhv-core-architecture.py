@@ -316,6 +316,18 @@ def check(root: Path) -> list[str]:
             f"{CORE_RECOVERY_PACKAGE}: assessment-only recovery must remain production-unwired; "
             f"depended on by {recovery_dependents}"
         )
+    for relative in (
+        Path("crates/cellhv-core-store/src/lib.rs"),
+        Path("crates/cellhv-core-operations/src/lib.rs"),
+    ):
+        path = root / relative
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        if re.search(r"\bpub\s+active_attempt_token\s*:", source):
+            errors.append(
+                f"{relative}: recovery and restart projections must not expose attempt tokens"
+            )
 
     # Process identity is a runtime-backend capability. Transports,
     # compatibility adapters, and provider daemons must consume Core results,

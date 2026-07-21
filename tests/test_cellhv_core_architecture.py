@@ -406,6 +406,27 @@ class ArchitectureGuardTests(unittest.TestCase):
                     for error in GUARD.check(root))
             )
 
+    def test_recovery_projection_cannot_expose_attempt_token(self):
+        for relative, anchor in (
+            ("crates/cellhv-core-store/src/lib.rs", "pub struct RecoveryAssessmentRecord {"),
+            ("crates/cellhv-core-operations/src/lib.rs", "pub struct RestartOperation {"),
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.copy_baseline(root)
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+                text = path.read_text(encoding="utf-8").replace(
+                    anchor,
+                    anchor + "\n    pub active_attempt_token: String,",
+                    1,
+                )
+                path.write_text(text, encoding="utf-8")
+                self.assertTrue(
+                    any("must not expose attempt tokens" in error for error in GUARD.check(root))
+                )
+
     def test_api_cannot_depend_on_runtime_ownership(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
