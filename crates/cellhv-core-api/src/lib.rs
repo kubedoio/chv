@@ -431,13 +431,20 @@ pub enum BindError {
     Io(#[from] std::io::Error),
 }
 pub async fn bind_private(socket: &FsPath) -> Result<tokio::net::UnixListener, BindError> {
-    bind_private_owned(socket)
+    bind_private_owned(socket, ExistingSocketPolicy::Refuse)
         .await
         .map(|(listener, _)| listener)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ExistingSocketPolicy {
+    Refuse,
+    RecoverStale,
+}
+
 async fn bind_private_owned(
     socket: &FsPath,
+    existing_socket_policy: ExistingSocketPolicy,
 ) -> Result<(tokio::net::UnixListener, crate::listener::SocketIdentity), BindError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     let parent = socket
@@ -453,6 +460,12 @@ async fn bind_private_owned(
         return Err(BindError::UnsafeParent(parent.display().to_string()));
     }
     match std::fs::symlink_metadata(socket) {
+        Ok(metadata)
+            if metadata.file_type().is_socket()
+                && matches!(existing_socket_policy, ExistingSocketPolicy::RecoverStale) =>
+        {
+            recover_stale_socket(socket).await?;
+        }
         Ok(_) => return Err(BindError::ExistingPath(socket.display().to_string())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(BindError::Io(error)),
@@ -479,6 +492,28 @@ async fn bind_private_owned(
         return Err(BindError::IdentityMismatch(socket.display().to_string()));
     }
     Ok((listener, identity))
+}
+
+async fn recover_stale_socket(socket: &FsPath) -> Result<(), BindError> {
+    let (_, identity) = crate::listener::open_socket_path(socket)
+        .map_err(|_| BindError::ExistingPath(socket.display().to_string()))?;
+    match tokio::net::UnixStream::connect(socket).await {
+        Ok(stream) => {
+            drop(stream);
+            return Err(BindError::ExistingPath(socket.display().to_string()));
+        }
+        Err(error) if error.raw_os_error() == Some(nix::libc::ECONNREFUSED) => {}
+        Err(_) => return Err(BindError::ExistingPath(socket.display().to_string())),
+    }
+
+    // Revalidate after the liveness probe. The directory is owner-only, and
+    // removal still checks the captured inode immediately before unlinking.
+    crate::listener::remove_matching_socket(socket, identity);
+    match std::fs::symlink_metadata(socket) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(BindError::ExistingPath(socket.display().to_string())),
+        Err(error) => Err(BindError::Io(error)),
+    }
 }
 
 #[cfg(test)]

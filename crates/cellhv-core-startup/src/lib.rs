@@ -151,6 +151,13 @@ impl ActivatedStore {
 }
 
 impl StartupTransaction {
+    pub fn activate_native_only(self, configured_seed: Option<String>) -> Result<ActivatedStore> {
+        if self.cache.is_some() {
+            return Err(StartupError::LegacyCachePresent);
+        }
+        self.activate(configured_seed, None)
+    }
+
     /// Acquires process-lifetime exclusion and the NodeCache transaction lock,
     /// then snapshots both persistence sources while both remain held.
     pub fn begin(paths: &StartupPaths) -> Result<Self> {
@@ -271,6 +278,8 @@ impl StartupTransaction {
 
 #[derive(Debug, Error)]
 pub enum StartupError {
+    #[error("core-native mode refuses a legacy NodeCache source")]
+    LegacyCachePresent,
     #[error("Core has an imported snapshot but the source NodeCache is missing")]
     ImportedSourceMissing,
     #[error("NodeCache checksum disagrees with the persisted Core migration marker")]

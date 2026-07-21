@@ -62,7 +62,7 @@ impl CoreRuntimeOwner {
         let (service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
         validate_native_only(kind, &provenance)?;
         let (authority, actor_join) = AuthorityActor::spawn(service, queue_capacity)?;
-        let listener = match CoreApiListener::start_with_drain_timeout(
+        let listener = match CoreApiListener::start_authority_owned_with_drain_timeout(
             socket,
             authority.clone(),
             drain_timeout,
@@ -295,6 +295,28 @@ mod tests {
         ));
         assert_eq!(std::fs::read(&socket).unwrap(), b"foreign");
         drop(StartupTransaction::begin(&paths).unwrap());
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_socket_left_by_unclean_process_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = paths(&directory);
+        let socket = directory.path().join("core.sock");
+        let stale = tokio::net::UnixListener::bind(&socket).unwrap();
+        drop(stale);
+
+        let owner = CoreRuntimeOwner::start(
+            fresh(&paths, "recovered-host"),
+            &socket,
+            16,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(request(&socket, "/v1/host")
+            .await
+            .contains("recovered-host"));
+        owner.shutdown().await.unwrap();
     }
 
     #[tokio::test]

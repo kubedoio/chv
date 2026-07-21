@@ -8,7 +8,7 @@ Type=simple
 User=chv
 Group=chv
 UMask=002
-ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent
+ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent /var/lib/chv/cache
 ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
 # UMask protects Core state. chv-agent explicitly sets its legacy API socket
 # mode after bind; no timing-dependent unit chmod is required.

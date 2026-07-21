@@ -214,7 +214,7 @@ setup_user_and_dirs() {
 
     mkdir -p "$CHV_CONFIG_DIR"/certs
     mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk,storage/lvm}
-    install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/agent" "$CHV_RUN_DIR/core"
+    install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/agent" "$CHV_DATA_DIR/cache" "$CHV_RUN_DIR/core"
     install -d -m 0775 -o "$CHV_USER" -g "$CHV_USER" "$CHV_RUN_DIR/agent"
     mkdir -p "$CHV_LOG_DIR"
     mkdir -p "$CHV_RUN_DIR"/{controlplane,agent,stord,nwd}
@@ -876,8 +876,10 @@ chv_binary_path = "/usr/bin/cloud-hypervisor"
 stord_binary_path = "/usr/bin/chv-stord"
 nwd_binary_path = "/usr/bin/chv-nwd"
 cache_path = "${CHV_DATA_DIR}/cache/agent-cache.json"
+authority_mode = "legacy"
 core_store_path = "${CHV_DATA_DIR}/agent/core.db"
 core_api_socket_path = "${CHV_RUN_DIR}/core/core-v1.sock"
+core_archive_path = "${CHV_DATA_DIR}/agent/node-cache-v1.archive"
 node_id = "${CHV_NODE_ID}"
 metrics_bind = "127.0.0.1:9901"
 storage_base_dir = "${CHV_DATA_DIR}/storage"
@@ -1014,7 +1016,7 @@ Type=simple
 User=chv
 Group=chv
 UMask=002
-ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent
+ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent /var/lib/chv/cache
 ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5

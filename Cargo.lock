@@ -650,6 +650,8 @@ name = "chv-agent"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "cellhv-core-runtime-owner",
+ "cellhv-core-startup",
  "chv-agent-core",
  "chv-agent-runtime-ch",
  "chv-common",
@@ -658,6 +660,7 @@ dependencies = [
  "chv-observability",
  "control-plane-node-api",
  "rustls",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

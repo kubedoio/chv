@@ -13,7 +13,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-use crate::{bind_private_owned, router, BindError};
+use crate::{bind_private_owned, router, BindError, ExistingSocketPolicy};
 
 #[derive(Debug, Error)]
 pub enum ListenerError {
@@ -54,15 +54,42 @@ impl CoreApiListener {
         Self::start_router(socket, router(authority), drain_timeout).await
     }
 
+    /// Starts a listener for a caller that already owns the process-wide
+    /// authority lease. A socket left by an unclean exit may be recovered,
+    /// but live listeners and foreign filesystem objects are never replaced.
+    pub async fn start_authority_owned_with_drain_timeout(
+        socket: &Path,
+        authority: AuthorityHandle,
+        drain_timeout: std::time::Duration,
+    ) -> Result<Self, ListenerError> {
+        Self::start_router_with_policy(
+            socket,
+            router(authority),
+            drain_timeout,
+            ExistingSocketPolicy::RecoverStale,
+        )
+        .await
+    }
+
     async fn start_router(
         socket: &Path,
         app: Router,
         drain_timeout: std::time::Duration,
     ) -> Result<Self, ListenerError> {
+        Self::start_router_with_policy(socket, app, drain_timeout, ExistingSocketPolicy::Refuse)
+            .await
+    }
+
+    async fn start_router_with_policy(
+        socket: &Path,
+        app: Router,
+        drain_timeout: std::time::Duration,
+        existing_socket_policy: ExistingSocketPolicy,
+    ) -> Result<Self, ListenerError> {
         if drain_timeout.is_zero() {
             return Err(ListenerError::DrainTimeout(drain_timeout));
         }
-        let (listener, identity) = bind_private_owned(socket).await?;
+        let (listener, identity) = bind_private_owned(socket, existing_socket_policy).await?;
         let socket = socket.to_path_buf();
         let cleanup = SocketCleanup {
             path: socket.clone(),
@@ -393,6 +420,77 @@ mod tests {
             Err(ListenerError::Bind(BindError::ExistingPath(_)))
         ));
         assert_eq!(std::fs::read(&path).unwrap(), b"foreign");
+    }
+
+    #[tokio::test]
+    async fn authority_owned_start_recovers_stale_socket_inode() {
+        let (_directory, path) = socket_path();
+        let stale = tokio::net::UnixListener::bind(&path).unwrap();
+        drop(stale);
+
+        let owner = CoreApiListener::start_router_with_policy(
+            &path,
+            Router::new().route("/ready", get(|| async { "ready" })),
+            DEFAULT_DRAIN_TIMEOUT,
+            ExistingSocketPolicy::RecoverStale,
+        )
+        .await
+        .unwrap();
+        assert!(request(&path, "/ready").await.starts_with("HTTP/1.1 200"));
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authority_owned_start_refuses_live_socket() {
+        let (_directory, path) = socket_path();
+        let live = tokio::net::UnixListener::bind(&path).unwrap();
+        let identity = std::fs::symlink_metadata(&path).unwrap().ino();
+        assert!(matches!(
+            CoreApiListener::start_router_with_policy(
+                &path,
+                Router::new(),
+                DEFAULT_DRAIN_TIMEOUT,
+                ExistingSocketPolicy::RecoverStale,
+            )
+            .await,
+            Err(ListenerError::Bind(BindError::ExistingPath(_)))
+        ));
+        assert_eq!(std::fs::symlink_metadata(&path).unwrap().ino(), identity);
+        drop(live);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn authority_owned_start_preserves_regular_file_and_symlink() {
+        let (directory, path) = socket_path();
+        std::fs::write(&path, b"foreign").unwrap();
+        assert!(matches!(
+            CoreApiListener::start_router_with_policy(
+                &path,
+                Router::new(),
+                DEFAULT_DRAIN_TIMEOUT,
+                ExistingSocketPolicy::RecoverStale,
+            )
+            .await,
+            Err(ListenerError::Bind(BindError::ExistingPath(_)))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"foreign");
+
+        std::fs::remove_file(&path).unwrap();
+        let target = directory.path().join("target");
+        std::fs::write(&target, b"target").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(matches!(
+            CoreApiListener::start_router_with_policy(
+                &path,
+                Router::new(),
+                DEFAULT_DRAIN_TIMEOUT,
+                ExistingSocketPolicy::RecoverStale,
+            )
+            .await,
+            Err(ListenerError::Bind(BindError::ExistingPath(_)))
+        ));
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
     }
 
     #[tokio::test]
