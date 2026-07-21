@@ -61,6 +61,18 @@ CORE_STORE_PACKAGE = "cellhv-core-store"
 CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
 CORE_EXECUTOR_PACKAGE = "cellhv-core-executor"
 CORE_RUNTIME_OWNERSHIP_PACKAGE = "cellhv-core-runtime-ownership"
+LINUX_OBSERVATION_OWNER = Path("crates/chv-agent-runtime-ch")
+LINUX_OBSERVATION_MODULE = Path("crates/chv-agent-runtime-ch/src/lib.rs")
+AGENT_COMMAND_PACKAGE = "chv-agent"
+OWNERSHIP_CAPABILITY_DEPENDENCIES = {
+    CORE_RUNTIME_OWNERSHIP_PACKAGE,
+    "procfs",
+    "sysinfo",
+}
+OBSERVER_WIRING_TOKENS = re.compile(
+    r"\b(?:LinuxOwnershipObservation|LinuxRuntimeObservation|LinuxObservation|"
+    r"RuntimeObservation|linux_observation)\b|\bcellhv_core_runtime_ownership\b"
+)
 STORE_ALLOWED_CORE_DEPENDENCIES = {"cellhv-core-types"}
 OPERATIONS_ALLOWED_DEPENDENCIES = {
     "async-channel",
@@ -280,6 +292,105 @@ def check(root: Path) -> list[str]:
             f"{CORE_RUNTIME_OWNERSHIP_PACKAGE}: dependency boundary forbids "
             f"{unexpected_ownership_dependencies}"
         )
+
+    # Process identity is a runtime-backend capability. Transports,
+    # compatibility adapters, and provider daemons must consume Core results,
+    # never inspect Linux process ownership themselves.
+    for name in dependency_graph:
+        is_restricted_consumer = (
+            name == "cellhv-core-api"
+            or "compat" in name
+            or name.startswith("chv-nwd")
+            or name.startswith("chv-stord")
+            or "provider" in name
+        )
+        consumer_reachable: set[str] = set()
+        consumer_pending = [name]
+        while consumer_pending:
+            package = consumer_pending.pop()
+            for dependency in dependency_graph.get(package, set()):
+                if dependency not in consumer_reachable:
+                    consumer_reachable.add(dependency)
+                    if dependency in manifests:
+                        consumer_pending.append(dependency)
+        escaped = sorted(consumer_reachable & OWNERSHIP_CAPABILITY_DEPENDENCIES)
+        if is_restricted_consumer and escaped:
+            errors.append(
+                f"{name}: transport/compatibility/provider boundary forbids "
+                f"process-ownership dependencies {escaped}"
+            )
+
+    agent_dependencies = dependency_graph.get(AGENT_COMMAND_PACKAGE, set())
+    if CORE_RUNTIME_OWNERSHIP_PACKAGE in agent_dependencies:
+        errors.append(
+            "cmd/chv-agent: production observer is not approved for composition; "
+            "runtime ownership must remain behind chv-agent-runtime-ch"
+        )
+
+    for source_root in (root / "cmd", root / "crates"):
+        if not source_root.exists():
+            continue
+        for source in source_root.rglob("*.rs"):
+            relative = source.relative_to(root)
+            text = source.read_text(encoding="utf-8", errors="replace")
+            observation_names = {"Observation"}
+            observation_names.update(
+                re.findall(
+                    r"\buse\s+[^;]*\bObservation\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+                    text,
+                )
+            )
+            implements_observation = any(
+                re.search(
+                    r"\bimpl(?:\s*<[^>]*>)?\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*"
+                    + re.escape(name)
+                    + r"\s+for\b",
+                    text,
+                )
+                for name in observation_names
+            )
+            if implements_observation:
+                is_test_fixture = (
+                    relative.is_relative_to(Path("crates/cellhv-core-runtime-ownership"))
+                    and (source.name == "tests.rs" or "#[cfg(test)]" in text)
+                )
+                if not relative.is_relative_to(LINUX_OBSERVATION_OWNER) and not is_test_fixture:
+                    errors.append(
+                        f"{relative}: production Linux Observation implementation is restricted "
+                        f"to {LINUX_OBSERVATION_OWNER}"
+                    )
+
+    observation_module = root / LINUX_OBSERVATION_MODULE
+    try:
+        observation_module_text = observation_module.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"{LINUX_OBSERVATION_MODULE}: {exc}")
+    else:
+        if not re.search(r"(?m)^pub\(crate\) mod linux_observation;$", observation_module_text):
+            errors.append(
+                f"{LINUX_OBSERVATION_MODULE}: linux_observation must remain crate-private "
+                "until the Phase C recovery transition is approved"
+            )
+        if not re.search(
+            r"(?m)^#\[allow\(dead_code\)\]\s*\n"
+            r"^pub\(crate\) mod linux_observation;$",
+            observation_module_text,
+        ):
+            errors.append(
+                f"{LINUX_OBSERVATION_MODULE}: the unwired observer must carry the single "
+                "module-level dead_code allowance until production composition removes it"
+            )
+
+    agent_source_root = root / "cmd/chv-agent/src"
+    if agent_source_root.exists():
+        for agent_source in agent_source_root.rglob("*.rs"):
+            if OBSERVER_WIRING_TOKENS.search(
+                agent_source.read_text(encoding="utf-8", errors="replace")
+            ):
+                errors.append(
+                    f"{agent_source.relative_to(root)}: production ownership observer wiring is "
+                    "forbidden until the Phase C recovery transition is approved"
+                )
 
     for source_root in (root / "cmd", root / "crates"):
         if not source_root.exists():

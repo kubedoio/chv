@@ -127,3 +127,32 @@ re-adopted process handle behind one control interface. The current launch path 
 its `HashMap<Uuid, VmProcess>` remain unchanged in this slice. No executor or
 production composition may call inspection until durable recovery transitions
 and their acceptance evidence are reviewed.
+
+## Machine-enforced boundary and evidence level
+
+`scripts/check-cellhv-core-architecture.py` enforces the current unwired
+boundary. The Linux observation module is `pub(crate)` inside
+`crates/chv-agent-runtime-ch`, making compiler visibility the authoritative
+construction boundary. API, compatibility, storage, network, and other
+provider packages may not directly or transitively depend on the ownership
+crate or the guarded general-purpose process-inspection crates.
+`cmd/chv-agent` may neither depend directly on the ownership crate nor
+construct an observer in this phase. Source scanning catches common direct,
+qualified, and aliased implementations and scans every agent command module,
+but is defense in depth rather than a claim to parse every valid Rust program.
+Mutation tests in `tests/test_cellhv_core_architecture.py` exercise the compiler
+visibility declaration, transitive dependency rule, implementation location,
+aliases, and non-main agent modules.
+
+An unwired `LinuxOwnershipObservation` now collects bounded process, pidfd,
+socket, peer-credential, and API-probe evidence. Its duplicate-candidate method
+returns `CapabilityUnavailable`; because the classifier treats unavailable
+duplicate proof as ambiguity, it cannot currently yield a positive real-world
+ownership classification. This is intentional fail-closed incompleteness, not
+recovery readiness.
+
+Those checks are T0 architecture evidence. The pure classifier, hostile marker
+store, and in-process Linux observer tests are T1 deterministic evidence. They
+do not constitute an isolated-process T2 result, real-KVM T3 recovery, a usable
+positive recovery decision, or permission to change VM launch and management
+behavior.

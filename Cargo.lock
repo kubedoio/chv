@@ -740,6 +740,8 @@ name = "chv-agent-runtime-ch"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "cellhv-core-runtime-ownership",
+ "cellhv-core-types",
  "chv-common",
  "chv-errors",
  "chv-observability",
@@ -749,6 +751,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]

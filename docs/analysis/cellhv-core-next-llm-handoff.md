@@ -52,6 +52,26 @@ At handoff time, `75eda99f` was one commit ahead of
 - Protocol transports receive `AuthorityHandle`; execution transitions are on
   a separate `ExecutionHandle` and guarded from transport/provider use.
 
+### Unwired executor and ownership evidence
+
+- `cellhv-core-executor` is a bounded, injected, side-effect-free journal
+  executor. It is not composed into `chv-agent` and has no production Cloud
+  Hypervisor adapter.
+- `cellhv-core-runtime-ownership` defines the strict owner marker, pure
+  inspection classifier, and hostile filesystem/classifier tests.
+- An unwired Linux `Observation` implementation exists inside
+  `chv-agent-runtime-ch`. It collects bounded pidfd, `/proc`, socket identity,
+  peer credential, and API probe evidence, but duplicate-candidate proof
+  deliberately returns `CapabilityUnavailable`. The pure classifier therefore
+  fail-closes every real observation as `AmbiguousPreserve`; this is not yet a
+  usable recovery observer.
+- The Linux observation module is compiler-private to `chv-agent-runtime-ch`.
+  The architecture guard also rejects transitive ownership/process-inspection
+  dependencies in API, compatibility, and provider crates, and scans every
+  `cmd/chv-agent/src` module for premature observer wiring as defense in depth.
+- This is T0/T1 structural and deterministic-test evidence only. There is no
+  isolated-process T2 result, real-KVM T3 result, or production composition.
+
 ### OpenStack discovery evidence
 
 - A fail-closed Path A discovery runner exists at
@@ -78,7 +98,7 @@ At handoff time, `75eda99f` was one commit ahead of
 
 ## Verification completed
 
-The latest focused combined verification passed:
+The previously recorded focused combined verification passed:
 
 - `cellhv-core-store`: 28 tests
 - `cellhv-core-operations`: 28 tests
@@ -97,13 +117,15 @@ focused changed-crate Clippy is green.
 
 ## Explicitly not implemented
 
-Do not infer any of the following from the completed fencing work:
+Do not infer any of the following from the completed fencing and unwired
+ownership work:
 
-- no Core journal executor exists yet;
+- the Core journal executor is not production-wired and cannot launch VMs;
 - native Core does not launch, start, stop, reboot, inspect, or delete a VM;
 - native power endpoints remain truthful unsupported responses;
-- no production Cloud Hypervisor process ownership marker exists;
-- no PID/start-time/executable/socket identity inventory or re-adoption exists;
+- no production code publishes a Cloud Hypervisor process ownership marker;
+- no complete duplicate-candidate inventory, positive ownership decision, or
+  re-adoption exists;
 - no retry/supersede transition exists for `InspectRequired` work;
 - legacy gRPC and native requests do not yet use one production operation
   authority;
@@ -130,36 +152,35 @@ introduce libvirt/XML types into Core.
 
 ## Next implementation sequence
 
-### 1. Bounded side-effect-free executor
+### 1. Linux observation adapter, still unwired
 
-Create a Core executor with an injected `CoreVmRuntime` trait and no production
-Cloud Hypervisor wiring initially.
+Complete the unwired Linux `Observation` adapter in `chv-agent-runtime-ch` with
+bounded duplicate-candidate proof and close the remaining probe review
+findings. Keep it out of `cmd/chv-agent` and the production executor
+composition until recovery transitions are reviewed.
 
 Required properties:
 
-- bounded queue and bounded cross-VM concurrency;
-- strict same-VM serialization;
-- scheduling deduplication;
-- only `ClaimResult::Acquired` crosses the side-effect boundary;
-- `Replay` never performs an effect;
-- only Accepted/Ready work is scheduled;
-- `InspectRequired` is surfaced but never executed;
-- effect completion is durably finished before executor shutdown completes;
-- runtime owner shutdown order becomes listener, executor drain/join, actor,
-  runtime lease;
-- architecture guards allow execution capability only in the executor/runtime
-  composition and continue rejecting API, compatibility, Controller/O3K, and
-  provider access.
+- only `chv-agent-runtime-ch` implements production Linux observation;
+- API, compatibility, storage, and network crates cannot acquire inspection
+  capability;
+- observation remains read-only and cannot signal, unlink, or resolve journal
+  ambiguity;
+- exact process-before/socket/process-after/pidfd evidence is fail-closed;
+- duplicate-candidate evidence must be bounded and implemented before a
+  positive classification is possible;
+- no production wiring or capability advertisement in this slice.
 
-Required tests include claim-before-effect, concurrent schedule deduplication,
-same-VM serialization, cross-VM concurrency bound, dropped claim reply, dropped
-finish reply, Replay-without-effect, ambiguous restart preservation, queue
-backpressure, and shutdown after effect but before finish.
+Required tests include PID reuse, process exit during inspection, replaced
+socket, peer credential mismatch, API liveness failure, duplicate candidates,
+permission denial, and descriptor/path replacement races. These are T1 until
+the real Linux adapter runs in an isolated process test (T2); they are not T3
+without KVM and a qualified guest.
 
 ### 2. Recovery-capable Cloud Hypervisor boundary
 
-Before enabling production effects, replace the current in-memory-only process
-ownership model with durable, inspectable evidence:
+Before enabling production effects, compose durable, inspectable evidence with
+reviewed journal recovery transitions:
 
 - canonical runtime directory and API socket naming;
 - PID plus `/proc/<pid>/stat` start time or equivalent anti-reuse identity;

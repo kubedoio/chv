@@ -25,6 +25,10 @@ class ArchitectureGuardTests(unittest.TestCase):
         target = root / process_source
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text((ROOT / process_source).read_text(), encoding="utf-8")
+        runtime_lib = "crates/chv-agent-runtime-ch/src/lib.rs"
+        target = root / runtime_lib
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / runtime_lib).read_text(), encoding="utf-8")
         api_source = "crates/cellhv-core-api/src/lib.rs"
         target = root / api_source
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -343,6 +347,167 @@ class ArchitectureGuardTests(unittest.TestCase):
                     "cellhv-core-runtime-ownership: dependency boundary forbids" in error
                     for error in errors
                 )
+            )
+
+    def test_api_cannot_depend_on_runtime_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-api/Cargo.toml"
+            path.write_text(
+                path.read_text().replace(
+                    "[dependencies]\n",
+                    '[dependencies]\ncellhv-core-runtime-ownership = { path = "../cellhv-core-runtime-ownership" }\n',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("process-ownership dependencies" in error for error in GUARD.check(root))
+            )
+
+    def test_provider_cannot_depend_on_process_inspection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-provider-test/Cargo.toml"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                '[package]\nname = "chv-agent-provider-test"\nversion = "0.1.0"\n'
+                '[dependencies]\nprocfs = "0.17"\n',
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("process-ownership dependencies" in error for error in GUARD.check(root))
+            )
+
+    def test_provider_cannot_reach_process_inspection_transitively(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            provider = root / "crates/chv-agent-provider-test/Cargo.toml"
+            provider.parent.mkdir(parents=True)
+            provider.write_text(
+                '[package]\nname = "chv-agent-provider-test"\nversion = "0.1.0"\n'
+                '[dependencies]\nhelper = { path = "../helper" }\n',
+                encoding="utf-8",
+            )
+            helper = root / "crates/helper/Cargo.toml"
+            helper.parent.mkdir(parents=True)
+            helper.write_text(
+                '[package]\nname = "helper"\nversion = "0.1.0"\n'
+                '[dependencies]\nprocfs = "0.17"\n',
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("process-ownership dependencies" in error for error in GUARD.check(root))
+            )
+
+    def test_linux_observation_implementation_is_runtime_ch_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-core/src/linux_observation.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("impl Observation for EscapedObserver {}\n", encoding="utf-8")
+            self.assertTrue(
+                any("production Linux Observation implementation" in error for error in GUARD.check(root))
+            )
+
+    def test_aliased_observation_implementation_outside_runtime_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-core/src/observer.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "use cellhv_core_runtime_ownership::Observation as EvidenceSource;\n"
+                "impl EvidenceSource for EscapedObserver {}\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("production Linux Observation implementation" in error for error in GUARD.check(root))
+            )
+
+    def test_linux_observation_implementation_is_allowed_in_runtime_ch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/chv-agent-runtime-ch/src/observation.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("impl Observation for LinuxObservation {}\n", encoding="utf-8")
+            self.assertFalse(
+                any("production Linux Observation implementation" in error for error in GUARD.check(root))
+            )
+
+    def test_agent_cannot_wire_observer_before_recovery_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "cmd/chv-agent/src/main.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fn main() { let _ = LinuxObservation::new(); }\n", encoding="utf-8")
+            self.assertTrue(
+                any("observer wiring is forbidden" in error for error in GUARD.check(root))
+            )
+
+    def test_agent_observer_scan_covers_non_main_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "cmd/chv-agent/src/recovery.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "fn wire() { let _ = LinuxOwnershipObservation::open(); }\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("recovery.rs: production ownership observer wiring" in error for error in GUARD.check(root))
+            )
+
+    def test_linux_observation_module_cannot_be_public(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / GUARD.LINUX_OBSERVATION_MODULE
+            path.write_text(
+                path.read_text().replace(
+                    "pub(crate) mod linux_observation;", "pub mod linux_observation;", 1
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("must remain crate-private" in error for error in GUARD.check(root))
+            )
+
+    def test_unwired_observation_requires_single_module_dead_code_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / GUARD.LINUX_OBSERVATION_MODULE
+            path.write_text(
+                path.read_text().replace("#[allow(dead_code)]\n", "", 1),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("module-level dead_code allowance" in error for error in GUARD.check(root))
+            )
+
+    def test_agent_cannot_depend_directly_on_runtime_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "cmd/chv-agent/Cargo.toml"
+            path.write_text(
+                path.read_text().replace(
+                    "[dependencies]\n",
+                    '[dependencies]\ncellhv-core-runtime-ownership = { path = "../../crates/cellhv-core-runtime-ownership" }\n',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("not approved for composition" in error for error in GUARD.check(root))
             )
 
     def test_native_api_must_receive_shared_authority_handle(self):

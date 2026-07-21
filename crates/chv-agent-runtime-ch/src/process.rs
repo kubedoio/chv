@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
@@ -10,7 +9,6 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::process::Child;
 use tracing::{info, warn};
 
@@ -58,6 +56,7 @@ impl Drop for VmOpGuard {
 use crate::adapter::{
     AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo,
 };
+use crate::ch_api::{parse_http_status, CloudHypervisorApiClient};
 
 const CONSOLE_SCROLLBACK_BYTES: usize = 256 * 1024;
 const CONSOLE_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -133,8 +132,9 @@ impl ProcessCloudHypervisorAdapter {
         path: &str,
         body: Option<&str>,
     ) -> Result<u16, ChvError> {
-        let (status, _body) = Self::ch_api_request_with_body(socket, method, path, body).await?;
-        Ok(status)
+        CloudHypervisorApiClient::default()
+            .request(socket, method, path, body)
+            .await
     }
 
     async fn ch_api_request_with_body(
@@ -143,76 +143,9 @@ impl ProcessCloudHypervisorAdapter {
         path: &str,
         body: Option<&str>,
     ) -> Result<(u16, String), ChvError> {
-        let mut stream = UnixStream::connect(socket)
+        CloudHypervisorApiClient::default()
+            .request_with_body(socket, method, path, body)
             .await
-            .map_err(|e| ChvError::Io {
-                path: socket.to_string_lossy().to_string(),
-                source: e,
-            })?;
-
-        let mut request = format!("{} {} HTTP/1.1\r\nHost: localhost\r\n", method, path);
-        if let Some(b) = body {
-            let _ = write!(&mut request, "Content-Length: {}\r\n", b.len());
-            request.push_str("Content-Type: application/json\r\n");
-            request.push_str("\r\n");
-            request.push_str(b);
-        } else {
-            request.push_str("Content-Length: 0\r\n");
-            request.push_str("\r\n");
-        }
-
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .map_err(|e| ChvError::Io {
-                path: socket.to_string_lossy().to_string(),
-                source: e,
-            })?;
-
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 4096];
-        let read_fut = async {
-            loop {
-                let n = stream.read(&mut tmp).await.map_err(|e| ChvError::Io {
-                    path: socket.to_string_lossy().to_string(),
-                    source: e,
-                })?;
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..n]);
-                if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let header_bytes = &buf[..header_end];
-                    let headers = String::from_utf8_lossy(header_bytes);
-                    let content_length = headers
-                        .lines()
-                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
-                        .and_then(|l| l.split_once(':').map(|x| x.1))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    let body_start = header_end + 4;
-                    if buf.len() >= body_start + content_length {
-                        break;
-                    }
-                }
-            }
-            Ok::<(), ChvError>(())
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(30), read_fut)
-            .await
-            .map_err(|_| ChvError::Io {
-                path: socket.to_string_lossy().to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::TimedOut, "socket read timed out"),
-            })??;
-
-        let raw = String::from_utf8_lossy(&buf);
-        let status_code = parse_http_status(raw.as_bytes()).unwrap_or(0);
-        let response_body = if let Some(idx) = raw.find("\r\n\r\n") {
-            raw[idx + 4..].to_string()
-        } else {
-            String::new()
-        };
-        Ok((status_code, response_body))
     }
 
     fn validate_vm_config(&self, config: &VmConfig) -> Result<(), ChvError> {
@@ -408,13 +341,6 @@ async fn build_cloud_init_seed(
     }
 
     Ok(seed_iso)
-}
-
-fn parse_http_status(response_bytes: &[u8]) -> Option<u16> {
-    let response = String::from_utf8_lossy(response_bytes);
-    let status_line = response.lines().next()?;
-    let parts: Vec<&str> = status_line.split_whitespace().collect();
-    parts.get(1)?.parse::<u16>().ok()
 }
 
 impl ProcessCloudHypervisorAdapter {
