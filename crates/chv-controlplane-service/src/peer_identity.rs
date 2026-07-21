@@ -326,7 +326,6 @@ mod tests {
     /// Documents the compile-time invariant: production builds (no `dev` feature)
     /// must never have the `dev` feature enabled.
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn allow_insecure_is_gated_by_feature() {
         #[cfg(not(feature = "dev"))]
         assert!(
