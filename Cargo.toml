@@ -25,6 +25,7 @@ members = [
     "crates/cellhv-core-fs",
     "crates/cellhv-core-operations",
     "crates/cellhv-core-api",
+    "crates/cellhv-core-runtime-owner",
     "crates/chv-agent-runtime-ch",
     "gen/rust/control-plane-node-api",
     "gen/rust/chv-webui-bff-api",

@@ -10,8 +10,46 @@ use crate::cache::{
 use crate::connectivity::ConnectivityState;
 use crate::state_machine::NodeState;
 use chv_errors::ChvError;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+pub struct AgentCoreActivation {
+    pub store: cellhv_core_startup::ActivatedStore,
+    pub node_cache: Option<NodeCacheAuthority>,
+}
+
+impl AgentCoreActivation {
+    pub fn from_pending(
+        pending: cellhv_core_startup::PendingActivatedStore,
+    ) -> Result<Self, ChvError> {
+        if let (Some(bytes), Some(expected)) = (
+            pending.cache_bytes(),
+            pending.provenance().source_checksum(),
+        ) {
+            let actual = format!("{:x}", Sha256::digest(bytes));
+            if actual != expected {
+                return Err(ChvError::Conflict {
+                    resource: "node_cache_activation".to_owned(),
+                    id: "source_checksum".to_owned(),
+                });
+            }
+        }
+        let node_cache = pending
+            .cache_bytes()
+            .map(|bytes| {
+                serde_json::from_slice(bytes).map_err(|error| ChvError::InvalidArgument {
+                    field: "node_cache".to_owned(),
+                    reason: format!("activation snapshot parse error: {error}"),
+                })
+            })
+            .transpose()?
+            .map(|cache| NodeCacheAuthority::core(cache, pending.node_cache_path()))
+            .transpose()?;
+        let store = pending.finish();
+        Ok(Self { store, node_cache })
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct VmAuthoritativeProjection {
@@ -686,5 +724,60 @@ mod tests {
         authority.remove_volume_handle("vol-1").unwrap();
         authority.remove_vm_attachment("vm-1").unwrap();
         authority.remove_vm_state("vm-1").unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_activation_builds_exact_facade_before_releasing_cache_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cache_path = directory.path().join("cache.json");
+        NodeCache::new("node-a").save(&cache_path).await.unwrap();
+        let paths = cellhv_core_startup::StartupPaths {
+            node_cache: cache_path.clone(),
+            core_database: directory.path().join("core.db"),
+            node_cache_archive: directory.path().join("cache.archive"),
+        };
+        let pending = cellhv_core_startup::StartupTransaction::begin(&paths)
+            .unwrap()
+            .prepare_activation(Some("node-a".to_owned()), None)
+            .unwrap();
+
+        let (sent, received) = std::sync::mpsc::channel();
+        let blocked_path = cache_path.clone();
+        let waiter = std::thread::spawn(move || {
+            let lock = cellhv_core_fs::AuthorityLock::acquire(&blocked_path).unwrap();
+            sent.send(()).unwrap();
+            lock
+        });
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+
+        let activation = AgentCoreActivation::from_pending(pending).unwrap();
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(waiter.join().unwrap());
+        let facade = activation.node_cache.as_ref().unwrap();
+        assert_eq!(facade.host_id(), "node-a");
+        facade.save().await.unwrap();
+    }
+
+    #[test]
+    fn fresh_activation_returns_no_synthetic_nodecache_facade() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let paths = cellhv_core_startup::StartupPaths {
+            node_cache: directory.path().join("cache.json"),
+            core_database: directory.path().join("core.db"),
+            node_cache_archive: directory.path().join("cache.archive"),
+        };
+        let pending = cellhv_core_startup::StartupTransaction::begin(&paths)
+            .unwrap()
+            .prepare_activation(Some("node-fresh".to_owned()), None)
+            .unwrap();
+        let activation = AgentCoreActivation::from_pending(pending).unwrap();
+        assert!(activation.node_cache.is_none());
+        assert!(!paths.node_cache.exists());
     }
 }

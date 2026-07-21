@@ -401,7 +401,7 @@ fn default_core_store_path() -> PathBuf {
 }
 
 fn default_core_api_socket_path() -> PathBuf {
-    PathBuf::from("/run/chv/agent/core-v1.sock")
+    PathBuf::from("/run/chv/core/core-v1.sock")
 }
 
 fn default_storage_base_dir() -> PathBuf {
@@ -638,7 +638,7 @@ jwt_secret = "tooshort"
         );
         assert_eq!(
             cfg.core_api_socket_path,
-            PathBuf::from("/run/chv/agent/core-v1.sock")
+            PathBuf::from("/run/chv/core/core-v1.sock")
         );
     }
 

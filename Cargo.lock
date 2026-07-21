@@ -542,6 +542,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellhv-core-runtime-owner"
+version = "0.1.0"
+dependencies = [
+ "cellhv-core-api",
+ "cellhv-core-operations",
+ "cellhv-core-startup",
+ "cellhv-core-types",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "cellhv-core-startup"
 version = "0.1.0"
 dependencies = [
@@ -657,6 +671,7 @@ dependencies = [
  "cellhv-core-api",
  "cellhv-core-fs",
  "cellhv-core-operations",
+ "cellhv-core-startup",
  "cellhv-core-types",
  "cellhv-nodecache-migration",
  "chv-agent-runtime-ch",
@@ -678,6 +693,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo 0.30.13",
  "tempfile",
  "tokio",

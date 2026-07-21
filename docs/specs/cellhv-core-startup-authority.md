@@ -23,8 +23,16 @@ guard. Once the database decision is durable, it releases the short
 `RuntimeAuthorityGuard`. Consuming `into_runtime_parts` transfers those values
 without releasing the runtime lease.
 
-This boundary activates only the Core database. It does not construct or
-authorize `NodeCacheAuthority`, select a process-wide cache mode, wire
+For agent composition, `prepare_activation` returns an opaque
+`PendingActivatedStore` that retains the short lock and exact snapshot bytes.
+`chv-agent-core::AgentCoreActivation::from_pending` verifies the checksum,
+parses those bytes, constructs the crate-private Core-mode cache facade, and
+only then calls `finish` to release the lock. With no live cache it returns no
+facade and never synthesizes a replacement JSON file. This composition remains
+unwired in production.
+
+The direct `activate` boundary activates only the Core database. It does not
+construct or authorize `NodeCacheAuthority`, select a process-wide cache mode, wire
 production handlers, or prove that every `OperationService` in the repository
 is runtime-lease guarded. `OperationService` remains publicly constructible for
 the existing library and test surfaces; production composition must close that

@@ -214,6 +214,8 @@ setup_user_and_dirs() {
 
     mkdir -p "$CHV_CONFIG_DIR"/certs
     mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk,storage/lvm}
+    install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/agent" "$CHV_RUN_DIR/core"
+    install -d -m 0775 -o "$CHV_USER" -g "$CHV_USER" "$CHV_RUN_DIR/agent"
     mkdir -p "$CHV_LOG_DIR"
     mkdir -p "$CHV_RUN_DIR"/{controlplane,agent,stord,nwd}
     mkdir -p "$CHV_UI_DIR"
@@ -874,6 +876,8 @@ chv_binary_path = "/usr/bin/cloud-hypervisor"
 stord_binary_path = "/usr/bin/chv-stord"
 nwd_binary_path = "/usr/bin/chv-nwd"
 cache_path = "${CHV_DATA_DIR}/cache/agent-cache.json"
+core_store_path = "${CHV_DATA_DIR}/agent/core.db"
+core_api_socket_path = "${CHV_RUN_DIR}/core/core-v1.sock"
 node_id = "${CHV_NODE_ID}"
 metrics_bind = "127.0.0.1:9901"
 storage_base_dir = "${CHV_DATA_DIR}/storage"
@@ -1007,17 +1011,20 @@ Wants=chv-controlplane.service
 
 [Service]
 Type=simple
+User=chv
 Group=chv
 UMask=002
-ExecStartPre=/bin/mkdir -p /run/chv/agent /run/chv/stord /run/chv/nwd /var/lib/chv/agent
-ExecStartPre=/bin/chown -R root:chv /run/chv
-ExecStartPre=/bin/chmod -R 775 /run/chv
+ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent
 ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
 TimeoutStopSec=5
 RuntimeDirectory=chv
+RuntimeDirectoryMode=0775
+StateDirectory=chv/agent
+StateDirectoryMode=0700
+ExecStopPost=-/bin/rm -f /run/chv/agent/api.sock
 LogsDirectory=chv
 
 [Install]
@@ -1189,7 +1196,8 @@ start_services() {
         fi
     fi
 
-    # Ensure agent cache is cleared so reinstall triggers fresh enrollment
+    # Delete only the legacy enrollment cache. Core prerequisites, core.db, and
+    # its persistent runtime lease are deliberately retained.
     rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
 
     # Pre-place agent client cert so mTLS works immediately

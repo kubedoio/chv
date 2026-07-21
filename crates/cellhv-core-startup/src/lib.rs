@@ -62,6 +62,7 @@ pub struct RuntimeAuthorityGuard {
 pub struct ActivationProvenance {
     source_checksum: Option<String>,
     live_cache_present: bool,
+    any_migration_state: bool,
 }
 
 impl ActivationProvenance {
@@ -72,6 +73,10 @@ impl ActivationProvenance {
     pub fn live_cache_present(&self) -> bool {
         self.live_cache_present
     }
+
+    pub fn has_any_migration_state(&self) -> bool {
+        self.any_migration_state
+    }
 }
 
 /// An already-open Core store with process-lifetime database exclusion held.
@@ -81,6 +86,39 @@ pub struct ActivatedStore {
     kind: ActivationKind,
     runtime_guard: RuntimeAuthorityGuard,
     provenance: ActivationProvenance,
+}
+
+/// Database activation completed while the exact NodeCache snapshot and its
+/// short transaction lock are still retained for agent composition.
+pub struct PendingActivatedStore {
+    activated: ActivatedStore,
+    node_cache_path: PathBuf,
+    cache: Option<Vec<u8>>,
+    authority_lock: cellhv_core_fs::AuthorityLock,
+}
+
+impl PendingActivatedStore {
+    pub fn cache_bytes(&self) -> Option<&[u8]> {
+        self.cache.as_deref()
+    }
+
+    pub fn node_cache_path(&self) -> &Path {
+        &self.node_cache_path
+    }
+
+    pub fn provenance(&self) -> &ActivationProvenance {
+        self.activated.provenance()
+    }
+
+    pub fn finish(self) -> ActivatedStore {
+        let Self {
+            activated,
+            authority_lock,
+            ..
+        } = self;
+        drop(authority_lock);
+        activated
+    }
 }
 
 impl ActivatedStore {
@@ -142,6 +180,16 @@ impl StartupTransaction {
         configured_seed: Option<String>,
         precreation_enrollment: Option<String>,
     ) -> Result<ActivatedStore> {
+        Ok(self
+            .prepare_activation(configured_seed, precreation_enrollment)?
+            .finish())
+    }
+
+    pub fn prepare_activation(
+        self,
+        configured_seed: Option<String>,
+        precreation_enrollment: Option<String>,
+    ) -> Result<PendingActivatedStore> {
         let Self {
             paths,
             cache,
@@ -151,6 +199,7 @@ impl StartupTransaction {
         } = self;
 
         let live_cache_present = cache.is_some();
+        let retained_cache = cache.clone();
         let (service, kind, source_checksum) = match (cache, database_exists) {
             (None, false) => {
                 let decision = resolve_host_identity(HostIdentityInputs {
@@ -198,8 +247,8 @@ impl StartupTransaction {
 
         // The short cache transaction ends once the validated snapshot has
         // been consumed. Runtime database exclusion remains process-lifetime.
-        drop(authority_lock);
-        Ok(ActivatedStore {
+        let any_migration_state = service.has_any_migration_state()?;
+        let activated = ActivatedStore {
             service,
             kind,
             runtime_guard: RuntimeAuthorityGuard {
@@ -208,7 +257,14 @@ impl StartupTransaction {
             provenance: ActivationProvenance {
                 source_checksum,
                 live_cache_present,
+                any_migration_state,
             },
+        };
+        Ok(PendingActivatedStore {
+            activated,
+            node_cache_path: paths.node_cache,
+            cache: retained_cache,
+            authority_lock,
         })
     }
 }

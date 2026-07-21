@@ -24,8 +24,8 @@ pub mod vm_runtime;
 pub use agent_server::AgentServer;
 pub use cache::NodeCache;
 pub use cache_authority::{
-    Blocked, CoreVmAuthority, EnrollmentMetadata, LegacyVmAuthority, NodeCacheAuthority,
-    NodeCacheAuthorityMode, NodeCacheCompatibilitySnapshot,
+    AgentCoreActivation, Blocked, CoreVmAuthority, EnrollmentMetadata, LegacyVmAuthority,
+    NodeCacheAuthority, NodeCacheAuthorityMode, NodeCacheCompatibilitySnapshot,
 };
 pub use config::AgentConfig;
 pub use connectivity::{ConnectivityMetrics, ConnectivityState, ConnectivityTracker};

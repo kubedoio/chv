@@ -142,6 +142,10 @@ pub struct OperationService {
 }
 
 impl OperationService {
+    pub fn has_any_migration_state(&self) -> Result<bool> {
+        Ok(self.store.has_any_migration_state()?)
+    }
+
     /// Creates an empty authority exclusively for a validated legacy import.
     pub fn create_migration_target(path: &Path) -> Result<Self> {
         Ok(Self::new(CoreStore::create_new(path)?))

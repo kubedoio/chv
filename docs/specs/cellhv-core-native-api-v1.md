@@ -9,7 +9,7 @@ single `cellhv-core-operations::AuthorityHandle`. It has no SQLite, provider,
 Cloud Hypervisor, control-plane, or cloud model dependency. It is intended to
 run inside `chv-agent`; it is not a daemon or a second lifecycle authority.
 
-The configured endpoint is `/run/chv/agent/core-v1.sock`. This phase does not
+The configured endpoint is `/run/chv/core/core-v1.sock`. This phase does not
 start the listener because the existing NodeCache path has not completed
 authority cutover. There is deliberately no inert enable flag: startup wiring
 will be added with the cutover rather than suggesting the surface is usable.

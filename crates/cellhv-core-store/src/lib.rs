@@ -130,6 +130,15 @@ pub struct CoreStore {
 }
 
 impl CoreStore {
+    pub fn has_any_migration_state(&self) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM migration_state)", [], |row| {
+                row.get::<_, i64>(0)
+            })?
+            != 0)
+    }
+
     pub fn is_pristine_migration_target(&self) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT (SELECT count(*) FROM host_identity) + (SELECT count(*) FROM vms) + (SELECT count(*) FROM attachments) + (SELECT count(*) FROM operations) + (SELECT count(*) FROM operation_steps) + (SELECT count(*) FROM idempotency_keys) + (SELECT count(*) FROM events) + (SELECT count(*) FROM ownership_markers) + (SELECT count(*) FROM migration_state)",

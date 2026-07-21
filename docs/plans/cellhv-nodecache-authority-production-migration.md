@@ -2,6 +2,19 @@
 
 Status: factual migration plan; production callers remain unchanged.
 
+## Activation Composition
+
+The dependency graph is acyclic: `chv-agent-core` depends on
+`cellhv-core-startup`; startup depends on Core operations/types, migration, and
+filesystem primitives, never on agent-core. `PendingActivatedStore` retains
+the exact lock-held bytes until `AgentCoreActivation` constructs the private
+facade and finishes the transaction.
+
+Activation without a live cache returns no facade and creates no synthetic
+JSON. Compatibility persistence for fresh hosts or retired imported sources
+remains explicitly unresolved; recreating a file would make restart mistake it
+for migration evidence. No second store or VM authority is introduced.
+
 ## Startup And Compatibility State
 
 | Current evidence | Classification | Migration |

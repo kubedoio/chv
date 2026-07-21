@@ -24,6 +24,16 @@ verify_install_state() {
         fi
     done
 
+    local agent_unit="/lib/systemd/system/chv-agent.service"
+    for directive in User=chv Group=chv UMask=002 RuntimeDirectoryMode=0775 StateDirectoryMode=0700; do
+        if ! grep -qx "$directive" "$agent_unit"; then
+            error "chv-agent.service missing security directive: $directive"
+        fi
+    done
+    if grep -q '^ExecStartPost=.*chmod' "$agent_unit"; then
+        error "chv-agent.service contains timing-dependent socket chmod"
+    fi
+
     info "Checking config files..."
     for cfg in controlplane.toml agent.toml stord.toml nwd.toml; do
         if [[ -f "/etc/chv/${cfg}" ]]; then
@@ -57,6 +67,14 @@ verify_install_state() {
         info "  Found: /var/lib/chv"
     else
         error "Missing: /var/lib/chv"
+    fi
+    for directory in /var/lib/chv/agent /run/chv/core; do
+        if [[ ! -d "$directory" || "$(stat -c '%a:%U:%G' "$directory")" != "700:chv:chv" ]]; then
+            error "Core prerequisite directory is not chv:chv 0700: $directory"
+        fi
+    done
+    if [[ ! -d /run/chv/agent || "$(stat -c '%a:%U:%G' /run/chv/agent)" != "775:chv:chv" ]]; then
+        error "Legacy runtime directory is not chv:chv 0775: /run/chv/agent"
     fi
 
     if [[ -d "/var/log/chv" ]]; then
