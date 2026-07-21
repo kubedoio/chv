@@ -6,6 +6,8 @@ edition = "2021"
 publish = false
 
 [dependencies]
+cellhv-core-executor = { path = "../cellhv-core-executor" }
+cellhv-core-operations = { path = "../cellhv-core-operations" }
 chv-common = { path = "../chv-common" }
 chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }

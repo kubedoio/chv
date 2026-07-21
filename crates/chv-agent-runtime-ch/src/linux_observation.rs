@@ -278,14 +278,20 @@ impl Observation for LinuxOwnershipObservation {
             if count > 131072 || start.elapsed() > Duration::from_secs(2) {
                 return Ok(DuplicateEvidence::Indeterminate);
             }
-            let Ok(entry) = entry else { continue; };
+            let Ok(entry) = entry else {
+                continue;
+            };
             let file_name = entry.file_name();
             let file_name_str = file_name.to_string_lossy();
             if !file_name_str.bytes().all(|b| b.is_ascii_digit()) {
                 continue;
             }
-            let Ok(pid) = file_name_str.parse::<u32>() else { continue; };
-            if pid == self.expected_pid { continue; }
+            let Ok(pid) = file_name_str.parse::<u32>() else {
+                continue;
+            };
+            if pid == self.expected_pid {
+                continue;
+            }
 
             let pid_cstr = match CString::new(file_name_str.as_bytes()) {
                 Ok(c) => c,
@@ -741,13 +747,9 @@ mod tests {
         )
         .unwrap();
 
-        let observer = LinuxOwnershipObservation::open_with_proc(
-            temp.path(),
-            proc.path(),
-            pid2,
-            vm.clone(),
-        )
-        .unwrap();
+        let observer =
+            LinuxOwnershipObservation::open_with_proc(temp.path(), proc.path(), pid2, vm.clone())
+                .unwrap();
 
         let duplicate = observer.duplicate_evidence(&vm).unwrap();
         assert_eq!(duplicate, DuplicateEvidence::Conflict);

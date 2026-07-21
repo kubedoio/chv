@@ -30,7 +30,13 @@ const CERT_ROTATION_INTERVAL_SECS: i64 = 12 * 60 * 60;
 
 async fn start_core_native(
     config: &AgentConfig,
-) -> Result<cellhv_core_runtime_owner::CoreRuntimeOwner, Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        cellhv_core_runtime_owner::CoreRuntimeOwner,
+        cellhv_core_operations::ExecutionHandle,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let paths = cellhv_core_startup::StartupPaths {
         node_cache: config.cache_path.clone(),
         core_database: config.core_store_path.clone(),
@@ -54,7 +60,17 @@ async fn start_core_native(
 async fn run_core_native(config: &AgentConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
-    let owner = start_core_native(config).await?;
+    let (owner, execution) = start_core_native(config).await?;
+
+    // Wire up Cloud Hypervisor executor
+    let chv_adapter = std::sync::Arc::new(
+        chv_agent_runtime_ch::ProcessCloudHypervisorAdapter::new(config.chv_binary_path.clone()),
+    );
+    let core_adapter = std::sync::Arc::new(
+        chv_agent_runtime_ch::core_adapter::CoreCloudHypervisorRuntime::new(chv_adapter),
+    );
+    let _executor = cellhv_core_executor::JournalExecutor::start(execution, core_adapter, 16, 128)?;
+
     info!(socket = %owner.socket_path().display(), "core-native authority ready");
     tokio::select! {
         _ = sigterm.recv() => info!("received SIGTERM, shutting down core-native authority"),
@@ -1041,7 +1057,7 @@ mod tests {
     async fn core_native_http_create_survives_restart_and_excludes_second_instance() {
         let directory = tempfile::tempdir().unwrap();
         let config = core_config(&directory);
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _execution) = start_core_native(&config).await.unwrap();
         assert!(start_core_native(&config).await.is_err());
         let body = serde_json::json!({"request_id":"create-1","definition":{
             "id":"vm-1","name":"vm-1","boot":{"kernel":"/kernel","firmware":null,"initial_disk":null},
@@ -1055,7 +1071,7 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 202"), "{response}");
         owner.shutdown().await.unwrap();
 
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _execution) = start_core_native(&config).await.unwrap();
         let response = unix_http(
             &config,
             "GET /v1/vms HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -1084,7 +1100,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut config = core_config(&directory);
         config.node_id = "  \t ".to_owned();
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _execution) = start_core_native(&config).await.unwrap();
         let response = unix_http(
             &config,
             "GET /v1/host HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -1106,7 +1122,7 @@ mod tests {
         std::fs::write(&config.core_api_socket_path, b"occupied").unwrap();
         assert!(start_core_native(&config).await.is_err());
         std::fs::remove_file(&config.core_api_socket_path).unwrap();
-        let owner = start_core_native(&config).await.unwrap();
+        let (owner, _execution) = start_core_native(&config).await.unwrap();
         owner.shutdown().await.unwrap();
     }
 
