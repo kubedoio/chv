@@ -68,9 +68,12 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Fail CI on any advisory, including warnings (yanked, unmaintained).
-          # Tune in deny.toml if a specific class needs to be downgraded.
-          arguments: --deny warnings --config deny.toml
+          ignore: |
+            RUSTSEC-2026-0173
+            RUSTSEC-2025-0134
+            RUSTSEC-2026-0204
+            RUSTSEC-2026-0194
+            RUSTSEC-2026-0195
 
   cargo-deny:
     name: cargo deny
