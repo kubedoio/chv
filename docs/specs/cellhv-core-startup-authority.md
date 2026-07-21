@@ -11,7 +11,30 @@ through `cellhv-core-operations::OperationService`; NodeCache conversion passes
 through `cellhv-nodecache-migration`.
 
 Neither `cmd/chv-agent` nor its current launch/reconcile paths call this crate.
-The public `AuthorityDecision` is the explicit input for that later wiring.
+
+`StartupTransaction::begin` is the activation boundary intended for that
+wiring. It acquires the non-blocking process-lifetime `RuntimeAuthorityLease`
+first and then the blocking NodeCache `AuthorityLock`. It snapshots cache and
+database presence only while both guards are held. `activate` performs identity
+resolution and fresh creation, import, or reopen without releasing either
+guard. Once the database decision is durable, it releases the short
+`AuthorityLock` and yields `ActivatedStore`, containing an already-open
+`OperationService`, validated migration provenance, and an opaque
+`RuntimeAuthorityGuard`. Consuming `into_runtime_parts` transfers those values
+without releasing the runtime lease.
+
+This boundary activates only the Core database. It does not construct or
+authorize `NodeCacheAuthority`, select a process-wide cache mode, wire
+production handlers, or prove that every `OperationService` in the repository
+is runtime-lease guarded. `OperationService` remains publicly constructible for
+the existing library and test surfaces; production composition must close that
+residual before claiming process-wide enforcement.
+
+The older `coordinate` decision API remains for the existing migration and
+fault-injection harness. It is not the production activation boundary and does
+not return an authority handle. Future `cmd/chv-agent` composition must consume
+`StartupTransaction` and retain `RuntimeAuthorityGuard` for the runtime
+lifetime.
 
 ## Durable Protocol
 
@@ -40,6 +63,7 @@ The parents may differ. Authority files must be regular, service-owner-owned,
 owner-only files. Symlinks, special files, multi-link files, and aliases between
 configured paths or derived archive-temporary, lock, and SQLite sidecar paths
 fail closed using lexical/normalized and existing-inode checks.
+The derived runtime-lease path participates in the same alias checks.
 Directory-fd-relative `openat` hardening remains appropriate if this trust
 boundary is later broadened.
 
@@ -70,6 +94,13 @@ mode policy. `InitializeFreshCore` does not authorize a placeholder identity or 
 in-memory/fallback authority. Production wiring must persist either a valid
 fresh seed or a one-time generated UUID before publishing the authority. It
 must select `core-vm-authority` only after that durable creation succeeds.
+
+A compatibility-only cache whose `node_id` is a reserved placeholder remains
+unresolved in this slice. `StartupTransaction` routes every present cache
+through the strict importer, which rejects that identity and fails closed. The
+ADR-019 archive/retire-then-fresh path requires a separately reviewed cache
+classification and retirement transaction; this implementation does not infer
+that an apparently empty JSON document is disposable.
 
 The pure resolution and explicit fresh-create primitives now exist in
 `cellhv-core-startup` and are specified in

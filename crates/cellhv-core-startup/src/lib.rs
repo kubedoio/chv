@@ -35,6 +35,184 @@ pub enum AuthorityDecision {
     InitializeFreshCore,
 }
 
+/// Evidence describing how an [`ActivatedStore`] became authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationKind {
+    Existing,
+    ImportedNodeCache,
+    Fresh,
+}
+
+/// A lock-held startup snapshot used only for durable database activation.
+pub struct StartupTransaction {
+    paths: StartupPaths,
+    cache: Option<Vec<u8>>,
+    database_exists: bool,
+    runtime_lease: cellhv_core_fs::RuntimeAuthorityLease,
+    authority_lock: cellhv_core_fs::AuthorityLock,
+}
+
+/// Opaque proof that this process still owns the Core database runtime lease.
+pub struct RuntimeAuthorityGuard {
+    _lease: cellhv_core_fs::RuntimeAuthorityLease,
+}
+
+/// Validated provenance for the compatibility snapshot used during activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivationProvenance {
+    source_checksum: Option<String>,
+    live_cache_present: bool,
+}
+
+impl ActivationProvenance {
+    pub fn source_checksum(&self) -> Option<&str> {
+        self.source_checksum.as_deref()
+    }
+
+    pub fn live_cache_present(&self) -> bool {
+        self.live_cache_present
+    }
+}
+
+/// An already-open Core store with process-lifetime database exclusion held.
+/// This does not select or authorize a NodeCache compatibility mode.
+pub struct ActivatedStore {
+    service: OperationService,
+    kind: ActivationKind,
+    runtime_guard: RuntimeAuthorityGuard,
+    provenance: ActivationProvenance,
+}
+
+impl ActivatedStore {
+    pub fn service(&self) -> &OperationService {
+        &self.service
+    }
+
+    pub fn service_mut(&mut self) -> &mut OperationService {
+        &mut self.service
+    }
+
+    pub fn kind(&self) -> ActivationKind {
+        self.kind
+    }
+
+    pub fn provenance(&self) -> &ActivationProvenance {
+        &self.provenance
+    }
+
+    pub fn into_runtime_parts(
+        self,
+    ) -> (
+        OperationService,
+        ActivationKind,
+        RuntimeAuthorityGuard,
+        ActivationProvenance,
+    ) {
+        (self.service, self.kind, self.runtime_guard, self.provenance)
+    }
+}
+
+impl StartupTransaction {
+    /// Acquires process-lifetime exclusion and the NodeCache transaction lock,
+    /// then snapshots both persistence sources while both remain held.
+    pub fn begin(paths: &StartupPaths) -> Result<Self> {
+        validate_paths(paths)?;
+        let runtime_lease = cellhv_core_fs::RuntimeAuthorityLease::acquire(&paths.core_database)
+            .map_err(|source| io_error(&paths.core_database, source))?;
+        let authority_lock = cellhv_core_fs::AuthorityLock::acquire(&paths.node_cache)
+            .map_err(|source| io_error(&paths.node_cache, source))?;
+        let cache = read_optional(&paths.node_cache)?;
+        let database_exists = paths
+            .core_database
+            .try_exists()
+            .map_err(|source| io_error(&paths.core_database, source))?;
+        Ok(Self {
+            paths: paths.clone(),
+            cache,
+            database_exists,
+            runtime_lease,
+            authority_lock,
+        })
+    }
+
+    /// Resolves identity, completes import/fresh/open, releases the short cache
+    /// lock, and transfers only process-lifetime exclusion into the result.
+    pub fn activate(
+        self,
+        configured_seed: Option<String>,
+        precreation_enrollment: Option<String>,
+    ) -> Result<ActivatedStore> {
+        let Self {
+            paths,
+            cache,
+            database_exists,
+            runtime_lease,
+            authority_lock,
+        } = self;
+
+        let live_cache_present = cache.is_some();
+        let (service, kind, source_checksum) = match (cache, database_exists) {
+            (None, false) => {
+                let decision = resolve_host_identity(HostIdentityInputs {
+                    configured_seed,
+                    precreation_enrollment,
+                    ..HostIdentityInputs::default()
+                })?;
+                (
+                    create_fresh_authority(&paths.core_database, &decision)?,
+                    ActivationKind::Fresh,
+                    None,
+                )
+            }
+            (Some(bytes), false) => {
+                let import = plan(&bytes)?;
+                resolve_host_identity(HostIdentityInputs {
+                    importable_nodecache: Some(import.host().clone()),
+                    configured_seed,
+                    precreation_enrollment,
+                    ..HostIdentityInputs::default()
+                })?;
+                archive_exact(&paths.node_cache_archive, &bytes, &mut |_| Ok(()))?;
+                let mut service = OperationService::create_migration_target(&paths.core_database)?;
+                set_owner_only(&paths.core_database)?;
+                import.import(&mut service)?;
+                import.cutover(&mut service)?;
+                let checksum = import.checksum().to_owned();
+                (service, ActivationKind::ImportedNodeCache, Some(checksum))
+            }
+            (cache, true) => {
+                let mut service = OperationService::open_existing(&paths.core_database)?;
+                let host = service.host()?.identity;
+                let import = cache.as_deref().map(plan).transpose()?;
+                resolve_host_identity(HostIdentityInputs {
+                    existing_core: Some(host),
+                    importable_nodecache: import.as_ref().map(|value| value.host().clone()),
+                    configured_seed,
+                    precreation_enrollment,
+                })?;
+                let (kind, checksum) =
+                    activate_existing(&paths, cache.as_deref(), import.as_ref(), &mut service)?;
+                (service, kind, checksum)
+            }
+        };
+
+        // The short cache transaction ends once the validated snapshot has
+        // been consumed. Runtime database exclusion remains process-lifetime.
+        drop(authority_lock);
+        Ok(ActivatedStore {
+            service,
+            kind,
+            runtime_guard: RuntimeAuthorityGuard {
+                _lease: runtime_lease,
+            },
+            provenance: ActivationProvenance {
+                source_checksum,
+                live_cache_present,
+            },
+        })
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StartupError {
     #[error("Core has an imported snapshot but the source NodeCache is missing")]
@@ -63,6 +241,8 @@ pub enum StartupError {
     Migration(#[from] MigrationError),
     #[error(transparent)]
     Operations(#[from] OperationServiceError),
+    #[error(transparent)]
+    Identity(#[from] HostIdentityError),
 }
 
 pub type Result<T> = std::result::Result<T, StartupError>;
@@ -163,6 +343,67 @@ fn coordinate_with_hook(
     }
 }
 
+fn activate_existing(
+    paths: &StartupPaths,
+    cache: Option<&[u8]>,
+    import: Option<&cellhv_nodecache_migration::ImportPlan>,
+    service: &mut OperationService,
+) -> Result<(ActivationKind, Option<String>)> {
+    let marker = service.legacy_migration_state(SOURCE_NAME)?;
+    let source_checksum = marker
+        .as_ref()
+        .map(|value| value.checksum.clone())
+        .or_else(|| import.map(|value| value.checksum().to_owned()));
+    let imported = marker.is_some() || import.is_some();
+    match (cache, import, marker) {
+        (None, None, None) => {
+            if paths
+                .node_cache_archive
+                .try_exists()
+                .map_err(|source| io_error(&paths.node_cache_archive, source))?
+            {
+                return Err(StartupError::InterruptedMigrationSourceMissing);
+            }
+        }
+        (None, None, Some(marker)) if marker.cutover => {
+            verify_archive(&paths.node_cache_archive, &marker.checksum)?;
+        }
+        (None, None, Some(_)) => return Err(StartupError::ImportedSourceMissing),
+        (Some(bytes), Some(import), None) => {
+            if !service.is_pristine_migration_target()? {
+                return Err(StartupError::UnrelatedAuthority);
+            }
+            archive_exact(&paths.node_cache_archive, bytes, &mut |_| Ok(()))?;
+            import.import(service)?;
+            import.cutover(service)?;
+        }
+        (Some(bytes), Some(import), Some(marker)) => {
+            if import.checksum() != marker.checksum {
+                return Err(StartupError::ChecksumMismatch);
+            }
+            archive_exact(&paths.node_cache_archive, bytes, &mut |_| Ok(()))?;
+            if !marker.cutover {
+                let disposition = import.import(service)?;
+                debug_assert_eq!(disposition, MigrationDisposition::Replay);
+                import.cutover(service)?;
+            }
+        }
+        _ => {
+            return Err(StartupError::UnsafePath(
+                "inconsistent NodeCache activation snapshot".to_owned(),
+            ))
+        }
+    }
+    Ok((
+        if imported {
+            ActivationKind::ImportedNodeCache
+        } else {
+            ActivationKind::Existing
+        },
+        source_checksum,
+    ))
+}
+
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.file_type().is_file() => {
@@ -221,6 +462,8 @@ fn validate_paths(paths: &StartupPaths) -> Result<()> {
     let archive_temp = archive_temp_path(&paths.node_cache_archive);
     let authority_lock = cellhv_core_fs::lock_path(&paths.node_cache)
         .map_err(|error| StartupError::UnsafePath(error.to_string()))?;
+    let runtime_lease = cellhv_core_fs::runtime_lease_path(&paths.core_database)
+        .map_err(|error| StartupError::UnsafePath(error.to_string()))?;
     let database_wal = PathBuf::from(format!("{}-wal", paths.core_database.display()));
     let database_shm = PathBuf::from(format!("{}-shm", paths.core_database.display()));
     let all_paths = [
@@ -229,6 +472,7 @@ fn validate_paths(paths: &StartupPaths) -> Result<()> {
         paths.node_cache_archive.clone(),
         archive_temp,
         authority_lock,
+        runtime_lease,
         database_wal,
         database_shm,
     ];
@@ -803,5 +1047,101 @@ mod tests {
             Err(StartupError::ArchiveMismatch)
         ));
         assert!(!paths.core_database.exists());
+    }
+
+    #[test]
+    fn startup_transaction_yields_open_fresh_authority_and_restart_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let transaction = StartupTransaction::begin(&paths).unwrap();
+        let active = transaction
+            .activate(Some("host-transaction".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::Fresh);
+        assert_eq!(
+            active.service().host().unwrap().identity.id.as_str(),
+            "host-transaction"
+        );
+        let (service, kind, runtime_guard, provenance) = active.into_runtime_parts();
+        assert_eq!(kind, ActivationKind::Fresh);
+        assert!(provenance.source_checksum().is_none());
+        assert!(!provenance.live_cache_present());
+        assert!(matches!(
+            StartupTransaction::begin(&paths),
+            Err(StartupError::Io { source, .. })
+                if source.kind() == io::ErrorKind::WouldBlock
+        ));
+
+        drop(service);
+        drop(runtime_guard);
+        let restarted = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("host-transaction".to_owned()), None)
+            .unwrap();
+        assert_eq!(restarted.kind(), ActivationKind::Existing);
+        assert_eq!(
+            restarted.service().host().unwrap().identity.id.as_str(),
+            "host-transaction"
+        );
+    }
+
+    #[test]
+    fn activated_store_releases_cache_lock_but_retains_runtime_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let transaction = StartupTransaction::begin(&paths).unwrap();
+        let active = transaction
+            .activate(Some("host-lock-held".to_owned()), None)
+            .unwrap();
+        let cache_guard = cellhv_core_fs::AuthorityLock::acquire(&paths.node_cache).unwrap();
+        assert!(matches!(
+            StartupTransaction::begin(&paths),
+            Err(StartupError::Io { source, .. })
+                if source.kind() == io::ErrorKind::WouldBlock
+        ));
+        drop(cache_guard);
+        drop(active);
+        drop(StartupTransaction::begin(&paths).unwrap());
+    }
+
+    #[test]
+    fn startup_transaction_rejects_runtime_lease_aliases_before_locking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = test_paths(&dir);
+        paths.node_cache = cellhv_core_fs::runtime_lease_path(&paths.core_database).unwrap();
+        assert!(matches!(
+            StartupTransaction::begin(&paths),
+            Err(StartupError::UnsafePath(_))
+        ));
+        assert!(!paths.core_database.exists());
+    }
+
+    #[test]
+    fn startup_transaction_imports_exact_snapshot_and_restarts_under_one_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        write_private(&paths.node_cache, source());
+        let active = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(active.kind(), ActivationKind::ImportedNodeCache);
+        assert!(paths.node_cache_archive.exists());
+        assert_eq!(
+            active.service().host().unwrap().identity.id.as_str(),
+            "node-a"
+        );
+        drop(active);
+        fs::remove_file(&paths.node_cache).unwrap();
+
+        let restarted = StartupTransaction::begin(&paths)
+            .unwrap()
+            .activate(Some("node-a".to_owned()), None)
+            .unwrap();
+        assert_eq!(restarted.kind(), ActivationKind::ImportedNodeCache);
+        assert_eq!(
+            restarted.service().host().unwrap().identity.id.as_str(),
+            "node-a"
+        );
     }
 }

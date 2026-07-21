@@ -14,6 +14,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 nix = { workspace = true, features = ["user"] }
+hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "service"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 http-body-util = "0.1"

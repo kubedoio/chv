@@ -164,6 +164,10 @@ impl NodeCacheAuthority {
         }
     }
 
+    pub fn host_id(&self) -> &str {
+        &self.cache.node_id
+    }
+
     pub fn observe_generation(
         &mut self,
         kind: &str,
@@ -256,6 +260,44 @@ impl NodeCacheAuthority {
         Ok(())
     }
 
+    pub fn apply_enrollment(
+        &mut self,
+        node_id: &str,
+        metadata: EnrollmentMetadata,
+    ) -> Result<(), ChvError> {
+        if node_id.trim().is_empty() {
+            return Err(ChvError::InvalidArgument {
+                field: "node_id".to_owned(),
+                reason: "must not be empty".to_owned(),
+            });
+        }
+        match &self.mode {
+            NodeCacheAuthorityMode::LegacyVmAuthority(_) => {
+                self.cache.node_id = node_id.to_owned();
+            }
+            NodeCacheAuthorityMode::CoreVmAuthority(_) if node_id == self.cache.node_id => {}
+            NodeCacheAuthorityMode::CoreVmAuthority(_) => {
+                return Err(core_write_error("apply_enrollment changed host identity"));
+            }
+            NodeCacheAuthorityMode::Blocked(blocked) => {
+                return Err(blocked_error(blocked, "apply_enrollment"));
+            }
+        }
+        self.set_enrollment_metadata(metadata)
+    }
+
+    pub fn record_certificate_rotation(&mut self, unix_ms: i64) -> Result<(), ChvError> {
+        self.require_compatibility_mutation("record_certificate_rotation")?;
+        if unix_ms < 0 {
+            return Err(ChvError::InvalidArgument {
+                field: "last_certificate_rotation_unix_ms".to_owned(),
+                reason: "must not be negative".to_owned(),
+            });
+        }
+        self.cache.last_certificate_rotation_unix_ms = Some(unix_ms);
+        Ok(())
+    }
+
     pub fn enqueue_pending_message(
         &mut self,
         message: PendingControlPlaneMessage,
@@ -286,6 +328,34 @@ impl NodeCacheAuthority {
         Ok(())
     }
 
+    pub fn set_volume_handle(&mut self, volume_id: &str, handle: String) -> Result<(), ChvError> {
+        self.require_legacy_vm_mutation("set_volume_handle")?;
+        self.cache
+            .volume_handles
+            .insert(volume_id.to_owned(), handle);
+        Ok(())
+    }
+
+    pub fn remove_volume_handle(&mut self, volume_id: &str) -> Result<(), ChvError> {
+        self.require_legacy_vm_mutation("remove_volume_handle")?;
+        self.cache.volume_handles.remove(volume_id);
+        Ok(())
+    }
+
+    pub fn remove_vm_attachment(&mut self, vm_id: &str) -> Result<(), ChvError> {
+        self.require_legacy_vm_mutation("remove_vm_attachment")?;
+        self.cache.vm_attachments.remove(vm_id);
+        Ok(())
+    }
+
+    pub fn complete_volume_snapshot_operation(&mut self, volume_id: &str) -> Result<(), ChvError> {
+        self.remove_volume_spec_fields(volume_id, &["snapshot_op", "snapshot_name"])
+    }
+
+    pub fn complete_volume_clone_operation(&mut self, volume_id: &str) -> Result<(), ChvError> {
+        self.remove_volume_spec_fields(volume_id, &["clone_source_volume_id"])
+    }
+
     pub async fn save(&self) -> Result<(), ChvError> {
         match &self.mode {
             NodeCacheAuthorityMode::LegacyVmAuthority(_) => self.cache.save(&self.cache_path).await,
@@ -313,6 +383,35 @@ impl NodeCacheAuthority {
             | NodeCacheAuthorityMode::CoreVmAuthority(_) => Ok(()),
             NodeCacheAuthorityMode::Blocked(blocked) => Err(blocked_error(blocked, operation)),
         }
+    }
+
+    fn remove_volume_spec_fields(
+        &mut self,
+        volume_id: &str,
+        fields: &[&str],
+    ) -> Result<(), ChvError> {
+        self.require_legacy_vm_mutation("complete_volume_operation")?;
+        let Some(fragment) = self.cache.volume_fragments.get_mut(volume_id) else {
+            return Ok(());
+        };
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&fragment.spec_json).map_err(|e| ChvError::InvalidArgument {
+                field: "volume_fragment.spec_json".to_owned(),
+                reason: e.to_string(),
+            })?;
+        let object = spec
+            .as_object_mut()
+            .ok_or_else(|| ChvError::InvalidArgument {
+                field: "volume_fragment.spec_json".to_owned(),
+                reason: "must be a JSON object".to_owned(),
+            })?;
+        for field in fields {
+            object.remove(*field);
+        }
+        fragment.spec_json = serde_json::to_vec(&spec).map_err(|e| ChvError::Internal {
+            reason: format!("serialize volume fragment: {e}"),
+        })?;
+        Ok(())
     }
 }
 
@@ -372,6 +471,16 @@ mod tests {
         assert!(matches!(result, Err(ChvError::AccessDenied { .. })));
     }
 
+    fn enrollment() -> EnrollmentMetadata {
+        EnrollmentMetadata {
+            complete: true,
+            certificate_path: Some("/cert".to_owned()),
+            private_key_path: Some("/key".to_owned()),
+            ca_path: Some("/ca".to_owned()),
+            last_certificate_rotation_unix_ms: Some(42),
+        }
+    }
+
     #[test]
     fn core_mode_denies_every_nodecache_vm_mutator() {
         let directory = tempfile::tempdir().unwrap();
@@ -387,6 +496,11 @@ mod tests {
         assert_denied(authority.observe_vm_attachment("vm-1", &["vol-2".to_owned()], &[]));
         assert_denied(authority.remove_vm_state("vm-1"));
         assert_denied(authority.update_vm_desired_state("vm-1", "Stopped"));
+        assert_denied(authority.set_volume_handle("vol-2", "handle".to_owned()));
+        assert_denied(authority.remove_volume_handle("vol-1"));
+        assert_denied(authority.remove_vm_attachment("vm-1"));
+        assert_denied(authority.complete_volume_snapshot_operation("vol-1"));
+        assert_denied(authority.complete_volume_clone_operation("vol-1"));
         for state in [NodeState::Draining, NodeState::Maintenance] {
             assert!(matches!(
                 authority.transition_node_state(state),
@@ -402,15 +516,10 @@ mod tests {
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = directory.path().join("cache.json");
         let mut authority = NodeCacheAuthority::core(populated_cache(), &path).unwrap();
-        authority
-            .set_enrollment_metadata(EnrollmentMetadata {
-                complete: true,
-                certificate_path: Some("/cert".to_owned()),
-                private_key_path: Some("/key".to_owned()),
-                ca_path: Some("/ca".to_owned()),
-                last_certificate_rotation_unix_ms: Some(42),
-            })
-            .unwrap();
+        authority.apply_enrollment("node-1", enrollment()).unwrap();
+        assert_denied(authority.apply_enrollment("replacement", enrollment()));
+        authority.record_certificate_rotation(84).unwrap();
+        assert_eq!(authority.host_id(), "node-1");
         authority
             .set_last_error(Some("reported-only".to_owned()))
             .unwrap();
@@ -432,6 +541,10 @@ mod tests {
             .unwrap();
         let snapshot = authority.compatibility_snapshot();
         assert!(snapshot.enrollment.complete);
+        assert_eq!(
+            snapshot.enrollment.last_certificate_rotation_unix_ms,
+            Some(84)
+        );
         assert_eq!(
             snapshot.enrollment.certificate_path.as_deref(),
             Some("/cert")
@@ -533,6 +646,10 @@ mod tests {
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = directory.path().join("cache.json");
         let mut authority = NodeCacheAuthority::legacy(NodeCache::new("node-1"), &path).unwrap();
+        authority
+            .apply_enrollment("legacy-issued", enrollment())
+            .unwrap();
+        assert_eq!(authority.host_id(), "legacy-issued");
         authority.observe_generation("vm", "vm-1", "1").unwrap();
         authority
             .store_fragment("vm", "vm-1", fragment("vm", "vm-1"))
@@ -540,6 +657,22 @@ mod tests {
         authority
             .observe_vm_attachment("vm-1", &["vol-1".to_owned()], &[])
             .unwrap();
+        authority
+            .set_volume_handle("vol-1", "legacy-handle".to_owned())
+            .unwrap();
+        let mut volume = fragment("volume", "vol-1");
+        volume.spec_json =
+            br#"{"snapshot_op":"create","snapshot_name":"s1","clone_source_volume_id":"source"}"#
+                .to_vec();
+        authority.store_fragment("volume", "vol-1", volume).unwrap();
+        authority
+            .complete_volume_snapshot_operation("vol-1")
+            .unwrap();
+        authority.complete_volume_clone_operation("vol-1").unwrap();
+        assert_eq!(
+            authority.cache.volume_fragments["vol-1"].spec_json,
+            br#"{}"#
+        );
         authority
             .update_vm_desired_state("vm-1", "Stopped")
             .unwrap();
@@ -550,6 +683,8 @@ mod tests {
             .get_fragment("vm", "vm-1")
             .is_some());
         authority.remove_fragment("vm", "vm-1").unwrap();
+        authority.remove_volume_handle("vol-1").unwrap();
+        authority.remove_vm_attachment("vm-1").unwrap();
         authority.remove_vm_state("vm-1").unwrap();
     }
 }

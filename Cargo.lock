@@ -508,6 +508,7 @@ dependencies = [
  "cellhv-core-operations",
  "cellhv-core-types",
  "http-body-util",
+ "hyper-util",
  "nix 0.29.0",
  "serde",
  "serde_json",
@@ -515,6 +516,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]

@@ -1,5 +1,9 @@
 //! Versioned local HTTP/JSON transport for the single CellHV Core authority.
 
+mod listener;
+
+pub use listener::{CoreApiListener, ListenerError};
+
 use axum::{
     extract::{
         rejection::{JsonRejection, PathRejection, QueryRejection},
@@ -421,11 +425,21 @@ pub enum BindError {
     UnsafeParent(String),
     #[error("refusing to replace existing Core API socket path: {0}")]
     ExistingPath(String),
+    #[error("Core API socket path does not identify the bound socket: {0}")]
+    IdentityMismatch(String),
     #[error("Core API socket operation failed: {0}")]
     Io(#[from] std::io::Error),
 }
 pub async fn bind_private(socket: &FsPath) -> Result<tokio::net::UnixListener, BindError> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    bind_private_owned(socket)
+        .await
+        .map(|(listener, _)| listener)
+}
+
+async fn bind_private_owned(
+    socket: &FsPath,
+) -> Result<(tokio::net::UnixListener, crate::listener::SocketIdentity), BindError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     let parent = socket
         .parent()
         .ok_or_else(|| BindError::UnsafeParent(socket.display().to_string()))?;
@@ -438,12 +452,33 @@ pub async fn bind_private(socket: &FsPath) -> Result<tokio::net::UnixListener, B
     {
         return Err(BindError::UnsafeParent(parent.display().to_string()));
     }
-    if std::fs::symlink_metadata(socket).is_ok() {
-        return Err(BindError::ExistingPath(socket.display().to_string()));
+    match std::fs::symlink_metadata(socket) {
+        Ok(_) => return Err(BindError::ExistingPath(socket.display().to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BindError::Io(error)),
     }
     let listener = tokio::net::UnixListener::bind(socket)?;
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
+    let (path_file, identity) = crate::listener::open_socket_path(socket).map_err(BindError::Io)?;
+    if let Err(error) = crate::listener::set_socket_mode(socket, &path_file, identity) {
+        crate::listener::remove_matching_socket(socket, identity);
+        return Err(BindError::Io(error));
+    }
+    let path_metadata = match std::fs::symlink_metadata(socket) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            crate::listener::remove_matching_socket(socket, identity);
+            return Err(BindError::Io(error));
+        }
+    };
+    if !path_metadata.file_type().is_socket()
+        || path_metadata.dev() != identity.device
+        || path_metadata.ino() != identity.inode
+        || path_metadata.permissions().mode() & 0o777 != 0o600
+    {
+        crate::listener::remove_matching_socket(socket, identity);
+        return Err(BindError::IdentityMismatch(socket.display().to_string()));
+    }
+    Ok((listener, identity))
 }
 
 #[cfg(test)]
