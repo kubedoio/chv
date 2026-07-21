@@ -59,21 +59,15 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock', 'deny.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-audit-
 
-      - name: Run cargo audit
-        # rustsec/audit-check@v2.0.0
-        uses: rustsec/audit-check@v2.0.0
+      - name: Run cargo audit via cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: |
-            RUSTSEC-2026-0173
-            RUSTSEC-2025-0134
-            RUSTSEC-2026-0204
-            RUSTSEC-2026-0194
-            RUSTSEC-2026-0195
+          command: check advisories
+          arguments: --all-features
 
   cargo-deny:
     name: cargo deny
