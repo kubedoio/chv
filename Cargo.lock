@@ -520,6 +520,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellhv-core-executor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cellhv-core-operations",
+ "cellhv-core-store",
+ "cellhv-core-types",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "cellhv-core-fs"
 version = "0.1.0"
 dependencies = [

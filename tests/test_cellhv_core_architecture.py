@@ -47,6 +47,8 @@ class ArchitectureGuardTests(unittest.TestCase):
             "docs/specs/adr/019-stable-core-host-identity-and-nodecache-authority.md",
             "docs/acceptance/cellhv-core-registry-v1.json",
             "docs/schemas/cellhv-acceptance-registry-v1.schema.json",
+            GUARD.O3K_CONTRACT_PATH,
+            GUARD.O3K_CONTRACT_SCHEMA_PATH,
             "docs/qualification/cellhv-core-phase-a-claim.json",
             "docs/schemas/cellhv-compatibility-claim-v1.schema.json",
         ):
@@ -56,6 +58,38 @@ class ArchitectureGuardTests(unittest.TestCase):
 
     def test_repository_passes(self):
         self.assertEqual(GUARD.check(ROOT), [])
+
+    def test_o3k_contract_cannot_claim_t5_or_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / GUARD.O3K_CONTRACT_PATH
+            value = json.loads(path.read_text())
+            value["maximum_evidence_tier"] = "T5"
+            value["t5_eligible"] = True
+            value["executed_scenarios"] = ["OCORE-001"]
+            path.write_text(json.dumps(value), encoding="utf-8")
+            self.assertTrue(any("not-run, T1-only" in error for error in GUARD.check(root)))
+
+    def test_o3k_registry_scenarios_cannot_be_labeled_t5(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "docs/acceptance/cellhv-core-registry-v1.json"
+            value = json.loads(path.read_text())
+            next(item for item in value["scenarios"] if item["id"] == "OCORE-001")["tier"] = "T5"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            self.assertTrue(any("may never be T5" in error for error in GUARD.check(root)))
+
+    def test_o3k_contract_revision_is_pinned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / GUARD.O3K_CONTRACT_PATH
+            value = json.loads(path.read_text())
+            value["o3k_revision"] = "0" * 40
+            path.write_text(json.dumps(value), encoding="utf-8")
+            self.assertTrue(any("audited O3K revision" in error for error in GUARD.check(root)))
 
     def test_nodecache_authority_cannot_expose_raw_cache(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -278,6 +312,20 @@ class ArchitectureGuardTests(unittest.TestCase):
             errors = GUARD.check(root)
             self.assertTrue(any("dependency boundary forbids" in error for error in errors))
 
+    def test_executor_cannot_depend_on_cloud_hypervisor_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-executor/Cargo.toml"
+            text = path.read_text().replace(
+                "[dependencies]\n",
+                '[dependencies]\nchv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }\n',
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            errors = GUARD.check(root)
+            self.assertTrue(any("cellhv-core-executor: dependency boundary" in error for error in errors))
+
     def test_native_api_must_receive_shared_authority_handle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -361,6 +409,22 @@ class ArchitectureGuardTests(unittest.TestCase):
             )
             errors = GUARD.check(root)
             self.assertTrue(any("execution capability is restricted" in error for error in errors))
+
+    def test_executor_production_after_test_module_cannot_bypass_capability_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.copy_baseline(root)
+            path = root / "crates/cellhv-core-executor/src/lib.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "#[cfg(test)] mod tests { fn allowed_fixture() {} }\n"
+                + "pub struct OperationService;\n"
+                + "pub fn bypass(_: ExecutionHandle) { AuthorityActor::spawn_with_execution(); }\n",
+                encoding="utf-8",
+            )
+            errors = GUARD.check(root)
+            self.assertTrue(any("execution capability is restricted" in error for error in errors))
+            self.assertTrue(any("operation authority must be owned" in error for error in errors))
 
     def test_native_api_operation_service_alias_in_another_module_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

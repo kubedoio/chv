@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "profile": "o3k-core-client-t1",
+  "evidence_status": "proposed-not-run",
+  "result": "not-run",
+  "maximum_evidence_tier": "T1",
+  "t5_eligible": false,
+  "o3k_repository": "https://github.com/kubedoio/o3k",
+  "o3k_revision": "53fd2cb36ee79f42da49c8181d6ceed12b41b3aa",
+  "o3k_module": "github.com/cobaltcore-dev/o3k",
+  "core_api_contract": "crates/cellhv-core-api/contract/cellhv-core-api-v1.json",
+  "scenarios": ["OCORE-001", "OCORE-002", "OCORE-003", "OCORE-004", "OCORE-005"],
+  "executed_scenarios": [],
+  "non_claims": [
+    "No O3K-to-CellHV Core integration has been executed.",
+    "No OpenStack, Nova, libvirt, Neutron, Cinder, VM launch, or power-operation compatibility is claimed.",
+    "This profile cannot produce T5 evidence."
+  ],
+  "implementation_prerequisites": [
+    "An O3K-owned Core client and deterministic translation layer.",
+    "An injectable O3K compute boundary that does not own VM lifecycle state.",
+    "An isolated real-process harness for chv-agent and the O3K-owned client."
+  ]
+}

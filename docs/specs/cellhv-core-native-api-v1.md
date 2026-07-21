@@ -1,6 +1,6 @@
 # CellHV Core Native Local API v1
 
-Status: Phase B contract skeleton, production startup disabled
+Status: Phase B local authority contract; explicit production composition available
 
 ## Boundary
 
@@ -9,10 +9,11 @@ single `cellhv-core-operations::AuthorityHandle`. It has no SQLite, provider,
 Cloud Hypervisor, control-plane, or cloud model dependency. It is intended to
 run inside `chv-agent`; it is not a daemon or a second lifecycle authority.
 
-The configured endpoint is `/run/chv/core/core-v1.sock`. This phase does not
-start the listener because the existing NodeCache path has not completed
-authority cutover. There is deliberately no inert enable flag: startup wiring
-will be added with the cutover rather than suggesting the surface is usable.
+The configured endpoint is `/run/chv/core/core-v1.sock`. `chv-agent` starts the
+listener only when explicitly configured with `authority_mode = "core-native"`.
+The default remains the legacy authority mode, so an upgrade does not silently
+cut over production VM authority. Core-native mode does not compose the legacy
+Controller, VMM, or provider stack.
 
 ## Contract
 
@@ -53,7 +54,6 @@ gone.
 
 ## Deferred work
 
-- production listener startup and graceful shutdown in `chv-agent`;
 - NodeCache cutover and legacy gRPC routing into this same operation service;
 - deterministic OpenAPI publication/client generation decision;
 - event streaming (v1 exposes deterministic polling);
@@ -62,9 +62,12 @@ gone.
 The router cannot construct an `OperationService` or actor. Async handlers send
 typed requests through the bounded shared authority queue and await typed
 replies, preserving authority ordering without blocking Tokio workers. The
-future `chv-agent` composition root must retain the actor owner for the whole
-listener lifetime and perform ordered shutdown.
+`chv-agent` composition root retains the actor owner for the whole listener
+lifetime and performs ordered shutdown in explicit core-native mode.
 
 `vm_definitions=false` currently describes executable production availability:
-the router is not started. Its CRUD contract is implemented and tested, but the
-flag must not become true until the writable surface is safely wired.
+the writable definition journal is not an executable VM-definition backend and
+no lifecycle executor or managed Cloud Hypervisor transport is composed. Its
+CRUD contract is implemented, tested, and reachable in explicit core-native
+mode, but this does not advertise O3K compute support and the flag must not
+become true until executable definition handling is safely wired.

@@ -131,7 +131,7 @@ journal.
 ## 8. Explicitly pending
 
 - production native or legacy API routing and authorization;
-- durable execution-step population and executor scheduling;
+- durable execution-step population and production executor composition;
 - Cloud Hypervisor lifecycle calls and observed-state updates;
 - process recovery, ownership transitions, and ambiguous-side-effect policy;
 - NodeCache import and single-authority cutover;

@@ -25,6 +25,7 @@ CORE_MANIFESTS = (
     "crates/cellhv-core-types/Cargo.toml",
     "crates/cellhv-core-store/Cargo.toml",
     "crates/cellhv-core-operations/Cargo.toml",
+    "crates/cellhv-core-executor/Cargo.toml",
     "crates/cellhv-core-api/Cargo.toml",
     "crates/cellhv-nodecache-migration/Cargo.toml",
     "crates/cellhv-core-startup/Cargo.toml",
@@ -57,6 +58,7 @@ LEASE_PARENT_TARGET = re.compile(
 STORE_DEPENDENCIES = {"rusqlite", "sqlx", "libsqlite3-sys"}
 CORE_STORE_PACKAGE = "cellhv-core-store"
 CORE_OPERATIONS_PACKAGE = "cellhv-core-operations"
+CORE_EXECUTOR_PACKAGE = "cellhv-core-executor"
 STORE_ALLOWED_CORE_DEPENDENCIES = {"cellhv-core-types"}
 OPERATIONS_ALLOWED_DEPENDENCIES = {
     "async-channel",
@@ -67,6 +69,15 @@ OPERATIONS_ALLOWED_DEPENDENCIES = {
     "thiserror",
     "tokio",
 }
+EXECUTOR_ALLOWED_DEPENDENCIES = {
+    "async-trait",
+    "cellhv-core-operations",
+    "cellhv-core-types",
+    "serde_json",
+    "thiserror",
+    "tokio",
+    "uuid",
+}
 OPERATION_AUTHORITY_DECLARATION = re.compile(
     r"\b(?:struct|enum|trait|type)\s+"
     r"(?:Operation(?:Engine|Service|Executor|Processor|Manager|Coordinator)|"
@@ -76,8 +87,15 @@ OPERATION_MODULE_NAME = re.compile(
     r"(?:^|[_-])(?:operation(?:s|[_-](?:engine|service|executor|processor|manager))?|"
     r"journal(?:[_-](?:engine|service|executor|processor|manager))?)(?:$|[_-])"
 )
-EXECUTION_CAPABILITY = re.compile(r"\b(?:ExecutionHandle|spawn_with_execution)\b")
+EXECUTION_HANDLE_CAPABILITY = re.compile(r"\bExecutionHandle\b")
+EXECUTION_CONSTRUCTOR_CAPABILITY = re.compile(r"\bspawn_with_execution\b")
 EXECUTION_CAPABILITY_OWNER = Path("crates/cellhv-core-operations")
+EXECUTION_HANDLE_CONSUMER = Path("crates/cellhv-core-executor")
+EXECUTOR_TEST_SOURCE = Path("crates/cellhv-core-executor/src/tests.rs")
+O3K_CONTRACT_PATH = "docs/acceptance/cellhv-o3k-core-client-contract-v1.json"
+O3K_CONTRACT_SCHEMA_PATH = "docs/schemas/cellhv-o3k-core-client-contract-v1.schema.json"
+O3K_PINNED_REVISION = "53fd2cb36ee79f42da49c8181d6ceed12b41b3aa"
+O3K_SCENARIO_IDS = ("OCORE-001", "OCORE-002", "OCORE-003", "OCORE-004", "OCORE-005")
 
 
 def load_json(path: Path) -> object:
@@ -236,6 +254,14 @@ def check(root: Path) -> list[str]:
             f"{CORE_OPERATIONS_PACKAGE}: dependency boundary forbids "
             f"{unexpected_operations_dependencies}"
         )
+    unexpected_executor_dependencies = sorted(
+        dependency_graph.get(CORE_EXECUTOR_PACKAGE, set()) - EXECUTOR_ALLOWED_DEPENDENCIES
+    )
+    if unexpected_executor_dependencies:
+        errors.append(
+            f"{CORE_EXECUTOR_PACKAGE}: dependency boundary forbids "
+            f"{unexpected_executor_dependencies}"
+        )
 
     for source_root in (root / "cmd", root / "crates"):
         if not source_root.exists():
@@ -244,11 +270,20 @@ def check(root: Path) -> list[str]:
             relative = source.relative_to(root)
             if relative.is_relative_to(EXECUTION_CAPABILITY_OWNER):
                 continue
+            if relative == EXECUTOR_TEST_SOURCE:
+                continue
             text = source.read_text(encoding="utf-8", errors="replace")
-            if EXECUTION_CAPABILITY.search(text):
+            is_executor = relative.is_relative_to(EXECUTION_HANDLE_CONSUMER)
+            production_text = text
+            if is_executor and re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub\s+)?mod\s+\w+\s*\{", text):
+                errors.append(f"{relative}: inline cfg(test) modules are forbidden in executor source")
+            forbidden = bool(EXECUTION_CONSTRUCTOR_CAPABILITY.search(production_text)) or (
+                bool(EXECUTION_HANDLE_CAPABILITY.search(production_text)) and not is_executor
+            )
+            if forbidden:
                 errors.append(
                     f"{relative}: execution capability is restricted to "
-                    f"{EXECUTION_CAPABILITY_OWNER} until an executor boundary is approved"
+                    f"{EXECUTION_CAPABILITY_OWNER} or {EXECUTION_HANDLE_CONSUMER}"
                 )
 
     api_source_root = root / "crates/cellhv-core-api/src"
@@ -366,7 +401,14 @@ def check(root: Path) -> list[str]:
                 escaped_operation_authorities.append(package_root.relative_to(root).as_posix())
             for source in package_root.glob("src/**/*.rs"):
                 text = source.read_text(encoding="utf-8", errors="replace")
-                if name != CORE_OPERATIONS_PACKAGE and (
+                if name == CORE_EXECUTOR_PACKAGE:
+                    if source.relative_to(root) == EXECUTOR_TEST_SOURCE:
+                        continue
+                    production = text
+                    remaining = re.sub(r"\bpub\s+struct\s+JournalExecutor\b", "", production)
+                    if OPERATION_AUTHORITY_DECLARATION.search(remaining):
+                        escaped_operation_authorities.append(source.relative_to(root).as_posix())
+                elif name != CORE_OPERATIONS_PACKAGE and (
                     OPERATION_MODULE_NAME.search(source.stem)
                     or OPERATION_AUTHORITY_DECLARATION.search(text)
                 ):
@@ -508,8 +550,56 @@ def check(root: Path) -> list[str]:
             if forbidden_identity.search(text):
                 errors.append(f"{path.relative_to(root)}: forbidden Cloud Hypervisor QEMU/QMP identity")
 
+    try:
+        o3k_contract = load_json(root / O3K_CONTRACT_PATH)
+    except (OSError, ValueError) as exc:
+        errors.append(f"{O3K_CONTRACT_PATH}: {exc}")
+    else:
+        expected_fields = {
+            "schema_version": 1,
+            "profile": "o3k-core-client-t1",
+            "evidence_status": "proposed-not-run",
+            "result": "not-run",
+            "maximum_evidence_tier": "T1",
+            "t5_eligible": False,
+            "o3k_repository": "https://github.com/kubedoio/o3k",
+            "o3k_revision": O3K_PINNED_REVISION,
+            "o3k_module": "github.com/cobaltcore-dev/o3k",
+            "core_api_contract": "crates/cellhv-core-api/contract/cellhv-core-api-v1.json",
+            "scenarios": list(O3K_SCENARIO_IDS),
+            "executed_scenarios": [],
+        }
+        if not isinstance(o3k_contract, dict) or any(
+            o3k_contract.get(key) != value for key, value in expected_fields.items()
+        ):
+            errors.append(
+                f"{O3K_CONTRACT_PATH}: pinned profile must remain not-run, T1-only, "
+                "and fixed to the audited O3K revision"
+            )
+
+    registry_path = root / "docs/acceptance/cellhv-core-registry-v1.json"
+    try:
+        registry = load_json(registry_path)
+        scenarios = registry.get("scenarios", []) if isinstance(registry, dict) else []
+        o3k_scenarios = {
+            scenario.get("id"): scenario
+            for scenario in scenarios
+            if isinstance(scenario, dict) and str(scenario.get("id", "")).startswith("OCORE-")
+        }
+    except (OSError, ValueError) as exc:
+        errors.append(f"docs/acceptance/cellhv-core-registry-v1.json: {exc}")
+    else:
+        if set(o3k_scenarios) != set(O3K_SCENARIO_IDS) or any(
+            scenario.get("tier") != "T1" for scenario in o3k_scenarios.values()
+        ):
+            errors.append(
+                "docs/acceptance/cellhv-core-registry-v1.json: O3K Core client "
+                "scenarios must be exactly the registered T1-only set and may never be T5"
+            )
+
     validations = (
         ("docs/acceptance/cellhv-core-registry-v1.json", "docs/schemas/cellhv-acceptance-registry-v1.schema.json"),
+        (O3K_CONTRACT_PATH, O3K_CONTRACT_SCHEMA_PATH),
         ("docs/qualification/cellhv-core-phase-a-claim.json", "docs/schemas/cellhv-compatibility-claim-v1.schema.json"),
     )
     for document_name, schema_name in validations:

@@ -24,6 +24,7 @@ members = [
     "crates/cellhv-core-startup",
     "crates/cellhv-core-fs",
     "crates/cellhv-core-operations",
+    "crates/cellhv-core-executor",
     "crates/cellhv-core-api",
     "crates/cellhv-core-runtime-owner",
     "crates/chv-agent-runtime-ch",
