@@ -124,6 +124,13 @@ impl OperationServiceError {
 
 pub type Result<T> = std::result::Result<T, OperationServiceError>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyMigrationState {
+    pub source: String,
+    pub checksum: String,
+    pub cutover: bool,
+}
+
 pub struct OperationService {
     store: CoreStore,
 }
@@ -275,6 +282,21 @@ impl OperationService {
         checksum: &str,
     ) -> Result<MigrationDisposition> {
         Ok(self.store.rollback_legacy_import(source, checksum)?)
+    }
+
+    pub fn legacy_migration_state(&self, source: &str) -> Result<Option<LegacyMigrationState>> {
+        Ok(self
+            .store
+            .legacy_migration_state(source)?
+            .map(|state| LegacyMigrationState {
+                source: state.source,
+                checksum: state.checksum,
+                cutover: state.cutover,
+            }))
+    }
+
+    pub fn is_pristine_migration_target(&self) -> Result<bool> {
+        Ok(self.store.is_pristine_migration_target()?)
     }
 
     fn desired_state(&self, submission: &SubmitMutation) -> Result<Option<VmDefinition>> {

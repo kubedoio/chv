@@ -12,6 +12,7 @@ use cellhv_core_types::{
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -101,6 +102,13 @@ pub struct OperationJournalEntry {
     pub error: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyMigrationState {
+    pub source: String,
+    pub checksum: String,
+    pub cutover: bool,
+}
+
 struct Migration {
     version: i64,
     name: &'static str,
@@ -118,6 +126,32 @@ pub struct CoreStore {
 }
 
 impl CoreStore {
+    pub fn is_pristine_migration_target(&self) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT (SELECT count(*) FROM host_identity) + (SELECT count(*) FROM vms) + (SELECT count(*) FROM attachments) + (SELECT count(*) FROM operations) + (SELECT count(*) FROM operation_steps) + (SELECT count(*) FROM idempotency_keys) + (SELECT count(*) FROM events) + (SELECT count(*) FROM ownership_markers) + (SELECT count(*) FROM migration_state)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 0)
+    }
+    pub fn legacy_migration_state(&self, source: &str) -> Result<Option<LegacyMigrationState>> {
+        self.conn
+            .query_row(
+                "SELECT source,source_checksum,state FROM migration_state WHERE source=?1",
+                [source],
+                |row| {
+                    let state: String = row.get(2)?;
+                    Ok(LegacyMigrationState {
+                        source: row.get(0)?,
+                        checksum: row.get(1)?,
+                        cutover: state == "cutover",
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     /// Imports a validated legacy snapshot without changing the source file.
     /// The marker, host identity, and VM definitions commit atomically.
     pub fn import_legacy_snapshot(
@@ -317,6 +351,7 @@ impl CoreStore {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(path)
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -328,11 +363,13 @@ impl CoreStore {
         drop(file);
 
         let result = (|| {
+            validate_database_sidecars(path)?;
             let mut conn = Connection::open_with_flags(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             configure(&conn)?;
+            enforce_database_modes(path)?;
             apply_migrations(&mut conn)?;
             validate(&conn)?;
             Ok(Self { conn })
@@ -344,9 +381,8 @@ impl CoreStore {
     }
 
     pub fn open_existing(path: &Path) -> Result<Self> {
-        if !path.is_file() {
-            return Err(StoreError::Missing(path.to_path_buf()));
-        }
+        validate_database_file(path)?;
+        validate_database_sidecars(path)?;
         // Validate through a read-only handle first. In particular, an empty,
         // corrupt, or foreign file must not be initialized by connection
         // pragmas before it has proved it is a compatible Core store.
@@ -362,6 +398,7 @@ impl CoreStore {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         configure(&conn)?;
+        enforce_database_modes(path)?;
         validate(&conn)?;
         Ok(Self { conn })
     }
@@ -803,6 +840,92 @@ impl CoreStore {
             Err(error) => Err(error),
         }
     }
+}
+
+fn enforce_database_modes(path: &Path) -> Result<()> {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata)
+                if metadata.file_type().is_file()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.nlink() == 1 =>
+            {
+                std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| {
+                        StoreError::Integrity(format!(
+                            "cannot secure {}: {error}",
+                            candidate.display()
+                        ))
+                    })?;
+            }
+            Ok(_) => {
+                return Err(StoreError::Integrity(format!(
+                    "{} must be an owner-owned regular file with one link",
+                    candidate.display()
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(StoreError::Integrity(format!(
+                    "cannot inspect {}: {error}",
+                    candidate.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_database_sidecars(path: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata)
+                if metadata.file_type().is_file()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.permissions().mode() & 0o077 == 0
+                    && metadata.nlink() == 1 => {}
+            Ok(_) => {
+                return Err(StoreError::Integrity(format!(
+                    "{} must be an owner-owned owner-only regular file with one link",
+                    candidate.display()
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(StoreError::Integrity(format!(
+                    "cannot inspect {}: {error}",
+                    candidate.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_database_file(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StoreError::Missing(path.to_path_buf())
+        } else {
+            StoreError::Integrity(format!("cannot inspect {}: {error}", path.display()))
+        }
+    })?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(StoreError::Integrity(format!(
+            "{} must be an owner-owned 0600 regular file with one link",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn configure(conn: &Connection) -> Result<()> {
@@ -2367,5 +2490,28 @@ mod tests {
             })
         ));
         assert_eq!(store.list_vms().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sqlite_sidecars_are_rejected_before_open() {
+        for suffix in ["-wal", "-shm"] {
+            let (_directory, path, store) = new_store();
+            drop(store);
+            let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+            let target = path.parent().unwrap().join(format!("target{suffix}"));
+            std::fs::write(&target, b"external").unwrap();
+            std::os::unix::fs::symlink(&target, &sidecar).unwrap();
+            assert!(matches!(
+                CoreStore::open_existing(&path),
+                Err(StoreError::Integrity(_))
+            ));
+
+            std::fs::remove_file(&sidecar).unwrap();
+            std::fs::create_dir(&sidecar).unwrap();
+            assert!(matches!(
+                CoreStore::open_existing(&path),
+                Err(StoreError::Integrity(_))
+            ));
+        }
     }
 }

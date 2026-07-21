@@ -6,6 +6,29 @@ Status: Phase B compatibility component; not wired into production startup.
 
 `cellhv-nodecache-migration` is a read-only adapter from the serialized
 `chv-agent-core::cache::NodeCache` version-1 format to the single Core authority.
+
+While NodeCache remains the compatibility cache, each save preserves its JSON
+format and uses a crash-consistent same-directory replacement: a uniquely named
+mode-`0600` temporary file is written and synced, renamed atomically, and the
+parent directory is synced. Saves and startup cutover take the same sibling
+authority-file advisory lock. Per-path monotonic sequencing prevents a cancelled
+older blocking save from replacing a newer snapshot after its async waiter has
+gone away. Only a successful rename advances the committed sequence; reserving
+a newer sequence does not suppress an older write if the newer job fails or is
+never started. A failed serialization, temporary-file write, or pre-rename sync
+leaves the last good cache in place and removes the writer-owned temporary file.
+
+The cache directory is pre-provisioned, service-owned state: save does not create
+it. Its immediate parent must already exist as a real directory owned by the
+effective service user and must not be group- or world-writable. Symlink and
+non-regular cache destinations are rejected. A
+parent-directory sync failure reported after a successful rename is ambiguous:
+the new file is visible, but its survival across a crash is not guaranteed, so
+callers must treat the error as indeterminate and reload rather than assume the
+old snapshot remains. Normal failures remove their temporary file; abrupt
+process or host termination may leave a uniquely named stale temporary file.
+This phase does not scavenge those files because an age/ownership policy has not
+yet been accepted.
 It enters that authority only through `cellhv-core-operations::OperationService`;
 the store remains private to the application-service boundary. The adapter is
 not a database, daemon, operation engine, or VM lifecycle path. It does not

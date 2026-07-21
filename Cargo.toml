@@ -21,6 +21,8 @@ members = [
     "crates/cellhv-core-types",
     "crates/cellhv-core-store",
     "crates/cellhv-nodecache-migration",
+    "crates/cellhv-core-startup",
+    "crates/cellhv-core-fs",
     "crates/cellhv-core-operations",
     "crates/cellhv-core-api",
     "crates/chv-agent-runtime-ch",

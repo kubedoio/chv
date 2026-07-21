@@ -506,6 +506,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellhv-core-fs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "cellhv-core-operations"
 version = "0.1.0"
 dependencies = [
@@ -518,10 +526,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellhv-core-startup"
+version = "0.1.0"
+dependencies = [
+ "cellhv-core-fs",
+ "cellhv-core-operations",
+ "cellhv-nodecache-migration",
+ "libc",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cellhv-core-store"
 version = "0.1.0"
 dependencies = [
  "cellhv-core-types",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -613,6 +636,7 @@ name = "chv-agent-core"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "cellhv-core-fs",
  "cellhv-core-operations",
  "cellhv-core-types",
  "cellhv-nodecache-migration",
