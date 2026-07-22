@@ -54,7 +54,7 @@ impl NetworkExecutor for MockExecutor {
         Ok((format!("ns-{}", network_id), format!("tap-{}", nic_id)))
     }
 
-    async fn detach_vm_nic(&self, _nic_id: &str) -> Result<(), ChvError> {
+    async fn detach_vm_nic(&self, _nic_id: &str, _ownership: chv_common::AttachmentOwnership) -> Result<(), ChvError> {
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::ChvError;
+use chv_common::AttachmentOwnership;
 
 #[derive(Debug, Clone)]
 pub struct VolumeExport {
@@ -38,7 +39,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         volume_id: &str,
         handle: &str,
-        vm_id: &str,
+        ownership: AttachmentOwnership,
         force: bool,
     ) -> Result<(), ChvError>;
 
@@ -55,6 +56,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         volume_id: &str,
         handle: &str,
+        ownership: AttachmentOwnership,
         snapshot_name: &str,
     ) -> Result<(), ChvError>;
 
@@ -62,6 +64,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         volume_id: &str,
         handle: &str,
+        ownership: AttachmentOwnership,
         clone_name: &str,
     ) -> Result<(), ChvError>;
 
@@ -190,10 +193,10 @@ impl StorageBackend for Box<dyn StorageBackend> {
         &self,
         volume_id: &str,
         handle: &str,
-        vm_id: &str,
+        ownership: AttachmentOwnership,
         force: bool,
     ) -> Result<(), ChvError> {
-        (**self).detach(volume_id, handle, vm_id, force).await
+        (**self).detach(volume_id, handle, ownership, force).await
     }
 
     async fn health(&self, volume_id: &str, handle: &str) -> Result<BackendHealth, ChvError> {
@@ -213,10 +216,11 @@ impl StorageBackend for Box<dyn StorageBackend> {
         &self,
         volume_id: &str,
         handle: &str,
+        ownership: AttachmentOwnership,
         snapshot_name: &str,
     ) -> Result<(), ChvError> {
         (**self)
-            .prepare_snapshot(volume_id, handle, snapshot_name)
+            .prepare_snapshot(volume_id, handle, ownership, snapshot_name)
             .await
     }
 
@@ -224,9 +228,10 @@ impl StorageBackend for Box<dyn StorageBackend> {
         &self,
         volume_id: &str,
         handle: &str,
+        ownership: AttachmentOwnership,
         clone_name: &str,
     ) -> Result<(), ChvError> {
-        (**self).prepare_clone(volume_id, handle, clone_name).await
+        (**self).prepare_clone(volume_id, handle, ownership, clone_name).await
     }
 
     async fn restore_snapshot(

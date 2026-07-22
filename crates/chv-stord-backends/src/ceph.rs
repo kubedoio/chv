@@ -239,9 +239,13 @@ impl StorageBackend for CephRbdBackend {
         &self,
         volume_id: &str,
         _handle: &str,
-        vm_id: &str,
+        ownership: chv_common::AttachmentOwnership,
         force: bool,
     ) -> Result<(), ChvError> {
+        let vm_id = &ownership.vm_id;
+        if vm_id.is_empty() {
+            return Err(ChvError::InvalidArgument { field: "vm_id".to_string(), reason: "missing vm_id for detach".to_string() });
+        }
         if force {
             warn!(volume_id, vm_id, "force detaching Ceph RBD volume");
         } else {
@@ -307,6 +311,7 @@ impl StorageBackend for CephRbdBackend {
         &self,
         volume_id: &str,
         handle: &str,
+        _ownership: chv_common::AttachmentOwnership,
         snapshot_name: &str,
     ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
@@ -337,6 +342,7 @@ impl StorageBackend for CephRbdBackend {
         &self,
         volume_id: &str,
         handle: &str,
+        _ownership: chv_common::AttachmentOwnership,
         clone_name: &str,
     ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;

@@ -31,6 +31,7 @@ pub struct AgentServer {
     /// observe failures of long-running migration tasks. The registry closes
     /// that gap. See [`MigrationTaskRegistry`] and ADR-008 / ADR-009.
     pub migration_tasks: Arc<MigrationTaskRegistry>,
+    pub core_authority: Option<cellhv_core_operations::AuthorityHandle>,
 }
 
 impl AgentServer {
@@ -50,7 +51,13 @@ impl AgentServer {
             cache_path,
             runtime_dir,
             migration_tasks: Arc::new(MigrationTaskRegistry::new()),
+            core_authority: None,
         }
+    }
+
+    pub fn with_core_authority(mut self, authority: cellhv_core_operations::AuthorityHandle) -> Self {
+        self.core_authority = Some(authority);
+        self
     }
 
     /// Cancel a tracked migration task by its `operation_id`.

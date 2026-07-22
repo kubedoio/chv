@@ -417,9 +417,13 @@ impl StorageBackend for LocalFileBackend {
         &self,
         volume_id: &str,
         handle: &str,
-        vm_id: &str,
+        ownership: chv_common::AttachmentOwnership,
         force: bool,
     ) -> Result<(), ChvError> {
+        let vm_id = &ownership.vm_id;
+        if vm_id.is_empty() {
+            return Err(ChvError::InvalidArgument { field: "vm_id".to_string(), reason: "missing vm_id for detach".to_string() });
+        }
         let prefix = format!("local-{}-", volume_id);
         if !handle.starts_with(&prefix) {
             return Err(ChvError::BackendUnavailable {
@@ -586,6 +590,7 @@ impl StorageBackend for LocalFileBackend {
         &self,
         volume_id: &str,
         handle: &str,
+        _ownership: chv_common::AttachmentOwnership,
         snapshot_name: &str,
     ) -> Result<(), ChvError> {
         self.copy_volume(
@@ -602,6 +607,7 @@ impl StorageBackend for LocalFileBackend {
         &self,
         volume_id: &str,
         handle: &str,
+        _ownership: chv_common::AttachmentOwnership,
         clone_name: &str,
     ) -> Result<(), ChvError> {
         self.copy_volume(
@@ -1160,9 +1166,14 @@ mod tests {
     async fn local_backend_detach_succeeds_with_valid_handle() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
 
         let res = backend
-            .detach("vol-1", "local-vol-1-vol.img", "vm-1", false)
+            .detach("vol-1", "local-vol-1-vol.img", ownership, false)
             .await;
         assert!(res.is_ok());
     }
@@ -1171,9 +1182,14 @@ mod tests {
     async fn local_backend_detach_force_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
 
         let res = backend
-            .detach("vol-1", "local-vol-1-vol.img", "vm-1", true)
+            .detach("vol-1", "local-vol-1-vol.img", ownership, true)
             .await;
         assert!(res.is_ok());
     }
@@ -1199,9 +1215,14 @@ mod tests {
     async fn local_backend_set_device_policy_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
 
         let res = backend
-            .set_device_policy("vol-1", "local-vol-1-vol.img", &DevicePolicy::default())
+            .detach("vol-1", "local-vol-1-vol.img", ownership, false)
             .await;
         assert!(res.is_ok());
     }
@@ -1250,8 +1271,13 @@ mod tests {
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let handle = "local-vol-1-vol.img";
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
         backend
-            .prepare_snapshot("vol-1", handle, "snap1")
+            .prepare_snapshot("vol-1", handle, ownership, "snap1")
             .await
             .unwrap();
 
@@ -1271,8 +1297,13 @@ mod tests {
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
         let handle = "local-vol-1-vol.img";
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
         backend
-            .prepare_clone("vol-1", handle, "clone1")
+            .prepare_clone("vol-1", handle, ownership, "clone1")
             .await
             .unwrap();
 
@@ -1285,8 +1316,13 @@ mod tests {
     async fn local_backend_prepare_snapshot_missing_file_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
         let res = backend
-            .prepare_snapshot("vol-1", "local-vol-1-vol.img", "snap1")
+            .prepare_snapshot("vol-1", "local-vol-1-vol.img", ownership, "snap1")
             .await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
@@ -1295,8 +1331,13 @@ mod tests {
     async fn local_backend_prepare_snapshot_invalid_handle() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
         let res = backend
-            .prepare_snapshot("vol-1", "iscsi-vol-1-target", "snap1")
+            .prepare_snapshot("vol-1", "iscsi-vol-1-target", ownership, "snap1")
             .await;
         assert!(matches!(res, Err(ChvError::BackendUnavailable { .. })));
     }
@@ -1305,8 +1346,13 @@ mod tests {
     async fn local_backend_prepare_clone_missing_file_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
         let res = backend
-            .prepare_clone("vol-1", "local-vol-1-vol.img", "clone1")
+            .prepare_clone("vol-1", "local-vol-1-vol.img", ownership, "clone1")
             .await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
@@ -1322,8 +1368,13 @@ mod tests {
         }
 
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
+        let ownership = chv_common::AttachmentOwnership {
+            vm_id: "vm-1".to_string(),
+            operation_id: None,
+            requester: None,
+        };
         let res = backend
-            .prepare_clone("vol-1", "local-vol-1-vol.qcow2", "clone1")
+            .prepare_clone("vol-1", "local-vol-1-vol.qcow2", ownership, "clone1")
             .await;
         assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
     }

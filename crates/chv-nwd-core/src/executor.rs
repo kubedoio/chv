@@ -49,7 +49,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         ip_address: &str,
     ) -> Result<(String, String), ChvError>;
 
-    async fn detach_vm_nic(&self, nic_id: &str) -> Result<(), ChvError>;
+    async fn detach_vm_nic(&self, nic_id: &str, ownership: chv_common::AttachmentOwnership) -> Result<(), ChvError>;
 
     async fn set_firewall_policy(
         &self,
@@ -865,7 +865,10 @@ impl NetworkExecutor for LinuxExecutor {
         Ok((format!("ns-{}", network_id), tap_name))
     }
 
-    async fn detach_vm_nic(&self, nic_id: &str) -> Result<(), ChvError> {
+    async fn detach_vm_nic(&self, nic_id: &str, ownership: chv_common::AttachmentOwnership) -> Result<(), ChvError> {
+        if ownership.vm_id.is_empty() {
+            return Err(ChvError::InvalidArgument { field: "vm_id".to_string(), reason: "missing vm_id for detach".to_string() });
+        }
         let tap_handle = Self::tap_name_for_nic(nic_id);
         let out = Command::new("ip")
             .args(["tuntap", "del", "dev", &tap_handle, "mode", "tap"])
@@ -1387,7 +1390,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn detach_vm_nic(&self, _nic_id: &str) -> Result<(), ChvError> {
+        async fn detach_vm_nic(&self, _nic_id: &str, _ownership: chv_common::AttachmentOwnership) -> Result<(), ChvError> {
             unimplemented!()
         }
 
