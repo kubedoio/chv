@@ -564,6 +564,66 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::CreateVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if let Some(ref authority) = self.core_authority {
+            let inner = req.into_inner();
+            let meta = inner
+                .meta
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+            let vm = inner
+                .vm
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing vm"))?;
+            let legacy_meta = crate::legacy_core_adapter::LegacyRequestMeta {
+                operation_id: meta.operation_id.clone(),
+                requested_by: meta.requested_by.clone(),
+                target_node_id: meta.target_node_id.clone(),
+                desired_state_version: meta.desired_state_version.clone(),
+                request_unix_ms: meta.request_unix_ms,
+            };
+            let spec =
+                crate::spec::VmSpec::from_json(std::str::from_utf8(&vm.vm_spec_json).unwrap_or(""))
+                    .map_err(|e| {
+                        Status::invalid_argument(format!("invalid vm_spec_json: {}", e))
+                    })?;
+            let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
+                &legacy_meta,
+                &meta.target_node_id,
+                crate::legacy_core_adapter::LegacyVmMutation::Create {
+                    vm_id: vm.vm_id.clone(),
+                    spec: Box::new(spec),
+                },
+                cellhv_core_types::ResourceVersion::new(1).unwrap(),
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let accepted = authority
+                .submit(intent.submission)
+                .await
+                .map_err(|e| match e {
+                    cellhv_core_operations::AuthorityActorError::Service(err) => {
+                        match err.class() {
+                            cellhv_core_operations::ErrorClass::Conflict => {
+                                Status::already_exists(err.to_string())
+                            }
+                            cellhv_core_operations::ErrorClass::Precondition => {
+                                Status::failed_precondition(err.to_string())
+                            }
+                            _ => Status::internal(err.to_string()),
+                        }
+                    }
+                    _ => Status::internal(e.to_string()),
+                })?;
+            return Ok(Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: meta.operation_id.clone(),
+                    status: "ok".to_string(),
+                    node_observed_generation: self.cache.lock().await.observed_generation.clone(),
+                    error_code: "".to_string(),
+                    human_summary: format!("{:?}", accepted.disposition),
+                }),
+            }));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -732,6 +792,63 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::StartVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if let Some(ref authority) = self.core_authority {
+            let inner = req.into_inner();
+            let meta = inner
+                .meta
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+            let legacy_meta = crate::legacy_core_adapter::LegacyRequestMeta {
+                operation_id: meta.operation_id.clone(),
+                requested_by: meta.requested_by.clone(),
+                target_node_id: meta.target_node_id.clone(),
+                desired_state_version: meta.desired_state_version.clone(),
+                request_unix_ms: meta.request_unix_ms,
+            };
+            let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let expected_version = authority
+                .vm(vm_id)
+                .await
+                .map(|vm| vm.resource_version)
+                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
+                &legacy_meta,
+                &meta.target_node_id,
+                crate::legacy_core_adapter::LegacyVmMutation::Start {
+                    vm_id: inner.vm_id.clone(),
+                },
+                expected_version,
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let accepted = authority
+                .submit(intent.submission)
+                .await
+                .map_err(|e| match e {
+                    cellhv_core_operations::AuthorityActorError::Service(err) => {
+                        match err.class() {
+                            cellhv_core_operations::ErrorClass::Conflict => {
+                                Status::already_exists(err.to_string())
+                            }
+                            cellhv_core_operations::ErrorClass::Precondition => {
+                                Status::failed_precondition(err.to_string())
+                            }
+                            _ => Status::internal(err.to_string()),
+                        }
+                    }
+                    _ => Status::internal(e.to_string()),
+                })?;
+            return Ok(Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: meta.operation_id.clone(),
+                    status: "ok".to_string(),
+                    node_observed_generation: self.cache.lock().await.observed_generation.clone(),
+                    error_code: "".to_string(),
+                    human_summary: format!("{:?}", accepted.disposition),
+                }),
+            }));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -773,6 +890,64 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::StopVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if let Some(ref authority) = self.core_authority {
+            let inner = req.into_inner();
+            let meta = inner
+                .meta
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+            let legacy_meta = crate::legacy_core_adapter::LegacyRequestMeta {
+                operation_id: meta.operation_id.clone(),
+                requested_by: meta.requested_by.clone(),
+                target_node_id: meta.target_node_id.clone(),
+                desired_state_version: meta.desired_state_version.clone(),
+                request_unix_ms: meta.request_unix_ms,
+            };
+            let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let expected_version = authority
+                .vm(vm_id)
+                .await
+                .map(|vm| vm.resource_version)
+                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
+                &legacy_meta,
+                &meta.target_node_id,
+                crate::legacy_core_adapter::LegacyVmMutation::Stop {
+                    vm_id: inner.vm_id.clone(),
+                    force: inner.force,
+                },
+                expected_version,
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let accepted = authority
+                .submit(intent.submission)
+                .await
+                .map_err(|e| match e {
+                    cellhv_core_operations::AuthorityActorError::Service(err) => {
+                        match err.class() {
+                            cellhv_core_operations::ErrorClass::Conflict => {
+                                Status::already_exists(err.to_string())
+                            }
+                            cellhv_core_operations::ErrorClass::Precondition => {
+                                Status::failed_precondition(err.to_string())
+                            }
+                            _ => Status::internal(err.to_string()),
+                        }
+                    }
+                    _ => Status::internal(e.to_string()),
+                })?;
+            return Ok(Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: meta.operation_id.clone(),
+                    status: "ok".to_string(),
+                    node_observed_generation: self.cache.lock().await.observed_generation.clone(),
+                    error_code: "".to_string(),
+                    human_summary: format!("{:?}", accepted.disposition),
+                }),
+            }));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -804,6 +979,64 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::RebootVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if let Some(ref authority) = self.core_authority {
+            let inner = req.into_inner();
+            let meta = inner
+                .meta
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+            let legacy_meta = crate::legacy_core_adapter::LegacyRequestMeta {
+                operation_id: meta.operation_id.clone(),
+                requested_by: meta.requested_by.clone(),
+                target_node_id: meta.target_node_id.clone(),
+                desired_state_version: meta.desired_state_version.clone(),
+                request_unix_ms: meta.request_unix_ms,
+            };
+            let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let expected_version = authority
+                .vm(vm_id)
+                .await
+                .map(|vm| vm.resource_version)
+                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
+                &legacy_meta,
+                &meta.target_node_id,
+                crate::legacy_core_adapter::LegacyVmMutation::Reboot {
+                    vm_id: inner.vm_id.clone(),
+                    force: false,
+                },
+                expected_version,
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let accepted = authority
+                .submit(intent.submission)
+                .await
+                .map_err(|e| match e {
+                    cellhv_core_operations::AuthorityActorError::Service(err) => {
+                        match err.class() {
+                            cellhv_core_operations::ErrorClass::Conflict => {
+                                Status::already_exists(err.to_string())
+                            }
+                            cellhv_core_operations::ErrorClass::Precondition => {
+                                Status::failed_precondition(err.to_string())
+                            }
+                            _ => Status::internal(err.to_string()),
+                        }
+                    }
+                    _ => Status::internal(e.to_string()),
+                })?;
+            return Ok(Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: meta.operation_id.clone(),
+                    status: "ok".to_string(),
+                    node_observed_generation: self.cache.lock().await.observed_generation.clone(),
+                    error_code: "".to_string(),
+                    human_summary: format!("{:?}", accepted.disposition),
+                }),
+            }));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -831,6 +1064,64 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::DeleteVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if let Some(ref authority) = self.core_authority {
+            let inner = req.into_inner();
+            let meta = inner
+                .meta
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("missing meta"))?;
+            let legacy_meta = crate::legacy_core_adapter::LegacyRequestMeta {
+                operation_id: meta.operation_id.clone(),
+                requested_by: meta.requested_by.clone(),
+                target_node_id: meta.target_node_id.clone(),
+                desired_state_version: meta.desired_state_version.clone(),
+                request_unix_ms: meta.request_unix_ms,
+            };
+            let vm_id = cellhv_core_types::VmId::new(&inner.vm_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let expected_version = authority
+                .vm(vm_id)
+                .await
+                .map(|vm| vm.resource_version)
+                .unwrap_or_else(|_| cellhv_core_types::ResourceVersion::new(1).unwrap());
+            let intent = crate::legacy_core_adapter::adapt_legacy_vm_mutation(
+                &legacy_meta,
+                &meta.target_node_id,
+                crate::legacy_core_adapter::LegacyVmMutation::Delete {
+                    vm_id: inner.vm_id.clone(),
+                    force: false,
+                },
+                expected_version,
+            )
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let accepted = authority
+                .submit(intent.submission)
+                .await
+                .map_err(|e| match e {
+                    cellhv_core_operations::AuthorityActorError::Service(err) => {
+                        match err.class() {
+                            cellhv_core_operations::ErrorClass::Conflict => {
+                                Status::already_exists(err.to_string())
+                            }
+                            cellhv_core_operations::ErrorClass::Precondition => {
+                                Status::failed_precondition(err.to_string())
+                            }
+                            _ => Status::internal(err.to_string()),
+                        }
+                    }
+                    _ => Status::internal(e.to_string()),
+                })?;
+            return Ok(Response::new(proto::AckResponse {
+                result: Some(proto::ResultMeta {
+                    operation_id: meta.operation_id.clone(),
+                    status: "ok".to_string(),
+                    node_observed_generation: self.cache.lock().await.observed_generation.clone(),
+                    error_code: "".to_string(),
+                    human_summary: format!("{:?}", accepted.disposition),
+                }),
+            }));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -875,6 +1166,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::ResizeVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "resize_vm is unsupported in core-managed mode",
+            ));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -909,6 +1206,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::AttachVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "attach_volume is unsupported in core-managed mode",
+            ));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -955,6 +1258,12 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::DetachVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "detach_volume is unsupported in core-managed mode",
+            ));
+        }
+
         let inner = req.into_inner();
         let meta = inner
             .meta

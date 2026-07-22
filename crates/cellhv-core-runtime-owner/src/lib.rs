@@ -136,6 +136,13 @@ impl CoreRuntimeOwner {
         })
     }
 
+    pub fn authority(&self) -> cellhv_core_operations::AuthorityHandle {
+        self.authority
+            .as_ref()
+            .expect("authority is present before shutdown")
+            .clone()
+    }
+
     pub fn socket_path(&self) -> &Path {
         self.listener
             .as_ref()

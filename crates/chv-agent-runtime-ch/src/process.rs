@@ -1989,9 +1989,6 @@ mod tests {
         .with_runtime_root(temp.path().to_path_buf());
 
         let r = handle.revalidate();
-        if let Err(e) = &r {
-            println!("ERR: {:?}", e);
-        }
         assert!(r.is_ok());
 
         fs::write(pid_path.join("stat"), b"1234 (bash) S 1 1 1 0 -1 4210944 1 0 0 0 0 0 0 0 20 0 1 0 99999 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();

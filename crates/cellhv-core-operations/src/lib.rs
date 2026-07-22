@@ -602,17 +602,6 @@ fn expected_next(version: ResourceVersion) -> Result<ResourceVersion> {
         .map_err(|error| OperationServiceError::Invalid(error.to_string()))
 }
 
-fn require_vm(store: &CoreStore, vm_id: &VmId, expected: ResourceVersion) -> Result<VmDefinition> {
-    let current = store.get_vm(vm_id)?;
-    if current.resource_version != expected {
-        return Err(OperationServiceError::Invalid(format!(
-            "expected version {expected:?}, found {:?}",
-            current.resource_version
-        )));
-    }
-    Ok(current)
-}
-
 fn power_desired(
     store: &CoreStore,
     vm_id: &VmId,

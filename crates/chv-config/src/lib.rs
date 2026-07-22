@@ -344,6 +344,7 @@ pub enum AgentAuthorityMode {
     #[default]
     Legacy,
     CoreNative,
+    CoreManaged,
 }
 
 #[derive(Debug, Clone, Deserialize)]
