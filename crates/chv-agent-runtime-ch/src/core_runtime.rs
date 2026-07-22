@@ -72,7 +72,7 @@ impl CoreVmRuntime for CloudHypervisorCoreRuntime {
                 self.adapter.delete_vm(operation.operation.vm_id.as_str(), Some(op_id)).await.map_err(|_| RuntimeFailure::Internal)?;
                 Ok(None)
             }
-            OperationKind::UpdateVm => {
+            OperationKind::UpdateVm | OperationKind::AttachVolume | OperationKind::DetachVolume | OperationKind::AttachNetwork | OperationKind::DetachNetwork => {
                 let _def: VmDefinition = serde_json::from_value(operation.request.clone())
                     .map_err(|_| RuntimeFailure::InvalidRequest)?;
                 

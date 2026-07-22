@@ -467,7 +467,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.nwd_socket.clone(),
         Some(config.cache_path.clone()),
         config.runtime_dir.clone(),
-        None,
     );
     // Share the migration registry with the reconciler so drain evacuation
     // can gate on in-flight migrations (see reconcile.rs Draining arm).

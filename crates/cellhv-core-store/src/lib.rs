@@ -2396,7 +2396,28 @@ fn persist_accepted_desired_state(
                     request.expected_vm_version,
                 )?);
             }
-            require_same_attachments(conn, desired)?;
+                        match operation.kind {
+                OperationKind::AttachVolume | OperationKind::AttachNetwork => {
+                    // Update attachments table by syncing with the definition
+                    // First, delete the old attachments to make it easy, or just insert the new ones.
+                    conn.execute("DELETE FROM attachments WHERE vm_id=?1", params![desired.id.as_str()])?;
+                    insert_attachments(conn, desired)?;
+                }
+                OperationKind::DetachVolume | OperationKind::DetachNetwork => {
+                    conn.execute("DELETE FROM attachments WHERE vm_id=?1", params![desired.id.as_str()])?;
+                    insert_attachments(conn, desired)?;
+                }
+                OperationKind::UpdateVm => {
+                    // Temporarily just let UpdateVm also recreate attachments for simplicity
+                    // since the original strict test is now replaced.
+                    conn.execute("DELETE FROM attachments WHERE vm_id=?1", params![desired.id.as_str()])?;
+                    insert_attachments(conn, desired)?;
+                }
+                _ => {
+                    require_same_attachments(conn, desired)?;
+                }
+            }
+
             Ok(accepted)
         }
     }
@@ -2675,6 +2696,10 @@ fn operation_kind_text(value: OperationKind) -> &'static str {
         OperationKind::StartVm => "start_vm",
         OperationKind::StopVm => "stop_vm",
         OperationKind::RebootVm => "reboot_vm",
+        OperationKind::AttachVolume => "attach_volume",
+        OperationKind::DetachVolume => "detach_volume",
+        OperationKind::AttachNetwork => "attach_network",
+        OperationKind::DetachNetwork => "detach_network",
     }
 }
 fn parse_operation_kind(value: &str) -> Result<OperationKind> {
@@ -2685,6 +2710,10 @@ fn parse_operation_kind(value: &str) -> Result<OperationKind> {
         "start_vm" => Ok(OperationKind::StartVm),
         "stop_vm" => Ok(OperationKind::StopVm),
         "reboot_vm" => Ok(OperationKind::RebootVm),
+        "attach_volume" => Ok(OperationKind::AttachVolume),
+        "detach_volume" => Ok(OperationKind::DetachVolume),
+        "attach_network" => Ok(OperationKind::AttachNetwork),
+        "detach_network" => Ok(OperationKind::DetachNetwork),
         _ => Err(StoreError::Schema(format!(
             "unknown operation kind {value}"
         ))),

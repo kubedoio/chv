@@ -171,6 +171,10 @@ pub enum OperationKind {
     StartVm,
     StopVm,
     RebootVm,
+    AttachVolume,
+    DetachVolume,
+    AttachNetwork,
+    DetachNetwork,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

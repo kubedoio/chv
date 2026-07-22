@@ -32,7 +32,7 @@ CREATE TABLE attachments (
 
 CREATE TABLE operations (
     operation_id TEXT PRIMARY KEY NOT NULL CHECK (length(trim(operation_id)) > 0),
-    kind TEXT NOT NULL CHECK (kind IN ('create_vm', 'update_vm', 'delete_vm', 'start_vm', 'stop_vm', 'reboot_vm')),
+    kind TEXT NOT NULL CHECK (kind IN ('create_vm', 'update_vm', 'delete_vm', 'start_vm', 'stop_vm', 'reboot_vm', 'attach_volume', 'detach_volume', 'attach_network', 'detach_network')),
     vm_id TEXT NOT NULL REFERENCES vms(vm_id) ON DELETE RESTRICT,
     request_fingerprint TEXT NOT NULL CHECK (length(trim(request_fingerprint)) > 0),
     request_json TEXT NOT NULL CHECK (json_valid(request_json)),
