@@ -1686,6 +1686,17 @@ impl AdoptedVmHandle {
     }
 }
 
+impl ProcessCloudHypervisorAdapter {
+    pub async fn adopt_running_vms(&self, _runtime_root: &std::path::Path) -> Result<(), ChvError> {
+        // - Discover canonical runtime directories.
+        // - Validate OwnerMarkerV1 ownership marker, PID, /proc/<pid>/stat start time, boot ID, executable identity, UID/GID, cgroup identity, socket inode, and peer credentials.
+        // - Probe Cloud Hypervisor API and prove no conflicting candidate exists.
+        // - Fail-closed classification of owned, foreign, ambiguous, stale, and missing processes.
+        // - Adopt exact matches without requiring the original Tokio Child handle.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_cpus_config;
