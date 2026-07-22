@@ -1645,8 +1645,13 @@ impl AdoptedVmHandle {
                 reason: "process exited".to_string(),
             })?;
 
-        if current_identity.start_ticks != self.identity.start_ticks
+        if current_identity.pid != self.identity.pid
+            || current_identity.start_ticks != self.identity.start_ticks
             || current_identity.boot_id != self.identity.boot_id
+            || current_identity.executable != self.identity.executable
+            || current_identity.uid != self.identity.uid
+            || current_identity.gid != self.identity.gid
+            || current_identity.cgroup_fingerprint != self.identity.cgroup_fingerprint
         {
             return Err(ChvError::Internal {
                 reason: "process identity changed".to_string(),
