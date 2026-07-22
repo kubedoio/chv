@@ -1,7 +1,6 @@
 # CellHV Core Native Runtime Owner
 
-Status: Phase B native-only slice; wired only by `cmd/chv-agent`'s explicit,
-default-off `core-native` authority mode.
+Status: Composed in production (Core M1), with `JournalExecutor` and `CoreVmRuntime` dependencies injected. Real KVM evidence is T3; exercised on Linux without KVM or with fake adapters in tests.
 
 `cellhv-core-runtime-owner::CoreRuntimeOwner` is the bounded composition root
 for a fresh native Core database and its later native restart. It consumes an
@@ -11,11 +10,10 @@ NodeCache migration checksum, or an imported activation kind. This fail-closed
 restriction remains until process-wide NodeCache facade authorization is
 implemented.
 
-For an eligible store the owner starts exactly one `AuthorityActor`, passes a
+For an eligible store the owner starts exactly one `AuthorityActor`, one `JournalExecutor` with its `CoreVmRuntime` dependency, passes a
 clone of that actor's bounded `AuthorityHandle` to exactly one
 `CoreApiListener`, and retains the opaque `RuntimeAuthorityGuard`. It creates no
-VM runtime, provider attachment, compatibility service, database, or operation
-engine.
+provider attachment, compatibility service, or standalone database.
 
 Explicit shutdown is ordered:
 

@@ -2399,36 +2399,7 @@ fn persist_accepted_desired_state(
                     request.expected_vm_version,
                 )?);
             }
-            match operation.kind {
-                OperationKind::AttachVolume | OperationKind::AttachNetwork => {
-                    // Update attachments table by syncing with the definition
-                    // First, delete the old attachments to make it easy, or just insert the new ones.
-                    conn.execute(
-                        "DELETE FROM attachments WHERE vm_id=?1",
-                        params![desired.id.as_str()],
-                    )?;
-                    insert_attachments(conn, desired)?;
-                }
-                OperationKind::DetachVolume | OperationKind::DetachNetwork => {
-                    conn.execute(
-                        "DELETE FROM attachments WHERE vm_id=?1",
-                        params![desired.id.as_str()],
-                    )?;
-                    insert_attachments(conn, desired)?;
-                }
-                OperationKind::UpdateVm => {
-                    // Temporarily just let UpdateVm also recreate attachments for simplicity
-                    // since the original strict test is now replaced.
-                    conn.execute(
-                        "DELETE FROM attachments WHERE vm_id=?1",
-                        params![desired.id.as_str()],
-                    )?;
-                    insert_attachments(conn, desired)?;
-                }
-                _ => {
-                    require_same_attachments(conn, desired)?;
-                }
-            }
+            require_same_attachments(conn, desired)?;
 
             Ok(accepted)
         }

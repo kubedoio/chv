@@ -19,11 +19,21 @@ use thiserror::Error;
 pub enum RuntimeOwnerError {
     #[error("Core runtime composition is not native-only: {0}")]
     Ineligible(&'static str),
-    #[error(transparent)]
-    Actor(#[from] AuthorityActorError),
+    #[error("Core runtime actor startup failed: {0}")]
+    ActorStartup(#[from] AuthorityActorError),
+    #[error("Core runtime executor startup failed: {primary}; cleanup failures: {cleanup:?}")]
+    ExecutorStartup {
+        primary: cellhv_core_executor::ExecutorError,
+        cleanup: Vec<RuntimeStageFailure>,
+    },
     #[error("Core runtime listener startup failed: {primary}; cleanup failures: {cleanup:?}")]
-    Startup {
+    ListenerStartup {
         primary: ListenerError,
+        cleanup: Vec<RuntimeStageFailure>,
+    },
+    #[error("Core runtime recovery startup failed: {primary}; cleanup failures: {cleanup:?}")]
+    RecoveryStartup {
+        primary: String,
         cleanup: Vec<RuntimeStageFailure>,
     },
     #[error("Core runtime shutdown failures: {0:?}")]
@@ -34,6 +44,10 @@ pub enum RuntimeOwnerError {
 pub enum RuntimeStageFailure {
     #[error("listener: {0}")]
     Listener(ListenerError),
+    #[error("executor: {0}")]
+    Executor(cellhv_core_executor::ExecutorError),
+    #[error("recovery: {0}")]
+    Recovery(String),
     #[error("actor shutdown: {0}")]
     ActorShutdown(AuthorityActorError),
     #[error("actor join: {0}")]
@@ -73,7 +87,7 @@ impl CoreRuntimeOwner {
             queue_capacity,
         ) {
             Ok(e) => e,
-            Err(_) => {
+            Err(executor_err) => {
                 let mut cleanup = Vec::new();
                 if let Err(error) = authority.shutdown().await {
                     cleanup.push(RuntimeStageFailure::ActorShutdown(error));
@@ -82,8 +96,8 @@ impl CoreRuntimeOwner {
                 if let Err(error) = actor_join.join().await {
                     cleanup.push(RuntimeStageFailure::ActorJoin(error));
                 }
-                return Err(RuntimeOwnerError::Startup {
-                    primary: ListenerError::DrainTimeout(Duration::from_secs(0)), // Hack for error match
+                return Err(RuntimeOwnerError::ExecutorStartup {
+                    primary: executor_err,
                     cleanup,
                 });
             }
@@ -105,7 +119,7 @@ impl CoreRuntimeOwner {
                 if let Err(error) = actor_join.join().await {
                     cleanup.push(RuntimeStageFailure::ActorJoin(error));
                 }
-                return Err(RuntimeOwnerError::Startup {
+                return Err(RuntimeOwnerError::ListenerStartup {
                     primary: error,
                     cleanup,
                 });
@@ -325,7 +339,7 @@ mod tests {
                 Duration::from_secs(1)
             )
             .await,
-            Err(RuntimeOwnerError::Actor(
+            Err(RuntimeOwnerError::ActorStartup(
                 AuthorityActorError::InvalidCapacity
             ))
         ));
@@ -348,7 +362,7 @@ mod tests {
                 Duration::from_secs(1)
             )
             .await,
-            Err(RuntimeOwnerError::Startup { .. })
+            Err(RuntimeOwnerError::ListenerStartup { .. })
         ));
         assert_eq!(std::fs::read(&socket).unwrap(), b"foreign");
         drop(StartupTransaction::begin(&paths).unwrap());

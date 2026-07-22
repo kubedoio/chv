@@ -1,11 +1,9 @@
 # CellHV Core Journal Executor
 
-**Status:** Implemented but deliberately unwired  
+**Status:** Composed in production (Core M1). Real KVM evidence is T3; exercised on Linux without KVM or with fake adapters in tests.  
 **Scope:** Runtime-neutral execution boundary after durable operation acceptance
 
-`cellhv-core-executor` consumes the executor-only `ExecutionHandle`. It has no
-Cloud Hypervisor, provider, control-plane, or transport dependency and no
-production runtime implementation. `chv-agent` does not construct it yet.
+`cellhv-core-executor` consumes the executor-only `ExecutionHandle` and composes `CoreVmRuntime`.
 
 ## Invariants
 
