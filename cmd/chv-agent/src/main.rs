@@ -42,9 +42,13 @@ async fn start_core_native(
     };
     let activated = cellhv_core_startup::StartupTransaction::begin(&paths)?
         .activate_native_only(configured_seed)?;
-    let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> = Arc::new(chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
-    let runtime = Arc::new(chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime::new(adapter));
-    Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(runtime, 
+    let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> = Arc::new(
+        chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter::new(&config.chv_binary_path),
+    );
+    let runtime =
+        Arc::new(chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime::new(adapter));
+    Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
+        runtime,
         activated,
         &config.core_api_socket_path,
         128,

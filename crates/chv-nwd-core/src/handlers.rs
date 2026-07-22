@@ -343,11 +343,17 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     tracing::error!(tap = %tap_handle, error = %e, "eBPF policy load failed — refusing NIC attach (default-deny)");
                     self.ebpf_load_failures.fetch_add(1, Ordering::Relaxed);
                     // Detach the NIC we just attached to avoid dangling resources
-                    let _ = self.executor.detach_vm_nic(&nic.nic_id, chv_common::AttachmentOwnership {
-                        vm_id: nic.vm_id.clone(),
-                        operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
-                        requester: None,
-                    }).await;
+                    let _ = self
+                        .executor
+                        .detach_vm_nic(
+                            &nic.nic_id,
+                            chv_common::AttachmentOwnership {
+                                vm_id: nic.vm_id.clone(),
+                                operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                                requester: None,
+                            },
+                        )
+                        .await;
                     let err = ChvError::Internal {
                         reason: format!(
                             "eBPF policy program failed to load on tap {tap_handle}: {e}"
@@ -363,11 +369,17 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     tracing::error!(bridge = %bridge_name, error = %e, "eBPF ingress load failed — refusing NIC attach (default-deny)");
                     self.ebpf_load_failures.fetch_add(1, Ordering::Relaxed);
                     // Detach the NIC we just attached to avoid dangling resources
-                    let _ = self.executor.detach_vm_nic(&nic.nic_id, chv_common::AttachmentOwnership {
-                        vm_id: nic.vm_id.clone(),
-                        operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
-                        requester: None,
-                    }).await;
+                    let _ = self
+                        .executor
+                        .detach_vm_nic(
+                            &nic.nic_id,
+                            chv_common::AttachmentOwnership {
+                                vm_id: nic.vm_id.clone(),
+                                operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                                requester: None,
+                            },
+                        )
+                        .await;
                     let err = ChvError::Internal {
                         reason: format!(
                             "eBPF ingress program failed to load on bridge {bridge_name}: {e}"
@@ -406,11 +418,18 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             .map(|m| operation_span(&m.operation_id))
             .unwrap_or_else(|| operation_span(""));
 
-        match self.executor.detach_vm_nic(&req.nic_id, chv_common::AttachmentOwnership {
-            vm_id: req.vm_id.clone(),
-            operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
-            requester: None,
-        }).await {
+        match self
+            .executor
+            .detach_vm_nic(
+                &req.nic_id,
+                chv_common::AttachmentOwnership {
+                    vm_id: req.vm_id.clone(),
+                    operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                    requester: None,
+                },
+            )
+            .await
+        {
             Ok(()) => {
                 // Clean up FDB entries for this VM's MAC across peer VTEPs
                 if !req.network_id.is_empty() && !req.vm_mac.is_empty() {

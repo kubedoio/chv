@@ -1,10 +1,10 @@
 pub mod adapter;
 pub mod ch_api;
+pub mod core_runtime;
 #[cfg(target_os = "linux")]
 // Phase C deliberately compiles this observer without production composition.
 #[allow(dead_code)]
 pub(crate) mod linux_observation;
-pub mod core_runtime;
 pub mod mock;
 pub mod process;
 

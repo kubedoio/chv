@@ -285,7 +285,11 @@ mod tests {
             unimplemented!()
         }
 
-        async fn detach_vm_nic(&self, _nic_id: &str, _ownership: chv_common::AttachmentOwnership) -> Result<(), ChvError> {
+        async fn detach_vm_nic(
+            &self,
+            _nic_id: &str,
+            _ownership: chv_common::AttachmentOwnership,
+        ) -> Result<(), ChvError> {
             unimplemented!()
         }
 

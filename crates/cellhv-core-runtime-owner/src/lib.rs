@@ -65,8 +65,13 @@ impl CoreRuntimeOwner {
         validate_native_only(kind, &provenance)?;
         let (authority, actor_join) = AuthorityActor::spawn(service, queue_capacity)?;
         let execution = authority.execution_handle();
-        
-        let executor = match cellhv_core_executor::JournalExecutor::start(execution, runtime, 16, queue_capacity) {
+
+        let executor = match cellhv_core_executor::JournalExecutor::start(
+            execution,
+            runtime,
+            16,
+            queue_capacity,
+        ) {
             Ok(e) => e,
             Err(_) => {
                 let mut cleanup = Vec::new();
@@ -145,8 +150,11 @@ impl CoreRuntimeOwner {
         {
             failures.push(RuntimeStageFailure::Listener(error));
         }
-        
-        let executor = self.executor.take().expect("executor is present before shutdown");
+
+        let executor = self
+            .executor
+            .take()
+            .expect("executor is present before shutdown");
         drop(executor); // shutdown the executor before the actor
 
         let authority = self
@@ -259,7 +267,8 @@ mod tests {
         async fn execute(
             &self,
             _operation: cellhv_core_operations::OperationJournalEntry,
-        ) -> std::result::Result<Option<serde_json::Value>, cellhv_core_executor::RuntimeFailure> {
+        ) -> std::result::Result<Option<serde_json::Value>, cellhv_core_executor::RuntimeFailure>
+        {
             Ok(None)
         }
     }
@@ -289,9 +298,15 @@ mod tests {
             .activate(Some("native-host".to_owned()), None)
             .unwrap();
         assert_eq!(restarted.kind(), ActivationKind::Existing);
-        let owner = CoreRuntimeOwner::start(std::sync::Arc::new(DummyRuntime), restarted, &socket, 16, Duration::from_secs(1))
-            .await
-            .unwrap();
+        let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(DummyRuntime),
+            restarted,
+            &socket,
+            16,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert!(request(&socket, "/v1/host").await.contains("native-host"));
         owner.shutdown().await.unwrap();
     }
@@ -390,7 +405,14 @@ mod tests {
             .activate(Some("legacy-host".to_owned()), None)
             .unwrap();
         assert!(matches!(
-            CoreRuntimeOwner::start(std::sync::Arc::new(DummyRuntime), activated, &socket, 16, Duration::from_secs(1)).await,
+            CoreRuntimeOwner::start(
+                std::sync::Arc::new(DummyRuntime),
+                activated,
+                &socket,
+                16,
+                Duration::from_secs(1)
+            )
+            .await,
             Err(RuntimeOwnerError::Ineligible(_))
         ));
         assert!(!socket.exists());
@@ -421,7 +443,14 @@ mod tests {
             .unwrap();
         assert!(activated.provenance().has_any_migration_state());
         assert!(matches!(
-            CoreRuntimeOwner::start(std::sync::Arc::new(DummyRuntime), activated, &socket, 16, Duration::from_secs(1)).await,
+            CoreRuntimeOwner::start(
+                std::sync::Arc::new(DummyRuntime),
+                activated,
+                &socket,
+                16,
+                Duration::from_secs(1)
+            )
+            .await,
             Err(RuntimeOwnerError::Ineligible(
                 "durable migration state is present"
             ))

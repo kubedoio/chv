@@ -524,11 +524,16 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         if !updated {
             if let Err(e) = self
                 .backend
-                .detach(&req.volume_id, &req.attachment_handle, chv_common::AttachmentOwnership {
-                    vm_id: req.vm_id.clone(),
-                    operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
-                    requester: None,
-                }, false)
+                .detach(
+                    &req.volume_id,
+                    &req.attachment_handle,
+                    chv_common::AttachmentOwnership {
+                        vm_id: req.vm_id.clone(),
+                        operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                        requester: None,
+                    },
+                    false,
+                )
                 .await
             {
                 tracing::warn!(
@@ -586,12 +591,16 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         if let Some(s) = session {
             if let Err(e) = self
                 .backend
-                .detach(&req.volume_id, &s.attachment_handle, chv_common::AttachmentOwnership {
-                    vm_id: req.vm_id.clone(),
-                    operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
-                    requester: None,
-                },
-                req.force)
+                .detach(
+                    &req.volume_id,
+                    &s.attachment_handle,
+                    chv_common::AttachmentOwnership {
+                        vm_id: req.vm_id.clone(),
+                        operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                        requester: None,
+                    },
+                    req.force,
+                )
                 .await
             {
                 if !req.force {
@@ -698,11 +707,16 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
 
         if let Err(e) = self
             .backend
-            .prepare_snapshot(&s.volume_id, &s.attachment_handle, chv_common::AttachmentOwnership {
-                vm_id: s.vm_id.clone().unwrap_or_default(),
-                operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
-                requester: None,
-            }, &req.snapshot_name)
+            .prepare_snapshot(
+                &s.volume_id,
+                &s.attachment_handle,
+                chv_common::AttachmentOwnership {
+                    vm_id: s.vm_id.clone().unwrap_or_default(),
+                    operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                    requester: None,
+                },
+                &req.snapshot_name,
+            )
             .await
         {
             return Ok(Response::new(e.to_proto_result()));
@@ -736,11 +750,16 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
 
         if let Err(e) = self
             .backend
-            .prepare_clone(&s.volume_id, &s.attachment_handle, chv_common::AttachmentOwnership {
-                vm_id: s.vm_id.clone().unwrap_or_default(),
-                operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
-                requester: None,
-            }, &req.clone_name)
+            .prepare_clone(
+                &s.volume_id,
+                &s.attachment_handle,
+                chv_common::AttachmentOwnership {
+                    vm_id: s.vm_id.clone().unwrap_or_default(),
+                    operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                    requester: None,
+                },
+                &req.clone_name,
+            )
             .await
         {
             return Ok(Response::new(e.to_proto_result()));

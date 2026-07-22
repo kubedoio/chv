@@ -110,7 +110,10 @@ impl AuthorityHandle {
             .send(Request::PersistObservedVmState(vm_id, observed, reply))
             .await
             .map_err(|_| AuthorityActorError::Unavailable)?;
-        receive.await.map_err(|_| AuthorityActorError::Unavailable)?.map_err(AuthorityActorError::Service)
+        receive
+            .await
+            .map_err(|_| AuthorityActorError::Unavailable)?
+            .map_err(AuthorityActorError::Service)
     }
 
     pub async fn host(&self) -> Result<HostRecord> {
@@ -261,9 +264,9 @@ impl AuthorityActor {
                         Request::Host(reply) => {
                             let _ = reply.send(service.host());
                         }
-                Request::PersistObservedVmState(vm_id, observed, reply) => {
-                    let _ = reply.send(service.persist_observed_vm_state(&vm_id, observed));
-                }
+                        Request::PersistObservedVmState(vm_id, observed, reply) => {
+                            let _ = reply.send(service.persist_observed_vm_state(&vm_id, observed));
+                        }
 
                         Request::RestartOperations(reply) => {
                             let _ = reply.send(service.restart_operations());

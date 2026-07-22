@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
-use chv_errors::ChvError;
 use chv_common::AttachmentOwnership;
+use chv_errors::ChvError;
 
 #[derive(Debug, Clone)]
 pub struct VolumeExport {
@@ -231,7 +231,9 @@ impl StorageBackend for Box<dyn StorageBackend> {
         ownership: AttachmentOwnership,
         clone_name: &str,
     ) -> Result<(), ChvError> {
-        (**self).prepare_clone(volume_id, handle, ownership, clone_name).await
+        (**self)
+            .prepare_clone(volume_id, handle, ownership, clone_name)
+            .await
     }
 
     async fn restore_snapshot(

@@ -55,7 +55,10 @@ impl AgentServer {
         }
     }
 
-    pub fn with_core_authority(mut self, authority: cellhv_core_operations::AuthorityHandle) -> Self {
+    pub fn with_core_authority(
+        mut self,
+        authority: cellhv_core_operations::AuthorityHandle,
+    ) -> Self {
         self.core_authority = Some(authority);
         self
     }

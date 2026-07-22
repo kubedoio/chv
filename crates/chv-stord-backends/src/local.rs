@@ -422,7 +422,10 @@ impl StorageBackend for LocalFileBackend {
     ) -> Result<(), ChvError> {
         let vm_id = &ownership.vm_id;
         if vm_id.is_empty() {
-            return Err(ChvError::InvalidArgument { field: "vm_id".to_string(), reason: "missing vm_id for detach".to_string() });
+            return Err(ChvError::InvalidArgument {
+                field: "vm_id".to_string(),
+                reason: "missing vm_id for detach".to_string(),
+            });
         }
         let prefix = format!("local-{}-", volume_id);
         if !handle.starts_with(&prefix) {

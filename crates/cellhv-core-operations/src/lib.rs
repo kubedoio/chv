@@ -53,16 +53,40 @@ impl AttemptToken {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MutationCommand {
-    CreateVm { definition: VmDefinition },
-    UpdateVm { definition: VmDefinition },
-    DeleteVm { vm_id: VmId },
-    StartVm { vm_id: VmId },
-    StopVm { vm_id: VmId },
-    RebootVm { vm_id: VmId },
-    AttachVolume { vm_id: VmId, attachment: cellhv_core_types::StorageAttachmentRef },
-    DetachVolume { vm_id: VmId, attachment_id: String },
-    AttachNetwork { vm_id: VmId, attachment: cellhv_core_types::NetworkAttachmentRef },
-    DetachNetwork { vm_id: VmId, attachment_id: String },
+    CreateVm {
+        definition: VmDefinition,
+    },
+    UpdateVm {
+        definition: VmDefinition,
+    },
+    DeleteVm {
+        vm_id: VmId,
+    },
+    StartVm {
+        vm_id: VmId,
+    },
+    StopVm {
+        vm_id: VmId,
+    },
+    RebootVm {
+        vm_id: VmId,
+    },
+    AttachVolume {
+        vm_id: VmId,
+        attachment: cellhv_core_types::StorageAttachmentRef,
+    },
+    DetachVolume {
+        vm_id: VmId,
+        attachment_id: String,
+    },
+    AttachNetwork {
+        vm_id: VmId,
+        attachment: cellhv_core_types::NetworkAttachmentRef,
+    },
+    DetachNetwork {
+        vm_id: VmId,
+        attachment_id: String,
+    },
 }
 
 impl MutationCommand {
@@ -497,20 +521,30 @@ impl OperationService {
                 expected,
                 RequestedPowerState::Stopped,
             )?)),
-                        MutationCommand::AttachVolume { vm_id, attachment } => {
+            MutationCommand::AttachVolume { vm_id, attachment } => {
                 let mut current = require_vm(&self.store, vm_id, expected)?;
                 current.storage.push(attachment.clone());
-                current.validate().map_err(|e| OperationServiceError::Invalid(e.to_string()))?;
+                current
+                    .validate()
+                    .map_err(|e| OperationServiceError::Invalid(e.to_string()))?;
                 current.resource_version = expected_next(expected)?;
 
                 Ok(Some(current))
             }
-            MutationCommand::DetachVolume { vm_id, attachment_id } => {
+            MutationCommand::DetachVolume {
+                vm_id,
+                attachment_id,
+            } => {
                 let mut current = require_vm(&self.store, vm_id, expected)?;
                 let len = current.storage.len();
-                current.storage.retain(|x| x.attachment_id != *attachment_id);
+                current
+                    .storage
+                    .retain(|x| x.attachment_id != *attachment_id);
                 if current.storage.len() == len {
-                    return Err(OperationServiceError::Invalid(format!("storage attachment {} not found", attachment_id)));
+                    return Err(OperationServiceError::Invalid(format!(
+                        "storage attachment {} not found",
+                        attachment_id
+                    )));
                 }
                 current.resource_version = expected_next(expected)?;
 
@@ -521,19 +555,29 @@ impl OperationService {
             MutationCommand::AttachNetwork { vm_id, attachment } => {
                 let mut current = require_vm(&self.store, vm_id, expected)?;
                 current.networks.push(attachment.clone());
-                current.validate().map_err(|e| OperationServiceError::Invalid(e.to_string()))?;
+                current
+                    .validate()
+                    .map_err(|e| OperationServiceError::Invalid(e.to_string()))?;
                 current.resource_version = expected_next(expected)?;
 
                 current.resource_version = expected_next(expected)?;
 
                 Ok(Some(current))
             }
-            MutationCommand::DetachNetwork { vm_id, attachment_id } => {
+            MutationCommand::DetachNetwork {
+                vm_id,
+                attachment_id,
+            } => {
                 let mut current = require_vm(&self.store, vm_id, expected)?;
                 let len = current.networks.len();
-                current.networks.retain(|x| x.attachment_id != *attachment_id);
+                current
+                    .networks
+                    .retain(|x| x.attachment_id != *attachment_id);
                 if current.networks.len() == len {
-                    return Err(OperationServiceError::Invalid(format!("network attachment {} not found", attachment_id)));
+                    return Err(OperationServiceError::Invalid(format!(
+                        "network attachment {} not found",
+                        attachment_id
+                    )));
                 }
                 current.resource_version = expected_next(expected)?;
 
@@ -541,7 +585,7 @@ impl OperationService {
 
                 Ok(Some(current))
             }
-MutationCommand::RebootVm { vm_id } => {
+            MutationCommand::RebootVm { vm_id } => {
                 let current =
                     power_desired(&self.store, vm_id, expected, RequestedPowerState::Running)?;
                 Ok(Some(current))
@@ -586,11 +630,7 @@ fn expected_next(version: ResourceVersion) -> Result<ResourceVersion> {
         .map_err(|error| OperationServiceError::Invalid(error.to_string()))
 }
 
-fn require_vm(
-    store: &CoreStore,
-    vm_id: &VmId,
-    expected: ResourceVersion,
-) -> Result<VmDefinition> {
+fn require_vm(store: &CoreStore, vm_id: &VmId, expected: ResourceVersion) -> Result<VmDefinition> {
     let current = store.get_vm(vm_id)?;
     if current.resource_version != expected {
         return Err(OperationServiceError::Invalid(format!(
@@ -952,8 +992,17 @@ mod tests {
     #[test]
     fn attachment_operations_can_add_and_remove() {
         let (_dir, _path, mut service) = service();
-        service.submit(submission(MutationCommand::CreateVm { definition: vm("a") }, "op-1", "create", 1)).unwrap();
-        
+        service
+            .submit(submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "op-1",
+                "create",
+                1,
+            ))
+            .unwrap();
+
         let attach_cmd = MutationCommand::AttachNetwork {
             vm_id: cellhv_core_types::VmId::new("a").unwrap(),
             attachment: cellhv_core_types::NetworkAttachmentRef {
@@ -962,13 +1011,17 @@ mod tests {
                 mac_address: None,
             },
         };
-        service.submit(submission(attach_cmd, "op-2", "attach", 1)).unwrap();
-        
+        service
+            .submit(submission(attach_cmd, "op-2", "attach", 1))
+            .unwrap();
+
         let detach_cmd = MutationCommand::DetachNetwork {
             vm_id: cellhv_core_types::VmId::new("a").unwrap(),
             attachment_id: "nic-1".to_owned(),
         };
-        service.submit(submission(detach_cmd, "op-3", "detach", 2)).unwrap();
+        service
+            .submit(submission(detach_cmd, "op-3", "detach", 2))
+            .unwrap();
     }
 
     #[test]
