@@ -112,7 +112,7 @@
       "id": "upstream-source-audit",
       "kind": "report",
       "path": "docs/analysis/cellhv-openstack-discovery-source-audit.md",
-      "sha256": "eebd2912e69bab3ef185e55e6cd53d8d8b8374b0efcf28ec2a83a03721ab0db3",
+      "sha256": "f0e17dfdfc1d127155c61a068c718bbe3ce4e6a7c34daf9b4e96946b024bfa91",
       "redacted": true
     },
     {
