@@ -881,6 +881,23 @@ impl CoreStore {
 
     /// Appends evidence about one fenced running attempt without resolving it.
     #[doc(hidden)]
+    pub fn persist_observed_vm_state(
+        &mut self,
+        vm_id: &VmId,
+        observed: cellhv_core_types::ObservedPowerState,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE vms SET observed_power_state=?1, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE vm_id=?2 AND deleted_at IS NULL",
+            rusqlite::params![observed_text(observed), vm_id.as_str()],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::NotFound { kind: "vm", id: vm_id.as_str().to_string() });
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn record_recovery_assessment(
         &mut self,
         id: &OperationId,

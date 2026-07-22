@@ -7,11 +7,13 @@ publish = false
 
 [dependencies]
 cellhv-core-api = { path = "../cellhv-core-api" }
+cellhv-core-executor = { version = "0.1.0", path = "../cellhv-core-executor" }
 cellhv-core-operations = { path = "../cellhv-core-operations" }
 cellhv-core-startup = { path = "../cellhv-core-startup" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+async-trait.workspace = true
 cellhv-core-types = { path = "../cellhv-core-types" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

@@ -19,6 +19,8 @@ nix = { version = "0.29", features = ["term", "fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+cellhv-core-executor = { version = "0.1.0", path = "../cellhv-core-executor" }
+cellhv-core-operations = { version = "0.1.0", path = "../cellhv-core-operations" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
