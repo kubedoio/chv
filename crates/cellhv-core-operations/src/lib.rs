@@ -268,6 +268,16 @@ impl OperationService {
         Ok(self.store.operation_entry(id)?)
     }
 
+    pub fn persist_observed_vm_state(
+        &mut self,
+        vm_id: &VmId,
+        observed: cellhv_core_types::ObservedPowerState,
+    ) -> Result<()> {
+        self.store
+            .persist_observed_vm_state(vm_id, observed)
+            .map_err(OperationServiceError::Store)
+    }
+
     pub fn host(&self) -> Result<HostRecord> {
         Ok(self.store.host()?)
     }

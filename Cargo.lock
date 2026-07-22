@@ -570,7 +570,9 @@ dependencies = [
 name = "cellhv-core-runtime-owner"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cellhv-core-api",
+ "cellhv-core-executor",
  "cellhv-core-operations",
  "cellhv-core-startup",
  "cellhv-core-types",
@@ -750,6 +752,8 @@ name = "chv-agent-runtime-ch"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "cellhv-core-executor",
+ "cellhv-core-operations",
  "cellhv-core-runtime-ownership",
  "cellhv-core-types",
  "chv-common",

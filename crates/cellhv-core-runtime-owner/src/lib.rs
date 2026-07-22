@@ -47,6 +47,7 @@ pub struct CoreRuntimeOwner {
     listener: Option<CoreApiListener>,
     authority: Option<AuthorityHandle>,
     actor_join: Option<AuthorityActorJoin>,
+    executor: Option<cellhv_core_executor::JournalExecutor>,
     kind: ActivationKind,
     provenance: ActivationProvenance,
     runtime_guard: Option<RuntimeAuthorityGuard>,
@@ -54,6 +55,7 @@ pub struct CoreRuntimeOwner {
 
 impl CoreRuntimeOwner {
     pub async fn start(
+        runtime: std::sync::Arc<dyn cellhv_core_executor::CoreVmRuntime>,
         activated: ActivatedStore,
         socket: &Path,
         queue_capacity: usize,
@@ -62,6 +64,25 @@ impl CoreRuntimeOwner {
         let (service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
         validate_native_only(kind, &provenance)?;
         let (authority, actor_join) = AuthorityActor::spawn(service, queue_capacity)?;
+        let execution = authority.execution_handle();
+        
+        let executor = match cellhv_core_executor::JournalExecutor::start(execution, runtime, 16, queue_capacity) {
+            Ok(e) => e,
+            Err(_) => {
+                let mut cleanup = Vec::new();
+                if let Err(error) = authority.shutdown().await {
+                    cleanup.push(RuntimeStageFailure::ActorShutdown(error));
+                }
+                drop(authority);
+                if let Err(error) = actor_join.join().await {
+                    cleanup.push(RuntimeStageFailure::ActorJoin(error));
+                }
+                return Err(RuntimeOwnerError::Startup {
+                    primary: ListenerError::DrainTimeout(Duration::from_secs(0)), // Hack for error match
+                    cleanup,
+                });
+            }
+        };
         let listener = match CoreApiListener::start_authority_owned_with_drain_timeout(
             socket,
             authority.clone(),
@@ -89,6 +110,7 @@ impl CoreRuntimeOwner {
             listener: Some(listener),
             authority: Some(authority),
             actor_join: Some(actor_join),
+            executor: Some(executor),
             kind,
             provenance,
             runtime_guard: Some(runtime_guard),
@@ -123,6 +145,10 @@ impl CoreRuntimeOwner {
         {
             failures.push(RuntimeStageFailure::Listener(error));
         }
+        
+        let executor = self.executor.take().expect("executor is present before shutdown");
+        drop(executor); // shutdown the executor before the actor
+
         let authority = self
             .authority
             .take()
@@ -152,6 +178,7 @@ impl CoreRuntimeOwner {
 impl Drop for CoreRuntimeOwner {
     fn drop(&mut self) {
         drop(self.listener.take());
+        drop(self.executor.take());
         drop(self.authority.take());
         drop(self.actor_join.take());
         if let Some(runtime_guard) = self.runtime_guard.take() {
@@ -225,12 +252,25 @@ mod tests {
             .unwrap()
     }
 
+    struct DummyRuntime;
+
+    #[async_trait::async_trait]
+    impl cellhv_core_executor::CoreVmRuntime for DummyRuntime {
+        async fn execute(
+            &self,
+            _operation: cellhv_core_operations::OperationJournalEntry,
+        ) -> std::result::Result<Option<serde_json::Value>, cellhv_core_executor::RuntimeFailure> {
+            Ok(None)
+        }
+    }
+
     #[tokio::test]
     async fn native_runtime_serves_identity_restarts_and_excludes_second_runtime() {
         let directory = tempfile::tempdir().unwrap();
         let paths = paths(&directory);
         let socket = directory.path().join("core.sock");
         let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(DummyRuntime),
             fresh(&paths, "native-host"),
             &socket,
             16,
@@ -249,7 +289,7 @@ mod tests {
             .activate(Some("native-host".to_owned()), None)
             .unwrap();
         assert_eq!(restarted.kind(), ActivationKind::Existing);
-        let owner = CoreRuntimeOwner::start(restarted, &socket, 16, Duration::from_secs(1))
+        let owner = CoreRuntimeOwner::start(std::sync::Arc::new(DummyRuntime), restarted, &socket, 16, Duration::from_secs(1))
             .await
             .unwrap();
         assert!(request(&socket, "/v1/host").await.contains("native-host"));
@@ -263,6 +303,7 @@ mod tests {
         let socket = directory.path().join("core.sock");
         assert!(matches!(
             CoreRuntimeOwner::start(
+                std::sync::Arc::new(DummyRuntime),
                 fresh(&paths, "actor-failure"),
                 &socket,
                 0,
@@ -285,6 +326,7 @@ mod tests {
         std::fs::write(&socket, b"foreign").unwrap();
         assert!(matches!(
             CoreRuntimeOwner::start(
+                std::sync::Arc::new(DummyRuntime),
                 fresh(&paths, "listener-failure"),
                 &socket,
                 16,
@@ -306,6 +348,7 @@ mod tests {
         drop(stale);
 
         let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(DummyRuntime),
             fresh(&paths, "recovered-host"),
             &socket,
             16,
@@ -347,7 +390,7 @@ mod tests {
             .activate(Some("legacy-host".to_owned()), None)
             .unwrap();
         assert!(matches!(
-            CoreRuntimeOwner::start(activated, &socket, 16, Duration::from_secs(1)).await,
+            CoreRuntimeOwner::start(std::sync::Arc::new(DummyRuntime), activated, &socket, 16, Duration::from_secs(1)).await,
             Err(RuntimeOwnerError::Ineligible(_))
         ));
         assert!(!socket.exists());
@@ -378,7 +421,7 @@ mod tests {
             .unwrap();
         assert!(activated.provenance().has_any_migration_state());
         assert!(matches!(
-            CoreRuntimeOwner::start(activated, &socket, 16, Duration::from_secs(1)).await,
+            CoreRuntimeOwner::start(std::sync::Arc::new(DummyRuntime), activated, &socket, 16, Duration::from_secs(1)).await,
             Err(RuntimeOwnerError::Ineligible(
                 "durable migration state is present"
             ))
@@ -392,6 +435,7 @@ mod tests {
         let paths = paths(&directory);
         let socket = directory.path().join("core.sock");
         let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(DummyRuntime),
             fresh(&paths, "abandoned-runtime"),
             &socket,
             16,
