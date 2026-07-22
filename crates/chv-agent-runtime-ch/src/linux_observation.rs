@@ -76,7 +76,7 @@ impl LinuxOwnershipObservation {
         Self::open_with_proc(runtime_root, Path::new("/proc"), expected_pid, expected_vm)
     }
 
-    fn open_with_proc(
+    pub(crate) fn open_with_proc(
         runtime_root: &Path,
         proc_root: &Path,
         expected_pid: u32,
@@ -95,7 +95,10 @@ impl LinuxOwnershipObservation {
         })
     }
 
-    fn process(&self, pid: u32) -> Result<Option<ProcessIdentity>, LinuxObservationError> {
+    pub(crate) fn process(
+        &self,
+        pid: u32,
+    ) -> Result<Option<ProcessIdentity>, LinuxObservationError> {
         let name = CString::new(pid.to_string()).map_err(|_| LinuxObservationError::UnsafePath)?;
         let dir = match openat_directory(self.proc_root.as_raw_fd(), &name) {
             Ok(file) => file,

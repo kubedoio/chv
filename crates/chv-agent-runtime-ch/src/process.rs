@@ -1590,6 +1590,102 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     }
 }
 
+use cellhv_core_runtime_ownership::ProcessIdentity;
+
+#[derive(Debug, Clone)]
+pub struct AdoptedVmHandle {
+    pub vm_id: String,
+    pub api_socket: std::path::PathBuf,
+    pub identity: ProcessIdentity,
+    pub proc_path: std::path::PathBuf,
+    pub runtime_root: std::path::PathBuf,
+}
+
+impl AdoptedVmHandle {
+    pub fn new(vm_id: String, api_socket: std::path::PathBuf, identity: ProcessIdentity) -> Self {
+        Self {
+            vm_id,
+            api_socket,
+            identity,
+            proc_path: std::path::PathBuf::from("/proc"),
+            runtime_root: std::path::PathBuf::from("/"),
+        }
+    }
+
+    pub fn with_runtime_root(mut self, path: std::path::PathBuf) -> Self {
+        self.runtime_root = path;
+        self
+    }
+
+    pub fn with_proc_path(mut self, path: std::path::PathBuf) -> Self {
+        self.proc_path = path;
+        self
+    }
+
+    pub fn revalidate(&self) -> Result<(), ChvError> {
+        let vm_id = cellhv_core_types::VmId::new(&self.vm_id).map_err(|_| ChvError::Internal {
+            reason: "invalid vm_id".to_string(),
+        })?;
+        let observer = crate::linux_observation::LinuxOwnershipObservation::open_with_proc(
+            &self.runtime_root,
+            &self.proc_path,
+            self.identity.pid,
+            vm_id,
+        )
+        .map_err(|e| ChvError::Internal {
+            reason: format!("failed to open observer: {}", e),
+        })?;
+
+        let current_identity = observer
+            .process(self.identity.pid)
+            .map_err(|e| ChvError::Internal {
+                reason: format!("failed to get process identity: {}", e),
+            })?
+            .ok_or_else(|| ChvError::Internal {
+                reason: "process exited".to_string(),
+            })?;
+
+        if current_identity.pid != self.identity.pid
+            || current_identity.start_ticks != self.identity.start_ticks
+            || current_identity.boot_id != self.identity.boot_id
+            || current_identity.executable != self.identity.executable
+            || current_identity.uid != self.identity.uid
+            || current_identity.gid != self.identity.gid
+            || current_identity.cgroup_fingerprint != self.identity.cgroup_fingerprint
+        {
+            return Err(ChvError::Internal {
+                reason: "process identity changed".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub async fn api_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<u16, ChvError> {
+        self.revalidate()?;
+        crate::ch_api::CloudHypervisorApiClient::default()
+            .request(&self.api_socket, method, path, body)
+            .await
+    }
+
+    pub async fn api_request_with_body(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), ChvError> {
+        self.revalidate()?;
+        crate::ch_api::CloudHypervisorApiClient::default()
+            .request_with_body(&self.api_socket, method, path, body)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_cpus_config;
@@ -1627,7 +1723,7 @@ mod tests {
 
     #[test]
     fn validate_vm_config_rejects_missing_kernel() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let chv_bin = dir.path().join("cloud-hypervisor");
         std::fs::write(&chv_bin, b"#!/bin/true").unwrap();
         let adapter = ProcessCloudHypervisorAdapter::new(chv_bin);
@@ -1649,7 +1745,7 @@ mod tests {
 
     #[test]
     fn validate_vm_config_accepts_existing_paths() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let chv_bin = dir.path().join("cloud-hypervisor");
         let kernel = dir.path().join("vmlinux");
         let disk = dir.path().join("root.img");
@@ -1706,7 +1802,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_vm_force_clears_console_cache() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let vm_dir = dir.path().join("vm-test");
         std::fs::create_dir_all(&vm_dir).unwrap();
 
@@ -1766,7 +1862,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_vm_graceful_clears_console_cache() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let vm_dir = dir.path().join("vm-test");
         std::fs::create_dir_all(&vm_dir).unwrap();
 
@@ -1833,5 +1929,72 @@ mod tests {
             post_size, 0,
             "console.log should be truncated on graceful stop"
         );
+    }
+
+    #[test]
+    fn adopted_vm_handle_revalidates_successfully() {
+        use super::AdoptedVmHandle;
+        use std::fs;
+
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let proc_path = temp.path().join("proc");
+        fs::create_dir(&proc_path).unwrap();
+
+        let pid = 1234;
+        let pid_path = proc_path.join(pid.to_string());
+        fs::create_dir(&pid_path).unwrap();
+
+        fs::write(pid_path.join("stat"), b"1234 (bash) S 1 1 1 0 -1 4210944 1 0 0 0 0 0 0 0 20 0 1 0 12345 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
+
+        fs::write(
+            pid_path.join("status"),
+            b"Uid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n",
+        )
+        .unwrap();
+        fs::write(pid_path.join("cgroup"), b"0::/test\n").unwrap();
+
+        let sys_kernel_random = proc_path.join("sys").join("kernel").join("random");
+        fs::create_dir_all(&sys_kernel_random).unwrap();
+        fs::write(
+            sys_kernel_random.join("boot_id"),
+            b"00000000-0000-4000-8000-000000000001\n",
+        )
+        .unwrap();
+
+        let fake_exe = temp.path().join("fake_exe");
+        fs::write(&fake_exe, b"").unwrap();
+        std::os::unix::fs::symlink(&fake_exe, pid_path.join("exe")).unwrap();
+
+        use std::os::unix::fs::MetadataExt;
+        let exe_meta = fs::metadata(&fake_exe).unwrap();
+        let identity = cellhv_core_runtime_ownership::ProcessIdentity {
+            pid,
+            start_ticks: 12345,
+            boot_id: "00000000-0000-4000-8000-000000000001".to_string(),
+            executable: cellhv_core_runtime_ownership::FileIdentity {
+                device: exe_meta.dev(),
+                inode: exe_meta.ino(),
+            },
+            uid: 1000,
+            gid: 1000,
+            cgroup_fingerprint: "/test".to_string(),
+        };
+
+        let handle = AdoptedVmHandle::new(
+            "vm-test".to_string(),
+            temp.path().join("vm.sock"),
+            identity.clone(),
+        )
+        .with_proc_path(proc_path.clone())
+        .with_runtime_root(temp.path().to_path_buf());
+
+        let r = handle.revalidate();
+        if let Err(e) = &r {
+            println!("ERR: {:?}", e);
+        }
+        assert!(r.is_ok());
+
+        fs::write(pid_path.join("stat"), b"1234 (bash) S 1 1 1 0 -1 4210944 1 0 0 0 0 0 0 0 20 0 1 0 99999 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
+        assert!(handle.revalidate().is_err());
     }
 }
