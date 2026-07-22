@@ -114,3 +114,11 @@ mod tests {
         assert!(!validate_id("g1h2i3j4")); // non-hex letters
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentOwnership {
+    pub vm_id: String,
+    pub operation_id: Option<String>,
+    pub requester: Option<String>,
+}

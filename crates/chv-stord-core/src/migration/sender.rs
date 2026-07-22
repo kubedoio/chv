@@ -759,7 +759,7 @@ mod tests {
             &self,
             _volume_id: &str,
             _handle: &str,
-            _vm_id: &str,
+            _ownership: chv_common::AttachmentOwnership,
             _force: bool,
         ) -> Result<(), ChvError> {
             Ok(())
@@ -786,6 +786,7 @@ mod tests {
             &self,
             _volume_id: &str,
             _handle: &str,
+            _ownership: chv_common::AttachmentOwnership,
             _snapshot_name: &str,
         ) -> Result<(), ChvError> {
             Ok(())
@@ -795,6 +796,7 @@ mod tests {
             &self,
             _volume_id: &str,
             _handle: &str,
+            _ownership: chv_common::AttachmentOwnership,
             _clone_name: &str,
         ) -> Result<(), ChvError> {
             Ok(())
