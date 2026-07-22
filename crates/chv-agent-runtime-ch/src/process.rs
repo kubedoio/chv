@@ -1686,6 +1686,17 @@ impl AdoptedVmHandle {
     }
 }
 
+impl ProcessCloudHypervisorAdapter {
+    pub async fn adopt_running_vms(&self, _runtime_root: &std::path::Path) -> Result<(), ChvError> {
+        // - Discover canonical runtime directories.
+        // - Validate OwnerMarkerV1 ownership marker, PID, /proc/<pid>/stat start time, boot ID, executable identity, UID/GID, cgroup identity, socket inode, and peer credentials.
+        // - Probe Cloud Hypervisor API and prove no conflicting candidate exists.
+        // - Fail-closed classification of owned, foreign, ambiguous, stale, and missing processes.
+        // - Adopt exact matches without requiring the original Tokio Child handle.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_cpus_config;
@@ -1993,16 +2004,5 @@ mod tests {
 
         fs::write(pid_path.join("stat"), b"1234 (bash) S 1 1 1 0 -1 4210944 1 0 0 0 0 0 0 0 20 0 1 0 99999 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
         assert!(handle.revalidate().is_err());
-    }
-}
-
-impl ProcessCloudHypervisorAdapter {
-    pub async fn adopt_running_vms(&self, _runtime_root: &std::path::Path) -> Result<(), ChvError> {
-        // - Discover canonical runtime directories.
-        // - Validate OwnerMarkerV1 ownership marker, PID, /proc/<pid>/stat start time, boot ID, executable identity, UID/GID, cgroup identity, socket inode, and peer credentials.
-        // - Probe Cloud Hypervisor API and prove no conflicting candidate exists.
-        // - Fail-closed classification of owned, foreign, ambiguous, stale, and missing processes.
-        // - Adopt exact matches without requiring the original Tokio Child handle.
-        Ok(())
     }
 }
