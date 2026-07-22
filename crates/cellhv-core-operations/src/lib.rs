@@ -493,6 +493,12 @@ impl OperationService {
                         "mutations cannot set observed power state".to_owned(),
                     ));
                 }
+                if definition.storage != current.storage || definition.networks != current.networks
+                {
+                    return Err(OperationServiceError::Invalid(
+                        "update definitions cannot modify attachment topology".to_owned(),
+                    ));
+                }
                 if current.resource_version == expected
                     && definition.requested_power_state != current.requested_power_state
                 {
@@ -522,68 +528,34 @@ impl OperationService {
                 RequestedPowerState::Stopped,
             )?)),
             MutationCommand::AttachVolume { vm_id, attachment } => {
-                let mut current = require_vm(&self.store, vm_id, expected)?;
-                current.storage.push(attachment.clone());
-                current
-                    .validate()
-                    .map_err(|e| OperationServiceError::Invalid(e.to_string()))?;
-                current.resource_version = expected_next(expected)?;
-
-                Ok(Some(current))
+                let _ = (vm_id, attachment);
+                Err(OperationServiceError::Invalid(
+                    "dynamic attach/detach is unsupported for Core M1".to_string(),
+                ))
             }
             MutationCommand::DetachVolume {
                 vm_id,
                 attachment_id,
             } => {
-                let mut current = require_vm(&self.store, vm_id, expected)?;
-                let len = current.storage.len();
-                current
-                    .storage
-                    .retain(|x| x.attachment_id != *attachment_id);
-                if current.storage.len() == len {
-                    return Err(OperationServiceError::Invalid(format!(
-                        "storage attachment {} not found",
-                        attachment_id
-                    )));
-                }
-                current.resource_version = expected_next(expected)?;
-
-                current.resource_version = expected_next(expected)?;
-
-                Ok(Some(current))
+                let _ = (vm_id, attachment_id);
+                Err(OperationServiceError::Invalid(
+                    "dynamic attach/detach is unsupported for Core M1".to_string(),
+                ))
             }
             MutationCommand::AttachNetwork { vm_id, attachment } => {
-                let mut current = require_vm(&self.store, vm_id, expected)?;
-                current.networks.push(attachment.clone());
-                current
-                    .validate()
-                    .map_err(|e| OperationServiceError::Invalid(e.to_string()))?;
-                current.resource_version = expected_next(expected)?;
-
-                current.resource_version = expected_next(expected)?;
-
-                Ok(Some(current))
+                let _ = (vm_id, attachment);
+                Err(OperationServiceError::Invalid(
+                    "dynamic attach/detach is unsupported for Core M1".to_string(),
+                ))
             }
             MutationCommand::DetachNetwork {
                 vm_id,
                 attachment_id,
             } => {
-                let mut current = require_vm(&self.store, vm_id, expected)?;
-                let len = current.networks.len();
-                current
-                    .networks
-                    .retain(|x| x.attachment_id != *attachment_id);
-                if current.networks.len() == len {
-                    return Err(OperationServiceError::Invalid(format!(
-                        "network attachment {} not found",
-                        attachment_id
-                    )));
-                }
-                current.resource_version = expected_next(expected)?;
-
-                current.resource_version = expected_next(expected)?;
-
-                Ok(Some(current))
+                let _ = (vm_id, attachment_id);
+                Err(OperationServiceError::Invalid(
+                    "dynamic attach/detach is unsupported for Core M1".to_string(),
+                ))
             }
             MutationCommand::RebootVm { vm_id } => {
                 let current =
@@ -990,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_operations_can_add_and_remove() {
+    fn attachment_operations_are_rejected() {
         let (_dir, _path, mut service) = service();
         service
             .submit(submission(
@@ -1011,17 +983,19 @@ mod tests {
                 mac_address: None,
             },
         };
-        service
+        let err = service
             .submit(submission(attach_cmd, "op-2", "attach", 1))
-            .unwrap();
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported for Core M1"));
 
         let detach_cmd = MutationCommand::DetachNetwork {
             vm_id: cellhv_core_types::VmId::new("a").unwrap(),
             attachment_id: "nic-1".to_owned(),
         };
-        service
-            .submit(submission(detach_cmd, "op-3", "detach", 2))
-            .unwrap();
+        let err = service
+            .submit(submission(detach_cmd, "op-3", "detach", 1))
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported for Core M1"));
     }
 
     #[test]
