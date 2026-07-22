@@ -28,6 +28,33 @@ use tracing::{info, warn};
 const FAILED_THRESHOLD: u32 = 6; // 6 ticks * 5s = 30s
 const CERT_ROTATION_INTERVAL_SECS: i64 = 12 * 60 * 60;
 
+async fn start_core_managed(
+    config: &AgentConfig,
+    adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter>,
+) -> Result<cellhv_core_runtime_owner::CoreRuntimeOwner, Box<dyn std::error::Error>> {
+    let paths = cellhv_core_startup::StartupPaths {
+        node_cache: config.cache_path.clone(),
+        core_database: config.core_store_path.clone(),
+        node_cache_archive: config.core_archive_path.clone(),
+    };
+    let configured_seed = match config.node_id.trim() {
+        "" => None,
+        node_id => Some(node_id.to_owned()),
+    };
+    let activated =
+        cellhv_core_startup::StartupTransaction::begin(&paths)?.activate(configured_seed, None)?;
+    let runtime =
+        Arc::new(chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime::new(adapter));
+    Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
+        runtime,
+        activated,
+        &config.core_api_socket_path,
+        128,
+        Duration::from_secs(2),
+    )
+    .await?)
+}
+
 async fn start_core_native(
     config: &AgentConfig,
 ) -> Result<cellhv_core_runtime_owner::CoreRuntimeOwner, Box<dyn std::error::Error>> {
@@ -460,11 +487,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> =
         Arc::new(ProcessCloudHypervisorAdapter::new(&config.chv_binary_path));
-    let vm_runtime = VmRuntime::new(adapter);
+    let vm_runtime = VmRuntime::new(adapter.clone());
 
     let cache = Arc::new(tokio::sync::Mutex::new(cache));
 
-    let agent_server = AgentServer::new(
+    let mut core_owner = None;
+    if config.authority_mode == AgentAuthorityMode::CoreManaged {
+        let owner = start_core_managed(&config, adapter.clone()).await?;
+        core_owner = Some(owner);
+    }
+
+    let mut agent_server = AgentServer::new(
         cache.clone(),
         vm_runtime.clone(),
         config.stord_socket.clone(),
@@ -472,12 +505,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(config.cache_path.clone()),
         config.runtime_dir.clone(),
     );
+    if let Some(owner) = &core_owner {
+        agent_server = agent_server.with_core_authority(owner.authority());
+    }
     // Share the migration registry with the reconciler so drain evacuation
     // can gate on in-flight migrations (see reconcile.rs Draining arm).
     let migration_registry = agent_server.migration_tasks.clone();
     let server_socket = config.socket_path.clone();
+    let agent_server_clone = agent_server.clone();
     let mut agent_server_handle = tokio::spawn(async move {
-        if let Err(e) = agent_server.serve(&server_socket).await {
+        if let Err(e) = agent_server_clone.serve(&server_socket).await {
             tracing::error!(error = %e, "agent server exited with error — node is unreachable");
         }
     });
@@ -583,16 +620,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = sigterm.recv() => {
                 info!("received SIGTERM, shutting down gracefully");
                 supervisor.shutdown().await;
+                if let Some(owner) = core_owner.take() { let _ = owner.shutdown().await; }
                 break;
             }
             _ = sigint.recv() => {
                 info!("received SIGINT, shutting down gracefully");
                 supervisor.shutdown().await;
+                if let Some(owner) = core_owner.take() { let _ = owner.shutdown().await; }
                 break;
             }
             _ = &mut agent_server_handle => {
                 tracing::error!("agent gRPC server exited unexpectedly — shutting down");
                 supervisor.shutdown().await;
+                if let Some(owner) = core_owner.take() { let _ = owner.shutdown().await; }
                 break;
             }
         }
