@@ -1480,10 +1480,11 @@ fn validate_fresh_parent(path: &Path) -> Result<()> {
     })?;
     if !metadata.file_type().is_dir()
         || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o777 != 0o700
+        || (metadata.permissions().mode() & 0o777 != 0o700
+            && metadata.permissions().mode() & 0o777 != 0o750)
     {
         return Err(StoreError::Integrity(format!(
-            "fresh Core parent {} must be a real euid-owned 0700 directory",
+            "fresh Core parent {} must be a real euid-owned 0700 or 0750 directory",
             parent.display()
         )));
     }

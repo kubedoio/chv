@@ -74,12 +74,18 @@ impl DaemonSupervisor {
         let stord_ok = if let Some(ref mut child) = self.stord_child {
             matches!(child.try_wait(), Ok(None))
         } else {
-            false
+            self.stord_socket.exists()
+                && tokio::net::UnixStream::connect(&self.stord_socket)
+                    .await
+                    .is_ok()
         };
         let nwd_ok = if let Some(ref mut child) = self.nwd_child {
             matches!(child.try_wait(), Ok(None))
         } else {
-            false
+            self.nwd_socket.exists()
+                && tokio::net::UnixStream::connect(&self.nwd_socket)
+                    .await
+                    .is_ok()
         };
         (stord_ok, nwd_ok)
     }
@@ -164,6 +170,10 @@ async fn start_daemon(
     name: &str,
 ) -> Result<(), ChvError> {
     if child.is_some() {
+        return Ok(());
+    }
+    if socket.exists() && tokio::net::UnixStream::connect(socket).await.is_ok() {
+        info!(socket = %socket.display(), "external {} daemon is already listening on socket; skipping sub-process spawn", name);
         return Ok(());
     }
     if let Err(e) = tokio::fs::create_dir_all(runtime_dir).await {

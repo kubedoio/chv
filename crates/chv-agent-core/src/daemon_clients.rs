@@ -131,6 +131,20 @@ impl StordClient {
                 reason: e.to_string(),
             })?
             .into_inner();
+        if let Some(ref res) = resp.result {
+            if !res.status.eq_ignore_ascii_case("ok")
+                && !res.status.eq_ignore_ascii_case("0")
+                && !res.status.is_empty()
+            {
+                return Err(ChvError::BackendUnavailable {
+                    backend: "stord".to_string(),
+                    reason: format!(
+                        "stord open_volume failed (code {}): {}",
+                        res.error_code, res.human_summary
+                    ),
+                });
+            }
+        }
         Ok((resp.volume_id, resp.attachment_handle, resp.export_path))
     }
 

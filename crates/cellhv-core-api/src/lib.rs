@@ -455,7 +455,8 @@ async fn bind_private_owned(
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != nix::unistd::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o777 != 0o700
+        || (metadata.permissions().mode() & 0o777 != 0o700
+            && metadata.permissions().mode() & 0o777 != 0o750)
     {
         return Err(BindError::UnsafeParent(parent.display().to_string()));
     }

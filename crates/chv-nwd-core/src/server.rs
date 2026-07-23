@@ -91,7 +91,7 @@ impl<E: NetworkExecutor> NetworkServer<E> {
             source: e,
         })?;
 
-        tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+        tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))
             .await
             .map_err(|e| ChvError::Io {
                 path: socket_path.to_string_lossy().to_string(),

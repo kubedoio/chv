@@ -12,6 +12,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+if ! command -v cargo &>/dev/null; then
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    elif [ -d "/root/.cargo/bin" ]; then
+        export PATH="/root/.cargo/bin:$PATH"
+    fi
+fi
+
 CHANNEL="${CHV_RELEASE_CHANNEL:-stable}"
 
 # Derive extra args for version.sh based on channel

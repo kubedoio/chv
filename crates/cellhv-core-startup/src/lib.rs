@@ -498,10 +498,11 @@ fn validate_paths(paths: &StartupPaths) -> Result<()> {
         let metadata = fs::symlink_metadata(&parent).map_err(|source| io_error(&parent, source))?;
         if !metadata.file_type().is_dir()
             || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o777 != 0o700
+            || (metadata.permissions().mode() & 0o777 != 0o700
+                && metadata.permissions().mode() & 0o777 != 0o750)
         {
             return Err(StartupError::UnsafePath(format!(
-                "{} must be an owner-owned 0700 directory",
+                "{} must be an owner-owned 0700 or 0750 directory",
                 parent.display()
             )));
         }

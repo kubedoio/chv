@@ -24,6 +24,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+if ! command -v cargo &>/dev/null; then
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    elif [ -d "/root/.cargo/bin" ]; then
+        export PATH="/root/.cargo/bin:$PATH"
+    fi
+fi
+
 NO_UNINSTALL=0
 NO_SEED=0
 INSTALL_ONLY=0
@@ -223,10 +231,11 @@ elif [ "$NO_UNINSTALL" = "0" ]; then
     rm -f /run/chv/nwd/dnsmasq-*.pid
 
     # Remove database (clean state for new install)
-    rm -f /var/lib/chv/controlplane.db
+    rm -f /var/lib/chv/controlplane.db*
 
-    # Remove agent cache so re-install triggers fresh enrollment
+    # Remove agent cache and stale certificates so re-install triggers fresh enrollment
     rm -f /var/lib/chv/cache/agent-cache.json
+    rm -f /var/lib/chv/agent/agent.crt /var/lib/chv/agent/agent.key /var/lib/chv/agent/ca.crt
 
     # Remove any stale volume files so seeding works on fresh install
     rm -rf /var/lib/chv/storage/localdisk/*

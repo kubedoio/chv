@@ -839,6 +839,11 @@ async fn prepare_vm_resources(
         .map_err(|e| ChvError::Internal {
             reason: format!("failed to create vm dir: {}", e),
         })?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = tokio::fs::set_permissions(&vm_dir, std::fs::Permissions::from_mode(0o775)).await;
+    if let Ok(Some(group)) = nix::unistd::Group::from_name("chv-stord") {
+        let _ = nix::unistd::chown(&vm_dir, None, Some(group.gid));
+    }
 
     let mut disks = Vec::new();
     let mut volume_ids = Vec::new();

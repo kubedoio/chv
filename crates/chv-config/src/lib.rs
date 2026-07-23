@@ -281,6 +281,7 @@ impl Default for StordConfig {
             path_allowlist: vec![
                 PathBuf::from("/var/lib/chv/storage/localdisk"),
                 PathBuf::from("/var/lib/chv/storage/lvm"),
+                PathBuf::from("/var/lib/chv/agent"),
             ],
             device_allowlist: vec!["/dev/dm-*".to_string(), "/dev/mapper/*".to_string()],
             metrics_bind: None,

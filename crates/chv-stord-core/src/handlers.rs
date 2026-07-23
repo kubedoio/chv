@@ -335,13 +335,15 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                 .sessions
                 .find_by_volume_and_path(&req.volume_id, &precompute_path)
             {
-                return Ok(Response::new(proto::OpenVolumeResponse {
-                    result: Some(Self::ok_result()),
-                    volume_id: s.volume_id,
-                    attachment_handle: s.attachment_handle,
-                    export_kind: s.export_kind,
-                    export_path: s.export_path,
-                }));
+                if !s.export_path.is_empty() {
+                    return Ok(Response::new(proto::OpenVolumeResponse {
+                        result: Some(Self::ok_result()),
+                        volume_id: s.volume_id,
+                        attachment_handle: s.attachment_handle,
+                        export_kind: s.export_kind,
+                        export_path: s.export_path,
+                    }));
+                }
             }
         }
 
@@ -360,13 +362,15 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
 
         // Post-open idempotency: same handle may already exist
         if let Some(s) = self.sessions.get(&req.volume_id, &export.attachment_handle) {
-            return Ok(Response::new(proto::OpenVolumeResponse {
-                result: Some(Self::ok_result()),
-                volume_id: s.volume_id,
-                attachment_handle: s.attachment_handle,
-                export_kind: s.export_kind,
-                export_path: s.export_path,
-            }));
+            if !s.export_path.is_empty() {
+                return Ok(Response::new(proto::OpenVolumeResponse {
+                    result: Some(Self::ok_result()),
+                    volume_id: s.volume_id,
+                    attachment_handle: s.attachment_handle,
+                    export_kind: s.export_kind,
+                    export_path: s.export_path,
+                }));
+            }
         }
 
         let session = Session {

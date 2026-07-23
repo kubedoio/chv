@@ -211,10 +211,13 @@ setup_user_and_dirs() {
     usermod -aG kvm "$CHV_USER" 2>/dev/null || true
     usermod -aG disk chv-stord 2>/dev/null || true
     usermod -aG chv chv-stord 2>/dev/null || true
+    usermod -aG chv-stord "$CHV_USER" 2>/dev/null || true
 
     mkdir -p "$CHV_CONFIG_DIR"/certs
     mkdir -p "$CHV_DATA_DIR"/{cache,images,storage/localdisk,storage/lvm}
-    install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/agent" "$CHV_DATA_DIR/cache" "$CHV_RUN_DIR/core"
+    install -d -m 0750 -o "$CHV_USER" -g chv-stord "$CHV_DATA_DIR/agent"
+    install -d -m 0775 -o "$CHV_USER" -g chv-stord "$CHV_DATA_DIR/agent/vms"
+    install -d -m 0700 -o "$CHV_USER" -g "$CHV_USER" "$CHV_DATA_DIR/cache" "$CHV_RUN_DIR/core"
     install -d -m 0775 -o "$CHV_USER" -g "$CHV_USER" "$CHV_RUN_DIR/agent"
     mkdir -p "$CHV_LOG_DIR"
     mkdir -p "$CHV_RUN_DIR"/{controlplane,agent,stord,nwd}
@@ -222,8 +225,11 @@ setup_user_and_dirs() {
     mkdir -p "$CHV_MIGRATIONS_DIR"
 
     chown -R "$CHV_USER:$CHV_USER" "$CHV_DATA_DIR"/cache "$CHV_DATA_DIR"/images "$CHV_LOG_DIR" "$CHV_RUN_DIR"/controlplane "$CHV_RUN_DIR"/agent "$CHV_RUN_DIR"/nwd
+    chown "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent"
+    chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent/vms"
     chown -R "chv-stord:chv-stord" "$CHV_DATA_DIR"/storage "$CHV_RUN_DIR"/stord
-    chmod 750 "$CHV_DATA_DIR" "$CHV_LOG_DIR"
+    chmod 750 "$CHV_DATA_DIR" "$CHV_LOG_DIR" "$CHV_DATA_DIR/agent"
+    chmod 775 "$CHV_DATA_DIR/agent/vms"
     chmod 750 "$CHV_DATA_DIR"/storage
     chmod 750 "$CHV_DATA_DIR"/storage/localdisk
     chmod 750 "$CHV_DATA_DIR"/storage/lvm
@@ -897,7 +903,7 @@ EOF
 socket_path = "/run/chv/stord/api.sock"
 runtime_dir = "${CHV_DATA_DIR}/storage/localdisk"
 log_level = "info"
-path_allowlist = ["${CHV_DATA_DIR}/storage/localdisk", "${CHV_DATA_DIR}/storage/lvm"]
+path_allowlist = ["${CHV_DATA_DIR}/storage/localdisk", "${CHV_DATA_DIR}/storage/lvm", "${CHV_DATA_DIR}/agent"]
 device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
 EOF
     chmod 640 "$CHV_CONFIG_DIR/stord.toml"
@@ -975,7 +981,7 @@ LogsDirectory=chv
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/run/chv/stord /var/lib/chv/storage
+ReadWritePaths=/run/chv/stord /var/lib/chv/storage /var/lib/chv/agent
 AmbientCapabilities=
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE
 RestrictAddressFamilies=AF_UNIX
@@ -1008,15 +1014,17 @@ EOF
     cat > /etc/systemd/system/chv-agent.service <<'EOF'
 [Unit]
 Description=CHV Node Agent
-After=network.target chv-controlplane.service
-Wants=chv-controlplane.service
+After=network.target chv-controlplane.service chv-stord.service chv-nwd.service
+Wants=chv-controlplane.service chv-stord.service chv-nwd.service
 
 [Service]
 Type=simple
 User=chv
 Group=chv
 UMask=002
-ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/agent /var/lib/chv/cache
+ExecStartPre=+/usr/bin/install -d -m 0750 -o chv -g chv-stord /var/lib/chv/agent
+ExecStartPre=+/usr/bin/install -d -m 0775 -o chv -g chv-stord /var/lib/chv/agent/vms
+ExecStartPre=+/usr/bin/install -d -m 0700 -o chv -g chv /run/chv/core /var/lib/chv/cache
 ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
@@ -1025,7 +1033,7 @@ TimeoutStopSec=5
 RuntimeDirectory=chv
 RuntimeDirectoryMode=0775
 StateDirectory=chv/agent
-StateDirectoryMode=0700
+StateDirectoryMode=0750
 ExecStopPost=-/bin/rm -f /run/chv/agent/api.sock
 LogsDirectory=chv
 
@@ -1220,7 +1228,13 @@ start_services() {
         chown -R "chv-stord:chv-stord" "$CHV_DATA_DIR/storage" 2>/dev/null || true
         chmod 750 "$CHV_DATA_DIR/storage" "$CHV_DATA_DIR/storage/localdisk" "$CHV_DATA_DIR/storage/lvm" 2>/dev/null || true
     fi
+    mkdir -p "$CHV_DATA_DIR/agent/vms" 2>/dev/null || true
+    chown "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent" 2>/dev/null || true
+    chown -R "$CHV_USER:chv-stord" "$CHV_DATA_DIR/agent/vms" 2>/dev/null || true
+    chmod 750 "$CHV_DATA_DIR/agent" 2>/dev/null || true
+    chmod 775 "$CHV_DATA_DIR/agent/vms" 2>/dev/null || true
 
+    systemctl enable --now chv-stord chv-nwd
     systemctl enable --now chv-agent
 
     # We intentionally do NOT wait for enrollment or TenantReady here.
@@ -1355,6 +1369,7 @@ wipe_deployment() {
     # two independent lock namespaces on a concurrent-start failure.
     rm -rf "${CHV_CONFIG_DIR}"
     rm -rf "${CHV_DATA_DIR}/cache" "${CHV_DATA_DIR}/storage"
+    rm -f "${CHV_DATA_DIR}/agent/agent.crt" "${CHV_DATA_DIR}/agent/agent.key" "${CHV_DATA_DIR}/agent/ca.crt"
     rm -f "${CHV_DATA_DIR}/controlplane.db"*
     rm -rf "${CHV_RUN_DIR}"
     rm -rf "${CHV_LOG_DIR}"

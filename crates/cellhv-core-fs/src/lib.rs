@@ -213,11 +213,12 @@ fn validate_private_parent(parent: &Path) -> io::Result<()> {
     if !metadata.file_type().is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o777 != 0o700
+        || (metadata.permissions().mode() & 0o777 != 0o700
+            && metadata.permissions().mode() & 0o777 != 0o750)
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "runtime lease parent must be a real owner-owned 0700 directory",
+            "runtime lease parent must be a real owner-owned 0700 or 0750 directory",
         ));
     }
     Ok(())
