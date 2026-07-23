@@ -10,4 +10,5 @@ pub mod process;
 
 pub use adapter::{CloudHypervisorAdapter, VmConfig};
 pub use ch_api::CloudHypervisorApiClient;
+pub use chv_hypervisor_api::HypervisorAdapter;
 pub use process::ProcessCloudHypervisorAdapter;

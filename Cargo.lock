@@ -720,6 +720,7 @@ dependencies = [
  "chv-common",
  "chv-config",
  "chv-errors",
+ "chv-hypervisor-api",
  "chv-nwd-api",
  "chv-observability",
  "chv-stord-api",
@@ -758,6 +759,7 @@ dependencies = [
  "cellhv-core-types",
  "chv-common",
  "chv-errors",
+ "chv-hypervisor-api",
  "chv-observability",
  "metrics",
  "metrics-util",
@@ -948,6 +950,17 @@ version = "0.2.0"
 dependencies = [
  "thiserror 2.0.18",
  "tonic",
+]
+
+[[package]]
+name = "chv-hypervisor-api"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chv-common",
+ "chv-errors",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

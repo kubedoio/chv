@@ -4,8 +4,8 @@ use crate::migration_registry::MigrationTaskRegistry;
 use crate::reconcile::{bridge_name_for_network, cleanup_vm_resources, vm_runtime_dir};
 use crate::state_machine::NodeState;
 use crate::vm_runtime::VmRuntime;
-use chv_agent_runtime_ch::adapter::VmConfig;
 use chv_errors::ChvError;
+use chv_hypervisor_api::VmConfig;
 use control_plane_node_api::control_plane_node_api as proto;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -679,7 +679,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     .attach_volume_to_vm(&disk.volume_id, &vm.vm_id, &handle, Some(op_id))
                     .await
                     .map_err(|e| Status::internal(format!("attach_volume_to_vm failed: {}", e)))?;
-                disks.push(chv_agent_runtime_ch::adapter::VmDiskConfig {
+                disks.push(chv_hypervisor_api::VmDiskConfig {
                     path: std::path::PathBuf::from(export_path),
                     read_only: disk.read_only,
                     id: Some(disk.volume_id.clone()),
@@ -729,7 +729,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     )
                     .await
                     .map_err(|e| Status::internal(format!("attach_vm_nic failed: {}", e)))?;
-                nics.push(chv_agent_runtime_ch::adapter::VmNicConfig {
+                nics.push(chv_hypervisor_api::VmNicConfig {
                     network_id: nic.network_id.clone(),
                     mac_address: nic.mac_address.clone(),
                     ip_address: nic.ip_address.clone(),
@@ -1775,7 +1775,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         drop(cache);
-        let params = chv_agent_runtime_ch::adapter::AddDiskParams {
+        let params = chv_hypervisor_api::AddDiskParams {
             path: std::path::PathBuf::from(&inner.disk_path),
             read_only: inner.read_only,
             id: if inner.disk_id.is_empty() {
@@ -1842,7 +1842,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         ControlPlaneClient::stale_generation_check(meta, &cache, "vm", &inner.vm_id)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         drop(cache);
-        let params = chv_agent_runtime_ch::adapter::AddNetParams {
+        let params = chv_hypervisor_api::AddNetParams {
             tap_name: inner.tap_name.clone(),
             mac_address: inner.mac_address.clone(),
             id: if inner.net_id.is_empty() {

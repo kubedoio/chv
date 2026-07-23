@@ -1,5 +1,5 @@
-use chv_agent_runtime_ch::adapter::{CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo};
 use chv_errors::ChvError;
+use chv_hypervisor_api::{HypervisorAdapter, VmConfig, VmCounters, VmInfo};
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub struct VmRecord {
 pub struct VmRuntime {
     vms: Arc<RwLock<HashMap<String, VmRecord>>>,
     failure_counts: Arc<RwLock<HashMap<String, (u32, String)>>>,
-    adapter: Arc<dyn CloudHypervisorAdapter>,
+    adapter: Arc<dyn HypervisorAdapter>,
 }
 
 impl Clone for VmRuntime {
@@ -33,7 +33,7 @@ impl Clone for VmRuntime {
 }
 
 impl VmRuntime {
-    pub fn new(adapter: Arc<dyn CloudHypervisorAdapter>) -> Self {
+    pub fn new(adapter: Arc<dyn HypervisorAdapter>) -> Self {
         Self {
             vms: Arc::new(RwLock::new(HashMap::new())),
             failure_counts: Arc::new(RwLock::new(HashMap::new())),
@@ -204,7 +204,7 @@ impl VmRuntime {
     pub async fn add_disk(
         &self,
         vm_id: &str,
-        params: &chv_agent_runtime_ch::adapter::AddDiskParams,
+        params: &chv_hypervisor_api::AddDiskParams,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
         self.adapter.add_disk(vm_id, params, operation_id).await
@@ -224,7 +224,7 @@ impl VmRuntime {
     pub async fn add_net(
         &self,
         vm_id: &str,
-        params: &chv_agent_runtime_ch::adapter::AddNetParams,
+        params: &chv_hypervisor_api::AddNetParams,
         operation_id: Option<&str>,
     ) -> Result<String, ChvError> {
         self.adapter.add_net(vm_id, params, operation_id).await

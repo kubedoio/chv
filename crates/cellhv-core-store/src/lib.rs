@@ -3058,7 +3058,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let directory = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = directory.path().join("core.db");
         assert!(matches!(
             CoreStore::create_new_with_host(

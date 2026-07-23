@@ -6,6 +6,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+chv-hypervisor-api = { path = "../chv-hypervisor-api" }
 chv-common = { path = "../chv-common" }
 chv-errors = { path = "../chv-errors" }
 chv-observability = { path = "../chv-observability" }

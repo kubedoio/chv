@@ -1,0 +1,13 @@
+[package]
+name = "chv-hypervisor-api"
+version = "0.2.0"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chv-common = { path = "../chv-common" }
+chv-errors = { path = "../chv-errors" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
