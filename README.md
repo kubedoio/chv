@@ -79,8 +79,10 @@ The project has a solid Phase 1 foundation (Rust control plane, SQLite store, ce
 ├── crates/                 # Rust library crates
 │   ├── chv-common/
 │   ├── chv-config/
+│   ├── chv-hypervisor-api/  # Hypervisor-neutral VMM adapter interface
 │   ├── chv-controlplane-*
 │   ├── chv-agent-*
+│   ├── cellhv-core-*        # CellHV Core single-node authority & journal crates
 │   ├── chv-nwd-core/
 │   ├── chv-stord-*
 │   ├── chv-webui-bff/

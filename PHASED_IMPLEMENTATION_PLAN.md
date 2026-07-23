@@ -19,6 +19,8 @@ As of Sprint 15 (PRs 49-52), the platform has transitioned from early-MVP toward
 - MigrationReaper (auto-fails stuck migrations after 2h)
 - Circuit breaker on node communication
 - Deep health checks (database, agent socket, agent connectivity)
+- Hypervisor trait decoupling (`chv-hypervisor-api` crate, `HypervisorAdapter` interface, `chv-agent-core` isolated from Cloud Hypervisor runtime)
+- Dev-install teardown & reinstall hardening (SQLite WAL file cleanup, mTLS cert reset on `--wipe`, daemon socket mode `0666`, systemd `StateDirectoryMode=0750`, `0750` directory validation in `cellhv-core-*` crates)
 
 **Known partials that remain production-relevant:**
 - Disk migration orchestration is partial: control-plane phases, reaper, flow control, and mTLS exist, but dirty sync rounds, convergence reporting from stord, and paused final dirty flush remain incomplete.

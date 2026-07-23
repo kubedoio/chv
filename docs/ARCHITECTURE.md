@@ -21,9 +21,13 @@ The system is built around four binaries:
 
 - **Only `chv-agent` is reachable from the control plane.** All communication is gRPC over mTLS.
 - The control plane owns **desired state**; the agent owns **observed state** and converges toward desired state.
-- Cloud Hypervisor is accessed **only** via local Unix sockets from `chv-agent`.
-
 See ADR-002: [Control Plane to Node Boundary](./specs/adr/002-control-plane-boundary.md)
+
+### Agent ↔ Hypervisor Trait Boundary (`chv-hypervisor-api`)
+
+- `chv-agent-core` is **fully decoupled** from Cloud Hypervisor and depends strictly on the `HypervisorAdapter` trait in `chv-hypervisor-api`.
+- Low-level VMM interaction (process supervision, REST API over Unix domain socket, PTY master allocation) is isolated in `chv-agent-runtime-ch`.
+- Alternative VMM backends (such as `o3k` or OpenStack Nova drivers) implement `chv_hypervisor_api::HypervisorAdapter` and `cellhv_core_executor::CoreVmRuntime` without modifying `chv-agent-core` or `cellhv-core-*`.
 
 ### Agent ↔ Storage / Network
 
