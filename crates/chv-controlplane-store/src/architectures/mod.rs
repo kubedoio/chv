@@ -25,7 +25,7 @@ pub use topology::{
 pub use version::{VersionCreateInput, VersionRepository};
 
 use crate::StoreError;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 
 /// Parses the `text` timestamp columns produced by
 /// `strftime('%Y-%m-%dT%H:%M:%SZ', ...)` back into chrono.
