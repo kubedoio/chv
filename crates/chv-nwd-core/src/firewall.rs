@@ -68,8 +68,11 @@ fn is_valid_cidr(cidr: &str) -> bool {
     if parts.len() != 2 {
         return false;
     }
-    parts[0].parse::<std::net::IpAddr>().is_ok()
-        && parts[1].parse::<u8>().map(|p| p <= 128).unwrap_or(false)
+    match parts[0].parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(_)) => parts[1].parse::<u8>().map(|p| p <= 32).unwrap_or(false),
+        Ok(std::net::IpAddr::V6(_)) => parts[1].parse::<u8>().map(|p| p <= 128).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 fn is_valid_port_spec(port: &str) -> bool {

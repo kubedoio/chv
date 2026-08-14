@@ -12,6 +12,9 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info};
 
+/// Maximum volume size accepted for a migration (16 TiB).
+const MAX_MIGRATION_SIZE_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
+
 /// Tonic service implementation for the storage migration receiver.
 ///
 /// This handles incoming bidirectional streams. The first message in the
@@ -53,6 +56,13 @@ impl<B: StorageBackend> StorageMigrationService for StorageMigrationServiceImpl<
                 ));
             }
         };
+
+        if init.size_bytes > MAX_MIGRATION_SIZE_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "InitMigration size_bytes {} exceeds maximum allowed {} bytes",
+                init.size_bytes, MAX_MIGRATION_SIZE_BYTES
+            )));
+        }
 
         info!(
             volume_id = %init.volume_id,
@@ -96,7 +106,8 @@ impl<B: StorageBackend> StorageMigrationService for StorageMigrationServiceImpl<
         let backend = self.backend.clone();
         let volume_id = dest_volume_id.clone();
         tokio::spawn(async move {
-            let receiver = MigrationReceiver::new(backend, volume_id.clone(), handle);
+            let receiver =
+                MigrationReceiver::new(backend, volume_id.clone(), handle, init.size_bytes);
             if let Err(e) = receiver.run(inbound, tx).await {
                 error!(
                     volume_id = %volume_id,

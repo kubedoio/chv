@@ -15,6 +15,9 @@ const DUMMY_HASH: &str = "$2b$12$JbNLkka47ajSOyzKo8fKI.CBvQav06.Vrnh4pbZf4VSaLwS
 
 const MAX_LOGIN_ATTEMPTS: u32 = 10;
 const RATE_WINDOW_SECS: u64 = 60;
+/// Hard backstop on distinct usernames tracked at once. A spray of unique
+/// usernames must not be able to grow the map without bound.
+const MAX_LOGIN_USERS: usize = 10_000;
 
 /// Minimum length for a rotated password. install.sh promises operators a
 /// real rotation; an industrial-grade floor here keeps anyone from picking
@@ -29,15 +32,39 @@ async fn check_rate_limit(username: &str) -> Result<(), BffError> {
     let now = Instant::now();
     let window = std::time::Duration::from_secs(RATE_WINDOW_SECS);
 
-    let entry = attempts.entry(username.to_string()).or_default();
-    entry.retain(|t| now.duration_since(*t) < window);
+    // Prune expired timestamps for this username, dropping the entry when
+    // nothing recent remains so unique-username sprays cannot grow the map.
+    let recent_count = match attempts.get_mut(username) {
+        Some(entry) => {
+            entry.retain(|t| now.duration_since(*t) < window);
+            if entry.is_empty() {
+                attempts.remove(username);
+                0
+            } else {
+                entry.len()
+            }
+        }
+        None => 0,
+    };
 
-    if entry.len() >= MAX_LOGIN_ATTEMPTS as usize {
+    if recent_count >= MAX_LOGIN_ATTEMPTS as usize {
         return Err(BffError::TooManyRequests(
             "too many login attempts, try again later".into(),
         ));
     }
-    entry.push(now);
+
+    attempts.entry(username.to_string()).or_default().push(now);
+
+    // Backstop cap: once the map grows past MAX_LOGIN_USERS, sweep every
+    // entry's expired timestamps and drop empty entries so the map can only
+    // hold usernames active within the current rate window.
+    if attempts.len() > MAX_LOGIN_USERS {
+        attempts.retain(|_, v| {
+            v.retain(|t| now.duration_since(*t) < window);
+            !v.is_empty()
+        });
+    }
+
     Ok(())
 }
 

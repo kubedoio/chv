@@ -229,7 +229,7 @@ impl<B: StorageBackend> MigrationSender<B> {
         }
         info!(volume_id = %self.volume_id, "starting iterative dirty sync rounds");
         let dirty_chunks = self
-            .dirty_sync_rounds(&tx, &mut inbound, &mut sequence_num)
+            .dirty_sync_rounds(&tx, &mut inbound, &mut sequence_num, volume_size)
             .await?;
         info!(
             volume_id = %self.volume_id,
@@ -413,6 +413,7 @@ impl<B: StorageBackend> MigrationSender<B> {
         tx: &mpsc::Sender<MigrationMessage>,
         inbound: &mut tonic::Streaming<MigrationMessage>,
         sequence_num: &mut u32,
+        volume_size: u64,
     ) -> Result<u32, tonic::Status> {
         let mut total_dirty_chunks: u32 = 0;
 
@@ -478,9 +479,10 @@ impl<B: StorageBackend> MigrationSender<B> {
                     self.wait_for_ack(inbound).await?;
                 }
 
+                let length = std::cmp::min(self.block_size, volume_size - offset);
                 let data = self
                     .backend
-                    .read_block(&self.volume_id, &self.handle, offset, self.block_size)
+                    .read_block(&self.volume_id, &self.handle, offset, length)
                     .await
                     .map_err(|e| {
                         tonic::Status::internal(format!(

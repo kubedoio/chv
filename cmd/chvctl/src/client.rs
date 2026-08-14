@@ -32,7 +32,6 @@ pub struct BffClient {
 impl BffClient {
     pub fn new(base_url: String, token: Option<String>) -> Self {
         let http = Client::builder()
-            .danger_accept_invalid_certs(true)
             .build()
             .expect("failed to build HTTP client");
 

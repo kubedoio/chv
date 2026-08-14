@@ -28,6 +28,21 @@ use tracing::{info, warn};
 const FAILED_THRESHOLD: u32 = 6; // 6 ticks * 5s = 30s
 const CERT_ROTATION_INTERVAL_SECS: i64 = 12 * 60 * 60;
 
+/// Write `contents` to `path` with mode 0600, normalizing the permissions of
+/// an existing file as well. Used for TLS private key material.
+async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .mode(0o600)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await?;
+    tokio::io::AsyncWriteExt::write_all(&mut file, contents).await?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .await
+}
+
 async fn start_core_managed(
     config: &AgentConfig,
     adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter>,
@@ -376,7 +391,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ok = false;
                                         }
                                         if let Err(e) =
-                                            tokio::fs::write(&key_path, &resp.private_key_pem).await
+                                            write_private_file(&key_path, &resp.private_key_pem)
+                                                .await
                                         {
                                             warn!(error = %e, "failed to write private key");
                                             ok = false;
@@ -687,7 +703,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let write_result = async {
                                     tokio::fs::write(&cert_path, &resp.certificate_pem).await?;
-                                    tokio::fs::write(&key_path, &resp.private_key_pem).await?;
+                                    write_private_file(Path::new(&key_path), &resp.private_key_pem)
+                                        .await?;
                                     tokio::fs::write(&ca_path, &resp.ca_pem).await?;
                                     Ok::<(), std::io::Error>(())
                                 }

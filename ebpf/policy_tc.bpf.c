@@ -281,6 +281,14 @@ int policy_tc(struct __sk_buff *skb)
 
     // Parse L4 headers for port info
     __u8 ihl = (ip->ihl_version & 0x0f) * 4;
+    if (ihl < 20)
+        return TC_ACT_OK;
+
+    // Ignore non-first IP fragments (fragment offset != 0).
+    __u16 frag_off = __bpf_ntohs(ip->frag_off);
+    if (frag_off & 0x1FFF)
+        return TC_ACT_OK;
+
     void *l4 = (void *)ip + ihl;
 
     if (protocol == IPPROTO_TCP) {

@@ -103,7 +103,7 @@ impl<B: StorageBackend> StorageServer<B> {
             source: e,
         })?;
 
-        tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))
+        tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
             .await
             .map_err(|e| ChvError::Io {
                 path: socket_path.to_string_lossy().to_string(),
