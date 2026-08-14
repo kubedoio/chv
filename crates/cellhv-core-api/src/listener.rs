@@ -11,8 +11,6 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
 
-const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 use crate::{bind_private_owned, router, BindError, ExistingSocketPolicy};
 
 #[derive(Debug, Error)]
@@ -281,6 +279,8 @@ mod tests {
     use super::*;
     use axum::{routing::get, Router};
     use std::os::unix::fs::PermissionsExt;
+
+    const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,

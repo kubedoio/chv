@@ -18,9 +18,7 @@ use chv_controlplane_store::{
     ObservedStateRepository, OperationRepository, PlanRepository, PlanStatusUpdateInput,
     TopologyRepository,
 };
-use chv_controlplane_types::architecture::{
-    ArchitectureId, ArchitecturePlanId, ArchitectureVersionId, PlanAction, PlanMode, PlanStatus,
-};
+use chv_controlplane_types::architecture::{ArchitecturePlanId, PlanAction, PlanMode, PlanStatus};
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
     create_architecture, destroy_plan_architecture, discard_plan_architecture, plan_architecture,
