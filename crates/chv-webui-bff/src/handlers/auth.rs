@@ -81,10 +81,29 @@ struct UserRow {
     must_change_password: i64,
 }
 
+/// Login endpoint (`POST /v1/auth/login`).
+///
+/// On success the response body carries the JWT (the UI still stores it in
+/// localStorage) AND a `Set-Cookie: chv_session=<JWT>` HttpOnly session
+/// cookie (Security S1, staged item 3.B). The BFF auth middleware accepts
+/// that cookie as a fallback credential when no Authorization header is
+/// present.
+///
+/// Cookie attributes:
+/// - `HttpOnly` — script-immune; the UI cannot read it.
+/// - `Path=/` — sent for the whole BFF surface.
+/// - `SameSite=Strict` — the cookie never rides cross-site requests,
+///   which (together with the csrf_middleware's application/json
+///   requirement for non-GET) is the CSRF posture for this staged flow.
+/// - `Max-Age=<token ttl>` — the cookie dies with the JWT.
+/// - `Secure` — only when the request arrived over https. Behind nginx the
+///   BFF sees plain http, so `Secure` is off unless `X-Forwarded-Proto:
+///   https` advertises TLS.
 pub async fn login(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     axum::Json(payload): axum::Json<Value>,
-) -> Result<Json<Value>, BffError> {
+) -> Result<(axum::http::HeaderMap, Json<Value>), BffError> {
     let username = payload
         .get("username")
         .and_then(|v| v.as_str())
@@ -128,11 +147,12 @@ pub async fn login(
         }
     };
 
-    let exp = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        + 24 * 60 * 60;
+        .as_secs();
+    const TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+    let exp = now + TOKEN_TTL_SECS;
 
     let must_change_password = user.must_change_password != 0;
 
@@ -151,14 +171,42 @@ pub async fn login(
     )
     .map_err(|e| BffError::Internal(format!("failed to encode token: {}", e)))?;
 
-    Ok(Json(json!({
-        "token": token,
-        "user": {
-            "username": user.username,
-            "role": user.role
-        },
-        "must_change_password": must_change_password
-    })))
+    // Session cookie (Security S1, 3.B). `Secure` is only added when the
+    // request demonstrably arrived over TLS: either the URI scheme is https
+    // or a fronting proxy set X-Forwarded-Proto: https. Behind nginx the
+    // BFF itself sees http, so the default is NO Secure flag — that is
+    // deliberate for the staged deployment, and documented in the handler
+    // doc-comment.
+    let is_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+    let mut cookie = format!(
+        "{}={token}; HttpOnly; Path=/; SameSite=Strict; Max-Age={TOKEN_TTL_SECS}",
+        crate::auth::SESSION_COOKIE_NAME
+    );
+    if is_https {
+        cookie.push_str("; Secure");
+    }
+
+    let mut response_headers = axum::http::HeaderMap::new();
+    let cookie_value = cookie
+        .parse::<axum::http::HeaderValue>()
+        .map_err(|e| BffError::Internal(format!("failed to build session cookie: {e}")))?;
+    response_headers.insert(axum::http::header::SET_COOKIE, cookie_value);
+
+    Ok((
+        response_headers,
+        Json(json!({
+            "token": token,
+            "user": {
+                "username": user.username,
+                "role": user.role
+            },
+            "must_change_password": must_change_password
+        })),
+    ))
 }
 
 /// Validate password policy. Centralised so the rules are visible at one site
@@ -532,9 +580,13 @@ mod tests {
         seed_user(&state.pool, "u-must-1", "alice", "correctpassword", true).await;
 
         let body = serde_json::json!({"username": "alice", "password": "correctpassword"});
-        let resp = login(axum::extract::State(state.clone()), axum::Json(body))
-            .await
-            .expect("login should succeed");
+        let (_headers, resp) = login(
+            axum::extract::State(state.clone()),
+            axum::http::HeaderMap::new(),
+            axum::Json(body),
+        )
+        .await
+        .expect("login should succeed");
         let v = resp.0;
         assert_eq!(
             v.get("must_change_password").and_then(|x| x.as_bool()),
@@ -555,9 +607,13 @@ mod tests {
         seed_user(&state.pool, "u-clear-1", "bob", "correctpassword", false).await;
 
         let body = serde_json::json!({"username": "bob", "password": "correctpassword"});
-        let resp = login(axum::extract::State(state.clone()), axum::Json(body))
-            .await
-            .expect("login should succeed");
+        let (_headers, resp) = login(
+            axum::extract::State(state.clone()),
+            axum::http::HeaderMap::new(),
+            axum::Json(body),
+        )
+        .await
+        .expect("login should succeed");
         let v = resp.0;
         assert_eq!(
             v.get("must_change_password").and_then(|x| x.as_bool()),
@@ -566,6 +622,86 @@ mod tests {
         let token = v["token"].as_str().unwrap();
         let claims = crate::auth::validate_token(token, &state.jwt_secret).expect("decode token");
         assert!(!claims.must_change_password);
+    }
+
+    // ── session cookie (Security S1, staged item 3.B) ─────────────────────
+
+    #[tokio::test]
+    async fn login_sets_session_cookie_with_expected_attributes() {
+        let state = build_test_state().await;
+        seed_user(&state.pool, "u-cookie-1", "gina", "correctpassword", false).await;
+
+        let mut request_headers = axum::http::HeaderMap::new();
+        request_headers.insert("x-forwarded-proto", "https".parse().unwrap());
+
+        let body = serde_json::json!({"username": "gina", "password": "correctpassword"});
+        let (headers, resp) = login(
+            axum::extract::State(state.clone()),
+            request_headers,
+            axum::Json(body),
+        )
+        .await
+        .expect("login should succeed");
+
+        let token = resp.0["token"].as_str().unwrap().to_string();
+        let cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("login must set the session cookie");
+
+        assert!(
+            cookie.starts_with(&format!("{}={token};", crate::auth::SESSION_COOKIE_NAME)),
+            "cookie must carry the same JWT as the body; got: {cookie}"
+        );
+        assert!(cookie.contains("; HttpOnly"), "cookie must be HttpOnly");
+        assert!(cookie.contains("; Path=/"), "cookie must be Path=/");
+        assert!(
+            cookie.contains("; SameSite=Strict"),
+            "cookie must be SameSite=Strict"
+        );
+        assert!(
+            cookie.contains("; Max-Age=86400"),
+            "cookie TTL must match the 24h token TTL"
+        );
+        assert!(
+            cookie.contains("; Secure"),
+            "X-Forwarded-Proto: https must add the Secure flag"
+        );
+
+        // The cookie JWT must verify through the exact same path the
+        // middleware uses.
+        let cookie_token =
+            cookie.trim_start_matches(&format!("{}=", crate::auth::SESSION_COOKIE_NAME));
+        let cookie_token = cookie_token.split(';').next().unwrap();
+        let claims =
+            crate::auth::validate_token(cookie_token, &state.jwt_secret).expect("cookie JWT valid");
+        assert_eq!(claims.username, "gina");
+    }
+
+    #[tokio::test]
+    async fn login_cookie_omits_secure_without_https_proto() {
+        let state = build_test_state().await;
+        seed_user(&state.pool, "u-cookie-2", "hugo", "correctpassword", false).await;
+
+        let body = serde_json::json!({"username": "hugo", "password": "correctpassword"});
+        // Plain-http request (what the BFF sees behind nginx): no
+        // X-Forwarded-Proto, so no Secure flag.
+        let (headers, _resp) = login(
+            axum::extract::State(state),
+            axum::http::HeaderMap::new(),
+            axum::Json(body),
+        )
+        .await
+        .expect("login should succeed");
+        let cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("login must set the session cookie");
+        assert!(
+            !cookie.contains("Secure"),
+            "plain-http login must not set Secure; got: {cookie}"
+        );
+        assert!(cookie.contains("; HttpOnly"), "HttpOnly stays on");
     }
 
     #[tokio::test]
@@ -724,6 +860,100 @@ mod tests {
             resp2.status(),
             StatusCode::OK,
             "change-password route must be reachable while flag is set"
+        );
+    }
+
+    // ── session-cookie fallback (Security S1, staged item 3.B) ────────────
+
+    #[tokio::test]
+    async fn cookie_only_request_is_authenticated() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = build_test_state().await;
+        let token = admin_token_for(&state, "u-cookie-mw-1", false);
+
+        let app = crate::bff_router(state.clone()).with_state(state);
+
+        // No Authorization header at all; the chv_session cookie alone must
+        // authenticate through the exact same JWT verification path.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/overview")
+            .header(
+                axum::http::header::COOKIE,
+                format!("{}={token}", crate::auth::SESSION_COOKIE_NAME),
+            )
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cookie-only request must authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_session_cookie_returns_401() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = build_test_state().await;
+        let app = crate::bff_router(state.clone()).with_state(state);
+
+        // A garbage cookie JWT must be a hard 401 — never a silent fallback
+        // to an anonymous request.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/overview")
+            .header(
+                axum::http::header::COOKIE,
+                format!("{}=not-a-valid-jwt", crate::auth::SESSION_COOKIE_NAME),
+            )
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "invalid cookie JWT must be 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_header_takes_precedence_over_cookie() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = build_test_state().await;
+        let token = admin_token_for(&state, "u-cookie-mw-2", false);
+
+        let app = crate::bff_router(state.clone()).with_state(state);
+
+        // Valid Authorization header + invalid cookie: the header wins, so
+        // the request must succeed (200), not 401.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/overview")
+            .header("authorization", format!("Bearer {token}"))
+            .header(
+                axum::http::header::COOKIE,
+                format!("{}=not-a-valid-jwt", crate::auth::SESSION_COOKIE_NAME),
+            )
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Authorization header must take precedence over the cookie"
         );
     }
 }

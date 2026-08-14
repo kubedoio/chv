@@ -26,6 +26,7 @@ impl<B: StorageBackend> StorageServer<B> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: B,
+        runtime_dir: std::path::PathBuf,
         metrics: Metrics,
         backend_allowlist: Vec<String>,
         path_allowlist: Vec<std::path::PathBuf>,
@@ -40,6 +41,7 @@ impl<B: StorageBackend> StorageServer<B> {
             backend.clone(),
             sessions,
             Arc::new(metrics),
+            runtime_dir.clone(),
             backend_allowlist,
             path_allowlist,
             device_allowlist,
@@ -49,7 +51,7 @@ impl<B: StorageBackend> StorageServer<B> {
         if let Some(store) = store {
             inner.set_store(store);
         }
-        let migration_service = StorageMigrationServiceImpl::new(backend);
+        let migration_service = StorageMigrationServiceImpl::new(backend, runtime_dir);
         Self {
             inner,
             migration_service,

@@ -7,8 +7,16 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::BffError;
+
+/// Name of the HttpOnly session cookie set at login and accepted by the
+/// bearer extractor as a fallback credential (Security S1, staged item 3.B).
+/// The UI still keeps the JWT in localStorage for now; the cookie is a
+/// server-side session channel that survives page reloads without script
+/// access.
+pub const SESSION_COOKIE_NAME: &str = "chv_session";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Claims {
@@ -72,6 +80,40 @@ pub fn has_apply_permission(role: &Role) -> bool {
     match role {
         Role::Admin | Role::Operator => true,
         Role::Viewer => false,
+    }
+}
+
+/// Warn-once flag for API tokens whose `scope` column holds a value outside
+/// the defined set. Legacy rows (or rows written by a newer/older control
+/// plane) must not lock users out — they fall back to `full` — but the
+/// anomaly should surface exactly once per process instead of spamming logs
+/// on every request.
+static WARNED_UNKNOWN_API_TOKEN_SCOPE: AtomicBool = AtomicBool::new(false);
+
+/// Enforce `api_tokens.scope` (Security T1).
+///
+/// Scope semantics:
+///
+/// - `"full"` — the token keeps the user's role unchanged.
+/// - `"readonly"` — the token is demoted to the `viewer` role, regardless
+///   of the user's own role: read-only endpoints only, every mutating route
+///   rejects it at the role middleware.
+/// - anything else (including `NULL` → `""` from legacy rows) — treated as
+///   `"full"` (fail-safe: no lockout), with a one-time warning so the
+///   anomaly is visible in logs.
+fn effective_role_for_scope(scope: &str, user_role: &str) -> String {
+    match scope {
+        "full" => user_role.to_string(),
+        "readonly" => "viewer".to_string(),
+        other => {
+            if !WARNED_UNKNOWN_API_TOKEN_SCOPE.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    scope = %other,
+                    "api_token has unrecognized scope; treating as \"full\" (fail-safe)"
+                );
+            }
+            user_role.to_string()
+        }
     }
 }
 
@@ -164,6 +206,32 @@ pub fn validate_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken:
     Ok(token_data.claims)
 }
 
+/// Parse the `chv_session` cookie value out of the request's `Cookie`
+/// header. Returns `None` when the cookie is absent or malformed.
+///
+/// Hand-rolled instead of pulling the `cookie` crate (no new dependency):
+/// the BFF sets this cookie itself and the value is a JWT (base64url and
+/// `.` only — no percent-encoding), so an exact-prefix scan over
+/// `;`-separated pairs is sufficient. A cookie *name* that merely shares
+/// the prefix (`chv_sessionX=...`) does not match because the character
+/// after the prefix must be `=`.
+fn session_cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some(rest) = pair.strip_prefix(SESSION_COOKIE_NAME) {
+            let rest = rest.trim_start();
+            if let Some(value) = rest.strip_prefix('=') {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub struct BearerToken(pub Claims);
 
 #[async_trait]
@@ -181,11 +249,42 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
             )
         };
 
-        let auth = parts
+        let auth_header = parts
             .headers
             .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| reject("missing authorization header"))?;
+            .and_then(|v| v.to_str().ok());
+
+        // Session-cookie fallback (Security S1, staged item 3.B). When no
+        // Authorization header is present, the HttpOnly `chv_session` cookie
+        // (set by /v1/auth/login) is accepted as the JWT and goes through
+        // the exact same verification path (constant-time HMAC, exp check).
+        //
+        // Deliberate behaviors:
+        // - If BOTH are present, the Authorization header wins (the cookie
+        //   is not even parsed).
+        // - An invalid cookie JWT is a hard 401 — we never silently fall
+        //   back to an anonymous request.
+        // - Cookie auth is NOT restricted to non-mutating methods: the
+        //   csrf_middleware already requires `application/json` content-type
+        //   for every non-GET (cross-site HTML forms cannot send that
+        //   without a CORS preflight) and SameSite=Strict blocks the cookie
+        //   from being sent on cross-site requests at all. That reasoning
+        //   is the documented CSRF posture for this staged flow.
+        let auth = match auth_header {
+            Some(header) => header,
+            None => {
+                return match session_cookie_token(&parts.headers) {
+                    Some(token) => match validate_token(&token, &state.jwt_secret) {
+                        Ok(claims) => Ok(BearerToken(claims)),
+                        Err(e) => {
+                            tracing::debug!(error = %e, "session cookie JWT validation failed");
+                            Err(reject("invalid or expired session cookie"))
+                        }
+                    },
+                    None => Err(reject("missing authorization header")),
+                };
+            }
+        };
 
         if !auth.to_ascii_lowercase().starts_with("bearer ") {
             return Err(reject("invalid authorization scheme"));
@@ -209,10 +308,15 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
                 user_id: String,
                 username: String,
                 role: String,
+                /// Enforced per Security T1: `"full"` keeps the user's role,
+                /// `"readonly"` demotes to viewer, unknown values are
+                /// fail-safe-treated as `"full"` (see
+                /// [`effective_role_for_scope`]).
+                scope: String,
             }
 
             let result = sqlx::query_as::<_, ApiTokenUser>(
-                "SELECT u.user_id, u.username, u.role \
+                "SELECT u.user_id, u.username, u.role, t.scope \
                  FROM api_tokens t \
                  JOIN users u ON t.user_id = u.user_id \
                  WHERE t.token_hash = ? \
@@ -239,7 +343,9 @@ impl FromRequestParts<crate::router::AppState> for BearerToken {
                     let claims = Claims {
                         sub: row.user_id,
                         username: row.username,
-                        role: row.role,
+                        // Scope enforcement: the token's role on the wire is
+                        // the user's role as narrowed by api_tokens.scope.
+                        role: effective_role_for_scope(&row.scope, &row.role),
                         // Far future expiry for API tokens — their expiry is managed by expires_at in DB
                         exp: u64::MAX / 2,
                         // API tokens bypass the must-change-password gate: they are
@@ -499,6 +605,74 @@ mod tests {
         let validated = result.expect("far-future exp must validate");
         assert_eq!(validated.exp, u64::MAX / 2);
         assert_eq!(validated.role, "operator");
+    }
+
+    // ── api_tokens.scope enforcement (Security T1) ────────────────────────
+
+    #[test]
+    fn full_scope_keeps_user_role() {
+        assert_eq!(effective_role_for_scope("full", "operator"), "operator");
+        assert_eq!(effective_role_for_scope("full", "admin"), "admin");
+        assert_eq!(effective_role_for_scope("full", "viewer"), "viewer");
+    }
+
+    #[test]
+    fn readonly_scope_demotes_to_viewer() {
+        assert_eq!(effective_role_for_scope("readonly", "operator"), "viewer");
+        assert_eq!(effective_role_for_scope("readonly", "admin"), "viewer");
+        assert_eq!(effective_role_for_scope("readonly", "viewer"), "viewer");
+    }
+
+    #[test]
+    fn unknown_scope_fails_safe_to_full() {
+        // Fail-safe contract: an unrecognized scope must never grant MORE
+        // than the user's own role, and must never lock the user out either
+        // — it degrades to the user's role ("full" semantics).
+        assert_eq!(effective_role_for_scope("banana", "operator"), "operator");
+        assert_eq!(effective_role_for_scope("", "admin"), "admin");
+        assert_eq!(effective_role_for_scope("READONLY", "operator"), "operator");
+    }
+
+    // ── session cookie parsing (Security S1) ──────────────────────────────
+
+    fn headers_with_cookie(value: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::COOKIE, value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn session_cookie_parses_single_cookie() {
+        let headers = headers_with_cookie("chv_session=abc.def.ghi");
+        assert_eq!(
+            session_cookie_token(&headers).as_deref(),
+            Some("abc.def.ghi")
+        );
+    }
+
+    #[test]
+    fn session_cookie_parses_among_other_cookies() {
+        let headers =
+            headers_with_cookie("theme=dark; chv_session=abc.def.ghi; other=1; chv_sessionX=nope");
+        assert_eq!(
+            session_cookie_token(&headers).as_deref(),
+            Some("abc.def.ghi")
+        );
+    }
+
+    #[test]
+    fn session_cookie_rejects_missing_or_malformed() {
+        assert!(session_cookie_token(&axum::http::HeaderMap::new()).is_none());
+        assert!(session_cookie_token(&headers_with_cookie("other=1")).is_none());
+        // Prefix look-alike must not match.
+        assert!(session_cookie_token(&headers_with_cookie("chv_sessionX=abc")).is_none());
+        // Empty value is not a credential.
+        assert!(session_cookie_token(&headers_with_cookie("chv_session=")).is_none());
+        // Whitespace around the value is tolerated by the parser.
+        assert_eq!(
+            session_cookie_token(&headers_with_cookie("chv_session= abc ")).as_deref(),
+            Some("abc")
+        );
     }
 
     #[test]

@@ -529,7 +529,7 @@ async fn discard_plan_idempotent() {
     // Underlying row reflects the discarded status.
     let plan_repo = PlanRepository::new(state.pool.clone());
     let row = plan_repo
-        .get(&ArchitecturePlanId::new(plan_id).unwrap())
+        .get(&ArchitecturePlanId::new(plan_id).unwrap(), None)
         .await
         .expect("plan row exists");
     assert_eq!(row.status, PlanStatus::Discarded);
@@ -652,7 +652,7 @@ async fn discard_plan_records_actor() {
 
     let plan_repo = PlanRepository::new(state.pool.clone());
     let row = plan_repo
-        .get(&ArchitecturePlanId::new(plan_id_str).unwrap())
+        .get(&ArchitecturePlanId::new(plan_id_str).unwrap(), None)
         .await
         .expect("plan row exists");
     assert_eq!(row.status, PlanStatus::Discarded);

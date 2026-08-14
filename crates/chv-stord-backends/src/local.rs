@@ -1,4 +1,6 @@
-use crate::r#trait::{BackendHealth, StorageBackend, VolumeExport};
+use crate::r#trait::{
+    validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE,
+};
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::ChvError;
@@ -13,6 +15,7 @@ const DEFAULT_SPARSE_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 struct DirtyTracker {
     block_size: u64,
+    volume_size: u64,
     bitmap: Vec<u8>,
 }
 
@@ -586,7 +589,19 @@ impl StorageBackend for LocalFileBackend {
         .map_err(|e| ChvError::BackendUnavailable {
             backend: "local".to_string(),
             reason: format!("spawn_blocking join error: {e}"),
-        })?
+        })??;
+
+        // Keep dirty tracking consistent with the new size so that writes
+        // into the grown region are both allowed and marked.
+        if let Some(tracker) = self.dirty_trackers.write().await.get_mut(handle) {
+            tracker.volume_size = new_size_bytes;
+            let needed_bytes = new_size_bytes.div_ceil(tracker.block_size).div_ceil(8) as usize;
+            if tracker.bitmap.len() < needed_bytes {
+                tracker.bitmap.resize(needed_bytes, 0);
+            }
+        }
+
+        Ok(())
     }
 
     async fn prepare_snapshot(
@@ -758,6 +773,32 @@ impl StorageBackend for LocalFileBackend {
 
     // --- Phase 2.1-2.2: Migration methods ---
 
+    /// Initialize the dirty bitmap for an opened volume.
+    ///
+    /// The bitmap has one bit per 4 MiB block and starts all-clear. Reusing
+    /// an existing tracker (idempotent re-open) preserves the dirty bits.
+    async fn enable_dirty_tracking(
+        &self,
+        _volume_id: &str,
+        handle: &str,
+        volume_size_bytes: u64,
+    ) -> Result<(), ChvError> {
+        let bitmap_bytes = volume_size_bytes
+            .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+            .div_ceil(8) as usize;
+        let tracker = DirtyTracker {
+            block_size: DIRTY_TRACKING_BLOCK_SIZE,
+            volume_size: volume_size_bytes,
+            bitmap: vec![0u8; bitmap_bytes],
+        };
+        self.dirty_trackers
+            .write()
+            .await
+            .entry(handle.to_string())
+            .or_insert(tracker);
+        Ok(())
+    }
+
     /// Atomically snapshot and clear the dirty bitmap under a single write lock.
     ///
     /// This prevents any window where a write could dirty a block between
@@ -822,6 +863,27 @@ impl StorageBackend for LocalFileBackend {
         data: &[u8],
     ) -> Result<(), ChvError> {
         let path = self.path_from_handle(volume_id, handle)?;
+
+        // When dirty tracking is enabled, reject out-of-range writes up
+        // front: the bitmap is sized from the volume size, so a write past
+        // the end could otherwise be silently dropped from the dirty bitmap
+        // and lost during migration. The mark range is captured before the
+        // write so the bitmap update below cannot run past the bitmap end.
+        let mark_range = {
+            let map = self.dirty_trackers.read().await;
+            match map.get(handle) {
+                Some(tracker) => {
+                    let end =
+                        validate_write_bounds(offset, data.len() as u64, tracker.volume_size)?;
+                    Some((
+                        offset / tracker.block_size,
+                        end.div_ceil(tracker.block_size),
+                    ))
+                }
+                None => None,
+            }
+        };
+
         let data_owned = data.to_vec();
         tokio::task::spawn_blocking(move || {
             let mut file = std::fs::File::options()
@@ -849,15 +911,12 @@ impl StorageBackend for LocalFileBackend {
         })??;
 
         // Update dirty bitmap if tracking is enabled for this handle.
-        let mut map = self.dirty_trackers.write().await;
-        if let Some(tracker) = map.get_mut(handle) {
-            let bs = tracker.block_size;
-            let start_block = offset / bs;
-            let end_block = (offset + data.len() as u64).div_ceil(bs);
-            for block in start_block..end_block {
-                let byte_idx = (block / 8) as usize;
-                let bit_idx = (block % 8) as u8;
-                if byte_idx < tracker.bitmap.len() {
+        if let Some((start_block, end_block)) = mark_range {
+            let mut map = self.dirty_trackers.write().await;
+            if let Some(tracker) = map.get_mut(handle) {
+                for block in start_block..end_block {
+                    let byte_idx = (block / 8) as usize;
+                    let bit_idx = (block % 8) as u8;
                     tracker.bitmap[byte_idx] |= 1 << bit_idx;
                 }
             }
@@ -896,8 +955,39 @@ impl StorageBackend for LocalFileBackend {
                 reason: "size_bytes must be > 0".to_string(),
             });
         }
+
+        // Defense in depth: the receiving filename is built from a
+        // caller-supplied volume_id. The migration gRPC boundary already
+        // validates ids, but the backend never trusts caller input when
+        // constructing a path under runtime_dir.
+        if !chv_common::is_safe_id(volume_id) {
+            return Err(ChvError::InvalidArgument {
+                field: "volume_id".to_string(),
+                reason: format!("unsafe volume_id '{volume_id}': must be a single path component"),
+            });
+        }
         let filename = format!("{}.img", volume_id);
         let dest = self.runtime_dir.join(&filename);
+
+        // Canonical containment: resolve runtime_dir (which must exist to
+        // receive a volume) and verify the destination still lands inside it.
+        // Fail closed on any resolution error.
+        let runtime_canonical =
+            std::fs::canonicalize(&self.runtime_dir).map_err(|e| ChvError::BackendUnavailable {
+                backend: "local".to_string(),
+                reason: format!("cannot resolve runtime_dir for receiving volume: {}", e),
+            })?;
+        let dest_canonical = runtime_canonical.join(&filename);
+        if !dest_canonical.starts_with(&runtime_canonical) {
+            return Err(ChvError::AccessDenied {
+                resource: volume_id.to_string(),
+                reason: format!(
+                    "receiving volume path '{}' escapes runtime_dir",
+                    dest.display()
+                ),
+            });
+        }
+
         let dest_clone = dest.clone();
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::create(&dest_clone).map_err(|e| ChvError::Io {
@@ -1397,6 +1487,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_receiving_volume_rejects_traversal_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalFileBackend::new(dir.path().to_path_buf());
+
+        for bad_id in ["../escape", "a/b", "a\\b", "..", "a..b"] {
+            let err = backend
+                .create_receiving_volume(bad_id, 8192, "raw")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ChvError::InvalidArgument { .. }),
+                "volume_id {bad_id:?} should be rejected, got {err:?}"
+            );
+        }
+
+        // Nothing may have been created outside runtime_dir.
+        assert!(!dir.path().parent().unwrap().join("escape.img").exists());
+    }
+
+    #[tokio::test]
     async fn volume_size_returns_correct_value() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sized.img");
@@ -1409,5 +1519,166 @@ mod tests {
         let handle = "local-sz-vol-sized.img";
         let size = backend.volume_size("sz-vol", handle).await.unwrap();
         assert_eq!(size, 16384);
+    }
+
+    // --- Dirty tracking tests ---
+
+    async fn open_tracked_volume(
+        dir: &std::path::Path,
+        volume_id: &str,
+        name: &str,
+        size_bytes: u64,
+    ) -> (LocalFileBackend, String) {
+        let backend = LocalFileBackend::new(dir.to_path_buf());
+        let mut options = std::collections::HashMap::new();
+        options.insert("size_bytes".to_string(), size_bytes.to_string());
+        let locator = BackendLocator {
+            backend_class: "local".to_string(),
+            locator: name.to_string(),
+            options,
+        };
+        let export = backend
+            .open(volume_id, &locator, &DevicePolicy::default())
+            .await
+            .unwrap();
+        (backend, export.attachment_handle)
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_not_found_before_enable_and_empty_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, handle) =
+            open_tracked_volume(dir.path(), "vol-1", "tracked.img", 8_388_608).await;
+
+        // Without enabling, the snapshot call reports NotFound.
+        let before = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await;
+        assert!(matches!(before, Err(ChvError::NotFound { .. })));
+
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 8_388_608)
+            .await
+            .unwrap();
+
+        // After enabling, a freshly opened volume returns an empty bitmap
+        // (not NotFound) so migration dirty-sync rounds can proceed.
+        let bitmap = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await
+            .unwrap();
+        assert!(!bitmap.is_empty());
+        assert!(bitmap.iter().all(|&b| b == 0));
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_marks_written_block_and_snapshot_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, handle) =
+            open_tracked_volume(dir.path(), "vol-1", "tracked.img", 8_388_608).await;
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 8_388_608)
+            .await
+            .unwrap();
+
+        // Write inside the second 4 MiB block (block index 1 -> byte 0, bit 1).
+        let offset = DIRTY_TRACKING_BLOCK_SIZE + 1024;
+        backend
+            .write_block("vol-1", &handle, offset, &[0xAAu8; 512])
+            .await
+            .unwrap();
+
+        let bitmap = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await
+            .unwrap();
+        assert_eq!(bitmap, vec![0b0000_0010]);
+
+        // The snapshot call atomically cleared the bitmap.
+        let after = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await
+            .unwrap();
+        assert_eq!(after, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_rejects_out_of_range_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, handle) = open_tracked_volume(dir.path(), "vol-1", "tracked.img", 4096).await;
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 4096)
+            .await
+            .unwrap();
+
+        let res = backend
+            .write_block("vol-1", &handle, 3000, &[0u8; 2000])
+            .await;
+        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+
+        // The rejected write must not have extended the volume file.
+        let meta = std::fs::metadata(dir.path().join("tracked.img")).unwrap();
+        assert_eq!(meta.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_resize_updates_bounds_and_grows_bitmap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, handle) = open_tracked_volume(dir.path(), "vol-1", "tracked.img", 4096).await;
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 4096)
+            .await
+            .unwrap();
+
+        // Before resize, a write past the old end is rejected.
+        let res = backend
+            .write_block("vol-1", &handle, 4096, &[0u8; 512])
+            .await;
+        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+
+        // Grow to 10 blocks (40 MiB -> 2 bitmap bytes).
+        let new_size = 10 * DIRTY_TRACKING_BLOCK_SIZE;
+        backend.resize("vol-1", &handle, new_size).await.unwrap();
+
+        // A write into block 8 is now in range and marks byte 1, bit 0.
+        let offset = 8 * DIRTY_TRACKING_BLOCK_SIZE + 64;
+        backend
+            .write_block("vol-1", &handle, offset, &[0xBBu8; 512])
+            .await
+            .unwrap();
+
+        let bitmap = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await
+            .unwrap();
+        assert_eq!(bitmap, vec![0, 0b0000_0001]);
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_enable_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, handle) =
+            open_tracked_volume(dir.path(), "vol-1", "tracked.img", 8_388_608).await;
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 8_388_608)
+            .await
+            .unwrap();
+
+        backend
+            .write_block("vol-1", &handle, 0, &[0xCCu8; 512])
+            .await
+            .unwrap();
+
+        // A redundant enable (idempotent re-open) must not reset dirty bits.
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 8_388_608)
+            .await
+            .unwrap();
+
+        let bitmap = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await
+            .unwrap();
+        assert_eq!(bitmap, vec![0b0000_0001]);
     }
 }

@@ -83,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = StorageServer::new(
         backend,
+        config.runtime_dir.clone(),
         chv_observability::Metrics::new(),
         config.backend_allowlist,
         config.path_allowlist,

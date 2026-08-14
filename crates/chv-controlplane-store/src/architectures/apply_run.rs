@@ -98,35 +98,80 @@ impl ApplyRunRepository {
         row_to_run(&row)
     }
 
+    /// Fetch an apply run by id, optionally scoped to a caller.
+    ///
+    /// Apply runs inherit ownership from their architecture's
+    /// `architecture_topologies` row (see [`crate::architectures::plan`]
+    /// for the same join pattern). `Some(uid)` scopes to rows whose
+    /// topology is owned by `uid` or system-owned; `None` lifts the
+    /// predicate (admin / internal callers).
     pub async fn get(
         &self,
         id: &ArchitectureApplyRunId,
+        visible_to_user: Option<&str>,
     ) -> Result<ArchitectureApplyRun, StoreError> {
-        let row = sqlx::query(r#"SELECT * FROM architecture_apply_runs WHERE id = $1"#)
-            .bind(id.as_str())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: ENTITY,
-                id: id.to_string(),
-            })?;
+        let row = match visible_to_user {
+            None => {
+                sqlx::query(r#"SELECT * FROM architecture_apply_runs WHERE id = $1"#)
+                    .bind(id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT r.* FROM architecture_apply_runs r
+                    JOIN architecture_topologies t ON t.id = r.architecture_id
+                    WHERE r.id = $1 AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(uid)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        let row = row.ok_or_else(|| StoreError::NotFound {
+            entity: ENTITY,
+            id: id.to_string(),
+        })?;
         row_to_run(&row)
     }
 
     pub async fn list_for_architecture(
         &self,
         architecture_id: &ArchitectureId,
+        visible_to_user: Option<&str>,
     ) -> Result<Vec<ArchitectureApplyRun>, StoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT * FROM architecture_apply_runs
-            WHERE architecture_id = $1
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(architecture_id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = match visible_to_user {
+            None => {
+                sqlx::query(
+                    r#"
+                    SELECT * FROM architecture_apply_runs
+                    WHERE architecture_id = $1
+                    ORDER BY created_at DESC
+                    "#,
+                )
+                .bind(architecture_id.as_str())
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT r.* FROM architecture_apply_runs r
+                    JOIN architecture_topologies t ON t.id = r.architecture_id
+                    WHERE r.architecture_id = $1
+                      AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
+                    ORDER BY r.created_at DESC
+                    "#,
+                )
+                .bind(architecture_id.as_str())
+                .bind(uid)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
         rows.iter().map(row_to_run).collect()
     }
 
@@ -166,7 +211,7 @@ impl ApplyRunRepository {
             });
         }
 
-        self.get(&input.id).await
+        self.get(&input.id, None).await
     }
 
     /// Apply orchestration is a Phase 1+ concern.

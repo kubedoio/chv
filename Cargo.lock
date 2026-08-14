@@ -709,6 +709,7 @@ dependencies = [
 name = "chv-agent-core"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "axum",
  "cellhv-core-api",
  "cellhv-core-fs",

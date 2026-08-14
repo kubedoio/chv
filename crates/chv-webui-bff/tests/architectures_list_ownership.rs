@@ -347,7 +347,7 @@ async fn archived_filter_still_works() {
     let arch_id = ArchitectureId::new(arch_a.clone()).unwrap();
     state
         .topology_repo
-        .archive(&arch_id, 1)
+        .archive(&arch_id, 1, None)
         .await
         .expect("archive arch-A");
 

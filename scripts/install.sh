@@ -4,6 +4,7 @@
 #   curl -sfL https://get.cellhv.com/ | sh -
 #   curl -sfL https://get.cellhv.com/ | INSTALL_CHV_VERSION=0.2.0 sh -
 #   ./scripts/install.sh --wipe    # Full teardown before clean install
+#   ./scripts/install.sh --fresh   # Alias for --wipe
 #
 # Environment variables:
 #   INSTALL_CHV_VERSION         - Version to install (default: latest)
@@ -14,7 +15,8 @@
 #   INSTALL_CHV_BRIDGE_NAME     - Bridge name (default: chvbr0)
 #   INSTALL_CHV_BRIDGE_CIDR     - Bridge CIDR (default: 10.200.0.1/24)
 #   INSTALL_CHV_NO_SEED         - Set to "1" to skip default network + test VM creation
-#   INSTALL_CHV_WIPE            - Set to "1" to fully wipe previous deployment first
+#   INSTALL_CHV_WIPE            - Set to "1" to wipe the previous deployment first,
+#                                 including existing VMs and the control-plane database
 
 set -euo pipefail
 
@@ -31,7 +33,7 @@ INSTALL_CHV_WIPE="${INSTALL_CHV_WIPE:-0}"
 # Parse CLI flags
 for arg in "$@"; do
     case "$arg" in
-        --wipe) INSTALL_CHV_WIPE="1" ;;
+        --wipe|--fresh) INSTALL_CHV_WIPE="1" ;;
     esac
 done
 
@@ -1426,7 +1428,35 @@ install_dependencies
 setup_user_and_dirs
 
 # Clean up previous installation artifacts
+#
+# Persistent state (VM runtime data, VM disk images, and the control-plane
+# database) is only ever removed when the operator explicitly opts in via
+# INSTALL_CHV_WIPE=1 (or --wipe/--fresh). A plain re-run must never silently
+# destroy running VMs or the control-plane database, so it refuses to proceed
+# when persistent data is present and otherwise only replaces the replaceable
+# artifacts (sockets, configs, binaries, UI assets, caches).
+persistent_data_present() {
+    if [ -d "${CHV_DATA_DIR}/agent/vms" ] && [ -n "$(ls -A "${CHV_DATA_DIR}/agent/vms" 2>/dev/null)" ]; then
+        return 0
+    fi
+    if [ -f "${CHV_DB_PATH}" ]; then
+        return 0
+    fi
+    if ls "${CHV_DATA_DIR}/agent/"*.img >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
 clean_previous_install() {
+    if [ "$INSTALL_CHV_WIPE" = "1" ]; then
+        info "INSTALL_CHV_WIPE=1: persistent VM and control-plane database state will be wiped."
+    elif persistent_data_present; then
+        fatal "Persistent CHV data exists (${CHV_DATA_DIR}/agent/vms, ${CHV_DATA_DIR}/agent/*.img, or ${CHV_DB_PATH}).
+Refusing to overwrite it on a re-run. To destroy existing VMs and the control-plane
+database, rerun with INSTALL_CHV_WIPE=1 (or --wipe/--fresh)."
+    fi
+
     info "Cleaning previous installation..."
     # Stop services if running
     for svc in chv-agent chv-controlplane chv-stord chv-nwd; do
@@ -1441,13 +1471,16 @@ clean_previous_install() {
     rm -f "${CHV_CONFIG_DIR}/agent.toml" "${CHV_CONFIG_DIR}/controlplane.toml" \
           "${CHV_CONFIG_DIR}/stord.toml" "${CHV_CONFIG_DIR}/nwd.toml" \
           "${CHV_CONFIG_DIR}/bootstrap.token"
-    # Remove old runtime data (VMs, volumes, certs in agent dir)
-    rm -rf "${CHV_DATA_DIR}/agent/vms" "${CHV_DATA_DIR}/agent/"*.img \
-           "${CHV_DATA_DIR}/agent/agent.crt" "${CHV_DATA_DIR}/agent/agent.key" \
-           "${CHV_DATA_DIR}/agent/ca.crt" \
-           "${CHV_DATA_DIR}/agent/chv-nwd.toml" "${CHV_DATA_DIR}/agent/chv-stord.toml"
-    # Remove old database
-    rm -f "${CHV_DATA_DIR}/controlplane.db"*
+    # Remove replaceable agent-dir artifacts (certs and daemon configs are
+    # re-created from /etc/chv at startup).
+    rm -f "${CHV_DATA_DIR}/agent/agent.crt" "${CHV_DATA_DIR}/agent/agent.key" \
+          "${CHV_DATA_DIR}/agent/ca.crt" \
+          "${CHV_DATA_DIR}/agent/chv-nwd.toml" "${CHV_DATA_DIR}/agent/chv-stord.toml"
+    # Persistent VM/volume/database state: gated on the explicit wipe flag.
+    if [ "$INSTALL_CHV_WIPE" = "1" ]; then
+        rm -rf "${CHV_DATA_DIR}/agent/vms" "${CHV_DATA_DIR}/agent/"*.img
+        rm -f "${CHV_DB_PATH}" "${CHV_DB_PATH}-wal" "${CHV_DB_PATH}-shm" "${CHV_DB_PATH}-journal"
+    fi
     # Remove old cache
     rm -f "${CHV_DATA_DIR}/cache/agent-cache.json"
     info "Previous installation cleaned."

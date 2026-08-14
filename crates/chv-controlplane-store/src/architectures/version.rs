@@ -78,32 +78,80 @@ impl VersionRepository {
         row_to_version(&row)
     }
 
-    pub async fn get(&self, id: &ArchitectureVersionId) -> Result<ArchitectureVersion, StoreError> {
-        let row = sqlx::query(r#"SELECT * FROM architecture_versions WHERE id = $1"#)
-            .bind(id.as_str())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: ENTITY,
-                id: id.to_string(),
-            })?;
+    /// Fetch a version row by id, optionally scoped to a caller.
+    ///
+    /// Version rows inherit ownership from their architecture's
+    /// `architecture_topologies` row (same join pattern as the plan /
+    /// apply-run / drift repositories). `Some(uid)` scopes to rows whose
+    /// topology is owned by `uid` or system-owned; `None` lifts the
+    /// predicate (admin / internal callers).
+    pub async fn get(
+        &self,
+        id: &ArchitectureVersionId,
+        visible_to_user: Option<&str>,
+    ) -> Result<ArchitectureVersion, StoreError> {
+        let row = match visible_to_user {
+            None => {
+                sqlx::query(r#"SELECT * FROM architecture_versions WHERE id = $1"#)
+                    .bind(id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT v.* FROM architecture_versions v
+                    JOIN architecture_topologies t ON t.id = v.architecture_id
+                    WHERE v.id = $1 AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(uid)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        let row = row.ok_or_else(|| StoreError::NotFound {
+            entity: ENTITY,
+            id: id.to_string(),
+        })?;
         row_to_version(&row)
     }
 
     pub async fn list_for_architecture(
         &self,
         architecture_id: &ArchitectureId,
+        visible_to_user: Option<&str>,
     ) -> Result<Vec<ArchitectureVersion>, StoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT * FROM architecture_versions
-            WHERE architecture_id = $1
-            ORDER BY version_number DESC, created_at DESC
-            "#,
-        )
-        .bind(architecture_id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = match visible_to_user {
+            None => {
+                sqlx::query(
+                    r#"
+                    SELECT * FROM architecture_versions
+                    WHERE architecture_id = $1
+                    ORDER BY version_number DESC, created_at DESC
+                    "#,
+                )
+                .bind(architecture_id.as_str())
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT v.* FROM architecture_versions v
+                    JOIN architecture_topologies t ON t.id = v.architecture_id
+                    WHERE v.architecture_id = $1
+                      AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
+                    ORDER BY v.version_number DESC, v.created_at DESC
+                    "#,
+                )
+                .bind(architecture_id.as_str())
+                .bind(uid)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
 
         rows.iter().map(row_to_version).collect()
     }

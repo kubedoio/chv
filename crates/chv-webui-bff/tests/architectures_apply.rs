@@ -387,7 +387,7 @@ async fn apply_happy_path() {
     let runs_repo = ApplyRunRepository::new(state.pool.clone());
     let arch = ArchitectureId::new(arch_id).unwrap();
     let runs = runs_repo
-        .list_for_architecture(&arch)
+        .list_for_architecture(&arch, None)
         .await
         .expect("list runs");
     assert_eq!(runs.len(), 1);
@@ -769,6 +769,7 @@ async fn apply_records_actor_in_run() {
         .get(
             &chv_controlplane_types::architecture::ArchitectureApplyRunId::new(resp.run_id)
                 .unwrap(),
+            None,
         )
         .await
         .expect("run row exists");
@@ -1306,7 +1307,10 @@ async fn apply_enqueue_failure_rolls_plan_back_to_failed_and_discard_succeeds() 
     // terminal state from which retry/discard both work.
     let plan_repo = PlanRepository::new(state.pool.clone());
     let plan_after = plan_repo
-        .get(&ArchitecturePlanId::new(plan.plan_id.clone()).unwrap())
+        .get(
+            &ArchitecturePlanId::new(plan.plan_id.clone()).unwrap(),
+            None,
+        )
         .await
         .expect("re-fetch plan");
     assert_eq!(
@@ -1321,7 +1325,7 @@ async fn apply_enqueue_failure_rolls_plan_back_to_failed_and_discard_succeeds() 
     let runs_repo = ApplyRunRepository::new(state.pool.clone());
     let arch = ArchitectureId::new(arch_id.clone()).unwrap();
     let runs = runs_repo
-        .list_for_architecture(&arch)
+        .list_for_architecture(&arch, None)
         .await
         .expect("list runs");
     assert_eq!(runs.len(), 1);
@@ -1344,7 +1348,10 @@ async fn apply_enqueue_failure_rolls_plan_back_to_failed_and_discard_succeeds() 
 
     // The plan row is now Discarded.
     let plan_after_discard = plan_repo
-        .get(&ArchitecturePlanId::new(plan.plan_id.clone()).unwrap())
+        .get(
+            &ArchitecturePlanId::new(plan.plan_id.clone()).unwrap(),
+            None,
+        )
         .await
         .expect("re-fetch plan after discard");
     assert_eq!(plan_after_discard.status, PlanStatus::Discarded);

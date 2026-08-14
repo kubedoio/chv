@@ -54,7 +54,7 @@ async fn topology_create_get_roundtrip() {
     assert_eq!(created.version_number, 1);
     assert_eq!(created.status, ArchitectureStatus::Draft);
 
-    let fetched = repo.get(&aid("topo-1")).await.expect("get");
+    let fetched = repo.get(&aid("topo-1"), None).await.expect("get");
     assert_eq!(fetched, created);
 }
 
@@ -63,7 +63,7 @@ async fn topology_get_not_found() {
     let db = TestDb::new().await;
     let repo = TopologyRepository::new(db.pool.clone());
 
-    let err = repo.get(&aid("missing")).await.unwrap_err();
+    let err = repo.get(&aid("missing"), None).await.unwrap_err();
     assert!(
         matches!(&err, StoreError::NotFound { entity, id } if *entity == "architecture_topology" && id == "missing"),
         "expected NotFound, got {err:?}"
@@ -81,7 +81,7 @@ async fn topology_list_excludes_archived_by_default() {
     repo.create(make_topology_input("topo-b", "beta"))
         .await
         .unwrap();
-    repo.archive(&aid("topo-a"), 1).await.unwrap();
+    repo.archive(&aid("topo-a"), 1, None).await.unwrap();
 
     let active = repo
         .list(TopologyListFilter::default())
@@ -111,11 +111,11 @@ async fn topology_archive_then_archive_again_is_not_found() {
     repo.create(make_topology_input("topo-1", "alpha"))
         .await
         .unwrap();
-    repo.archive(&aid("topo-1"), 1)
+    repo.archive(&aid("topo-1"), 1, None)
         .await
         .expect("first archive");
 
-    let err = repo.archive(&aid("topo-1"), 1).await.unwrap_err();
+    let err = repo.archive(&aid("topo-1"), 1, None).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }));
 }
 
@@ -131,19 +131,22 @@ async fn topology_update_happy_path_bumps_version() {
     assert_eq!(created.version_number, 1);
 
     let updated = repo
-        .update(TopologyUpdateInput {
-            id: aid("topo-1"),
-            expected_version: 1,
-            display_name: Some("alpha v2".to_string()),
-            description: None,
-            environment: None,
-            status: Some(ArchitectureStatus::Valid),
-            design_graph_json: Some("{\"nodes\":[]}".to_string()),
-            latest_yaml: None,
-            latest_version_id: None,
-            last_validation_status: Some(ValidationStatus::Passed),
-            last_fleet_check_status: Some(FleetCheckStatus::Unknown),
-        })
+        .update(
+            TopologyUpdateInput {
+                id: aid("topo-1"),
+                expected_version: 1,
+                display_name: Some("alpha v2".to_string()),
+                description: None,
+                environment: None,
+                status: Some(ArchitectureStatus::Valid),
+                design_graph_json: Some("{\"nodes\":[]}".to_string()),
+                latest_yaml: None,
+                latest_version_id: None,
+                last_validation_status: Some(ValidationStatus::Passed),
+                last_fleet_check_status: Some(FleetCheckStatus::Unknown),
+            },
+            None,
+        )
         .await
         .expect("update");
     assert_eq!(updated.version_number, 2);
@@ -161,28 +164,11 @@ async fn topology_update_with_stale_version_returns_stale_version() {
         .unwrap();
 
     // First update succeeds and bumps to version 2.
-    repo.update(TopologyUpdateInput {
-        id: aid("topo-1"),
-        expected_version: 1,
-        display_name: Some("v2".to_string()),
-        description: None,
-        environment: None,
-        status: None,
-        design_graph_json: None,
-        latest_yaml: None,
-        latest_version_id: None,
-        last_validation_status: None,
-        last_fleet_check_status: None,
-    })
-    .await
-    .unwrap();
-
-    // Second update with stale expected_version=1 must fail.
-    let err = repo
-        .update(TopologyUpdateInput {
+    repo.update(
+        TopologyUpdateInput {
             id: aid("topo-1"),
             expected_version: 1,
-            display_name: Some("v3".to_string()),
+            display_name: Some("v2".to_string()),
             description: None,
             environment: None,
             status: None,
@@ -191,7 +177,30 @@ async fn topology_update_with_stale_version_returns_stale_version() {
             latest_version_id: None,
             last_validation_status: None,
             last_fleet_check_status: None,
-        })
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Second update with stale expected_version=1 must fail.
+    let err = repo
+        .update(
+            TopologyUpdateInput {
+                id: aid("topo-1"),
+                expected_version: 1,
+                display_name: Some("v3".to_string()),
+                description: None,
+                environment: None,
+                status: None,
+                design_graph_json: None,
+                latest_yaml: None,
+                latest_version_id: None,
+                last_validation_status: None,
+                last_fleet_check_status: None,
+            },
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -212,19 +221,22 @@ async fn topology_update_missing_returns_not_found() {
     let repo = TopologyRepository::new(db.pool.clone());
 
     let err = repo
-        .update(TopologyUpdateInput {
-            id: aid("missing"),
-            expected_version: 1,
-            display_name: None,
-            description: None,
-            environment: None,
-            status: None,
-            design_graph_json: None,
-            latest_yaml: None,
-            latest_version_id: None,
-            last_validation_status: None,
-            last_fleet_check_status: None,
-        })
+        .update(
+            TopologyUpdateInput {
+                id: aid("missing"),
+                expected_version: 1,
+                display_name: None,
+                description: None,
+                environment: None,
+                status: None,
+                design_graph_json: None,
+                latest_yaml: None,
+                latest_version_id: None,
+                last_validation_status: None,
+                last_fleet_check_status: None,
+            },
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }), "got {err:?}");
@@ -242,26 +254,29 @@ async fn archive_with_stale_version_returns_stale_version() {
     assert_eq!(created.version_number, 1);
 
     // Bump the version with a successful update first.
-    repo.update(TopologyUpdateInput {
-        id: aid("topo-1"),
-        expected_version: 1,
-        display_name: Some("v2".to_string()),
-        description: None,
-        environment: None,
-        status: None,
-        design_graph_json: None,
-        latest_yaml: None,
-        latest_version_id: None,
-        last_validation_status: None,
-        last_fleet_check_status: None,
-    })
+    repo.update(
+        TopologyUpdateInput {
+            id: aid("topo-1"),
+            expected_version: 1,
+            display_name: Some("v2".to_string()),
+            description: None,
+            environment: None,
+            status: None,
+            design_graph_json: None,
+            latest_yaml: None,
+            latest_version_id: None,
+            last_validation_status: None,
+            last_fleet_check_status: None,
+        },
+        None,
+    )
     .await
     .unwrap();
 
     // Caller still holds the pre-update version → must see StaleVersion, not
     // NotFound. Surfacing this as 409 keeps optimistic-concurrency intent
     // visible at the wire.
-    let err = repo.archive(&aid("topo-1"), 1).await.unwrap_err();
+    let err = repo.archive(&aid("topo-1"), 1, None).await.unwrap_err();
     match err {
         StoreError::StaleVersion {
             current, expected, ..
@@ -284,7 +299,7 @@ async fn archive_with_correct_version_succeeds_and_returns_archived_row() {
         .unwrap();
 
     let archived = repo
-        .archive(&aid("topo-1"), created.version_number)
+        .archive(&aid("topo-1"), created.version_number, None)
         .await
         .expect("archive should succeed");
     assert_eq!(archived.id, created.id);
@@ -304,13 +319,13 @@ async fn archive_already_archived_returns_not_found() {
         .await
         .unwrap();
     let archived = repo
-        .archive(&aid("topo-1"), created.version_number)
+        .archive(&aid("topo-1"), created.version_number, None)
         .await
         .expect("first archive");
     // Even with the latest version_number, an already-archived row maps to
     // NotFound — the repository treats archived as "gone for routing".
     let err = repo
-        .archive(&aid("topo-1"), archived.version_number)
+        .archive(&aid("topo-1"), archived.version_number, None)
         .await
         .unwrap_err();
     assert!(
@@ -336,24 +351,27 @@ async fn update_then_concurrent_archive_returns_stale_version_not_not_found() {
     assert_eq!(created.version_number, 1);
 
     // Race: archive happens out-of-band before the update lands.
-    repo.archive(&aid("topo-1"), 1)
+    repo.archive(&aid("topo-1"), 1, None)
         .await
         .expect("concurrent archive");
 
     let err = repo
-        .update(TopologyUpdateInput {
-            id: aid("topo-1"),
-            expected_version: 1,
-            display_name: Some("racing".to_string()),
-            description: None,
-            environment: None,
-            status: None,
-            design_graph_json: None,
-            latest_yaml: None,
-            latest_version_id: None,
-            last_validation_status: None,
-            last_fleet_check_status: None,
-        })
+        .update(
+            TopologyUpdateInput {
+                id: aid("topo-1"),
+                expected_version: 1,
+                display_name: Some("racing".to_string()),
+                description: None,
+                environment: None,
+                status: None,
+                design_graph_json: None,
+                latest_yaml: None,
+                latest_version_id: None,
+                last_validation_status: None,
+                last_fleet_check_status: None,
+            },
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -445,7 +463,7 @@ async fn cascade_delete_topology_removes_plans() {
         .await
         .unwrap();
 
-    let err = plan.get(&pid("plan-1")).await.unwrap_err();
+    let err = plan.get(&pid("plan-1"), None).await.unwrap_err();
     assert!(
         matches!(err, StoreError::NotFound { .. }),
         "expected plan to cascade, got {err:?}"
@@ -493,10 +511,13 @@ async fn version_create_get_list() {
         .await
         .unwrap();
 
-    let fetched = repo.get(&vid("v-1")).await.unwrap();
+    let fetched = repo.get(&vid("v-1"), None).await.unwrap();
     assert_eq!(fetched, v1);
 
-    let list = repo.list_for_architecture(&aid("topo-1")).await.unwrap();
+    let list = repo
+        .list_for_architecture(&aid("topo-1"), None)
+        .await
+        .unwrap();
     assert_eq!(list.len(), 2);
     // Ordered DESC by version_number.
     assert_eq!(list[0].version_number, 2);
@@ -564,7 +585,7 @@ async fn version_cascades_when_topology_hard_deleted() {
         .await
         .unwrap();
 
-    let err = repo.get(&vid("v-1")).await.unwrap_err();
+    let err = repo.get(&vid("v-1"), None).await.unwrap_err();
     assert!(
         matches!(err, StoreError::NotFound { .. }),
         "expected version to cascade, got {err:?}"
@@ -614,7 +635,7 @@ async fn plan_create_get_list() {
         .unwrap();
     assert_eq!(plan.mode, PlanMode::DryRun);
 
-    let fetched = repo.get(&pid("plan-1")).await.unwrap();
+    let fetched = repo.get(&pid("plan-1"), None).await.unwrap();
     assert_eq!(fetched, plan);
 
     let list = repo.list_for_architecture(&aid("topo-1")).await.unwrap();
@@ -739,10 +760,16 @@ async fn apply_run_create_get_list_update() {
     assert_eq!(updated.status, RunStatus::Running);
     assert_eq!(updated.task_id.as_deref(), Some("task-abc"));
 
-    let fetched = repo.get(&ArchitectureApplyRunIdNew("run-1")).await.unwrap();
+    let fetched = repo
+        .get(&ArchitectureApplyRunIdNew("run-1"), None)
+        .await
+        .unwrap();
     assert_eq!(fetched, updated);
 
-    let list = repo.list_for_architecture(&aid("topo-1")).await.unwrap();
+    let list = repo
+        .list_for_architecture(&aid("topo-1"), None)
+        .await
+        .unwrap();
     assert_eq!(list.len(), 1);
 }
 
@@ -802,7 +829,7 @@ async fn drift_report_create_get_list() {
     assert_eq!(drift.status, DriftStatus::NoDrift);
 
     let fetched = repo
-        .get(&ArchitectureDriftReportIdNew("drift-1"))
+        .get(&ArchitectureDriftReportIdNew("drift-1"), None)
         .await
         .unwrap();
     assert_eq!(fetched, drift);
@@ -905,7 +932,7 @@ async fn set_validation_status_on_archived_returns_not_found() {
         .create(make_topology_input("topo-vs-3", "vs-arch"))
         .await
         .unwrap();
-    repo.archive(&created.id, 1).await.unwrap();
+    repo.archive(&created.id, 1, None).await.unwrap();
 
     let err = repo
         .set_validation_status(&created.id, 2, ValidationStatus::Failed)

@@ -3,6 +3,44 @@ use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_common::AttachmentOwnership;
 use chv_errors::ChvError;
 
+/// Block size used for dirty-bitmap tracking: one bit per block.
+///
+/// Must match the block size the migration sender uses (its
+/// `DEFAULT_BLOCK_SIZE`) so that bitmap bits map 1:1 to migration chunks.
+pub const DIRTY_TRACKING_BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4 MiB
+
+/// Validate a block-write range against the volume size.
+///
+/// Returns the exclusive end offset (`offset + data_len`) on success. The
+/// dirty bitmap is sized from the volume size, so `write_block`
+/// implementations use this check to guarantee that a bitmap update can
+/// never run past the end of the bitmap.
+pub(crate) fn validate_write_bounds(
+    offset: u64,
+    data_len: u64,
+    volume_size: u64,
+) -> Result<u64, ChvError> {
+    let end = offset
+        .checked_add(data_len)
+        .ok_or_else(|| ChvError::InvalidArgument {
+            field: "offset".to_string(),
+            reason: format!(
+                "write range offset {} + length {} overflows u64",
+                offset, data_len
+            ),
+        })?;
+    if end > volume_size {
+        return Err(ChvError::InvalidArgument {
+            field: "write_block".to_string(),
+            reason: format!(
+                "write range {}..{} exceeds volume size {} bytes",
+                offset, end, volume_size
+            ),
+        });
+    }
+    Ok(end)
+}
+
 #[derive(Debug, Clone)]
 pub struct VolumeExport {
     pub export_kind: String,
@@ -115,6 +153,25 @@ pub trait StorageBackend: Send + Sync + 'static {
         size_bytes: u64,
         format: &str,
     ) -> Result<VolumeExport, ChvError>;
+
+    /// Initialize dirty-bitmap tracking for a volume that has been opened.
+    ///
+    /// The bitmap is sized from `volume_size_bytes` with one bit per
+    /// [`DIRTY_TRACKING_BLOCK_SIZE`] block and starts all-clear. chv-stord
+    /// calls this when a volume session is opened so that migration
+    /// dirty-sync rounds can always snapshot a bitmap for an open volume
+    /// (an empty one when nothing was written yet).
+    ///
+    /// The default implementation is a no-op: backends without dirty
+    /// tracking accept the call and simply don't track writes.
+    async fn enable_dirty_tracking(
+        &self,
+        _volume_id: &str,
+        _handle: &str,
+        _volume_size_bytes: u64,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
 
     /// Atomically snapshot the dirty bitmap and clear it.
     ///
@@ -275,6 +332,17 @@ impl StorageBackend for Box<dyn StorageBackend> {
             .await
     }
 
+    async fn enable_dirty_tracking(
+        &self,
+        volume_id: &str,
+        handle: &str,
+        volume_size_bytes: u64,
+    ) -> Result<(), ChvError> {
+        (**self)
+            .enable_dirty_tracking(volume_id, handle, volume_size_bytes)
+            .await
+    }
+
     async fn snapshot_and_clear_dirty_bitmap(
         &self,
         volume_id: &str,
@@ -283,5 +351,38 @@ impl StorageBackend for Box<dyn StorageBackend> {
         (**self)
             .snapshot_and_clear_dirty_bitmap(volume_id, handle)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_write_bounds_accepts_in_range_writes() {
+        // A write ending exactly at the volume size is in range.
+        assert_eq!(validate_write_bounds(3, 7, 10).unwrap(), 10);
+        assert_eq!(validate_write_bounds(0, 0, 0).unwrap(), 0);
+        assert_eq!(validate_write_bounds(0, 0, 4096).unwrap(), 0);
+    }
+
+    #[test]
+    fn validate_write_bounds_rejects_out_of_range_writes() {
+        assert!(matches!(
+            validate_write_bounds(0, 100, 99),
+            Err(ChvError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            validate_write_bounds(50, 51, 100),
+            Err(ChvError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_write_bounds_rejects_offset_overflow() {
+        assert!(matches!(
+            validate_write_bounds(u64::MAX, 1, u64::MAX),
+            Err(ChvError::InvalidArgument { .. })
+        ));
     }
 }

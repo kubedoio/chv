@@ -1,15 +1,18 @@
-use crate::r#trait::{BackendHealth, StorageBackend, VolumeExport};
+use crate::r#trait::{
+    validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE,
+};
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::ChvError;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 struct DirtyTracker {
     block_size: u64,
+    volume_size: u64,
     bitmap: Vec<u8>,
 }
 
@@ -35,6 +38,11 @@ pub struct IscsiConfig {
 pub struct IscsiBackend {
     config: IscsiConfig,
     dirty_trackers: Arc<RwLock<HashMap<String, DirtyTracker>>>,
+    /// Reference counts per target IQN: one reference per open/attach. The
+    /// shared iSCSI session is only logged out when the last reference is
+    /// released, so closing one volume cannot tear down the session that
+    /// other volumes on the same target still use.
+    session_refs: Mutex<HashMap<String, usize>>,
 }
 
 impl IscsiBackend {
@@ -54,7 +62,46 @@ impl IscsiBackend {
         Ok(Self {
             config,
             dirty_trackers: Arc::new(RwLock::new(HashMap::new())),
+            session_refs: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Acquire one reference to the shared iSCSI session for `target`.
+    ///
+    /// `open` and `attach` each acquire a reference; the corresponding
+    /// `close`/`detach` must release it. Kept synchronous (std `Mutex`, no
+    /// await inside) so callers can use it without holding a lock across
+    /// yield points.
+    fn acquire_session_ref(&self, target: &str) {
+        let mut refs = self
+            .session_refs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = refs.entry(target.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
+    /// Release one reference to the shared iSCSI session for `target`.
+    ///
+    /// Returns `true` when the last reference was released, meaning the
+    /// caller should perform the physical logout of the session.
+    fn release_session_ref(&self, target: &str) -> bool {
+        let mut refs = self
+            .session_refs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match refs.get_mut(target) {
+            Some(count) => {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    refs.remove(target);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        }
     }
 
     fn sanitize_id(id: &str) -> Result<String, ChvError> {
@@ -357,6 +404,7 @@ impl StorageBackend for IscsiBackend {
         // Discover and login to the target.
         self.discover_targets().await?;
         self.login().await?;
+        self.acquire_session_ref(&self.config.target_iqn);
 
         let path = self.device_path(volume_id);
         info!(volume_id, path = %path, "opened iSCSI volume");
@@ -376,8 +424,15 @@ impl StorageBackend for IscsiBackend {
             });
         }
 
-        self.logout().await?;
-        info!(volume_id, "closed iSCSI volume (logged out)");
+        if self.release_session_ref(&self.config.target_iqn) {
+            self.logout().await?;
+            info!(volume_id, "closed iSCSI volume (session logged out)");
+        } else {
+            info!(
+                volume_id,
+                "closed iSCSI volume (shared session still in use by other volumes)"
+            );
+        }
         Ok(())
     }
 
@@ -396,6 +451,7 @@ impl StorageBackend for IscsiBackend {
         }
         let path = self.device_path(volume_id);
         info!(volume_id, vm_id, handle, path = %path, "attaching iSCSI volume");
+        self.acquire_session_ref(&self.config.target_iqn);
         Ok(VolumeExport {
             export_kind: "iscsi".to_string(),
             export_path: path,
@@ -421,6 +477,10 @@ impl StorageBackend for IscsiBackend {
             warn!(volume_id, vm_id, "force detaching iSCSI volume");
         } else {
             info!(volume_id, vm_id, "detaching iSCSI volume");
+        }
+
+        if self.release_session_ref(&self.config.target_iqn) {
+            self.logout().await?;
         }
         Ok(())
     }
@@ -506,6 +566,16 @@ impl StorageBackend for IscsiBackend {
         }
 
         info!(volume_id, new_size_bytes, "resized iSCSI LUN");
+
+        // Keep dirty tracking consistent with the new size.
+        if let Some(tracker) = self.dirty_trackers.write().await.get_mut(handle) {
+            tracker.volume_size = new_size_bytes;
+            let needed_bytes = new_size_bytes.div_ceil(tracker.block_size).div_ceil(8) as usize;
+            if tracker.bitmap.len() < needed_bytes {
+                tracker.bitmap.resize(needed_bytes, 0);
+            }
+        }
+
         Ok(())
     }
 
@@ -610,6 +680,49 @@ impl StorageBackend for IscsiBackend {
 
     // --- Migration methods ---
 
+    /// Initialize the dirty bitmap for an opened volume.
+    async fn enable_dirty_tracking(
+        &self,
+        _volume_id: &str,
+        handle: &str,
+        volume_size_bytes: u64,
+    ) -> Result<(), ChvError> {
+        let bitmap_bytes = volume_size_bytes
+            .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+            .div_ceil(8) as usize;
+        let tracker = DirtyTracker {
+            block_size: DIRTY_TRACKING_BLOCK_SIZE,
+            volume_size: volume_size_bytes,
+            bitmap: vec![0u8; bitmap_bytes],
+        };
+        self.dirty_trackers
+            .write()
+            .await
+            .entry(handle.to_string())
+            .or_insert(tracker);
+        Ok(())
+    }
+
+    /// Atomically snapshot and clear the dirty bitmap under a single write lock.
+    async fn snapshot_and_clear_dirty_bitmap(
+        &self,
+        _volume_id: &str,
+        handle: &str,
+    ) -> Result<Vec<u8>, ChvError> {
+        let mut map = self.dirty_trackers.write().await;
+        match map.get_mut(handle) {
+            Some(tracker) => {
+                let snapshot = tracker.bitmap.clone();
+                tracker.bitmap.iter_mut().for_each(|byte| *byte = 0);
+                Ok(snapshot)
+            }
+            None => Err(ChvError::NotFound {
+                resource: "dirty_tracker".to_string(),
+                id: handle.to_string(),
+            }),
+        }
+    }
+
     async fn read_block(
         &self,
         volume_id: &str,
@@ -654,8 +767,25 @@ impl StorageBackend for IscsiBackend {
     ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         let path = self.device_path(volume_id);
+
+        // When dirty tracking is enabled, reject out-of-range writes up
+        // front; see LocalFileBackend::write_block for rationale.
+        let mark_range = {
+            let map = self.dirty_trackers.read().await;
+            match map.get(handle) {
+                Some(tracker) => {
+                    let end =
+                        validate_write_bounds(offset, data.len() as u64, tracker.volume_size)?;
+                    Some((
+                        offset / tracker.block_size,
+                        end.div_ceil(tracker.block_size),
+                    ))
+                }
+                None => None,
+            }
+        };
+
         let data_owned = data.to_vec();
-        let data_len = data.len() as u64;
         let path_clone = path.clone();
         tokio::task::spawn_blocking(move || {
             use std::io::{Seek, SeekFrom, Write};
@@ -684,15 +814,12 @@ impl StorageBackend for IscsiBackend {
         })??;
 
         // Update dirty bitmap if tracking is enabled.
-        let mut map = self.dirty_trackers.write().await;
-        if let Some(tracker) = map.get_mut(handle) {
-            let bs = tracker.block_size;
-            let start_block = offset / bs;
-            let end_block = (offset + data_len).div_ceil(bs);
-            for block in start_block..end_block {
-                let byte_idx = (block / 8) as usize;
-                let bit_idx = (block % 8) as u8;
-                if byte_idx < tracker.bitmap.len() {
+        if let Some((start_block, end_block)) = mark_range {
+            let mut map = self.dirty_trackers.write().await;
+            if let Some(tracker) = map.get_mut(handle) {
+                for block in start_block..end_block {
+                    let byte_idx = (block / 8) as usize;
+                    let bit_idx = (block % 8) as u8;
                     tracker.bitmap[byte_idx] |= 1 << bit_idx;
                 }
             }
@@ -943,5 +1070,100 @@ mod tests {
             }
             Err(other) => panic!("unexpected error variant from health(): {:?}", other),
         }
+    }
+
+    // --- Session refcount tests ---
+
+    fn refcount_test_backend() -> IscsiBackend {
+        IscsiBackend::new(IscsiConfig {
+            portal: "192.168.1.100:3260".to_string(),
+            target_iqn: "iqn.2024-01.com.example:target".to_string(),
+            initiator_name: "iqn.2024-01.com.example:init".to_string(),
+            chap_username: None,
+            chap_secret: None,
+        })
+        .expect("valid config")
+    }
+
+    /// Simulates open(A), open(B), close(A), close(B) on a shared target:
+    /// the logout must fire exactly once, when the last reference is
+    /// released. `release_session_ref` returning `true` is the seam that
+    /// triggers `perform_logout` in `close()`.
+    #[test]
+    fn session_refcount_logs_out_only_on_last_release() {
+        let backend = refcount_test_backend();
+        let target = backend.config.target_iqn.clone();
+
+        backend.acquire_session_ref(&target); // open volume A
+        backend.acquire_session_ref(&target); // open volume B
+
+        // Closing the first volume must not log out the shared session.
+        assert!(!backend.release_session_ref(&target));
+        // Closing the last volume logs out exactly once.
+        assert!(backend.release_session_ref(&target));
+        // Further releases are no-ops (no spurious logout, no underflow).
+        assert!(!backend.release_session_ref(&target));
+    }
+
+    #[test]
+    fn session_refcount_attach_detach_are_balanced_with_open_close() {
+        let backend = refcount_test_backend();
+        let target = backend.config.target_iqn.clone();
+
+        backend.acquire_session_ref(&target); // open
+        backend.acquire_session_ref(&target); // attach
+        assert!(!backend.release_session_ref(&target)); // detach
+        assert!(backend.release_session_ref(&target)); // close -> logout
+    }
+
+    #[test]
+    fn session_refcount_is_per_target() {
+        let backend = refcount_test_backend();
+        let target = backend.config.target_iqn.clone();
+        let other = "iqn.2024-01.com.example:other-target".to_string();
+
+        backend.acquire_session_ref(&target);
+        backend.acquire_session_ref(&other);
+
+        // Releasing the last reference for one target logs that target out
+        // (returns true) without disturbing the other target's session.
+        assert!(backend.release_session_ref(&target));
+        assert!(backend.release_session_ref(&other));
+    }
+
+    // --- Dirty tracking tests (in-memory; no iSCSI infrastructure needed) ---
+
+    #[tokio::test]
+    async fn dirty_tracking_not_found_before_enable() {
+        let backend = refcount_test_backend();
+        let handle = backend.expected_handle("vol-1");
+        let res = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_enable_then_snapshot_round_trip() {
+        let backend = refcount_test_backend();
+        let handle = backend.expected_handle("vol-1");
+
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 8_388_608)
+            .await
+            .unwrap();
+
+        // Freshly enabled volume returns an empty bitmap, not NotFound.
+        let bitmap = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await
+            .unwrap();
+        assert_eq!(bitmap, vec![0]);
+
+        let after = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await
+            .unwrap();
+        assert_eq!(after, vec![0]);
     }
 }

@@ -119,7 +119,7 @@ async fn fixture(plan_status: PlanStatus, plan_mode: PlanMode) -> Fixture {
             .expect("transition plan status");
     }
 
-    let plan_record = plans_repo.get(&pid()).await.expect("fetch plan");
+    let plan_record = plans_repo.get(&pid(), None).await.expect("fetch plan");
 
     let ctx = ApplyContext {
         architecture_id: aid(),
@@ -273,7 +273,7 @@ async fn apply_plan_idempotent_on_retry() {
     // status (Applying after first apply), as the BFF does in production.
     let plan_record_v2 = f
         .plans_repo
-        .get(&f.plan_record.id)
+        .get(&f.plan_record.id, None)
         .await
         .expect("re-fetch plan record");
 
@@ -542,7 +542,7 @@ async fn apply_plan_rejects_non_ready_to_apply_status() {
     // pre-condition guard fires.
     let runs = f
         .runs_repo
-        .list_for_architecture(&aid())
+        .list_for_architecture(&aid(), None)
         .await
         .expect("list runs");
     assert!(
@@ -550,7 +550,7 @@ async fn apply_plan_rejects_non_ready_to_apply_status() {
         "no run should be created when status guard rejects"
     );
     // Plan stays where it was.
-    let plan_after = f.plans_repo.get(&pid()).await.unwrap();
+    let plan_after = f.plans_repo.get(&pid(), None).await.unwrap();
     assert_eq!(plan_after.status, PlanStatus::Draft);
     // Suppress unused warnings.
     let _ = (ResourceKind::Vm, ResourceId::new("x").unwrap());
@@ -589,11 +589,15 @@ async fn apply_plan_rejects_resource_name_containing_double_colon() {
     }
 
     // No apply_run row should have been written when the guard fires.
-    let runs = f.runs_repo.list_for_architecture(&aid()).await.unwrap();
+    let runs = f
+        .runs_repo
+        .list_for_architecture(&aid(), None)
+        .await
+        .unwrap();
     assert!(runs.is_empty());
     // Plan stays in ReadyToApply (the transition only fires after the
     // sanitization guard passes).
-    let plan_after = f.plans_repo.get(&pid()).await.unwrap();
+    let plan_after = f.plans_repo.get(&pid(), None).await.unwrap();
     assert_eq!(plan_after.status, PlanStatus::ReadyToApply);
 }
 
@@ -653,7 +657,7 @@ async fn apply_plan_transitions_plan_to_applying() {
     .await
     .expect("apply");
 
-    let plan_after = f.plans_repo.get(&pid()).await.unwrap();
+    let plan_after = f.plans_repo.get(&pid(), None).await.unwrap();
     assert_eq!(plan_after.status, PlanStatus::Applying);
 }
 
@@ -707,7 +711,11 @@ async fn apply_plan_concurrent_discard_loses_race_returns_plan_not_applicable() 
 
     // The apply_run must have been rolled back to Cancelled with the
     // explanatory error_message.
-    let runs = f.runs_repo.list_for_architecture(&aid()).await.unwrap();
+    let runs = f
+        .runs_repo
+        .list_for_architecture(&aid(), None)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1, "apply_run row should exist (rolled back)");
     assert_eq!(
         runs[0].status,
@@ -805,7 +813,11 @@ async fn apply_plan_failure_preserves_started_at() {
     .await
     .expect_err("apply must fail when the operations table is gone");
 
-    let runs = f.runs_repo.list_for_architecture(&aid()).await.unwrap();
+    let runs = f
+        .runs_repo
+        .list_for_architecture(&aid(), None)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1);
     assert!(
         runs[0].started_at.is_some(),
@@ -883,7 +895,11 @@ async fn apply_plan_rolls_back_to_failed_when_enqueue_errors_mid_apply() {
 
     // The apply_run row should be Failed (matches existing
     // `apply_plan_failure_preserves_started_at` contract).
-    let runs = f.runs_repo.list_for_architecture(&aid()).await.unwrap();
+    let runs = f
+        .runs_repo
+        .list_for_architecture(&aid(), None)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(
         runs[0].status,
@@ -894,7 +910,7 @@ async fn apply_plan_rolls_back_to_failed_when_enqueue_errors_mid_apply() {
     // The plan row must be rolled back to Failed — NOT stuck in Applying.
     // This is the H4 regression: pre-fix the plan stayed in `Applying`
     // forever (until 15-min TTL) and the operator could not discard it.
-    let plan_after = f.plans_repo.get(&pid()).await.unwrap();
+    let plan_after = f.plans_repo.get(&pid(), None).await.unwrap();
     assert_eq!(
         plan_after.status,
         PlanStatus::Failed,

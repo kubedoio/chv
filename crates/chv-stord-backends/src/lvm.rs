@@ -1,4 +1,6 @@
-use crate::r#trait::{BackendHealth, StorageBackend, VolumeExport};
+use crate::r#trait::{
+    validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE,
+};
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::ChvError;
@@ -11,6 +13,7 @@ use tracing::{info, warn};
 
 struct DirtyTracker {
     block_size: u64,
+    volume_size: u64,
     bitmap: Vec<u8>,
 }
 
@@ -224,6 +227,16 @@ impl StorageBackend for LVMBackend {
             });
         }
         info!(volume_id, new_size_bytes, "resized LVM volume");
+
+        // Keep dirty tracking consistent with the new size.
+        if let Some(tracker) = self.dirty_trackers.write().await.get_mut(handle) {
+            tracker.volume_size = new_size_bytes;
+            let needed_bytes = new_size_bytes.div_ceil(tracker.block_size).div_ceil(8) as usize;
+            if tracker.bitmap.len() < needed_bytes {
+                tracker.bitmap.resize(needed_bytes, 0);
+            }
+        }
+
         Ok(())
     }
 
@@ -440,6 +453,49 @@ impl StorageBackend for LVMBackend {
 
     // --- Phase 2.3: Migration methods ---
 
+    /// Initialize the dirty bitmap for an opened volume.
+    async fn enable_dirty_tracking(
+        &self,
+        _volume_id: &str,
+        handle: &str,
+        volume_size_bytes: u64,
+    ) -> Result<(), ChvError> {
+        let bitmap_bytes = volume_size_bytes
+            .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+            .div_ceil(8) as usize;
+        let tracker = DirtyTracker {
+            block_size: DIRTY_TRACKING_BLOCK_SIZE,
+            volume_size: volume_size_bytes,
+            bitmap: vec![0u8; bitmap_bytes],
+        };
+        self.dirty_trackers
+            .write()
+            .await
+            .entry(handle.to_string())
+            .or_insert(tracker);
+        Ok(())
+    }
+
+    /// Atomically snapshot and clear the dirty bitmap under a single write lock.
+    async fn snapshot_and_clear_dirty_bitmap(
+        &self,
+        _volume_id: &str,
+        handle: &str,
+    ) -> Result<Vec<u8>, ChvError> {
+        let mut map = self.dirty_trackers.write().await;
+        match map.get_mut(handle) {
+            Some(tracker) => {
+                let snapshot = tracker.bitmap.clone();
+                tracker.bitmap.iter_mut().for_each(|byte| *byte = 0);
+                Ok(snapshot)
+            }
+            None => Err(ChvError::NotFound {
+                resource: "dirty_tracker".to_string(),
+                id: handle.to_string(),
+            }),
+        }
+    }
+
     async fn read_block(
         &self,
         volume_id: &str,
@@ -483,6 +539,24 @@ impl StorageBackend for LVMBackend {
     ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         let path = self.volume_path(volume_id)?;
+
+        // When dirty tracking is enabled, reject out-of-range writes up
+        // front; see LocalFileBackend::write_block for rationale.
+        let mark_range = {
+            let map = self.dirty_trackers.read().await;
+            match map.get(handle) {
+                Some(tracker) => {
+                    let end =
+                        validate_write_bounds(offset, data.len() as u64, tracker.volume_size)?;
+                    Some((
+                        offset / tracker.block_size,
+                        end.div_ceil(tracker.block_size),
+                    ))
+                }
+                None => None,
+            }
+        };
+
         let data_owned = data.to_vec();
         tokio::task::spawn_blocking(move || {
             use std::io::{Seek, SeekFrom, Write};
@@ -511,15 +585,12 @@ impl StorageBackend for LVMBackend {
         })??;
 
         // Update dirty bitmap if tracking is enabled for this handle.
-        let mut map = self.dirty_trackers.write().await;
-        if let Some(tracker) = map.get_mut(handle) {
-            let bs = tracker.block_size;
-            let start_block = offset / bs;
-            let end_block = (offset + data.len() as u64).div_ceil(bs);
-            for block in start_block..end_block {
-                let byte_idx = (block / 8) as usize;
-                let bit_idx = (block % 8) as u8;
-                if byte_idx < tracker.bitmap.len() {
+        if let Some((start_block, end_block)) = mark_range {
+            let mut map = self.dirty_trackers.write().await;
+            if let Some(tracker) = map.get_mut(handle) {
+                for block in start_block..end_block {
+                    let byte_idx = (block / 8) as usize;
+                    let bit_idx = (block % 8) as u8;
                     tracker.bitmap[byte_idx] |= 1 << bit_idx;
                 }
             }
@@ -530,11 +601,33 @@ impl StorageBackend for LVMBackend {
 
     async fn volume_size(&self, volume_id: &str, _handle: &str) -> Result<u64, ChvError> {
         let path = self.volume_path(volume_id)?;
-        std::fs::metadata(&path)
-            .map(|m| m.len())
+        // Use blockdev to get the size of the block device; metadata().len()
+        // reports 0 for block device nodes. The dirty tracker is sized from
+        // this value, so a wrong size would corrupt write bounds checking.
+        let path_str = path.to_string_lossy().to_string();
+        let out = Command::new("blockdev")
+            .args(["--getsize64", &path_str])
+            .output()
+            .await
             .map_err(|e| ChvError::Io {
-                path: path.display().to_string(),
+                path: "blockdev".to_string(),
                 source: e,
+            })?;
+        if !out.status.success() {
+            return Err(ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!(
+                    "blockdev --getsize64 failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+            });
+        }
+        let size_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        size_str
+            .parse::<u64>()
+            .map_err(|_| ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!("could not parse blockdev output as bytes: '{}'", size_str),
             })
     }
 
@@ -736,6 +829,41 @@ mod tests {
         // Since the volume path won't exist, it returns NotFound before lvresize.
         let res = backend.resize("vol-1", "lvm-vg0-vol-1", u64::MAX).await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    // --- Dirty tracking tests (in-memory; no LVM infrastructure needed) ---
+
+    #[tokio::test]
+    async fn dirty_tracking_not_found_before_enable() {
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let res = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", "lvm-vg0-vol-1")
+            .await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_enable_then_snapshot_round_trip() {
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let handle = "lvm-vg0-vol-1";
+
+        backend
+            .enable_dirty_tracking("vol-1", handle, 8_388_608)
+            .await
+            .unwrap();
+
+        // Freshly enabled volume returns an empty bitmap, not NotFound.
+        let bitmap = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", handle)
+            .await
+            .unwrap();
+        assert_eq!(bitmap, vec![0]);
+
+        let after = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", handle)
+            .await
+            .unwrap();
+        assert_eq!(after, vec![0]);
     }
 
     // C-19 (S4-5): unit-test boundary for the LVM backend.

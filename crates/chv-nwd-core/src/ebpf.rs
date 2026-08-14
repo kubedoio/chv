@@ -157,7 +157,8 @@ fn serialize_rate_limit_value(rate_limit: &EbpfRateLimit) -> [u8; 32] {
 /// Represents a security rule entry for the eBPF rule_map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EbpfRule {
-    pub vm_id_hash: u32,
+    /// Fixed 16-byte BPF map key derived from the vm_id.
+    pub vm_key: [u8; VM_KEY_LEN],
     /// 0=both, 1=ingress, 2=egress
     pub direction: u8,
     pub priority: u32,
@@ -178,7 +179,8 @@ pub struct EbpfRule {
 /// Rate limit entry for the eBPF rate_map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EbpfRateLimit {
-    pub vm_id_hash: u32,
+    /// Fixed 16-byte BPF map key derived from the vm_id.
+    pub vm_key: [u8; VM_KEY_LEN],
     pub rate_bps: u64,
     pub burst_bytes: u64,
 }
@@ -217,14 +219,27 @@ pub trait EbpfManager: Send + Sync + 'static {
 }
 
 // ---------------------------------------------------------------------------
-// Hash helper
+// VM map key helper
 // ---------------------------------------------------------------------------
 
-/// Hash a vm_id to a u32 for use as eBPF map key.
-/// Uses FNV-1a hash truncated to 32 bits.
-pub fn hash_vm_id(vm_id: &str) -> u32 {
-    let full = chv_common::fnv1a_hash(vm_id);
-    (full & 0xffff_ffff) as u32
+/// Length in bytes of the fixed BPF map key built from a vm_id.
+/// Must match `struct rule_key { __u8 id[16]; }` in ebpf/policy_tc.bpf.c.
+pub const VM_KEY_LEN: usize = 16;
+
+/// Build the fixed 16-byte BPF map key for a vm_id.
+///
+/// The key holds the vm_id's raw ASCII bytes, zero-padded to `VM_KEY_LEN`
+/// (or deterministically truncated to the first `VM_KEY_LEN` bytes if the
+/// vm_id is longer). Distinct vm_ids that fit in 16 bytes therefore produce
+/// distinct keys. This replaces the previous FNV-1a hash truncated to u32,
+/// where two distinct vm_ids could collide and one VM's policy would
+/// overwrite the other's.
+pub fn build_vm_key(vm_id: &str) -> [u8; VM_KEY_LEN] {
+    let mut key = [0u8; VM_KEY_LEN];
+    let bytes = vm_id.as_bytes();
+    let n = bytes.len().min(VM_KEY_LEN);
+    key[..n].copy_from_slice(&bytes[..n]);
+    key
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +304,7 @@ fn parse_ipv4(s: &str) -> Option<u32> {
 
 /// Convert a proto SecurityPolicy into a Vec<EbpfRule>.
 pub fn proto_to_ebpf_rules(vm_id: &str, policy: &proto::SecurityPolicy) -> Vec<EbpfRule> {
-    let vm_hash = hash_vm_id(vm_id);
+    let vm_key = build_vm_key(vm_id);
     policy
         .rules
         .iter()
@@ -335,7 +350,7 @@ pub fn proto_to_ebpf_rules(vm_id: &str, policy: &proto::SecurityPolicy) -> Vec<E
                 .unwrap_or((0, 0));
 
             EbpfRule {
-                vm_id_hash: vm_hash,
+                vm_key,
                 direction,
                 priority: rule.priority,
                 src_ip,
@@ -356,7 +371,7 @@ pub fn proto_to_ebpf_rules(vm_id: &str, policy: &proto::SecurityPolicy) -> Vec<E
 /// Convert a proto RateLimitPolicy into an EbpfRateLimit.
 pub fn proto_to_ebpf_rate_limit(policy: &proto::RateLimitPolicy) -> EbpfRateLimit {
     EbpfRateLimit {
-        vm_id_hash: hash_vm_id(&policy.vm_id),
+        vm_key: build_vm_key(&policy.vm_id),
         rate_bps: policy.rate_bps,
         burst_bytes: policy.burst_bytes,
     }
@@ -466,8 +481,7 @@ impl EbpfManager for LinuxEbpfManager {
     }
 
     async fn update_rules(&self, vm_id: &str, rules: &[EbpfRule]) -> Result<(), ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
+        let key = build_vm_key(vm_id);
         let value = serialize_rules_value(rules);
         let pin_path = self.map_path("rule_map");
 
@@ -475,7 +489,6 @@ impl EbpfManager for LinuxEbpfManager {
 
         info!(
             vm_id = %vm_id,
-            vm_id_hash = vm_hash,
             rule_count = rules.len(),
             pin_path = %pin_path,
             "eBPF rule_map updated"
@@ -484,8 +497,7 @@ impl EbpfManager for LinuxEbpfManager {
     }
 
     async fn set_default_action(&self, vm_id: &str, action: u8) -> Result<(), ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
+        let key = build_vm_key(vm_id);
         // Value is action as u32 (u8 padded to u32 for BPF map alignment)
         let value = (action as u32).to_ne_bytes();
         let pin_path = self.map_path("defaults_map");
@@ -494,7 +506,6 @@ impl EbpfManager for LinuxEbpfManager {
 
         info!(
             vm_id = %vm_id,
-            vm_id_hash = vm_hash,
             action = action,
             pin_path = %pin_path,
             "eBPF defaults_map updated"
@@ -507,8 +518,7 @@ impl EbpfManager for LinuxEbpfManager {
         vm_id: &str,
         rate_limit: &EbpfRateLimit,
     ) -> Result<(), ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
+        let key = build_vm_key(vm_id);
         let value = serialize_rate_limit_value(rate_limit);
         let pin_path = self.map_path("rate_map");
 
@@ -516,7 +526,6 @@ impl EbpfManager for LinuxEbpfManager {
 
         info!(
             vm_id = %vm_id,
-            vm_id_hash = vm_hash,
             rate_bps = rate_limit.rate_bps,
             burst_bytes = rate_limit.burst_bytes,
             pin_path = %pin_path,
@@ -677,17 +686,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_vm_id_is_deterministic() {
-        let h1 = hash_vm_id("vm-abc-123");
-        let h2 = hash_vm_id("vm-abc-123");
-        assert_eq!(h1, h2);
+    fn build_vm_key_is_deterministic() {
+        let k1 = build_vm_key("vm-abc-123");
+        let k2 = build_vm_key("vm-abc-123");
+        assert_eq!(k1, k2);
     }
 
     #[test]
-    fn hash_vm_id_different_inputs_differ() {
-        let h1 = hash_vm_id("vm-1");
-        let h2 = hash_vm_id("vm-2");
-        assert_ne!(h1, h2);
+    fn build_vm_key_different_inputs_differ() {
+        let k1 = build_vm_key("vm-1");
+        let k2 = build_vm_key("vm-2");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn build_vm_key_zero_pads_short_ids() {
+        let key = build_vm_key("vm-1");
+        assert_eq!(&key[..4], b"vm-1");
+        assert!(key[4..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn build_vm_key_truncates_long_ids_to_first_16_bytes() {
+        let vm_id = "abcdefghijklmnopqrstuvwxyz";
+        let key = build_vm_key(vm_id);
+        assert_eq!(&key[..], b"abcdefghijklmnop");
+    }
+
+    /// Regression test: "bkq56sy7yl" and "7rw963dz3" collide under the old
+    /// FNV-1a-truncated-to-u32 key (both hash to 0xe7a4f6a2 in the low 32
+    /// bits), so one VM's policy could overwrite the other's. The fixed
+    /// 16-byte key must keep them distinct.
+    #[test]
+    fn build_vm_key_distinguishes_former_fnv_collisions() {
+        let a = "bkq56sy7yl";
+        let b = "7rw963dz3";
+        assert_eq!(
+            chv_common::fnv1a_hash(a) as u32,
+            chv_common::fnv1a_hash(b) as u32,
+            "test fixture must still collide under the old FNV-1a u32 key"
+        );
+        assert_ne!(build_vm_key(a), build_vm_key(b));
     }
 
     #[test]
@@ -771,6 +810,8 @@ mod tests {
 
         let rules = proto_to_ebpf_rules("vm-test", &policy);
         assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].vm_key, build_vm_key("vm-test"));
+        assert_eq!(rules[1].vm_key, build_vm_key("vm-test"));
 
         // First rule: TCP ingress 10.0.0.0/24 -> 192.168.1.0/24 port 80-443 allow
         assert_eq!(rules[0].direction, 1); // ingress
@@ -804,7 +845,7 @@ mod tests {
         };
 
         let rl = proto_to_ebpf_rate_limit(&policy);
-        assert_eq!(rl.vm_id_hash, hash_vm_id("vm-rl"));
+        assert_eq!(rl.vm_key, build_vm_key("vm-rl"));
         assert_eq!(rl.rate_bps, 1_000_000);
         assert_eq!(rl.burst_bytes, 65536);
     }
@@ -818,7 +859,7 @@ mod tests {
         mock.load_ingress_program("br0").await.unwrap();
 
         let rules = vec![EbpfRule {
-            vm_id_hash: 42,
+            vm_key: build_vm_key("vm-1"),
             direction: 1,
             priority: 100,
             src_ip: 0x0a000000,
@@ -836,7 +877,7 @@ mod tests {
         mock.set_default_action("vm-1", 0).await.unwrap();
 
         let rl = EbpfRateLimit {
-            vm_id_hash: 42,
+            vm_key: build_vm_key("vm-1"),
             rate_bps: 1_000_000,
             burst_bytes: 65536,
         };
@@ -866,7 +907,7 @@ mod tests {
         assert!(noop.update_rules("vm-x", &[]).await.is_ok());
         assert!(noop.set_default_action("vm-x", 1).await.is_ok());
         let rl = EbpfRateLimit {
-            vm_id_hash: 0,
+            vm_key: [0u8; VM_KEY_LEN],
             rate_bps: 0,
             burst_bytes: 0,
         };

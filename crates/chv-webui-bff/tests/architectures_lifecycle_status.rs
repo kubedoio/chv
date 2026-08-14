@@ -313,7 +313,7 @@ async fn topology_status(state: &AppState, arch_id: &str) -> ArchitectureStatus 
     let arch = ArchitectureId::new(arch_id.to_string()).expect("parse arch id");
     state
         .topology_repo
-        .get(&arch)
+        .get(&arch, None)
         .await
         .expect("read topology")
         .status

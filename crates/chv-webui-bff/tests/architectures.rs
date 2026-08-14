@@ -258,8 +258,10 @@ async fn crud_lifecycle_create_list_get_update_archive() {
         Some(r#"{"nodes":[],"edges":[]}"#)
     );
 
-    // 4. Update bumps version_number
-    let updated = update_architecture(
+    // 4. A non-admin may not mutate a production-tagged row — even when the
+    //    request carries `environment: null` (Security F7: the persisted tag
+    //    fires the guard, not the request's environment field).
+    let prod_guard_err = update_architecture(
         BearerToken(claims_for("operator")),
         State(state.clone()),
         Json(UpdateArchitectureRequest {
@@ -274,16 +276,43 @@ async fn crud_lifecycle_create_list_get_update_archive() {
         }),
     )
     .await
-    .expect("update should succeed");
+    .expect_err("operator update on production-tagged row must be blocked");
+    assert_eq!(
+        err_status(&prod_guard_err),
+        403,
+        "production-tagged update by operator => 403"
+    );
+    assert!(
+        matches!(prod_guard_err, BffError::ProductionRequiresAdmin { .. }),
+        "expected ProductionRequiresAdmin, got {prod_guard_err:?}"
+    );
+
+    // 5. Admin update bumps version_number.
+    let updated = update_architecture(
+        BearerToken(claims_for("admin")),
+        State(state.clone()),
+        Json(UpdateArchitectureRequest {
+            id: arch_id.clone(),
+            expected_version: 1,
+            display_name: Some("Customer A — Prod (renamed)".to_string()),
+            description: None,
+            environment: None,
+            design_graph_json: Some(r#"{"nodes":[1],"edges":[]}"#.to_string()),
+            latest_yaml: None,
+            latest_version_id: None,
+        }),
+    )
+    .await
+    .expect("admin update should succeed");
     assert_eq!(updated.0.architecture.version_number, 2);
     assert_eq!(
         updated.0.architecture.display_name.as_deref(),
         Some("Customer A — Prod (renamed)")
     );
 
-    // 5. Archive — supplies the bumped version_number from the update.
+    // 6. Archive — supplies the bumped version_number from the update.
     let _ = archive_architecture(
-        BearerToken(claims_for("operator")),
+        BearerToken(claims_for("admin")),
         State(state.clone()),
         Json(ArchiveArchitectureRequest {
             id: arch_id.clone(),
@@ -293,7 +322,7 @@ async fn crud_lifecycle_create_list_get_update_archive() {
     .await
     .expect("archive should succeed");
 
-    // 6. List default excludes archived
+    // 7. List default excludes archived
     let listed_again = list_architectures(
         BearerToken(claims_for("operator")),
         State(state.clone()),
@@ -306,7 +335,7 @@ async fn crud_lifecycle_create_list_get_update_archive() {
         "archived topology must be hidden from default list"
     );
 
-    // 7. List include_archived=true surfaces it
+    // 8. List include_archived=true surfaces it
     let listed_arch = list_architectures(
         BearerToken(claims_for("operator")),
         State(state.clone()),

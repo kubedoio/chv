@@ -110,15 +110,49 @@ impl TopologyRepository {
         }
     }
 
-    pub async fn get(&self, id: &ArchitectureId) -> Result<ArchitectureTopology, StoreError> {
-        let row = sqlx::query(r#"SELECT * FROM architecture_topologies WHERE id = $1"#)
-            .bind(id.as_str())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: ENTITY,
-                id: id.to_string(),
-            })?;
+    /// Fetch a topology by id, optionally scoped to a caller.
+    ///
+    /// `visible_to_user = Some(uid)` adds the same ownership predicate as
+    /// [`TopologyListFilter::visible_to_user`]:
+    /// `(owner_user_id = uid OR owner_user_id IS NULL)` — the IS NULL
+    /// branch keeps the system-owned starter topologies universally
+    /// reachable. A row owned by a *different* user is reported as
+    /// [`StoreError::NotFound`]; the BFF layer disambiguates that into a
+    /// 403 (it probes the row unscoped and applies its
+    /// `require_owner_or_admin` check). `None` lifts the predicate —
+    /// admin callers and internal (reconcile writeback) callers.
+    pub async fn get(
+        &self,
+        id: &ArchitectureId,
+        visible_to_user: Option<&str>,
+    ) -> Result<ArchitectureTopology, StoreError> {
+        // Two static shapes instead of one query with a reused parameter:
+        // sqlx's SQLite bindings do not reliably accept the same parameter
+        // twice in one statement, mirroring the approach in [`Self::list`].
+        let row = match visible_to_user {
+            None => {
+                sqlx::query(r#"SELECT * FROM architecture_topologies WHERE id = $1"#)
+                    .bind(id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT * FROM architecture_topologies
+                    WHERE id = $1 AND (owner_user_id = $2 OR owner_user_id IS NULL)
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(uid)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        let row = row.ok_or_else(|| StoreError::NotFound {
+            entity: ENTITY,
+            id: id.to_string(),
+        })?;
 
         row_to_topology(&row)
     }
@@ -200,42 +234,90 @@ impl TopologyRepository {
     /// statements in one transaction closes the TOCTOU race against a
     /// concurrent archive that could otherwise turn a stale-version error
     /// into a misleading not-found.
+    ///
+    /// `visible_to_user` scopes the write the same way as [`Self::get`]
+    /// (own row or system-owned starter). The BFF performs the authoritative
+    /// 403 check before calling this; the predicate here is defence-in-depth
+    /// so a future caller cannot accidentally widen the write window.
+    /// `owner_user_id` is immutable once created, so a caller that passed
+    /// the BFF check can never lose this predicate to a race.
     pub async fn update(
         &self,
         input: TopologyUpdateInput,
+        visible_to_user: Option<&str>,
     ) -> Result<ArchitectureTopology, StoreError> {
         let mut tx = self.pool.begin().await?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE architecture_topologies SET
-                display_name = COALESCE($2, display_name),
-                description = COALESCE($3, description),
-                environment = COALESCE($4, environment),
-                status = COALESCE($5, status),
-                design_graph_json = COALESCE($6, design_graph_json),
-                latest_yaml = COALESCE($7, latest_yaml),
-                latest_version_id = COALESCE($8, latest_version_id),
-                last_validation_status = COALESCE($9, last_validation_status),
-                last_fleet_check_status = COALESCE($10, last_fleet_check_status),
-                version_number = version_number + 1,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-            WHERE id = $1 AND version_number = $11 AND archived_at IS NULL
-            "#,
-        )
-        .bind(input.id.as_str())
-        .bind(&input.display_name)
-        .bind(&input.description)
-        .bind(&input.environment)
-        .bind(input.status.map(|s| s.as_str()))
-        .bind(&input.design_graph_json)
-        .bind(&input.latest_yaml)
-        .bind(input.latest_version_id.as_ref().map(|v| v.as_str()))
-        .bind(input.last_validation_status.map(|s| s.as_str()))
-        .bind(input.last_fleet_check_status.map(|s| s.as_str()))
-        .bind(input.expected_version)
-        .execute(&mut *tx)
-        .await?;
+        // Two static SQL shapes (unscoped / ownership-scoped) — same
+        // no-reused-parameter constraint documented in [`Self::list`].
+        let result = match visible_to_user {
+            None => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        display_name = COALESCE($2, display_name),
+                        description = COALESCE($3, description),
+                        environment = COALESCE($4, environment),
+                        status = COALESCE($5, status),
+                        design_graph_json = COALESCE($6, design_graph_json),
+                        latest_yaml = COALESCE($7, latest_yaml),
+                        latest_version_id = COALESCE($8, latest_version_id),
+                        last_validation_status = COALESCE($9, last_validation_status),
+                        last_fleet_check_status = COALESCE($10, last_fleet_check_status),
+                        version_number = version_number + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    WHERE id = $1 AND version_number = $11 AND archived_at IS NULL
+                    "#,
+                )
+                .bind(input.id.as_str())
+                .bind(&input.display_name)
+                .bind(&input.description)
+                .bind(&input.environment)
+                .bind(input.status.map(|s| s.as_str()))
+                .bind(&input.design_graph_json)
+                .bind(&input.latest_yaml)
+                .bind(input.latest_version_id.as_ref().map(|v| v.as_str()))
+                .bind(input.last_validation_status.map(|s| s.as_str()))
+                .bind(input.last_fleet_check_status.map(|s| s.as_str()))
+                .bind(input.expected_version)
+                .execute(&mut *tx)
+                .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        display_name = COALESCE($2, display_name),
+                        description = COALESCE($3, description),
+                        environment = COALESCE($4, environment),
+                        status = COALESCE($5, status),
+                        design_graph_json = COALESCE($6, design_graph_json),
+                        latest_yaml = COALESCE($7, latest_yaml),
+                        latest_version_id = COALESCE($8, latest_version_id),
+                        last_validation_status = COALESCE($9, last_validation_status),
+                        last_fleet_check_status = COALESCE($10, last_fleet_check_status),
+                        version_number = version_number + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    WHERE id = $1 AND version_number = $11 AND archived_at IS NULL
+                      AND (owner_user_id = $12 OR owner_user_id IS NULL)
+                    "#,
+                )
+                .bind(input.id.as_str())
+                .bind(&input.display_name)
+                .bind(&input.description)
+                .bind(&input.environment)
+                .bind(input.status.map(|s| s.as_str()))
+                .bind(&input.design_graph_json)
+                .bind(&input.latest_yaml)
+                .bind(input.latest_version_id.as_ref().map(|v| v.as_str()))
+                .bind(input.last_validation_status.map(|s| s.as_str()))
+                .bind(input.last_fleet_check_status.map(|s| s.as_str()))
+                .bind(input.expected_version)
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?
+            }
+        };
 
         if result.rows_affected() == 0 {
             let probe = fetch_version_and_archived_in_tx(&mut tx, &input.id).await?;
@@ -263,27 +345,56 @@ impl TopologyRepository {
     /// the row are reported as [`StoreError::StaleVersion`]. An already-archived
     /// row (regardless of version) is reported as [`StoreError::NotFound`] so
     /// archive remains idempotent at the routing layer.
+    ///
+    /// `visible_to_user` mirrors [`Self::get`] (own row or system-owned
+    /// starter); the BFF's `require_owner_or_admin` is the authoritative
+    /// 403 gate and this predicate is defence-in-depth.
     pub async fn archive(
         &self,
         id: &ArchitectureId,
         expected_version: i64,
+        visible_to_user: Option<&str>,
     ) -> Result<ArchitectureTopology, StoreError> {
         let mut tx = self.pool.begin().await?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE architecture_topologies SET
-                archived_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                status = 'archived',
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                version_number = version_number + 1
-            WHERE id = $1 AND archived_at IS NULL AND version_number = $2
-            "#,
-        )
-        .bind(id.as_str())
-        .bind(expected_version)
-        .execute(&mut *tx)
-        .await?;
+        // Two static SQL shapes (unscoped / ownership-scoped) — same
+        // no-reused-parameter constraint documented in [`Self::list`].
+        let result = match visible_to_user {
+            None => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        archived_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                        status = 'archived',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                        version_number = version_number + 1
+                    WHERE id = $1 AND archived_at IS NULL AND version_number = $2
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(expected_version)
+                .execute(&mut *tx)
+                .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        archived_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                        status = 'archived',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                        version_number = version_number + 1
+                    WHERE id = $1 AND archived_at IS NULL AND version_number = $2
+                      AND (owner_user_id = $3 OR owner_user_id IS NULL)
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(expected_version)
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?
+            }
+        };
 
         if result.rows_affected() == 0 {
             let probe = fetch_version_and_archived_in_tx(&mut tx, id).await?;

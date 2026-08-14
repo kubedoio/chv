@@ -5,7 +5,7 @@ use chv_stord_api::chv_stord_api::{
     BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
     RoundStart,
 };
-use chv_stord_backends::StorageBackend;
+use chv_stord_backends::{StorageBackend, DIRTY_TRACKING_BLOCK_SIZE};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
@@ -15,7 +15,9 @@ use tracing::{debug, error, info, warn};
 const STORD_MIGRATION_BYTES_SENT_TOTAL: &str = "chv_stord_migration_bytes_sent_total";
 const STORD_MIGRATION_ERRORS_TOTAL: &str = "chv_stord_migration_errors_total";
 
-const DEFAULT_BLOCK_SIZE: u64 = 4_194_304; // 4 MB
+/// Default migration block size: must equal the backends' dirty-tracking
+/// block size so bitmap bits map 1:1 to migration chunks.
+const DEFAULT_BLOCK_SIZE: u64 = DIRTY_TRACKING_BLOCK_SIZE;
 const DIRTY_THRESHOLD: u64 = 1024;
 const MAX_DIRTY_ROUNDS: u32 = 10;
 
