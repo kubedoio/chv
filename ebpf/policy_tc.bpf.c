@@ -312,11 +312,16 @@ int policy_tc(struct __sk_buff *skb)
         dst_port = __bpf_ntohs(udp->dest);
     }
 
-    // Determine VM identity from interface index (stored in cb by tc)
-    // In practice, the rule_key is derived from the interface the packet
-    // arrives on. For TC on a per-VM TAP, we use the ifindex as a proxy
-    // lookup into a separate ifindex->rule_key map. Simplified here to use
-    // skb->ifindex packed into the leading bytes of the key.
+    // Determine VM identity from the interface index.
+    //
+    // NOTE: `skb->ifindex` is only a placeholder. The keys the control
+    // plane stores in rule_map/defaults_map/rate_map are 16-byte
+    // build_vm_key(vm_id) values (the zero-padded vm_id), NOT raw
+    // ifindexes, so lookups keyed on the ifindex can never match until an
+    // ifindex -> rule_key mapping is implemented (e.g. a separate
+    // ifindex_map populated at attach time, or carrying the rule_key in
+    // skb metadata). Until that mapping exists policy enforcement is a
+    // no-op; the mismatch below is a known placeholder, not a bug.
     __u32 vm_id_hash = skb->ifindex; // placeholder: real impl uses ifindex_map
     struct rule_key vm_key = {0};
     __builtin_memcpy(vm_key.id, &vm_id_hash, sizeof(vm_id_hash));

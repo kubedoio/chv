@@ -48,10 +48,14 @@
 //! `owner_user_id` before returning or mutating anything:
 //!
 //! - **Admin**: sees and mutates all rows (store scope `None`).
-//! - **Viewer / Operator**: sees and mutates only rows they own
-//!   (`owner_user_id == claims.sub`) plus system-owned rows
-//!   (`owner_user_id IS NULL` — the pre-seeded starter topologies, which
-//!   are shared by design; operators clone them rather than edit them).
+//! - **Viewer / Operator**: see rows they own (`owner_user_id ==
+//!   claims.sub`) plus system-owned rows (`owner_user_id IS NULL` — the
+//!   pre-seeded starter topologies, which are shared by design). Mutating
+//!   a topology row is narrower: only rows they own, plus system-owned
+//!   rows for admin. The store write predicates drop the `IS NULL`
+//!   carve-out, and [`require_owner_or_admin`] denies NULL-owned writes to
+//!   non-admins, so starters are read-only templates that operators clone
+//!   rather than edit.
 //! - A non-admin request against a row owned by *another* user fails with
 //!   403 Forbidden via [`require_owner_or_admin`], never with the row's
 //!   data. The store layer independently re-enforces the same predicate
@@ -137,10 +141,11 @@ fn caller_visible_scope(claims: &Claims) -> Result<Option<String>, BffError> {
 ///
 /// - `role == admin` always passes (sees and mutates all rows).
 /// - `owner_user_id == claims.sub` passes (the caller's own row).
-/// - `owner_user_id == None` passes — system-owned rows (the pre-seeded
-///   starter topologies) are shared resources, matching the
-///   `visible_to_user` store predicate. Writes to them are the documented
-///   starter workflow (clone/plan/apply), not cross-tenant access.
+/// - `owner_user_id == None` — system-owned starter rows. They stay
+///   READABLE to every authenticated caller (the store read predicate
+///   keeps its `IS NULL` carve-out), but WRITES to them are admin-only:
+///   non-admins get 403 here, so starters are read-only templates that
+///   operators clone instead of edit.
 /// - any other owner fails with 403 Forbidden.
 fn require_owner_or_admin(claims: &Claims, owner_user_id: Option<&str>) -> Result<(), BffError> {
     if claims.role == "admin" {
@@ -148,7 +153,9 @@ fn require_owner_or_admin(claims: &Claims, owner_user_id: Option<&str>) -> Resul
     }
     match owner_user_id {
         Some(owner) if owner == claims.sub => Ok(()),
-        None => Ok(()),
+        None => Err(BffError::Forbidden(
+            "system-owned starter architectures are read-only; clone to edit".into(),
+        )),
         Some(_) => Err(BffError::Forbidden(
             "you do not own this architecture".into(),
         )),
@@ -479,8 +486,9 @@ pub async fn create_architecture(
 
 /// Update a topology with optimistic-concurrency check.
 ///
-/// **Ownership (Security H6):** non-admin callers may only mutate rows they
-/// own plus system-owned starters; a foreign row answers 403.
+/// **Ownership (Security H6):** non-admin callers may only mutate rows
+/// they own; system-owned starter rows are read-only templates (403 via
+/// [`require_owner_or_admin`]) and a foreign row answers 403.
 ///
 /// **Production guard (Security F2/F7):** the guard decision is made
 /// against the *persisted* row's environment, not the request's
@@ -521,39 +529,22 @@ pub async fn update_architecture(
     );
 
     // Ownership + production-guard load. For a NON-admin caller a foreign
-    // row that is production-tagged must surface
-    // PRODUCTION_REQUIRES_ADMIN (Security F7 — the guard fires from the
-    // persisted tag regardless of the request's environment field, so
-    // `environment: null` cannot downgrade it to a plain ownership check or
-    // a pass); any other foreign row surfaces the plain ownership 403.
-    // Missing rows stay 404.
+    // row must surface the plain ownership 403 FIRST — never
+    // PRODUCTION_REQUIRES_ADMIN, which would leak the persisted
+    // environment tag of a row the caller may not even see (Security F7
+    // information disclosure). Missing rows stay 404.
     let scope = caller_visible_scope(&claims)?;
     let topo = match state.topology_repo.get(&id, scope.as_deref()).await {
         Ok(topo) => topo,
         Err(StoreError::NotFound { .. }) if scope.is_some() => {
+            // Probe unscoped for the existence decision only; the probed
+            // row's contents are discarded so no row data leaks into the
+            // error response.
             match state.topology_repo.get(&id, None).await {
-                Ok(row) => {
-                    if is_production_environment(row.environment.as_deref())
-                        && !role.meets(Role::Admin)
-                    {
-                        return Err(BffError::ProductionRequiresAdmin {
-                            environment: row
-                                .environment
-                                .as_deref()
-                                .unwrap_or("")
-                                .trim()
-                                .to_string(),
-                        });
-                    }
-                    return Err(
-                        require_owner_or_admin(&claims, row.owner_user_id.as_deref())
-                            .err()
-                            .unwrap_or_else(|| {
-                                BffError::Internal(
-                                    "ownership helper passed on a scoped topology miss".into(),
-                                )
-                            }),
-                    );
+                Ok(_) => {
+                    return Err(BffError::Forbidden(
+                        "you do not own this architecture".into(),
+                    ));
                 }
                 Err(_) => {
                     return Err(BffError::NotFound(format!(
@@ -566,10 +557,16 @@ pub async fn update_architecture(
         Err(e) => return Err(e.into()),
     };
 
+    // NULL-owned starter rows are read-only templates for non-admins:
+    // require_owner_or_admin answers 403 here, before any production
+    // decision, so the starter workflow stays clone-not-edit.
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+
     // (b) A non-admin may not mutate a row that is *already*
     // production-tagged, regardless of what the request's environment field
     // says (including null/absent). This is what stops the un-tag-then-apply
-    // bypass of the apply-time production guard.
+    // bypass of the apply-time production guard. Only reached after the
+    // ownership gate above passes.
     if is_production_environment(topo.environment.as_deref()) && !role.meets(Role::Admin) {
         return Err(BffError::ProductionRequiresAdmin {
             environment: topo.environment.as_deref().unwrap_or("").trim().to_string(),
@@ -648,7 +645,11 @@ pub async fn archive_architecture(
     );
     // Ownership check (403 for foreign rows, 404 for missing) before the
     // write; the scoped store call below re-enforces the same predicate.
-    get_topology_authorized(&state, &claims, &id).await?;
+    // NULL-owned starter rows pass the READ gate in
+    // get_topology_authorized but are denied here for non-admins: they are
+    // read-only templates (Security H6).
+    let topo = get_topology_authorized(&state, &claims, &id).await?;
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
     let scope = caller_visible_scope(&claims)?;
     let result = state
         .topology_repo
@@ -747,7 +748,16 @@ pub async fn validate_architecture(
     tracing::info!(architecture_id = %id, "validate_architecture");
 
     // Ownership check before reading the row or persisting any status.
+    // NULL-owned starter rows are read-only templates for non-admins (403
+    // via require_owner_or_admin), and a production-tagged row is
+    // admin-only — validating it would persist `last_validation_status`
+    // onto a row the caller may not write.
     let topo = get_topology_authorized(&state, &claims, &id).await?;
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    enforce_production_guard(topo.environment.as_deref(), role)?;
     let yaml = topo.latest_yaml.as_deref().unwrap_or("");
     let result = validate_yaml_str(yaml);
 
@@ -760,9 +770,10 @@ pub async fn validate_architecture(
     } else {
         ValidationStatus::Failed
     };
+    let scope = caller_visible_scope(&claims)?;
     match state
         .topology_repo
-        .set_validation_status(&id, topo.version_number, new_status)
+        .set_validation_status(&id, topo.version_number, new_status, scope.as_deref())
         .await
     {
         Ok(_) => {}
@@ -836,6 +847,14 @@ pub async fn import_yaml_architecture(
     tracing::info!(architecture_id = %id, "import_yaml_architecture");
 
     let topo = get_topology_authorized(&state, &claims, &id).await?;
+    // NULL-owned starter rows are read-only templates for non-admins (403),
+    // and a production-tagged row is admin-only — importing YAML would
+    // persist `latest_yaml` onto a row the caller may not write.
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    enforce_production_guard(topo.environment.as_deref(), role)?;
     let result = validate_yaml_str(&req.yaml);
     let new_status = if result.summary.errors == 0 {
         ValidationStatus::Passed
@@ -1352,6 +1371,14 @@ pub async fn check_fleet_architecture(
     tracing::info!(architecture_id = %id, "check_fleet_architecture");
 
     let topo = get_topology_authorized(&state, &claims, &id).await?;
+    // NULL-owned starter rows are read-only templates for non-admins (403),
+    // and a production-tagged row is admin-only — the fleet check persists
+    // `last_fleet_check_status` onto a row the caller may not write.
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    enforce_production_guard(topo.environment.as_deref(), role)?;
     let yaml = topo
         .latest_yaml
         .as_deref()

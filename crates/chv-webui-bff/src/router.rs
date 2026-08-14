@@ -57,7 +57,9 @@ pub struct AppState {
 
 pub fn bff_router(state: AppState) -> Router<AppState> {
     // Unauthenticated
-    let login = Router::new().route("/v1/auth/login", post(crate::handlers::auth::login));
+    let login = Router::new()
+        .route("/v1/auth/login", post(crate::handlers::auth::login))
+        .route("/v1/auth/logout", post(crate::handlers::auth::logout));
 
     // Authenticated change-password endpoint. Lives in its own sub-router so
     // it is reachable even when the caller's JWT carries

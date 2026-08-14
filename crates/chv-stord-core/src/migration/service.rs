@@ -42,26 +42,43 @@ impl<B: StorageBackend> StorageMigrationServiceImpl<B> {
     /// but a peer stord is its own trust boundary: reject unsafe ids here
     /// too, and additionally verify that the resolved receiving path stays
     /// inside `runtime_dir` (fail closed on any resolution error).
-    fn validate_receiving_volume_id(&self, volume_id: &str) -> Result<(), Status> {
+    fn validate_receiving_volume_id(&self, volume_id: &str) -> Result<(), ReceivingVolumeError> {
         if !chv_common::is_safe_id(volume_id) {
-            return Err(Status::invalid_argument(format!(
-                "volume_id '{volume_id}' is not a safe id (path separators or traversal rejected)"
-            )));
+            return Err(ReceivingVolumeError::UnsafeId(volume_id.to_string()));
         }
         if let Some(runtime_dir) = self.runtime_dir.as_deref() {
             let dest = runtime_dir.join(format!("{}.img", volume_id));
             let canonical = crate::handlers::canonicalize_or_ancestor(&dest)
-                .map_err(|e| Status::permission_denied(e.to_string()))?;
+                .map_err(|e| ReceivingVolumeError::Resolution(e.to_string()))?;
             let canonical_runtime = crate::handlers::canonicalize_or_ancestor(runtime_dir)
-                .map_err(|e| Status::permission_denied(e.to_string()))?;
+                .map_err(|e| ReceivingVolumeError::Resolution(e.to_string()))?;
             if !canonical.starts_with(&canonical_runtime) {
-                return Err(Status::permission_denied(format!(
-                    "receiving volume path '{}' escapes runtime_dir",
-                    dest.display()
-                )));
+                return Err(ReceivingVolumeError::Escape(dest.display().to_string()));
             }
         }
         Ok(())
+    }
+}
+
+/// Small error type for receiving-volume id validation, kept separate from
+/// `tonic::Status` so the hot error path doesn't carry a 176-byte `Status`.
+enum ReceivingVolumeError {
+    UnsafeId(String),
+    Resolution(String),
+    Escape(String),
+}
+
+impl From<ReceivingVolumeError> for Status {
+    fn from(error: ReceivingVolumeError) -> Self {
+        match error {
+            ReceivingVolumeError::UnsafeId(id) => Status::invalid_argument(format!(
+                "volume_id '{id}' is not a safe id (path separators or traversal rejected)"
+            )),
+            ReceivingVolumeError::Resolution(message) => Status::permission_denied(message),
+            ReceivingVolumeError::Escape(path) => Status::invalid_argument(format!(
+                "receiving volume path '{path}' escapes runtime_dir"
+            )),
+        }
     }
 }
 

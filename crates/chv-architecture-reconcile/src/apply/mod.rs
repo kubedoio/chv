@@ -251,6 +251,7 @@ pub async fn apply_plan(
                 &ctx.architecture_id,
                 ArchitectureStatus::Applying,
                 ctx.topology_version,
+                None,
             )
             .await
         {
@@ -646,7 +647,7 @@ pub async fn set_topology_terminal_status(
         return Ok(());
     }
     topology_repo
-        .set_lifecycle_status(architecture_id, status, current.version_number)
+        .set_lifecycle_status(architecture_id, status, current.version_number, None)
         .await?;
     tracing::info!(
         target: "architecture.apply",

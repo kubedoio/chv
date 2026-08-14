@@ -174,8 +174,24 @@ pub async fn me_handler(
     )
 }
 
+/// Logout terminates the cookie session: the `chv_session` cookie minted
+/// by `/api/v1/auth/login` (and the BFF's `/v1/auth/login`) is cleared with
+/// `Max-Age=0` and the same attributes it was set with (`Path=/`,
+/// `HttpOnly`, `SameSite=Strict`), so the browser stops sending the JWT on
+/// subsequent requests. JWTs are stateless and cannot be revoked
+/// server-side; expiring the cookie is the termination this surface owns.
 pub async fn logout_handler() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::SET_COOKIE,
+            format!(
+                "{}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict",
+                chv_webui_bff::auth::SESSION_COOKIE_NAME
+            ),
+        )],
+        Json(serde_json::json!({"ok": true})),
+    )
 }
 
 #[derive(sqlx::FromRow)]

@@ -384,22 +384,20 @@ impl ProcessCloudHypervisorAdapter {
 
 /// What `start_vm` should do for a VM whose `vm.info` reported `state`.
 ///
-/// A paused VM must be resumed rather than treated as a successful no-op:
-/// a migration failure can leave the VM paused, and the reconciler relies on
-/// `start_vm` to drive it back to Running.
+/// Both `Running` and `Paused` map to an idempotent no-op: a paused VM is
+/// deliberately left paused. The migration path owns resume-after-pause (see
+/// `PausedVmGuard` in chv-agent-core), and user-initiated pauses must survive
+/// the reconciler's periodic `start_vm` calls.
 enum StartVmAction {
-    /// VM is already running: start is an idempotent no-op.
+    /// VM is already running (or deliberately paused): idempotent no-op.
     AlreadyRunning,
-    /// VM is paused: resume it (reconciler self-healing).
-    Resume,
     /// Any other state: boot the VM.
     Boot,
 }
 
 fn start_vm_action(state: &str) -> StartVmAction {
     match state {
-        "Running" => StartVmAction::AlreadyRunning,
-        "Paused" => StartVmAction::Resume,
+        "Running" | "Paused" => StartVmAction::AlreadyRunning,
         _ => StartVmAction::Boot,
     }
 }
@@ -871,19 +869,6 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         }
 
         match action {
-            StartVmAction::Resume => {
-                // A migration failure can leave the VM paused; resume it so
-                // the reconciler drives it back to Running (self-healing).
-                info!(vm_id = %vm_id, state = %state, "vm is paused; resuming via ch api");
-                let status =
-                    Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.resume", None).await?;
-                Self::expect_status(status, "vm.resume")?;
-                // Idempotent success: the VM is now in the desired state.
-                // The guard's succeeded flag must be set on every Ok return
-                // so RED metrics classify this as ok, not err.
-                __guard.succeeded = true;
-                return Ok(());
-            }
             StartVmAction::AlreadyRunning => {
                 info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
                 // Idempotent success: VM is already in the desired state.
@@ -2045,10 +2030,10 @@ mod tests {
     }
 
     #[test]
-    fn start_vm_action_paused_maps_to_resume() {
+    fn start_vm_action_paused_is_already_running() {
         assert!(matches!(
             super::start_vm_action("Paused"),
-            super::StartVmAction::Resume
+            super::StartVmAction::AlreadyRunning
         ));
     }
 

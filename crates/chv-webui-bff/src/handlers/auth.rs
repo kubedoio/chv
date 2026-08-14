@@ -27,6 +27,27 @@ const MIN_NEW_PASSWORD_LEN: usize = 12;
 static LOGIN_ATTEMPTS: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// `Secure` attribute for the session cookie, read once at process start
+/// from `CHV_COOKIE_SECURE` (truthy = set the flag; default off). Enable it
+/// when the BFF is only reachable over TLS — i.e. when a TLS-terminating
+/// proxy fronts the BFF. The flag is deliberately NOT derived from the
+/// request (e.g. `X-Forwarded-Proto`), because that header is
+/// client-supplied and an attacker could trivially claim https.
+static COOKIE_SECURE: LazyLock<bool> =
+    LazyLock::new(|| cookie_secure_enabled(std::env::var("CHV_COOKIE_SECURE").ok().as_deref()));
+
+/// Truthiness mapping for `CHV_COOKIE_SECURE`: any non-empty value other
+/// than `0`/`false` (trimmed, ASCII case-insensitive) enables `Secure`.
+fn cookie_secure_enabled(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !v.is_empty() && v != "0" && v != "false"
+        }
+        None => false,
+    }
+}
+
 async fn check_rate_limit(username: &str) -> Result<(), BffError> {
     let mut attempts = LOGIN_ATTEMPTS.lock().await;
     let now = Instant::now();
@@ -96,12 +117,10 @@ struct UserRow {
 ///   which (together with the csrf_middleware's application/json
 ///   requirement for non-GET) is the CSRF posture for this staged flow.
 /// - `Max-Age=<token ttl>` — the cookie dies with the JWT.
-/// - `Secure` — only when the request arrived over https. Behind nginx the
-///   BFF sees plain http, so `Secure` is off unless `X-Forwarded-Proto:
-///   https` advertises TLS.
+/// - `Secure` — controlled by the `CHV_COOKIE_SECURE` env var (default
+///   off); enable it when the BFF sits behind TLS.
 pub async fn login(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
     axum::Json(payload): axum::Json<Value>,
 ) -> Result<(axum::http::HeaderMap, Json<Value>), BffError> {
     let username = payload
@@ -171,22 +190,16 @@ pub async fn login(
     )
     .map_err(|e| BffError::Internal(format!("failed to encode token: {}", e)))?;
 
-    // Session cookie (Security S1, 3.B). `Secure` is only added when the
-    // request demonstrably arrived over TLS: either the URI scheme is https
-    // or a fronting proxy set X-Forwarded-Proto: https. Behind nginx the
-    // BFF itself sees http, so the default is NO Secure flag — that is
-    // deliberate for the staged deployment, and documented in the handler
-    // doc-comment.
-    let is_https = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("https"))
-        .unwrap_or(false);
+    // Session cookie (Security S1, 3.B). `Secure` comes from the
+    // `CHV_COOKIE_SECURE` env var read once at startup (see [`COOKIE_SECURE`])
+    // — never from a client-supplied header. Behind nginx the BFF sees
+    // plain http, so the default is NO Secure flag; operators enable it
+    // when the BFF is reachable only over TLS.
     let mut cookie = format!(
         "{}={token}; HttpOnly; Path=/; SameSite=Strict; Max-Age={TOKEN_TTL_SECS}",
         crate::auth::SESSION_COOKIE_NAME
     );
-    if is_https {
+    if *COOKIE_SECURE {
         cookie.push_str("; Secure");
     }
 
@@ -207,6 +220,29 @@ pub async fn login(
             "must_change_password": must_change_password
         })),
     ))
+}
+
+/// Logout endpoint (`POST /v1/auth/logout`).
+///
+/// Terminates the cookie session minted by [`login`]: the `chv_session`
+/// cookie is cleared with `Max-Age=0` and the same attributes it was set
+/// with, so the browser stops sending the JWT on subsequent requests. The
+/// route is deliberately unauthenticated — clearing the cookie must
+/// succeed even when the caller's token is already invalid or absent, and
+/// it performs no authorization decision of its own. JWTs are stateless
+/// and cannot be revoked server-side; expiring the cookie is the
+/// termination this endpoint owns.
+pub async fn logout() -> Result<(axum::http::HeaderMap, Json<Value>), BffError> {
+    let cookie = format!(
+        "{}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict",
+        crate::auth::SESSION_COOKIE_NAME
+    );
+    let mut headers = axum::http::HeaderMap::new();
+    let cookie_value = cookie
+        .parse::<axum::http::HeaderValue>()
+        .map_err(|e| BffError::Internal(format!("failed to build logout cookie: {e}")))?;
+    headers.insert(axum::http::header::SET_COOKIE, cookie_value);
+    Ok((headers, Json(json!({ "ok": true }))))
 }
 
 /// Validate password policy. Centralised so the rules are visible at one site
@@ -580,13 +616,9 @@ mod tests {
         seed_user(&state.pool, "u-must-1", "alice", "correctpassword", true).await;
 
         let body = serde_json::json!({"username": "alice", "password": "correctpassword"});
-        let (_headers, resp) = login(
-            axum::extract::State(state.clone()),
-            axum::http::HeaderMap::new(),
-            axum::Json(body),
-        )
-        .await
-        .expect("login should succeed");
+        let (_headers, resp) = login(axum::extract::State(state.clone()), axum::Json(body))
+            .await
+            .expect("login should succeed");
         let v = resp.0;
         assert_eq!(
             v.get("must_change_password").and_then(|x| x.as_bool()),
@@ -607,13 +639,9 @@ mod tests {
         seed_user(&state.pool, "u-clear-1", "bob", "correctpassword", false).await;
 
         let body = serde_json::json!({"username": "bob", "password": "correctpassword"});
-        let (_headers, resp) = login(
-            axum::extract::State(state.clone()),
-            axum::http::HeaderMap::new(),
-            axum::Json(body),
-        )
-        .await
-        .expect("login should succeed");
+        let (_headers, resp) = login(axum::extract::State(state.clone()), axum::Json(body))
+            .await
+            .expect("login should succeed");
         let v = resp.0;
         assert_eq!(
             v.get("must_change_password").and_then(|x| x.as_bool()),
@@ -631,17 +659,10 @@ mod tests {
         let state = build_test_state().await;
         seed_user(&state.pool, "u-cookie-1", "gina", "correctpassword", false).await;
 
-        let mut request_headers = axum::http::HeaderMap::new();
-        request_headers.insert("x-forwarded-proto", "https".parse().unwrap());
-
         let body = serde_json::json!({"username": "gina", "password": "correctpassword"});
-        let (headers, resp) = login(
-            axum::extract::State(state.clone()),
-            request_headers,
-            axum::Json(body),
-        )
-        .await
-        .expect("login should succeed");
+        let (headers, resp) = login(axum::extract::State(state.clone()), axum::Json(body))
+            .await
+            .expect("login should succeed");
 
         let token = resp.0["token"].as_str().unwrap().to_string();
         let cookie = headers
@@ -663,9 +684,13 @@ mod tests {
             cookie.contains("; Max-Age=86400"),
             "cookie TTL must match the 24h token TTL"
         );
-        assert!(
+        // `Secure` follows the CHV_COOKIE_SECURE env var read once at
+        // startup — never a request header (the handler no longer even
+        // accepts headers). Unset in the test process, so off by default.
+        assert_eq!(
             cookie.contains("; Secure"),
-            "X-Forwarded-Proto: https must add the Secure flag"
+            *COOKIE_SECURE,
+            "Secure must follow CHV_COOKIE_SECURE, not the request"
         );
 
         // The cookie JWT must verify through the exact same path the
@@ -678,30 +703,20 @@ mod tests {
         assert_eq!(claims.username, "gina");
     }
 
-    #[tokio::test]
-    async fn login_cookie_omits_secure_without_https_proto() {
-        let state = build_test_state().await;
-        seed_user(&state.pool, "u-cookie-2", "hugo", "correctpassword", false).await;
-
-        let body = serde_json::json!({"username": "hugo", "password": "correctpassword"});
-        // Plain-http request (what the BFF sees behind nginx): no
-        // X-Forwarded-Proto, so no Secure flag.
-        let (headers, _resp) = login(
-            axum::extract::State(state),
-            axum::http::HeaderMap::new(),
-            axum::Json(body),
-        )
-        .await
-        .expect("login should succeed");
-        let cookie = headers
-            .get(axum::http::header::SET_COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .expect("login must set the session cookie");
-        assert!(
-            !cookie.contains("Secure"),
-            "plain-http login must not set Secure; got: {cookie}"
-        );
-        assert!(cookie.contains("; HttpOnly"), "HttpOnly stays on");
+    #[test]
+    fn cookie_secure_flag_truthiness() {
+        // Absent / empty / explicit off → no Secure attribute.
+        assert!(!cookie_secure_enabled(None));
+        assert!(!cookie_secure_enabled(Some("")));
+        assert!(!cookie_secure_enabled(Some("   ")));
+        assert!(!cookie_secure_enabled(Some("0")));
+        assert!(!cookie_secure_enabled(Some("false")));
+        assert!(!cookie_secure_enabled(Some(" FALSE ")));
+        // Any other non-empty value → Secure.
+        assert!(cookie_secure_enabled(Some("1")));
+        assert!(cookie_secure_enabled(Some("true")));
+        assert!(cookie_secure_enabled(Some("TRUE")));
+        assert!(cookie_secure_enabled(Some(" yes ")));
     }
 
     #[tokio::test]
@@ -954,6 +969,68 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "Authorization header must take precedence over the cookie"
+        );
+    }
+
+    // ── logout clears the session cookie (Security S1 review) ─────────────
+
+    #[tokio::test]
+    async fn logout_clears_session_cookie_and_cleared_cookie_no_longer_authenticates() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = build_test_state().await;
+        let app = crate::bff_router(state.clone()).with_state(state.clone());
+
+        // Logout is deliberately unauthenticated: clearing the cookie must
+        // succeed even with no (or an invalid) token. The clearing cookie
+        // empties the value with Max-Age=0 and the same attributes login
+        // set.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/auth/logout")
+            .header("content-type", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("logout must clear the session cookie")
+            .to_string();
+        assert!(
+            set_cookie.starts_with(&format!("{}=;", crate::auth::SESSION_COOKIE_NAME)),
+            "clearing cookie must empty the value; got: {set_cookie}"
+        );
+        assert!(set_cookie.contains("Max-Age=0"), "got: {set_cookie}");
+        assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
+        assert!(set_cookie.contains("Path=/"), "got: {set_cookie}");
+        assert!(set_cookie.contains("SameSite=Strict"), "got: {set_cookie}");
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["ok"], true);
+
+        // A request carrying the cleared cookie value must NOT
+        // authenticate: the empty value is rejected by the cookie parser
+        // and the request falls through to the missing-credential 401.
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/v1/overview")
+            .header(
+                axum::http::header::COOKIE,
+                format!("{}=", crate::auth::SESSION_COOKIE_NAME),
+            )
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::UNAUTHORIZED,
+            "cleared cookie must no longer authenticate"
         );
     }
 }

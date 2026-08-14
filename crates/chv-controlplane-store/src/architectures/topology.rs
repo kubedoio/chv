@@ -235,12 +235,17 @@ impl TopologyRepository {
     /// concurrent archive that could otherwise turn a stale-version error
     /// into a misleading not-found.
     ///
-    /// `visible_to_user` scopes the write the same way as [`Self::get`]
-    /// (own row or system-owned starter). The BFF performs the authoritative
-    /// 403 check before calling this; the predicate here is defence-in-depth
-    /// so a future caller cannot accidentally widen the write window.
-    /// `owner_user_id` is immutable once created, so a caller that passed
-    /// the BFF check can never lose this predicate to a race.
+    /// `visible_to_user` scopes the write the same way as [`Self::get`],
+    /// with one hardening difference: the scoped shape matches
+    /// `owner_user_id = uid` ONLY. System-owned starter rows
+    /// (`owner_user_id IS NULL`) stay readable to every authenticated
+    /// caller (the read paths keep the `IS NULL` carve-out) but are
+    /// read-only templates for non-admin writers — the BFF denies those
+    /// mutations with 403 before reaching here, and this predicate is
+    /// defence-in-depth so a future caller cannot accidentally widen the
+    /// write window. `owner_user_id` is immutable once created, so a
+    /// caller that passed the BFF check can never lose this predicate to a
+    /// race.
     pub async fn update(
         &self,
         input: TopologyUpdateInput,
@@ -299,7 +304,7 @@ impl TopologyRepository {
                         version_number = version_number + 1,
                         updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
                     WHERE id = $1 AND version_number = $11 AND archived_at IS NULL
-                      AND (owner_user_id = $12 OR owner_user_id IS NULL)
+                      AND owner_user_id = $12
                     "#,
                 )
                 .bind(input.id.as_str())
@@ -346,9 +351,12 @@ impl TopologyRepository {
     /// row (regardless of version) is reported as [`StoreError::NotFound`] so
     /// archive remains idempotent at the routing layer.
     ///
-    /// `visible_to_user` mirrors [`Self::get`] (own row or system-owned
-    /// starter); the BFF's `require_owner_or_admin` is the authoritative
-    /// 403 gate and this predicate is defence-in-depth.
+    /// `visible_to_user` mirrors [`Self::get`] with the same write-side
+    /// hardening as [`Self::update`]: the scoped shape matches
+    /// `owner_user_id = uid` ONLY — system-owned starter rows are
+    /// read-only templates for non-admin writers. The BFF's
+    /// `require_owner_or_admin` is the authoritative 403 gate and this
+    /// predicate is defence-in-depth.
     pub async fn archive(
         &self,
         id: &ArchitectureId,
@@ -385,7 +393,7 @@ impl TopologyRepository {
                         updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
                         version_number = version_number + 1
                     WHERE id = $1 AND archived_at IS NULL AND version_number = $2
-                      AND (owner_user_id = $3 OR owner_user_id IS NULL)
+                      AND owner_user_id = $3
                     "#,
                 )
                 .bind(id.as_str())
@@ -422,28 +430,59 @@ impl TopologyRepository {
     /// the Phase 0 stub to leave the field permanently `None`. A focused
     /// method makes the semantics — "record a validation outcome" — explicit
     /// at the call site.
+    ///
+    /// `visible_to_user` applies the same write-side ownership predicate as
+    /// [`Self::update`]: `Some(uid)` only matches `owner_user_id = uid`
+    /// (system-owned starter rows are read-only templates for non-admin
+    /// writers; the BFF denies those with 403 before reaching here),
+    /// `None` lifts the predicate for admin/internal callers.
     pub async fn set_validation_status(
         &self,
         id: &ArchitectureId,
         expected_version: i64,
         status: ValidationStatus,
+        visible_to_user: Option<&str>,
     ) -> Result<ArchitectureTopology, StoreError> {
         let mut tx = self.pool.begin().await?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE architecture_topologies SET
-                last_validation_status = $2,
-                version_number = version_number + 1,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-            WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
-            "#,
-        )
-        .bind(id.as_str())
-        .bind(status.as_str())
-        .bind(expected_version)
-        .execute(&mut *tx)
-        .await?;
+        // Two static SQL shapes (unscoped / ownership-scoped) — same
+        // no-reused-parameter constraint documented in [`Self::list`].
+        let result = match visible_to_user {
+            None => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        last_validation_status = $2,
+                        version_number = version_number + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(status.as_str())
+                .bind(expected_version)
+                .execute(&mut *tx)
+                .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        last_validation_status = $2,
+                        version_number = version_number + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
+                      AND owner_user_id = $4
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(status.as_str())
+                .bind(expected_version)
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?
+            }
+        };
 
         if result.rows_affected() == 0 {
             let probe = fetch_version_and_archived_in_tx(&mut tx, id).await?;
@@ -480,28 +519,60 @@ impl TopologyRepository {
     /// the row out from under us; the apply path uses that signal to roll
     /// back the plan-status claim instead of leaving the topology wedged
     /// in an inconsistent state.
+    ///
+    /// `visible_to_user` applies the same write-side ownership predicate as
+    /// [`Self::update`]: `Some(uid)` only matches `owner_user_id = uid`
+    /// (system-owned starter rows are read-only templates for non-admin
+    /// writers), `None` lifts the predicate for admin/internal callers —
+    /// the reconcile crate's apply/drift writeback passes `None` after the
+    /// BFF has already authorized the caller.
     pub async fn set_lifecycle_status(
         &self,
         id: &ArchitectureId,
         status: ArchitectureStatus,
         expected_version: i64,
+        visible_to_user: Option<&str>,
     ) -> Result<ArchitectureTopology, StoreError> {
         let mut tx = self.pool.begin().await?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE architecture_topologies SET
-                status = $2,
-                version_number = version_number + 1,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-            WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
-            "#,
-        )
-        .bind(id.as_str())
-        .bind(status.as_str())
-        .bind(expected_version)
-        .execute(&mut *tx)
-        .await?;
+        // Two static SQL shapes (unscoped / ownership-scoped) — same
+        // no-reused-parameter constraint documented in [`Self::list`].
+        let result = match visible_to_user {
+            None => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        status = $2,
+                        version_number = version_number + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(status.as_str())
+                .bind(expected_version)
+                .execute(&mut *tx)
+                .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    UPDATE architecture_topologies SET
+                        status = $2,
+                        version_number = version_number + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    WHERE id = $1 AND version_number = $3 AND archived_at IS NULL
+                      AND owner_user_id = $4
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(status.as_str())
+                .bind(expected_version)
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?
+            }
+        };
 
         if result.rows_affected() == 0 {
             let probe = fetch_version_and_archived_in_tx(&mut tx, id).await?;

@@ -31,8 +31,11 @@ use chv_controlplane_store::{
 use chv_controlplane_types::architecture::{ArchitectureId, ArchitectureStatus};
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
-    archive_architecture, get_architecture, update_architecture, ArchiveArchitectureRequest,
-    GetArchitectureRequest, UpdateArchitectureRequest,
+    apply_architecture, archive_architecture, check_fleet_architecture, get_architecture,
+    get_architecture_drift, list_architecture_runs, plan_architecture, update_architecture,
+    ApplyArchitectureRequest, ArchiveArchitectureRequest, CheckFleetRequest, DriftRequest,
+    GetArchitectureRequest, ListApplyRunsRequest, PlanArchitectureRequest,
+    UpdateArchitectureRequest,
 };
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};
@@ -334,8 +337,10 @@ async fn admin_can_archive_foreign_architecture() {
 #[tokio::test]
 async fn production_guard_fires_from_persisted_tag_even_when_request_environment_is_null() {
     let state = build_state().await;
-    // Admin-owned production topology.
-    let prod_arch = seed_topology(&state, "admin-prod", Some("u-admin"), Some("production")).await;
+    // Operator-owned production topology: the ownership gate passes, so the
+    // persisted-tag guard (b) is what must fire. (A *foreign* production
+    // row answers the plain ownership 403 instead — see the next test.)
+    let prod_arch = seed_topology(&state, "admin-prod", Some("u-alice"), Some("production")).await;
 
     // An operator tries to update it while sending environment: null (the
     // serde shape of `"environment": null` / absent field). The persisted
@@ -355,7 +360,7 @@ async fn production_guard_fires_from_persisted_tag_even_when_request_environment
         }),
     )
     .await
-    .expect_err("production guard must fire for admin-owned production row");
+    .expect_err("production guard must fire for operator-owned production row");
     assert_eq!(
         err_status(&err),
         403,
@@ -379,6 +384,39 @@ async fn production_guard_fires_from_persisted_tag_even_when_request_environment
         Some("production")
     );
     assert_eq!(resp.0.architecture.version_number, 1);
+}
+
+#[tokio::test]
+async fn foreign_production_row_returns_plain_forbidden_before_production_guard() {
+    // Information disclosure (Security F7 review): a non-admin touching a
+    // FOREIGN production row must get the plain ownership 403 — never
+    // ProductionRequiresAdmin, which would confirm the persisted tag of a
+    // row the caller may not see.
+    let state = build_state().await;
+    let foreign_prod =
+        seed_topology(&state, "foreign-prod", Some("u-admin"), Some("production")).await;
+
+    let err = update_architecture(
+        BearerToken(claims("u-alice", "operator")),
+        State(state),
+        Json(UpdateArchitectureRequest {
+            id: foreign_prod,
+            expected_version: 1,
+            display_name: Some("sneaky".to_string()),
+            description: None,
+            environment: None,
+            design_graph_json: None,
+            latest_yaml: None,
+            latest_version_id: None,
+        }),
+    )
+    .await
+    .expect_err("operator must not touch a foreign production row");
+    assert_eq!(err_status(&err), 403);
+    assert!(
+        matches!(err, BffError::Forbidden(_)),
+        "expected plain Forbidden (no production-tag leak), got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -409,5 +447,156 @@ async fn operator_cannot_untag_own_production_row_via_update() {
     assert!(
         matches!(err, BffError::ProductionRequiresAdmin { .. }),
         "expected ProductionRequiresAdmin, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (e) object-level endpoints answer 403 on foreign rows (review follow-up)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn plan_architecture_on_foreign_row_returns_403() {
+    let state = build_state().await;
+    let bob_arch = seed_topology(&state, "bob-plan", Some("u-bob"), None).await;
+
+    let err = plan_architecture(
+        BearerToken(claims("u-alice", "operator")),
+        State(state),
+        Json(PlanArchitectureRequest {
+            id: bob_arch,
+            allow_warnings: None,
+            refresh_inventory: None,
+        }),
+    )
+    .await
+    .expect_err("operator must not plan against a foreign row");
+    assert_eq!(err_status(&err), 403, "foreign plan => 403");
+    assert!(
+        matches!(err, BffError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn apply_architecture_on_foreign_row_returns_403() {
+    let state = build_state().await;
+    let bob_arch = seed_topology(&state, "bob-apply", Some("u-bob"), None).await;
+
+    let err = apply_architecture(
+        BearerToken(claims("u-alice", "operator")),
+        State(state),
+        Json(ApplyArchitectureRequest {
+            id: bob_arch,
+            plan_id: "plan-fake".to_string(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect_err("operator must not apply a foreign row");
+    assert_eq!(err_status(&err), 403, "foreign apply => 403");
+    assert!(
+        matches!(err, BffError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_architecture_drift_on_foreign_row_returns_403() {
+    let state = build_state().await;
+    let bob_arch = seed_topology(&state, "bob-drift", Some("u-bob"), None).await;
+
+    let err = get_architecture_drift(
+        BearerToken(claims("u-alice", "operator")),
+        State(state),
+        Json(DriftRequest {
+            id: bob_arch,
+            force_refresh: false,
+        }),
+    )
+    .await
+    .expect_err("operator must not drift-check a foreign row");
+    assert_eq!(err_status(&err), 403, "foreign drift => 403");
+    assert!(
+        matches!(err, BffError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_architecture_runs_on_foreign_row_returns_403() {
+    let state = build_state().await;
+    let bob_arch = seed_topology(&state, "bob-runs", Some("u-bob"), None).await;
+
+    let err = list_architecture_runs(
+        BearerToken(claims("u-alice", "operator")),
+        State(state),
+        Json(ListApplyRunsRequest { id: bob_arch }),
+    )
+    .await
+    .expect_err("operator must not list runs of a foreign row");
+    assert_eq!(err_status(&err), 403, "foreign runs => 403");
+    assert!(
+        matches!(err, BffError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_fleet_architecture_on_foreign_row_returns_403() {
+    let state = build_state().await;
+    let bob_arch = seed_topology(&state, "bob-fleet", Some("u-bob"), None).await;
+
+    let err = check_fleet_architecture(
+        BearerToken(claims("u-alice", "operator")),
+        State(state),
+        Json(CheckFleetRequest { id: bob_arch }),
+    )
+    .await
+    .expect_err("operator must not check-fleet a foreign row");
+    assert_eq!(err_status(&err), 403, "foreign check-fleet => 403");
+    assert!(
+        matches!(err, BffError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (f) NULL-owned starter rows are readable but not writable by non-admins
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn null_owned_starter_row_readable_but_not_archivable_by_operator() {
+    let state = build_state().await;
+    let starter = seed_topology(&state, "starter", None, None).await;
+
+    // Readable: the read predicate keeps the IS NULL carve-out, so the
+    // shared starter template is visible to every authenticated caller.
+    let resp = get_architecture(
+        BearerToken(claims("u-alice", "operator")),
+        State(state.clone()),
+        Json(GetArchitectureRequest {
+            id: starter.clone(),
+        }),
+    )
+    .await
+    .expect("operator must read the NULL-owned starter");
+    assert_eq!(resp.0.architecture.id, "arch-starter");
+
+    // Not archivable: NULL-owned rows are read-only templates for
+    // non-admins (Security H6 review) — require_owner_or_admin answers 403.
+    let err = archive_architecture(
+        BearerToken(claims("u-alice", "operator")),
+        State(state),
+        Json(ArchiveArchitectureRequest {
+            id: starter,
+            expected_version: 1,
+        }),
+    )
+    .await
+    .expect_err("operator must not archive a NULL-owned starter");
+    assert_eq!(err_status(&err), 403);
+    assert!(
+        matches!(err, BffError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
     );
 }

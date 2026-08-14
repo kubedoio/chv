@@ -766,8 +766,16 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             0u8
         };
 
-        // Convert proto rules to eBPF rules
-        let ebpf_rules = ebpf::proto_to_ebpf_rules(&vm_id, &policy);
+        // Convert proto rules to eBPF rules; an overlong vm_id is rejected
+        // rather than silently truncated into a colliding map key.
+        let ebpf_rules = match ebpf::proto_to_ebpf_rules(&vm_id, &policy) {
+            Ok(rules) => rules,
+            Err(e) => {
+                return Ok(Response::new(proto::UpdateSecurityPolicyResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        };
 
         info!(
             vm_id = %policy.vm_id,
@@ -800,7 +808,14 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         let policy = request.into_inner();
 
         let vm_id = policy.vm_id.clone();
-        let ebpf_rl = ebpf::proto_to_ebpf_rate_limit(&policy);
+        let ebpf_rl = match ebpf::proto_to_ebpf_rate_limit(&policy) {
+            Ok(rl) => rl,
+            Err(e) => {
+                return Ok(Response::new(proto::UpdateRateLimitResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        };
 
         info!(
             vm_id = %policy.vm_id,

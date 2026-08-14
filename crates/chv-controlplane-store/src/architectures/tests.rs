@@ -882,7 +882,7 @@ async fn set_validation_status_happy_path_bumps_version() {
     assert_eq!(created.last_validation_status, None);
 
     let updated = repo
-        .set_validation_status(&created.id, 1, ValidationStatus::Passed)
+        .set_validation_status(&created.id, 1, ValidationStatus::Passed, None)
         .await
         .unwrap();
     assert_eq!(updated.version_number, 2);
@@ -904,12 +904,12 @@ async fn set_validation_status_with_stale_version_returns_stale_version() {
         .create(make_topology_input("topo-vs-2", "vs-stale"))
         .await
         .unwrap();
-    repo.set_validation_status(&created.id, 1, ValidationStatus::Passed)
+    repo.set_validation_status(&created.id, 1, ValidationStatus::Passed, None)
         .await
         .unwrap();
 
     let err = repo
-        .set_validation_status(&created.id, 1, ValidationStatus::Failed)
+        .set_validation_status(&created.id, 1, ValidationStatus::Failed, None)
         .await
         .unwrap_err();
     match err {
@@ -935,7 +935,7 @@ async fn set_validation_status_on_archived_returns_not_found() {
     repo.archive(&created.id, 1, None).await.unwrap();
 
     let err = repo
-        .set_validation_status(&created.id, 2, ValidationStatus::Failed)
+        .set_validation_status(&created.id, 2, ValidationStatus::Failed, None)
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }));
@@ -947,7 +947,7 @@ async fn set_validation_status_on_unknown_id_returns_not_found() {
     let repo = TopologyRepository::new(db.pool.clone());
 
     let err = repo
-        .set_validation_status(&aid("nope"), 1, ValidationStatus::Failed)
+        .set_validation_status(&aid("nope"), 1, ValidationStatus::Failed, None)
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound { .. }));

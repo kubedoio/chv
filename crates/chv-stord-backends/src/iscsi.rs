@@ -1,10 +1,11 @@
 use crate::r#trait::{
     validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE,
+    MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES,
 };
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::ChvError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -43,6 +44,16 @@ pub struct IscsiBackend {
     /// released, so closing one volume cannot tear down the session that
     /// other volumes on the same target still use.
     session_refs: Mutex<HashMap<String, usize>>,
+    /// Volume ids currently holding an open reference. Used to make `open`
+    /// idempotent: a re-open returns the existing export without a second
+    /// login + acquire, so the stord-core idempotent re-open path cannot
+    /// leak session references.
+    open_volumes: Mutex<HashSet<String>>,
+    /// Handles currently holding an attach reference. Used to make `attach`
+    /// idempotent per (target, handle): a re-attach returns the existing
+    /// export without a second acquire, and `detach` releases a reference
+    /// only for a handle that was actually attached.
+    attached_handles: Mutex<HashSet<String>>,
 }
 
 impl IscsiBackend {
@@ -63,6 +74,8 @@ impl IscsiBackend {
             config,
             dirty_trackers: Arc::new(RwLock::new(HashMap::new())),
             session_refs: Mutex::new(HashMap::new()),
+            open_volumes: Mutex::new(HashSet::new()),
+            attached_handles: Mutex::new(HashSet::new()),
         })
     }
 
@@ -401,9 +414,42 @@ impl StorageBackend for IscsiBackend {
         }
         Self::sanitize_id(volume_id)?;
 
-        // Discover and login to the target.
-        self.discover_targets().await?;
-        self.login().await?;
+        // Idempotent re-open: if this volume id is already open, return the
+        // existing export without logging in again or acquiring another
+        // session reference. `insert` is atomic, so only one of two
+        // concurrent opens proceeds; the loser takes the early return.
+        {
+            let mut open_volumes = self
+                .open_volumes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !open_volumes.insert(volume_id.to_string()) {
+                let path = self.device_path(volume_id);
+                info!(volume_id, path = %path, "iSCSI volume already open; reusing existing session");
+                return Ok(VolumeExport {
+                    export_kind: "iscsi".to_string(),
+                    export_path: path,
+                    attachment_handle: self.expected_handle(volume_id),
+                });
+            }
+        }
+
+        // Discover and login to the target. Roll the open mark back on
+        // failure so a later open retries the login.
+        if let Err(e) = self.discover_targets().await {
+            self.open_volumes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(volume_id);
+            return Err(e);
+        }
+        if let Err(e) = self.login().await {
+            self.open_volumes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(volume_id);
+            return Err(e);
+        }
         self.acquire_session_ref(&self.config.target_iqn);
 
         let path = self.device_path(volume_id);
@@ -423,6 +469,15 @@ impl StorageBackend for IscsiBackend {
                 reason: format!("handle {} does not match volume_id {}", handle, volume_id),
             });
         }
+
+        // Clear the open mark so a later open performs a fresh login, and
+        // drop the dirty tracker for this handle so closed volumes cannot
+        // accumulate bitmaps.
+        self.open_volumes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(volume_id);
+        self.dirty_trackers.write().await.remove(handle);
 
         if self.release_session_ref(&self.config.target_iqn) {
             self.logout().await?;
@@ -449,6 +504,26 @@ impl StorageBackend for IscsiBackend {
                 reason: format!("handle {} does not match volume_id {}", handle, volume_id),
             });
         }
+
+        // Idempotent re-attach per (target, handle): a repeated attach for
+        // an already-attached handle must not acquire a second session
+        // reference, or the matching detach could never balance it.
+        {
+            let mut attached = self
+                .attached_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !attached.insert(handle.to_string()) {
+                let path = self.device_path(volume_id);
+                info!(volume_id, vm_id, handle, path = %path, "iSCSI volume already attached; reusing attachment");
+                return Ok(VolumeExport {
+                    export_kind: "iscsi".to_string(),
+                    export_path: path,
+                    attachment_handle: handle.to_string(),
+                });
+            }
+        }
+
         let path = self.device_path(volume_id);
         info!(volume_id, vm_id, handle, path = %path, "attaching iSCSI volume");
         self.acquire_session_ref(&self.config.target_iqn);
@@ -462,7 +537,7 @@ impl StorageBackend for IscsiBackend {
     async fn detach(
         &self,
         volume_id: &str,
-        _handle: &str,
+        handle: &str,
         ownership: chv_common::AttachmentOwnership,
         force: bool,
     ) -> Result<(), ChvError> {
@@ -479,7 +554,15 @@ impl StorageBackend for IscsiBackend {
             info!(volume_id, vm_id, "detaching iSCSI volume");
         }
 
-        if self.release_session_ref(&self.config.target_iqn) {
+        // Release the attach reference only if this handle was actually
+        // attached: an idempotent re-attach did not acquire an extra
+        // reference, so its detach must not release one either.
+        let was_attached = self
+            .attached_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(handle);
+        if was_attached && self.release_session_ref(&self.config.target_iqn) {
             self.logout().await?;
         }
         Ok(())
@@ -687,19 +770,43 @@ impl StorageBackend for IscsiBackend {
         handle: &str,
         volume_size_bytes: u64,
     ) -> Result<(), ChvError> {
-        let bitmap_bytes = volume_size_bytes
-            .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
-            .div_ceil(8) as usize;
-        let tracker = DirtyTracker {
-            block_size: DIRTY_TRACKING_BLOCK_SIZE,
-            volume_size: volume_size_bytes,
-            bitmap: vec![0u8; bitmap_bytes],
-        };
-        self.dirty_trackers
-            .write()
-            .await
-            .entry(handle.to_string())
-            .or_insert(tracker);
+        if volume_size_bytes > MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES {
+            return Err(ChvError::InvalidArgument {
+                field: "volume_size_bytes".to_string(),
+                reason: format!(
+                    "volume size {} exceeds dirty-tracking maximum {} bytes",
+                    volume_size_bytes, MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES
+                ),
+            });
+        }
+        let mut map = self.dirty_trackers.write().await;
+        match map.get_mut(handle) {
+            Some(tracker) => {
+                // Re-enable heals stale bounds from out-of-band resizes:
+                // update the size and grow the bitmap in place, keeping
+                // the dirty bits.
+                tracker.volume_size = volume_size_bytes;
+                let needed_bytes = volume_size_bytes
+                    .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+                    .div_ceil(8) as usize;
+                if tracker.bitmap.len() < needed_bytes {
+                    tracker.bitmap.resize(needed_bytes, 0);
+                }
+            }
+            None => {
+                let bitmap_bytes = volume_size_bytes
+                    .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+                    .div_ceil(8) as usize;
+                map.insert(
+                    handle.to_string(),
+                    DirtyTracker {
+                        block_size: DIRTY_TRACKING_BLOCK_SIZE,
+                        volume_size: volume_size_bytes,
+                        bitmap: vec![0u8; bitmap_bytes],
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -876,6 +983,10 @@ impl StorageBackend for IscsiBackend {
         // Re-discover to pick up the new LUN.
         self.discover_targets().await?;
         self.login().await?;
+        // The receiving volume holds a session reference like an open()
+        // does; the migration receiver's close() releases it when the
+        // stream ends so the refcount stays balanced.
+        self.acquire_session_ref(&self.config.target_iqn);
 
         // Rescan sessions so the new LUN appears as a block device.
         let _ = Command::new("iscsiadm")
@@ -1165,5 +1276,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_rejects_oversized_volume() {
+        let backend = refcount_test_backend();
+        let handle = backend.expected_handle("vol-1");
+        let res = backend
+            .enable_dirty_tracking("vol-1", &handle, MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES + 1)
+            .await;
+        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+    }
+
+    #[tokio::test]
+    async fn close_evicts_dirty_tracker() {
+        let backend = refcount_test_backend();
+        let handle = backend.expected_handle("vol-1");
+        backend
+            .enable_dirty_tracking("vol-1", &handle, 8_388_608)
+            .await
+            .unwrap();
+
+        backend.close("vol-1", &handle).await.unwrap();
+
+        let res = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", &handle)
+            .await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
 }

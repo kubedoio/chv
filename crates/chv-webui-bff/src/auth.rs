@@ -223,6 +223,14 @@ fn session_cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
             let rest = rest.trim_start();
             if let Some(value) = rest.strip_prefix('=') {
                 let value = value.trim();
+                // Some clients (and the RFC 6265 cookie grammar) wrap the
+                // value in double quotes. Strip a balanced surrounding
+                // pair before validating — a quoted JWT is not a token and
+                // must not silently fail an otherwise-valid session.
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(value);
                 if !value.is_empty() {
                     return Some(value.to_string());
                 }
@@ -672,6 +680,21 @@ mod tests {
         assert_eq!(
             session_cookie_token(&headers_with_cookie("chv_session= abc ")).as_deref(),
             Some("abc")
+        );
+    }
+
+    #[test]
+    fn session_cookie_strips_surrounding_quotes() {
+        // RFC 6265 allows a quoted cookie value; a quoted JWT must parse
+        // to the bare token instead of failing as garbage.
+        assert_eq!(
+            session_cookie_token(&headers_with_cookie("chv_session=\"abc.def.ghi\"")).as_deref(),
+            Some("abc.def.ghi")
+        );
+        // An unbalanced leading quote is left alone — no half-parse.
+        assert_eq!(
+            session_cookie_token(&headers_with_cookie("chv_session=\"abc.def.ghi")).as_deref(),
+            Some("\"abc.def.ghi")
         );
     }
 

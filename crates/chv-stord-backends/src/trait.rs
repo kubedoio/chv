@@ -9,6 +9,14 @@ use chv_errors::ChvError;
 /// `DEFAULT_BLOCK_SIZE`) so that bitmap bits map 1:1 to migration chunks.
 pub const DIRTY_TRACKING_BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4 MiB
 
+/// Maximum volume size accepted for dirty-bitmap tracking (16 TiB).
+///
+/// The bitmap stores one bit per [`DIRTY_TRACKING_BLOCK_SIZE`] block, so
+/// capping the volume size bounds the bitmap allocation: 16 TiB needs at
+/// most 512 KiB of bitmap. Larger volumes are rejected with
+/// `InvalidArgument` instead of allocating an unbounded bitmap.
+pub const MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
+
 /// Validate a block-write range against the volume size.
 ///
 /// Returns the exclusive end offset (`offset + data_len`) on success. The

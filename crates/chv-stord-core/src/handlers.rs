@@ -223,6 +223,13 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         })
     }
 
+    /// Threat model: this check hardens the API boundary against hostile
+    /// API callers (control-plane / agent requests), not against hostile
+    /// local users with write access to the runtime directories. It
+    /// canonicalizes the path and then the backend opens it later, so
+    /// there is a check-then-use window in which a local attacker could
+    /// swap in a symlink. If that threat model ever changes, the next
+    /// layer is an O_NOFOLLOW reopen at the backend level.
     fn check_path_allowlist(&self, locator: &str) -> Result<(), ChvError> {
         if self.path_allowlist.is_empty() {
             return Ok(());
@@ -317,6 +324,19 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             ),
         })
     }
+
+    /// Snapshot and clone names become path components in backend filenames
+    /// (e.g. `{volume_id}-{name}.img`), so reject any name that is not a
+    /// single safe component before it reaches the backend.
+    fn validate_snapshot_or_clone_name(name: &str, field: &str) -> Result<(), ChvError> {
+        if !chv_common::is_safe_id(name) {
+            return Err(ChvError::InvalidArgument {
+                field: field.to_string(),
+                reason: format!("'{name}' is not a safe id (must be a single path component)"),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -372,14 +392,23 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             }));
         }
 
-        if let Err(e) = self.check_path_allowlist(&locator.locator) {
-            return Ok(Response::new(proto::OpenVolumeResponse {
-                result: Some(e.to_proto_result()),
-                volume_id: req.volume_id,
-                attachment_handle: String::new(),
-                export_kind: String::new(),
-                export_path: String::new(),
-            }));
+        // The path allowlist only makes sense for the local/filesystem
+        // backend: lvm/ceph/iscsi locators are volume/device identifiers,
+        // not filesystem paths, and treating them as paths would either
+        // fail the check or wrongly resolve against runtime_dir.
+        if matches!(
+            locator.backend_class.as_str(),
+            "local" | "local-file" | "localdisk"
+        ) {
+            if let Err(e) = self.check_path_allowlist(&locator.locator) {
+                return Ok(Response::new(proto::OpenVolumeResponse {
+                    result: Some(e.to_proto_result()),
+                    volume_id: req.volume_id,
+                    attachment_handle: String::new(),
+                    export_kind: String::new(),
+                    export_path: String::new(),
+                }));
+            }
         }
 
         if locator.backend_class == "lvm" || locator.backend_class == "block" {
@@ -450,34 +479,42 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
 
         // Enable dirty tracking for the freshly opened volume so that disk
         // migration dirty-sync rounds can always snapshot a bitmap (empty
-        // when nothing was written yet). Failures must not fail the open:
-        // the volume remains usable, only dirty tracking is degraded.
-        match self
-            .backend
-            .volume_size(&req.volume_id, &export.attachment_handle)
-            .await
-        {
-            Ok(size_bytes) => {
-                if let Err(e) = self
-                    .backend
-                    .enable_dirty_tracking(&req.volume_id, &export.attachment_handle, size_bytes)
-                    .await
-                {
+        // when nothing was written yet). Read-only opens are skipped: a
+        // read-only volume cannot be dirtied, so the bitmap would only
+        // waste memory. Failures must not fail the open: the volume remains
+        // usable, only dirty tracking is degraded.
+        if !policy.read_only {
+            match self
+                .backend
+                .volume_size(&req.volume_id, &export.attachment_handle)
+                .await
+            {
+                Ok(size_bytes) => {
+                    if let Err(e) = self
+                        .backend
+                        .enable_dirty_tracking(
+                            &req.volume_id,
+                            &export.attachment_handle,
+                            size_bytes,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            volume_id = %req.volume_id,
+                            handle = %export.attachment_handle,
+                            error = %e,
+                            "failed to enable dirty tracking for opened volume"
+                        );
+                    }
+                }
+                Err(e) => {
                     tracing::warn!(
                         volume_id = %req.volume_id,
                         handle = %export.attachment_handle,
                         error = %e,
-                        "failed to enable dirty tracking for opened volume"
+                        "could not determine volume size; dirty tracking not enabled"
                     );
                 }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    volume_id = %req.volume_id,
-                    handle = %export.attachment_handle,
-                    error = %e,
-                    "could not determine volume size; dirty tracking not enabled"
-                );
             }
         }
 
@@ -817,6 +854,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             return Ok(Response::new(e.to_proto_result()));
         };
 
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.snapshot_name, "snapshot_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
         if let Err(e) = self
             .backend
             .prepare_snapshot(
@@ -859,6 +900,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             };
             return Ok(Response::new(e.to_proto_result()));
         };
+
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.clone_name, "clone_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
 
         if let Err(e) = self
             .backend
@@ -904,6 +949,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             return Ok(Response::new(e.to_proto_result()));
         };
 
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.snapshot_name, "snapshot_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
         if let Err(e) = self
             .backend
             .restore_snapshot(&s.volume_id, &s.attachment_handle, &req.snapshot_name)
@@ -938,6 +987,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             };
             return Ok(Response::new(e.to_proto_result()));
         };
+
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.snapshot_name, "snapshot_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
 
         if let Err(e) = self
             .backend

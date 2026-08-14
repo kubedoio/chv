@@ -45,6 +45,43 @@ async fn security_headers(req: Request, next: Next) -> impl IntoResponse {
 pub fn admin_router(bff_state: AppState, convergence_metrics: SharedConvergenceMetrics) -> Router {
     let bff_router = chv_webui_bff::bff_router(bff_state.clone());
 
+    // Legacy cookie-authenticated backup routes. Mounted on the outer
+    // router (not the BFF's /v1 surface) for the stage-1 UI, they accept
+    // the `chv_session` session cookie as a credential — so they get the
+    // same CSRF middleware the BFF surface runs: non-GET requests must
+    // carry `Content-Type: application/json`, which cross-site HTML forms
+    // cannot send (review finding: these routes previously had no CSRF
+    // protection at all).
+    let legacy_backup_routes = Router::new()
+        .route(
+            "/api/v1/backup-jobs",
+            get(chv_webui_bff::handlers::backups::list_backup_jobs_api)
+                .post(chv_webui_bff::handlers::backups::create_backup_job_api),
+        )
+        .route(
+            "/api/v1/backup-jobs/:job_id",
+            delete(chv_webui_bff::handlers::backups::delete_backup_job_api),
+        )
+        .route(
+            "/api/v1/backup-jobs/:job_id/run",
+            post(chv_webui_bff::handlers::backups::run_backup_job_api),
+        )
+        .route(
+            "/api/v1/backup-jobs/:job_id/toggle",
+            post(chv_webui_bff::handlers::backups::toggle_backup_job_api),
+        )
+        .route(
+            "/api/v1/backup-history",
+            get(chv_webui_bff::handlers::backups::list_backup_history_api),
+        )
+        .route(
+            "/api/v1/vms/:vm_id/backups",
+            get(chv_webui_bff::handlers::backups::list_vm_backups_api),
+        )
+        .layer(middleware::from_fn(
+            chv_webui_bff::csrf_middleware::csrf_protection,
+        ));
+
     let admin_routes = Router::new()
         .route("/admin/nodes", get(nodes::list_nodes))
         .route("/admin/nodes/{id}", get(nodes::get_node))
@@ -100,31 +137,7 @@ pub fn admin_router(bff_state: AppState, convergence_metrics: SharedConvergenceM
             "/api/v1/cloud-init-templates",
             get(stub::list_cloud_init_templates_stub),
         )
-        .route(
-            "/api/v1/backup-jobs",
-            get(chv_webui_bff::handlers::backups::list_backup_jobs_api)
-                .post(chv_webui_bff::handlers::backups::create_backup_job_api),
-        )
-        .route(
-            "/api/v1/backup-jobs/:job_id",
-            delete(chv_webui_bff::handlers::backups::delete_backup_job_api),
-        )
-        .route(
-            "/api/v1/backup-jobs/:job_id/run",
-            post(chv_webui_bff::handlers::backups::run_backup_job_api),
-        )
-        .route(
-            "/api/v1/backup-jobs/:job_id/toggle",
-            post(chv_webui_bff::handlers::backups::toggle_backup_job_api),
-        )
-        .route(
-            "/api/v1/backup-history",
-            get(chv_webui_bff::handlers::backups::list_backup_history_api),
-        )
-        .route(
-            "/api/v1/vms/:vm_id/backups",
-            get(chv_webui_bff::handlers::backups::list_vm_backups_api),
-        )
+        .merge(legacy_backup_routes)
         .route("/api/v1/quotas", get(stub::list_quotas_stub))
         .route("/api/v1/usage", get(stub::get_usage_stub))
         .fallback(not_found_handler)

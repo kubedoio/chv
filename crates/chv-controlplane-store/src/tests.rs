@@ -171,7 +171,7 @@ async fn test_telemetry_missing_parent_node() {
     let test_db = TestDb::new().await;
     let pool = test_db.pool.clone();
     let repo = ObservedStateRepository::new(pool.clone());
-    let vm_id = ResourceId::new("test-vm-missing-node").unwrap();
+    let vm_id = ResourceId::new("vm-missing-node").unwrap();
     let node_id = NodeId::new("non-existent-parent-node").unwrap();
 
     // Ensure VM exists (or try to create it, but wait, if VM has a node_id FK we can test that)
@@ -216,8 +216,8 @@ async fn test_telemetry_missing_attached_vm() {
     let test_db = TestDb::new().await;
     let pool = test_db.pool.clone();
     let repo = ObservedStateRepository::new(pool.clone());
-    let volume_id = ResourceId::new("test-vol-missing-vm").unwrap();
-    let vm_id = ResourceId::new("non-existent-attached-vm").unwrap();
+    let volume_id = ResourceId::new("vol-missing-vm").unwrap();
+    let vm_id = ResourceId::new("vm-not-attached").unwrap();
 
     // Ensure Volume exists
     sqlx::query("INSERT INTO volumes (volume_id, display_name, capacity_bytes) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")

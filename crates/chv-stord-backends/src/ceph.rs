@@ -1,5 +1,6 @@
 use crate::r#trait::{
     validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE,
+    MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES,
 };
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
@@ -197,6 +198,11 @@ impl StorageBackend for CephRbdBackend {
                 reason: format!("handle {} does not match volume_id {}", handle, volume_id),
             });
         }
+
+        // The handle is gone once closed: drop its dirty tracker so closed
+        // volumes cannot accumulate bitmaps. Evicted before the unmap
+        // attempt so a failed unmap cannot leak the bitmap either.
+        self.dirty_trackers.write().await.remove(handle);
 
         // Unmap the RBD device.
         let spec = self.image_spec(volume_id);
@@ -534,19 +540,43 @@ impl StorageBackend for CephRbdBackend {
         handle: &str,
         volume_size_bytes: u64,
     ) -> Result<(), ChvError> {
-        let bitmap_bytes = volume_size_bytes
-            .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
-            .div_ceil(8) as usize;
-        let tracker = DirtyTracker {
-            block_size: DIRTY_TRACKING_BLOCK_SIZE,
-            volume_size: volume_size_bytes,
-            bitmap: vec![0u8; bitmap_bytes],
-        };
-        self.dirty_trackers
-            .write()
-            .await
-            .entry(handle.to_string())
-            .or_insert(tracker);
+        if volume_size_bytes > MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES {
+            return Err(ChvError::InvalidArgument {
+                field: "volume_size_bytes".to_string(),
+                reason: format!(
+                    "volume size {} exceeds dirty-tracking maximum {} bytes",
+                    volume_size_bytes, MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES
+                ),
+            });
+        }
+        let mut map = self.dirty_trackers.write().await;
+        match map.get_mut(handle) {
+            Some(tracker) => {
+                // Re-enable heals stale bounds from out-of-band resizes:
+                // update the size and grow the bitmap in place, keeping
+                // the dirty bits.
+                tracker.volume_size = volume_size_bytes;
+                let needed_bytes = volume_size_bytes
+                    .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+                    .div_ceil(8) as usize;
+                if tracker.bitmap.len() < needed_bytes {
+                    tracker.bitmap.resize(needed_bytes, 0);
+                }
+            }
+            None => {
+                let bitmap_bytes = volume_size_bytes
+                    .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+                    .div_ceil(8) as usize;
+                map.insert(
+                    handle.to_string(),
+                    DirtyTracker {
+                        block_size: DIRTY_TRACKING_BLOCK_SIZE,
+                        volume_size: volume_size_bytes,
+                        bitmap: vec![0u8; bitmap_bytes],
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -973,5 +1003,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_rejects_oversized_volume() {
+        let backend = CephRbdBackend::new(test_config()).unwrap();
+        let res = backend
+            .enable_dirty_tracking(
+                "vol-1",
+                "rbd-rbd-vol-1",
+                MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES + 1,
+            )
+            .await;
+        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+    }
+
+    #[tokio::test]
+    async fn close_evicts_dirty_tracker() {
+        let backend = CephRbdBackend::new(test_config()).unwrap();
+        let handle = "rbd-rbd-vol-1";
+        backend
+            .enable_dirty_tracking("vol-1", handle, 8_388_608)
+            .await
+            .unwrap();
+
+        // The tracker is evicted regardless of whether `rbd unmap`
+        // succeeds (the rbd binary may not even be installed here).
+        let _ = backend.close("vol-1", handle).await;
+
+        let res = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", handle)
+            .await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
 }

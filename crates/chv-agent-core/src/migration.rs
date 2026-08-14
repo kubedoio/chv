@@ -175,9 +175,10 @@ where
 /// error.
 ///
 /// A VM left paused by a failed migration would otherwise never recover: the
-/// reconciler's `start_vm` treats `Paused` as already-running. The resume here
-/// is best-effort — a failed resume is logged (the reconciler can retry) and
-/// the caller still surfaces the original migration error.
+/// reconciler's `start_vm` treats `Paused` as already-running, so this guard
+/// is the single owner of resume-after-pause. The resume here is best-effort —
+/// a failed resume is logged and the caller still surfaces the original
+/// migration error.
 struct PausedVmGuard {
     vm_runtime: VmRuntime,
     vm_id: String,
@@ -231,7 +232,7 @@ impl PausedVmGuard {
                 vm_id = %self.vm_id,
                 operation_id = %self.operation_id,
                 error = %e,
-                "best-effort VM resume after migration failure failed; reconciler will retry"
+                "best-effort VM resume after migration failure failed; the VM may remain paused and require a manual resume"
             );
         }
     }

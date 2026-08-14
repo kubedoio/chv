@@ -43,10 +43,30 @@ impl<B: StorageBackend> MigrationReceiver<B> {
     /// Run the receiver loop: process incoming messages and write blocks.
     ///
     /// This is spawned as a task and communicates back via the `tx` channel.
+    /// However the stream ends, the receiving volume is closed exactly once:
+    /// `create_receiving_volume` acquired a backend reference (an iSCSI
+    /// session ref) that must be released to keep the backend refcount
+    /// balanced.
     pub async fn run(
         mut self,
         mut inbound: Streaming<MigrationMessage>,
         tx: mpsc::Sender<MigrationMessage>,
+    ) -> Result<(), tonic::Status> {
+        let result = self.run_inner(&mut inbound, &tx).await;
+        if let Err(e) = self.backend.close(&self.volume_id, &self.handle).await {
+            warn!(
+                volume_id = %self.volume_id,
+                error = %e,
+                "failed to release receiving volume after migration stream ended"
+            );
+        }
+        result
+    }
+
+    async fn run_inner(
+        &mut self,
+        inbound: &mut Streaming<MigrationMessage>,
+        tx: &mpsc::Sender<MigrationMessage>,
     ) -> Result<(), tonic::Status> {
         loop {
             let msg = match inbound.message().await? {
@@ -59,7 +79,7 @@ impl<B: StorageBackend> MigrationReceiver<B> {
 
             match msg.payload {
                 Some(migration_message::Payload::Chunk(chunk)) => {
-                    self.handle_chunk(&chunk, &tx).await?;
+                    self.handle_chunk(&chunk, tx).await?;
                 }
                 Some(migration_message::Payload::RoundStart(ref rs)) => {
                     debug!(

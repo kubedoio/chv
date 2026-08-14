@@ -1439,6 +1439,18 @@ persistent_data_present() {
     if [ -d "${CHV_DATA_DIR}/agent/vms" ] && [ -n "$(ls -A "${CHV_DATA_DIR}/agent/vms" 2>/dev/null)" ]; then
         return 0
     fi
+    # Real volume files live in stord's localdisk runtime dir
+    # (runtime_dir = "${CHV_DATA_DIR}/storage/localdisk" in the generated
+    # stord config), not under agent/.
+    if [ -d "${CHV_DATA_DIR}/storage/localdisk" ] && [ -n "$(ls -A "${CHV_DATA_DIR}/storage/localdisk" 2>/dev/null)" ]; then
+        return 0
+    fi
+    # User-imported images share the images dir with the base image the
+    # script manages itself (BASE_IMAGE_PATH); any other file there is
+    # persistent data a plain re-run must not destroy.
+    if [ -d "${CHV_DATA_DIR}/images" ] && [ -n "$(find "${CHV_DATA_DIR}/images" -mindepth 1 -maxdepth 1 ! -name "ubuntu-noble-${CHV_ARCH}.img" ! -name "ubuntu-noble-${CHV_ARCH}.img.tmp" -print -quit 2>/dev/null)" ]; then
+        return 0
+    fi
     if [ -f "${CHV_DB_PATH}" ]; then
         return 0
     fi
@@ -1452,7 +1464,7 @@ clean_previous_install() {
     if [ "$INSTALL_CHV_WIPE" = "1" ]; then
         info "INSTALL_CHV_WIPE=1: persistent VM and control-plane database state will be wiped."
     elif persistent_data_present; then
-        fatal "Persistent CHV data exists (${CHV_DATA_DIR}/agent/vms, ${CHV_DATA_DIR}/agent/*.img, or ${CHV_DB_PATH}).
+        fatal "Persistent CHV data exists (${CHV_DATA_DIR}/agent/vms, ${CHV_DATA_DIR}/agent/*.img, ${CHV_DATA_DIR}/storage/localdisk, ${CHV_DATA_DIR}/images, or ${CHV_DB_PATH}).
 Refusing to overwrite it on a re-run. To destroy existing VMs and the control-plane
 database, rerun with INSTALL_CHV_WIPE=1 (or --wipe/--fresh)."
     fi
