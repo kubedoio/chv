@@ -175,32 +175,6 @@ export interface APIErrorEnvelope {
   };
 }
 
-export interface VMMetrics {
-  cpu: {
-    usage_percent: number;
-    vcpus: number;
-  };
-  memory: {
-    total_mb: number;
-    used_mb: number;
-    free_mb: number;
-    usage_percent: number;
-  };
-  disk: {
-    read_bytes: number;
-    write_bytes: number;
-    read_ops: number;
-    write_ops: number;
-  };
-  network: {
-    rx_bytes: number;
-    tx_bytes: number;
-    rx_packets: number;
-    tx_packets: number;
-  };
-  uptime: string;
-}
-
 // Node types
 export interface Node {
   id: string;
@@ -223,17 +197,6 @@ export interface NodeWithResources extends Node {
     storage_pools: number;
     networks: number;
   };
-}
-
-export interface HealthAlert {
-  id?: string;
-  node_id: string;
-  node_name: string;
-  type: string;
-  severity: 'info' | 'warning' | 'critical';
-  message: string;
-  timestamp: string;
-  dismissed?: boolean;
 }
 
 export interface CreateNodeInput {

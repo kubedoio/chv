@@ -130,11 +130,6 @@ impl LinkMonitor {
             .map(|iface| self.check_link(iface))
             .collect()
     }
-
-    /// Get the current flap count for an interface without re-reading state.
-    pub fn flap_count(&self, iface: &str) -> u64 {
-        self.state.get(iface).map(|s| s.flap_count).unwrap_or(0)
-    }
 }
 
 impl Default for LinkMonitor {
