@@ -57,10 +57,9 @@ use chv_controlplane_store::{
     TopologyUpdateInput, VersionCreateInput, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureDriftReportId, ArchitectureId, ArchitecturePlanId,
-    ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId, DriftStatus, Finding,
-    FleetCheckStatus, InventorySnapshotId, PlanChange, PlanMode, PlanStatus, RunStatus, Severity,
-    ValidationStatus,
+    ArchitectureDriftReportId, ArchitectureId, ArchitecturePlanId, ArchitectureStatus,
+    ArchitectureTopology, ArchitectureVersionId, DriftStatus, Finding, FleetCheckStatus,
+    InventorySnapshotId, PlanChange, PlanMode, PlanStatus, RunStatus, Severity, ValidationStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

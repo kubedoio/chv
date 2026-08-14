@@ -23,8 +23,8 @@ use chv_controlplane_types::architecture::{
 };
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
-    create_architecture, destroy_plan_architecture, discard_plan_architecture,
-    plan_architecture, CreateArchitectureRequest, DiscardPlanRequest, PlanArchitectureRequest,
+    create_architecture, destroy_plan_architecture, discard_plan_architecture, plan_architecture,
+    CreateArchitectureRequest, DiscardPlanRequest, PlanArchitectureRequest,
 };
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};

@@ -153,11 +153,7 @@ pub fn shipper_from_destination(
         }
 
         return Ok(Box::new(S3Shipper::new(
-            bucket,
-            region,
-            endpoint,
-            access_key,
-            secret_key,
+            bucket, region, endpoint, access_key, secret_key,
         )?));
     }
 

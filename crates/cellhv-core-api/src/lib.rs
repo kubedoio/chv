@@ -433,7 +433,8 @@ pub enum BindError {
 
 #[derive(Clone, Copy)]
 pub(crate) enum ExistingSocketPolicy {
-    #[allow(dead_code)] // refuse semantics exercised only by #[cfg(test)] callers after start_router removal
+    #[allow(dead_code)]
+    // refuse semantics exercised only by #[cfg(test)] callers after start_router removal
     Refuse,
     RecoverStale,
 }

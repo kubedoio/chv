@@ -70,8 +70,12 @@ pub struct AuthorityHandle {
 impl AuthorityHandle {
     pub async fn submit(&self, submission: SubmitMutation) -> Result<AcceptedOperation> {
         let (reply, receive) = oneshot::channel();
-        Self::send(&self.sender, Request::Submit(Box::new(submission), reply), receive)
-            .await
+        Self::send(
+            &self.sender,
+            Request::Submit(Box::new(submission), reply),
+            receive,
+        )
+        .await
     }
 
     pub async fn operation(&self, id: OperationId) -> Result<OperationJournalEntry> {
@@ -96,8 +100,12 @@ impl AuthorityHandle {
 
     pub async fn events_after(&self, sequence: u64, limit: u32) -> Result<Vec<OperationEvent>> {
         let (reply, receive) = oneshot::channel();
-        Self::send(&self.sender, Request::EventsAfter(sequence, limit, reply), receive)
-            .await
+        Self::send(
+            &self.sender,
+            Request::EventsAfter(sequence, limit, reply),
+            receive,
+        )
+        .await
     }
 
     pub async fn persist_observed_vm_state(
