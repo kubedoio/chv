@@ -19,14 +19,12 @@ use chv_controlplane_store::{
     TopologyRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureId, ArchitecturePlan, ArchitecturePlanId, ArchitectureVersionId, PlanAction,
-    PlanMode, PlanStatus,
+    ArchitectureId, ArchitecturePlanId, ArchitectureVersionId, PlanAction, PlanMode, PlanStatus,
 };
 use chv_webui_bff::auth::{BearerToken, Claims};
 use chv_webui_bff::handlers::architectures::{
     create_architecture, destroy_plan_architecture, discard_plan_architecture,
-    ensure_plan_not_expired, plan_architecture, CreateArchitectureRequest, DiscardPlanRequest,
-    PlanArchitectureRequest,
+    plan_architecture, CreateArchitectureRequest, DiscardPlanRequest, PlanArchitectureRequest,
 };
 use chv_webui_bff::mutations::MutationService;
 use chv_webui_bff::{AppState, BffError};
@@ -431,51 +429,6 @@ async fn plan_viewer_returns_403() {
     .await
     .expect_err("viewer must be forbidden");
     assert_eq!(err_status(&err), 403);
-}
-
-// ---------------------------------------------------------------------------
-// helper: ensure_plan_not_expired
-// ---------------------------------------------------------------------------
-
-fn fixture_plan(created_at: chrono::DateTime<Utc>, ttl: Duration) -> ArchitecturePlan {
-    ArchitecturePlan {
-        id: ArchitecturePlanId::new("plan-fixture-1").unwrap(),
-        architecture_id: ArchitectureId::new("arch-fixture-1").unwrap(),
-        architecture_version_id: ArchitectureVersionId::new("ver-fixture-1").unwrap(),
-        inventory_snapshot_id: None,
-        mode: PlanMode::Apply,
-        status: PlanStatus::ReadyToApply,
-        plan_json: None,
-        summary_json: None,
-        created_by: None,
-        created_at,
-        expires_at: created_at + ttl,
-        confirmed_at: None,
-        confirmed_by: None,
-        discarded_at: None,
-        discarded_by: None,
-    }
-}
-
-#[test]
-fn ensure_plan_not_expired_helper() {
-    let start = t0();
-    let plan = fixture_plan(start, Duration::minutes(15));
-
-    // Before expiry — Ok.
-    let early = ManualClock::new(start + Duration::minutes(10));
-    ensure_plan_not_expired(&plan, &early).expect("plan still valid 10min in");
-
-    // After expiry — PlanExpired.
-    let late = ManualClock::new(start + Duration::minutes(16));
-    let err = ensure_plan_not_expired(&plan, &late)
-        .expect_err("plan must be reported expired 1min past TTL");
-    match err {
-        BffError::PlanExpired { plan_id, .. } => {
-            assert_eq!(plan_id, "plan-fixture-1");
-        }
-        other => panic!("expected PlanExpired, got {other:?}"),
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -506,7 +506,7 @@ fn check_dhcp_ranges(model: &CHVArchitecture, out: &mut Vec<Finding>) {
                         blocking: true,
                         suggestion: Some(format!("place start and end inside {c}")),
                     });
-                } else if !ip_le(s, e) {
+                } else if s > e {
                     out.push(Finding {
                         severity: Severity::Error,
                         code: Cow::Borrowed(DHCP_RANGE_INVALID),
@@ -541,16 +541,8 @@ fn check_dhcp_ranges(model: &CHVArchitecture, out: &mut Vec<Finding>) {
     }
 }
 
-fn ip_le(a: IpAddr, b: IpAddr) -> bool {
-    match (a, b) {
-        (IpAddr::V4(a), IpAddr::V4(b)) => a.octets() <= b.octets(),
-        (IpAddr::V6(a), IpAddr::V6(b)) => a.octets() <= b.octets(),
-        _ => false, // mismatched families — caller should treat as invalid
-    }
-}
-
 fn ip_in_range(ip: IpAddr, start: IpAddr, end: IpAddr) -> bool {
-    ip_le(start, ip) && ip_le(ip, end)
+    start <= ip && ip <= end
 }
 
 // ---------------------------------------------------------------------------
@@ -1270,16 +1262,6 @@ instances:
         assert_eq!(warns.len(), 1);
         assert_eq!(warns[0].severity, Severity::Warning);
         assert!(!warns[0].blocking);
-    }
-
-    #[test]
-    fn ip_le_handles_v4_and_mismatched_families() {
-        let v4a: IpAddr = "10.0.0.1".parse().unwrap();
-        let v4b: IpAddr = "10.0.0.2".parse().unwrap();
-        assert!(ip_le(v4a, v4b));
-        assert!(!ip_le(v4b, v4a));
-        let v6: IpAddr = "::1".parse().unwrap();
-        assert!(!ip_le(v4a, v6), "mismatched families return false");
     }
 
     #[test]

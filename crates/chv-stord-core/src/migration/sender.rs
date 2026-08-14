@@ -829,39 +829,6 @@ mod tests {
             Ok(())
         }
 
-        async fn enable_dirty_tracking(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-            _block_size: u64,
-        ) -> Result<(), ChvError> {
-            Ok(())
-        }
-
-        async fn get_dirty_bitmap(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-        ) -> Result<Vec<u8>, ChvError> {
-            Ok(vec![])
-        }
-
-        async fn clear_dirty_bitmap(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-        ) -> Result<(), ChvError> {
-            Ok(())
-        }
-
-        async fn disable_dirty_tracking(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-        ) -> Result<(), ChvError> {
-            Ok(())
-        }
-
         async fn read_block(
             &self,
             _volume_id: &str,
@@ -893,10 +860,6 @@ mod tests {
             _format: &str,
         ) -> Result<VolumeExport, ChvError> {
             unimplemented!("not needed for sender tests")
-        }
-
-        async fn delete_volume(&self, _volume_id: &str) -> Result<(), ChvError> {
-            Ok(())
         }
     }
 

@@ -174,11 +174,6 @@ impl LinuxExecutor {
         }
     }
 
-    pub fn with_vtep_ip(mut self, vtep_ip: String) -> Self {
-        self.vtep_ip = Some(vtep_ip);
-        self
-    }
-
     async fn run_ip(args: &[&str]) -> Result<(), ChvError> {
         let out = Command::new("ip")
             .args(args)

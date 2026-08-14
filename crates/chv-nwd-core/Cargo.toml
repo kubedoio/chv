@@ -5,10 +5,6 @@ license = "Apache-2.0"
 edition = "2021"
 publish = false
 
-[features]
-default = []
-ebpf = ["libbpf-rs"]
-
 [dependencies]
 chv-common = { path = "../chv-common" }
 chv-errors = { path = "../chv-errors" }
@@ -18,17 +14,14 @@ metrics = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
-prost = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
-rusqlite = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libbpf-rs = { version = "0.26", optional = true }
 libc = "0.2"
 
 [dev-dependencies]

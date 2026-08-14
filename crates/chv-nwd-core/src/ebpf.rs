@@ -7,10 +7,7 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
 // BPF map pinned-file operations (Linux only)
@@ -80,78 +77,9 @@ fn bpf_map_update(pin_path: &str, key: &[u8], value: &[u8]) -> Result<(), ChvErr
     Ok(())
 }
 
-/// Lookup a BPF map element via the pinned map file and bpf() syscall.
-///
-/// Opens the pinned map at `pin_path`, then calls BPF_MAP_LOOKUP_ELEM.
-/// Returns the value bytes of `value_size` length.
-#[cfg(target_os = "linux")]
-fn bpf_map_lookup(pin_path: &str, key: &[u8], value_size: usize) -> Result<Vec<u8>, ChvError> {
-    use std::os::unix::io::AsRawFd;
-
-    const BPF_MAP_LOOKUP_ELEM: u32 = 1;
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(pin_path)
-        .map_err(|e| ChvError::Io {
-            path: pin_path.to_string(),
-            source: e,
-        })?;
-
-    let fd = file.as_raw_fd();
-
-    let mut value_buf = vec![0u8; value_size];
-
-    #[repr(C)]
-    struct BpfMapLookupAttr {
-        map_fd: u32,
-        _pad0: u32,
-        key: u64,
-        value_or_next_key: u64,
-        flags: u64,
-    }
-
-    let attr = BpfMapLookupAttr {
-        map_fd: fd as u32,
-        _pad0: 0,
-        key: key.as_ptr() as u64,
-        value_or_next_key: value_buf.as_mut_ptr() as u64,
-        flags: 0,
-    };
-
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_bpf,
-            BPF_MAP_LOOKUP_ELEM as libc::c_long,
-            &attr as *const BpfMapLookupAttr as *const libc::c_void,
-            std::mem::size_of::<BpfMapLookupAttr>() as libc::c_long,
-        )
-    };
-
-    if ret < 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(ChvError::Internal {
-            reason: format!("bpf(BPF_MAP_LOOKUP_ELEM) on {} failed: {}", pin_path, err),
-        });
-    }
-
-    Ok(value_buf)
-}
-
 /// Stub for non-Linux platforms — always returns an error.
 #[cfg(not(target_os = "linux"))]
 fn bpf_map_update(pin_path: &str, _key: &[u8], _value: &[u8]) -> Result<(), ChvError> {
-    Err(ChvError::Internal {
-        reason: format!(
-            "BPF map operations are only supported on Linux (attempted: {})",
-            pin_path
-        ),
-    })
-}
-
-/// Stub for non-Linux platforms — always returns an error.
-#[cfg(not(target_os = "linux"))]
-fn bpf_map_lookup(pin_path: &str, _key: &[u8], _value_size: usize) -> Result<Vec<u8>, ChvError> {
     Err(ChvError::Internal {
         reason: format!(
             "BPF map operations are only supported on Linux (attempted: {})",
@@ -222,23 +150,6 @@ fn serialize_rate_limit_value(rate_limit: &EbpfRateLimit) -> [u8; 32] {
     buf
 }
 
-/// Size of the stats_map value: packets_allowed(8) + packets_denied(8) +
-/// bytes_allowed(8) + bytes_denied(8) = 32 bytes
-const BPF_STATS_VALUE_SIZE: usize = 32;
-
-/// Deserialize stats from the BPF stats_map value.
-fn deserialize_stats(buf: &[u8]) -> EbpfStats {
-    if buf.len() < BPF_STATS_VALUE_SIZE {
-        return EbpfStats::default();
-    }
-    EbpfStats {
-        packets_allowed: u64::from_ne_bytes(buf[0..8].try_into().unwrap_or([0; 8])),
-        packets_denied: u64::from_ne_bytes(buf[8..16].try_into().unwrap_or([0; 8])),
-        bytes_allowed: u64::from_ne_bytes(buf[16..24].try_into().unwrap_or([0; 8])),
-        bytes_denied: u64::from_ne_bytes(buf[24..32].try_into().unwrap_or([0; 8])),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Data structures for eBPF map entries
 // ---------------------------------------------------------------------------
@@ -272,15 +183,6 @@ pub struct EbpfRateLimit {
     pub burst_bytes: u64,
 }
 
-/// Per-VM traffic stats from eBPF stats_map.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EbpfStats {
-    pub packets_allowed: u64,
-    pub packets_denied: u64,
-    pub bytes_allowed: u64,
-    pub bytes_denied: u64,
-}
-
 // ---------------------------------------------------------------------------
 // EbpfManager trait
 // ---------------------------------------------------------------------------
@@ -307,20 +209,11 @@ pub trait EbpfManager: Send + Sync + 'static {
         rate_limit: &EbpfRateLimit,
     ) -> Result<(), ChvError>;
 
-    /// Read traffic stats for a VM from stats_map.
-    async fn read_stats(&self, vm_id: &str) -> Result<EbpfStats, ChvError>;
-
-    /// Detach TC program from an interface.
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError>;
-
     /// Check if eBPF programs are available (compiled .o files exist).
     fn is_available(&self) -> bool;
 
     /// Return the number of interfaces with loaded eBPF programs.
     fn loaded_program_count(&self) -> u32;
-
-    /// Return the total number of denied packets observed across all VMs.
-    fn denied_packets_total(&self) -> u64;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,8 +375,6 @@ pub struct LinuxEbpfManager {
     bpf_pin_base: String,
     /// Interfaces with successfully loaded eBPF programs.
     loaded_interfaces: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// Counter tracking total denied packets observed from stats reads.
-    denied_packets: Arc<AtomicU64>,
 }
 
 impl LinuxEbpfManager {
@@ -492,17 +383,6 @@ impl LinuxEbpfManager {
             program_path,
             bpf_pin_base: DEFAULT_BPF_PIN_PATH.to_string(),
             loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
-            denied_packets: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    /// Create a manager with a custom BPF pin base path.
-    pub fn with_pin_path(program_path: String, bpf_pin_base: String) -> Self {
-        Self {
-            program_path,
-            bpf_pin_base,
-            loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
-            denied_packets: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -645,37 +525,6 @@ impl EbpfManager for LinuxEbpfManager {
         Ok(())
     }
 
-    async fn read_stats(&self, vm_id: &str) -> Result<EbpfStats, ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
-        let pin_path = self.map_path("stats_map");
-
-        let value = bpf_map_lookup(&pin_path, &key, BPF_STATS_VALUE_SIZE)?;
-        let stats = deserialize_stats(&value);
-
-        // Track denied packets
-        if stats.packets_denied > 0 {
-            self.denied_packets
-                .fetch_add(stats.packets_denied, Ordering::Relaxed);
-        }
-
-        debug!(
-            vm_id = %vm_id,
-            vm_id_hash = vm_hash,
-            packets_allowed = stats.packets_allowed,
-            packets_denied = stats.packets_denied,
-            "eBPF stats_map read"
-        );
-        Ok(stats)
-    }
-
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError> {
-        // Remove clsact qdisc (removes all attached TC eBPF programs)
-        Self::run_tc(&["qdisc", "del", "dev", interface, "clsact"]).await?;
-        info!(interface = %interface, "detached eBPF TC programs");
-        Ok(())
-    }
-
     fn is_available(&self) -> bool {
         let obj_path = format!("{}/policy_tc.o", self.program_path);
         std::path::Path::new(&obj_path).exists()
@@ -686,10 +535,6 @@ impl EbpfManager for LinuxEbpfManager {
             .lock()
             .map(|s| s.len() as u32)
             .unwrap_or(0)
-    }
-
-    fn denied_packets_total(&self) -> u64 {
-        self.denied_packets.load(Ordering::Relaxed)
     }
 }
 
@@ -732,24 +577,11 @@ impl EbpfManager for NoopEbpfManager {
         Ok(())
     }
 
-    async fn read_stats(&self, _vm_id: &str) -> Result<EbpfStats, ChvError> {
-        Ok(EbpfStats::default())
-    }
-
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError> {
-        debug!(interface = %interface, "noop: eBPF detach skipped");
-        Ok(())
-    }
-
     fn is_available(&self) -> bool {
         false
     }
 
     fn loaded_program_count(&self) -> u32 {
-        0
-    }
-
-    fn denied_packets_total(&self) -> u64 {
         0
     }
 }
@@ -765,8 +597,6 @@ pub struct MockEbpfManager {
     pub updated_rules: std::sync::Mutex<Vec<(String, Vec<EbpfRule>)>>,
     pub default_actions: std::sync::Mutex<Vec<(String, u8)>>,
     pub updated_rate_limits: std::sync::Mutex<Vec<(String, EbpfRateLimit)>>,
-    pub detached: std::sync::Mutex<Vec<String>>,
-    pub stats_reads: std::sync::Mutex<Vec<String>>,
     pub available: bool,
 }
 
@@ -778,8 +608,6 @@ impl MockEbpfManager {
             updated_rules: std::sync::Mutex::new(Vec::new()),
             default_actions: std::sync::Mutex::new(Vec::new()),
             updated_rate_limits: std::sync::Mutex::new(Vec::new()),
-            detached: std::sync::Mutex::new(Vec::new()),
-            stats_reads: std::sync::Mutex::new(Vec::new()),
             available,
         }
     }
@@ -831,75 +659,12 @@ impl EbpfManager for MockEbpfManager {
         Ok(())
     }
 
-    async fn read_stats(&self, vm_id: &str) -> Result<EbpfStats, ChvError> {
-        self.stats_reads.lock().unwrap().push(vm_id.to_string());
-        Ok(EbpfStats {
-            packets_allowed: 100,
-            packets_denied: 5,
-            bytes_allowed: 50000,
-            bytes_denied: 1000,
-        })
-    }
-
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError> {
-        self.detached.lock().unwrap().push(interface.to_string());
-        Ok(())
-    }
-
     fn is_available(&self) -> bool {
         self.available
     }
 
     fn loaded_program_count(&self) -> u32 {
         0
-    }
-
-    fn denied_packets_total(&self) -> u64 {
-        0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stats collection background task
-// ---------------------------------------------------------------------------
-
-/// Background task that periodically reads eBPF stats for known VMs and emits metrics.
-pub async fn stats_collection_loop(
-    ebpf: Arc<dyn EbpfManager>,
-    vm_ids: Arc<DashMap<String, ()>>,
-    interval_secs: u64,
-    mut shutdown: tokio::sync::watch::Receiver<()>,
-) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                for entry in vm_ids.iter() {
-                    let vm_id = entry.key();
-                    match ebpf.read_stats(vm_id).await {
-                        Ok(stats) => {
-                            debug!(
-                                vm_id = %vm_id,
-                                packets_allowed = stats.packets_allowed,
-                                packets_denied = stats.packets_denied,
-                                bytes_allowed = stats.bytes_allowed,
-                                bytes_denied = stats.bytes_denied,
-                                "eBPF stats"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(vm_id = %vm_id, error = %e, "failed to read eBPF stats");
-                        }
-                    }
-                }
-            }
-            _ = shutdown.changed() => {
-                info!("eBPF stats collection loop shutting down");
-                break;
-            }
-        }
     }
 }
 
@@ -1077,11 +842,6 @@ mod tests {
         };
         mock.update_rate_limit("vm-1", &rl).await.unwrap();
 
-        let stats = mock.read_stats("vm-1").await.unwrap();
-        assert_eq!(stats.packets_allowed, 100);
-
-        mock.detach_program("tap-001").await.unwrap();
-
         // Verify tracked calls
         assert_eq!(
             mock.loaded_programs.lock().unwrap().as_slice(),
@@ -1094,14 +854,6 @@ mod tests {
             &[("vm-1".to_string(), 0)]
         );
         assert_eq!(mock.updated_rate_limits.lock().unwrap().len(), 1);
-        assert_eq!(
-            mock.stats_reads.lock().unwrap().as_slice(),
-            &["vm-1".to_string()]
-        );
-        assert_eq!(
-            mock.detached.lock().unwrap().as_slice(),
-            &["tap-001".to_string()]
-        );
     }
 
     #[tokio::test]
@@ -1119,9 +871,6 @@ mod tests {
             burst_bytes: 0,
         };
         assert!(noop.update_rate_limit("vm-x", &rl).await.is_ok());
-        let stats = noop.read_stats("vm-x").await.unwrap();
-        assert_eq!(stats, EbpfStats::default());
-        assert!(noop.detach_program("tap-x").await.is_ok());
     }
 
     #[test]
@@ -1181,38 +930,6 @@ mod tests {
             mgr.loaded_program_count(),
             1,
             "duplicate insert should not increase count"
-        );
-    }
-
-    #[tokio::test]
-    async fn stats_collection_loop_reads_and_shuts_down() {
-        let mock = Arc::new(MockEbpfManager::new(true));
-        let vm_ids: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
-        vm_ids.insert("vm-loop-1".to_string(), ());
-        vm_ids.insert("vm-loop-2".to_string(), ());
-
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-
-        let ebpf: Arc<dyn EbpfManager> = mock.clone();
-        let vm_ids_clone = vm_ids.clone();
-
-        let handle = tokio::spawn(async move {
-            stats_collection_loop(ebpf, vm_ids_clone, 1, shutdown_rx).await;
-        });
-
-        // Let it tick once
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-
-        // Signal shutdown
-        drop(shutdown_tx);
-        handle.await.unwrap();
-
-        // Verify stats were read for both VMs
-        let reads = mock.stats_reads.lock().unwrap();
-        assert!(
-            reads.len() >= 2,
-            "expected at least 2 stats reads, got {}",
-            reads.len()
         );
     }
 }

@@ -430,14 +430,10 @@ pub enum BindError {
     #[error("Core API socket operation failed: {0}")]
     Io(#[from] std::io::Error),
 }
-pub async fn bind_private(socket: &FsPath) -> Result<tokio::net::UnixListener, BindError> {
-    bind_private_owned(socket, ExistingSocketPolicy::Refuse)
-        .await
-        .map(|(listener, _)| listener)
-}
 
 #[derive(Clone, Copy)]
 pub(crate) enum ExistingSocketPolicy {
+    #[allow(dead_code)] // refuse semantics exercised only by #[cfg(test)] callers after start_router removal
     Refuse,
     RecoverStale,
 }

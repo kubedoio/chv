@@ -91,19 +91,6 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     // --- Phase 2.1-2.2: Migration methods ---
 
-    async fn enable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-        block_size: u64,
-    ) -> Result<(), ChvError>;
-
-    async fn get_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError>;
-
-    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError>;
-
-    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError>;
-
     async fn read_block(
         &self,
         volume_id: &str,
@@ -129,37 +116,23 @@ pub trait StorageBackend: Send + Sync + 'static {
         format: &str,
     ) -> Result<VolumeExport, ChvError>;
 
-    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError>;
-
     /// Atomically snapshot the dirty bitmap and clear it.
     ///
     /// Acquires a write lock, clones the bitmap, resets it to zeros, and returns
     /// the snapshot. This prevents any window where dirty writes could be lost
     /// between a separate get + clear sequence.
     ///
-    /// Default implementation calls get_dirty_bitmap + clear_dirty_bitmap sequentially
-    /// (not truly atomic, but backward-compatible for backends that haven't overridden).
+    /// The default implementation returns `NotFound`: backends that support
+    /// dirty tracking must override it.
     async fn snapshot_and_clear_dirty_bitmap(
         &self,
-        volume_id: &str,
+        _volume_id: &str,
         handle: &str,
     ) -> Result<Vec<u8>, ChvError> {
-        let bitmap = self.get_dirty_bitmap(volume_id, handle).await?;
-        self.clear_dirty_bitmap(volume_id, handle).await?;
-        Ok(bitmap)
-    }
-
-    /// Configure I/O rate limits for a volume.
-    ///
-    /// Backends that support IOPS/bandwidth enforcement (e.g., via cgroup v2)
-    /// should override this method. The default is a no-op.
-    async fn set_io_limits(
-        &self,
-        _volume_id: &str,
-        _iops: Option<u64>,
-        _bandwidth_mbps: Option<u64>,
-    ) -> Result<(), ChvError> {
-        Ok(())
+        Err(ChvError::NotFound {
+            resource: "dirty_tracker".to_string(),
+            id: handle.to_string(),
+        })
     }
 }
 
@@ -267,29 +240,6 @@ impl StorageBackend for Box<dyn StorageBackend> {
         (**self).set_device_policy(volume_id, handle, policy).await
     }
 
-    async fn enable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-        block_size: u64,
-    ) -> Result<(), ChvError> {
-        (**self)
-            .enable_dirty_tracking(volume_id, handle, block_size)
-            .await
-    }
-
-    async fn get_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError> {
-        (**self).get_dirty_bitmap(volume_id, handle).await
-    }
-
-    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        (**self).clear_dirty_bitmap(volume_id, handle).await
-    }
-
-    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        (**self).disable_dirty_tracking(volume_id, handle).await
-    }
-
     async fn read_block(
         &self,
         volume_id: &str,
@@ -325,10 +275,6 @@ impl StorageBackend for Box<dyn StorageBackend> {
             .await
     }
 
-    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
-        (**self).delete_volume(volume_id).await
-    }
-
     async fn snapshot_and_clear_dirty_bitmap(
         &self,
         volume_id: &str,
@@ -336,17 +282,6 @@ impl StorageBackend for Box<dyn StorageBackend> {
     ) -> Result<Vec<u8>, ChvError> {
         (**self)
             .snapshot_and_clear_dirty_bitmap(volume_id, handle)
-            .await
-    }
-
-    async fn set_io_limits(
-        &self,
-        volume_id: &str,
-        iops: Option<u64>,
-        bandwidth_mbps: Option<u64>,
-    ) -> Result<(), ChvError> {
-        (**self)
-            .set_io_limits(volume_id, iops, bandwidth_mbps)
             .await
     }
 }

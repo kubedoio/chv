@@ -51,14 +51,13 @@ use chv_architecture_validate::{
     fleet::check_fleet, parse_yaml as parse_arch_yaml, validate as validate_yaml_str,
     ValidationResult,
 };
-use chv_common::Clock;
 use chv_controlplane_store::{
     DriftReportCreateInput, InventorySnapshotCreateInput, PlanCreateInput, PlanRepository,
     PlanStatusUpdateInput, StoreError, TopologyCreateInput, TopologyListFilter,
     TopologyUpdateInput, VersionCreateInput, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureDriftReportId, ArchitectureId, ArchitecturePlan, ArchitecturePlanId,
+    ArchitectureDriftReportId, ArchitectureId, ArchitecturePlanId,
     ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId, DriftStatus, Finding,
     FleetCheckStatus, InventorySnapshotId, PlanChange, PlanMode, PlanStatus, RunStatus, Severity,
     ValidationStatus,
@@ -733,7 +732,7 @@ pub struct DiscardPlanResponse {
 /// returns the plan body.
 ///
 /// Operator+ only. The 15-minute TTL is computed against the injected
-/// [`Clock`] so tests can drive expiry deterministically.
+/// clock so tests can drive expiry deterministically.
 pub async fn plan_architecture(
     BearerToken(claims): BearerToken,
     State(state): State<AppState>,
@@ -1102,27 +1101,6 @@ async fn generate_plan_inner(
         expires_at: persisted.expires_at,
         created_at: persisted.created_at,
     })
-}
-
-/// Returns `Err(BffError::PlanExpired)` when `clock.now() > plan.expires_at`.
-///
-/// Phase 5's apply/confirm handlers will gate on this; centralizing the
-/// check here keeps the wording and the `code: "PLAN_EXPIRED"` body shape
-/// consistent across all callers. The expiry comparison itself is delegated
-/// to [`chv_architecture_reconcile::is_expired`] so the periodic sweeper
-/// (Phase 5) and the per-call gate share one definition of "expired".
-#[allow(dead_code)] // Phase 5 wires the apply/confirm callers.
-pub fn ensure_plan_not_expired(plan: &ArchitecturePlan, clock: &dyn Clock) -> Result<(), BffError> {
-    if chv_architecture_reconcile::is_expired(plan, clock) {
-        return Err(BffError::PlanExpired {
-            plan_id: plan.id.to_string(),
-            message: format!(
-                "plan {} has expired (created {}, expires {})",
-                plan.id, plan.created_at, plan.expires_at
-            ),
-        });
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

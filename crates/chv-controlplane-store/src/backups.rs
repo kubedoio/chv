@@ -287,17 +287,6 @@ VALUES (
 )
 "#;
 
-const UPDATE_RESTORE_STATUS_SQL: &str = r#"
-UPDATE backup_restores SET
-    status = ?,
-    started_at = ?,
-    completed_at = ?,
-    error_message = ?,
-    source_path = ?,
-    storage_backend = ?
-WHERE restore_id = ?
-"#;
-
 // ── Repository ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -634,26 +623,6 @@ impl BackupRepository {
         Ok(rows)
     }
 
-    pub async fn update_schedule_last_run(
-        &self,
-        schedule_id: &str,
-        last_run_at: &str,
-    ) -> Result<(), StoreError> {
-        let result =
-            sqlx::query("UPDATE backup_schedules SET last_run_at = ? WHERE schedule_id = ?")
-                .bind(last_run_at)
-                .bind(schedule_id)
-                .execute(&self.pool)
-                .await?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::NotFound {
-                entity: "backup_schedule",
-                id: schedule_id.to_string(),
-            });
-        }
-        Ok(())
-    }
-
     /// Atomically claim a schedule run using optimistic locking on `last_run_at`.
     /// Returns `true` if the row was updated (we won the race), `false` if another
     /// worker already processed this schedule slot.
@@ -685,39 +654,6 @@ impl BackupRepository {
             }
         };
         Ok(result.rows_affected() > 0)
-    }
-
-    pub async fn list_pending_jobs(&self) -> Result<Vec<BackupJobRow>, StoreError> {
-        sqlx::query_as::<_, BackupJobRow>(
-            "SELECT * FROM backup_jobs WHERE status = 'Pending' ORDER BY created_at ASC LIMIT 50",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(StoreError::from)
-    }
-
-    /// Prune completed backup jobs for a specific schedule, keeping only the most
-    /// recent `retention_count` successes/failures.  Scoping by `schedule_id`
-    /// prevents jobs from one schedule from consuming another schedule's retention
-    /// budget for the same VM.
-    pub async fn prune_old_jobs_for_schedule(
-        &self,
-        schedule_id: &str,
-        retention_count: i64,
-    ) -> Result<u64, StoreError> {
-        let result = sqlx::query(
-            "DELETE FROM backup_jobs WHERE job_id IN (\
-                SELECT job_id FROM backup_jobs \
-                WHERE schedule_id = ? AND status IN ('Succeeded', 'Failed') \
-                ORDER BY created_at DESC \
-                LIMIT -1 OFFSET ?\
-            )",
-        )
-        .bind(schedule_id)
-        .bind(retention_count)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
     }
 
     /// List completed backup jobs for a specific schedule that exceed the
@@ -757,18 +693,6 @@ impl BackupRepository {
         }
         let result = query.execute(&self.pool).await?;
         Ok(result.rows_affected())
-    }
-
-    pub async fn list_retryable_jobs(&self, now: &str) -> Result<Vec<BackupJobRow>, StoreError> {
-        sqlx::query_as::<_, BackupJobRow>(
-            "SELECT * FROM backup_jobs \
-             WHERE status = 'RetryPending' AND next_retry_at <= ? \
-             ORDER BY next_retry_at ASC LIMIT 20",
-        )
-        .bind(now)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(StoreError::from)
     }
 
     pub async fn mark_for_retry(
@@ -851,40 +775,6 @@ impl BackupRepository {
             .execute(&self.pool)
             .await?;
         Ok(restore_id)
-    }
-
-    pub async fn update_restore_status(
-        &self,
-        input: &BackupRestoreStatusUpdateInput,
-    ) -> Result<(), StoreError> {
-        let result = sqlx::query(UPDATE_RESTORE_STATUS_SQL)
-            .bind(&input.status)
-            .bind(&input.started_at)
-            .bind(&input.completed_at)
-            .bind(&input.error_message)
-            .bind(&input.source_path)
-            .bind(&input.storage_backend)
-            .bind(&input.restore_id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::NotFound {
-                entity: "backup_restore",
-                id: input.restore_id.clone(),
-            });
-        }
-        Ok(())
-    }
-
-    pub async fn list_pending_restores(&self) -> Result<Vec<BackupRestoreRow>, StoreError> {
-        sqlx::query_as::<_, BackupRestoreRow>(
-            "SELECT restore_id, backup_job_id, target_vm_id, target_volume_id, status, \
-             created_at, started_at, completed_at, error_message, source_path, storage_backend \
-             FROM backup_restores WHERE status = 'Pending' ORDER BY created_at ASC LIMIT 50",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(StoreError::from)
     }
 
     /// List completed backup jobs older than `retention_days` for a given schedule.
@@ -1063,17 +953,6 @@ pub struct BackupRestoreCreateInput {
     pub backup_job_id: String,
     pub target_vm_id: Option<String>,
     pub target_volume_id: Option<String>,
-    pub status: String,
-    pub started_at: Option<String>,
-    pub completed_at: Option<String>,
-    pub error_message: Option<String>,
-    pub source_path: Option<String>,
-    pub storage_backend: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct BackupRestoreStatusUpdateInput {
-    pub restore_id: String,
     pub status: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,

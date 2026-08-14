@@ -117,19 +117,11 @@
 	const pageDef = {
 		href: '/settings/hypervisor',
 		navLabel: 'Hypervisor',
-		shortLabel: 'Hypervisor',
 		title: 'Fabric Infrastructure',
 		eyebrow: 'SET_INFRA_REGISTRY',
 		description: 'Low-level hypervisor parameters and global fabric posture.',
 		icon: Settings,
-		badges: [{ label: 'ADMIN_ONLY', tone: 'warning' as const }, { label: 'GLOBAL_SCOPE', tone: 'healthy' as const }],
-		summary: [],
-		focusAreas: [],
-		states: {
-			loading: { title: 'Loading', description: 'Loading hypervisor settings.', hint: '' },
-			empty: { title: 'No data', description: 'No hypervisor settings available.', hint: '' },
-			error: { title: 'Error', description: 'Failed to load hypervisor settings.', hint: '' }
-		}
+		badges: [{ label: 'ADMIN_ONLY', tone: 'warning' as const }, { label: 'GLOBAL_SCOPE', tone: 'healthy' as const }]
 	};
 </script>
 

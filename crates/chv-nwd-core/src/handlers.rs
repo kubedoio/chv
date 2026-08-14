@@ -15,7 +15,6 @@ pub struct NetworkServiceImpl<E: NetworkExecutor> {
     executor: Arc<E>,
     topologies: Arc<TopologyTable>,
     metrics: Arc<Metrics>,
-    store: Option<Arc<std::sync::Mutex<crate::store::TopologyStore>>>,
     security_policies: Arc<DashMap<String, proto::SecurityPolicy>>,
     rate_limit_policies: Arc<DashMap<String, proto::RateLimitPolicy>>,
     ebpf: Arc<dyn EbpfManager>,
@@ -29,7 +28,6 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             executor,
             topologies,
             metrics,
-            store: None,
             security_policies: Arc::new(DashMap::new()),
             rate_limit_policies: Arc::new(DashMap::new()),
             ebpf: Arc::new(ebpf::NoopEbpfManager),
@@ -37,59 +35,8 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
         }
     }
 
-    pub fn with_ebpf(mut self, ebpf: Arc<dyn EbpfManager>) -> Self {
-        self.ebpf = ebpf;
-        self
-    }
-
     pub fn topologies(&self) -> Arc<TopologyTable> {
         self.topologies.clone()
-    }
-
-    pub fn set_store(&mut self, store: crate::store::TopologyStore) {
-        self.store = Some(Arc::new(std::sync::Mutex::new(store)));
-    }
-
-    async fn persist_upsert(&self, state: &TopologyState) {
-        if let Some(store) = &self.store {
-            let store = store.clone();
-            let state = state.clone();
-            match tokio::task::spawn_blocking(move || {
-                let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                store.upsert(&state)
-            })
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "failed to persist topology state to SQLite");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to join persist topology task");
-                }
-            }
-        }
-    }
-
-    async fn persist_remove(&self, network_id: &str) {
-        if let Some(store) = &self.store {
-            let store = store.clone();
-            let network_id = network_id.to_string();
-            match tokio::task::spawn_blocking(move || {
-                let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                store.remove(&network_id)
-            })
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "failed to remove topology state from SQLite");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to join remove topology task");
-                }
-            }
-        }
     }
 
     fn ok_result() -> proto::Result {
@@ -195,7 +142,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     peer_vteps,
                 };
                 self.topologies.upsert(state.clone());
-                self.persist_upsert(&state).await;
                 Ok(Response::new(Self::ok_result()))
             }
             Err(e) => Ok(Response::new(Self::err_result(&e))),
@@ -220,7 +166,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 return Ok(Response::new(Self::err_result(&e)));
             }
             self.topologies.remove(&req.network_id);
-            self.persist_remove(&req.network_id).await;
         }
 
         Ok(Response::new(Self::ok_result()))
@@ -747,7 +692,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             ..state.clone()
         };
         self.topologies.upsert(updated_state.clone());
-        self.persist_upsert(&updated_state).await;
 
         info!(
             network_id = %req.network_id,

@@ -80,7 +80,6 @@ pub enum MigrationDisposition {
     Imported,
     Replay,
     Cutover,
-    RolledBack,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,80 +379,6 @@ impl CoreStore {
                 id: source.to_owned(),
             }),
         }
-    }
-
-    /// Removes an unactivated import. Cutover is deliberately irreversible.
-    pub fn rollback_legacy_import(
-        &mut self,
-        source: &str,
-        checksum: &str,
-    ) -> Result<MigrationDisposition> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state: Option<(String, String, Option<String>, Option<String>)> = tx
-            .query_row(
-                "SELECT state,source_checksum,imported_host_id,imported_vm_ids_json FROM migration_state WHERE source=?1",
-                [source],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        match state {
-            Some((state, actual, Some(imported_host), Some(imported_vms)))
-                if state == "imported" && actual == checksum =>
-            {
-                let actual_host: Option<String> = tx
-                    .query_row(
-                        "SELECT host_id FROM host_identity WHERE singleton_key=1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                let mut statement = tx.prepare("SELECT vm_id FROM vms ORDER BY vm_id")?;
-                let actual_vms = statement
-                    .query_map([], |row| row.get::<_, String>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                let expected_vms: Vec<String> =
-                    serde_json::from_str(&imported_vms).map_err(|error| {
-                        StoreError::Integrity(format!("migration VM manifest is invalid: {error}"))
-                    })?;
-                if actual_host.as_deref() != Some(imported_host.as_str())
-                    || actual_vms != expected_vms
-                {
-                    return Err(StoreError::Conflict {
-                        kind: "migration_rollback_drift",
-                        id: source.to_owned(),
-                    });
-                }
-            }
-            Some(_) => {
-                return Err(StoreError::Conflict {
-                    kind: "migration",
-                    id: source.to_owned(),
-                })
-            }
-            None => {
-                return Err(StoreError::NotFound {
-                    kind: "migration",
-                    id: source.to_owned(),
-                })
-            }
-        }
-        let journal_count: i64 =
-            tx.query_row("SELECT count(*) FROM operations", [], |row| row.get(0))?;
-        if journal_count != 0 {
-            return Err(StoreError::Conflict {
-                kind: "migration_rollback",
-                id: source.to_owned(),
-            });
-        }
-        tx.execute("DELETE FROM attachments", [])?;
-        tx.execute("DELETE FROM ownership_markers", [])?;
-        tx.execute("DELETE FROM vms", [])?;
-        tx.execute("DELETE FROM host_identity", [])?;
-        tx.execute("DELETE FROM migration_state WHERE source=?1", [source])?;
-        tx.commit()?;
-        Ok(MigrationDisposition::RolledBack)
     }
 
     /// Atomically reserve a new file and initialize it. Parent directories
@@ -4239,33 +4164,6 @@ mod tests {
             CoreStore::open_existing(&path),
             Err(StoreError::Integrity(_))
         ));
-    }
-
-    #[test]
-    fn rollback_refuses_authority_drift() {
-        let (_directory, _path, mut store) = new_store();
-        let host = HostIdentity {
-            id: HostId::new("legacy-host").unwrap(),
-            resource_version: version(1),
-        };
-        store
-            .import_legacy_snapshot(
-                "node-cache-v1",
-                "checksum",
-                &host,
-                &HostCapabilities::default(),
-                &[vm("vm-a", 1)],
-            )
-            .unwrap();
-        store.create_vm(&vm("post-import", 1)).unwrap();
-        assert!(matches!(
-            store.rollback_legacy_import("node-cache-v1", "checksum"),
-            Err(StoreError::Conflict {
-                kind: "migration_rollback_drift",
-                ..
-            })
-        ));
-        assert_eq!(store.list_vms().unwrap().len(), 2);
     }
 
     #[test]

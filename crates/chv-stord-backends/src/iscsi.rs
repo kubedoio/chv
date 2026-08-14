@@ -336,34 +336,6 @@ impl IscsiBackend {
         info!(volume_id, size_bytes, "created iSCSI LUN");
         Ok(())
     }
-
-    /// Delete a LUN from the target using targetcli.
-    async fn delete_lun(&self, volume_id: &str) -> Result<(), ChvError> {
-        Self::sanitize_id(volume_id)?;
-
-        // Delete the backstore.
-        let backstore_path = format!("/backstores/fileio/{}", volume_id);
-        let out = Command::new("targetcli")
-            .args([&backstore_path, "delete"])
-            .output()
-            .await
-            .map_err(|e| ChvError::Io {
-                path: "targetcli".to_string(),
-                source: e,
-            })?;
-        if !out.status.success() {
-            return Err(ChvError::BackendUnavailable {
-                backend: "iscsi".to_string(),
-                reason: format!(
-                    "targetcli delete backstore failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                ),
-            });
-        }
-
-        info!(volume_id, "deleted iSCSI LUN");
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -638,81 +610,6 @@ impl StorageBackend for IscsiBackend {
 
     // --- Migration methods ---
 
-    async fn enable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-        block_size: u64,
-    ) -> Result<(), ChvError> {
-        if block_size == 0 {
-            return Err(ChvError::InvalidArgument {
-                field: "block_size".to_string(),
-                reason: "block_size must be > 0".to_string(),
-            });
-        }
-        self.validate_handle(handle)?;
-
-        // For iSCSI, dirty tracking is maintained in-memory as a bitmap.
-        // The actual block-level change tracking would need to be done at the
-        // target side; here we maintain a software bitmap for compatibility.
-        let path = self.device_path(volume_id);
-        let metadata = tokio::fs::metadata(&path).await.map_err(|e| ChvError::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-        let file_len = metadata.len();
-        let num_blocks = file_len.div_ceil(block_size);
-        let bitmap_bytes = num_blocks.div_ceil(8) as usize;
-
-        let tracker = DirtyTracker {
-            block_size,
-            bitmap: vec![0u8; bitmap_bytes],
-        };
-        let mut map = self.dirty_trackers.write().await;
-        map.insert(handle.to_string(), tracker);
-        info!(
-            volume_id,
-            handle, block_size, bitmap_bytes, "enabled dirty tracking for iSCSI volume"
-        );
-        Ok(())
-    }
-
-    async fn get_dirty_bitmap(&self, _volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError> {
-        let map = self.dirty_trackers.read().await;
-        match map.get(handle) {
-            Some(t) => Ok(t.bitmap.clone()),
-            None => Err(ChvError::NotFound {
-                resource: "dirty_tracker".to_string(),
-                id: handle.to_string(),
-            }),
-        }
-    }
-
-    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        let mut map = self.dirty_trackers.write().await;
-        match map.get_mut(handle) {
-            Some(t) => {
-                t.bitmap.iter_mut().for_each(|b| *b = 0);
-                info!(volume_id, handle, "cleared dirty bitmap for iSCSI volume");
-                Ok(())
-            }
-            None => Err(ChvError::NotFound {
-                resource: "dirty_tracker".to_string(),
-                id: handle.to_string(),
-            }),
-        }
-    }
-
-    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        let mut map = self.dirty_trackers.write().await;
-        map.remove(handle);
-        info!(
-            volume_id,
-            handle, "disabled dirty tracking for iSCSI volume"
-        );
-        Ok(())
-    }
-
     async fn read_block(
         &self,
         volume_id: &str,
@@ -866,10 +763,6 @@ impl StorageBackend for IscsiBackend {
             export_path: path,
             attachment_handle: self.expected_handle(volume_id),
         })
-    }
-
-    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
-        self.delete_lun(volume_id).await
     }
 }
 

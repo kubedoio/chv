@@ -86,17 +86,6 @@ export interface Image {
   created_at?: string;
 }
 
-export interface ImportProgress {
-  image_id: string;
-  status: 'pending' | 'downloading' | 'validating' | 'ready' | 'failed';
-  progress_percent: number;
-  bytes_downloaded: number;
-  total_bytes: number;
-  speed: string;
-  error?: string;
-  updated_at: string;
-}
-
 export interface VM {
   id: string;
   name: string;
@@ -186,20 +175,6 @@ export interface APIErrorEnvelope {
   };
 }
 
-export interface VMMetricsResponse {
-  id: string;
-  current: VMMetrics | null;
-  history: VMMetrics[];
-}
-
-export interface BulkVMRequest {
-  ids: string[];
-}
-
-export interface BulkVMResponse {
-  results: Record<string, string>;
-}
-
 export interface VMMetrics {
   cpu: {
     usage_percent: number;
@@ -226,18 +201,6 @@ export interface VMMetrics {
   uptime: string;
 }
 
-export interface VMSnapshot {
-  id: string;
-  vm_id: string;
-  name: string;
-  description?: string;
-  size_bytes?: number;
-  includes_memory?: boolean;
-  snapshot_path?: string;
-  created_at: string;
-  status: string;
-}
-
 // Node types
 export interface Node {
   id: string;
@@ -260,23 +223,6 @@ export interface NodeWithResources extends Node {
     storage_pools: number;
     networks: number;
   };
-}
-
-export interface NodeHealthMetrics {
-  cpu_percent: number;
-  memory_used_mb: number;
-  memory_total_mb: number;
-  disk_used_gb: number;
-  disk_total_gb: number;
-  timestamp?: string;
-}
-
-export interface NodeHealth {
-  node_id: string;
-  node_name: string;
-  status: 'online' | 'offline' | 'maintenance' | 'error';
-  last_seen_at?: string;
-  metrics?: NodeHealthMetrics;
 }
 
 export interface HealthAlert {
@@ -308,13 +254,6 @@ export interface UpdateNodeInput {
   agent_url?: string;
 }
 
-export interface NodeResources {
-  vms: number;
-  images: number;
-  storagePools: number;
-  networks: number;
-}
-
 export interface NodeMetrics {
   cpu: {
     usage_percent: number;
@@ -332,21 +271,6 @@ export interface NodeMetrics {
     free_bytes: number;
     usage_percent: number;
   };
-}
-
-// Tree navigation item types
-export interface TreeNode {
-  id: string;
-  type: 'datacenter' | 'node' | 'resource';
-  label: string;
-  icon?: string;
-  status?: 'online' | 'offline' | 'warning' | 'error' | 'maintenance';
-  expanded?: boolean;
-  selected?: boolean;
-  children?: TreeNode[];
-  href?: string;
-  badge?: number;
-  metadata?: Record<string, any>;
 }
 
 export type ResourceType = 
@@ -383,37 +307,11 @@ export interface InstanceActionDefinition {
   disabledReason?: string;
 }
 
-export interface ResourceTreeNode {
-  id: string;
-  type: 'cloud' | 'host' | 'group' | 'instance' | 'network' | 'storage_pool' | 'image' | 'global_nav';
-  name: string;
-  status?: InstanceStatus | 'online' | 'offline' | 'error' | 'maintenance';
-  route?: string;
-  children?: ResourceTreeNode[];
-  actions?: InstanceActionDefinition[];
-  metadata?: Record<string, unknown>;
-  count?: number;
-}
-
-export interface HostTreeData {
-  hostId: string;
-  hostName: string;
-  hostStatus: 'online' | 'offline' | 'error' | 'maintenance';
-  instances: InstanceTreeItem[];
-}
-
 export interface InstanceTreeItem {
   id: string;
   name: string;
   status: InstanceStatus;
   nodeId: string;
-}
-
-export interface GlobalNavItem {
-  id: string;
-  label: string;
-  route: string;
-  icon: string;
 }
 
 // Backup types
@@ -452,53 +350,6 @@ export interface CreateBackupJobInput {
 }
 
 export interface BackupJobResponse extends BackupJob {}
-
-// VLAN Types
-export interface VLANNetwork {
-  id: string;
-  network_id: string;
-  vlan_id: number;
-  name: string;
-  cidr: string;
-  gateway_ip: string;
-  created_at: string;
-}
-
-export interface CreateVLANInput {
-  vlan_id: number;
-  name: string;
-  cidr: string;
-  gateway_ip: string;
-}
-
-// DHCP Types
-export interface DHCPServerConfig {
-  id: string;
-  network_id: string;
-  range_start: string;
-  range_end: string;
-  lease_time_seconds: number;
-  is_running: boolean;
-  configured: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ConfigureDHCPInput {
-  range_start: string;
-  range_end: string;
-  lease_time_seconds: number;
-}
-
-export interface DHCPLease {
-  id: string;
-  network_id: string;
-  mac_address: string;
-  ip_address: string;
-  hostname?: string;
-  lease_start: string;
-  lease_end: string;
-}
 
 // Firewall Types
 export interface FirewallRule {

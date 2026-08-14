@@ -1,7 +1,6 @@
 import { bffFetch } from './client';
 import { BFFEndpoints } from './endpoints';
 import type {
-	BackupJob,
 	BackupHistory,
 	ListBackupJobsResponse,
 	ListBackupHistoryResponse,
@@ -13,13 +12,6 @@ import type {
 
 export async function listBackupJobs(token?: string): Promise<ListBackupJobsResponse> {
 	return bffFetch<ListBackupJobsResponse>(BFFEndpoints.listBackupJobs, {
-		method: 'GET',
-		token
-	});
-}
-
-export async function getBackupJob(jobId: string, token?: string): Promise<BackupJob> {
-	return bffFetch<BackupJob>(`${BFFEndpoints.listBackupJobs}/${jobId}`, {
 		method: 'GET',
 		token
 	});

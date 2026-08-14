@@ -70,33 +70,33 @@ pub struct AuthorityHandle {
 impl AuthorityHandle {
     pub async fn submit(&self, submission: SubmitMutation) -> Result<AcceptedOperation> {
         let (reply, receive) = oneshot::channel();
-        self.send(Request::Submit(Box::new(submission), reply), receive)
+        Self::send(&self.sender, Request::Submit(Box::new(submission), reply), receive)
             .await
     }
 
     pub async fn operation(&self, id: OperationId) -> Result<OperationJournalEntry> {
         let (reply, receive) = oneshot::channel();
-        self.send(Request::Operation(id, reply), receive).await
+        Self::send(&self.sender, Request::Operation(id, reply), receive).await
     }
 
     pub async fn vm(&self, id: VmId) -> Result<VmDefinition> {
         let (reply, receive) = oneshot::channel();
-        self.send(Request::Vm(id, reply), receive).await
+        Self::send(&self.sender, Request::Vm(id, reply), receive).await
     }
 
     pub async fn vms(&self) -> Result<Vec<VmDefinition>> {
         let (reply, receive) = oneshot::channel();
-        self.send(Request::Vms(reply), receive).await
+        Self::send(&self.sender, Request::Vms(reply), receive).await
     }
 
     pub async fn operations(&self) -> Result<Vec<OperationJournalEntry>> {
         let (reply, receive) = oneshot::channel();
-        self.send(Request::Operations(reply), receive).await
+        Self::send(&self.sender, Request::Operations(reply), receive).await
     }
 
     pub async fn events_after(&self, sequence: u64, limit: u32) -> Result<Vec<OperationEvent>> {
         let (reply, receive) = oneshot::channel();
-        self.send(Request::EventsAfter(sequence, limit, reply), receive)
+        Self::send(&self.sender, Request::EventsAfter(sequence, limit, reply), receive)
             .await
     }
 
@@ -118,15 +118,15 @@ impl AuthorityHandle {
 
     pub async fn host(&self) -> Result<HostRecord> {
         let (reply, receive) = oneshot::channel();
-        self.send(Request::Host(reply), receive).await
+        Self::send(&self.sender, Request::Host(reply), receive).await
     }
 
     async fn send<T>(
-        &self,
+        sender: &Sender<Request>,
         request: Request,
         receive: oneshot::Receiver<crate::Result<T>>,
     ) -> Result<T> {
-        self.sender
+        sender
             .send(request)
             .await
             .map_err(|_| AuthorityActorError::Unavailable)?;
@@ -168,7 +168,7 @@ impl ExecutionHandle {
         attempt_token: AttemptToken,
     ) -> Result<ClaimResult> {
         let (reply, receive) = oneshot::channel();
-        send_request(
+        AuthorityHandle::send(
             &self.sender,
             Request::ClaimAttempt(id, attempt_token, reply),
             receive,
@@ -183,7 +183,7 @@ impl ExecutionHandle {
         outcome: TerminalOutcome,
     ) -> Result<CompletionResult> {
         let (reply, receive) = oneshot::channel();
-        send_request(
+        AuthorityHandle::send(
             &self.sender,
             Request::Finish(id, attempt_token, Box::new(outcome), reply),
             receive,
@@ -194,23 +194,8 @@ impl ExecutionHandle {
     /// Returns active attempt tokens only to the recovery/executor capability.
     pub async fn restart_operations(&self) -> Result<Vec<RestartOperation>> {
         let (reply, receive) = oneshot::channel();
-        send_request(&self.sender, Request::RestartOperations(reply), receive).await
+        AuthorityHandle::send(&self.sender, Request::RestartOperations(reply), receive).await
     }
-}
-
-async fn send_request<T>(
-    sender: &Sender<Request>,
-    request: Request,
-    receive: oneshot::Receiver<crate::Result<T>>,
-) -> Result<T> {
-    sender
-        .send(request)
-        .await
-        .map_err(|_| AuthorityActorError::Unavailable)?;
-    receive
-        .await
-        .map_err(|_| AuthorityActorError::Unavailable)?
-        .map_err(AuthorityActorError::Service)
 }
 
 pub struct AuthorityActor;

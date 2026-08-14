@@ -514,98 +514,6 @@ impl StorageBackend for CephRbdBackend {
 
     // --- Migration methods ---
 
-    async fn enable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-        block_size: u64,
-    ) -> Result<(), ChvError> {
-        if block_size == 0 {
-            return Err(ChvError::InvalidArgument {
-                field: "block_size".to_string(),
-                reason: "block_size must be > 0".to_string(),
-            });
-        }
-        self.validate_handle(handle)?;
-
-        // Query volume size via rbd info.
-        let spec = self.image_spec(volume_id);
-        let out = self.run_rbd(&["info", &spec, "--format", "json"]).await?;
-        if !out.status.success() {
-            return Err(ChvError::BackendUnavailable {
-                backend: "ceph".to_string(),
-                reason: format!("rbd info failed: {}", String::from_utf8_lossy(&out.stderr)),
-            });
-        }
-
-        let info_json: serde_json::Value =
-            serde_json::from_slice(&out.stdout).map_err(|e| ChvError::BackendUnavailable {
-                backend: "ceph".to_string(),
-                reason: format!("failed to parse rbd info JSON: {}", e),
-            })?;
-
-        let file_len = info_json["size"]
-            .as_u64()
-            .ok_or_else(|| ChvError::BackendUnavailable {
-                backend: "ceph".to_string(),
-                reason: "rbd info missing 'size' field".to_string(),
-            })?;
-
-        let num_blocks = file_len.div_ceil(block_size);
-        let bitmap_bytes = num_blocks.div_ceil(8) as usize;
-
-        let tracker = DirtyTracker {
-            block_size,
-            bitmap: vec![0u8; bitmap_bytes],
-        };
-        let mut map = self.dirty_trackers.write().await;
-        map.insert(handle.to_string(), tracker);
-        info!(
-            volume_id,
-            handle, block_size, bitmap_bytes, "enabled dirty tracking for Ceph RBD volume"
-        );
-        Ok(())
-    }
-
-    async fn get_dirty_bitmap(&self, _volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError> {
-        let map = self.dirty_trackers.read().await;
-        match map.get(handle) {
-            Some(t) => Ok(t.bitmap.clone()),
-            None => Err(ChvError::NotFound {
-                resource: "dirty_tracker".to_string(),
-                id: handle.to_string(),
-            }),
-        }
-    }
-
-    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        let mut map = self.dirty_trackers.write().await;
-        match map.get_mut(handle) {
-            Some(t) => {
-                t.bitmap.iter_mut().for_each(|b| *b = 0);
-                info!(
-                    volume_id,
-                    handle, "cleared dirty bitmap for Ceph RBD volume"
-                );
-                Ok(())
-            }
-            None => Err(ChvError::NotFound {
-                resource: "dirty_tracker".to_string(),
-                id: handle.to_string(),
-            }),
-        }
-    }
-
-    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        let mut map = self.dirty_trackers.write().await;
-        map.remove(handle);
-        info!(
-            volume_id,
-            handle, "disabled dirty tracking for Ceph RBD volume"
-        );
-        Ok(())
-    }
-
     async fn read_block(
         &self,
         volume_id: &str,
@@ -770,25 +678,6 @@ impl StorageBackend for CephRbdBackend {
             export_path: device_path,
             attachment_handle: self.expected_handle(volume_id),
         })
-    }
-
-    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
-        Self::sanitize_id(volume_id)?;
-
-        // Unmap first (best-effort).
-        let spec = self.image_spec(volume_id);
-        let _ = self.run_rbd(&["unmap", &spec]).await;
-
-        // Remove the image.
-        let out = self.run_rbd(&["rm", &spec]).await?;
-        if !out.status.success() {
-            return Err(ChvError::BackendUnavailable {
-                backend: "ceph".to_string(),
-                reason: format!("rbd rm failed: {}", String::from_utf8_lossy(&out.stderr)),
-            });
-        }
-        info!(volume_id, "deleted Ceph RBD image");
-        Ok(())
     }
 }
 

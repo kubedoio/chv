@@ -758,80 +758,10 @@ impl StorageBackend for LocalFileBackend {
 
     // --- Phase 2.1-2.2: Migration methods ---
 
-    async fn enable_dirty_tracking(
-        &self,
-        volume_id: &str,
-        handle: &str,
-        block_size: u64,
-    ) -> Result<(), ChvError> {
-        if block_size == 0 {
-            return Err(ChvError::InvalidArgument {
-                field: "block_size".to_string(),
-                reason: "block_size must be > 0".to_string(),
-            });
-        }
-        let path = self.path_from_handle(volume_id, handle)?;
-        let path_clone = path.clone();
-        let file_len = tokio::task::spawn_blocking(move || {
-            std::fs::metadata(&path_clone).map(|m| m.len()).unwrap_or(0)
-        })
-        .await
-        .map_err(|e| ChvError::BackendUnavailable {
-            backend: "local".to_string(),
-            reason: format!("spawn_blocking join error: {e}"),
-        })?;
-        let num_blocks = file_len.div_ceil(block_size);
-        let bitmap_bytes = num_blocks.div_ceil(8) as usize;
-        let tracker = DirtyTracker {
-            block_size,
-            bitmap: vec![0u8; bitmap_bytes],
-        };
-        let mut map = self.dirty_trackers.write().await;
-        map.insert(handle.to_string(), tracker);
-        info!(
-            volume_id,
-            handle, block_size, bitmap_bytes, "enabled dirty tracking"
-        );
-        Ok(())
-    }
-
-    async fn get_dirty_bitmap(&self, _volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError> {
-        let map = self.dirty_trackers.read().await;
-        match map.get(handle) {
-            Some(t) => Ok(t.bitmap.clone()),
-            None => Err(ChvError::NotFound {
-                resource: "dirty_tracker".to_string(),
-                id: handle.to_string(),
-            }),
-        }
-    }
-
-    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        let mut map = self.dirty_trackers.write().await;
-        match map.get_mut(handle) {
-            Some(t) => {
-                t.bitmap.iter_mut().for_each(|b| *b = 0);
-                info!(volume_id, handle, "cleared dirty bitmap");
-                Ok(())
-            }
-            None => Err(ChvError::NotFound {
-                resource: "dirty_tracker".to_string(),
-                id: handle.to_string(),
-            }),
-        }
-    }
-
-    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        let mut map = self.dirty_trackers.write().await;
-        map.remove(handle);
-        info!(volume_id, handle, "disabled dirty tracking");
-        Ok(())
-    }
-
     /// Atomically snapshot and clear the dirty bitmap under a single write lock.
     ///
     /// This prevents any window where a write could dirty a block between
-    /// get_dirty_bitmap and clear_dirty_bitmap, which would lose that dirty
+    /// reading the bitmap and clearing it, which would lose that dirty
     /// information during migration sync rounds.
     async fn snapshot_and_clear_dirty_bitmap(
         &self,
@@ -992,68 +922,6 @@ impl StorageBackend for LocalFileBackend {
             export_path: dest.to_string_lossy().to_string(),
             attachment_handle: handle,
         })
-    }
-
-    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
-        let primary = self.runtime_dir.join(format!("{}.img", volume_id));
-        let primary_clone = primary.clone();
-        let primary_exists = tokio::task::spawn_blocking(move || primary_clone.exists())
-            .await
-            .map_err(|e| ChvError::BackendUnavailable {
-                backend: "local".to_string(),
-                reason: format!("spawn_blocking join error: {e}"),
-            })?;
-        if primary_exists {
-            tokio::fs::remove_file(&primary)
-                .await
-                .map_err(|e| ChvError::Io {
-                    path: primary.display().to_string(),
-                    source: e,
-                })?;
-            info!(volume_id, path = %primary.display(), "deleted primary volume file");
-        }
-
-        // Remove related snapshot/clone files matching `{volume_id}-*.img`.
-        let pattern = format!("{}-", volume_id);
-        if let Ok(mut entries) = tokio::fs::read_dir(&self.runtime_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with(&pattern) && name_str.ends_with(".img") {
-                    let p = entry.path();
-                    if let Err(e) = tokio::fs::remove_file(&p).await {
-                        warn!(volume_id, path = %p.display(), err = %e, "failed to remove snapshot file");
-                    } else {
-                        info!(volume_id, path = %p.display(), "deleted snapshot/clone file");
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn set_io_limits(
-        &self,
-        volume_id: &str,
-        iops: Option<u64>,
-        bandwidth_mbps: Option<u64>,
-    ) -> Result<(), ChvError> {
-        if let Some(iops_val) = iops {
-            tracing::info!(
-                volume_id = %volume_id,
-                iops = iops_val,
-                "IOPS limit configured (enforcement requires cgroup v2)"
-            );
-        }
-        if let Some(bw) = bandwidth_mbps {
-            tracing::info!(
-                volume_id = %volume_id,
-                bandwidth_mbps = bw,
-                "bandwidth limit configured (enforcement requires cgroup v2)"
-            );
-        }
-        Ok(())
     }
 }
 
@@ -1484,44 +1352,6 @@ mod tests {
     // --- Phase 2.1-2.2 unit tests ---
 
     #[tokio::test]
-    async fn dirty_tracking_lifecycle() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create a 4096-byte volume file
-        let path = dir.path().join("vol.img");
-        {
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(4096).unwrap();
-        }
-
-        let backend = LocalFileBackend::new(dir.path().to_path_buf());
-        let handle = "local-vol-dt-vol.img";
-
-        // Enable tracking with 512-byte blocks (8 blocks total)
-        backend
-            .enable_dirty_tracking("vol-dt", handle, 512)
-            .await
-            .unwrap();
-
-        // Bitmap should be all zeros (1 byte covers 8 blocks)
-        let bitmap = backend.get_dirty_bitmap("vol-dt", handle).await.unwrap();
-        assert_eq!(bitmap.len(), 1);
-        assert_eq!(bitmap[0], 0x00);
-
-        // Mark a bit manually by setting it via clear (which should keep zeros)
-        backend.clear_dirty_bitmap("vol-dt", handle).await.unwrap();
-        let bitmap = backend.get_dirty_bitmap("vol-dt", handle).await.unwrap();
-        assert_eq!(bitmap[0], 0x00);
-
-        // Disable tracking — subsequent get should return NotFound
-        backend
-            .disable_dirty_tracking("vol-dt", handle)
-            .await
-            .unwrap();
-        let res = backend.get_dirty_bitmap("vol-dt", handle).await;
-        assert!(matches!(res, Err(ChvError::NotFound { .. })));
-    }
-
-    #[tokio::test]
     async fn read_write_block_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vol.img");
@@ -1549,51 +1379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_block_marks_dirty_bitmap() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vol.img");
-        {
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(4096).unwrap();
-        }
-
-        let backend = LocalFileBackend::new(dir.path().to_path_buf());
-        let handle = "local-vol-db-vol.img";
-
-        // Enable with 512-byte blocks
-        backend
-            .enable_dirty_tracking("vol-db", handle, 512)
-            .await
-            .unwrap();
-
-        // Write to block 0 (offset 0, 1 byte)
-        backend
-            .write_block("vol-db", handle, 0, b"x")
-            .await
-            .unwrap();
-
-        let bitmap = backend.get_dirty_bitmap("vol-db", handle).await.unwrap();
-        // Block 0 = bit 0 of byte 0
-        assert_eq!(bitmap[0] & 0x01, 0x01, "block 0 should be marked dirty");
-
-        // Write to block 2 (offset 1024, 1 byte)
-        backend
-            .write_block("vol-db", handle, 1024, b"y")
-            .await
-            .unwrap();
-
-        let bitmap = backend.get_dirty_bitmap("vol-db", handle).await.unwrap();
-        // Block 2 = bit 2 of byte 0
-        assert_eq!(bitmap[0] & 0x04, 0x04, "block 2 should be marked dirty");
-
-        // Clear bitmap and verify it resets
-        backend.clear_dirty_bitmap("vol-db", handle).await.unwrap();
-        let bitmap = backend.get_dirty_bitmap("vol-db", handle).await.unwrap();
-        assert_eq!(bitmap[0], 0x00, "bitmap should be zeroed after clear");
-    }
-
-    #[tokio::test]
-    async fn create_and_delete_receiving_volume() {
+    async fn create_receiving_volume() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalFileBackend::new(dir.path().to_path_buf());
 
@@ -1608,34 +1394,6 @@ mod tests {
 
         let meta = std::fs::metadata(&export.export_path).unwrap();
         assert_eq!(meta.len(), 8192);
-
-        // Delete should remove the file
-        backend.delete_volume("rcv-vol-1").await.unwrap();
-        assert!(
-            !std::path::Path::new(&export.export_path).exists(),
-            "primary volume file should be deleted"
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_volume_also_removes_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = LocalFileBackend::new(dir.path().to_path_buf());
-
-        // Create primary
-        backend
-            .create_receiving_volume("snap-vol", 512, "raw")
-            .await
-            .unwrap();
-
-        // Create a fake snapshot file matching the pattern `{volume_id}-*.img`
-        let snap_path = dir.path().join("snap-vol-snap1.img");
-        std::fs::File::create(&snap_path).unwrap();
-
-        backend.delete_volume("snap-vol").await.unwrap();
-
-        assert!(!dir.path().join("snap-vol.img").exists());
-        assert!(!snap_path.exists(), "snapshot file should be deleted");
     }
 
     #[tokio::test]

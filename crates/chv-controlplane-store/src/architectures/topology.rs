@@ -1,6 +1,6 @@
 //! Topology repository — CRUD with optimistic concurrency and soft delete.
 
-use crate::architectures::{format_ts, parse_ts, parse_ts_opt};
+use crate::architectures::{parse_ts, parse_ts_opt};
 use crate::{StoreError, StorePool};
 use chv_controlplane_types::architecture::{
     ArchitectureId, ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId,
@@ -567,10 +567,4 @@ fn row_to_topology(row: &sqlx::sqlite::SqliteRow) -> Result<ArchitectureTopology
         created_at: parse_ts(&created_at, "created_at")?,
         updated_at: parse_ts(&updated_at, "updated_at")?,
     })
-}
-
-// Re-exported for tests in sibling modules.
-#[allow(dead_code)]
-pub(crate) fn now_text() -> String {
-    format_ts(chrono::Utc::now())
 }

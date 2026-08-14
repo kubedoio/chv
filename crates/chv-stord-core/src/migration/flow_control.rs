@@ -32,17 +32,6 @@ impl SendWindow {
         }
     }
 
-    /// Create a SendWindow with custom parameters.
-    pub fn with_params(max_unacked: u32, ack_interval: u32, timeout: Duration) -> Self {
-        Self {
-            max_unacked,
-            ack_interval,
-            timeout,
-            unacked: 0,
-            last_ack_sequence: 0,
-        }
-    }
-
     /// Returns true if the sender is allowed to send another block.
     pub fn can_send(&self) -> bool {
         self.unacked < self.max_unacked
@@ -73,11 +62,6 @@ impl SendWindow {
     /// Returns the configured timeout duration.
     pub fn timeout(&self) -> Duration {
         self.timeout
-    }
-
-    /// Returns the ack interval.
-    pub fn ack_interval(&self) -> u32 {
-        self.ack_interval
     }
 
     /// Returns the sequence number of the last received Ack.

@@ -42,7 +42,6 @@
   },
   "dependencies": {
     "@xyflow/svelte": "^1.6.2",
-    "caniuse-lite": "^1.0.30001806",
     "chart.js": "^4.5.1",
     "fuse.js": "^7.5.0",
     "js-yaml": "^5.2.1",

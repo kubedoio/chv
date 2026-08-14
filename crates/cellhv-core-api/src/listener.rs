@@ -42,18 +42,6 @@ pub struct CoreApiListener {
 }
 
 impl CoreApiListener {
-    pub async fn start(socket: &Path, authority: AuthorityHandle) -> Result<Self, ListenerError> {
-        Self::start_with_drain_timeout(socket, authority, DEFAULT_DRAIN_TIMEOUT).await
-    }
-
-    pub async fn start_with_drain_timeout(
-        socket: &Path,
-        authority: AuthorityHandle,
-        drain_timeout: std::time::Duration,
-    ) -> Result<Self, ListenerError> {
-        Self::start_router(socket, router(authority), drain_timeout).await
-    }
-
     /// Starts a listener for a caller that already owns the process-wide
     /// authority lease. A socket left by an unclean exit may be recovered,
     /// but live listeners and foreign filesystem objects are never replaced.
@@ -69,15 +57,6 @@ impl CoreApiListener {
             ExistingSocketPolicy::RecoverStale,
         )
         .await
-    }
-
-    async fn start_router(
-        socket: &Path,
-        app: Router,
-        drain_timeout: std::time::Duration,
-    ) -> Result<Self, ListenerError> {
-        Self::start_router_with_policy(socket, app, drain_timeout, ExistingSocketPolicy::Refuse)
-            .await
     }
 
     async fn start_router_with_policy(
@@ -333,10 +312,11 @@ mod tests {
     #[tokio::test]
     async fn serves_http_and_removes_owned_socket() {
         let (_directory, path) = socket_path();
-        let owner = CoreApiListener::start_router(
+        let owner = CoreApiListener::start_router_with_policy(
             &path,
             Router::new().route("/ready", get(|| async { "ready" })),
             DEFAULT_DRAIN_TIMEOUT,
+            ExistingSocketPolicy::Refuse,
         )
         .await
         .unwrap();
@@ -384,10 +364,11 @@ mod tests {
     #[tokio::test]
     async fn malformed_client_does_not_stop_listener() {
         let (_directory, path) = socket_path();
-        let owner = CoreApiListener::start_router(
+        let owner = CoreApiListener::start_router_with_policy(
             &path,
             Router::new().route("/ready", get(|| async { "ready" })),
             DEFAULT_DRAIN_TIMEOUT,
+            ExistingSocketPolicy::Refuse,
         )
         .await
         .unwrap();
@@ -405,18 +386,35 @@ mod tests {
     #[tokio::test]
     async fn concurrent_bind_refuses_to_replace_live_socket() {
         let (_directory, path) = socket_path();
-        let owner = CoreApiListener::start_router(&path, Router::new(), DEFAULT_DRAIN_TIMEOUT)
-            .await
-            .unwrap();
+        let owner = CoreApiListener::start_router_with_policy(
+            &path,
+            Router::new(),
+            DEFAULT_DRAIN_TIMEOUT,
+            ExistingSocketPolicy::Refuse,
+        )
+        .await
+        .unwrap();
         assert!(matches!(
-            CoreApiListener::start_router(&path, Router::new(), DEFAULT_DRAIN_TIMEOUT).await,
+            CoreApiListener::start_router_with_policy(
+                &path,
+                Router::new(),
+                DEFAULT_DRAIN_TIMEOUT,
+                ExistingSocketPolicy::Refuse,
+            )
+            .await,
             Err(ListenerError::Bind(BindError::ExistingPath(_)))
         ));
         owner.shutdown().await.unwrap();
 
         std::fs::write(&path, b"foreign").unwrap();
         assert!(matches!(
-            CoreApiListener::start_router(&path, Router::new(), DEFAULT_DRAIN_TIMEOUT).await,
+            CoreApiListener::start_router_with_policy(
+                &path,
+                Router::new(),
+                DEFAULT_DRAIN_TIMEOUT,
+                ExistingSocketPolicy::Refuse,
+            )
+            .await,
             Err(ListenerError::Bind(BindError::ExistingPath(_)))
         ));
         assert_eq!(std::fs::read(&path).unwrap(), b"foreign");
@@ -514,9 +512,14 @@ mod tests {
                 }
             }),
         );
-        let owner = CoreApiListener::start_router(&path, app, DEFAULT_DRAIN_TIMEOUT)
-            .await
-            .unwrap();
+        let owner = CoreApiListener::start_router_with_policy(
+            &path,
+            app,
+            DEFAULT_DRAIN_TIMEOUT,
+            ExistingSocketPolicy::Refuse,
+        )
+        .await
+        .unwrap();
         let request_path = path.clone();
         let request_task = tokio::spawn(async move { request(&request_path, "/slow").await });
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -537,9 +540,14 @@ mod tests {
     #[tokio::test]
     async fn foreign_replacement_is_not_removed_on_shutdown() {
         let (_directory, path) = socket_path();
-        let owner = CoreApiListener::start_router(&path, Router::new(), DEFAULT_DRAIN_TIMEOUT)
-            .await
-            .unwrap();
+        let owner = CoreApiListener::start_router_with_policy(
+            &path,
+            Router::new(),
+            DEFAULT_DRAIN_TIMEOUT,
+            ExistingSocketPolicy::Refuse,
+        )
+        .await
+        .unwrap();
         std::fs::remove_file(&path).unwrap();
         let foreign = tokio::net::UnixListener::bind(&path).unwrap();
         let foreign_identity = std::fs::symlink_metadata(&path).unwrap().ino();
@@ -588,9 +596,14 @@ mod tests {
             }),
         );
         let timeout = Duration::from_millis(20);
-        let owner = CoreApiListener::start_router(&path, app, timeout)
-            .await
-            .unwrap();
+        let owner = CoreApiListener::start_router_with_policy(
+            &path,
+            app,
+            timeout,
+            ExistingSocketPolicy::Refuse,
+        )
+        .await
+        .unwrap();
         let request_path = path.clone();
         let request = tokio::spawn(async move { request(&request_path, "/blocked").await });
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -636,9 +649,14 @@ mod tests {
                 }
             }),
         );
-        let owner = CoreApiListener::start_router(&path, app, DEFAULT_DRAIN_TIMEOUT)
-            .await
-            .unwrap();
+        let owner = CoreApiListener::start_router_with_policy(
+            &path,
+            app,
+            DEFAULT_DRAIN_TIMEOUT,
+            ExistingSocketPolicy::Refuse,
+        )
+        .await
+        .unwrap();
         let request_path = path.clone();
         let request = tokio::spawn(async move { request(&request_path, "/blocked").await });
         tokio::time::timeout(Duration::from_secs(2), async {

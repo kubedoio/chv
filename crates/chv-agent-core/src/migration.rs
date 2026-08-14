@@ -83,47 +83,6 @@ pub fn extract_destination_host(req: &proto::MigrateVmRequest) -> String {
     req.destination_node_id.clone()
 }
 
-/// Execute migration as the source agent.
-/// This spawns a background task that calls CH send-migration and reports progress.
-pub fn spawn_source_migration(
-    vm_runtime: VmRuntime,
-    vm_id: String,
-    operation_id: String,
-    destination_url: String,
-) -> tokio::task::JoinHandle<Result<(), String>> {
-    tokio::spawn(async move {
-        info!(
-            vm_id = %vm_id,
-            destination_url = %destination_url,
-            operation_id = %operation_id,
-            "source agent: starting send-migration"
-        );
-
-        match vm_runtime
-            .send_migration(&vm_id, &destination_url, Some(&operation_id))
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    "source agent: send-migration completed successfully"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    error = %e,
-                    "source agent: send-migration failed"
-                );
-                Err(e.to_string())
-            }
-        }
-    })
-}
-
 /// Execute migration as the destination agent.
 /// This spawns a background task that calls CH receive-migration.
 pub fn spawn_destination_migration(
@@ -195,7 +154,7 @@ pub struct DiskPrecopyConfig {
 
 /// A callback type for reporting migration progress to the control plane.
 ///
-/// When provided to `spawn_source_migration_with_disk_precopy`, this is called
+/// When provided to `source_migration_with_disk_precopy`, this is called
 /// after each disk sync round with the current dirty_blocks_remaining count,
 /// enabling the control plane to track convergence.
 pub type ProgressReporter = Arc<Mutex<dyn FnMut(proto::MigrationProgress) + Send>>;
@@ -203,7 +162,7 @@ pub type ProgressReporter = Arc<Mutex<dyn FnMut(proto::MigrationProgress) + Send
 /// Build a progress reporter closure that sends updates to the control plane.
 ///
 /// This creates a `ProgressReporter` wrapping a control plane client reference,
-/// suitable for passing to `spawn_source_migration_with_disk_precopy`.
+/// suitable for passing to `source_migration_with_disk_precopy`.
 pub fn make_progress_reporter<F>(callback: F) -> ProgressReporter
 where
     F: FnMut(proto::MigrationProgress) + Send + 'static,
@@ -211,48 +170,9 @@ where
     Arc::new(Mutex::new(callback))
 }
 
-/// Execute migration as the source agent with disk pre-copy.
-///
-/// This orchestrates the full live migration sequence:
-/// 1. **Disk pre-copy**: For each volume, triggers the local stord to stream blocks
-///    to the destination stord. This runs while the VM is still executing.
-/// 2. **Memory migration**: Once disk pre-copy completes (or converges), calls
-///    Cloud Hypervisor's send-migration which handles iterative memory copy and
-///    final VM pause/transfer.
-///
-/// If disk pre-copy fails for any volume, the migration is aborted before memory
-/// transfer begins. The original `spawn_source_migration` function remains available
-/// for memory-only migration scenarios (e.g., VMs with no local disk).
-///
-/// When `progress_reporter` is provided, the function reports dirty_blocks_remaining
-/// after each volume sync round completes, enabling the control plane to track
-/// convergence in real time.
-pub fn spawn_source_migration_with_disk_precopy(
-    vm_runtime: VmRuntime,
-    vm_id: String,
-    operation_id: String,
-    destination_url: String,
-    disk_config: DiskPrecopyConfig,
-    progress_reporter: Option<ProgressReporter>,
-) -> tokio::task::JoinHandle<Result<(), String>> {
-    // Backward-compatible spawn wrapper: never-cancelled token preserves old
-    // behaviour for callers that haven't migrated to the registry-tracked path.
-    let cancel = CancellationToken::new();
-    tokio::spawn(source_migration_with_disk_precopy(
-        vm_runtime,
-        vm_id,
-        operation_id,
-        destination_url,
-        disk_config,
-        progress_reporter,
-        cancel,
-    ))
-}
-
 /// Run a full source-side migration with disk pre-copy.
 ///
-/// This is the cancel-aware async core that `spawn_source_migration_with_disk_precopy`
-/// delegates to. The `cancel_token` is consulted at every **phase boundary**
+/// This is the cancel-aware async core. The `cancel_token` is consulted at every **phase boundary**
 /// — before connecting to stord, before each volume's pre-copy trigger, on
 /// every poll iteration, before pausing the VM, and before the memory
 /// migration phase — matching the retro pattern in
@@ -560,7 +480,7 @@ pub async fn source_migration_with_disk_precopy(
     // Phase boundary 5: before memory migration begins.
     check_cancel!("pre-memory-migration");
 
-    // Phase 2: Memory migration (same as spawn_source_migration)
+    // Phase 2: Memory migration
     info!(
         vm_id = %vm_id,
         destination_url = %destination_url,
@@ -620,140 +540,6 @@ pub async fn source_migration_with_disk_precopy(
             Err(format!("memory migration failed: {e}"))
         }
     }
-}
-
-/// Execute migration as the destination agent with disk pre-copy acceptance.
-///
-/// This orchestrates the destination side of a full live migration:
-/// 1. **Disk pre-copy acceptance**: Prepares the local stord to receive incoming
-///    block streams from the source stord. The actual block reception is handled
-///    by stord's `StorageMigrationService`.
-/// 2. **Memory migration**: Starts Cloud Hypervisor's receive-migration which
-///    listens for the incoming VM memory state.
-///
-/// If disk acceptance preparation fails, the migration is aborted before memory
-/// receive begins.
-pub fn spawn_destination_migration_with_disk_precopy(
-    vm_runtime: VmRuntime,
-    vm_id: String,
-    operation_id: String,
-    receiver_url: String,
-    disk_config: DiskPrecopyConfig,
-) -> tokio::task::JoinHandle<Result<(), String>> {
-    tokio::spawn(async move {
-        info!(
-            vm_id = %vm_id,
-            receiver_url = %receiver_url,
-            operation_id = %operation_id,
-            volume_count = disk_config.volumes.len(),
-            "destination agent: starting migration with disk pre-copy acceptance"
-        );
-
-        // Phase 1: Prepare to accept disk migration
-        if !disk_config.volumes.is_empty() {
-            info!(
-                vm_id = %vm_id,
-                operation_id = %operation_id,
-                "destination agent: preparing to accept disk pre-copy"
-            );
-
-            let mut stord_client =
-                match StordClient::connect(Path::new(&disk_config.stord_socket)).await {
-                    Ok(client) => client,
-                    Err(e) => {
-                        error!(
-                            vm_id = %vm_id,
-                            operation_id = %operation_id,
-                            error = %e,
-                            "destination agent: failed to connect to local stord"
-                        );
-                        return Err(format!(
-                            "disk migration acceptance failed: cannot connect to stord: {e}"
-                        ));
-                    }
-                };
-
-            for volume in &disk_config.volumes {
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    volume_id = %volume.volume_id,
-                    "destination agent: accepting disk migration for volume"
-                );
-
-                if let Err(e) = stord_client
-                    .accept_disk_migration(
-                        &volume.volume_id,
-                        0, // Size will be communicated via InitMigration in the stream
-                        Some(&operation_id),
-                    )
-                    .await
-                {
-                    error!(
-                        vm_id = %vm_id,
-                        operation_id = %operation_id,
-                        volume_id = %volume.volume_id,
-                        error = %e,
-                        "destination agent: disk migration acceptance failed for volume"
-                    );
-                    return Err(format!(
-                        "disk migration acceptance failed for volume {}: {e}",
-                        volume.volume_id
-                    ));
-                }
-
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    volume_id = %volume.volume_id,
-                    "destination agent: disk migration acceptance ready for volume"
-                );
-            }
-
-            info!(
-                vm_id = %vm_id,
-                operation_id = %operation_id,
-                "destination agent: disk pre-copy acceptance prepared for all volumes"
-            );
-        } else {
-            warn!(
-                vm_id = %vm_id,
-                operation_id = %operation_id,
-                "destination agent: no volumes to receive, skipping disk acceptance"
-            );
-        }
-
-        // Phase 2: Memory migration (same as spawn_destination_migration)
-        info!(
-            vm_id = %vm_id,
-            receiver_url = %receiver_url,
-            operation_id = %operation_id,
-            "destination agent: starting memory migration (receive-migration)"
-        );
-
-        match vm_runtime
-            .receive_migration(&vm_id, &receiver_url, Some(&operation_id))
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    "destination agent: receive-migration completed (disk + memory)"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    error = %e,
-                    "destination agent: memory migration (receive-migration) failed"
-                );
-                Err(format!("memory receive-migration failed: {e}"))
-            }
-        }
-    })
 }
 
 /// Build a MigrationProgress proto message.

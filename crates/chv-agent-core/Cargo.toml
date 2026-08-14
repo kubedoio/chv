@@ -26,8 +26,6 @@ prost = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
-dashmap = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
 hyper-util = { workspace = true }

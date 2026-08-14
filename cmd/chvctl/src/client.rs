@@ -43,14 +43,6 @@ impl BffClient {
         }
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    pub fn set_token(&mut self, token: String) {
-        self.token = Some(token);
-    }
-
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
