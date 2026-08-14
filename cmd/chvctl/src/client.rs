@@ -97,16 +97,6 @@ impl BffClient {
         self.handle_response(resp).await
     }
 
-    pub async fn patch(&self, path: &str, body: &Value) -> Result<Value, CliError> {
-        let req = self.http.patch(self.url(path)).json(body);
-        let req = self.apply_auth(req);
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CliError::Http(e.to_string()))?;
-        self.handle_response(resp).await
-    }
-
     pub async fn delete(&self, path: &str) -> Result<Value, CliError> {
         let req = self.http.delete(self.url(path));
         let req = self.apply_auth(req);
