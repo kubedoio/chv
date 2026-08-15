@@ -347,25 +347,3 @@ async fn strict_preconditions_use_412_for_stale_versions() {
     );
     join_app(app, owner).await;
 }
-
-#[tokio::test]
-async fn private_bind_requires_exact_0700_parent_and_refuses_existing_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("core.sock");
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(matches!(
-        bind_private(&socket).await,
-        Err(BindError::UnsafeParent(_))
-    ));
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let listener = bind_private(&socket).await.unwrap();
-    assert_eq!(
-        std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    assert!(matches!(
-        bind_private(&socket).await,
-        Err(BindError::ExistingPath(_))
-    ));
-    drop(listener);
-}

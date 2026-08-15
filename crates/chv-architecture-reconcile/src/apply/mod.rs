@@ -216,7 +216,7 @@ pub async fn apply_plan(
             // not ReadyToApply, but the precise value (Applying/Discarded/...)
             // helps the UI render a useful message.
             let current = plan_repo
-                .get(&ctx.plan_id)
+                .get(&ctx.plan_id, None)
                 .await
                 .map(|p| p.status.as_str().to_string())
                 .unwrap_or_else(|_| "unknown".to_string());
@@ -251,6 +251,7 @@ pub async fn apply_plan(
                 &ctx.architecture_id,
                 ArchitectureStatus::Applying,
                 ctx.topology_version,
+                None,
             )
             .await
         {
@@ -630,7 +631,7 @@ pub async fn set_topology_terminal_status(
     architecture_id: &chv_controlplane_types::architecture::ArchitectureId,
     status: ArchitectureStatus,
 ) -> Result<(), StoreError> {
-    let current = topology_repo.get(architecture_id).await?;
+    let current = topology_repo.get(architecture_id, None).await?;
     let from_status = current.status.as_str().to_string();
     if current.status == status {
         // Idempotent: already at target. Skip the write so we do not bump
@@ -646,7 +647,7 @@ pub async fn set_topology_terminal_status(
         return Ok(());
     }
     topology_repo
-        .set_lifecycle_status(architecture_id, status, current.version_number)
+        .set_lifecycle_status(architecture_id, status, current.version_number, None)
         .await?;
     tracing::info!(
         target: "architecture.apply",

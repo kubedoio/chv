@@ -926,13 +926,3 @@ export async function getArchitectureDrift(
 		signal
 	});
 }
-
-/**
- * Discriminator helper for the dashboard sidebar. The badge renders only
- * when the architecture is in a state where drift is meaningful (i.e. it
- * has a baseline). Drift on a `draft` topology is always `unknown` and we
- * suppress the badge to keep the dashboard quiet.
- */
-export function isDriftBadgeVisible(status: DriftStatus): boolean {
-	return status === 'drifted' || status === 'check_failed' || status === 'no_drift';
-}

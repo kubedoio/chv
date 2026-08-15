@@ -41,7 +41,19 @@ pub fn load_credentials() -> Option<String> {
 }
 
 pub fn save_credentials(token: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let dir = config_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("failed to create config dir: {e}"))?;
-    fs::write(credentials_path(), token).map_err(|e| format!("failed to save credentials: {e}"))
+    let path = credentials_path();
+    let mut file = fs::OpenOptions::new()
+        .mode(0o600)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("failed to save credentials: {e}"))?;
+    file.write_all(token.as_bytes())
+        .map_err(|e| format!("failed to save credentials: {e}"))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to set credentials permissions: {e}"))
 }

@@ -5,7 +5,7 @@ use chv_stord_api::chv_stord_api::{
     BlockChunk, FinalSync, FinalizeComplete, InitMigration, MigrationMessage, RoundComplete,
     RoundStart,
 };
-use chv_stord_backends::StorageBackend;
+use chv_stord_backends::{StorageBackend, DIRTY_TRACKING_BLOCK_SIZE};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
@@ -15,7 +15,9 @@ use tracing::{debug, error, info, warn};
 const STORD_MIGRATION_BYTES_SENT_TOTAL: &str = "chv_stord_migration_bytes_sent_total";
 const STORD_MIGRATION_ERRORS_TOTAL: &str = "chv_stord_migration_errors_total";
 
-const DEFAULT_BLOCK_SIZE: u64 = 4_194_304; // 4 MB
+/// Default migration block size: must equal the backends' dirty-tracking
+/// block size so bitmap bits map 1:1 to migration chunks.
+const DEFAULT_BLOCK_SIZE: u64 = DIRTY_TRACKING_BLOCK_SIZE;
 const DIRTY_THRESHOLD: u64 = 1024;
 const MAX_DIRTY_ROUNDS: u32 = 10;
 
@@ -229,7 +231,7 @@ impl<B: StorageBackend> MigrationSender<B> {
         }
         info!(volume_id = %self.volume_id, "starting iterative dirty sync rounds");
         let dirty_chunks = self
-            .dirty_sync_rounds(&tx, &mut inbound, &mut sequence_num)
+            .dirty_sync_rounds(&tx, &mut inbound, &mut sequence_num, volume_size)
             .await?;
         info!(
             volume_id = %self.volume_id,
@@ -413,6 +415,7 @@ impl<B: StorageBackend> MigrationSender<B> {
         tx: &mpsc::Sender<MigrationMessage>,
         inbound: &mut tonic::Streaming<MigrationMessage>,
         sequence_num: &mut u32,
+        volume_size: u64,
     ) -> Result<u32, tonic::Status> {
         let mut total_dirty_chunks: u32 = 0;
 
@@ -478,9 +481,10 @@ impl<B: StorageBackend> MigrationSender<B> {
                     self.wait_for_ack(inbound).await?;
                 }
 
+                let length = std::cmp::min(self.block_size, volume_size - offset);
                 let data = self
                     .backend
-                    .read_block(&self.volume_id, &self.handle, offset, self.block_size)
+                    .read_block(&self.volume_id, &self.handle, offset, length)
                     .await
                     .map_err(|e| {
                         tonic::Status::internal(format!(
@@ -829,39 +833,6 @@ mod tests {
             Ok(())
         }
 
-        async fn enable_dirty_tracking(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-            _block_size: u64,
-        ) -> Result<(), ChvError> {
-            Ok(())
-        }
-
-        async fn get_dirty_bitmap(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-        ) -> Result<Vec<u8>, ChvError> {
-            Ok(vec![])
-        }
-
-        async fn clear_dirty_bitmap(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-        ) -> Result<(), ChvError> {
-            Ok(())
-        }
-
-        async fn disable_dirty_tracking(
-            &self,
-            _volume_id: &str,
-            _handle: &str,
-        ) -> Result<(), ChvError> {
-            Ok(())
-        }
-
         async fn read_block(
             &self,
             _volume_id: &str,
@@ -893,10 +864,6 @@ mod tests {
             _format: &str,
         ) -> Result<VolumeExport, ChvError> {
             unimplemented!("not needed for sender tests")
-        }
-
-        async fn delete_volume(&self, _volume_id: &str) -> Result<(), ChvError> {
-            Ok(())
         }
     }
 

@@ -1,10 +1,7 @@
 import { getStoredToken } from '$lib/api/client';
 import {
-	listArchitectures,
-	getArchitecture,
 	createArchitecture,
 	updateArchitecture,
-	archiveArchitecture,
 	validateArchitecture,
 	validateYaml,
 	generateYaml,
@@ -15,8 +12,6 @@ import {
 	discardPlan,
 	StaleVersionError,
 	type Architecture,
-	type ArchitectureSummary,
-	type ArchitectureDetail,
 	type CreateArchitectureRequest,
 	type FleetCheckResult,
 	type PlanResult,
@@ -35,10 +30,10 @@ import { mutateWithRefresh } from './mutation.svelte';
  *      forbids manual `invalidateAll()` / `invalidatePattern()` calls in
  *      page components.
  *
- * Optimistic concurrency (Q3 of the Phase 0 plan): `update` and `archive`
- * forward the caller's `expected_version`. When the BFF returns 409 the
- * underlying client throws {@link StaleVersionError} — we let it propagate so
- * pages can render the StaleVersionBanner and offer a Reload action.
+ * Optimistic concurrency (Q3 of the Phase 0 plan): `update` forwards the
+ * caller's `expected_version`. When the BFF returns 409 the underlying client
+ * throws {@link StaleVersionError} — we let it propagate so pages can render
+ * the StaleVersionBanner and offer a Reload action.
  */
 
 export type {
@@ -79,31 +74,6 @@ export interface ArchitectureEditableFields {
 const REFRESH_PATTERNS = ['architectures:'];
 
 class ArchitectureStore {
-	items = $state<ArchitectureSummary[]>([]);
-	loading = $state(false);
-	error = $state<string | null>(null);
-
-	async list(): Promise<ArchitectureSummary[]> {
-		this.loading = true;
-		this.error = null;
-		try {
-			const token = getStoredToken() ?? undefined;
-			const res = await listArchitectures({}, token);
-			this.items = res.architectures ?? [];
-			return this.items;
-		} catch (err) {
-			this.error = err instanceof Error ? err.message : 'Failed to load architectures';
-			throw err;
-		} finally {
-			this.loading = false;
-		}
-	}
-
-	async get(id: string): Promise<ArchitectureDetail> {
-		const token = getStoredToken() ?? undefined;
-		return getArchitecture({ id }, token);
-	}
-
 	async create(
 		input: CreateArchitectureRequest,
 		opts: MutateOpts<Architecture> = {}
@@ -146,27 +116,6 @@ class ArchitectureStore {
 				detailId: id,
 				successMessage: 'Architecture updated',
 				errorMessage: 'Failed to update architecture',
-				...opts
-			}
-		);
-	}
-
-	async archive(
-		id: string,
-		expectedVersion: number,
-		opts: MutateOpts<Architecture> = {}
-	): Promise<Architecture> {
-		const token = getStoredToken() ?? undefined;
-		return mutateWithRefresh<Architecture>(
-			async () => {
-				const res = await archiveArchitecture({ id, expected_version: expectedVersion }, token);
-				return res.architecture;
-			},
-			{
-				patterns: REFRESH_PATTERNS,
-				detailId: id,
-				successMessage: 'Architecture archived',
-				errorMessage: 'Failed to archive architecture',
 				...opts
 			}
 		);

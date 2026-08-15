@@ -1,4 +1,7 @@
-use crate::r#trait::{BackendHealth, StorageBackend, VolumeExport};
+use crate::r#trait::{
+    validate_write_bounds, BackendHealth, StorageBackend, VolumeExport, DIRTY_TRACKING_BLOCK_SIZE,
+    MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES,
+};
 use async_trait::async_trait;
 use chv_common::types::{BackendLocator, DevicePolicy};
 use chv_errors::ChvError;
@@ -11,6 +14,7 @@ use tracing::{info, warn};
 
 struct DirtyTracker {
     block_size: u64,
+    volume_size: u64,
     bitmap: Vec<u8>,
 }
 
@@ -124,6 +128,9 @@ impl StorageBackend for LVMBackend {
                 reason: format!("handle {} does not match volume_id {}", handle, volume_id),
             });
         }
+        // The handle is gone once closed: drop its dirty tracker so closed
+        // volumes cannot accumulate bitmaps.
+        self.dirty_trackers.write().await.remove(handle);
         info!(volume_id, "closing LVM volume");
         Ok(())
     }
@@ -224,6 +231,16 @@ impl StorageBackend for LVMBackend {
             });
         }
         info!(volume_id, new_size_bytes, "resized LVM volume");
+
+        // Keep dirty tracking consistent with the new size.
+        if let Some(tracker) = self.dirty_trackers.write().await.get_mut(handle) {
+            tracker.volume_size = new_size_bytes;
+            let needed_bytes = new_size_bytes.div_ceil(tracker.block_size).div_ceil(8) as usize;
+            if tracker.bitmap.len() < needed_bytes {
+                tracker.bitmap.resize(needed_bytes, 0);
+            }
+        }
+
         Ok(())
     }
 
@@ -440,93 +457,71 @@ impl StorageBackend for LVMBackend {
 
     // --- Phase 2.3: Migration methods ---
 
+    /// Initialize the dirty bitmap for an opened volume.
     async fn enable_dirty_tracking(
         &self,
-        volume_id: &str,
+        _volume_id: &str,
         handle: &str,
-        block_size: u64,
+        volume_size_bytes: u64,
     ) -> Result<(), ChvError> {
-        if block_size == 0 {
+        if volume_size_bytes > MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES {
             return Err(ChvError::InvalidArgument {
-                field: "block_size".to_string(),
-                reason: "block_size must be > 0".to_string(),
+                field: "volume_size_bytes".to_string(),
+                reason: format!(
+                    "volume size {} exceeds dirty-tracking maximum {} bytes",
+                    volume_size_bytes, MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES
+                ),
             });
         }
-        // Determine volume size via `lvs --nosuffix -o lv_size --units b`.
-        let lv_name = Self::sanitize_id(volume_id)?;
-        let out = Command::new("lvs")
-            .args([
-                "--noheadings",
-                "-o",
-                "lv_size",
-                "--units",
-                "b",
-                "--nosuffix",
-                &format!("{}/{}", self.vg_name, lv_name),
-            ])
-            .output()
-            .await
-            .map_err(|e| ChvError::Io {
-                path: "lvs".to_string(),
-                source: e,
-            })?;
-        if !out.status.success() {
-            return Err(ChvError::BackendUnavailable {
-                backend: "lvm".to_string(),
-                reason: format!("lvs failed: {}", String::from_utf8_lossy(&out.stderr)),
-            });
-        }
-        let size_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let file_len: u64 = size_str.parse().map_err(|_| ChvError::BackendUnavailable {
-            backend: "lvm".to_string(),
-            reason: format!("could not parse lvs output as bytes: '{}'", size_str),
-        })?;
-        let num_blocks = file_len.div_ceil(block_size);
-        let bitmap_bytes = num_blocks.div_ceil(8) as usize;
-        let tracker = DirtyTracker {
-            block_size,
-            bitmap: vec![0u8; bitmap_bytes],
-        };
         let mut map = self.dirty_trackers.write().await;
-        map.insert(handle.to_string(), tracker);
-        info!(
-            volume_id,
-            handle, block_size, bitmap_bytes, "enabled dirty tracking for LVM volume"
-        );
+        match map.get_mut(handle) {
+            Some(tracker) => {
+                // Re-enable heals stale bounds from out-of-band resizes:
+                // update the size and grow the bitmap in place, keeping
+                // the dirty bits.
+                tracker.volume_size = volume_size_bytes;
+                let needed_bytes = volume_size_bytes
+                    .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+                    .div_ceil(8) as usize;
+                if tracker.bitmap.len() < needed_bytes {
+                    tracker.bitmap.resize(needed_bytes, 0);
+                }
+            }
+            None => {
+                let bitmap_bytes = volume_size_bytes
+                    .div_ceil(DIRTY_TRACKING_BLOCK_SIZE)
+                    .div_ceil(8) as usize;
+                map.insert(
+                    handle.to_string(),
+                    DirtyTracker {
+                        block_size: DIRTY_TRACKING_BLOCK_SIZE,
+                        volume_size: volume_size_bytes,
+                        bitmap: vec![0u8; bitmap_bytes],
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
-    async fn get_dirty_bitmap(&self, _volume_id: &str, handle: &str) -> Result<Vec<u8>, ChvError> {
-        let map = self.dirty_trackers.read().await;
-        match map.get(handle) {
-            Some(t) => Ok(t.bitmap.clone()),
-            None => Err(ChvError::NotFound {
-                resource: "dirty_tracker".to_string(),
-                id: handle.to_string(),
-            }),
-        }
-    }
-
-    async fn clear_dirty_bitmap(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
+    /// Atomically snapshot and clear the dirty bitmap under a single write lock.
+    async fn snapshot_and_clear_dirty_bitmap(
+        &self,
+        _volume_id: &str,
+        handle: &str,
+    ) -> Result<Vec<u8>, ChvError> {
         let mut map = self.dirty_trackers.write().await;
         match map.get_mut(handle) {
-            Some(t) => {
-                t.bitmap.iter_mut().for_each(|b| *b = 0);
-                info!(volume_id, handle, "cleared dirty bitmap for LVM volume");
-                Ok(())
+            Some(tracker) => {
+                let snapshot = tracker.bitmap.clone();
+                tracker.bitmap.iter_mut().for_each(|byte| *byte = 0);
+                Ok(snapshot)
             }
             None => Err(ChvError::NotFound {
                 resource: "dirty_tracker".to_string(),
                 id: handle.to_string(),
             }),
         }
-    }
-
-    async fn disable_dirty_tracking(&self, volume_id: &str, handle: &str) -> Result<(), ChvError> {
-        let mut map = self.dirty_trackers.write().await;
-        map.remove(handle);
-        info!(volume_id, handle, "disabled dirty tracking for LVM volume");
-        Ok(())
     }
 
     async fn read_block(
@@ -572,6 +567,24 @@ impl StorageBackend for LVMBackend {
     ) -> Result<(), ChvError> {
         self.validate_handle(handle)?;
         let path = self.volume_path(volume_id)?;
+
+        // When dirty tracking is enabled, reject out-of-range writes up
+        // front; see LocalFileBackend::write_block for rationale.
+        let mark_range = {
+            let map = self.dirty_trackers.read().await;
+            match map.get(handle) {
+                Some(tracker) => {
+                    let end =
+                        validate_write_bounds(offset, data.len() as u64, tracker.volume_size)?;
+                    Some((
+                        offset / tracker.block_size,
+                        end.div_ceil(tracker.block_size),
+                    ))
+                }
+                None => None,
+            }
+        };
+
         let data_owned = data.to_vec();
         tokio::task::spawn_blocking(move || {
             use std::io::{Seek, SeekFrom, Write};
@@ -600,15 +613,12 @@ impl StorageBackend for LVMBackend {
         })??;
 
         // Update dirty bitmap if tracking is enabled for this handle.
-        let mut map = self.dirty_trackers.write().await;
-        if let Some(tracker) = map.get_mut(handle) {
-            let bs = tracker.block_size;
-            let start_block = offset / bs;
-            let end_block = (offset + data.len() as u64).div_ceil(bs);
-            for block in start_block..end_block {
-                let byte_idx = (block / 8) as usize;
-                let bit_idx = (block % 8) as u8;
-                if byte_idx < tracker.bitmap.len() {
+        if let Some((start_block, end_block)) = mark_range {
+            let mut map = self.dirty_trackers.write().await;
+            if let Some(tracker) = map.get_mut(handle) {
+                for block in start_block..end_block {
+                    let byte_idx = (block / 8) as usize;
+                    let bit_idx = (block % 8) as u8;
                     tracker.bitmap[byte_idx] |= 1 << bit_idx;
                 }
             }
@@ -619,11 +629,33 @@ impl StorageBackend for LVMBackend {
 
     async fn volume_size(&self, volume_id: &str, _handle: &str) -> Result<u64, ChvError> {
         let path = self.volume_path(volume_id)?;
-        std::fs::metadata(&path)
-            .map(|m| m.len())
+        // Use blockdev to get the size of the block device; metadata().len()
+        // reports 0 for block device nodes. The dirty tracker is sized from
+        // this value, so a wrong size would corrupt write bounds checking.
+        let path_str = path.to_string_lossy().to_string();
+        let out = Command::new("blockdev")
+            .args(["--getsize64", &path_str])
+            .output()
+            .await
             .map_err(|e| ChvError::Io {
-                path: path.display().to_string(),
+                path: "blockdev".to_string(),
                 source: e,
+            })?;
+        if !out.status.success() {
+            return Err(ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!(
+                    "blockdev --getsize64 failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+            });
+        }
+        let size_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        size_str
+            .parse::<u64>()
+            .map_err(|_| ChvError::BackendUnavailable {
+                backend: "lvm".to_string(),
+                reason: format!("could not parse blockdev output as bytes: '{}'", size_str),
             })
     }
 
@@ -668,105 +700,6 @@ impl StorageBackend for LVMBackend {
             export_path: path.to_string_lossy().to_string(),
             attachment_handle: self.expected_handle(volume_id),
         })
-    }
-
-    async fn delete_volume(&self, volume_id: &str) -> Result<(), ChvError> {
-        Self::sanitize_id(volume_id)?;
-
-        // Remove any snapshot and clone LVs that belong to this volume before
-        // removing the origin LV.  LVM will refuse to remove an origin that
-        // still has dependent snapshots, so we iterate over all LVs in the VG
-        // and remove those whose names start with `{volume_id}-snap-` or
-        // `{volume_id}-clone-`.  Failures are logged as warnings rather than
-        // aborting: the primary volume removal attempt that follows will still
-        // fail with a clear error if any dependent LV could not be removed.
-        let prefixes = [
-            format!("{}-snap-", volume_id),
-            format!("{}-clone-", volume_id),
-        ];
-        let list_out = Command::new("lvs")
-            .args([
-                "--noheadings",
-                "-o",
-                "lv_name",
-                "--select",
-                &format!("vg_name={}", self.vg_name),
-            ])
-            .output()
-            .await;
-        if let Ok(out) = list_out {
-            if !out.status.success() {
-                warn!(
-                    volume_id,
-                    stderr = %String::from_utf8_lossy(&out.stderr),
-                    "lvs command failed; snapshot inventory may be incomplete"
-                );
-                return Ok(());
-            }
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for lv_name in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
-                if !lv_name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
-                {
-                    warn!(
-                        volume_id,
-                        lv = lv_name,
-                        "skipping lv with unexpected characters in name"
-                    );
-                    continue;
-                }
-                if prefixes.iter().any(|p| lv_name.starts_with(p.as_str())) {
-                    let lv_path = format!("{}/{}", self.vg_name, lv_name);
-                    match Command::new("lvremove")
-                        .args(["-y", &lv_path])
-                        .output()
-                        .await
-                    {
-                        Ok(r) if r.status.success() => {
-                            info!(
-                                volume_id,
-                                lv = lv_name,
-                                "removed dependent LVM snapshot/clone LV"
-                            );
-                        }
-                        Ok(r) => {
-                            warn!(
-                                volume_id,
-                                lv = lv_name,
-                                stderr = %String::from_utf8_lossy(&r.stderr),
-                                "failed to remove dependent LVM snapshot/clone LV; continuing"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                volume_id,
-                                lv = lv_name,
-                                error = %e,
-                                "I/O error removing dependent LVM snapshot/clone LV; continuing"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let out = Command::new("lvremove")
-            .args(["-y", &format!("{}/{}", self.vg_name, volume_id)])
-            .output()
-            .await
-            .map_err(|e| ChvError::Io {
-                path: "lvremove".to_string(),
-                source: e,
-            })?;
-        if !out.status.success() {
-            return Err(ChvError::BackendUnavailable {
-                backend: "lvm".to_string(),
-                reason: format!("lvremove failed: {}", String::from_utf8_lossy(&out.stderr)),
-            });
-        }
-        info!(volume_id, "deleted LVM volume");
-        Ok(())
     }
 }
 
@@ -923,6 +856,71 @@ mod tests {
         // passing u64::MAX.  The size_mb calculation should not panic.
         // Since the volume path won't exist, it returns NotFound before lvresize.
         let res = backend.resize("vol-1", "lvm-vg0-vol-1", u64::MAX).await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    // --- Dirty tracking tests (in-memory; no LVM infrastructure needed) ---
+
+    #[tokio::test]
+    async fn dirty_tracking_not_found_before_enable() {
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let res = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", "lvm-vg0-vol-1")
+            .await;
+        assert!(matches!(res, Err(ChvError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_enable_then_snapshot_round_trip() {
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let handle = "lvm-vg0-vol-1";
+
+        backend
+            .enable_dirty_tracking("vol-1", handle, 8_388_608)
+            .await
+            .unwrap();
+
+        // Freshly enabled volume returns an empty bitmap, not NotFound.
+        let bitmap = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", handle)
+            .await
+            .unwrap();
+        assert_eq!(bitmap, vec![0]);
+
+        let after = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", handle)
+            .await
+            .unwrap();
+        assert_eq!(after, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn dirty_tracking_rejects_oversized_volume() {
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let res = backend
+            .enable_dirty_tracking(
+                "vol-1",
+                "lvm-vg0-vol-1",
+                MAX_DIRTY_TRACKING_VOLUME_SIZE_BYTES + 1,
+            )
+            .await;
+        assert!(matches!(res, Err(ChvError::InvalidArgument { .. })));
+    }
+
+    #[tokio::test]
+    async fn close_evicts_dirty_tracker() {
+        let backend = LVMBackend::new("vg0".to_string()).unwrap();
+        let handle = "lvm-vg0-vol-1";
+        backend
+            .enable_dirty_tracking("vol-1", handle, 8_388_608)
+            .await
+            .unwrap();
+
+        backend.close("vol-1", handle).await.unwrap();
+
+        let res = backend
+            .snapshot_and_clear_dirty_bitmap("vol-1", handle)
+            .await;
         assert!(matches!(res, Err(ChvError::NotFound { .. })));
     }
 

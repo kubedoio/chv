@@ -1176,11 +1176,11 @@ async fn test_lifecycle_invalid_node_id() {
         meta: Some(proto::RequestMeta {
             operation_id: "op-drain".into(),
             requested_by: "test".into(),
-            target_node_id: "non-existent-node".into(),
+            target_node_id: "missing-node".into(),
             desired_state_version: "1".into(),
             request_unix_ms: 1000,
         }),
-        node_id: "non-existent-node".into(),
+        node_id: "missing-node".into(),
         allow_workload_stop: false,
     };
 
@@ -2238,13 +2238,13 @@ async fn test_pause_node_scheduling_preserves_existing_desired_state() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     sqlx::query(
-        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-pause-preserve', 'host', 'host')",
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('pause-preserve', 'host', 'host')",
     )
     .execute(&pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused, allow_workload_stop) VALUES ('node-pause-preserve', 1, 'Draining', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), false, true)",
+        "INSERT INTO node_desired_state (node_id, desired_generation, desired_state, requested_at, updated_at, scheduling_paused, allow_workload_stop) VALUES ('pause-preserve', 1, 'Draining', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), false, true)",
     )
     .execute(&pool)
     .await
@@ -2261,11 +2261,11 @@ async fn test_pause_node_scheduling_preserves_existing_desired_state() {
         meta: Some(proto::RequestMeta {
             operation_id: "".into(),
             requested_by: "test".into(),
-            target_node_id: "node-pause-preserve".into(),
+            target_node_id: "pause-preserve".into(),
             desired_state_version: "2".into(),
             request_unix_ms: 1000,
         }),
-        node_id: "node-pause-preserve".into(),
+        node_id: "pause-preserve".into(),
     };
 
     service.pause_node_scheduling(req).await.unwrap();
@@ -2273,7 +2273,7 @@ async fn test_pause_node_scheduling_preserves_existing_desired_state() {
     let row = sqlx::query(
         "SELECT desired_state, scheduling_paused, allow_workload_stop FROM node_desired_state WHERE node_id = ?",
     )
-    .bind("node-pause-preserve")
+    .bind("pause-preserve")
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -2331,7 +2331,7 @@ async fn test_pause_node_scheduling_rejects_missing_desired_state() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     sqlx::query(
-        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-pause-missing', 'host', 'host')",
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('pause-missing', 'host', 'host')",
     )
     .execute(&pool)
     .await
@@ -2348,11 +2348,11 @@ async fn test_pause_node_scheduling_rejects_missing_desired_state() {
         meta: Some(proto::RequestMeta {
             operation_id: "op-pause-missing".into(),
             requested_by: "test".into(),
-            target_node_id: "node-pause-missing".into(),
+            target_node_id: "pause-missing".into(),
             desired_state_version: "1".into(),
             request_unix_ms: 1000,
         }),
-        node_id: "node-pause-missing".into(),
+        node_id: "pause-missing".into(),
     };
 
     let result = service.pause_node_scheduling(req).await;
@@ -2368,7 +2368,7 @@ async fn test_pause_node_scheduling_rejects_missing_desired_state() {
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM node_desired_state WHERE node_id = ?")
-            .bind("node-pause-missing")
+            .bind("pause-missing")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2380,7 +2380,7 @@ async fn test_resume_node_scheduling_rejects_missing_desired_state() {
     let test_db = chv_controlplane_store::test_util::TestDb::new().await;
     let pool = test_db.pool.clone();
     sqlx::query(
-        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('node-resume-missing', 'host', 'host')",
+        "INSERT INTO nodes (node_id, hostname, display_name) VALUES ('resume-missing', 'host', 'host')",
     )
     .execute(&pool)
     .await
@@ -2397,11 +2397,11 @@ async fn test_resume_node_scheduling_rejects_missing_desired_state() {
         meta: Some(proto::RequestMeta {
             operation_id: "op-resume-missing".into(),
             requested_by: "test".into(),
-            target_node_id: "node-resume-missing".into(),
+            target_node_id: "resume-missing".into(),
             desired_state_version: "1".into(),
             request_unix_ms: 1000,
         }),
-        node_id: "node-resume-missing".into(),
+        node_id: "resume-missing".into(),
     };
 
     let result = service.resume_node_scheduling(req).await;
@@ -2417,7 +2417,7 @@ async fn test_resume_node_scheduling_rejects_missing_desired_state() {
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM node_desired_state WHERE node_id = ?")
-            .bind("node-resume-missing")
+            .bind("resume-missing")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2711,7 +2711,7 @@ async fn test_start_vm_fails_operation_when_vm_missing() {
             request_unix_ms: 1000,
         }),
         node_id: "node-op-fail".into(),
-        vm_id: "vm-missing-for-op".into(),
+        vm_id: "vm-missing-op".into(),
     };
 
     let result = service.start_vm(req).await;
@@ -3051,4 +3051,39 @@ async fn test_post_merge_validation_rejects_iommu_without_memory_shared() {
             other
         ),
     }
+}
+
+#[tokio::test]
+async fn test_logout_clears_session_cookie() {
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    let test_db = chv_controlplane_store::test_util::TestDb::new().await;
+    let app = crate::api::router::admin_router(
+        test_app_state(test_db.pool.clone()),
+        crate::convergence_metrics::new_shared(),
+    );
+
+    // Logout must terminate the cookie session: clear chv_session with
+    // Max-Age=0 and the same attributes the login path sets.
+    let response = app
+        .oneshot(
+            axum::http::Request::post("/api/v1/auth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .expect("logout must clear the session cookie");
+    assert!(set_cookie.starts_with("chv_session=;"), "got: {set_cookie}");
+    assert!(set_cookie.contains("Max-Age=0"), "got: {set_cookie}");
+    assert!(set_cookie.contains("Path=/"), "got: {set_cookie}");
+    assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
+    assert!(set_cookie.contains("SameSite=Strict"), "got: {set_cookie}");
 }

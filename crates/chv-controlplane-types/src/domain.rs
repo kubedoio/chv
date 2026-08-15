@@ -5,6 +5,9 @@ use std::time::SystemTime;
 
 macro_rules! string_id_newtype {
     ($name:ident, $field_name:literal) => {
+        string_id_newtype!($name, $field_name, max_bytes = usize::MAX);
+    };
+    ($name:ident, $field_name:literal, max_bytes = $max_bytes:expr) => {
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
         pub struct $name(String);
 
@@ -14,6 +17,9 @@ macro_rules! string_id_newtype {
                 let trimmed = value.trim();
                 if trimmed.is_empty() {
                     return Err(IdentifierError::empty($field_name));
+                }
+                if trimmed.as_bytes().len() > $max_bytes {
+                    return Err(IdentifierError::too_long($field_name, $max_bytes));
                 }
                 Ok(Self(trimmed.to_string()))
             }
@@ -54,17 +60,31 @@ macro_rules! string_id_newtype {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentifierError {
     field: &'static str,
+    max_bytes: Option<usize>,
 }
 
 impl IdentifierError {
     pub fn empty(field: &'static str) -> Self {
-        Self { field }
+        Self {
+            field,
+            max_bytes: None,
+        }
+    }
+
+    pub fn too_long(field: &'static str, max_bytes: usize) -> Self {
+        Self {
+            field,
+            max_bytes: Some(max_bytes),
+        }
     }
 }
 
 impl fmt::Display for IdentifierError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} cannot be empty", self.field)
+        match self.max_bytes {
+            Some(max) => write!(f, "{} must not exceed {} bytes", self.field, max),
+            None => write!(f, "{} cannot be empty", self.field),
+        }
     }
 }
 
@@ -73,7 +93,10 @@ impl Error for IdentifierError {}
 string_id_newtype!(ActorId, "actor_id");
 string_id_newtype!(NodeId, "node_id");
 string_id_newtype!(OperationId, "operation_id");
-string_id_newtype!(ResourceId, "resource_id");
+// Resource ids feed into fixed-size structures such as the 16-byte BPF
+// vm_key in chv-nwd-core, so ids are capped at 16 bytes: a longer id would
+// have to be truncated there and could collide with another resource's id.
+string_id_newtype!(ResourceId, "resource_id", max_bytes = 16);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Generation(u64);
@@ -573,6 +596,17 @@ mod tests {
         let kind = ResourceKind::from_str("vm").unwrap();
         assert_eq!(kind, ResourceKind::Vm);
         assert_eq!(kind.to_string(), "vm");
+    }
+
+    #[test]
+    fn resource_id_caps_length_at_sixteen_bytes() {
+        // Exactly 16 bytes fits the BPF vm_key and is accepted.
+        assert!(ResourceId::new("vm-1234567890123").is_ok());
+        // 17 bytes must be rejected, not silently truncated.
+        assert!(ResourceId::new("vm-12345678901234").is_err());
+        // Trimming still applies before the length check.
+        assert!(ResourceId::new("  vm-1234567890123  ").is_ok());
+        assert!(ResourceId::new("  vm-12345678901234 ").is_err());
     }
 
     #[test]

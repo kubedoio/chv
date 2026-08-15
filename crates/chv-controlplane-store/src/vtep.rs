@@ -17,15 +17,6 @@ pub struct VtepEntry {
     pub updated_at: String,
 }
 
-/// A VNI allocation entry.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct VniAllocation {
-    pub vni: i32,
-    pub network_id: String,
-    pub allocated_at: String,
-    pub released_at: Option<String>,
-}
-
 impl VtepRepository {
     pub fn new(pool: StorePool) -> Self {
         Self { pool }

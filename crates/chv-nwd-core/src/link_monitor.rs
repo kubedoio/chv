@@ -7,7 +7,6 @@
 //! This is NOT a full BFD (Bidirectional Forwarding Detection) implementation,
 //! but provides the essential link health visibility needed for M1.
 
-use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{debug, warn};
@@ -59,15 +58,6 @@ impl LinkMonitor {
     pub fn new() -> Self {
         Self {
             sysfs_base: "/sys/class/net".to_string(),
-            state: HashMap::new(),
-        }
-    }
-
-    /// Create a monitor with a custom sysfs base path (for testing).
-    #[cfg(test)]
-    pub fn with_sysfs_base(sysfs_base: String) -> Self {
-        Self {
-            sysfs_base,
             state: HashMap::new(),
         }
     }
@@ -140,45 +130,12 @@ impl LinkMonitor {
             .map(|iface| self.check_link(iface))
             .collect()
     }
-
-    /// Get the current flap count for an interface without re-reading state.
-    pub fn flap_count(&self, iface: &str) -> u64 {
-        self.state.get(iface).map(|s| s.flap_count).unwrap_or(0)
-    }
-
-    /// Reset flap counters for all interfaces.
-    pub fn reset_flap_counts(&mut self) {
-        for state in self.state.values_mut() {
-            state.flap_count = 0;
-            state.last_flap_time = None;
-        }
-    }
 }
 
 impl Default for LinkMonitor {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Async convenience function
-// ---------------------------------------------------------------------------
-
-/// Check all interfaces asynchronously, performing sysfs reads in a blocking
-/// task to avoid stalling the async runtime.
-pub async fn check_all_links(interfaces: &[String]) -> Result<Vec<LinkHealthSnapshot>, ChvError> {
-    let interfaces = interfaces.to_vec();
-    let snapshots = tokio::task::spawn_blocking(move || {
-        let mut monitor = LinkMonitor::new();
-        monitor.check_all(&interfaces)
-    })
-    .await
-    .map_err(|e| ChvError::Internal {
-        reason: format!("link monitor task panicked: {}", e),
-    })?;
-
-    Ok(snapshots)
 }
 
 /// Run a periodic link health check loop, reporting results via the provided
@@ -228,7 +185,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         setup_fake_sysfs(tmp.path(), "eth0", "up\n", "1\n");
 
-        let mut monitor = LinkMonitor::with_sysfs_base(tmp.path().to_string_lossy().to_string());
+        let mut monitor = LinkMonitor {
+            sysfs_base: tmp.path().to_string_lossy().to_string(),
+            state: HashMap::new(),
+        };
         let snap = monitor.check_link("eth0");
 
         assert!(snap.is_up);
@@ -242,7 +202,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         setup_fake_sysfs(tmp.path(), "eth0", "down\n", "0\n");
 
-        let mut monitor = LinkMonitor::with_sysfs_base(tmp.path().to_string_lossy().to_string());
+        let mut monitor = LinkMonitor {
+            sysfs_base: tmp.path().to_string_lossy().to_string(),
+            state: HashMap::new(),
+        };
         let snap = monitor.check_link("eth0");
 
         assert!(!snap.is_up);
@@ -260,7 +223,10 @@ mod tests {
         fs::write(iface_dir.join("operstate"), "up\n").unwrap();
         fs::write(iface_dir.join("carrier"), "1\n").unwrap();
 
-        let mut monitor = LinkMonitor::with_sysfs_base(tmp.path().to_string_lossy().to_string());
+        let mut monitor = LinkMonitor {
+            sysfs_base: tmp.path().to_string_lossy().to_string(),
+            state: HashMap::new(),
+        };
         let snap = monitor.check_link("eth0");
         assert!(snap.is_up);
         assert_eq!(snap.flap_count, 0);
@@ -281,7 +247,10 @@ mod tests {
         let iface_dir = tmp.path().join("eth0");
         fs::create_dir_all(&iface_dir).unwrap();
 
-        let mut monitor = LinkMonitor::with_sysfs_base(tmp.path().to_string_lossy().to_string());
+        let mut monitor = LinkMonitor {
+            sysfs_base: tmp.path().to_string_lossy().to_string(),
+            state: HashMap::new(),
+        };
 
         // up -> down -> up -> down = 2 flaps
         fs::write(iface_dir.join("operstate"), "up\n").unwrap();
@@ -309,7 +278,10 @@ mod tests {
         setup_fake_sysfs(tmp.path(), "eth0", "up\n", "1\n");
         setup_fake_sysfs(tmp.path(), "br0", "down\n", "0\n");
 
-        let mut monitor = LinkMonitor::with_sysfs_base(tmp.path().to_string_lossy().to_string());
+        let mut monitor = LinkMonitor {
+            sysfs_base: tmp.path().to_string_lossy().to_string(),
+            state: HashMap::new(),
+        };
         let ifaces = vec!["eth0".to_string(), "br0".to_string()];
         let snaps = monitor.check_all(&ifaces);
 
@@ -321,42 +293,14 @@ mod tests {
     #[test]
     fn missing_interface_returns_down() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut monitor = LinkMonitor::with_sysfs_base(tmp.path().to_string_lossy().to_string());
+        let mut monitor = LinkMonitor {
+            sysfs_base: tmp.path().to_string_lossy().to_string(),
+            state: HashMap::new(),
+        };
         let snap = monitor.check_link("nonexistent0");
 
         assert!(!snap.is_up);
         assert!(!snap.carrier);
         assert_eq!(snap.flap_count, 0);
-    }
-
-    #[test]
-    fn reset_flap_counts_works() {
-        let tmp = tempfile::tempdir().unwrap();
-        let iface_dir = tmp.path().join("eth0");
-        fs::create_dir_all(&iface_dir).unwrap();
-
-        let mut monitor = LinkMonitor::with_sysfs_base(tmp.path().to_string_lossy().to_string());
-
-        // Cause a flap
-        fs::write(iface_dir.join("operstate"), "up\n").unwrap();
-        fs::write(iface_dir.join("carrier"), "1\n").unwrap();
-        monitor.check_link("eth0");
-
-        fs::write(iface_dir.join("operstate"), "down\n").unwrap();
-        fs::write(iface_dir.join("carrier"), "0\n").unwrap();
-        monitor.check_link("eth0");
-
-        assert_eq!(monitor.flap_count("eth0"), 1);
-
-        monitor.reset_flap_counts();
-        assert_eq!(monitor.flap_count("eth0"), 0);
-    }
-
-    #[tokio::test]
-    async fn check_all_links_async_works() {
-        // This will likely return empty/down results since we're not on a real
-        // Linux box with those interfaces, but it shouldn't panic.
-        let result = check_all_links(&["lo".to_string()]).await;
-        assert!(result.is_ok());
     }
 }

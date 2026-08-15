@@ -15,7 +15,6 @@ pub struct NetworkServiceImpl<E: NetworkExecutor> {
     executor: Arc<E>,
     topologies: Arc<TopologyTable>,
     metrics: Arc<Metrics>,
-    store: Option<Arc<std::sync::Mutex<crate::store::TopologyStore>>>,
     security_policies: Arc<DashMap<String, proto::SecurityPolicy>>,
     rate_limit_policies: Arc<DashMap<String, proto::RateLimitPolicy>>,
     ebpf: Arc<dyn EbpfManager>,
@@ -29,7 +28,6 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             executor,
             topologies,
             metrics,
-            store: None,
             security_policies: Arc::new(DashMap::new()),
             rate_limit_policies: Arc::new(DashMap::new()),
             ebpf: Arc::new(ebpf::NoopEbpfManager),
@@ -37,59 +35,8 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
         }
     }
 
-    pub fn with_ebpf(mut self, ebpf: Arc<dyn EbpfManager>) -> Self {
-        self.ebpf = ebpf;
-        self
-    }
-
     pub fn topologies(&self) -> Arc<TopologyTable> {
         self.topologies.clone()
-    }
-
-    pub fn set_store(&mut self, store: crate::store::TopologyStore) {
-        self.store = Some(Arc::new(std::sync::Mutex::new(store)));
-    }
-
-    async fn persist_upsert(&self, state: &TopologyState) {
-        if let Some(store) = &self.store {
-            let store = store.clone();
-            let state = state.clone();
-            match tokio::task::spawn_blocking(move || {
-                let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                store.upsert(&state)
-            })
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "failed to persist topology state to SQLite");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to join persist topology task");
-                }
-            }
-        }
-    }
-
-    async fn persist_remove(&self, network_id: &str) {
-        if let Some(store) = &self.store {
-            let store = store.clone();
-            let network_id = network_id.to_string();
-            match tokio::task::spawn_blocking(move || {
-                let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                store.remove(&network_id)
-            })
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "failed to remove topology state from SQLite");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to join remove topology task");
-                }
-            }
-        }
     }
 
     fn ok_result() -> proto::Result {
@@ -195,7 +142,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     peer_vteps,
                 };
                 self.topologies.upsert(state.clone());
-                self.persist_upsert(&state).await;
                 Ok(Response::new(Self::ok_result()))
             }
             Err(e) => Ok(Response::new(Self::err_result(&e))),
@@ -220,7 +166,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                 return Ok(Response::new(Self::err_result(&e)));
             }
             self.topologies.remove(&req.network_id);
-            self.persist_remove(&req.network_id).await;
         }
 
         Ok(Response::new(Self::ok_result()))
@@ -338,7 +283,8 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         {
             Ok((namespace_handle, tap_handle)) => {
                 // Auto-load eBPF programs on the new tap interface — MANDATORY for tenant isolation
-                let bridge_name = format!("br-{}", &nic.network_id[..nic.network_id.len().min(8)]);
+                let bridge_name =
+                    format!("br-{}", nic.network_id.chars().take(8).collect::<String>());
                 if let Err(e) = self.ebpf.load_policy_program(&tap_handle).await {
                     tracing::error!(tap = %tap_handle, error = %e, "eBPF policy load failed — refusing NIC attach (default-deny)");
                     self.ebpf_load_failures.fetch_add(1, Ordering::Relaxed);
@@ -747,7 +693,6 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             ..state.clone()
         };
         self.topologies.upsert(updated_state.clone());
-        self.persist_upsert(&updated_state).await;
 
         info!(
             network_id = %req.network_id,
@@ -821,8 +766,16 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             0u8
         };
 
-        // Convert proto rules to eBPF rules
-        let ebpf_rules = ebpf::proto_to_ebpf_rules(&vm_id, &policy);
+        // Convert proto rules to eBPF rules; an overlong vm_id is rejected
+        // rather than silently truncated into a colliding map key.
+        let ebpf_rules = match ebpf::proto_to_ebpf_rules(&vm_id, &policy) {
+            Ok(rules) => rules,
+            Err(e) => {
+                return Ok(Response::new(proto::UpdateSecurityPolicyResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        };
 
         info!(
             vm_id = %policy.vm_id,
@@ -855,7 +808,14 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         let policy = request.into_inner();
 
         let vm_id = policy.vm_id.clone();
-        let ebpf_rl = ebpf::proto_to_ebpf_rate_limit(&policy);
+        let ebpf_rl = match ebpf::proto_to_ebpf_rate_limit(&policy) {
+            Ok(rl) => rl,
+            Err(e) => {
+                return Ok(Response::new(proto::UpdateRateLimitResponse {
+                    result: Some(Self::err_result(&e)),
+                }));
+            }
+        };
 
         info!(
             vm_id = %policy.vm_id,

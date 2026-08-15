@@ -10,6 +10,11 @@ use crate::BffError;
 use chv_common::hypervisor::HypervisorOverrides;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+/// Sanity ceilings for user-supplied sizes (see S2 overflow hardening):
+/// memory ≤ 1 TiB, volume size ≤ 64 TiB.
+const MAX_MEMORY_BYTES: i64 = 1024 * 1024 * 1024 * 1024;
+const MAX_VOLUME_SIZE_GB: i64 = 64 * 1024;
+
 pub async fn list_vms(
     crate::auth::BearerToken(_claims): crate::auth::BearerToken,
     State(state): State<AppState>,
@@ -305,6 +310,14 @@ pub async fn create_vm(
         .ok_or_else(|| BffError::BadRequest("missing name/display_name".into()))?
         .to_string();
 
+    // Reject names that could traverse or pollute filesystem paths; the
+    // name is stored in vms.display_name and interpolated into volume names.
+    if !is_valid_display_name(&display_name) {
+        return Err(BffError::BadRequest(
+            "display_name must match ^[A-Za-z0-9 ._-]{1,64}$".into(),
+        ));
+    }
+
     tracing::info!(%display_name, "create_vm: parsed display_name");
 
     let node_id = if let Some(nid) = payload.get("node_id").and_then(|v| v.as_str()) {
@@ -331,10 +344,18 @@ pub async fn create_vm(
     let memory_bytes = if let Some(bytes) = payload.get("memory_bytes").and_then(|v| v.as_i64()) {
         bytes
     } else if let Some(mb) = payload.get("memory_mb").and_then(|v| v.as_i64()) {
-        mb * 1024 * 1024
+        // checked_mul: an oversized memory_mb wrapped to a negative/absurd
+        // value in release builds, corrupting stored state and bypassing quota.
+        mb.checked_mul(1024 * 1024)
+            .ok_or_else(|| BffError::BadRequest("memory_mb too large".into()))?
     } else {
         2 * 1024 * 1024 * 1024
     };
+    if memory_bytes <= 0 || memory_bytes > MAX_MEMORY_BYTES {
+        return Err(BffError::BadRequest(
+            "memory must be between 1 byte and 1 TiB".into(),
+        ));
+    }
 
     let mut image_ref = payload
         .get("image_ref")
@@ -379,13 +400,21 @@ pub async fn create_vm(
         .unwrap_or("default")
         .to_string();
 
-    let volume_size_bytes = payload
+    let volume_size_gb = payload
         .get("volume_size_gb")
         .and_then(|v| v.as_i64())
-        .unwrap_or(10)
-        * 1024
-        * 1024
-        * 1024;
+        .unwrap_or(10);
+    if volume_size_gb <= 0 || volume_size_gb > MAX_VOLUME_SIZE_GB {
+        return Err(BffError::BadRequest(format!(
+            "volume_size_gb must be between 1 and {} (64 TiB)",
+            MAX_VOLUME_SIZE_GB
+        )));
+    }
+    // checked_mul: a huge volume_size_gb wrapped to a negative value in
+    // release builds, corrupting capacity_bytes and bypassing quota.
+    let volume_size_bytes = volume_size_gb
+        .checked_mul(1024 * 1024 * 1024)
+        .ok_or_else(|| BffError::BadRequest("volume_size_gb too large".into()))?;
 
     let cloud_init_userdata = payload
         .get("cloud_init_userdata")
@@ -756,7 +785,9 @@ pub async fn resize_vm(
     let memory_bytes = if let Some(bytes) = payload.get("memory_bytes").and_then(|v| v.as_i64()) {
         bytes
     } else if let Some(mb) = payload.get("memory_mb").and_then(|v| v.as_i64()) {
-        mb * 1024 * 1024
+        // Same overflow guard as create_vm (S2 hardening).
+        mb.checked_mul(1024 * 1024)
+            .ok_or_else(|| BffError::BadRequest("memory_mb too large".into()))?
     } else {
         0
     };
@@ -764,8 +795,10 @@ pub async fn resize_vm(
     if cpu_count <= 0 {
         return Err(BffError::BadRequest("cpu_count must be > 0".into()));
     }
-    if memory_bytes <= 0 {
-        return Err(BffError::BadRequest("memory must be > 0".into()));
+    if memory_bytes <= 0 || memory_bytes > MAX_MEMORY_BYTES {
+        return Err(BffError::BadRequest(
+            "memory must be between 1 byte and 1 TiB".into(),
+        ));
     }
 
     let exists = sqlx::query_scalar::<_, String>("SELECT vm_id FROM vms WHERE vm_id = ?")
@@ -1170,6 +1203,17 @@ struct VmNicRow {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Validate a user-supplied VM display name against the safe charset used by
+/// the UI: 1-64 chars of `[A-Za-z0-9 ._-]`. Rejects path separators and
+/// traversal sequences so names can never escape into filesystem paths.
+pub(crate) fn is_valid_display_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'.' | b'_' | b'-'))
+}
 
 /// Check if creating a VM would exceed the user's quota.
 /// Returns Ok(()) if allowed, Err(BffError) if quota would be exceeded.

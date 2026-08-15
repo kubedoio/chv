@@ -1,25 +1,15 @@
-pub mod cert_watcher;
-
 use rand::RngExt;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Multi-node configuration: Overlay, eBPF, and Migration
+// Multi-node configuration: Overlay and eBPF
 // ---------------------------------------------------------------------------
 
 /// VXLAN overlay network configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OverlayConfig {
-    /// UDP port used for VXLAN encapsulation.
-    #[serde(default = "default_vxlan_port")]
-    pub vxlan_port: u16,
-
-    /// Interface used as the VTEP endpoint. "auto" selects the default route interface.
-    #[serde(default = "default_vtep_interface")]
-    pub vtep_interface: String,
-
     /// Disable MAC learning on VXLAN interfaces (use explicit FDB entries only).
     #[serde(default = "default_nolearning")]
     pub nolearning: bool,
@@ -36,8 +26,6 @@ pub struct OverlayConfig {
 impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
-            vxlan_port: default_vxlan_port(),
-            vtep_interface: default_vtep_interface(),
             nolearning: default_nolearning(),
             arp_suppress: false,
             inner_mtu: default_inner_mtu(),
@@ -45,12 +33,6 @@ impl Default for OverlayConfig {
     }
 }
 
-fn default_vxlan_port() -> u16 {
-    4789
-}
-fn default_vtep_interface() -> String {
-    "auto".to_string()
-}
 fn default_nolearning() -> bool {
     true
 }
@@ -68,10 +50,6 @@ pub struct EbpfConfig {
     /// Default action when no rule matches: "deny" or "allow".
     #[serde(default = "default_ebpf_action")]
     pub default_action: String,
-
-    /// Interval in seconds between eBPF stats collection cycles.
-    #[serde(default = "default_ebpf_stats_interval_secs")]
-    pub stats_interval_secs: u64,
 }
 
 impl Default for EbpfConfig {
@@ -79,7 +57,6 @@ impl Default for EbpfConfig {
         Self {
             program_path: default_ebpf_program_path(),
             default_action: default_ebpf_action(),
-            stats_interval_secs: default_ebpf_stats_interval_secs(),
         }
     }
 }
@@ -89,61 +66,6 @@ fn default_ebpf_program_path() -> PathBuf {
 }
 fn default_ebpf_action() -> String {
     "deny".to_string()
-}
-fn default_ebpf_stats_interval_secs() -> u64 {
-    10
-}
-
-/// Live migration tuning parameters.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MigrationTuningConfig {
-    /// Dirty block threshold below which convergence is considered achieved.
-    #[serde(default = "default_dirty_threshold_blocks")]
-    pub dirty_threshold_blocks: u32,
-
-    /// Maximum number of convergence rounds before aborting.
-    #[serde(default = "default_max_convergence_rounds")]
-    pub max_convergence_rounds: u32,
-
-    /// Block size in bytes for disk copy operations.
-    #[serde(default = "default_block_size_bytes")]
-    pub block_size_bytes: u32,
-
-    /// Port range used for memory migration data transfer (e.g. "49152-49200").
-    #[serde(default = "default_memory_migration_port_range")]
-    pub memory_migration_port_range: String,
-
-    /// Multiplier applied to calculated timeouts for total migration budget.
-    #[serde(default = "default_total_timeout_multiplier")]
-    pub total_timeout_multiplier: f64,
-}
-
-impl Default for MigrationTuningConfig {
-    fn default() -> Self {
-        Self {
-            dirty_threshold_blocks: default_dirty_threshold_blocks(),
-            max_convergence_rounds: default_max_convergence_rounds(),
-            block_size_bytes: default_block_size_bytes(),
-            memory_migration_port_range: default_memory_migration_port_range(),
-            total_timeout_multiplier: default_total_timeout_multiplier(),
-        }
-    }
-}
-
-fn default_dirty_threshold_blocks() -> u32 {
-    1024
-}
-fn default_max_convergence_rounds() -> u32 {
-    10
-}
-fn default_block_size_bytes() -> u32 {
-    4_194_304
-}
-fn default_memory_migration_port_range() -> String {
-    "49152-49200".to_string()
-}
-fn default_total_timeout_multiplier() -> f64 {
-    1.5
 }
 
 fn generate_secure_secret() -> String {
@@ -506,9 +428,6 @@ pub struct ControlPlaneConfig {
     /// VXLAN overlay network defaults for cluster-wide behavior.
     #[serde(default)]
     pub overlay: OverlayConfig,
-    /// Live migration tuning parameters.
-    #[serde(default)]
-    pub migration: MigrationTuningConfig,
 }
 
 fn default_jwt_secret() -> String {
@@ -568,7 +487,6 @@ impl Default for ControlPlaneConfig {
             kernel_path: default_kernel_path(),
             firmware_path: default_firmware_path(),
             overlay: OverlayConfig::default(),
-            migration: MigrationTuningConfig::default(),
         }
     }
 }

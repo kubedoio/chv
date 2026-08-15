@@ -103,15 +103,46 @@ impl PlanRepository {
         row_to_plan(&row)
     }
 
-    pub async fn get(&self, id: &ArchitecturePlanId) -> Result<ArchitecturePlan, StoreError> {
-        let row = sqlx::query(r#"SELECT * FROM architecture_plans WHERE id = $1"#)
-            .bind(id.as_str())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: ENTITY,
-                id: id.to_string(),
-            })?;
+    /// Fetch a plan by id, optionally scoped to a caller.
+    ///
+    /// Plans carry no owner column of their own; they inherit ownership
+    /// from their `architecture_topologies` row. `visible_to_user =
+    /// Some(uid)` therefore joins through `architecture_id` and applies the
+    /// same predicate as the topology list filter:
+    /// `(t.owner_user_id = uid OR t.owner_user_id IS NULL)`. A plan whose
+    /// architecture belongs to a *different* user is reported as
+    /// [`StoreError::NotFound`]; the BFF disambiguates that into 403.
+    /// `None` lifts the predicate (admin / internal callers).
+    pub async fn get(
+        &self,
+        id: &ArchitecturePlanId,
+        visible_to_user: Option<&str>,
+    ) -> Result<ArchitecturePlan, StoreError> {
+        let row = match visible_to_user {
+            None => {
+                sqlx::query(r#"SELECT * FROM architecture_plans WHERE id = $1"#)
+                    .bind(id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT p.* FROM architecture_plans p
+                    JOIN architecture_topologies t ON t.id = p.architecture_id
+                    WHERE p.id = $1 AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(uid)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        let row = row.ok_or_else(|| StoreError::NotFound {
+            entity: ENTITY,
+            id: id.to_string(),
+        })?;
         row_to_plan(&row)
     }
 
@@ -163,7 +194,7 @@ impl PlanRepository {
             });
         }
 
-        self.get(&input.id).await
+        self.get(&input.id, None).await
     }
 
     /// Atomic status transition with a precondition: the row only updates

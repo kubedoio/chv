@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 
-#[allow(dead_code)]
 mod client;
 mod commands;
 mod config;
@@ -21,10 +20,6 @@ struct Cli {
     /// BFF server URL (default: http://localhost:8080 or from config)
     #[arg(long, global = true)]
     server: Option<String>,
-
-    /// Connect via Unix socket instead of TCP
-    #[arg(long, global = true)]
-    socket: Option<String>,
 
     /// Auth token (overrides stored credential)
     #[arg(long, global = true)]
@@ -111,16 +106,6 @@ async fn main() {
     let cli = Cli::parse();
 
     let cfg = config::load();
-
-    if let Some(ref socket_path) = cli.socket {
-        eprintln!(
-            "Error: Unix socket mode (--socket {}) is not yet supported. \
-             Use --server to specify a TCP URL instead.\n\
-             Tracking: requires hyper-util unix-connector integration.",
-            socket_path
-        );
-        std::process::exit(1);
-    }
 
     let server_url = cli
         .server

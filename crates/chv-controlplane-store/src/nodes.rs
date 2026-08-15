@@ -146,43 +146,6 @@ VALUES (
 )
 "#;
 
-const UPSERT_NODE_DESIRED_STATE_SQL: &str = r#"
-INSERT INTO node_desired_state (
-    node_id,
-    desired_generation,
-    desired_state,
-    requested_by,
-    updated_by,
-    state_reason,
-    scheduling_paused,
-    allow_workload_stop,
-    requested_at,
-    updated_at
-)
-VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    $7,
-    $8,
-    strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch'),
-    strftime('%Y-%m-%dT%H:%M:%SZ', $9 / 1000.0, 'unixepoch')
-)
-ON CONFLICT (node_id) DO UPDATE SET
-    desired_generation = EXCLUDED.desired_generation,
-    desired_state = EXCLUDED.desired_state,
-    requested_by = EXCLUDED.requested_by,
-    updated_by = EXCLUDED.updated_by,
-    state_reason = EXCLUDED.state_reason,
-    scheduling_paused = EXCLUDED.scheduling_paused,
-    allow_workload_stop = EXCLUDED.allow_workload_stop,
-    requested_at = EXCLUDED.requested_at,
-    updated_at = EXCLUDED.updated_at
-"#;
-
 const UPDATE_NODE_CERTIFICATE_SQL: &str = r#"
 UPDATE nodes SET
     certificate_serial = $2,
@@ -384,22 +347,6 @@ impl NodeRepository {
         Ok(())
     }
 
-    pub async fn upsert_state(&self, input: &NodeStateInput) -> Result<(), StoreError> {
-        sqlx::query(UPSERT_NODE_DESIRED_STATE_SQL)
-            .bind(input.node_id.as_str())
-            .bind(generation_to_i64(input.desired_generation)?)
-            .bind(input.desired_state.as_str())
-            .bind(&input.requested_by)
-            .bind(&input.updated_by)
-            .bind(&input.state_reason)
-            .bind(input.scheduling_paused)
-            .bind(input.allow_workload_stop)
-            .bind(input.requested_unix_ms)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     pub async fn set_state_preserving_policy(
         &self,
         input: &NodeStatePatchInput,
@@ -534,19 +481,6 @@ pub struct NodeVersionInput {
     pub version: String,
     pub source: Option<String>,
     pub reported_unix_ms: i64,
-}
-
-#[derive(Clone)]
-pub struct NodeStateInput {
-    pub node_id: NodeId,
-    pub desired_state: NodeState,
-    pub desired_generation: Generation,
-    pub requested_by: Option<String>,
-    pub updated_by: Option<String>,
-    pub state_reason: Option<String>,
-    pub scheduling_paused: bool,
-    pub allow_workload_stop: Option<bool>,
-    pub requested_unix_ms: i64,
 }
 
 #[derive(Clone)]

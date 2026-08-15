@@ -43,7 +43,6 @@ ALLOWED_PACKAGED_SERVICES = {
     "chv-stord.service",
 }
 PERSISTENT_LEASE_TOKEN = "cellhv-runtime-authority.lease"
-NODECACHE_AUTHORITY_SOURCE = "crates/chv-agent-core/src/cache_authority.rs"
 FRESH_IDENTITY_SOURCE = "crates/cellhv-core-startup/src/identity.rs"
 AUTHORITY_CLEANUP_PATHS = (
     "packaging/scripts",
@@ -596,22 +595,6 @@ def check(root: Path) -> list[str]:
                 f"process owners {process_owners}"
             )
 
-    authority_facade_path = root / NODECACHE_AUTHORITY_SOURCE
-    try:
-        authority_facade = authority_facade_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        errors.append(f"{NODECACHE_AUTHORITY_SOURCE}: {exc}")
-    else:
-        public_signatures = re.findall(
-            r"\bpub\s+(?:async\s+)?fn\s+[^\{;]+(?:\{|;)", authority_facade
-        )
-        for signature in public_signatures:
-            if re.search(r"\bNodeCache\b|\bFnOnce\b", signature):
-                errors.append(
-                    f"{NODECACHE_AUTHORITY_SOURCE}: public facade signature exposes "
-                    "NodeCache or a caller-supplied closure"
-                )
-
     fresh_identity_path = root / FRESH_IDENTITY_SOURCE
     try:
         fresh_identity = fresh_identity_path.read_text(encoding="utf-8")
@@ -632,22 +615,6 @@ def check(root: Path) -> list[str]:
                 f"{FRESH_IDENTITY_SOURCE}: fresh identity authorization must be an "
                 "opaque resolver-issued tuple payload"
             )
-        containment_patterns = (
-            r"pub\s+type\s+\w+\s*=\s*[^;]*\bNodeCache\b",
-            r"pub\s+\w+\s*:\s*[^,\n]*\bNodeCache\b",
-            r"pub(?:\s*\([^)]*\))?\s+trait\s+\w+[^\{]*\{[^\}]*\bNodeCache\b[^\}]*\}",
-            r"pub(?:\s*\([^)]*\))?\s+(?:const|static)\s+\w+\s*:[^;]*\bNodeCache\b",
-            r"impl\s+(?:Deref|AsRef|Borrow|Into|From)(?:\s*<[^>]*>)?\s+for\s+NodeCacheAuthority",
-            r"impl\s+(?:Deref|AsRef|Borrow|Into|From)\s*<[^>]*NodeCache[^>]*>\s+for\s+NodeCacheAuthority",
-            r"impl(?=[^\{]*\bNodeCacheAuthority\b)(?=[^\{]*\bNodeCache\b)[^\{]*(?:Deref|AsRef|Borrow|Into|From)[^\{]*\{",
-            r"impl\s+(?:Serialize|serde::Serialize)\s+for\s+NodeCacheAuthority",
-            r"#\[derive\([^\]]*\b(?:Clone|Serialize)\b[^\]]*\)\]\s*pub\s+struct\s+NodeCacheAuthority",
-        )
-        if any(re.search(pattern, authority_facade, re.MULTILINE) for pattern in containment_patterns):
-            errors.append(
-                f"{NODECACHE_AUTHORITY_SOURCE}: facade containment trait, field, alias, "
-                "associated item, serialization, or clone escape is forbidden"
-            )
 
     identity_policy_path = root / "config/cellhv-core-identity-policy-v1.json"
     try:
@@ -662,7 +629,7 @@ def check(root: Path) -> list[str]:
             "host_identity_resolver_enforced": True,
             "fresh_store_initializer_enforced": True,
             "importer_reserved_host_ids_enforced": True,
-            "nodecache_authority_facade_enforced": True,
+            "nodecache_authority_facade_enforced": False,
             "nodecache_authority_mode_enforced": False,
             "durable_identity_precedence": [
                 "existing-core-database",

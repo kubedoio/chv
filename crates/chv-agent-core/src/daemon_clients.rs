@@ -533,20 +533,6 @@ impl StordClient {
         Ok(())
     }
 
-    /// Accept incoming disk migration for a volume from a remote stord peer.
-    ///
-    /// This is a placeholder: the destination stord's `StorageMigrationService`
-    /// already handles incoming streams. No explicit preparation RPC is needed
-    /// because the receiver creates the volume on `InitMigration`.
-    pub async fn accept_disk_migration(
-        &mut self,
-        _volume_id: &str,
-        _expected_size_bytes: u64,
-        _operation_id: Option<&str>,
-    ) -> Result<(), ChvError> {
-        Ok(())
-    }
-
     pub async fn set_device_policy(
         &mut self,
         volume_id: &str,

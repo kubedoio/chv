@@ -69,6 +69,17 @@ pub fn validate_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
 
+/// Validate that `id` is safe to use as a single filesystem path component:
+/// non-empty, containing only ASCII alphanumerics plus `.`, `_`, `-`, and
+/// never `..` (so `/`, `\`, and path traversal are rejected).
+pub fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !id.contains("..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +123,24 @@ mod tests {
         assert!(!validate_id("../etc/passwd")); // path traversal
         assert!(!validate_id("abc xyz")); // space
         assert!(!validate_id("g1h2i3j4")); // non-hex letters
+    }
+
+    #[test]
+    fn is_safe_id_accepts_safe_ids() {
+        assert!(is_safe_id("vm-1"));
+        assert!(is_safe_id("VM_2.test"));
+        assert!(is_safe_id("vol.3-x"));
+    }
+
+    #[test]
+    fn is_safe_id_rejects_unsafe_ids() {
+        assert!(!is_safe_id(""));
+        assert!(!is_safe_id("a/b"));
+        assert!(!is_safe_id("a\\b"));
+        assert!(!is_safe_id(".."));
+        assert!(!is_safe_id("a..b")); // path traversal
+        assert!(!is_safe_id("a b"));
+        assert!(!is_safe_id("aéb")); // non-ASCII
     }
 }
 

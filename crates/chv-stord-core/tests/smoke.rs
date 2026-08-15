@@ -41,6 +41,7 @@ async fn setup_server() -> (
     let backend = LocalFileBackend::new(dir.path().to_path_buf());
     let server = StorageServer::new(
         backend,
+        dir.path().to_path_buf(),
         Metrics::new(),
         vec!["local".to_string()],
         vec![],
@@ -579,6 +580,7 @@ async fn sqlite_persistence_roundtrip() {
     let store = SessionStore::new(&db_path).unwrap();
     let server = StorageServer::new(
         backend,
+        dir.path().to_path_buf(),
         Metrics::new(),
         vec!["local".to_string()],
         vec![],

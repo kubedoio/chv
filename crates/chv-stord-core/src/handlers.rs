@@ -24,10 +24,76 @@ impl ChvErrorProtoExt for ChvError {
     }
 }
 
+pub(crate) fn contains_dot_components(path: &str) -> bool {
+    path.split('/').any(|c| c == "." || c == "..")
+}
+
+/// Canonicalize `path`, resolving symlinks. If the path does not exist
+/// yet (the common case for not-yet-created volume files), canonicalize
+/// the nearest existing ancestor and re-append the missing components
+/// lexically — they cannot contain symlinks because they do not exist.
+///
+/// The fallback only triggers for `NotFound`; every other error (EACCES,
+/// ELOOP, ...) is treated as a verification failure and returned as an
+/// error so the allowlist check can never pass on a resolution failure.
+pub(crate) fn canonicalize_or_ancestor(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, ChvError> {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => Ok(canonical),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+            let mut cur = path;
+            loop {
+                match std::fs::canonicalize(cur) {
+                    Ok(canonical) => {
+                        let mut out = canonical;
+                        for component in suffix.iter().rev() {
+                            out.push(component);
+                        }
+                        return Ok(out);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        let name = cur.file_name().ok_or_else(|| ChvError::AccessDenied {
+                            resource: path.to_string_lossy().to_string(),
+                            reason: "path has no resolvable file name component".to_string(),
+                        })?;
+                        suffix.push(name.to_os_string());
+                        let parent = cur.parent().ok_or_else(|| ChvError::AccessDenied {
+                            resource: path.to_string_lossy().to_string(),
+                            reason: "path has no resolvable parent".to_string(),
+                        })?;
+                        if parent == cur {
+                            // Reached the root without finding an existing
+                            // ancestor; nothing left to resolve.
+                            return Err(ChvError::AccessDenied {
+                                resource: path.to_string_lossy().to_string(),
+                                reason: "no existing ancestor found to canonicalize".to_string(),
+                            });
+                        }
+                        cur = parent;
+                    }
+                    Err(e) => {
+                        return Err(ChvError::AccessDenied {
+                            resource: path.to_string_lossy().to_string(),
+                            reason: format!("cannot canonicalize path (fail closed): {}", e),
+                        });
+                    }
+                }
+            }
+        }
+        Err(e) => Err(ChvError::AccessDenied {
+            resource: path.to_string_lossy().to_string(),
+            reason: format!("cannot canonicalize path (fail closed): {}", e),
+        }),
+    }
+}
+
 pub struct StorageServiceImpl<B: StorageBackend> {
     backend: Arc<B>,
     sessions: Arc<SessionTable>,
     metrics: Arc<Metrics>,
+    runtime_dir: std::path::PathBuf,
     backend_allowlist: Vec<String>,
     path_allowlist: Vec<std::path::PathBuf>,
     device_allowlist: Vec<String>,
@@ -43,6 +109,7 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         backend: Arc<B>,
         sessions: Arc<SessionTable>,
         metrics: Arc<Metrics>,
+        runtime_dir: std::path::PathBuf,
         backend_allowlist: Vec<String>,
         path_allowlist: Vec<std::path::PathBuf>,
         device_allowlist: Vec<String>,
@@ -53,6 +120,7 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
             backend,
             sessions,
             metrics,
+            runtime_dir,
             backend_allowlist,
             path_allowlist,
             device_allowlist,
@@ -155,46 +223,60 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
         })
     }
 
-    fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-        let mut result = std::path::PathBuf::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::Prefix(_) | std::path::Component::RootDir => {
-                    result.push(component);
-                }
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    result.pop();
-                }
-                std::path::Component::Normal(c) => {
-                    result.push(c);
-                }
-            }
-        }
-        result
-    }
-
-    fn check_path_allowlist(&self, path: &str) -> Result<(), ChvError> {
+    /// Threat model: this check hardens the API boundary against hostile
+    /// API callers (control-plane / agent requests), not against hostile
+    /// local users with write access to the runtime directories. It
+    /// canonicalizes the path and then the backend opens it later, so
+    /// there is a check-then-use window in which a local attacker could
+    /// swap in a symlink. If that threat model ever changes, the next
+    /// layer is an O_NOFOLLOW reopen at the backend level.
+    fn check_path_allowlist(&self, locator: &str) -> Result<(), ChvError> {
         if self.path_allowlist.is_empty() {
             return Ok(());
         }
-        let path = std::path::Path::new(path);
-        if path.is_relative() {
-            // Relative paths are resolved by the backend against runtime_dir;
-            // skip path allowlist for relative locators.
-            return Ok(());
+
+        // (a) Reject `.` and `..` components outright, before any resolution.
+        if contains_dot_components(locator) {
+            return Err(ChvError::AccessDenied {
+                resource: locator.to_string(),
+                reason: "locator contains '.' or '..' path components".to_string(),
+            });
         }
-        let normalized = Self::normalize_path(path);
+
+        // Resolve the effective path exactly the way the local backend will:
+        // absolute locators are used verbatim, relative ones are joined onto
+        // runtime_dir (see LocalFileBackend::resolve_path).
+        let locator_path = std::path::Path::new(locator);
+        let effective = if locator_path.is_absolute() {
+            locator_path.to_path_buf()
+        } else {
+            self.runtime_dir.join(locator_path)
+        };
+
+        // (b) Canonicalize the resolved path, resolving any symlinks in the
+        // middle. If the file does not exist yet, canonicalize the parent and
+        // re-append the file name. Any resolution error rejects.
+        let canonical = canonicalize_or_ancestor(&effective)?;
+
+        // (c) Verify containment: the canonical path must start with one of
+        // the allowlisted prefixes, themselves canonicalized with the same
+        // ancestor fallback (the prefix dir may not exist yet). A prefix that
+        // cannot be verified never grants access.
         for allowed in &self.path_allowlist {
-            if normalized.starts_with(allowed) {
+            let Ok(allowed_canonical) = canonicalize_or_ancestor(allowed) else {
+                continue;
+            };
+            if canonical.starts_with(&allowed_canonical) {
                 return Ok(());
             }
         }
+
         Err(ChvError::AccessDenied {
-            resource: path.to_string_lossy().to_string(),
+            resource: locator.to_string(),
             reason: format!(
-                "path '{}' not within allowed prefixes: {:?}",
-                path.display(),
+                "path '{}' (resolved to '{}') not within allowed prefixes: {:?}",
+                locator,
+                canonical.display(),
                 self.path_allowlist
             ),
         })
@@ -241,6 +323,19 @@ impl<B: StorageBackend> StorageServiceImpl<B> {
                 path, self.device_allowlist
             ),
         })
+    }
+
+    /// Snapshot and clone names become path components in backend filenames
+    /// (e.g. `{volume_id}-{name}.img`), so reject any name that is not a
+    /// single safe component before it reaches the backend.
+    fn validate_snapshot_or_clone_name(name: &str, field: &str) -> Result<(), ChvError> {
+        if !chv_common::is_safe_id(name) {
+            return Err(ChvError::InvalidArgument {
+                field: field.to_string(),
+                reason: format!("'{name}' is not a safe id (must be a single path component)"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -297,14 +392,23 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             }));
         }
 
-        if let Err(e) = self.check_path_allowlist(&locator.locator) {
-            return Ok(Response::new(proto::OpenVolumeResponse {
-                result: Some(e.to_proto_result()),
-                volume_id: req.volume_id,
-                attachment_handle: String::new(),
-                export_kind: String::new(),
-                export_path: String::new(),
-            }));
+        // The path allowlist only makes sense for the local/filesystem
+        // backend: lvm/ceph/iscsi locators are volume/device identifiers,
+        // not filesystem paths, and treating them as paths would either
+        // fail the check or wrongly resolve against runtime_dir.
+        if matches!(
+            locator.backend_class.as_str(),
+            "local" | "local-file" | "localdisk"
+        ) {
+            if let Err(e) = self.check_path_allowlist(&locator.locator) {
+                return Ok(Response::new(proto::OpenVolumeResponse {
+                    result: Some(e.to_proto_result()),
+                    volume_id: req.volume_id,
+                    attachment_handle: String::new(),
+                    export_kind: String::new(),
+                    export_path: String::new(),
+                }));
+            }
         }
 
         if locator.backend_class == "lvm" || locator.backend_class == "block" {
@@ -370,6 +474,47 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
                     export_kind: s.export_kind,
                     export_path: s.export_path,
                 }));
+            }
+        }
+
+        // Enable dirty tracking for the freshly opened volume so that disk
+        // migration dirty-sync rounds can always snapshot a bitmap (empty
+        // when nothing was written yet). Read-only opens are skipped: a
+        // read-only volume cannot be dirtied, so the bitmap would only
+        // waste memory. Failures must not fail the open: the volume remains
+        // usable, only dirty tracking is degraded.
+        if !policy.read_only {
+            match self
+                .backend
+                .volume_size(&req.volume_id, &export.attachment_handle)
+                .await
+            {
+                Ok(size_bytes) => {
+                    if let Err(e) = self
+                        .backend
+                        .enable_dirty_tracking(
+                            &req.volume_id,
+                            &export.attachment_handle,
+                            size_bytes,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            volume_id = %req.volume_id,
+                            handle = %export.attachment_handle,
+                            error = %e,
+                            "failed to enable dirty tracking for opened volume"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        volume_id = %req.volume_id,
+                        handle = %export.attachment_handle,
+                        error = %e,
+                        "could not determine volume size; dirty tracking not enabled"
+                    );
+                }
             }
         }
 
@@ -709,6 +854,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             return Ok(Response::new(e.to_proto_result()));
         };
 
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.snapshot_name, "snapshot_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
         if let Err(e) = self
             .backend
             .prepare_snapshot(
@@ -751,6 +900,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             };
             return Ok(Response::new(e.to_proto_result()));
         };
+
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.clone_name, "clone_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
 
         if let Err(e) = self
             .backend
@@ -796,6 +949,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             return Ok(Response::new(e.to_proto_result()));
         };
 
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.snapshot_name, "snapshot_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
+
         if let Err(e) = self
             .backend
             .restore_snapshot(&s.volume_id, &s.attachment_handle, &req.snapshot_name)
@@ -830,6 +987,10 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             };
             return Ok(Response::new(e.to_proto_result()));
         };
+
+        if let Err(e) = Self::validate_snapshot_or_clone_name(&req.snapshot_name, "snapshot_name") {
+            return Ok(Response::new(e.to_proto_result()));
+        }
 
         if let Err(e) = self
             .backend
@@ -992,6 +1153,22 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
             state.total_bytes = volume_size;
         }
 
+        // Ensure dirty tracking is enabled before the sender reads the
+        // bitmap. This also covers sessions hydrated from the SQLite store
+        // after a stord restart (their trackers are not recreated by open).
+        if let Err(e) = self
+            .backend
+            .enable_dirty_tracking(&req.volume_id, &req.attachment_handle, volume_size)
+            .await
+        {
+            tracing::warn!(
+                volume_id = %req.volume_id,
+                handle = %req.attachment_handle,
+                error = %e,
+                "failed to enable dirty tracking before migration"
+            );
+        }
+
         self.migration_tasks
             .insert(migration_id.clone(), task.clone());
 
@@ -1147,5 +1324,153 @@ impl<B: StorageBackend> proto::storage_service_server::StorageService for Storag
         Ok(Response::new(proto::ResumeDiskMigrationResponse {
             result: Some(Self::ok_result()),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chv_stord_backends::LocalFileBackend;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn make_service(
+        runtime_dir: &std::path::Path,
+        allowlist: Vec<PathBuf>,
+    ) -> StorageServiceImpl<LocalFileBackend> {
+        let backend = Arc::new(LocalFileBackend::new(runtime_dir.to_path_buf()));
+        StorageServiceImpl::new(
+            backend,
+            Arc::new(SessionTable::new()),
+            Arc::new(Metrics::new()),
+            runtime_dir.to_path_buf(),
+            vec!["local".to_string()],
+            allowlist,
+            vec![],
+            vec![],
+            None,
+        )
+    }
+
+    #[test]
+    fn empty_allowlist_passes_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path(), vec![]);
+        // No allowlist configured: the check is a no-op (existing behavior).
+        assert!(svc.check_path_allowlist("../../etc/passwd").is_ok());
+        assert!(svc.check_path_allowlist("vol.img").is_ok());
+    }
+
+    #[test]
+    fn relative_locator_resolving_outside_allowlist_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("allowed")).unwrap();
+        std::fs::create_dir_all(dir.path().join("other")).unwrap();
+        let svc = make_service(dir.path(), vec![dir.path().join("allowed")]);
+        // Previously relative locators skipped the allowlist entirely; they
+        // must now resolve against runtime_dir and be verified.
+        assert!(svc.check_path_allowlist("other/vol.img").is_err());
+    }
+
+    #[test]
+    fn relative_locator_resolving_inside_allowlist_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let svc = make_service(dir.path(), vec![allowed]);
+        assert!(svc.check_path_allowlist("allowed/vol.img").is_ok());
+    }
+
+    #[test]
+    fn dot_dot_locator_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("allowed")).unwrap();
+        let svc = make_service(dir.path(), vec![dir.path().to_path_buf()]);
+        assert!(svc.check_path_allowlist("../escape.img").is_err());
+        assert!(svc.check_path_allowlist("allowed/../escape.img").is_err());
+        let abs = dir
+            .path()
+            .join("allowed/../escape.img")
+            .to_string_lossy()
+            .to_string();
+        assert!(svc.check_path_allowlist(&abs).is_err());
+    }
+
+    #[test]
+    fn dot_component_locator_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path(), vec![dir.path().to_path_buf()]);
+        assert!(svc.check_path_allowlist("./vol.img").is_err());
+        assert!(svc.check_path_allowlist("sub/./vol.img").is_err());
+    }
+
+    #[test]
+    fn absolute_locator_inside_allowlist_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let disk = allowed.join("disk.img");
+        std::fs::write(&disk, b"disk").unwrap();
+        let svc = make_service(dir.path(), vec![allowed]);
+        assert!(svc.check_path_allowlist(disk.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn absolute_locator_outside_allowlist_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("allowed")).unwrap();
+        std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+        let disk = dir.path().join("outside/disk.img");
+        std::fs::write(&disk, b"disk").unwrap();
+        let svc = make_service(dir.path(), vec![dir.path().join("allowed")]);
+        assert!(svc.check_path_allowlist(disk.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn symlink_escaping_allowlist_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, allowed.join("link")).unwrap();
+        std::fs::write(outside.join("disk.img"), b"disk").unwrap();
+        let svc = make_service(dir.path(), vec![allowed.clone()]);
+        let locator = allowed.join("link/disk.img");
+        assert!(svc.check_path_allowlist(locator.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn missing_file_with_parent_inside_allowlist_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let svc = make_service(dir.path(), vec![allowed.clone()]);
+        // File does not exist yet; canonicalize must resolve the parent and
+        // accept the not-yet-created volume file.
+        let locator = allowed.join("new.img");
+        assert!(svc.check_path_allowlist(locator.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn missing_file_with_missing_parent_inside_allowlist_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let svc = make_service(dir.path(), vec![allowed.clone()]);
+        // Neither the file nor its parent directory exist yet.
+        let locator = allowed.join("sub/new.img");
+        assert!(svc.check_path_allowlist(locator.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn nonexistent_allowlist_prefix_uses_ancestor_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed").join("nested");
+        // The allowlisted prefix itself does not exist yet; the check must
+        // fall back to the canonical nearest ancestor and still accept.
+        let svc = make_service(dir.path(), vec![allowed.clone()]);
+        let locator = allowed.join("vol.img");
+        assert!(svc.check_path_allowlist(locator.to_str().unwrap()).is_ok());
     }
 }

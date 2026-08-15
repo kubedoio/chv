@@ -10,7 +10,6 @@ chv-architecture-validate = { path = "../chv-architecture-validate" }
 chv-common = { path = "../chv-common" }
 chv-controlplane-store = { path = "../chv-controlplane-store" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
-chv-errors = { path = "../chv-errors" }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 serde = { workspace = true }

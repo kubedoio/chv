@@ -32,7 +32,6 @@ pub struct BffClient {
 impl BffClient {
     pub fn new(base_url: String, token: Option<String>) -> Self {
         let http = Client::builder()
-            .danger_accept_invalid_certs(true)
             .build()
             .expect("failed to build HTTP client");
 
@@ -41,14 +40,6 @@ impl BffClient {
             token,
             http,
         }
-    }
-
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    pub fn set_token(&mut self, token: String) {
-        self.token = Some(token);
     }
 
     fn url(&self, path: &str) -> String {
@@ -97,16 +88,6 @@ impl BffClient {
 
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value, CliError> {
         let req = self.http.post(self.url(path)).json(body);
-        let req = self.apply_auth(req);
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CliError::Http(e.to_string()))?;
-        self.handle_response(resp).await
-    }
-
-    pub async fn patch(&self, path: &str, body: &Value) -> Result<Value, CliError> {
-        let req = self.http.patch(self.url(path)).json(body);
         let req = self.apply_auth(req);
         let resp = req
             .send()

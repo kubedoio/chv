@@ -40,6 +40,31 @@
 //! HTTP 409 Conflict here so UIs can re-fetch and prompt the user. See
 //! `docs/specs/component/architecture-designer-data-model.md` for the
 //! invariant.
+//!
+//! # Ownership model (Security H6 — cross-tenant object access)
+//!
+//! Every handler that takes an architecture id (or a plan id, which resolves
+//! through its architecture) authorizes the caller against the row's
+//! `owner_user_id` before returning or mutating anything:
+//!
+//! - **Admin**: sees and mutates all rows (store scope `None`).
+//! - **Viewer / Operator**: see rows they own (`owner_user_id ==
+//!   claims.sub`) plus system-owned rows (`owner_user_id IS NULL` — the
+//!   pre-seeded starter topologies, which are shared by design). Mutating
+//!   a topology row is narrower: only rows they own, plus system-owned
+//!   rows for admin. The store write predicates drop the `IS NULL`
+//!   carve-out, and [`require_owner_or_admin`] denies NULL-owned writes to
+//!   non-admins, so starters are read-only templates that operators clone
+//!   rather than edit.
+//! - A non-admin request against a row owned by *another* user fails with
+//!   403 Forbidden via [`require_owner_or_admin`], never with the row's
+//!   data. The store layer independently re-enforces the same predicate
+//!   (`visible_to_user`) so a handler bug cannot leak a foreign row.
+//!
+//! The 403-vs-404 disambiguation is deliberate: a scoped store read reports
+//! a foreign row as `NotFound`; the handler then probes the row unscoped
+//! (existence only — its contents are never returned) to decide between
+//! "you may not see this" (403) and "this does not exist" (404).
 
 use axum::{extract::State, Json};
 use chv_architecture_reconcile::apply::{
@@ -51,17 +76,15 @@ use chv_architecture_validate::{
     fleet::check_fleet, parse_yaml as parse_arch_yaml, validate as validate_yaml_str,
     ValidationResult,
 };
-use chv_common::Clock;
 use chv_controlplane_store::{
     DriftReportCreateInput, InventorySnapshotCreateInput, PlanCreateInput, PlanRepository,
     PlanStatusUpdateInput, StoreError, TopologyCreateInput, TopologyListFilter,
     TopologyUpdateInput, VersionCreateInput, VersionRepository,
 };
 use chv_controlplane_types::architecture::{
-    ArchitectureDriftReportId, ArchitectureId, ArchitecturePlan, ArchitecturePlanId,
-    ArchitectureStatus, ArchitectureTopology, ArchitectureVersionId, DriftStatus, Finding,
-    FleetCheckStatus, InventorySnapshotId, PlanChange, PlanMode, PlanStatus, RunStatus, Severity,
-    ValidationStatus,
+    ArchitectureDriftReportId, ArchitectureId, ArchitecturePlanId, ArchitectureStatus,
+    ArchitectureTopology, ArchitectureVersionId, DriftStatus, Finding, FleetCheckStatus,
+    InventorySnapshotId, PlanChange, PlanMode, PlanStatus, RunStatus, Severity, ValidationStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -90,6 +113,115 @@ fn caller_can_apply(claims: &Claims) -> bool {
     Role::parse(&claims.role)
         .map(|r| has_apply_permission(&r))
         .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Ownership authorization (Security H6)
+// ---------------------------------------------------------------------------
+
+/// Resolve the caller's store-level ownership scope.
+///
+/// `None` means "no scoping" and is reserved for admins (and internal
+/// callers that have already authorized the action). `Some(sub)` makes the
+/// store apply the `(owner_user_id = sub OR owner_user_id IS NULL)`
+/// predicate — see the module-level ownership model.
+fn caller_visible_scope(claims: &Claims) -> Result<Option<String>, BffError> {
+    let role = Role::parse(&claims.role)
+        .ok_or_else(|| BffError::Internal("unparseable role on authenticated request".into()))?;
+    Ok(if matches!(role, Role::Admin) {
+        None
+    } else {
+        Some(claims.sub.clone())
+    })
+}
+
+/// Object-level ownership gate used by every architecture handler.
+///
+/// Ownership model (Security H6):
+///
+/// - `role == admin` always passes (sees and mutates all rows).
+/// - `owner_user_id == claims.sub` passes (the caller's own row).
+/// - `owner_user_id == None` — system-owned starter rows. They stay
+///   READABLE to every authenticated caller (the store read predicate
+///   keeps its `IS NULL` carve-out), but WRITES to them are admin-only:
+///   non-admins get 403 here, so starters are read-only templates that
+///   operators clone instead of edit.
+/// - any other owner fails with 403 Forbidden.
+fn require_owner_or_admin(claims: &Claims, owner_user_id: Option<&str>) -> Result<(), BffError> {
+    if claims.role == "admin" {
+        return Ok(());
+    }
+    match owner_user_id {
+        Some(owner) if owner == claims.sub => Ok(()),
+        None => Err(BffError::Forbidden(
+            "system-owned starter architectures are read-only; clone to edit".into(),
+        )),
+        Some(_) => Err(BffError::Forbidden(
+            "you do not own this architecture".into(),
+        )),
+    }
+}
+
+/// Load a topology for the authenticated caller, distinguishing 403
+/// (row exists but belongs to another user) from 404 (row does not exist).
+///
+/// The scoped store read never returns a foreign row; when it reports
+/// `NotFound` we probe unscoped *for the existence/ownership decision only*
+/// and discard the row contents — the caller's error carries no data.
+async fn get_topology_authorized(
+    state: &AppState,
+    claims: &Claims,
+    id: &ArchitectureId,
+) -> Result<ArchitectureTopology, BffError> {
+    let scope = caller_visible_scope(claims)?;
+    match state.topology_repo.get(id, scope.as_deref()).await {
+        Ok(topo) => Ok(topo),
+        Err(StoreError::NotFound { .. }) if scope.is_some() => {
+            match state.topology_repo.get(id, None).await {
+                Ok(row) => match require_owner_or_admin(claims, row.owner_user_id.as_deref()) {
+                    Ok(()) => Err(BffError::Internal(
+                        "ownership helper passed on a scoped topology miss".into(),
+                    )),
+                    Err(forbidden) => Err(forbidden),
+                },
+                Err(_) => Err(BffError::NotFound(format!(
+                    "architecture_topology {} not found",
+                    id
+                ))),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Load a plan for the authenticated caller with the same 403/404
+/// disambiguation as [`get_topology_authorized`]. Plan ownership is
+/// inherited from the plan's architecture.
+async fn get_plan_authorized(
+    state: &AppState,
+    claims: &Claims,
+    plan_id: &ArchitecturePlanId,
+) -> Result<chv_controlplane_types::architecture::ArchitecturePlan, BffError> {
+    let scope = caller_visible_scope(claims)?;
+    let plan_repo = PlanRepository::new(state.pool.clone());
+    match plan_repo.get(plan_id, scope.as_deref()).await {
+        Ok(plan) => Ok(plan),
+        Err(StoreError::NotFound { .. }) if scope.is_some() => {
+            match plan_repo.get(plan_id, None).await {
+                // The plan exists but its architecture belongs to another
+                // user (or to no user, which the scoped predicate matches —
+                // that case cannot land here).
+                Ok(_) => Err(BffError::Forbidden(
+                    "you do not own the architecture this plan belongs to".into(),
+                )),
+                Err(_) => Err(BffError::NotFound(format!(
+                    "architecture_plan {} not found",
+                    plan_id
+                ))),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -288,14 +420,17 @@ pub async fn list_architectures(
 }
 
 /// Read a single topology including its design graph and latest yaml.
+///
+/// **Ownership (Security H6):** non-admin callers may only read rows they
+/// own plus system-owned starters; a foreign row answers 403, not its data.
 pub async fn get_architecture(
-    BearerToken(_claims): BearerToken,
+    BearerToken(claims): BearerToken,
     State(state): State<AppState>,
     Json(req): Json<GetArchitectureRequest>,
 ) -> Result<Json<GetArchitectureResponse>, BffError> {
     let id = parse_id(&req.id)?;
     tracing::info!(architecture_id = %id, "get_architecture");
-    let topo = state.topology_repo.get(&id).await?;
+    let topo = get_topology_authorized(&state, &claims, &id).await?;
     let design_graph_json = topo.design_graph_json.clone();
     let latest_yaml = topo.latest_yaml.clone();
     Ok(Json(GetArchitectureResponse {
@@ -350,6 +485,19 @@ pub async fn create_architecture(
 }
 
 /// Update a topology with optimistic-concurrency check.
+///
+/// **Ownership (Security H6):** non-admin callers may only mutate rows
+/// they own; system-owned starter rows are read-only templates (403 via
+/// [`require_owner_or_admin`]) and a foreign row answers 403.
+///
+/// **Production guard (Security F2/F7):** the guard decision is made
+/// against the *persisted* row's environment, not the request's
+/// `environment` field. A non-admin cannot (a) tag a row as production,
+/// nor (b) mutate a row that is *already* production-tagged in any way —
+/// sending `environment: null` (or omitting it) does not bypass (b),
+/// because the persisted tag is what fires the guard. Un-tagging a
+/// production row to sneak an apply past `enforce_production_guard` is
+/// therefore blocked too.
 pub async fn update_architecture(
     BearerToken(claims): BearerToken,
     State(state): State<AppState>,
@@ -364,11 +512,11 @@ pub async fn update_architecture(
                 .map_err(|e| BffError::BadRequest(format!("invalid latest_version_id: {e}")))?,
         ),
     };
-    // Production-environment write guard (Security F2): only admins may
-    // tag (or re-tag) an architecture as production via update.
     let role = Role::parse(&claims.role).ok_or_else(|| {
         BffError::Internal("operator middleware passed but role string is unparseable".into())
     })?;
+    // (a) Only admins may tag (or re-tag) an architecture as production via
+    // update.
     if is_production_environment(req.environment.as_deref()) && !role.meets(Role::Admin) {
         return Err(BffError::ProductionRequiresAdmin {
             environment: req.environment.as_deref().unwrap_or("").trim().to_string(),
@@ -380,11 +528,55 @@ pub async fn update_architecture(
         "update_architecture"
     );
 
+    // Ownership + production-guard load. For a NON-admin caller a foreign
+    // row must surface the plain ownership 403 FIRST — never
+    // PRODUCTION_REQUIRES_ADMIN, which would leak the persisted
+    // environment tag of a row the caller may not even see (Security F7
+    // information disclosure). Missing rows stay 404.
+    let scope = caller_visible_scope(&claims)?;
+    let topo = match state.topology_repo.get(&id, scope.as_deref()).await {
+        Ok(topo) => topo,
+        Err(StoreError::NotFound { .. }) if scope.is_some() => {
+            // Probe unscoped for the existence decision only; the probed
+            // row's contents are discarded so no row data leaks into the
+            // error response.
+            match state.topology_repo.get(&id, None).await {
+                Ok(_) => {
+                    return Err(BffError::Forbidden(
+                        "you do not own this architecture".into(),
+                    ));
+                }
+                Err(_) => {
+                    return Err(BffError::NotFound(format!(
+                        "architecture_topology {} not found",
+                        id
+                    )))
+                }
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // NULL-owned starter rows are read-only templates for non-admins:
+    // require_owner_or_admin answers 403 here, before any production
+    // decision, so the starter workflow stays clone-not-edit.
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+
+    // (b) A non-admin may not mutate a row that is *already*
+    // production-tagged, regardless of what the request's environment field
+    // says (including null/absent). This is what stops the un-tag-then-apply
+    // bypass of the apply-time production guard. Only reached after the
+    // ownership gate above passes.
+    if is_production_environment(topo.environment.as_deref()) && !role.meets(Role::Admin) {
+        return Err(BffError::ProductionRequiresAdmin {
+            environment: topo.environment.as_deref().unwrap_or("").trim().to_string(),
+        });
+    }
+
     // Skip the UPDATE entirely when the caller sent no field changes — this
     // keeps version_number stable for clients that re-submit a PATCH-style
-    // form without modifying anything. The optimistic-concurrency check on
-    // expected_version is preserved by passing it to `update()` only when
-    // there is actual work to do; a pure-readback path uses `get()`.
+    // form without modifying anything. The row was already fetched (and
+    // authorized) above, so the readback path needs no second get().
     let no_field_changes = req.display_name.is_none()
         && req.description.is_none()
         && req.environment.is_none()
@@ -392,7 +584,6 @@ pub async fn update_architecture(
         && req.latest_yaml.is_none()
         && latest_version_id.is_none();
     if no_field_changes {
-        let topo = state.topology_repo.get(&id).await?;
         return Ok(Json(UpdateArchitectureResponse {
             architecture: ArchitectureSummary::from(topo),
         }));
@@ -400,21 +591,24 @@ pub async fn update_architecture(
 
     let result = state
         .topology_repo
-        .update(TopologyUpdateInput {
-            id: id.clone(),
-            expected_version: req.expected_version,
-            display_name: req.display_name,
-            description: req.description,
-            environment: req.environment,
-            // Status transitions are owned by validate/plan/apply phases —
-            // Phase 0 CRUD never moves a topology out of Draft.
-            status: None,
-            design_graph_json: req.design_graph_json,
-            latest_yaml: req.latest_yaml,
-            latest_version_id,
-            last_validation_status: None,
-            last_fleet_check_status: None,
-        })
+        .update(
+            TopologyUpdateInput {
+                id: id.clone(),
+                expected_version: req.expected_version,
+                display_name: req.display_name,
+                description: req.description,
+                environment: req.environment,
+                // Status transitions are owned by validate/plan/apply phases —
+                // Phase 0 CRUD never moves a topology out of Draft.
+                status: None,
+                design_graph_json: req.design_graph_json,
+                latest_yaml: req.latest_yaml,
+                latest_version_id,
+                last_validation_status: None,
+                last_fleet_check_status: None,
+            },
+            scope.as_deref(),
+        )
         .await;
     match result {
         Ok(topo) => Ok(Json(UpdateArchitectureResponse {
@@ -449,7 +643,18 @@ pub async fn archive_architecture(
         expected_version = req.expected_version,
         "archive_architecture"
     );
-    let result = state.topology_repo.archive(&id, req.expected_version).await;
+    // Ownership check (403 for foreign rows, 404 for missing) before the
+    // write; the scoped store call below re-enforces the same predicate.
+    // NULL-owned starter rows pass the READ gate in
+    // get_topology_authorized but are denied here for non-admins: they are
+    // read-only templates (Security H6).
+    let topo = get_topology_authorized(&state, &claims, &id).await?;
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+    let scope = caller_visible_scope(&claims)?;
+    let result = state
+        .topology_repo
+        .archive(&id, req.expected_version, scope.as_deref())
+        .await;
     match result {
         Ok(topo) => Ok(Json(ArchiveArchitectureResponse {
             architecture: ArchitectureSummary::from(topo),
@@ -542,7 +747,17 @@ pub async fn validate_architecture(
     let id = parse_id(&req.id)?;
     tracing::info!(architecture_id = %id, "validate_architecture");
 
-    let topo = state.topology_repo.get(&id).await?;
+    // Ownership check before reading the row or persisting any status.
+    // NULL-owned starter rows are read-only templates for non-admins (403
+    // via require_owner_or_admin), and a production-tagged row is
+    // admin-only — validating it would persist `last_validation_status`
+    // onto a row the caller may not write.
+    let topo = get_topology_authorized(&state, &claims, &id).await?;
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    enforce_production_guard(topo.environment.as_deref(), role)?;
     let yaml = topo.latest_yaml.as_deref().unwrap_or("");
     let result = validate_yaml_str(yaml);
 
@@ -555,9 +770,10 @@ pub async fn validate_architecture(
     } else {
         ValidationStatus::Failed
     };
+    let scope = caller_visible_scope(&claims)?;
     match state
         .topology_repo
-        .set_validation_status(&id, topo.version_number, new_status)
+        .set_validation_status(&id, topo.version_number, new_status, scope.as_deref())
         .await
     {
         Ok(_) => {}
@@ -604,7 +820,7 @@ pub async fn generate_architecture_yaml(
     require_operator_or_admin(&claims)?;
     let id = parse_id(&req.id)?;
     tracing::info!(architecture_id = %id, "generate_architecture_yaml");
-    let topo = state.topology_repo.get(&id).await?;
+    let topo = get_topology_authorized(&state, &claims, &id).await?;
     if let Some(yaml) = topo.latest_yaml.filter(|s| !s.trim().is_empty()) {
         return Ok(Json(GenerateYamlResponse { yaml }));
     }
@@ -630,7 +846,15 @@ pub async fn import_yaml_architecture(
     }
     tracing::info!(architecture_id = %id, "import_yaml_architecture");
 
-    let topo = state.topology_repo.get(&id).await?;
+    let topo = get_topology_authorized(&state, &claims, &id).await?;
+    // NULL-owned starter rows are read-only templates for non-admins (403),
+    // and a production-tagged row is admin-only — importing YAML would
+    // persist `latest_yaml` onto a row the caller may not write.
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    enforce_production_guard(topo.environment.as_deref(), role)?;
     let result = validate_yaml_str(&req.yaml);
     let new_status = if result.summary.errors == 0 {
         ValidationStatus::Passed
@@ -638,21 +862,25 @@ pub async fn import_yaml_architecture(
         ValidationStatus::Failed
     };
 
+    let scope = caller_visible_scope(&claims)?;
     let update_result = state
         .topology_repo
-        .update(TopologyUpdateInput {
-            id: id.clone(),
-            expected_version: topo.version_number,
-            display_name: None,
-            description: None,
-            environment: None,
-            status: None,
-            design_graph_json: None,
-            latest_yaml: Some(req.yaml),
-            latest_version_id: None,
-            last_validation_status: Some(new_status),
-            last_fleet_check_status: None,
-        })
+        .update(
+            TopologyUpdateInput {
+                id: id.clone(),
+                expected_version: topo.version_number,
+                display_name: None,
+                description: None,
+                environment: None,
+                status: None,
+                design_graph_json: None,
+                latest_yaml: Some(req.yaml),
+                latest_version_id: None,
+                last_validation_status: Some(new_status),
+                last_fleet_check_status: None,
+            },
+            scope.as_deref(),
+        )
         .await;
     match update_result {
         Ok(_) => Ok(Json(ImportYamlResponse { result })),
@@ -733,7 +961,7 @@ pub struct DiscardPlanResponse {
 /// returns the plan body.
 ///
 /// Operator+ only. The 15-minute TTL is computed against the injected
-/// [`Clock`] so tests can drive expiry deterministically.
+/// clock so tests can drive expiry deterministically.
 pub async fn plan_architecture(
     BearerToken(claims): BearerToken,
     State(state): State<AppState>,
@@ -746,15 +974,7 @@ pub async fn plan_architecture(
     // during apply. Phase 4 plan generation always returns warnings inline;
     // the apply handler is the one that gates on the flag.
     let _ = req.allow_warnings;
-    let resp = generate_plan_inner(
-        &state,
-        &claims.sub,
-        caller_can_apply(&claims),
-        id,
-        PlanMode::Apply,
-        refresh,
-    )
-    .await?;
+    let resp = generate_plan_inner(&state, &claims, id, PlanMode::Apply, refresh).await?;
     Ok(Json(resp))
 }
 
@@ -769,15 +989,7 @@ pub async fn destroy_plan_architecture(
     require_operator_or_admin(&claims)?;
     let id = parse_id(&req.id)?;
     let refresh = req.refresh_inventory.unwrap_or(true);
-    let resp = generate_plan_inner(
-        &state,
-        &claims.sub,
-        caller_can_apply(&claims),
-        id,
-        PlanMode::Destroy,
-        refresh,
-    )
-    .await?;
+    let resp = generate_plan_inner(&state, &claims, id, PlanMode::Destroy, refresh).await?;
     Ok(Json(resp))
 }
 
@@ -802,8 +1014,10 @@ pub async fn discard_plan_architecture(
     require_operator_or_admin(&claims)?;
     let plan_id = ArchitecturePlanId::new(req.plan_id.clone())
         .map_err(|e| BffError::BadRequest(format!("invalid plan id: {e}")))?;
+    // Ownership check (403 when the plan belongs to another user's
+    // architecture, 404 when it does not exist) before any read or write.
+    let plan = get_plan_authorized(&state, &claims, &plan_id).await?;
     let plan_repo = PlanRepository::new(state.pool.clone());
-    let plan = plan_repo.get(&plan_id).await?;
     tracing::info!(
         target: "architecture.plan",
         architecture_id = %plan.architecture_id,
@@ -870,8 +1084,7 @@ pub async fn discard_plan_architecture(
 ///    it with the matching `requires_confirmation`/`ready_to_apply` status.
 async fn generate_plan_inner(
     state: &AppState,
-    caller: &str,
-    caller_can_apply: bool,
+    claims: &Claims,
     id: ArchitectureId,
     mode: PlanMode,
     refresh_inventory: bool,
@@ -884,7 +1097,11 @@ async fn generate_plan_inner(
         "plan_architecture"
     );
 
-    let topo = state.topology_repo.get(&id).await?;
+    let caller = claims.sub.as_str();
+    let caller_can_apply = caller_can_apply(claims);
+    // Ownership check (403 for foreign rows, 404 for missing) before any
+    // read, snapshot capture, or plan/version persistence.
+    let topo = get_topology_authorized(state, claims, &id).await?;
     let yaml = topo
         .latest_yaml
         .as_deref()
@@ -1104,27 +1321,6 @@ async fn generate_plan_inner(
     })
 }
 
-/// Returns `Err(BffError::PlanExpired)` when `clock.now() > plan.expires_at`.
-///
-/// Phase 5's apply/confirm handlers will gate on this; centralizing the
-/// check here keeps the wording and the `code: "PLAN_EXPIRED"` body shape
-/// consistent across all callers. The expiry comparison itself is delegated
-/// to [`chv_architecture_reconcile::is_expired`] so the periodic sweeper
-/// (Phase 5) and the per-call gate share one definition of "expired".
-#[allow(dead_code)] // Phase 5 wires the apply/confirm callers.
-pub fn ensure_plan_not_expired(plan: &ArchitecturePlan, clock: &dyn Clock) -> Result<(), BffError> {
-    if chv_architecture_reconcile::is_expired(plan, clock) {
-        return Err(BffError::PlanExpired {
-            plan_id: plan.id.to_string(),
-            message: format!(
-                "plan {} has expired (created {}, expires {})",
-                plan.id, plan.created_at, plan.expires_at
-            ),
-        });
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Phase 3 DTOs — check-fleet
 // ---------------------------------------------------------------------------
@@ -1174,7 +1370,15 @@ pub async fn check_fleet_architecture(
     let id = parse_id(&req.id)?;
     tracing::info!(architecture_id = %id, "check_fleet_architecture");
 
-    let topo = state.topology_repo.get(&id).await?;
+    let topo = get_topology_authorized(&state, &claims, &id).await?;
+    // NULL-owned starter rows are read-only templates for non-admins (403),
+    // and a production-tagged row is admin-only — the fleet check persists
+    // `last_fleet_check_status` onto a row the caller may not write.
+    require_owner_or_admin(&claims, topo.owner_user_id.as_deref())?;
+    let role = Role::parse(&claims.role).ok_or_else(|| {
+        BffError::Internal("operator middleware passed but role string is unparseable".into())
+    })?;
+    enforce_production_guard(topo.environment.as_deref(), role)?;
     let yaml = topo
         .latest_yaml
         .as_deref()
@@ -1263,21 +1467,25 @@ pub async fn check_fleet_architecture(
     } else {
         FleetCheckStatus::Passed
     };
+    let scope = caller_visible_scope(&claims)?;
     let update_result = state
         .topology_repo
-        .update(TopologyUpdateInput {
-            id: id.clone(),
-            expected_version: topo.version_number,
-            display_name: None,
-            description: None,
-            environment: None,
-            status: None,
-            design_graph_json: None,
-            latest_yaml: None,
-            latest_version_id: None,
-            last_validation_status: None,
-            last_fleet_check_status: Some(new_status),
-        })
+        .update(
+            TopologyUpdateInput {
+                id: id.clone(),
+                expected_version: topo.version_number,
+                display_name: None,
+                description: None,
+                environment: None,
+                status: None,
+                design_graph_json: None,
+                latest_yaml: None,
+                latest_version_id: None,
+                last_validation_status: None,
+                last_fleet_check_status: Some(new_status),
+            },
+            scope.as_deref(),
+        )
         .await;
     match update_result {
         Ok(_) => {}
@@ -1386,10 +1594,18 @@ fn is_production_environment(environment: Option<&str>) -> bool {
 /// future fine-grained `architecture:apply:production` permission, but this
 /// guard is the conservative bridge until that lands.
 ///
-/// A `None` environment, or any non-`production`/`prod` value, passes
+/// The decision is made against the *persisted* topology environment (the
+/// `architecture` row loaded by the caller's scoped read) — never against
+/// any field of the apply/destroy request, which carries none. A `None`
+/// persisted environment, or any non-`production`/`prod` value, passes
 /// through. Admins always pass through. Operators (and viewers) hit a
 /// dedicated 403 with `code: "PRODUCTION_REQUIRES_ADMIN"` so the UI can
 /// route to "ask an admin to apply this".
+///
+/// Security F7 (environment-null bypass): the companion check in
+/// `update_architecture` blocks non-admins from *un-tagging* a persisted
+/// production row (including via `environment: null`/absent), so the
+/// apply-time guard here cannot be evaded by first relabelling the row.
 fn enforce_production_guard(environment: Option<&str>, role: Role) -> Result<(), BffError> {
     if is_production_environment(environment) && !role.meets(Role::Admin) {
         return Err(BffError::ProductionRequiresAdmin {
@@ -1470,12 +1686,14 @@ async fn apply_inner_core(
         .map_err(|e| BffError::BadRequest(format!("invalid plan id: {e}")))?;
     let role = Role::parse(&claims.role).unwrap_or(Role::Viewer);
 
-    // 1. Look up architecture (404 if missing).
-    let architecture = state.topology_repo.get(&architecture_id).await?;
+    // 1. Look up architecture with ownership check (403 for foreign rows,
+    //    404 if missing).
+    let architecture = get_topology_authorized(state, claims, &architecture_id).await?;
 
-    // 2. Look up plan (404 if missing).
+    // 2. Look up plan with ownership check — a plan belonging to another
+    //    user's architecture answers 403, not its contents.
     let plan_repo = PlanRepository::new(state.pool.clone());
-    let plan_record = plan_repo.get(&plan_id).await?;
+    let plan_record = get_plan_authorized(state, claims, &plan_id).await?;
 
     // 3. Verify the plan was generated against this architecture and the
     //    current `latest_version_id`. A version-drift mismatch is a 409 so
@@ -1696,8 +1914,9 @@ pub async fn get_architecture_drift(
         "architecture.drift.invoked"
     );
 
-    // 1. Look up the architecture (404 if missing).
-    let topo = state.topology_repo.get(&architecture_id).await?;
+    // 1. Look up the architecture with ownership check (403 for foreign
+    //    rows, 404 if missing).
+    let topo = get_topology_authorized(&state, &claims, &architecture_id).await?;
 
     // 2. Resolve baseline_version_id. The drift_reports row carries a FK
     //    onto `architecture_versions(id)` so we must persist a real version
@@ -1708,12 +1927,15 @@ pub async fn get_architecture_drift(
     //    topology's `version_number` to avoid the UNIQUE(architecture_id,
     //    version_number) collision on subsequent drift calls.
     let version_repo = VersionRepository::new(state.pool.clone());
+    let scope = caller_visible_scope(&claims)?;
     let baseline_version_id = match topo.latest_version_id.as_ref() {
         Some(v) => v.clone(),
         None => {
             // Look for an existing version row with this architecture's
             // current version_number first.
-            let existing = version_repo.list_for_architecture(&architecture_id).await?;
+            let existing = version_repo
+                .list_for_architecture(&architecture_id, scope.as_deref())
+                .await?;
             if let Some(matching) = existing
                 .into_iter()
                 .find(|v| v.version_number == topo.version_number)
@@ -1748,7 +1970,7 @@ pub async fn get_architecture_drift(
     if !req.force_refresh {
         let latest = state
             .drift_reports
-            .most_recent_for_architecture(&architecture_id)
+            .most_recent_for_architecture(&architecture_id, scope.as_deref())
             .await?;
         if let Some(latest) = latest {
             let age_secs = state
@@ -2020,19 +2242,21 @@ pub struct ApplyRunDto {
 /// 3. Call [`ApplyRunRepository::list_for_architecture`] (DESC).
 /// 4. Map each row to [`ApplyRunDto`] and return.
 pub async fn list_architecture_runs(
-    BearerToken(_claims): BearerToken,
+    BearerToken(claims): BearerToken,
     State(state): State<AppState>,
     Json(req): Json<ListApplyRunsRequest>,
 ) -> Result<Json<ListApplyRunsResponse>, BffError> {
     let architecture_id = parse_id(&req.id)?;
 
-    // 404 if the architecture does not exist. Without this the endpoint
-    // would happily return `runs: []` for a typoed id, hiding the bug.
-    let _ = state.topology_repo.get(&architecture_id).await?;
+    // Ownership check: 403 when the architecture belongs to another user,
+    // 404 when it does not exist. Without this the endpoint would leak run
+    // history (task ids, error messages, requested_by) of foreign rows.
+    get_topology_authorized(&state, &claims, &architecture_id).await?;
 
+    let scope = caller_visible_scope(&claims)?;
     let runs = state
         .apply_runs
-        .list_for_architecture(&architecture_id)
+        .list_for_architecture(&architecture_id, scope.as_deref())
         .await?;
     let runs: Vec<ApplyRunDto> = runs
         .into_iter()

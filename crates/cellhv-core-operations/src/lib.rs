@@ -435,14 +435,6 @@ impl OperationService {
         Ok(self.store.cutover_legacy_snapshot(source, checksum)?)
     }
 
-    pub fn rollback_legacy_import(
-        &mut self,
-        source: &str,
-        checksum: &str,
-    ) -> Result<MigrationDisposition> {
-        Ok(self.store.rollback_legacy_import(source, checksum)?)
-    }
-
     pub fn legacy_migration_state(&self, source: &str) -> Result<Option<LegacyMigrationState>> {
         Ok(self
             .store
@@ -566,16 +558,6 @@ impl OperationService {
     }
 }
 
-pub fn request_fingerprint(
-    command: &MutationCommand,
-    expected_vm_version: ResourceVersion,
-) -> Result<String> {
-    Ok(canonical_request_fingerprint(&canonical_request(
-        command,
-        expected_vm_version,
-    ))?)
-}
-
 pub fn classify_restart(operation: &Operation) -> RestartDisposition {
     match operation.status {
         OperationStatus::Accepted => RestartDisposition::Ready,
@@ -673,28 +655,6 @@ mod tests {
         let path = dir.path().join("core.db");
         let store = CoreStore::create_new(&path).unwrap();
         (dir, path, OperationService::new(store))
-    }
-
-    #[test]
-    fn fingerprint_is_deterministic_and_command_sensitive() {
-        let command = MutationCommand::CreateVm {
-            definition: vm("a"),
-        };
-        let expected = request_fingerprint(&command, version(1)).unwrap();
-        for _ in 0..100 {
-            assert_eq!(request_fingerprint(&command, version(1)).unwrap(), expected);
-        }
-        assert_ne!(
-            expected,
-            request_fingerprint(
-                &MutationCommand::CreateVm {
-                    definition: vm("b")
-                },
-                version(1)
-            )
-            .unwrap()
-        );
-        assert_ne!(expected, request_fingerprint(&command, version(2)).unwrap());
     }
 
     #[test]

@@ -25,10 +25,6 @@ impl BffCache {
         self.inner.insert(key.to_string(), data).await;
     }
 
-    pub async fn set_with_ttl(&self, key: &str, data: String, _ttl: Option<Duration>) {
-        self.inner.insert(key.to_string(), data).await;
-    }
-
     pub async fn invalidate(&self, prefix: &str) {
         let prefix_owned = prefix.to_string();
         self.inner

@@ -7,6 +7,11 @@ use serde_json::{json, Value};
 use crate::router::AppState;
 use crate::BffError;
 
+/// Sanity ceilings for user-supplied template/volume sizes (S2 overflow
+/// hardening): memory ≤ 1 TiB, volume size ≤ 64 TiB.
+const MAX_MEMORY_MB: i64 = 1024 * 1024;
+const MAX_VOLUME_SIZE_GB: i64 = 64 * 1024;
+
 // ---------------------------------------------------------------------------
 // VM Templates
 // ---------------------------------------------------------------------------
@@ -96,7 +101,17 @@ pub async fn create_vm_template(
         .and_then(|v| v.as_i64())
         .unwrap_or(2048);
 
-    let memory_bytes = memory_mb * 1024 * 1024;
+    if memory_mb <= 0 || memory_mb > MAX_MEMORY_MB {
+        return Err(BffError::BadRequest(format!(
+            "memory_mb must be between 1 and {} (1 TiB)",
+            MAX_MEMORY_MB
+        )));
+    }
+    // checked_mul: an oversized memory_mb wrapped to a negative value in
+    // release builds, corrupting stored state and bypassing quota.
+    let memory_bytes = memory_mb
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| BffError::BadRequest("memory_mb too large".into()))?;
 
     let image_id = payload.get("image_id").and_then(|v| v.as_str());
 
@@ -330,13 +345,20 @@ pub async fn clone_vm_template(
         .network_id
         .clone()
         .unwrap_or_else(|| "default".to_string());
-    let volume_size_bytes = payload
+    let volume_size_gb = payload
         .get("volume_size_gb")
         .and_then(|v| v.as_i64())
-        .unwrap_or(10)
-        * 1024
-        * 1024
-        * 1024;
+        .unwrap_or(10);
+    if volume_size_gb <= 0 || volume_size_gb > MAX_VOLUME_SIZE_GB {
+        return Err(BffError::BadRequest(format!(
+            "volume_size_gb must be between 1 and {} (64 TiB)",
+            MAX_VOLUME_SIZE_GB
+        )));
+    }
+    // checked_mul: same overflow guard as vms.rs::create_vm (S2 hardening).
+    let volume_size_bytes = volume_size_gb
+        .checked_mul(1024 * 1024 * 1024)
+        .ok_or_else(|| BffError::BadRequest("volume_size_gb too large".into()))?;
 
     // BEGIN IMMEDIATE: serialize concurrent writers to close the quota-check TOCTOU
     // window on template-driven VM creation. See S2-1 / vms.rs::create_vm for context.

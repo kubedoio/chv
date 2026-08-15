@@ -7,10 +7,7 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api as proto;
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
 // BPF map pinned-file operations (Linux only)
@@ -80,78 +77,9 @@ fn bpf_map_update(pin_path: &str, key: &[u8], value: &[u8]) -> Result<(), ChvErr
     Ok(())
 }
 
-/// Lookup a BPF map element via the pinned map file and bpf() syscall.
-///
-/// Opens the pinned map at `pin_path`, then calls BPF_MAP_LOOKUP_ELEM.
-/// Returns the value bytes of `value_size` length.
-#[cfg(target_os = "linux")]
-fn bpf_map_lookup(pin_path: &str, key: &[u8], value_size: usize) -> Result<Vec<u8>, ChvError> {
-    use std::os::unix::io::AsRawFd;
-
-    const BPF_MAP_LOOKUP_ELEM: u32 = 1;
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(pin_path)
-        .map_err(|e| ChvError::Io {
-            path: pin_path.to_string(),
-            source: e,
-        })?;
-
-    let fd = file.as_raw_fd();
-
-    let mut value_buf = vec![0u8; value_size];
-
-    #[repr(C)]
-    struct BpfMapLookupAttr {
-        map_fd: u32,
-        _pad0: u32,
-        key: u64,
-        value_or_next_key: u64,
-        flags: u64,
-    }
-
-    let attr = BpfMapLookupAttr {
-        map_fd: fd as u32,
-        _pad0: 0,
-        key: key.as_ptr() as u64,
-        value_or_next_key: value_buf.as_mut_ptr() as u64,
-        flags: 0,
-    };
-
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_bpf,
-            BPF_MAP_LOOKUP_ELEM as libc::c_long,
-            &attr as *const BpfMapLookupAttr as *const libc::c_void,
-            std::mem::size_of::<BpfMapLookupAttr>() as libc::c_long,
-        )
-    };
-
-    if ret < 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(ChvError::Internal {
-            reason: format!("bpf(BPF_MAP_LOOKUP_ELEM) on {} failed: {}", pin_path, err),
-        });
-    }
-
-    Ok(value_buf)
-}
-
 /// Stub for non-Linux platforms — always returns an error.
 #[cfg(not(target_os = "linux"))]
 fn bpf_map_update(pin_path: &str, _key: &[u8], _value: &[u8]) -> Result<(), ChvError> {
-    Err(ChvError::Internal {
-        reason: format!(
-            "BPF map operations are only supported on Linux (attempted: {})",
-            pin_path
-        ),
-    })
-}
-
-/// Stub for non-Linux platforms — always returns an error.
-#[cfg(not(target_os = "linux"))]
-fn bpf_map_lookup(pin_path: &str, _key: &[u8], _value_size: usize) -> Result<Vec<u8>, ChvError> {
     Err(ChvError::Internal {
         reason: format!(
             "BPF map operations are only supported on Linux (attempted: {})",
@@ -222,23 +150,6 @@ fn serialize_rate_limit_value(rate_limit: &EbpfRateLimit) -> [u8; 32] {
     buf
 }
 
-/// Size of the stats_map value: packets_allowed(8) + packets_denied(8) +
-/// bytes_allowed(8) + bytes_denied(8) = 32 bytes
-const BPF_STATS_VALUE_SIZE: usize = 32;
-
-/// Deserialize stats from the BPF stats_map value.
-fn deserialize_stats(buf: &[u8]) -> EbpfStats {
-    if buf.len() < BPF_STATS_VALUE_SIZE {
-        return EbpfStats::default();
-    }
-    EbpfStats {
-        packets_allowed: u64::from_ne_bytes(buf[0..8].try_into().unwrap_or([0; 8])),
-        packets_denied: u64::from_ne_bytes(buf[8..16].try_into().unwrap_or([0; 8])),
-        bytes_allowed: u64::from_ne_bytes(buf[16..24].try_into().unwrap_or([0; 8])),
-        bytes_denied: u64::from_ne_bytes(buf[24..32].try_into().unwrap_or([0; 8])),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Data structures for eBPF map entries
 // ---------------------------------------------------------------------------
@@ -246,7 +157,8 @@ fn deserialize_stats(buf: &[u8]) -> EbpfStats {
 /// Represents a security rule entry for the eBPF rule_map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EbpfRule {
-    pub vm_id_hash: u32,
+    /// Fixed 16-byte BPF map key derived from the vm_id.
+    pub vm_key: [u8; VM_KEY_LEN],
     /// 0=both, 1=ingress, 2=egress
     pub direction: u8,
     pub priority: u32,
@@ -267,18 +179,10 @@ pub struct EbpfRule {
 /// Rate limit entry for the eBPF rate_map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EbpfRateLimit {
-    pub vm_id_hash: u32,
+    /// Fixed 16-byte BPF map key derived from the vm_id.
+    pub vm_key: [u8; VM_KEY_LEN],
     pub rate_bps: u64,
     pub burst_bytes: u64,
-}
-
-/// Per-VM traffic stats from eBPF stats_map.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EbpfStats {
-    pub packets_allowed: u64,
-    pub packets_denied: u64,
-    pub bytes_allowed: u64,
-    pub bytes_denied: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,31 +211,43 @@ pub trait EbpfManager: Send + Sync + 'static {
         rate_limit: &EbpfRateLimit,
     ) -> Result<(), ChvError>;
 
-    /// Read traffic stats for a VM from stats_map.
-    async fn read_stats(&self, vm_id: &str) -> Result<EbpfStats, ChvError>;
-
-    /// Detach TC program from an interface.
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError>;
-
     /// Check if eBPF programs are available (compiled .o files exist).
     fn is_available(&self) -> bool;
 
     /// Return the number of interfaces with loaded eBPF programs.
     fn loaded_program_count(&self) -> u32;
-
-    /// Return the total number of denied packets observed across all VMs.
-    fn denied_packets_total(&self) -> u64;
 }
 
 // ---------------------------------------------------------------------------
-// Hash helper
+// VM map key helper
 // ---------------------------------------------------------------------------
 
-/// Hash a vm_id to a u32 for use as eBPF map key.
-/// Uses FNV-1a hash truncated to 32 bits.
-pub fn hash_vm_id(vm_id: &str) -> u32 {
-    let full = chv_common::fnv1a_hash(vm_id);
-    (full & 0xffff_ffff) as u32
+/// Length in bytes of the fixed BPF map key built from a vm_id.
+/// Must match `struct rule_key { __u8 id[16]; }` in ebpf/policy_tc.bpf.c.
+pub const VM_KEY_LEN: usize = 16;
+
+/// Build the fixed 16-byte BPF map key for a vm_id.
+///
+/// The key holds the vm_id's raw ASCII bytes, zero-padded to `VM_KEY_LEN`.
+/// Distinct vm_ids that fit in 16 bytes therefore produce distinct keys.
+/// vm_ids longer than `VM_KEY_LEN` bytes are rejected rather than
+/// truncated: truncation would let two distinct vm_ids collide and one
+/// VM's policy overwrite the other's. This replaces the previous FNV-1a
+/// hash truncated to u32, where two distinct vm_ids could collide and one
+/// VM's policy would overwrite the other's.
+pub fn build_vm_key(vm_id: &str) -> Result<[u8; VM_KEY_LEN], ChvError> {
+    if vm_id.len() > VM_KEY_LEN {
+        return Err(ChvError::InvalidArgument {
+            field: "vm_id".to_string(),
+            reason: format!(
+                "vm_id '{}' exceeds the {}-byte BPF map key length",
+                vm_id, VM_KEY_LEN
+            ),
+        });
+    }
+    let mut key = [0u8; VM_KEY_LEN];
+    key[..vm_id.len()].copy_from_slice(vm_id.as_bytes());
+    Ok(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -395,9 +311,12 @@ fn parse_ipv4(s: &str) -> Option<u32> {
 // ---------------------------------------------------------------------------
 
 /// Convert a proto SecurityPolicy into a Vec<EbpfRule>.
-pub fn proto_to_ebpf_rules(vm_id: &str, policy: &proto::SecurityPolicy) -> Vec<EbpfRule> {
-    let vm_hash = hash_vm_id(vm_id);
-    policy
+pub fn proto_to_ebpf_rules(
+    vm_id: &str,
+    policy: &proto::SecurityPolicy,
+) -> Result<Vec<EbpfRule>, ChvError> {
+    let vm_key = build_vm_key(vm_id)?;
+    Ok(policy
         .rules
         .iter()
         .map(|rule| {
@@ -442,7 +361,7 @@ pub fn proto_to_ebpf_rules(vm_id: &str, policy: &proto::SecurityPolicy) -> Vec<E
                 .unwrap_or((0, 0));
 
             EbpfRule {
-                vm_id_hash: vm_hash,
+                vm_key,
                 direction,
                 priority: rule.priority,
                 src_ip,
@@ -457,16 +376,18 @@ pub fn proto_to_ebpf_rules(vm_id: &str, policy: &proto::SecurityPolicy) -> Vec<E
                 action,
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Convert a proto RateLimitPolicy into an EbpfRateLimit.
-pub fn proto_to_ebpf_rate_limit(policy: &proto::RateLimitPolicy) -> EbpfRateLimit {
-    EbpfRateLimit {
-        vm_id_hash: hash_vm_id(&policy.vm_id),
+pub fn proto_to_ebpf_rate_limit(
+    policy: &proto::RateLimitPolicy,
+) -> Result<EbpfRateLimit, ChvError> {
+    Ok(EbpfRateLimit {
+        vm_key: build_vm_key(&policy.vm_id)?,
         rate_bps: policy.rate_bps,
         burst_bytes: policy.burst_bytes,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -482,8 +403,6 @@ pub struct LinuxEbpfManager {
     bpf_pin_base: String,
     /// Interfaces with successfully loaded eBPF programs.
     loaded_interfaces: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// Counter tracking total denied packets observed from stats reads.
-    denied_packets: Arc<AtomicU64>,
 }
 
 impl LinuxEbpfManager {
@@ -492,17 +411,6 @@ impl LinuxEbpfManager {
             program_path,
             bpf_pin_base: DEFAULT_BPF_PIN_PATH.to_string(),
             loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
-            denied_packets: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    /// Create a manager with a custom BPF pin base path.
-    pub fn with_pin_path(program_path: String, bpf_pin_base: String) -> Self {
-        Self {
-            program_path,
-            bpf_pin_base,
-            loaded_interfaces: std::sync::Mutex::new(std::collections::HashSet::new()),
-            denied_packets: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -586,8 +494,7 @@ impl EbpfManager for LinuxEbpfManager {
     }
 
     async fn update_rules(&self, vm_id: &str, rules: &[EbpfRule]) -> Result<(), ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
+        let key = build_vm_key(vm_id)?;
         let value = serialize_rules_value(rules);
         let pin_path = self.map_path("rule_map");
 
@@ -595,7 +502,6 @@ impl EbpfManager for LinuxEbpfManager {
 
         info!(
             vm_id = %vm_id,
-            vm_id_hash = vm_hash,
             rule_count = rules.len(),
             pin_path = %pin_path,
             "eBPF rule_map updated"
@@ -604,8 +510,7 @@ impl EbpfManager for LinuxEbpfManager {
     }
 
     async fn set_default_action(&self, vm_id: &str, action: u8) -> Result<(), ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
+        let key = build_vm_key(vm_id)?;
         // Value is action as u32 (u8 padded to u32 for BPF map alignment)
         let value = (action as u32).to_ne_bytes();
         let pin_path = self.map_path("defaults_map");
@@ -614,7 +519,6 @@ impl EbpfManager for LinuxEbpfManager {
 
         info!(
             vm_id = %vm_id,
-            vm_id_hash = vm_hash,
             action = action,
             pin_path = %pin_path,
             "eBPF defaults_map updated"
@@ -627,8 +531,7 @@ impl EbpfManager for LinuxEbpfManager {
         vm_id: &str,
         rate_limit: &EbpfRateLimit,
     ) -> Result<(), ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
+        let key = build_vm_key(vm_id)?;
         let value = serialize_rate_limit_value(rate_limit);
         let pin_path = self.map_path("rate_map");
 
@@ -636,43 +539,11 @@ impl EbpfManager for LinuxEbpfManager {
 
         info!(
             vm_id = %vm_id,
-            vm_id_hash = vm_hash,
             rate_bps = rate_limit.rate_bps,
             burst_bytes = rate_limit.burst_bytes,
             pin_path = %pin_path,
             "eBPF rate_map updated"
         );
-        Ok(())
-    }
-
-    async fn read_stats(&self, vm_id: &str) -> Result<EbpfStats, ChvError> {
-        let vm_hash = hash_vm_id(vm_id);
-        let key = vm_hash.to_ne_bytes();
-        let pin_path = self.map_path("stats_map");
-
-        let value = bpf_map_lookup(&pin_path, &key, BPF_STATS_VALUE_SIZE)?;
-        let stats = deserialize_stats(&value);
-
-        // Track denied packets
-        if stats.packets_denied > 0 {
-            self.denied_packets
-                .fetch_add(stats.packets_denied, Ordering::Relaxed);
-        }
-
-        debug!(
-            vm_id = %vm_id,
-            vm_id_hash = vm_hash,
-            packets_allowed = stats.packets_allowed,
-            packets_denied = stats.packets_denied,
-            "eBPF stats_map read"
-        );
-        Ok(stats)
-    }
-
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError> {
-        // Remove clsact qdisc (removes all attached TC eBPF programs)
-        Self::run_tc(&["qdisc", "del", "dev", interface, "clsact"]).await?;
-        info!(interface = %interface, "detached eBPF TC programs");
         Ok(())
     }
 
@@ -686,10 +557,6 @@ impl EbpfManager for LinuxEbpfManager {
             .lock()
             .map(|s| s.len() as u32)
             .unwrap_or(0)
-    }
-
-    fn denied_packets_total(&self) -> u64 {
-        self.denied_packets.load(Ordering::Relaxed)
     }
 }
 
@@ -732,24 +599,11 @@ impl EbpfManager for NoopEbpfManager {
         Ok(())
     }
 
-    async fn read_stats(&self, _vm_id: &str) -> Result<EbpfStats, ChvError> {
-        Ok(EbpfStats::default())
-    }
-
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError> {
-        debug!(interface = %interface, "noop: eBPF detach skipped");
-        Ok(())
-    }
-
     fn is_available(&self) -> bool {
         false
     }
 
     fn loaded_program_count(&self) -> u32 {
-        0
-    }
-
-    fn denied_packets_total(&self) -> u64 {
         0
     }
 }
@@ -765,8 +619,6 @@ pub struct MockEbpfManager {
     pub updated_rules: std::sync::Mutex<Vec<(String, Vec<EbpfRule>)>>,
     pub default_actions: std::sync::Mutex<Vec<(String, u8)>>,
     pub updated_rate_limits: std::sync::Mutex<Vec<(String, EbpfRateLimit)>>,
-    pub detached: std::sync::Mutex<Vec<String>>,
-    pub stats_reads: std::sync::Mutex<Vec<String>>,
     pub available: bool,
 }
 
@@ -778,8 +630,6 @@ impl MockEbpfManager {
             updated_rules: std::sync::Mutex::new(Vec::new()),
             default_actions: std::sync::Mutex::new(Vec::new()),
             updated_rate_limits: std::sync::Mutex::new(Vec::new()),
-            detached: std::sync::Mutex::new(Vec::new()),
-            stats_reads: std::sync::Mutex::new(Vec::new()),
             available,
         }
     }
@@ -831,75 +681,12 @@ impl EbpfManager for MockEbpfManager {
         Ok(())
     }
 
-    async fn read_stats(&self, vm_id: &str) -> Result<EbpfStats, ChvError> {
-        self.stats_reads.lock().unwrap().push(vm_id.to_string());
-        Ok(EbpfStats {
-            packets_allowed: 100,
-            packets_denied: 5,
-            bytes_allowed: 50000,
-            bytes_denied: 1000,
-        })
-    }
-
-    async fn detach_program(&self, interface: &str) -> Result<(), ChvError> {
-        self.detached.lock().unwrap().push(interface.to_string());
-        Ok(())
-    }
-
     fn is_available(&self) -> bool {
         self.available
     }
 
     fn loaded_program_count(&self) -> u32 {
         0
-    }
-
-    fn denied_packets_total(&self) -> u64 {
-        0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stats collection background task
-// ---------------------------------------------------------------------------
-
-/// Background task that periodically reads eBPF stats for known VMs and emits metrics.
-pub async fn stats_collection_loop(
-    ebpf: Arc<dyn EbpfManager>,
-    vm_ids: Arc<DashMap<String, ()>>,
-    interval_secs: u64,
-    mut shutdown: tokio::sync::watch::Receiver<()>,
-) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                for entry in vm_ids.iter() {
-                    let vm_id = entry.key();
-                    match ebpf.read_stats(vm_id).await {
-                        Ok(stats) => {
-                            debug!(
-                                vm_id = %vm_id,
-                                packets_allowed = stats.packets_allowed,
-                                packets_denied = stats.packets_denied,
-                                bytes_allowed = stats.bytes_allowed,
-                                bytes_denied = stats.bytes_denied,
-                                "eBPF stats"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(vm_id = %vm_id, error = %e, "failed to read eBPF stats");
-                        }
-                    }
-                }
-            }
-            _ = shutdown.changed() => {
-                info!("eBPF stats collection loop shutting down");
-                break;
-            }
-        }
     }
 }
 
@@ -912,17 +699,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_vm_id_is_deterministic() {
-        let h1 = hash_vm_id("vm-abc-123");
-        let h2 = hash_vm_id("vm-abc-123");
-        assert_eq!(h1, h2);
+    fn build_vm_key_is_deterministic() {
+        let k1 = build_vm_key("vm-abc-123").unwrap();
+        let k2 = build_vm_key("vm-abc-123").unwrap();
+        assert_eq!(k1, k2);
     }
 
     #[test]
-    fn hash_vm_id_different_inputs_differ() {
-        let h1 = hash_vm_id("vm-1");
-        let h2 = hash_vm_id("vm-2");
-        assert_ne!(h1, h2);
+    fn build_vm_key_different_inputs_differ() {
+        let k1 = build_vm_key("vm-1").unwrap();
+        let k2 = build_vm_key("vm-2").unwrap();
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn build_vm_key_zero_pads_short_ids() {
+        let key = build_vm_key("vm-1").unwrap();
+        assert_eq!(&key[..4], b"vm-1");
+        assert!(key[4..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn build_vm_key_rejects_long_ids_instead_of_truncating() {
+        // An overlong vm_id must be rejected: truncating to the first 16
+        // bytes would let distinct ids collide in the BPF maps.
+        let vm_id = "abcdefghijklmnopqrstuvwxyz";
+        assert!(matches!(
+            build_vm_key(vm_id),
+            Err(ChvError::InvalidArgument { .. })
+        ));
+
+        // Exactly 16 bytes is accepted and stored verbatim.
+        let exact = build_vm_key("abcdefghijklmnop").unwrap();
+        assert_eq!(&exact[..], b"abcdefghijklmnop");
+    }
+
+    /// Regression test: "bkq56sy7yl" and "7rw963dz3" collide under the old
+    /// FNV-1a-truncated-to-u32 key (both hash to 0xe7a4f6a2 in the low 32
+    /// bits), so one VM's policy could overwrite the other's. The fixed
+    /// 16-byte key must keep them distinct.
+    #[test]
+    fn build_vm_key_distinguishes_former_fnv_collisions() {
+        let a = "bkq56sy7yl";
+        let b = "7rw963dz3";
+        assert_eq!(
+            chv_common::fnv1a_hash(a) as u32,
+            chv_common::fnv1a_hash(b) as u32,
+            "test fixture must still collide under the old FNV-1a u32 key"
+        );
+        assert_ne!(build_vm_key(a).unwrap(), build_vm_key(b).unwrap());
     }
 
     #[test]
@@ -1004,8 +829,10 @@ mod tests {
             ],
         };
 
-        let rules = proto_to_ebpf_rules("vm-test", &policy);
+        let rules = proto_to_ebpf_rules("vm-test", &policy).unwrap();
         assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].vm_key, build_vm_key("vm-test").unwrap());
+        assert_eq!(rules[1].vm_key, build_vm_key("vm-test").unwrap());
 
         // First rule: TCP ingress 10.0.0.0/24 -> 192.168.1.0/24 port 80-443 allow
         assert_eq!(rules[0].direction, 1); // ingress
@@ -1038,8 +865,8 @@ mod tests {
             burst_bytes: 65536,
         };
 
-        let rl = proto_to_ebpf_rate_limit(&policy);
-        assert_eq!(rl.vm_id_hash, hash_vm_id("vm-rl"));
+        let rl = proto_to_ebpf_rate_limit(&policy).unwrap();
+        assert_eq!(rl.vm_key, build_vm_key("vm-rl").unwrap());
         assert_eq!(rl.rate_bps, 1_000_000);
         assert_eq!(rl.burst_bytes, 65536);
     }
@@ -1053,7 +880,7 @@ mod tests {
         mock.load_ingress_program("br0").await.unwrap();
 
         let rules = vec![EbpfRule {
-            vm_id_hash: 42,
+            vm_key: build_vm_key("vm-1").unwrap(),
             direction: 1,
             priority: 100,
             src_ip: 0x0a000000,
@@ -1071,16 +898,11 @@ mod tests {
         mock.set_default_action("vm-1", 0).await.unwrap();
 
         let rl = EbpfRateLimit {
-            vm_id_hash: 42,
+            vm_key: build_vm_key("vm-1").unwrap(),
             rate_bps: 1_000_000,
             burst_bytes: 65536,
         };
         mock.update_rate_limit("vm-1", &rl).await.unwrap();
-
-        let stats = mock.read_stats("vm-1").await.unwrap();
-        assert_eq!(stats.packets_allowed, 100);
-
-        mock.detach_program("tap-001").await.unwrap();
 
         // Verify tracked calls
         assert_eq!(
@@ -1094,14 +916,6 @@ mod tests {
             &[("vm-1".to_string(), 0)]
         );
         assert_eq!(mock.updated_rate_limits.lock().unwrap().len(), 1);
-        assert_eq!(
-            mock.stats_reads.lock().unwrap().as_slice(),
-            &["vm-1".to_string()]
-        );
-        assert_eq!(
-            mock.detached.lock().unwrap().as_slice(),
-            &["tap-001".to_string()]
-        );
     }
 
     #[tokio::test]
@@ -1114,14 +928,11 @@ mod tests {
         assert!(noop.update_rules("vm-x", &[]).await.is_ok());
         assert!(noop.set_default_action("vm-x", 1).await.is_ok());
         let rl = EbpfRateLimit {
-            vm_id_hash: 0,
+            vm_key: [0u8; VM_KEY_LEN],
             rate_bps: 0,
             burst_bytes: 0,
         };
         assert!(noop.update_rate_limit("vm-x", &rl).await.is_ok());
-        let stats = noop.read_stats("vm-x").await.unwrap();
-        assert_eq!(stats, EbpfStats::default());
-        assert!(noop.detach_program("tap-x").await.is_ok());
     }
 
     #[test]
@@ -1181,38 +992,6 @@ mod tests {
             mgr.loaded_program_count(),
             1,
             "duplicate insert should not increase count"
-        );
-    }
-
-    #[tokio::test]
-    async fn stats_collection_loop_reads_and_shuts_down() {
-        let mock = Arc::new(MockEbpfManager::new(true));
-        let vm_ids: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
-        vm_ids.insert("vm-loop-1".to_string(), ());
-        vm_ids.insert("vm-loop-2".to_string(), ());
-
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-
-        let ebpf: Arc<dyn EbpfManager> = mock.clone();
-        let vm_ids_clone = vm_ids.clone();
-
-        let handle = tokio::spawn(async move {
-            stats_collection_loop(ebpf, vm_ids_clone, 1, shutdown_rx).await;
-        });
-
-        // Let it tick once
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-
-        // Signal shutdown
-        drop(shutdown_tx);
-        handle.await.unwrap();
-
-        // Verify stats were read for both VMs
-        let reads = mock.stats_reads.lock().unwrap();
-        assert!(
-            reads.len() >= 2,
-            "expected at least 2 stats reads, got {}",
-            reads.len()
         );
     }
 }

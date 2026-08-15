@@ -77,18 +77,43 @@ impl DriftReportRepository {
         row_to_drift(&row)
     }
 
+    /// Fetch a drift report by id, optionally scoped to a caller.
+    ///
+    /// Drift reports inherit ownership from their architecture's
+    /// `architecture_topologies` row (same join pattern as the plan and
+    /// apply-run repositories). `Some(uid)` scopes to rows whose topology
+    /// is owned by `uid` or system-owned; `None` lifts the predicate
+    /// (admin / internal callers).
     pub async fn get(
         &self,
         id: &ArchitectureDriftReportId,
+        visible_to_user: Option<&str>,
     ) -> Result<ArchitectureDriftReport, StoreError> {
-        let row = sqlx::query(r#"SELECT * FROM architecture_drift_reports WHERE id = $1"#)
-            .bind(id.as_str())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: ENTITY,
-                id: id.to_string(),
-            })?;
+        let row = match visible_to_user {
+            None => {
+                sqlx::query(r#"SELECT * FROM architecture_drift_reports WHERE id = $1"#)
+                    .bind(id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT d.* FROM architecture_drift_reports d
+                    JOIN architecture_topologies t ON t.id = d.architecture_id
+                    WHERE d.id = $1 AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
+                    "#,
+                )
+                .bind(id.as_str())
+                .bind(uid)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        let row = row.ok_or_else(|| StoreError::NotFound {
+            entity: ENTITY,
+            id: id.to_string(),
+        })?;
         row_to_drift(&row)
     }
 
@@ -114,21 +139,46 @@ impl DriftReportRepository {
     /// `architecture_drift_reports_architecture_id_created_at_idx`. Use this
     /// for the cache-lookup hot path so we avoid the full-list scan that
     /// `list_for_architecture` performs.
+    ///
+    /// `visible_to_user = Some(uid)` joins through the owning topology and
+    /// applies the same `(owner = uid OR owner IS NULL)` predicate as
+    /// [`Self::get`]; `None` lifts it (admin / internal callers).
     pub async fn most_recent_for_architecture(
         &self,
         architecture_id: &ArchitectureId,
+        visible_to_user: Option<&str>,
     ) -> Result<Option<ArchitectureDriftReport>, StoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT * FROM architecture_drift_reports
-            WHERE architecture_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(architecture_id.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = match visible_to_user {
+            None => {
+                sqlx::query(
+                    r#"
+                    SELECT * FROM architecture_drift_reports
+                    WHERE architecture_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(architecture_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?
+            }
+            Some(uid) => {
+                sqlx::query(
+                    r#"
+                    SELECT d.* FROM architecture_drift_reports d
+                    JOIN architecture_topologies t ON t.id = d.architecture_id
+                    WHERE d.architecture_id = $1
+                      AND (t.owner_user_id = $2 OR t.owner_user_id IS NULL)
+                    ORDER BY d.created_at DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(architecture_id.as_str())
+                .bind(uid)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
         row.as_ref().map(row_to_drift).transpose()
     }
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import yaml from 'js-yaml';
+import { load } from 'js-yaml';
 
 // architecture-canvas-store imports architecture-store, which transitively
 // pulls in mutation.svelte → live-state.svelte → SvelteKit's $app/navigation
@@ -198,7 +198,7 @@ describe('architectureCanvasStore — generateYaml', () => {
 		architectureCanvasStore.addNode('host', { x: 0, y: 0 }, 'chv-node-01');
 		architectureCanvasStore.addNode('instance', { x: 100, y: 0 }, 'app-01');
 		const out = architectureCanvasStore.generateYaml();
-		const parsed = yaml.load(out) as Record<string, unknown>;
+		const parsed = load(out) as Record<string, unknown>;
 		expect(parsed).toBeDefined();
 		expect(parsed.apiVersion).toBe('chv.kubedo.io/v1alpha1');
 		expect(parsed.kind).toBe('CHVArchitecture');
@@ -210,7 +210,7 @@ describe('architectureCanvasStore — generateYaml', () => {
 		architectureCanvasStore.addNode('instance', { x: 0, y: 0 }, 'app-01');
 
 		const out = architectureCanvasStore.generateYaml();
-		const parsed = yaml.load(out) as Record<string, Array<{ name: string }>>;
+		const parsed = load(out) as Record<string, Array<{ name: string }>>;
 		expect(parsed.servers?.[0]?.name).toBe('chv-node-01');
 		expect(parsed.networks?.[0]?.name).toBe('tenant-prod');
 		expect(parsed.instances?.[0]?.name).toBe('app-01');
@@ -219,13 +219,13 @@ describe('architectureCanvasStore — generateYaml', () => {
 	it('falls back to "untitled" when a node has no name field', () => {
 		architectureCanvasStore.addNode('host', { x: 0, y: 0 }, '');
 		const out = architectureCanvasStore.generateYaml();
-		const parsed = yaml.load(out) as { servers?: Array<{ name: string }> };
+		const parsed = load(out) as { servers?: Array<{ name: string }> };
 		expect(parsed.servers?.[0]?.name).toBe('untitled');
 	});
 
 	it('emits empty graph as just metadata + apiVersion (no kind sections)', () => {
 		const out = architectureCanvasStore.generateYaml();
-		const parsed = yaml.load(out) as Record<string, unknown>;
+		const parsed = load(out) as Record<string, unknown>;
 		expect(parsed.apiVersion).toBe('chv.kubedo.io/v1alpha1');
 		expect(parsed.servers).toBeUndefined();
 	});
@@ -268,7 +268,7 @@ describe('architectureCanvasStore — persist', () => {
 		expect(parsedJson.version).toBe('1.0');
 		expect(parsedJson.nodes.length).toBe(1);
 		// The YAML blob also parses.
-		expect(yaml.load(fields.latest_yaml as string)).toBeDefined();
+		expect(load(fields.latest_yaml as string)).toBeDefined();
 	});
 
 	it('keeps dirty=true when update rejects', async () => {

@@ -15,17 +15,22 @@ pub async fn list_tasks(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<Value>,
 ) -> Result<Json<Value>, BffError> {
+    // Clamp to sane bounds BEFORE narrowing to u32: a page >= 2^32 used to
+    // truncate to 0 and underflow the offset computation, and a page_size
+    // >= 2^32 used to truncate to 0 and make div_ceil below panic.
     let page = req
         .get("page")
         .and_then(|v| v.as_u64())
-        .map(|p| p.max(1) as u32)
-        .unwrap_or(1);
+        .map(|p| p.max(1))
+        .unwrap_or(1)
+        .min(u32::MAX as u64);
 
     let page_size = req
         .get("page_size")
         .and_then(|v| v.as_u64())
-        .map(|p| if p == 0 { 50 } else { p as u32 })
-        .unwrap_or(50);
+        .map(|p| if p == 0 { 50 } else { p })
+        .unwrap_or(50)
+        .clamp(1, 200);
 
     let filters = req.get("filters").cloned().unwrap_or(json!({}));
 
@@ -107,7 +112,7 @@ pub async fn list_tasks(
         .map_err(|e| BffError::Internal(format!("failed to list tasks: {}", e)))?;
 
     let total = total_count as u64;
-    let total_pages = total.div_ceil(page_size as u64);
+    let total_pages = total.div_ceil(page_size);
 
     let items: Vec<Value> = rows
         .into_iter()

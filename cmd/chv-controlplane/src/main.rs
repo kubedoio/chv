@@ -1,9 +1,13 @@
 mod bootstrap;
-mod config;
 
+use chv_config::load_controlplane_config;
 use chv_observability::init_logger;
-use config::{config_path_from_args, load_config};
+use std::path::PathBuf;
 use tracing::info;
+
+fn config_path_from_args() -> Option<PathBuf> {
+    std::env::args().nth(1).map(PathBuf::from)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to install rustls ring crypto provider");
 
     let config_path = config_path_from_args();
-    let config = load_config(config_path.as_deref())?;
+    let config = load_controlplane_config(config_path.as_deref())?;
     init_logger(&config.log_level)?;
 
     info!(

@@ -23,11 +23,8 @@ vi.mock('$lib/bff/architectures', async () => {
 	);
 	return {
 		...actual,
-		listArchitectures: vi.fn(),
-		getArchitecture: vi.fn(),
 		createArchitecture: vi.fn(),
 		updateArchitecture: vi.fn(),
-		archiveArchitecture: vi.fn(),
 		validateArchitecture: vi.fn(),
 		validateYaml: vi.fn(),
 		generateYaml: vi.fn(),
@@ -40,11 +37,8 @@ vi.mock('$lib/bff/architectures', async () => {
 });
 
 import {
-	listArchitectures,
-	getArchitecture,
 	createArchitecture,
 	updateArchitecture,
-	archiveArchitecture,
 	validateArchitecture,
 	validateYaml as validateYamlBff,
 	generateYaml as generateYamlBff,
@@ -55,7 +49,6 @@ import {
 	discardPlan as discardPlanBff,
 	StaleVersionError,
 	type Architecture,
-	type ArchitectureDetail,
 	type ArchitectureSummary,
 	type FleetCheckResult,
 	type PlanResult,
@@ -83,70 +76,11 @@ const SUMMARY: ArchitectureSummary = {
 
 const ARCH: Architecture = SUMMARY;
 
-const DETAIL: ArchitectureDetail = {
-	architecture: SUMMARY,
-	design_graph_json: null,
-	latest_yaml: null
-};
-
 describe('architectureStore', () => {
 	beforeEach(() => {
 		vi.restoreAllMocks();
 		vi.spyOn(toast, 'success').mockImplementation(() => {});
 		vi.spyOn(toast, 'error').mockImplementation(() => {});
-		// architectureStore is a module-level singleton; reset reactive state
-		// between tests so each starts from a known baseline.
-		architectureStore.items = [];
-		architectureStore.error = null;
-		architectureStore.loading = false;
-	});
-
-	describe('list', () => {
-		it('loads items from `architectures` (new wire shape) and returns them', async () => {
-			vi.mocked(listArchitectures).mockResolvedValue({ architectures: [SUMMARY] });
-
-			const items = await architectureStore.list();
-
-			expect(items).toEqual([SUMMARY]);
-			expect(architectureStore.items).toEqual([SUMMARY]);
-			expect(architectureStore.error).toBeNull();
-			expect(architectureStore.loading).toBe(false);
-		});
-
-		it('passes the stored token through to the BFF client', async () => {
-			vi.mocked(listArchitectures).mockResolvedValue({ architectures: [] });
-
-			await architectureStore.list();
-
-			expect(listArchitectures).toHaveBeenCalledWith({}, 'test-token');
-		});
-
-		it('records error message and rethrows on failure', async () => {
-			const boom = new Error('list failed');
-			vi.mocked(listArchitectures).mockRejectedValue(boom);
-
-			await expect(architectureStore.list()).rejects.toBe(boom);
-			expect(architectureStore.error).toBe('list failed');
-			expect(architectureStore.loading).toBe(false);
-		});
-	});
-
-	describe('get', () => {
-		it('returns the architecture detail from the BFF', async () => {
-			vi.mocked(getArchitecture).mockResolvedValue(DETAIL);
-
-			const result = await architectureStore.get('arch-1');
-
-			expect(result).toEqual(DETAIL);
-			expect(getArchitecture).toHaveBeenCalledWith({ id: 'arch-1' }, 'test-token');
-		});
-
-		it('rethrows BFF errors so the loader can branch on them', async () => {
-			const boom = new Error('not found');
-			vi.mocked(getArchitecture).mockRejectedValue(boom);
-
-			await expect(architectureStore.get('arch-1')).rejects.toBe(boom);
-		});
 	});
 
 	describe('create', () => {
@@ -259,38 +193,6 @@ describe('architectureStore', () => {
 			await expect(
 				architectureStore.update('arch-1', 1, { display_name: 'renamed' })
 			).rejects.toBeInstanceOf(StaleVersionError);
-		});
-	});
-
-	describe('archive', () => {
-		it('calls archiveArchitecture with id and expected_version and returns the archived architecture', async () => {
-			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
-			const archived: Architecture = {
-				...ARCH,
-				status: 'archived',
-				version_number: 2,
-				archived_at: '2026-06-13T01:00:00Z'
-			};
-			vi.mocked(archiveArchitecture).mockResolvedValue({ architecture: archived });
-
-			const result = await architectureStore.archive('arch-1', 1);
-
-			expect(archiveArchitecture).toHaveBeenCalledWith(
-				{ id: 'arch-1', expected_version: 1 },
-				'test-token'
-			);
-			expect(result).toEqual(archived);
-			expect(result.status).toBe('archived');
-		});
-
-		it('propagates StaleVersionError on 409', async () => {
-			vi.spyOn(liveState, 'invalidateAndRefresh').mockResolvedValue(undefined);
-			const stale = new StaleVersionError('arch-1', 1);
-			vi.mocked(archiveArchitecture).mockRejectedValue(stale);
-
-			await expect(architectureStore.archive('arch-1', 1)).rejects.toBeInstanceOf(
-				StaleVersionError
-			);
 		});
 	});
 

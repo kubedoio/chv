@@ -25,8 +25,8 @@ pub use architectures::{
 };
 pub use backups::{
     BackupJobCreateInput, BackupJobRow, BackupJobStatusUpdateInput, BackupJobUpdateInput,
-    BackupRepository, BackupRestoreCreateInput, BackupRestoreRow, BackupRestoreStatusUpdateInput,
-    BackupScheduleCreateInput, BackupScheduleRow, BackupScheduleUpdateInput,
+    BackupRepository, BackupRestoreCreateInput, BackupRestoreRow, BackupScheduleCreateInput,
+    BackupScheduleRow, BackupScheduleUpdateInput,
 };
 pub use bootstrap_tokens::{BootstrapTokenRepository, BootstrapTokenValidation};
 pub use db::{
@@ -40,24 +40,20 @@ pub use desired_state::{
     VolumeSnapshotPatchInput,
 };
 pub use events::{EventAppendInput, EventRepository};
-pub use hypervisor_settings::{
-    HypervisorProfileRow, HypervisorSettingsPatchInput, HypervisorSettingsRepository,
-    HypervisorSettingsRow,
-};
+pub use hypervisor_settings::{HypervisorSettingsRepository, HypervisorSettingsRow};
 pub use images::{ImageRepository, ImageRow};
-pub use network_exposures::{NetworkExposureInput, NetworkExposureRepository};
+pub use network_exposures::NetworkExposureInput;
 pub use networks::{NetworkRepository, NetworkRow};
 pub use nodes::{
     NodeBootstrapResultInput, NodeDrainIntentInput, NodeInventoryInput, NodeRepository,
-    NodeSchedulingPatchInput, NodeStateInput, NodeStatePatchInput, NodeUpsertInput,
-    NodeVersionInput,
+    NodeSchedulingPatchInput, NodeStatePatchInput, NodeUpsertInput, NodeVersionInput,
 };
 pub use observed_state::{
     NetworkObservedStateInput, NodeObservedStateInput, ObservedStateRepository, VmMetricsInput,
     VmObservedStateInput, VolumeObservedStateInput,
 };
 pub use operations::{OperationCreateInput, OperationRepository, OperationStatusUpdateInput};
-pub use vtep::{VniAllocation, VtepEntry, VtepRepository};
+pub use vtep::{VtepEntry, VtepRepository};
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;

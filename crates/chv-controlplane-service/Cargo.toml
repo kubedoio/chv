@@ -37,9 +37,7 @@ metrics = { workspace = true }
 futures = "0.3"
 semver = "1"
 toml = { workspace = true }
-hex = { workspace = true }
 s3 = { workspace = true }
-sha2 = { workspace = true }
 x509-parser = "0.16"
 
 [features]

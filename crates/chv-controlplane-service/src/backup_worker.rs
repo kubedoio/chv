@@ -452,15 +452,4 @@ impl BackupWorker {
             || destination.starts_with("nfs://")
             || destination.eq_ignore_ascii_case("null")
     }
-
-    #[allow(dead_code)]
-    fn storage_backend_from_destination(destination: &str) -> String {
-        if destination.starts_with("s3://") {
-            "s3".to_string()
-        } else if destination.starts_with("nfs://") {
-            "nfs".to_string()
-        } else {
-            "null".to_string()
-        }
-    }
 }

@@ -18,6 +18,7 @@ pub struct MigrationReceiver<B: StorageBackend> {
     backend: Arc<B>,
     volume_id: String,
     handle: String,
+    size_bytes: u64,
     ack_interval: u32,
     blocks_received: u32,
     blocks_since_last_ack: u32,
@@ -26,11 +27,12 @@ pub struct MigrationReceiver<B: StorageBackend> {
 
 impl<B: StorageBackend> MigrationReceiver<B> {
     /// Create a new receiver (called after InitMigration is parsed).
-    pub fn new(backend: Arc<B>, volume_id: String, handle: String) -> Self {
+    pub fn new(backend: Arc<B>, volume_id: String, handle: String, size_bytes: u64) -> Self {
         Self {
             backend,
             volume_id,
             handle,
+            size_bytes,
             ack_interval: DEFAULT_ACK_INTERVAL,
             blocks_received: 0,
             blocks_since_last_ack: 0,
@@ -41,10 +43,30 @@ impl<B: StorageBackend> MigrationReceiver<B> {
     /// Run the receiver loop: process incoming messages and write blocks.
     ///
     /// This is spawned as a task and communicates back via the `tx` channel.
+    /// However the stream ends, the receiving volume is closed exactly once:
+    /// `create_receiving_volume` acquired a backend reference (an iSCSI
+    /// session ref) that must be released to keep the backend refcount
+    /// balanced.
     pub async fn run(
         mut self,
         mut inbound: Streaming<MigrationMessage>,
         tx: mpsc::Sender<MigrationMessage>,
+    ) -> Result<(), tonic::Status> {
+        let result = self.run_inner(&mut inbound, &tx).await;
+        if let Err(e) = self.backend.close(&self.volume_id, &self.handle).await {
+            warn!(
+                volume_id = %self.volume_id,
+                error = %e,
+                "failed to release receiving volume after migration stream ended"
+            );
+        }
+        result
+    }
+
+    async fn run_inner(
+        &mut self,
+        inbound: &mut Streaming<MigrationMessage>,
+        tx: &mpsc::Sender<MigrationMessage>,
     ) -> Result<(), tonic::Status> {
         loop {
             let msg = match inbound.message().await? {
@@ -57,7 +79,7 @@ impl<B: StorageBackend> MigrationReceiver<B> {
 
             match msg.payload {
                 Some(migration_message::Payload::Chunk(chunk)) => {
-                    self.handle_chunk(&chunk, &tx).await?;
+                    self.handle_chunk(&chunk, tx).await?;
                 }
                 Some(migration_message::Payload::RoundStart(ref rs)) => {
                     debug!(
@@ -135,6 +157,25 @@ impl<B: StorageBackend> MigrationReceiver<B> {
         tx: &mpsc::Sender<MigrationMessage>,
     ) -> Result<(), tonic::Status> {
         self.last_sequence_num = chunk.sequence_num;
+
+        // Reject chunks that would write past the end of the receiving volume.
+        let chunk_end = chunk
+            .offset
+            .checked_add(chunk.data.len() as u64)
+            .ok_or_else(|| {
+                tonic::Status::invalid_argument(format!(
+                    "BlockChunk at offset {} overflows u64",
+                    chunk.offset
+                ))
+            })?;
+        if chunk_end > self.size_bytes {
+            return Err(tonic::Status::invalid_argument(format!(
+                "BlockChunk at offset {} with {} bytes exceeds volume size {}",
+                chunk.offset,
+                chunk.data.len(),
+                self.size_bytes
+            )));
+        }
 
         // Verify CRC32 (skip for sparse blocks)
         if !chunk.is_sparse {

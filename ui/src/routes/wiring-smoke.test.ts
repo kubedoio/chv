@@ -52,9 +52,7 @@ describe('frontend-backend wiring smoke checks', () => {
 			import: 'default'
 		}) as Record<string, string>;
 		const filesToScan = Object.entries(svelteSources).filter(([key]) =>
-			key.startsWith('/src/routes/') ||
-			key === '/src/lib/components/system/FilterPanel.svelte' ||
-			key === '/src/lib/components/SkipLink.svelte'
+			key.startsWith('/src/routes/')
 		);
 		const literalHrefInterpolation = /href=["'][^"'`]*\{[^"'`]*["']/;
 

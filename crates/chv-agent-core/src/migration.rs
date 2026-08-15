@@ -83,47 +83,6 @@ pub fn extract_destination_host(req: &proto::MigrateVmRequest) -> String {
     req.destination_node_id.clone()
 }
 
-/// Execute migration as the source agent.
-/// This spawns a background task that calls CH send-migration and reports progress.
-pub fn spawn_source_migration(
-    vm_runtime: VmRuntime,
-    vm_id: String,
-    operation_id: String,
-    destination_url: String,
-) -> tokio::task::JoinHandle<Result<(), String>> {
-    tokio::spawn(async move {
-        info!(
-            vm_id = %vm_id,
-            destination_url = %destination_url,
-            operation_id = %operation_id,
-            "source agent: starting send-migration"
-        );
-
-        match vm_runtime
-            .send_migration(&vm_id, &destination_url, Some(&operation_id))
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    "source agent: send-migration completed successfully"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    error = %e,
-                    "source agent: send-migration failed"
-                );
-                Err(e.to_string())
-            }
-        }
-    })
-}
-
 /// Execute migration as the destination agent.
 /// This spawns a background task that calls CH receive-migration.
 pub fn spawn_destination_migration(
@@ -195,7 +154,7 @@ pub struct DiskPrecopyConfig {
 
 /// A callback type for reporting migration progress to the control plane.
 ///
-/// When provided to `spawn_source_migration_with_disk_precopy`, this is called
+/// When provided to `source_migration_with_disk_precopy`, this is called
 /// after each disk sync round with the current dirty_blocks_remaining count,
 /// enabling the control plane to track convergence.
 pub type ProgressReporter = Arc<Mutex<dyn FnMut(proto::MigrationProgress) + Send>>;
@@ -203,7 +162,7 @@ pub type ProgressReporter = Arc<Mutex<dyn FnMut(proto::MigrationProgress) + Send
 /// Build a progress reporter closure that sends updates to the control plane.
 ///
 /// This creates a `ProgressReporter` wrapping a control plane client reference,
-/// suitable for passing to `spawn_source_migration_with_disk_precopy`.
+/// suitable for passing to `source_migration_with_disk_precopy`.
 pub fn make_progress_reporter<F>(callback: F) -> ProgressReporter
 where
     F: FnMut(proto::MigrationProgress) + Send + 'static,
@@ -211,54 +170,322 @@ where
     Arc::new(Mutex::new(callback))
 }
 
-/// Execute migration as the source agent with disk pre-copy.
+/// Tracks whether this migration paused the source VM so that every
+/// post-pause failure path can best-effort resume it before returning the
+/// error.
 ///
-/// This orchestrates the full live migration sequence:
-/// 1. **Disk pre-copy**: For each volume, triggers the local stord to stream blocks
-///    to the destination stord. This runs while the VM is still executing.
-/// 2. **Memory migration**: Once disk pre-copy completes (or converges), calls
-///    Cloud Hypervisor's send-migration which handles iterative memory copy and
-///    final VM pause/transfer.
-///
-/// If disk pre-copy fails for any volume, the migration is aborted before memory
-/// transfer begins. The original `spawn_source_migration` function remains available
-/// for memory-only migration scenarios (e.g., VMs with no local disk).
-///
-/// When `progress_reporter` is provided, the function reports dirty_blocks_remaining
-/// after each volume sync round completes, enabling the control plane to track
-/// convergence in real time.
-pub fn spawn_source_migration_with_disk_precopy(
+/// A VM left paused by a failed migration would otherwise never recover: the
+/// reconciler's `start_vm` treats `Paused` as already-running, so this guard
+/// is the single owner of resume-after-pause. The resume here is best-effort —
+/// a failed resume is logged and the caller still surfaces the original
+/// migration error.
+struct PausedVmGuard {
     vm_runtime: VmRuntime,
     vm_id: String,
     operation_id: String,
-    destination_url: String,
-    disk_config: DiskPrecopyConfig,
-    progress_reporter: Option<ProgressReporter>,
-) -> tokio::task::JoinHandle<Result<(), String>> {
-    // Backward-compatible spawn wrapper: never-cancelled token preserves old
-    // behaviour for callers that haven't migrated to the registry-tracked path.
-    let cancel = CancellationToken::new();
-    tokio::spawn(source_migration_with_disk_precopy(
-        vm_runtime,
-        vm_id,
-        operation_id,
-        destination_url,
-        disk_config,
-        progress_reporter,
-        cancel,
-    ))
+    paused: bool,
+}
+
+impl PausedVmGuard {
+    fn new(vm_runtime: VmRuntime, vm_id: String, operation_id: String) -> Self {
+        Self {
+            vm_runtime,
+            vm_id,
+            operation_id,
+            paused: false,
+        }
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Pause the VM once and remember it so `resume_if_paused` can undo it.
+    async fn pause_vm(&mut self) -> Result<(), String> {
+        if self.paused {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .vm_runtime
+            .pause_vm(&self.vm_id, Some(&self.operation_id))
+            .await
+        {
+            return Err(format!("failed to pause VM for final disk sync: {e}"));
+        }
+        self.paused = true;
+        Ok(())
+    }
+
+    /// Best-effort resume, at most once per pause. Never fails: callers must
+    /// surface the original error; a failed resume is logged as a warning.
+    async fn resume_if_paused(&mut self) {
+        if !self.paused {
+            return;
+        }
+        self.paused = false;
+        if let Err(e) = self
+            .vm_runtime
+            .resume_vm(&self.vm_id, Some(&self.operation_id))
+            .await
+        {
+            warn!(
+                vm_id = %self.vm_id,
+                operation_id = %self.operation_id,
+                error = %e,
+                "best-effort VM resume after migration failure failed; the VM may remain paused and require a manual resume"
+            );
+        }
+    }
+}
+
+/// Seam over the two stord disk-migration calls the pause/final-sync poll
+/// loop needs, so the pause-recovery behavior can be tested with a stub.
+#[async_trait::async_trait]
+trait DiskMigrationControl: Send {
+    async fn get_status(
+        &mut self,
+        migration_id: &str,
+    ) -> Result<chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse, String>;
+
+    async fn resume(&mut self, migration_id: &str, vm_paused: bool) -> Result<(), String>;
+}
+
+#[async_trait::async_trait]
+impl DiskMigrationControl for StordClient {
+    async fn get_status(
+        &mut self,
+        migration_id: &str,
+    ) -> Result<chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse, String> {
+        self.get_disk_migration_status(migration_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn resume(&mut self, migration_id: &str, vm_paused: bool) -> Result<(), String> {
+        self.resume_disk_migration(migration_id, vm_paused)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Poll all volume migrations until they converge or fail, pausing the VM for
+/// the final sync when stord signals it.
+///
+/// Every failure path after the pause best-effort resumes the VM (via
+/// `pause_guard`) before returning the original error, so a failed or
+/// cancelled migration never leaves the VM paused forever.
+#[allow(clippy::too_many_arguments)]
+async fn run_disk_precopy_poll(
+    client: &mut impl DiskMigrationControl,
+    volume_migrations: &[(String, String)],
+    poll_interval: std::time::Duration,
+    cancel_token: &CancellationToken,
+    pause_guard: &mut PausedVmGuard,
+    progress_reporter: Option<&ProgressReporter>,
+    vm_id: &str,
+    operation_id: &str,
+) -> Result<(), String> {
+    loop {
+        // Phase boundary 3: each poll iteration. Use select! so a cancel
+        // signal short-circuits the sleep instead of waiting up to 5s.
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                warn!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    "source agent: migration cancelled during disk-precopy polling"
+                );
+                pause_guard.resume_if_paused().await;
+                return Err("migration cancelled at phase: disk-precopy-poll".to_string());
+            }
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+
+        let mut all_completed = true;
+        let mut any_failed = false;
+        let mut total_bytes_transferred: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut max_dirty_remaining: u64 = 0;
+        let mut max_round: u32 = 0;
+        let mut needs_vm_pause = false;
+
+        for (_vol_id, mig_id) in volume_migrations {
+            let status = match client.get_status(mig_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        migration_id = %mig_id,
+                        error = %e,
+                        "failed to query disk migration status"
+                    );
+                    all_completed = false;
+                    continue;
+                }
+            };
+
+            if let Some(ref result) = status.result {
+                if !result.status.eq_ignore_ascii_case("ok") {
+                    error!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        migration_id = %mig_id,
+                        error = %result.human_summary,
+                        "disk migration returned error status"
+                    );
+                    any_failed = true;
+                    break;
+                }
+            }
+
+            total_bytes_transferred += status.bytes_transferred;
+            total_bytes += status.total_bytes;
+            max_dirty_remaining = max_dirty_remaining.max(status.dirty_blocks_remaining);
+            max_round = max_round.max(status.convergence_round);
+
+            use chv_stord_api::chv_stord_api::get_disk_migration_status_response::Phase as StordPhase;
+            let phase = StordPhase::try_from(status.phase).unwrap_or(StordPhase::Pending);
+
+            match phase {
+                StordPhase::Pending | StordPhase::BulkCopy | StordPhase::DirtySync => {
+                    all_completed = false;
+                }
+                StordPhase::PausedFinalSync => {
+                    all_completed = false;
+                    needs_vm_pause = true;
+                }
+                StordPhase::Completed => {
+                    // volume done
+                }
+                StordPhase::Failed => {
+                    any_failed = true;
+                    error!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        migration_id = %mig_id,
+                        error = %status.error_message,
+                        "disk migration failed"
+                    );
+                }
+            }
+        }
+
+        if any_failed {
+            pause_guard.resume_if_paused().await;
+            return Err("disk migration failed for one or more volumes".to_string());
+        }
+
+        // Report progress to control plane
+        if let Some(reporter) = progress_reporter {
+            let proto_phase = if needs_vm_pause || all_completed {
+                proto::MigrationPhase::MemoryMigration
+            } else if max_round > 0 {
+                proto::MigrationPhase::ConvergingDisk
+            } else {
+                proto::MigrationPhase::PrecopyDisk
+            };
+            let progress_pct = if all_completed {
+                50.0
+            } else {
+                let ratio = if total_bytes > 0 {
+                    (total_bytes_transferred as f32 / total_bytes as f32) * 50.0
+                } else {
+                    0.0
+                };
+                ratio.min(45.0) // cap at 45% until all disk work is done
+            };
+
+            let progress = build_progress(
+                vm_id,
+                operation_id,
+                proto_phase,
+                total_bytes_transferred,
+                total_bytes,
+                max_round,
+                if needs_vm_pause || all_completed {
+                    0
+                } else {
+                    max_dirty_remaining
+                },
+                progress_pct,
+            );
+            let mut cb = reporter.lock().await;
+            cb(progress);
+        }
+
+        if all_completed {
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "source agent: all disk migrations completed"
+            );
+            return Ok(());
+        }
+
+        if needs_vm_pause && !pause_guard.is_paused() {
+            // Phase boundary 4: before pausing the VM for final sync.
+            if cancel_token.is_cancelled() {
+                warn!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    phase = "pre-vm-pause",
+                    "source agent: migration cancelled at phase boundary"
+                );
+                return Err("migration cancelled at phase: pre-vm-pause".to_string());
+            }
+
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "source agent: pausing VM for final disk sync"
+            );
+            if let Err(e) = pause_guard.pause_vm().await {
+                error!(
+                    vm_id = %vm_id,
+                    operation_id = %operation_id,
+                    error = %e,
+                    "source agent: failed to pause VM for final disk sync"
+                );
+                return Err(e);
+            }
+
+            for (_vol_id, mig_id) in volume_migrations {
+                if let Err(e) = client.resume(mig_id, true).await {
+                    error!(
+                        vm_id = %vm_id,
+                        operation_id = %operation_id,
+                        migration_id = %mig_id,
+                        error = %e,
+                        "source agent: failed to resume disk migration after VM pause"
+                    );
+                    pause_guard.resume_if_paused().await;
+                    return Err(format!("failed to resume disk migration {mig_id}: {e}"));
+                }
+            }
+
+            info!(
+                vm_id = %vm_id,
+                operation_id = %operation_id,
+                "source agent: VM paused, resumed all disk migrations for final sync"
+            );
+        }
+    }
 }
 
 /// Run a full source-side migration with disk pre-copy.
 ///
-/// This is the cancel-aware async core that `spawn_source_migration_with_disk_precopy`
-/// delegates to. The `cancel_token` is consulted at every **phase boundary**
+/// This is the cancel-aware async core. The `cancel_token` is consulted at every **phase boundary**
 /// — before connecting to stord, before each volume's pre-copy trigger, on
 /// every poll iteration, before pausing the VM, and before the memory
 /// migration phase — matching the retro pattern in
 /// `cancel-signal-recheck-after-phase.md`. If cancellation is observed, the
 /// function returns `Err("migration cancelled at phase: …")` so the agent
 /// can surface the cancel back to the control plane.
+///
+/// Once the VM has been paused for the final disk sync, every failure or
+/// cancellation path best-effort resumes it before returning the error, so a
+/// failed migration never leaves the VM paused forever.
 #[allow(clippy::too_many_arguments)]
 pub async fn source_migration_with_disk_precopy(
     vm_runtime: VmRuntime,
@@ -277,6 +504,9 @@ pub async fn source_migration_with_disk_precopy(
         dest_stord_endpoint = %disk_config.dest_stord_endpoint,
         "source agent: starting migration with disk pre-copy"
     );
+
+    let mut pause_guard =
+        PausedVmGuard::new(vm_runtime.clone(), vm_id.clone(), operation_id.clone());
 
     macro_rules! check_cancel {
         ($phase:expr) => {
@@ -369,186 +599,20 @@ pub async fn source_migration_with_disk_precopy(
             );
         }
 
-        // Poll all volume migrations until they converge or need VM pause.
-        let poll_interval = std::time::Duration::from_secs(5);
-        let mut vm_paused_for_final_sync = false;
-
-        loop {
-            // Phase boundary 3: each poll iteration. Use select! so a cancel
-            // signal short-circuits the sleep instead of waiting up to 5s.
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    warn!(
-                        vm_id = %vm_id,
-                        operation_id = %operation_id,
-                        "source agent: migration cancelled during disk-precopy polling"
-                    );
-                    return Err("migration cancelled at phase: disk-precopy-poll".to_string());
-                }
-                _ = tokio::time::sleep(poll_interval) => {}
-            }
-
-            let mut all_completed = true;
-            let mut any_failed = false;
-            let mut total_bytes_transferred: u64 = 0;
-            let mut total_bytes: u64 = 0;
-            let mut max_dirty_remaining: u64 = 0;
-            let mut max_round: u32 = 0;
-            let mut needs_vm_pause = false;
-
-            for (_vol_id, mig_id) in &volume_migrations {
-                let status = match stord_client.get_disk_migration_status(mig_id).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(
-                            vm_id = %vm_id,
-                            operation_id = %operation_id,
-                            migration_id = %mig_id,
-                            error = %e,
-                            "failed to query disk migration status"
-                        );
-                        all_completed = false;
-                        continue;
-                    }
-                };
-
-                if let Some(ref result) = status.result {
-                    if !result.status.eq_ignore_ascii_case("ok") {
-                        error!(
-                            vm_id = %vm_id,
-                            operation_id = %operation_id,
-                            migration_id = %mig_id,
-                            error = %result.human_summary,
-                            "disk migration returned error status"
-                        );
-                        any_failed = true;
-                        break;
-                    }
-                }
-
-                total_bytes_transferred += status.bytes_transferred;
-                total_bytes += status.total_bytes;
-                max_dirty_remaining = max_dirty_remaining.max(status.dirty_blocks_remaining);
-                max_round = max_round.max(status.convergence_round);
-
-                use chv_stord_api::chv_stord_api::get_disk_migration_status_response::Phase as StordPhase;
-                let phase = StordPhase::try_from(status.phase).unwrap_or(StordPhase::Pending);
-
-                match phase {
-                    StordPhase::Pending | StordPhase::BulkCopy | StordPhase::DirtySync => {
-                        all_completed = false;
-                    }
-                    StordPhase::PausedFinalSync => {
-                        all_completed = false;
-                        needs_vm_pause = true;
-                    }
-                    StordPhase::Completed => {
-                        // volume done
-                    }
-                    StordPhase::Failed => {
-                        any_failed = true;
-                        error!(
-                            vm_id = %vm_id,
-                            operation_id = %operation_id,
-                            migration_id = %mig_id,
-                            error = %status.error_message,
-                            "disk migration failed"
-                        );
-                    }
-                }
-            }
-
-            if any_failed {
-                return Err("disk migration failed for one or more volumes".to_string());
-            }
-
-            // Report progress to control plane
-            if let Some(ref reporter) = progress_reporter {
-                let proto_phase = if needs_vm_pause || all_completed {
-                    proto::MigrationPhase::MemoryMigration
-                } else if max_round > 0 {
-                    proto::MigrationPhase::ConvergingDisk
-                } else {
-                    proto::MigrationPhase::PrecopyDisk
-                };
-                let progress_pct = if all_completed {
-                    50.0
-                } else {
-                    let ratio = if total_bytes > 0 {
-                        (total_bytes_transferred as f32 / total_bytes as f32) * 50.0
-                    } else {
-                        0.0
-                    };
-                    ratio.min(45.0) // cap at 45% until all disk work is done
-                };
-
-                let progress = build_progress(
-                    &vm_id,
-                    &operation_id,
-                    proto_phase,
-                    total_bytes_transferred,
-                    total_bytes,
-                    max_round,
-                    if needs_vm_pause || all_completed {
-                        0
-                    } else {
-                        max_dirty_remaining
-                    },
-                    progress_pct,
-                );
-                let mut cb = reporter.lock().await;
-                cb(progress);
-            }
-
-            if all_completed {
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    "source agent: all disk migrations completed"
-                );
-                break;
-            }
-
-            if needs_vm_pause && !vm_paused_for_final_sync {
-                // Phase boundary 4: before pausing the VM for final sync.
-                check_cancel!("pre-vm-pause");
-
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    "source agent: pausing VM for final disk sync"
-                );
-                if let Err(e) = vm_runtime.pause_vm(&vm_id, Some(&operation_id)).await {
-                    error!(
-                        vm_id = %vm_id,
-                        operation_id = %operation_id,
-                        error = %e,
-                        "source agent: failed to pause VM for final disk sync"
-                    );
-                    return Err(format!("failed to pause VM for final disk sync: {e}"));
-                }
-                vm_paused_for_final_sync = true;
-
-                for (_vol_id, mig_id) in &volume_migrations {
-                    if let Err(e) = stord_client.resume_disk_migration(mig_id, true).await {
-                        error!(
-                            vm_id = %vm_id,
-                            operation_id = %operation_id,
-                            migration_id = %mig_id,
-                            error = %e,
-                            "source agent: failed to resume disk migration after VM pause"
-                        );
-                        return Err(format!("failed to resume disk migration {mig_id}: {e}"));
-                    }
-                }
-
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    "source agent: VM paused, resumed all disk migrations for final sync"
-                );
-            }
-        }
+        // Poll all volume migrations until they converge or fail. The helper
+        // drives the pause/resume handshake with stord and best-effort
+        // resumes the VM on every post-pause failure path.
+        run_disk_precopy_poll(
+            &mut stord_client,
+            &volume_migrations,
+            std::time::Duration::from_secs(5),
+            &cancel_token,
+            &mut pause_guard,
+            progress_reporter.as_ref(),
+            &vm_id,
+            &operation_id,
+        )
+        .await?;
     } else {
         info!(
             vm_id = %vm_id,
@@ -557,10 +621,21 @@ pub async fn source_migration_with_disk_precopy(
         );
     }
 
-    // Phase boundary 5: before memory migration begins.
-    check_cancel!("pre-memory-migration");
+    // Phase boundary 5: before memory migration begins. The VM may already be
+    // paused for the final disk sync at this point, so best-effort resume it
+    // before surfacing the cancellation.
+    if cancel_token.is_cancelled() {
+        warn!(
+            vm_id = %vm_id,
+            operation_id = %operation_id,
+            phase = "pre-memory-migration",
+            "source agent: migration cancelled at phase boundary"
+        );
+        pause_guard.resume_if_paused().await;
+        return Err("migration cancelled at phase: pre-memory-migration".to_string());
+    }
 
-    // Phase 2: Memory migration (same as spawn_source_migration)
+    // Phase 2: Memory migration
     info!(
         vm_id = %vm_id,
         destination_url = %destination_url,
@@ -617,143 +692,12 @@ pub async fn source_migration_with_disk_precopy(
                 error = %e,
                 "source agent: memory migration (send-migration) failed"
             );
+            // The VM is still paused from the final disk sync; resume it so
+            // the reconciler can drive it back to Running.
+            pause_guard.resume_if_paused().await;
             Err(format!("memory migration failed: {e}"))
         }
     }
-}
-
-/// Execute migration as the destination agent with disk pre-copy acceptance.
-///
-/// This orchestrates the destination side of a full live migration:
-/// 1. **Disk pre-copy acceptance**: Prepares the local stord to receive incoming
-///    block streams from the source stord. The actual block reception is handled
-///    by stord's `StorageMigrationService`.
-/// 2. **Memory migration**: Starts Cloud Hypervisor's receive-migration which
-///    listens for the incoming VM memory state.
-///
-/// If disk acceptance preparation fails, the migration is aborted before memory
-/// receive begins.
-pub fn spawn_destination_migration_with_disk_precopy(
-    vm_runtime: VmRuntime,
-    vm_id: String,
-    operation_id: String,
-    receiver_url: String,
-    disk_config: DiskPrecopyConfig,
-) -> tokio::task::JoinHandle<Result<(), String>> {
-    tokio::spawn(async move {
-        info!(
-            vm_id = %vm_id,
-            receiver_url = %receiver_url,
-            operation_id = %operation_id,
-            volume_count = disk_config.volumes.len(),
-            "destination agent: starting migration with disk pre-copy acceptance"
-        );
-
-        // Phase 1: Prepare to accept disk migration
-        if !disk_config.volumes.is_empty() {
-            info!(
-                vm_id = %vm_id,
-                operation_id = %operation_id,
-                "destination agent: preparing to accept disk pre-copy"
-            );
-
-            let mut stord_client =
-                match StordClient::connect(Path::new(&disk_config.stord_socket)).await {
-                    Ok(client) => client,
-                    Err(e) => {
-                        error!(
-                            vm_id = %vm_id,
-                            operation_id = %operation_id,
-                            error = %e,
-                            "destination agent: failed to connect to local stord"
-                        );
-                        return Err(format!(
-                            "disk migration acceptance failed: cannot connect to stord: {e}"
-                        ));
-                    }
-                };
-
-            for volume in &disk_config.volumes {
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    volume_id = %volume.volume_id,
-                    "destination agent: accepting disk migration for volume"
-                );
-
-                if let Err(e) = stord_client
-                    .accept_disk_migration(
-                        &volume.volume_id,
-                        0, // Size will be communicated via InitMigration in the stream
-                        Some(&operation_id),
-                    )
-                    .await
-                {
-                    error!(
-                        vm_id = %vm_id,
-                        operation_id = %operation_id,
-                        volume_id = %volume.volume_id,
-                        error = %e,
-                        "destination agent: disk migration acceptance failed for volume"
-                    );
-                    return Err(format!(
-                        "disk migration acceptance failed for volume {}: {e}",
-                        volume.volume_id
-                    ));
-                }
-
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    volume_id = %volume.volume_id,
-                    "destination agent: disk migration acceptance ready for volume"
-                );
-            }
-
-            info!(
-                vm_id = %vm_id,
-                operation_id = %operation_id,
-                "destination agent: disk pre-copy acceptance prepared for all volumes"
-            );
-        } else {
-            warn!(
-                vm_id = %vm_id,
-                operation_id = %operation_id,
-                "destination agent: no volumes to receive, skipping disk acceptance"
-            );
-        }
-
-        // Phase 2: Memory migration (same as spawn_destination_migration)
-        info!(
-            vm_id = %vm_id,
-            receiver_url = %receiver_url,
-            operation_id = %operation_id,
-            "destination agent: starting memory migration (receive-migration)"
-        );
-
-        match vm_runtime
-            .receive_migration(&vm_id, &receiver_url, Some(&operation_id))
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    "destination agent: receive-migration completed (disk + memory)"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    vm_id = %vm_id,
-                    operation_id = %operation_id,
-                    error = %e,
-                    "destination agent: memory migration (receive-migration) failed"
-                );
-                Err(format!("memory receive-migration failed: {e}"))
-            }
-        }
-    })
 }
 
 /// Build a MigrationProgress proto message.
@@ -1001,5 +945,174 @@ mod tests {
                 variant
             );
         }
+    }
+
+    // --- Post-pause resume recovery tests ---
+
+    use chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter;
+    use chv_hypervisor_api::VmConfig;
+    use chv_stord_api::chv_stord_api::get_disk_migration_status_response::Phase as StordPhase;
+    use chv_stord_api::chv_stord_api::GetDiskMigrationStatusResponse;
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+
+    fn test_runtime() -> (VmRuntime, Arc<MockCloudHypervisorAdapter>) {
+        let mock = Arc::new(MockCloudHypervisorAdapter::default());
+        (VmRuntime::new(mock.clone()), mock)
+    }
+
+    async fn create_vm_record(rt: &VmRuntime) {
+        let config = VmConfig {
+            vm_id: "vm-1".to_string(),
+            cpus: 2,
+            memory_bytes: 1024,
+            kernel_path: PathBuf::from("/dev/null"),
+            firmware_path: None,
+            disks: vec![],
+            nics: vec![],
+            api_socket_path: PathBuf::from("/var/lib/chv/agent/vms/vm-1/vm.sock"),
+            cloud_init_userdata: None,
+            hypervisor_overrides: None,
+        };
+        rt.create_vm("vm-1", "1", &config, Some("op-1"))
+            .await
+            .unwrap();
+    }
+
+    fn stub_status(phase: StordPhase) -> GetDiskMigrationStatusResponse {
+        GetDiskMigrationStatusResponse {
+            result: Some(chv_stord_api::chv_stord_api::Result {
+                status: "ok".to_string(),
+                error_code: "OK".to_string(),
+                human_summary: String::new(),
+            }),
+            phase: phase as i32,
+            convergence_round: 0,
+            dirty_blocks_remaining: 0,
+            bytes_transferred: 0,
+            total_bytes: 0,
+            needs_vm_pause: phase == StordPhase::PausedFinalSync,
+            error_message: String::new(),
+        }
+    }
+
+    struct StubDiskMigration {
+        statuses: VecDeque<GetDiskMigrationStatusResponse>,
+        resume_result: Result<(), String>,
+        resume_calls: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl DiskMigrationControl for StubDiskMigration {
+        async fn get_status(
+            &mut self,
+            _migration_id: &str,
+        ) -> Result<GetDiskMigrationStatusResponse, String> {
+            Ok(self
+                .statuses
+                .pop_front()
+                .unwrap_or_else(|| stub_status(StordPhase::Completed)))
+        }
+
+        async fn resume(&mut self, _migration_id: &str, _vm_paused: bool) -> Result<(), String> {
+            self.resume_calls += 1;
+            self.resume_result.clone()
+        }
+    }
+
+    fn new_guard(rt: &VmRuntime) -> PausedVmGuard {
+        PausedVmGuard::new(rt.clone(), "vm-1".to_string(), "op-1".to_string())
+    }
+
+    #[tokio::test]
+    async fn failed_resume_after_pause_resumes_vm_and_returns_original_error() {
+        let (rt, _mock) = test_runtime();
+        create_vm_record(&rt).await;
+
+        let mut stub = StubDiskMigration {
+            statuses: VecDeque::from([stub_status(StordPhase::PausedFinalSync)]),
+            resume_result: Err("stord rejected resume after pause".to_string()),
+            resume_calls: 0,
+        };
+        let mut guard = new_guard(&rt);
+        let cancel = CancellationToken::new();
+
+        let err = run_disk_precopy_poll(
+            &mut stub,
+            &[("vol-1".to_string(), "dm-test-1".to_string())],
+            std::time::Duration::from_millis(10),
+            &cancel,
+            &mut guard,
+            None,
+            "vm-1",
+            "op-1",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(stub.resume_calls, 1, "stord resume must be attempted once");
+        assert!(
+            err.contains("failed to resume disk migration dm-test-1"),
+            "original error must be surfaced, got: {err}"
+        );
+        assert!(
+            err.contains("stord rejected resume after pause"),
+            "underlying cause must be preserved, got: {err}"
+        );
+        assert_eq!(
+            rt.get("vm-1").await.unwrap().runtime_status,
+            "Running",
+            "VM must be resumed after the failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_pause_status_failure_resumes_vm_and_returns_original_error() {
+        let (rt, _mock) = test_runtime();
+        create_vm_record(&rt).await;
+
+        // First poll round signals the pause; the resumed migration then fails.
+        let mut stub = StubDiskMigration {
+            statuses: VecDeque::from([
+                stub_status(StordPhase::PausedFinalSync),
+                stub_status(StordPhase::Failed),
+            ]),
+            resume_result: Ok(()),
+            resume_calls: 0,
+        };
+        let mut guard = new_guard(&rt);
+        let cancel = CancellationToken::new();
+
+        let err = run_disk_precopy_poll(
+            &mut stub,
+            &[("vol-1".to_string(), "dm-test-1".to_string())],
+            std::time::Duration::from_millis(10),
+            &cancel,
+            &mut guard,
+            None,
+            "vm-1",
+            "op-1",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(stub.resume_calls, 1);
+        assert_eq!(err, "disk migration failed for one or more volumes");
+        assert_eq!(
+            rt.get("vm-1").await.unwrap().runtime_status,
+            "Running",
+            "VM must be resumed after the post-pause failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_if_paused_is_noop_when_vm_was_not_paused() {
+        let (rt, _mock) = test_runtime();
+        create_vm_record(&rt).await;
+        let mut guard = new_guard(&rt);
+        guard.resume_if_paused().await;
+        // A resume call would flip the record to Running; staying "Created"
+        // proves resume_vm was never invoked.
+        assert_eq!(rt.get("vm-1").await.unwrap().runtime_status, "Created");
     }
 }

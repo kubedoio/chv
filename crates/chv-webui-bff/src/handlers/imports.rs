@@ -32,12 +32,21 @@ pub async fn import_vm(
         let field_name = field.name().unwrap_or("").to_string();
 
         if field_name == "name" {
-            name = Some(
-                field
-                    .text()
-                    .await
-                    .map_err(|e| BffError::BadRequest(format!("invalid name: {}", e)))?,
-            );
+            let value = field
+                .text()
+                .await
+                .map_err(|e| BffError::BadRequest(format!("invalid name: {}", e)))?;
+            // Reject names that could traverse or pollute filesystem paths
+            // (the name becomes vms.display_name and a volume display name).
+            if !super::vms::is_valid_display_name(&value) {
+                if let Some(ref p) = tmp_path {
+                    let _ = tokio::fs::remove_file(p).await;
+                }
+                return Err(BffError::BadRequest(
+                    "name must match ^[A-Za-z0-9 ._-]{1,64}$".into(),
+                ));
+            }
+            name = Some(value);
             continue;
         }
 

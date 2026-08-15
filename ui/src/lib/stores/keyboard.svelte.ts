@@ -1,6 +1,5 @@
 import { browser } from '$app/environment';
 import { goto } from '$app/navigation';
-import { page } from '$app/stores';
 
 // Types
 export interface Shortcut {
@@ -223,19 +222,9 @@ export function registerShortcuts(shortcuts: Shortcut[]) {
   };
 }
 
-// Unregister shortcuts by ID
-export function unregisterShortcut(id: string) {
-  registeredShortcuts = registeredShortcuts.filter(s => s.id !== id);
-}
-
 // Set active context
 export function setActiveContext(context: string) {
   activeContext = context;
-}
-
-// Get current context
-export function getActiveContext(): string {
-  return activeContext;
 }
 
 // Toggle help modal
@@ -340,173 +329,6 @@ export function createGlobalShortcuts(
       context: 'global',
       description: 'Go to Networks',
       handler: () => goto('/networks')
-    }
-  ];
-}
-
-// VM list shortcuts
-export function createVMListShortcuts(handlers: {
-  onCreate: () => void;
-  onRefresh: () => void;
-  onSelectAll: () => void;
-  onDelete: () => void;
-  onStart: () => void;
-  onStop: () => void;
-  onNavigateUp: () => void;
-  onNavigateDown: () => void;
-  onToggleSelect: () => void;
-  onOpenDetail: () => void;
-}): Shortcut[] {
-  return [
-    {
-      id: 'vm-create',
-      key: 'c',
-      context: 'vms',
-      description: 'Create new VM',
-      handler: handlers.onCreate
-    },
-    {
-      id: 'vm-refresh',
-      key: 'r',
-      context: 'vms',
-      description: 'Refresh list',
-      handler: handlers.onRefresh
-    },
-    {
-      id: 'vm-select-all',
-      key: 'a',
-      modifiers: [isMac ? 'meta' : 'ctrl'],
-      context: 'vms',
-      description: 'Select all visible',
-      handler: handlers.onSelectAll
-    },
-    {
-      id: 'vm-delete',
-      key: 'delete',
-      context: 'vms',
-      description: 'Delete selected VMs',
-      handler: handlers.onDelete
-    },
-    {
-      id: 'vm-start',
-      key: 's',
-      context: 'vms',
-      description: 'Start selected VMs',
-      handler: handlers.onStart
-    },
-    {
-      id: 'vm-stop',
-      key: 'x',
-      context: 'vms',
-      description: 'Stop selected VMs',
-      handler: handlers.onStop
-    },
-    {
-      id: 'vm-nav-up',
-      key: 'arrowup',
-      context: 'vms',
-      description: 'Navigate up',
-      handler: handlers.onNavigateUp,
-      preventDefault: false
-    },
-    {
-      id: 'vm-nav-down',
-      key: 'arrowdown',
-      context: 'vms',
-      description: 'Navigate down',
-      handler: handlers.onNavigateDown,
-      preventDefault: false
-    },
-    {
-      id: 'vm-toggle-select',
-      key: ' ',
-      context: 'vms',
-      description: 'Toggle selection',
-      handler: handlers.onToggleSelect,
-      preventDefault: true
-    },
-    {
-      id: 'vm-open',
-      key: 'enter',
-      context: 'vms',
-      description: 'Open VM detail',
-      handler: handlers.onOpenDetail
-    }
-  ];
-}
-
-// VM detail shortcuts
-export function createVMDetailShortcuts(handlers: {
-  onEdit: () => void;
-  onStart: () => void;
-  onStop: () => void;
-  onRestart: () => void;
-  onDelete: () => void;
-  onTabChange: (tab: number) => void;
-}): Shortcut[] {
-  return [
-    {
-      id: 'vmd-edit',
-      key: 'e',
-      context: 'vm-detail',
-      description: 'Edit VM',
-      handler: handlers.onEdit
-    },
-    {
-      id: 'vmd-start',
-      key: 's',
-      context: 'vm-detail',
-      description: 'Start VM',
-      handler: handlers.onStart
-    },
-    {
-      id: 'vmd-stop',
-      key: 'x',
-      context: 'vm-detail',
-      description: 'Stop VM',
-      handler: handlers.onStop
-    },
-    {
-      id: 'vmd-restart',
-      key: 'r',
-      context: 'vm-detail',
-      description: 'Restart VM',
-      handler: handlers.onRestart
-    },
-    {
-      id: 'vmd-delete',
-      key: 'delete',
-      context: 'vm-detail',
-      description: 'Delete VM',
-      handler: handlers.onDelete
-    },
-    {
-      id: 'vmd-tab-1',
-      key: '1',
-      context: 'vm-detail',
-      description: 'Overview tab',
-      handler: () => handlers.onTabChange(0)
-    },
-    {
-      id: 'vmd-tab-2',
-      key: '2',
-      context: 'vm-detail',
-      description: 'Metrics tab',
-      handler: () => handlers.onTabChange(1)
-    },
-    {
-      id: 'vmd-tab-3',
-      key: '3',
-      context: 'vm-detail',
-      description: 'Snapshots tab',
-      handler: () => handlers.onTabChange(2)
-    },
-    {
-      id: 'vmd-tab-4',
-      key: '4',
-      context: 'vm-detail',
-      description: 'Console tab',
-      handler: () => handlers.onTabChange(3)
     }
   ];
 }

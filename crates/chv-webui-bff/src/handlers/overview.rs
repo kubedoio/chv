@@ -183,10 +183,7 @@ pub async fn get_overview(
         "state": "ready",
     }));
     if let Ok(json) = serde_json::to_string(&response.0) {
-        state
-            .cache
-            .set_with_ttl(cache_key, json, Some(std::time::Duration::from_secs(10)))
-            .await;
+        state.cache.set(cache_key, json).await;
     }
     Ok(response)
 }

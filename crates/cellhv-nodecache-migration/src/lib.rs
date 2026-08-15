@@ -66,10 +66,6 @@ impl ImportPlan {
     pub fn cutover(&self, service: &mut OperationService) -> Result<MigrationDisposition> {
         Ok(service.cutover_legacy_snapshot(SOURCE_NAME, &self.checksum)?)
     }
-
-    pub fn rollback_import(&self, service: &mut OperationService) -> Result<MigrationDisposition> {
-        Ok(service.rollback_legacy_import(SOURCE_NAME, &self.checksum)?)
-    }
 }
 
 pub fn plan(source: &[u8]) -> Result<ImportPlan> {
@@ -567,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn import_replay_rollback_and_cutover_are_guarded() {
+    fn import_replay_and_cutover_are_guarded() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("core.db");
         let mut store = OperationService::create_migration_target(&path).unwrap();
@@ -581,15 +577,6 @@ mod tests {
             MigrationDisposition::Replay
         );
         assert_eq!(
-            import.rollback_import(&mut store).unwrap(),
-            MigrationDisposition::RolledBack
-        );
-        assert!(store.vms().unwrap().is_empty());
-        assert_eq!(
-            import.import(&mut store).unwrap(),
-            MigrationDisposition::Imported
-        );
-        assert_eq!(
             import.cutover(&mut store).unwrap(),
             MigrationDisposition::Cutover
         );
@@ -597,10 +584,6 @@ mod tests {
             import.cutover(&mut store).unwrap(),
             MigrationDisposition::Cutover
         );
-        assert!(matches!(
-            import.rollback_import(&mut store),
-            Err(MigrationError::Operations(OperationServiceError::Store(_)))
-        ));
     }
 
     #[test]

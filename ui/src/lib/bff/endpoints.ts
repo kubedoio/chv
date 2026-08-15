@@ -17,7 +17,6 @@ export const BFFEndpoints = {
 	enrollNode: '/v1/nodes/enroll',
 	listVms: '/v1/vms',
 	getVm: '/v1/vms/get',
-	getVmConsoleUrl: '/v1/vms', // actual path: /v1/vms/:vm_id/console-url (constructed in vms.ts)
 	createVm: '/v1/vms/create',
 	mutateVm: '/v1/vms/mutate',
 	deleteVm: '/v1/vms/delete',
@@ -55,16 +54,9 @@ export const BFFEndpoints = {
 	listBackupJobs: '/v1/backups/jobs',
 	createBackupJob: '/v1/backups/jobs',
 	listBackupHistory: '/v1/backup-history',
-	listBackupSchedules: '/v1/backups/schedules',
-	createBackupSchedule: '/v1/backups/schedules',
-	listBackupRestores: '/v1/backups/restores',
-	createBackupRestore: '/v1/backups/restores',
 
 	// Storage pool endpoints
 	listStoragePools: '/v1/storage-pools',
-
-	// Auth endpoints
-	changePassword: '/v1/auth/change-password',
 
 	// Architecture Designer endpoints (Phase 0 skeleton)
 	listArchitectures: '/v1/architectures/list',

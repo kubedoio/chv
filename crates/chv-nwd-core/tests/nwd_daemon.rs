@@ -216,10 +216,10 @@ async fn ensure_and_delete_topology_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("nwd.sock");
 
-    let server = NetworkServer::new(MockExecutor, Metrics::new(), None);
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
     let socket_clone = socket.clone();
     tokio::spawn(async move {
-        server.serve(&socket_clone, None).await.ok();
+        server.serve(&socket_clone).await.ok();
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -315,10 +315,10 @@ async fn all_network_handlers_smoke() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("nwd.sock");
 
-    let server = NetworkServer::new(MockExecutor, Metrics::new(), None);
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
     let socket_clone = socket.clone();
     tokio::spawn(async move {
-        server.serve(&socket_clone, None).await.ok();
+        server.serve(&socket_clone).await.ok();
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -490,10 +490,10 @@ async fn attach_vm_nic_missing_topology_returns_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("nwd.sock");
 
-    let server = NetworkServer::new(MockExecutor, Metrics::new(), None);
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
     let socket_clone = socket.clone();
     tokio::spawn(async move {
-        server.serve(&socket_clone, None).await.ok();
+        server.serve(&socket_clone).await.ok();
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -524,10 +524,10 @@ async fn firewall_nat_and_exposure_smoke() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("nwd.sock");
 
-    let server = NetworkServer::new(MockExecutor, Metrics::new(), None);
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
     let socket_clone = socket.clone();
     tokio::spawn(async move {
-        server.serve(&socket_clone, None).await.ok();
+        server.serve(&socket_clone).await.ok();
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;

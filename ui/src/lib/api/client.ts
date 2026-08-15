@@ -3,22 +3,12 @@ import { goto } from '$app/navigation';
 import { toast } from '$lib/stores/toast.svelte';
 import type {
   APIErrorEnvelope,
-  CreateNetworkInput,
   CreateStoragePoolInput,
-  CreateVMInput,
-  CreateNodeInput,
-  CreateNodeResponse,
-  UpdateNodeInput,
   Event,
-  Image,
   InstallActionResponse,
   InstallStatusResponse,
-  LoginResponse,
-  Network,
   NodeWithResources,
-  Operation,
   StoragePool,
-  UserInfo,
   VM,
   VMTemplate,
   CreateVMTemplateInput,
@@ -29,14 +19,8 @@ import type {
   RenderCloudInitTemplateResponse,
   Quota,
   UsageWithQuota,
-  CheckQuotaRequest,
-  CheckQuotaResponse,
   SetQuotaInput,
   UpdateQuotaInput,
-  BackupHistory,
-  BackupJob,
-  BackupJobResponse,
-  CreateBackupJobInput,
 } from '$lib/api/types';
 
 const DEFAULT_BASE_URL = env.PUBLIC_CHV_API_BASE_URL || ''; // Empty string means same origin
@@ -323,48 +307,8 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(body)
       });
     },
-    listNetworks() {
-      return request<Network[]>('/api/v1/networks');
-    },
-    createNetwork(data: CreateNetworkInput) {
-      return request<Network>('/api/v1/networks', {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    getNetwork(networkId: string) {
-      return request<Network>(`/api/v1/networks/${networkId}`);
-    },
-    updateNetwork(networkId: string, data: Partial<CreateNetworkInput>) {
-      return request<Network>(`/api/v1/networks/${networkId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(data)
-      });
-    },
-    deleteNetwork(networkId: string) {
-      return request<void>(`/api/v1/networks/${networkId}`, { method: 'DELETE' });
-    },
-    listStoragePools() {
-      return request<StoragePool[]>('/api/v1/storage-pools');
-    },
     createStoragePool(data: CreateStoragePoolInput) {
       return request<StoragePool>('/api/v1/storage-pools', {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    listImages() {
-      return request<Image[]>('/api/v1/images');
-    },
-    importImage(data: {
-      name: string;
-      source_url: string;
-      checksum?: string;
-      os_family?: string;
-      architecture?: string;
-      format?: string;
-    }) {
-      return request<Image>('/api/v1/images/import', {
         method: 'POST',
         body: JSON.stringify(data)
       });
@@ -372,57 +316,14 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     listVMs() {
       return request<VM[]>('/api/v1/vms');
     },
-    createVM(data: CreateVMInput) {
-      return request<VM>('/api/v1/vms', {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    listOperations() {
-      return request<Operation[]>('/api/v1/operations');
-    },
-    getVM(id: string) {
-      return request<VM>(`/api/v1/vms/${id}`);
-    },
-    deleteVM(id: string) {
-      return request<void>(`/api/v1/vms/${id}`, { method: 'DELETE' });
-    },
     listEvents(query = '') {
       return request<Event[]>(`/api/v1/events${query}`);
-    },
-    login(username: string, password: string) {
-      return request<LoginResponse>('/api/v1/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ username, password })
-      });
     },
     logout() {
       return request<void>('/api/v1/auth/logout', { method: 'POST' });
     },
-    getCurrentUser() {
-      return request<UserInfo>('/api/v1/auth/me');
-    },
-    // Node management endpoints
     listNodes() {
       return request<NodeWithResources[]>('/api/v1/nodes');
-    },
-    createNode(data: CreateNodeInput) {
-      return request<CreateNodeResponse>('/api/v1/nodes', {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    getNode(nodeId: string) {
-      return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`);
-    },
-    updateNode(nodeId: string, data: UpdateNodeInput) {
-      return request<NodeWithResources>(`/api/v1/nodes/${nodeId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(data)
-      });
-    },
-    deleteNode(nodeId: string) {
-      return request<void>(`/api/v1/nodes/${nodeId}`, { method: 'DELETE' });
     },
     // VM Templates
     listVMTemplates() {
@@ -434,27 +335,15 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(data)
       });
     },
-    getVMTemplate(id: string) {
-      return request<VMTemplate>(`/v1/vm-templates/${id}`);
-    },
-    deleteVMTemplate(id: string) {
-      return request<void>(`/v1/vm-templates/${id}`, { method: 'DELETE' });
-    },
     cloneFromTemplate(templateId: string, data: CloneFromTemplateInput) {
       return request<VM>(`/v1/vm-templates/${templateId}/clone`, {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
-    previewVMTemplate(id: string) {
-      return request<VMTemplate>(`/v1/vm-templates/${id}/preview`);
-    },
     // Cloud-init Templates
     listCloudInitTemplates() {
       return request<CloudInitTemplate[]>('/v1/cloud-init-templates');
-    },
-    getCloudInitTemplate(id: string) {
-      return request<CloudInitTemplate>(`/v1/cloud-init-templates/${id}`);
     },
     createCloudInitTemplate(data: CreateCloudInitTemplateInput) {
       return request<CloudInitTemplate>('/v1/cloud-init-templates', {
@@ -462,56 +351,18 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
         body: JSON.stringify(data)
       });
     },
-    deleteCloudInitTemplate(id: string) {
-      return request<void>(`/v1/cloud-init-templates/${id}`, { method: 'DELETE' });
-    },
     renderCloudInitTemplate(templateId: string, data: RenderCloudInitTemplateInput) {
       return request<RenderCloudInitTemplateResponse>(`/v1/cloud-init-templates/${templateId}/render`, {
         method: 'POST',
         body: JSON.stringify(data)
       });
     },
-    // Backup Jobs
-    listBackupJobs() {
-      return request<BackupJobResponse[]>('/api/v1/backup-jobs');
-    },
-    createBackupJob(data: CreateBackupJobInput) {
-      return request<BackupJob>('/api/v1/backup-jobs', {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    deleteBackupJob(id: string) {
-      return request<{ success: boolean }>(`/api/v1/backup-jobs/${id}`, { method: 'DELETE' });
-    },
-    runBackupJob(id: string) {
-      return request<BackupHistory>(`/api/v1/backup-jobs/${id}/run`, { method: 'POST' });
-    },
-    toggleBackupJob(id: string) {
-      return request<{ success: boolean; enabled: boolean }>(`/api/v1/backup-jobs/${id}/toggle`, { method: 'POST' });
-    },
-    // VM Backups
-    listVMBackups(vmId: string) {
-      return request<BackupHistory[]>(`/api/v1/vms/${vmId}/backups`);
-    },
-    listBackupHistory() {
-      return request<BackupHistory[]>('/api/v1/backup-history');
-    },
     // Quota endpoints
-    listQuotas() {
-      return request<Quota[]>('/v1/quotas', { method: 'POST' });
-    },
     createQuota(data: SetQuotaInput) {
       return request<Quota>('/v1/quotas/create', {
         method: 'POST',
         body: JSON.stringify(data)
       });
-    },
-    getQuota(userId: string) {
-      return request<Quota>(`/v1/quotas/${userId}`);
-    },
-    getMyQuota() {
-      return request<Quota>('/v1/quotas/me');
     },
     updateQuota(userId: string, data: UpdateQuotaInput) {
       return request<Quota>(`/v1/quotas/${userId}`, {
@@ -521,20 +372,6 @@ export function createAPIClient(options?: { baseUrl?: string; token?: string }) 
     },
     getUsage() {
       return request<UsageWithQuota>('/v1/usage', { method: 'POST' });
-    },
-    getUserUsage(userId: string) {
-      return request<UsageWithQuota>(`/v1/quotas/${userId}/usage`);
-    },
-    checkQuota(data: CheckQuotaRequest) {
-      return request<CheckQuotaResponse>('/v1/quotas/check', {
-        method: 'POST',
-        body: JSON.stringify(data)
-      });
-    },
-    deleteQuota(userId: string) {
-      return request<{ success: boolean }>(`/v1/quotas/${userId}`, {
-        method: 'DELETE'
-      });
     }
   };
 }

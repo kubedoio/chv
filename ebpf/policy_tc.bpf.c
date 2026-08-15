@@ -43,11 +43,18 @@ typedef unsigned long long __u64;
 
 #define MAX_RULES_PER_VM 64
 
+// Fixed-size map key derived from the vm_id's raw bytes. Distinct vm_ids up
+// to 16 bytes produce distinct keys, unlike the previous FNV-1a u32 hash
+// which could collide and let one VM's policy overwrite another's.
+struct rule_key {
+    __u8 id[16]; // vm_id ASCII bytes, zero-padded (truncated to 16 by userspace)
+};
+
 // ---------------------------------------------------------------------------
 // Map definitions
 // ---------------------------------------------------------------------------
 
-// Key: vm_id_hash (u32)
+// Key: struct rule_key (16-byte zero-padded vm_id)
 // Value: array of rules for that VM
 struct rule_entry {
     __u8  direction;    // 0=both, 1=ingress, 2=egress
@@ -69,15 +76,15 @@ struct rule_set {
     struct rule_entry rules[MAX_RULES_PER_VM];
 };
 
-// BPF_MAP_TYPE_HASH: vm_id_hash -> rule_set
+// BPF_MAP_TYPE_HASH: rule_key -> rule_set
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
-    __type(key, __u32);
+    __type(key, struct rule_key);
     __type(value, struct rule_set);
 } rule_map __section(".maps");
 
-// Key: vm_id_hash (u32)
+// Key: struct rule_key (16-byte zero-padded vm_id)
 // Value: rate limit parameters
 struct rate_entry {
     __u64 rate_bps;       // bytes per second
@@ -86,11 +93,11 @@ struct rate_entry {
     __u64 last_refill_ns; // last refill timestamp (ktime_ns)
 };
 
-// BPF_MAP_TYPE_HASH: vm_id_hash -> rate_entry
+// BPF_MAP_TYPE_HASH: rule_key -> rate_entry
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
-    __type(key, __u32);
+    __type(key, struct rule_key);
     __type(value, struct rate_entry);
 } rate_map __section(".maps");
 
@@ -111,12 +118,12 @@ struct {
     __type(value, struct stats_entry);
 } stats_map __section(".maps");
 
-// Key: vm_id_hash (u32)
+// Key: struct rule_key (16-byte zero-padded vm_id)
 // Value: default action (u8: 0=deny, 1=allow)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
-    __type(key, __u32);
+    __type(key, struct rule_key);
     __type(value, __u8);
 } defaults_map __section(".maps");
 
@@ -161,10 +168,10 @@ struct udphdr {
 // ---------------------------------------------------------------------------
 
 static __always_inline int check_rate_limit(
-    __u32 vm_id_hash,
+    const struct rule_key *key,
     __u32 pkt_len)
 {
-    struct rate_entry *rate = bpf_map_lookup_elem(&rate_map, &vm_id_hash);
+    struct rate_entry *rate = bpf_map_lookup_elem(&rate_map, key);
     if (!rate)
         return 1; // no rate limit configured -> allow
 
@@ -192,7 +199,7 @@ static __always_inline int check_rate_limit(
 // ---------------------------------------------------------------------------
 
 static __always_inline int match_rules(
-    __u32 vm_id_hash,
+    const struct rule_key *key,
     __u8  direction,   // 1=ingress, 2=egress
     __u32 src_ip,
     __u32 dst_ip,
@@ -200,7 +207,7 @@ static __always_inline int match_rules(
     __u16 dst_port,
     __u8  protocol)
 {
-    struct rule_set *rs = bpf_map_lookup_elem(&rule_map, &vm_id_hash);
+    struct rule_set *rs = bpf_map_lookup_elem(&rule_map, key);
     if (!rs)
         goto default_action;
 
@@ -243,7 +250,7 @@ static __always_inline int match_rules(
 
 default_action:;
     // No rule matched -> check default action
-    __u8 *def = bpf_map_lookup_elem(&defaults_map, &vm_id_hash);
+    __u8 *def = bpf_map_lookup_elem(&defaults_map, key);
     if (def)
         return *def;
     return 1; // default allow if nothing configured
@@ -281,6 +288,14 @@ int policy_tc(struct __sk_buff *skb)
 
     // Parse L4 headers for port info
     __u8 ihl = (ip->ihl_version & 0x0f) * 4;
+    if (ihl < 20)
+        return TC_ACT_OK;
+
+    // Ignore non-first IP fragments (fragment offset != 0).
+    __u16 frag_off = __bpf_ntohs(ip->frag_off);
+    if (frag_off & 0x1FFF)
+        return TC_ACT_OK;
+
     void *l4 = (void *)ip + ihl;
 
     if (protocol == IPPROTO_TCP) {
@@ -297,24 +312,32 @@ int policy_tc(struct __sk_buff *skb)
         dst_port = __bpf_ntohs(udp->dest);
     }
 
-    // Determine VM identity from interface index (stored in cb by tc)
-    // In practice, vm_id_hash is derived from the interface the packet arrives on.
-    // For TC on a per-VM TAP, we use the ifindex as a proxy lookup into a
-    // separate ifindex->vm_id_hash map. Simplified here to use skb->ifindex.
+    // Determine VM identity from the interface index.
+    //
+    // NOTE: `skb->ifindex` is only a placeholder. The keys the control
+    // plane stores in rule_map/defaults_map/rate_map are 16-byte
+    // build_vm_key(vm_id) values (the zero-padded vm_id), NOT raw
+    // ifindexes, so lookups keyed on the ifindex can never match until an
+    // ifindex -> rule_key mapping is implemented (e.g. a separate
+    // ifindex_map populated at attach time, or carrying the rule_key in
+    // skb metadata). Until that mapping exists policy enforcement is a
+    // no-op; the mismatch below is a known placeholder, not a bug.
     __u32 vm_id_hash = skb->ifindex; // placeholder: real impl uses ifindex_map
+    struct rule_key vm_key = {0};
+    __builtin_memcpy(vm_key.id, &vm_id_hash, sizeof(vm_id_hash));
 
     // Determine direction: egress on TAP = traffic FROM VM, ingress on bridge = TO VM
     __u8 direction = 2; // egress (from VM perspective)
     // Note: when attached as ingress on bridge, flip to 1
 
     // Check security rules
-    int action = match_rules(vm_id_hash, direction, src_ip, dst_ip,
+    int action = match_rules(&vm_key, direction, src_ip, dst_ip,
                              src_port, dst_port, protocol);
 
     // Check rate limit (only for allowed packets)
     if (action == 1) {
         __u32 pkt_len = skb->len;
-        if (!check_rate_limit(vm_id_hash, pkt_len))
+        if (!check_rate_limit(&vm_key, pkt_len))
             action = 0; // rate limited -> deny
     }
 

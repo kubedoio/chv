@@ -15,7 +15,6 @@ metrics = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
-prost = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }

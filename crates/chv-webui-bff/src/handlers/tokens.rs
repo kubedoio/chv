@@ -10,6 +10,20 @@ fn rand_bytes_32() -> [u8; 32] {
     rand::rng().random()
 }
 
+/// Validate an API-token scope at creation time. The allowed set is the
+/// only vocabulary `crate::auth::effective_role_for_scope` interprets;
+/// rejecting anything else here means mint-time 400s instead of silent
+/// "full" treatment at every lookup.
+fn validate_scope(scope: &str) -> Result<(), BffError> {
+    if matches!(scope, "full" | "readonly") {
+        Ok(())
+    } else {
+        Err(BffError::BadRequest(format!(
+            "invalid scope {scope:?}; expected \"full\" or \"readonly\""
+        )))
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct TokenRow {
     token_id: String,
@@ -72,10 +86,21 @@ pub async fn create_token(
         return Err(BffError::BadRequest("name must not be empty".into()));
     }
 
+    // Scope semantics (Security T1 — enforced at token lookup in
+    // `crate::auth::effective_role_for_scope`):
+    //
+    // - "full"     -> the token keeps the user's role unchanged.
+    // - "readonly" -> the token is demoted to the viewer role (read-only
+    //                 endpoints only).
+    //
+    // Only these two values are accepted at creation time; anything else is
+    // a 400 so bad scopes are caught at mint time instead of being
+    // silently treated as "full" later.
     let scope = payload
         .get("scope")
         .and_then(|v| v.as_str())
         .unwrap_or("full");
+    validate_scope(scope)?;
 
     let token_id = chv_common::gen_short_id();
     let raw_token = format!("chv_{}", hex::encode(rand_bytes_32()));
@@ -162,6 +187,23 @@ pub async fn revoke_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_scope_accepts_full_and_readonly() {
+        assert!(validate_scope("full").is_ok());
+        assert!(validate_scope("readonly").is_ok());
+    }
+
+    #[test]
+    fn validate_scope_rejects_unknown_values() {
+        for bad in ["", "admin", "READONLY", "Full", "read-only"] {
+            let err = validate_scope(bad).expect_err("unknown scope must be rejected");
+            assert!(
+                matches!(err, BffError::BadRequest(_)),
+                "expected BadRequest for {bad:?}, got {err:?}"
+            );
+        }
+    }
 
     #[test]
     fn token_format_is_correct() {

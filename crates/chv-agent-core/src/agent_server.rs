@@ -139,9 +139,9 @@ impl AgentServer {
             path: socket_path.to_string_lossy().to_string(),
             source: e,
         })?;
-        // Ensure the socket is group-writable so the control plane (running as a
-        // different user in the same group) can connect.
-        let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o775));
+        // Restrict the socket to the agent's own user; the control plane runs
+        // as the same user, so no group access is required.
+        let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
         let uds_stream = UnixListenerStream::new(uds);
         tonic::transport::Server::builder()
             .layer(chv_observability::GrpcMetricsLayer::new())
@@ -189,6 +189,9 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         req: Request<proto::ApplyVmDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
+        if !chv_common::is_safe_id(&inner.vm_id) {
+            return Err(Status::invalid_argument("invalid vm_id"));
+        }
         let meta = inner
             .meta
             .as_ref()
@@ -229,6 +232,9 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         req: Request<proto::ApplyVolumeDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         let inner = req.into_inner();
+        if !chv_common::is_safe_id(&inner.volume_id) {
+            return Err(Status::invalid_argument("invalid volume_id"));
+        }
         let meta = inner
             .meta
             .as_ref()

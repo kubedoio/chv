@@ -35,7 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = NetworkServer::new(
         chv_nwd_core::executor::LinuxExecutor::new(config.runtime_dir.clone()),
         chv_observability::Metrics::new(),
-        None,
     );
 
     let socket_path = config.socket_path.clone();
@@ -43,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     tokio::select! {
-        result = server.serve(&config.socket_path, None) => {
+        result = server.serve(&config.socket_path) => {
             result?;
         }
         _ = sigterm.recv() => {

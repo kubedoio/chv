@@ -7,6 +7,29 @@ use serde_json::{json, Value};
 use crate::router::AppState;
 use crate::BffError;
 
+/// Sanity ceilings for quota values (S2 overflow hardening): memory ≤ 1 TiB,
+/// storage ≤ 64 TiB, both expressed in GB by the API.
+const MAX_MEMORY_GB: i64 = 1024;
+const MAX_STORAGE_GB: i64 = 64 * 1024;
+
+/// Convert an optional GB value to bytes with 400 on out-of-range input.
+/// `checked_mul` is defense in depth behind the bound: an overflowing value
+/// used to wrap negative in release builds, bypassing quota comparisons.
+/// `None` passes through so upserts can keep existing columns via COALESCE.
+fn gb_to_bytes(gb: Option<i64>, max_gb: i64, field: &str) -> Result<Option<i64>, BffError> {
+    match gb {
+        Some(gb) if !(0..=max_gb).contains(&gb) => Err(BffError::BadRequest(format!(
+            "{} must be between 0 and {} GB",
+            field, max_gb
+        ))),
+        Some(gb) => gb
+            .checked_mul(1024 * 1024 * 1024)
+            .map(Some)
+            .ok_or_else(|| BffError::BadRequest(format!("{} too large", field))),
+        None => Ok(None),
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct QuotaRow {
     user_id: String,
@@ -120,14 +143,16 @@ pub async fn create_quota(
 
     let max_vms = payload.get("max_vms").and_then(|v| v.as_i64());
     let max_cpu = payload.get("max_cpu").and_then(|v| v.as_i64());
-    let max_memory_bytes = payload
-        .get("max_memory_gb")
-        .and_then(|v| v.as_i64())
-        .map(|gb| gb * 1024 * 1024 * 1024);
-    let max_storage_bytes = payload
-        .get("max_storage_gb")
-        .and_then(|v| v.as_i64())
-        .map(|gb| gb * 1024 * 1024 * 1024);
+    let max_memory_bytes = gb_to_bytes(
+        payload.get("max_memory_gb").and_then(|v| v.as_i64()),
+        MAX_MEMORY_GB,
+        "max_memory_gb",
+    )?;
+    let max_storage_bytes = gb_to_bytes(
+        payload.get("max_storage_gb").and_then(|v| v.as_i64()),
+        MAX_STORAGE_GB,
+        "max_storage_gb",
+    )?;
 
     sqlx::query(
         r#"
@@ -183,14 +208,16 @@ pub async fn update_quota(
 
     let max_vms = payload.get("max_vms").and_then(|v| v.as_i64());
     let max_cpu = payload.get("max_cpu").and_then(|v| v.as_i64());
-    let max_memory_bytes = payload
-        .get("max_memory_gb")
-        .and_then(|v| v.as_i64())
-        .map(|gb| gb * 1024 * 1024 * 1024);
-    let max_storage_bytes = payload
-        .get("max_storage_gb")
-        .and_then(|v| v.as_i64())
-        .map(|gb| gb * 1024 * 1024 * 1024);
+    let max_memory_bytes = gb_to_bytes(
+        payload.get("max_memory_gb").and_then(|v| v.as_i64()),
+        MAX_MEMORY_GB,
+        "max_memory_gb",
+    )?;
+    let max_storage_bytes = gb_to_bytes(
+        payload.get("max_storage_gb").and_then(|v| v.as_i64()),
+        MAX_STORAGE_GB,
+        "max_storage_gb",
+    )?;
 
     sqlx::query(
         r#"
@@ -366,20 +393,18 @@ pub async fn check_quota(
         .get("requested_cpu")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let requested_memory_bytes = payload
-        .get("requested_memory_gb")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0)
-        * 1024
-        * 1024
-        * 1024;
-    let requested_storage_bytes = payload
-        .get("requested_storage_gb")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0)
-        * 1024
-        * 1024
-        * 1024;
+    let requested_memory_bytes = gb_to_bytes(
+        payload.get("requested_memory_gb").and_then(|v| v.as_i64()),
+        MAX_MEMORY_GB,
+        "requested_memory_gb",
+    )?
+    .unwrap_or(0);
+    let requested_storage_bytes = gb_to_bytes(
+        payload.get("requested_storage_gb").and_then(|v| v.as_i64()),
+        MAX_STORAGE_GB,
+        "requested_storage_gb",
+    )?
+    .unwrap_or(0);
 
     let quota_row = sqlx::query_as::<_, QuotaRow>(
         "SELECT user_id, max_vms, max_cpu, max_memory_bytes, max_storage_bytes FROM quotas WHERE user_id = ?"

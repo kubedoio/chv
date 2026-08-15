@@ -265,14 +265,6 @@ export function closeSearch() {
   }
 }
 
-export function toggleSearch() {
-  if (isOpen) {
-    closeSearch();
-  } else {
-    openSearch();
-  }
-}
-
 // Getters for state
 export function getIsOpen(): boolean {
   return isOpen;

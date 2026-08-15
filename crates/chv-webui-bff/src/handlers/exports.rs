@@ -51,6 +51,15 @@ pub async fn export_vm(
         .map_err(|e| BffError::Internal(format!("failed to look up vm: {}", e)))?
         .ok_or_else(|| BffError::NotFound(format!("vm {} not found", vm_id)))?;
 
+    // Never interpolate the DB-stored display_name into filesystem paths
+    // verbatim: use it only when it passes the same charset validation as
+    // create/import, otherwise fall back to the validated vm_id.
+    let safe_name = if super::vms::is_valid_display_name(&vm.display_name) {
+        vm.display_name.as_str()
+    } else {
+        vm_id.as_str()
+    };
+
     // Find ALL attached volumes
     let volumes: Vec<VolumeRow> =
         sqlx::query_as("SELECT volume_id FROM volume_desired_state WHERE attached_vm_id = ?")
@@ -101,14 +110,14 @@ pub async fn export_vm(
     // Copy all disks into the export directory with descriptive names
     for (i, disk_path) in disk_paths.iter().enumerate() {
         let vol = &volumes[i];
-        let dest = export_dir.join(format!("{}-{}.img", vm.display_name, vol.volume_id));
+        let dest = export_dir.join(format!("{}-{}.img", safe_name, vol.volume_id));
         tokio::fs::copy(disk_path, dest)
             .await
             .map_err(|e| BffError::Internal(format!("failed to copy disk image: {}", e)))?;
     }
 
     // Create a tar archive of the export directory
-    let filename = format!("{}-export.tar.gz", vm.display_name);
+    let filename = format!("{}-export.tar.gz", safe_name);
     let archive_path = export_dir.join(&filename);
     let tar_status = tokio::process::Command::new("tar")
         .arg("czf")

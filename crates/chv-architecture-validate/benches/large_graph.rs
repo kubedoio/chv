@@ -5,7 +5,7 @@
 //! on regression, but it gives a Criterion report (`cargo bench
 //! -p chv-architecture-validate`) when investigating perf changes.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 
 #[path = "../tests/common/synth.rs"]
 mod synth;
@@ -19,7 +19,7 @@ fn bench_validate_500_nodes(c: &mut Criterion) {
     let model = synth::synthesize_topology(500, 50, 800);
     c.bench_function("validate_static_checks_800_edges", |b| {
         b.iter(|| {
-            let _ = chv_architecture_validate::run_static_checks(black_box(&model));
+            let _ = chv_architecture_validate::run_static_checks(std::hint::black_box(&model));
         });
     });
 }

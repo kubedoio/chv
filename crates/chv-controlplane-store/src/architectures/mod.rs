@@ -25,7 +25,7 @@ pub use topology::{
 pub use version::{VersionCreateInput, VersionRepository};
 
 use crate::StoreError;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 
 /// Parses the `text` timestamp columns produced by
 /// `strftime('%Y-%m-%dT%H:%M:%SZ', ...)` back into chrono.
@@ -51,14 +51,4 @@ fn parse_ts_opt(
 /// throughout the schema. The companion of [`parse_ts`].
 fn format_ts(value: DateTime<Utc>) -> String {
     value.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-/// Convenience for constructing a literal Utc timestamp without dragging
-/// chrono::Utc into every callsite (used in tests and a few places that
-/// need a stable "now").
-#[allow(dead_code)]
-fn from_unix_seconds(seconds: i64) -> DateTime<Utc> {
-    Utc.timestamp_opt(seconds, 0)
-        .single()
-        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().expect("epoch is valid"))
 }

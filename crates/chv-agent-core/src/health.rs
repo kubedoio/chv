@@ -4,9 +4,6 @@ use crate::state_machine::NodeState;
 const MIN_DISK_AVAILABLE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// Maximum memory usage percentage before declaring memory pressure.
 const MAX_MEMORY_USAGE_PERCENT: f64 = 90.0;
-/// Maximum disk usage percentage before declaring disk pressure.
-#[allow(dead_code)]
-const MAX_DISK_USAGE_PERCENT: f64 = 95.0;
 
 /// Indicates whether the host is under resource pressure.
 #[derive(Debug, Clone)]

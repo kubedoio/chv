@@ -1,5 +1,4 @@
 import type {
-	InstanceActionId,
 	InstanceActionDefinition,
 	InstanceStatus
 } from '$lib/api/types';
@@ -83,41 +82,4 @@ export function buildInstanceActions(status: InstanceStatus): InstanceActionDefi
 			requiresConfirmation: true
 		}
 	];
-}
-
-/**
- * Get a single action definition by ID for a given status.
- */
-export function getInstanceAction(
-	status: InstanceStatus,
-	actionId: InstanceActionId
-): InstanceActionDefinition | undefined {
-	return buildInstanceActions(status).find((a) => a.id === actionId);
-}
-
-/**
- * Normalize a raw power-state string into the canonical InstanceStatus.
- */
-export function normalizeInstanceStatus(raw: string): InstanceStatus {
-	const s = raw.toLowerCase().trim();
-	if (s === 'running' || s === 'started' || s === 'active') return 'running';
-	if (s === 'stopped' || s === 'halted' || s === 'poweredoff' || s === 'powered_off') return 'stopped';
-	if (s === 'error' || s === 'failed' || s === 'crashed') return 'error';
-	if (s === 'paused') return 'paused';
-	return 'unknown';
-}
-
-/**
- * Group a flat list of instances by their host (node) ID.
- */
-export function groupInstancesByHost<T extends { nodeId: string; id: string; name: string; status: InstanceStatus }>(
-	instances: T[]
-): Map<string, T[]> {
-	const map = new Map<string, T[]>();
-	for (const inst of instances) {
-		const list = map.get(inst.nodeId) ?? [];
-		list.push(inst);
-		map.set(inst.nodeId, list);
-	}
-	return map;
 }

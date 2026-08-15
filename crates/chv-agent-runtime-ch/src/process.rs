@@ -382,6 +382,26 @@ impl ProcessCloudHypervisorAdapter {
     }
 }
 
+/// What `start_vm` should do for a VM whose `vm.info` reported `state`.
+///
+/// Both `Running` and `Paused` map to an idempotent no-op: a paused VM is
+/// deliberately left paused. The migration path owns resume-after-pause (see
+/// `PausedVmGuard` in chv-agent-core), and user-initiated pauses must survive
+/// the reconciler's periodic `start_vm` calls.
+enum StartVmAction {
+    /// VM is already running (or deliberately paused): idempotent no-op.
+    AlreadyRunning,
+    /// Any other state: boot the VM.
+    Boot,
+}
+
+fn start_vm_action(state: &str) -> StartVmAction {
+    match state {
+        "Running" | "Paused" => StartVmAction::AlreadyRunning,
+        _ => StartVmAction::Boot,
+    }
+}
+
 #[async_trait]
 impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     async fn create_vm(
@@ -811,19 +831,19 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let (info_status, info_body) =
             Self::ch_api_request_with_body(&api_socket, "GET", "/api/v1/vm.info", None).await?;
         let mut state = String::new();
-        let already_running = if info_status == 200 {
+        let action = if info_status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&info_body) {
                 state = v
                     .get("state")
                     .and_then(|s| s.as_str())
                     .unwrap_or("")
                     .to_string();
-                state == "Running" || state == "Paused"
+                start_vm_action(&state)
             } else {
-                false
+                start_vm_action("")
             }
         } else {
-            false
+            start_vm_action("")
         };
 
         // Respawn broadcaster if it died while the VM was running.
@@ -848,13 +868,16 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             }
         }
 
-        if already_running {
-            info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
-            // Idempotent success: VM is already in the desired state.
-            // The guard's succeeded flag must be set on every Ok return
-            // so RED metrics classify this as ok, not err.
-            __guard.succeeded = true;
-            return Ok(());
+        match action {
+            StartVmAction::AlreadyRunning => {
+                info!(vm_id = %vm_id, state = %state, "vm already booted, skipping vm.boot");
+                // Idempotent success: VM is already in the desired state.
+                // The guard's succeeded flag must be set on every Ok return
+                // so RED metrics classify this as ok, not err.
+                __guard.succeeded = true;
+                return Ok(());
+            }
+            StartVmAction::Boot => {}
         }
 
         let status = Self::ch_api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
@@ -2004,5 +2027,31 @@ mod tests {
 
         fs::write(pid_path.join("stat"), b"1234 (bash) S 1 1 1 0 -1 4210944 1 0 0 0 0 0 0 0 20 0 1 0 99999 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
         assert!(handle.revalidate().is_err());
+    }
+
+    #[test]
+    fn start_vm_action_paused_is_already_running() {
+        assert!(matches!(
+            super::start_vm_action("Paused"),
+            super::StartVmAction::AlreadyRunning
+        ));
+    }
+
+    #[test]
+    fn start_vm_action_running_is_already_running() {
+        assert!(matches!(
+            super::start_vm_action("Running"),
+            super::StartVmAction::AlreadyRunning
+        ));
+    }
+
+    #[test]
+    fn start_vm_action_other_states_map_to_boot() {
+        for state in ["", "Created", "Booted", "Failed", "garbage"] {
+            assert!(
+                matches!(super::start_vm_action(state), super::StartVmAction::Boot),
+                "state {state:?} should map to Boot"
+            );
+        }
     }
 }
