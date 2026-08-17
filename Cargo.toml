@@ -69,7 +69,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 axum = "0.7"
 bcrypt = "0.19"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "migrate", "derive", "json", "uuid", "chrono"] }
-nix = { version = "0.29", features = ["term", "ioctl", "process"] }
+nix = { version = "0.31", features = ["term", "ioctl", "process"] }
 crc32fast = "1"
 moka = { version = "0.12", features = ["future"] }
 aes-gcm = "0.10"
