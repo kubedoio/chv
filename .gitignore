@@ -11,6 +11,8 @@ bin/
 # Test artifacts
 *.test
 *.out
+*.log
+*.profraw
 coverage.html
 coverage.out
 
@@ -56,12 +58,16 @@ node_modules/
 # Build output
 dist/
 
-#Agent specific
+# Agent-specific local state
 docs/superpowers
 .worktrees/
 .claude/worktrees/
 .claude/session-reads.txt
+.codex/
+.kimi/
+.agents/
 .gstack/
+.sccache/
 
 # Review tooling output (per-session, not part of the source tree)
 .pr-review-out/
