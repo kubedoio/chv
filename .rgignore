@@ -1,0 +1,36 @@
+# Search/context exclusions for coding agents and ripgrep.
+# Keep proto/specs and tracked generated Rust searchable; exclude only local/generated noise.
+
+target/
+node_modules/
+dist/
+ui/playwright-report/
+ui/test-results/
+
+# Local agent/tool state
+.claude/worktrees/
+.codex/
+.kimi/
+.agents/
+.gstack/
+.worktrees/
+.sccache/
+.pr-review-out/
+
+# Local runtime/build data
+data/
+volumes/
+images/
+tmp/
+temp/
+*.iso
+*.raw
+*.qcow2
+*.img
+
+# Noisy local artifacts
+*.log
+*.tmp
+*.bak
+*.profraw
+.DS_Store
