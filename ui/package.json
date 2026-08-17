@@ -18,7 +18,7 @@
     "@sveltejs/adapter-node": "^5.5.7",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.70.2",
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@testing-library/svelte": "^5.4.2",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26.1.2",
