@@ -296,6 +296,7 @@ mod tests {
         async fn set_firewall_policy(
             &self,
             _network_id: &str,
+            _bridge_name: &str,
             _policy_version: &str,
             _policy_json: &[u8],
         ) -> Result<(), ChvError> {

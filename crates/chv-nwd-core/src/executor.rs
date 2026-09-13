@@ -58,6 +58,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     async fn set_firewall_policy(
         &self,
         network_id: &str,
+        bridge_name: &str,
         policy_version: &str,
         policy_json: &[u8],
     ) -> Result<(), ChvError>;
@@ -906,11 +907,12 @@ impl NetworkExecutor for LinuxExecutor {
     async fn set_firewall_policy(
         &self,
         network_id: &str,
+        bridge_name: &str,
         _policy_version: &str,
         policy_json: &[u8],
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
-        crate::firewall::apply_firewall_rules(&table, policy_json)
+        crate::firewall::apply_firewall_rules(&table, bridge_name, policy_json)
             .await
             .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall")
@@ -1407,6 +1409,7 @@ mod tests {
         async fn set_firewall_policy(
             &self,
             _network_id: &str,
+            _bridge_name: &str,
             _policy_version: &str,
             _policy_json: &[u8],
         ) -> Result<(), ChvError> {

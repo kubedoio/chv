@@ -431,9 +431,25 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Err(e) => return Ok(Response::new(Self::err_result(&e))),
         };
 
+        let bridge_name = match self.topologies.get(&req.network_id) {
+            Some(t) => t.bridge_name.clone(),
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: req.network_id.clone(),
+                };
+                return Ok(Response::new(Self::err_result(&e)));
+            }
+        };
+
         match self
             .executor
-            .set_firewall_policy(&req.network_id, &policy.policy_version, &policy.policy_json)
+            .set_firewall_policy(
+                &req.network_id,
+                &bridge_name,
+                &policy.policy_version,
+                &policy.policy_json,
+            )
             .await
         {
             Ok(()) => Ok(Response::new(Self::ok_result())),

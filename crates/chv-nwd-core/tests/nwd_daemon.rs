@@ -65,6 +65,7 @@ impl NetworkExecutor for MockExecutor {
     async fn set_firewall_policy(
         &self,
         _network_id: &str,
+        _bridge_name: &str,
         _policy_version: &str,
         _policy_json: &[u8],
     ) -> Result<(), ChvError> {
@@ -517,6 +518,37 @@ async fn attach_vm_nic_missing_topology_returns_not_found() {
 
     assert_eq!(result.result.as_ref().unwrap().status, "error");
     assert_eq!(result.result.as_ref().unwrap().error_code, "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn set_firewall_policy_missing_topology_returns_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+
+    let server = NetworkServer::new(MockExecutor, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    let result = client
+        .set_firewall_policy(SetFirewallPolicyRequest {
+            meta: None,
+            network_id: "net-not-ensured".to_string(),
+            policy: Some(FirewallPolicy {
+                policy_version: "v1".to_string(),
+                policy_json: b"[]".to_vec(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(result.status, "error");
+    assert_eq!(result.error_code, "NOT_FOUND");
 }
 
 #[tokio::test]
