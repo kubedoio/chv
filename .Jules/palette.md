@@ -17,3 +17,6 @@
 ## 2024-06-25 - Topology Canvas Controls Accessibility
 **Learning:** Found that the live topology canvas headers rely on icon/symbol buttons (+, -, Fit) that lacked hover tooltips and clear ARIA labeling. Sighted users wouldn't know the exact function without trial and error, and screen readers lacked context for actions like "Fit" vs "Focus".
 **Action:** Always ensure floating canvas or map control panels use both `title` (for sighted tooltips) and explicit `aria-label`s to describe their zoom/pan functions clearly, as symbols alone are ambiguous.
+## 2026-09-14 - [Missing Tooltip for Copy Buttons]
+**Learning:** Copy buttons without explicit tooltips might lack context. While the text 'Copy' exists, specifying what is being copied via a `title` attribute improves the experience.
+**Action:** Add `title` attribute to buttons when the action might benefit from extra context (e.g. `title="Copy YAML to clipboard"`).
