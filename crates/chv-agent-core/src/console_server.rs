@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -192,8 +192,6 @@ impl ConsoleServer {
         else {
             return;
         };
-        let raw_fd = pty_fd.as_raw_fd();
-
         let (mut ws_tx, mut ws_rx) = socket.split();
 
         // Subscribe to live feed first, then fetch scrollback, to minimize
@@ -253,18 +251,20 @@ impl ConsoleServer {
         // WebSocket → PTY
         let mut write_task = tokio::spawn(async move {
             // Dup fd for tokio async write
-            let dup_fd = unsafe { libc::dup(raw_fd) };
-            if dup_fd < 0 {
-                tracing::warn!(error = %std::io::Error::last_os_error(), "failed to dup pty fd for write");
-                return;
-            }
+            let dup_fd = match nix::unistd::dup(&pty_fd) {
+                Ok(fd) => fd,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to dup pty fd for write");
+                    return;
+                }
+            };
             // Set FD_CLOEXEC on the dup'd fd so it is not leaked to child processes
-            if let Ok(flags) = nix::fcntl::fcntl(dup_fd, nix::fcntl::FcntlArg::F_GETFD) {
+            if let Ok(flags) = nix::fcntl::fcntl(&dup_fd, nix::fcntl::FcntlArg::F_GETFD) {
                 let new_flags =
                     nix::fcntl::FdFlag::from_bits_truncate(flags) | nix::fcntl::FdFlag::FD_CLOEXEC;
-                let _ = nix::fcntl::fcntl(dup_fd, nix::fcntl::FcntlArg::F_SETFD(new_flags));
+                let _ = nix::fcntl::fcntl(&dup_fd, nix::fcntl::FcntlArg::F_SETFD(new_flags));
             }
-            let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+            let std_file = std::fs::File::from(dup_fd);
             let tokio_file = tokio::fs::File::from_std(std_file);
             let mut pty_writer = tokio_file;
 
