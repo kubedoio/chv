@@ -46,6 +46,7 @@
 				disabled={!yaml}
 				onclick={handleCopy}
 				ariaLabel="Copy YAML to clipboard"
+				title="Copy YAML to clipboard"
 			>
 				Copy
 			</Button>
