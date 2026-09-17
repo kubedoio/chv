@@ -85,8 +85,14 @@ impl CredentialEncryption {
         };
 
         let nonce_bytes: [u8; 12] = rand::random();
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = match cipher.encrypt(nonce, plaintext.as_bytes()) {
+        let nonce = match Nonce::try_from(nonce_bytes.as_slice()) {
+            Ok(nonce) => nonce,
+            Err(_) => {
+                tracing::warn!("invalid AES-256-GCM nonce length; storing plaintext");
+                return plaintext.to_string();
+            }
+        };
+        let ciphertext = match cipher.encrypt(&nonce, plaintext.as_bytes()) {
             Ok(ct) => ct,
             Err(e) => {
                 tracing::warn!(error = %e, "AES-256-GCM encryption failed; storing plaintext");
@@ -146,8 +152,15 @@ impl CredentialEncryption {
         }
 
         let (nonce_bytes, encrypted) = combined.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let plain_bytes = match cipher.decrypt(nonce, encrypted) {
+        let nonce = match Nonce::try_from(nonce_bytes) {
+            Ok(nonce) => nonce,
+            Err(_) => {
+                metrics::counter!("chv_credential_decrypt_total", "outcome" => "err_malformed")
+                    .increment(1);
+                return Err(DecryptError::Malformed);
+            }
+        };
+        let plain_bytes = match cipher.decrypt(&nonce, encrypted) {
             Ok(v) => v,
             Err(_) => {
                 metrics::counter!("chv_credential_decrypt_total", "outcome" => "err_auth")
