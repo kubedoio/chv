@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::io::{Read as _, Seek, SeekFrom};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
