@@ -321,8 +321,7 @@ impl EnrollmentService for EnrollmentServiceImplementation {
 }
 
 pub struct CaBackedCertificateIssuer {
-    ca_cert: rcgen::Certificate,
-    ca_key_pair: rcgen::KeyPair,
+    ca_issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
     ca_pem: String,
 }
 
@@ -332,20 +331,12 @@ impl CaBackedCertificateIssuer {
             ControlPlaneServiceError::Internal(format!("failed to parse CA key: {}", e))
         })?;
 
-        let params = rcgen::CertificateParams::from_ca_cert_pem(ca_cert_pem).map_err(|e| {
+        let ca_issuer = rcgen::Issuer::from_ca_cert_pem(ca_cert_pem, ca_key_pair).map_err(|e| {
             ControlPlaneServiceError::Internal(format!("failed to parse CA cert: {}", e))
         })?;
 
-        let ca_cert = params.self_signed(&ca_key_pair).map_err(|e| {
-            ControlPlaneServiceError::Internal(format!(
-                "failed to reconstruct CA certificate: {}",
-                e
-            ))
-        })?;
-
         Ok(Self {
-            ca_cert,
-            ca_key_pair,
+            ca_issuer,
             ca_pem: ca_cert_pem.to_string(),
         })
     }
@@ -357,9 +348,8 @@ impl CertificateIssuer for CaBackedCertificateIssuer {
         &self,
         node_id: &NodeId,
     ) -> Result<IssuedCertificate, ControlPlaneServiceError> {
-        use rcgen::{
-            CertificateParams, DistinguishedName, DnType, Ia5String, IsCa, KeyPair, SanType,
-        };
+        use rcgen::string::Ia5String;
+        use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, SanType};
 
         let mut params = CertificateParams::default();
         params.distinguished_name = DistinguishedName::new();
@@ -372,24 +362,21 @@ impl CertificateIssuer for CaBackedCertificateIssuer {
         })?;
         params.subject_alt_names.push(SanType::DnsName(dns_name));
         params.is_ca = IsCa::NoCa;
+        let serial = chv_common::gen_short_id();
+        params.serial_number = Some(rcgen::SerialNumber::from(serial.as_bytes().to_vec()));
 
         let key_pair =
             KeyPair::generate().map_err(|e| ControlPlaneServiceError::Internal(e.to_string()))?;
 
         let cert = params
-            .signed_by(&key_pair, &self.ca_cert, &self.ca_key_pair)
+            .signed_by(&key_pair, &self.ca_issuer)
             .map_err(|e| ControlPlaneServiceError::Internal(format!("signing failed: {}", e)))?;
 
         Ok(IssuedCertificate {
             certificate_pem: cert.pem().into_bytes(),
             private_key_pem: key_pair.serialize_pem().into_bytes(),
             ca_pem: self.ca_pem.as_bytes().to_vec(),
-            serial: cert
-                .params()
-                .serial_number
-                .as_ref()
-                .map(|s| s.to_string())
-                .unwrap_or_else(chv_common::gen_short_id),
+            serial,
         })
     }
 }

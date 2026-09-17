@@ -18,7 +18,7 @@ chv-observability = { path = "../chv-observability" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio-rustls"] }
@@ -38,7 +38,7 @@ futures = "0.3"
 semver = "1"
 toml = { workspace = true }
 s3 = { workspace = true }
-x509-parser = "0.16"
+x509-parser = { version = "0.16", features = ["verify"] }
 
 [features]
 dev = []
@@ -49,6 +49,6 @@ chv-controlplane-store = { path = "../chv-controlplane-store", features = ["test
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 chv-controlplane-types = { path = "../chv-controlplane-types" }
 async-trait = { workspace = true }
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tonic = { workspace = true }

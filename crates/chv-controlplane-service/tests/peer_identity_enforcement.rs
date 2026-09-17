@@ -33,7 +33,8 @@ use tonic::{Code, Request};
 
 /// Build a minimal self-signed leaf cert (DER) carrying `node_id` in CN+SAN.
 fn fake_leaf_der(node_id: &str) -> Vec<u8> {
-    use rcgen::{CertificateParams, DistinguishedName, DnType, Ia5String, IsCa, KeyPair, SanType};
+    use rcgen::string::Ia5String;
+    use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, SanType};
 
     let mut params = CertificateParams::default();
     params.distinguished_name = DistinguishedName::new();
