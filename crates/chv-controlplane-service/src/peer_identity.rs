@@ -278,9 +278,8 @@ mod tests {
     /// Build a self-signed leaf certificate whose CN and DNS SAN both equal
     /// `node_id`. Returns the DER bytes.
     fn fake_leaf_der(node_id: &str) -> Vec<u8> {
-        use rcgen::{
-            CertificateParams, DistinguishedName, DnType, Ia5String, IsCa, KeyPair, SanType,
-        };
+        use rcgen::string::Ia5String;
+        use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, SanType};
 
         let mut params = CertificateParams::default();
         params.distinguished_name = DistinguishedName::new();
