@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use std::collections::HashMap;
 use std::io::{Read as _, Seek, SeekFrom};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -346,14 +346,14 @@ async fn build_cloud_init_seed(
 impl ProcessCloudHypervisorAdapter {
     fn spawn_pty_broadcaster(
         vm_id: String,
-        pty_fd: std::os::fd::RawFd,
+        pty_fd: OwnedFd,
         pty_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
         pty_scrollback: Arc<tokio::sync::RwLock<Vec<u8>>>,
         broadcaster_alive: Arc<AtomicBool>,
     ) {
         tokio::spawn(async move {
             let _guard = AliveGuard(broadcaster_alive);
-            let std_file = unsafe { std::fs::File::from_raw_fd(pty_fd) };
+            let std_file = std::fs::File::from(pty_fd);
             let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
             let mut buf = [0u8; 4096];
             loop {
@@ -710,9 +710,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             let _ =
                 nix::sys::termios::tcsetattr(&pty_slave, nix::sys::termios::SetArg::TCSANOW, &term);
         }
-        let pty_fd_raw = pty_slave.into_raw_fd();
+        let pty_master: OwnedFd = pty_slave.into();
         let _ = nix::fcntl::fcntl(
-            pty_fd_raw,
+            &pty_master,
             nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
         );
 
@@ -727,9 +727,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         let pty_scrollback = Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let broadcaster_alive = Arc::new(AtomicBool::new(true));
 
-        // Dup the fd for the broadcaster BEFORE OwnedFd takes ownership
-        let broadcaster_fd = unsafe { nix::libc::dup(pty_fd_raw) };
-        if broadcaster_fd >= 0 {
+        // Duplicate the descriptor for the broadcaster while retaining the
+        // owned master descriptor for the VM process map.
+        let broadcaster_fd = nix::unistd::dup(&pty_master).ok();
+        if let Some(ref broadcaster_fd) = broadcaster_fd {
             let _ = nix::fcntl::fcntl(
                 broadcaster_fd,
                 nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
@@ -742,7 +743,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             VmProcess {
                 api_socket: config.api_socket_path.clone(),
                 child,
-                pty_master: unsafe { OwnedFd::from_raw_fd(pty_fd_raw) },
+                pty_master,
                 pty_tx: pty_tx.clone(),
                 pty_scrollback: pty_scrollback.clone(),
                 broadcaster_alive: broadcaster_alive.clone(),
@@ -753,7 +754,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         drop(map);
 
         // Spawn background broadcaster: read PTY output and fan out via broadcast channel
-        if broadcaster_fd >= 0 {
+        if let Some(broadcaster_fd) = broadcaster_fd {
             Self::spawn_pty_broadcaster(
                 config.vm_id.clone(),
                 broadcaster_fd,
@@ -811,7 +812,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
 
     async fn start_vm(&self, vm_id: &str, operation_id: Option<&str>) -> Result<(), ChvError> {
         let mut __guard = VmOpGuard::new("start");
-        let (api_socket, pty_master_fd, pty_tx, pty_scrollback, broadcaster_alive) = {
+        let (api_socket, pty_master, pty_tx, pty_scrollback, broadcaster_alive) = {
             let vms = self.vms.read().await;
             let proc = vms.get(vm_id).ok_or_else(|| ChvError::NotFound {
                 resource: "vm".to_string(),
@@ -819,7 +820,9 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             })?;
             (
                 proc.api_socket.clone(),
-                proc.pty_master.as_raw_fd(),
+                nix::unistd::dup(&proc.pty_master).map_err(|e| ChvError::Internal {
+                    reason: format!("failed to duplicate pty master for vm {}: {}", vm_id, e),
+                })?,
                 proc.pty_tx.clone(),
                 proc.pty_scrollback.clone(),
                 proc.broadcaster_alive.clone(),
@@ -851,10 +854,10 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
         // output doesn't stall when start_vm is called on an already-running VM.
         if !broadcaster_alive.load(Ordering::SeqCst) {
             info!(vm_id = %vm_id, "respawning pty broadcaster");
-            let broadcaster_fd = unsafe { nix::libc::dup(pty_master_fd) };
-            if broadcaster_fd >= 0 {
+            let broadcaster_fd = nix::unistd::dup(&pty_master).ok();
+            if let Some(broadcaster_fd) = broadcaster_fd {
                 let _ = nix::fcntl::fcntl(
-                    broadcaster_fd,
+                    &broadcaster_fd,
                     nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
                 );
                 broadcaster_alive.store(true, Ordering::SeqCst);
@@ -1592,8 +1595,7 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
     async fn pty_master(&self, vm_id: &str) -> Option<OwnedFd> {
         let map = self.vms.read().await;
         let proc = map.get(vm_id)?;
-        let fd = nix::unistd::dup(proc.pty_master.as_raw_fd()).ok()?;
-        Some(unsafe { OwnedFd::from_raw_fd(fd) })
+        nix::unistd::dup(&proc.pty_master).ok()
     }
 
     async fn pty_output_rx(
