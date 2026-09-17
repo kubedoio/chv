@@ -226,6 +226,14 @@ impl ConsoleServer {
         const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
         const MAX_MSG_SIZE: usize = 64 * 1024;
 
+        let write_pty_fd = match nix::unistd::dup(&pty_fd) {
+            Ok(fd) => fd,
+            Err(error) => {
+                tracing::warn!(%error, "failed to dup pty fd for write");
+                return;
+            }
+        };
+
         // PTY broadcast → WebSocket
         let mut read_task = tokio::spawn(async move {
             loop {
@@ -250,21 +258,13 @@ impl ConsoleServer {
 
         // WebSocket → PTY
         let mut write_task = tokio::spawn(async move {
-            // Dup fd for tokio async write
-            let dup_fd = match nix::unistd::dup(&pty_fd) {
-                Ok(fd) => fd,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to dup pty fd for write");
-                    return;
-                }
-            };
             // Set FD_CLOEXEC on the dup'd fd so it is not leaked to child processes
-            if let Ok(flags) = nix::fcntl::fcntl(&dup_fd, nix::fcntl::FcntlArg::F_GETFD) {
+            if let Ok(flags) = nix::fcntl::fcntl(&write_pty_fd, nix::fcntl::FcntlArg::F_GETFD) {
                 let new_flags =
                     nix::fcntl::FdFlag::from_bits_truncate(flags) | nix::fcntl::FdFlag::FD_CLOEXEC;
-                let _ = nix::fcntl::fcntl(&dup_fd, nix::fcntl::FcntlArg::F_SETFD(new_flags));
+                let _ = nix::fcntl::fcntl(&write_pty_fd, nix::fcntl::FcntlArg::F_SETFD(new_flags));
             }
-            let std_file = std::fs::File::from(dup_fd);
+            let std_file = std::fs::File::from(write_pty_fd);
             let tokio_file = tokio::fs::File::from_std(std_file);
             let mut pty_writer = tokio_file;
 
