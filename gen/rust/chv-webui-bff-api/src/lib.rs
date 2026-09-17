@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 pub mod chv_webui_bff_v1 {
     tonic::include_proto!("chv.webui.bff.v1");
 }
