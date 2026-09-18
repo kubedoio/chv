@@ -82,3 +82,42 @@ The workspace `build.rs` files use `tonic-build` to regenerate code in `/gen/rus
 | [`docs/release/PIPELINE.md`](docs/release/PIPELINE.md) | **Release engineering: read this first for any packaging/CI/CD/versioning work** |
 | [`VERSION`](VERSION) | Single source of truth for release version |
 | [`Makefile`](Makefile) | Packaging, testing, signing, and integration targets |
+
+## Agent Context and Token Efficiency
+
+Use the repository broadly during planning only when the task genuinely requires it. Once the plan identifies the affected component, crate, files, contracts, and tests, execution must start from that bounded scope instead of rediscovering the whole repository.
+
+### Search and reading discipline
+
+- Prefer `rg`, `git grep`, targeted directory listings, and bounded file reads over recursive `find`, `ls -R`, or broad file dumps.
+- Respect `.gitignore` and `.rgignore`. Do not search `target/`, `node_modules/`, `dist/`, Playwright output, worktrees, local VM images/data, caches, or agent-tool state unless the task explicitly depends on them.
+- Do not repeatedly read files that are unchanged and already understood. Re-open only the relevant section or inspect `git diff` after edits.
+- Do not dump large generated files or command logs into model context. For noisy commands, capture output and inspect the failure lines or a bounded tail.
+- Generated Rust under `gen/rust/` remains searchable because it is part of the proto/build contract, but do not hand-edit it and do not inspect it unless the proto/API task requires it.
+
+### Planner/executor discipline
+
+Before implementation, record the smallest useful execution scope:
+
+- affected service/component;
+- affected Cargo package(s) or UI area;
+- relevant proto/spec/ADR;
+- files expected to change;
+- tests/checks that prove the change.
+
+An implementation agent should begin from that scope and expand only when code or test evidence shows the plan was incomplete. Do not repeat broad architecture discovery already completed by a planning agent.
+
+### Validation ladder
+
+Use the cheapest relevant validation first, then widen:
+
+```bash
+# Examples; replace <package> with the affected workspace package.
+cargo check -p <package>
+cargo test -p <package>
+cargo clippy -p <package> --all-targets -- -D warnings
+```
+
+For UI-only work, stay under `ui/` until a cross-boundary check is needed. For proto changes, validate the affected generated API/consumer before widening to the workspace.
+
+Run the repository's full required checks (`cargo test --workspace`, workspace clippy/build, frontend build, release gates, or task-specific Make targets) once the targeted checks pass and before declaring the task complete. This section changes validation order, not the final quality gate.
