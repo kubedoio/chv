@@ -112,6 +112,12 @@
 		background: var(--color-danger-light);
 	}
 
+	.btn-icon-destructive:focus-visible {
+		outline: 2px solid var(--color-danger);
+		outline-offset: 2px;
+		color: var(--color-danger);
+	}
+
 	.cell-text {
 		font-variant-numeric: tabular-nums;
 	}
