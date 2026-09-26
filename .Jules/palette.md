@@ -17,3 +17,7 @@
 ## 2024-06-25 - Topology Canvas Controls Accessibility
 **Learning:** Found that the live topology canvas headers rely on icon/symbol buttons (+, -, Fit) that lacked hover tooltips and clear ARIA labeling. Sighted users wouldn't know the exact function without trial and error, and screen readers lacked context for actions like "Fit" vs "Focus".
 **Action:** Always ensure floating canvas or map control panels use both `title` (for sighted tooltips) and explicit `aria-label`s to describe their zoom/pan functions clearly, as symbols alone are ambiguous.
+
+## 2024-05-18 - Keyboard Focus on Custom Action Buttons
+**Learning:** Svelte component-scoped CSS classes for custom interactive buttons (e.g., `.btn-icon-destructive`) often define hover states but omit `:focus-visible` states. This breaks keyboard accessibility because users tabbing through tables or lists lose track of their focus position.
+**Action:** Always include a `:focus-visible` state when creating or modifying custom button classes. Standardize on `outline: 2px solid var(--color-danger)` (or the appropriate theme color) with a 2px outline-offset to maintain consistent focus ring visibility.
