@@ -1230,7 +1230,12 @@ impl NetworkExecutor for LinuxExecutor {
         )
         .await?;
         // Record so the exposure can be re-asserted after a firewall apply
-        // rebuilds the forward base chain.
+        // rebuilds the forward base chain. Replacing an existing exposure_id
+        // replaces its record (no unbounded growth).
+        self.exposures
+            .entry(network_id.to_string())
+            .or_default()
+            .retain(|r| r.safe_exposure_id != safe_exposure_id);
         self.exposures
             .entry(network_id.to_string())
             .or_default()
