@@ -52,16 +52,33 @@ pub enum RuntimeStageFailure {
     ActorShutdown(AuthorityActorError),
     #[error("actor join: {0}")]
     ActorJoin(AuthorityActorError),
+    #[error("executor scheduler task failed: {0}")]
+    PollerJoin(tokio::task::JoinError),
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeOwnerError>;
 
 /// Sole owner of the bounded native-only Core runtime composition.
+///
+/// The journal executor lives inside a background poller task that drives
+/// `JournalExecutor::scan_ready` — the only ingress into the scheduler — at a
+/// bounded interval. Without it, accepted operations are durable but never
+/// claimed, executed, or finished. The poller owns the executor's lifecycle and
+/// calls `executor.shutdown()` before exiting, preserving the
+/// executor-before-authority shutdown ordering contract.
 pub struct CoreRuntimeOwner {
     listener: Option<CoreApiListener>,
     authority: Option<AuthorityHandle>,
     actor_join: Option<AuthorityActorJoin>,
-    executor: Option<cellhv_core_executor::JournalExecutor>,
+    poller: Option<
+        tokio::task::JoinHandle<
+            std::result::Result<
+                cellhv_core_executor::ExecutionReport,
+                cellhv_core_executor::ExecutorError,
+            >,
+        >,
+    >,
+    stop_tx: Option<tokio::sync::watch::Sender<()>>,
     kind: ActivationKind,
     provenance: ActivationProvenance,
     runtime_guard: Option<RuntimeAuthorityGuard>,
@@ -74,6 +91,7 @@ impl CoreRuntimeOwner {
         socket: &Path,
         queue_capacity: usize,
         drain_timeout: Duration,
+        scan_interval: Duration,
     ) -> Result<Self> {
         let (service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
         validate_native_only(kind, &provenance)?;
@@ -125,11 +143,31 @@ impl CoreRuntimeOwner {
                 });
             }
         };
+        // Drive the journal: `scan_ready` is the only ingress into the executor
+        // scheduler, so without this poller accepted operations remain durable
+        // but are never claimed, executed, or finished. The poller owns the
+        // executor and runs `executor.shutdown()` (a graceful drain) when told
+        // to stop, preserving the executor-before-authority shutdown ordering.
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(());
+        let poller = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop_rx.changed() => break,
+                    _ = tokio::time::sleep(scan_interval) => {
+                        if let Err(error) = executor.scan_ready().await {
+                            tracing::warn!(%error, "core journal scan failed; will retry");
+                        }
+                    }
+                }
+            }
+            executor.shutdown().await
+        });
         Ok(Self {
             listener: Some(listener),
             authority: Some(authority),
             actor_join: Some(actor_join),
-            executor: Some(executor),
+            poller: Some(poller),
+            stop_tx: Some(stop_tx),
             kind,
             provenance,
             runtime_guard: Some(runtime_guard),
@@ -172,11 +210,23 @@ impl CoreRuntimeOwner {
             failures.push(RuntimeStageFailure::Listener(error));
         }
 
-        let executor = self
-            .executor
+        // Stop the scan loop and join the poller, which drains the executor
+        // (graceful shutdown) before we shut the actor down. This preserves the
+        // executor-before-authority ordering contract.
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        let poller = self
+            .poller
             .take()
-            .expect("executor is present before shutdown");
-        drop(executor); // shutdown the executor before the actor
+            .expect("poller is present before shutdown");
+        match poller.await {
+            Ok(Ok(report)) => {
+                tracing::debug!(completed = report.completed, "core executor drained")
+            }
+            Ok(Err(error)) => failures.push(RuntimeStageFailure::Executor(error)),
+            Err(join_error) => failures.push(RuntimeStageFailure::PollerJoin(join_error)),
+        }
 
         let authority = self
             .authority
@@ -207,7 +257,13 @@ impl CoreRuntimeOwner {
 impl Drop for CoreRuntimeOwner {
     fn drop(&mut self) {
         drop(self.listener.take());
-        drop(self.executor.take());
+        if let Some(poller) = self.poller.take() {
+            // Emergency path: abort the poller. Dropping the owned executor
+            // aborts its scheduler task, and the runtime lease is retained
+            // until process exit via abandonment below (no split authority).
+            poller.abort();
+        }
+        drop(self.stop_tx.take());
         drop(self.authority.take());
         drop(self.actor_join.take());
         if let Some(runtime_guard) = self.runtime_guard.take() {
@@ -247,7 +303,7 @@ mod tests {
     use super::*;
     use cellhv_core_operations::OperationService;
     use cellhv_core_startup::{StartupPaths, StartupTransaction};
-    use cellhv_core_types::{HostId, HostIdentity, ResourceVersion};
+    use cellhv_core_types::{HostId, HostIdentity, OperationStatus, ResourceVersion};
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -305,6 +361,7 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
+            Duration::from_millis(40),
         )
         .await
         .unwrap();
@@ -325,6 +382,7 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
+            Duration::from_millis(40),
         )
         .await
         .unwrap();
@@ -343,7 +401,8 @@ mod tests {
                 fresh(&paths, "actor-failure"),
                 &socket,
                 0,
-                Duration::from_secs(1)
+                Duration::from_secs(1),
+                Duration::from_millis(40)
             )
             .await,
             Err(RuntimeOwnerError::ActorStartup(
@@ -366,7 +425,8 @@ mod tests {
                 fresh(&paths, "listener-failure"),
                 &socket,
                 16,
-                Duration::from_secs(1)
+                Duration::from_secs(1),
+                Duration::from_millis(40)
             )
             .await,
             Err(RuntimeOwnerError::ListenerStartup { .. })
@@ -389,6 +449,7 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
+            Duration::from_millis(40),
         )
         .await
         .unwrap();
@@ -431,7 +492,8 @@ mod tests {
                 activated,
                 &socket,
                 16,
-                Duration::from_secs(1)
+                Duration::from_secs(1),
+                Duration::from_millis(40)
             )
             .await,
             Err(RuntimeOwnerError::Ineligible(_))
@@ -469,7 +531,8 @@ mod tests {
                 activated,
                 &socket,
                 16,
-                Duration::from_secs(1)
+                Duration::from_secs(1),
+                Duration::from_millis(40)
             )
             .await,
             Err(RuntimeOwnerError::Ineligible(
@@ -490,6 +553,7 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
+            Duration::from_millis(40),
         )
         .await
         .unwrap();
@@ -506,5 +570,112 @@ mod tests {
         ];
         let error = RuntimeOwnerError::Shutdown(failures);
         assert!(matches!(error, RuntimeOwnerError::Shutdown(values) if values.len() == 3));
+    }
+
+    struct RecordingRuntime {
+        executed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl cellhv_core_executor::CoreVmRuntime for RecordingRuntime {
+        async fn execute(
+            &self,
+            operation: cellhv_core_operations::OperationJournalEntry,
+        ) -> std::result::Result<Option<serde_json::Value>, cellhv_core_executor::RuntimeFailure>
+        {
+            self.executed.lock().unwrap().push(format!(
+                "{}:{}",
+                operation.operation.vm_id.as_str(),
+                operation.operation.id.as_str()
+            ));
+            Ok(None)
+        }
+    }
+
+    fn create_submission(vm: &str, op: &str) -> cellhv_core_operations::SubmitMutation {
+        use cellhv_core_operations::{MutationCommand, SubmitMutation};
+        use cellhv_core_types::{
+            BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, OperationId,
+            RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+        };
+        SubmitMutation {
+            operation_id: OperationId::new(op).unwrap(),
+            idempotency_scope: "test".into(),
+            idempotency_key: IdempotencyKey::new(op).unwrap(),
+            expected_vm_version: ResourceVersion::new(1).unwrap(),
+            command: MutationCommand::CreateVm {
+                definition: VmDefinition {
+                    id: VmId::new(vm).unwrap(),
+                    name: vm.into(),
+                    boot: BootSpec::new("/kernel").unwrap(),
+                    compute: ComputeSpec::new(1, 128).unwrap(),
+                    storage: vec![],
+                    networks: vec![],
+                    requested_power_state: RequestedPowerState::Stopped,
+                    observed_power_state: ObservedPowerState::Unknown,
+                    resource_version: ResourceVersion::new(1).unwrap(),
+                },
+            },
+        }
+    }
+
+    /// The production composition must claim, execute, and finish an accepted
+    /// operation WITHOUT any external caller driving the executor: the
+    /// composition-internal journal poller is the only scheduler ingress. This
+    /// is the regression test for the "effect-dead journal" gap (accepted-but-
+    /// never-executed operations under core-native / core-managed).
+    #[tokio::test]
+    async fn poller_executes_accepted_operations_in_production_composition() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = paths(&directory);
+        let socket = directory.path().join("core.sock");
+        let executed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let owner = CoreRuntimeOwner::start(
+            std::sync::Arc::new(RecordingRuntime {
+                executed: executed.clone(),
+            }),
+            fresh(&paths, "poller-host"),
+            &socket,
+            16,
+            Duration::from_secs(1),
+            Duration::from_millis(40),
+        )
+        .await
+        .unwrap();
+
+        owner
+            .authority()
+            .submit(create_submission("vm-a", "op-a"))
+            .await
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let entries = owner.authority().operations().await.unwrap();
+            if entries.iter().any(|entry| {
+                entry.operation.id.as_str() == "op-a"
+                    && entry.operation.status == OperationStatus::Succeeded
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "accepted operation never reached Succeeded in the production composition"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        {
+            let recorded = executed.lock().unwrap();
+            assert_eq!(
+                recorded
+                    .iter()
+                    .filter(|e| e.starts_with("vm-a:op-a"))
+                    .count(),
+                1,
+                "the runtime must execute each accepted operation exactly once"
+            );
+        }
+        owner.shutdown().await.unwrap();
     }
 }

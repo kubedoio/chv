@@ -26,6 +26,8 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
 const FAILED_THRESHOLD: u32 = 6; // 6 ticks * 5s = 30s
+/// How often the composition-internal journal poller drives `scan_ready`.
+const CORE_SCAN_INTERVAL: Duration = Duration::from_millis(250);
 const CERT_ROTATION_INTERVAL_SECS: i64 = 12 * 60 * 60;
 
 /// Write `contents` to `path` with mode 0600, normalizing the permissions of
@@ -66,6 +68,7 @@ async fn start_core_managed(
         &config.core_api_socket_path,
         128,
         Duration::from_secs(2),
+        CORE_SCAN_INTERVAL,
     )
     .await?)
 }
@@ -95,6 +98,7 @@ async fn start_core_native(
         &config.core_api_socket_path,
         128,
         Duration::from_secs(2),
+        CORE_SCAN_INTERVAL,
     )
     .await?)
 }

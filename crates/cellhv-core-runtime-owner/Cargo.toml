@@ -11,6 +11,8 @@ cellhv-core-executor = { version = "0.1.0", path = "../cellhv-core-executor" }
 cellhv-core-operations = { path = "../cellhv-core-operations" }
 cellhv-core-startup = { path = "../cellhv-core-startup" }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 async-trait.workspace = true
