@@ -2,8 +2,10 @@ use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{OverlayType, TopologySpec};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 // Metric names for network daemon operations.
@@ -166,6 +168,13 @@ pub trait NetworkExecutor: Send + Sync + 'static {
 pub struct LinuxExecutor {
     _runtime_dir: PathBuf,
     vtep_ip: Option<String>,
+    /// Serializes all nft table mutations for this executor (firewall/NAT
+    /// apply, service exposure, topology create/delete). The filter and NAT
+    /// paths flush+rebuild chains on the per-network table, so concurrent
+    /// writers could interleave and leave the table without its terminal
+    /// default-deny rules (fail-open for CHV guests). A single writer per
+    /// executor closes that race (#227).
+    nft_lock: Arc<Mutex<()>>,
 }
 
 impl LinuxExecutor {
@@ -173,6 +182,7 @@ impl LinuxExecutor {
         Self {
             _runtime_dir: runtime_dir,
             vtep_ip: None,
+            nft_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -306,6 +316,27 @@ impl LinuxExecutor {
         std::path::Path::new("/var/run/netns").join(name).exists()
     }
 
+    /// Extract the device name from one `ip link show master <bridge>` output line.
+    ///
+    /// Real-world line shapes (verified on iproute2 6.x):
+    ///   355: vA@vB: <BROADCAST,MULTICAST,M-DOWN> ... master brsmp ...
+    ///   388: tap-12ab: <BROADCAST,...> ... master brsmp ...
+    ///
+    /// Field 0 is the ifindex (`355:`), field 1 is `NAME@PEER:` — the actual
+    /// interface name with an optional `@peer` suffix and a trailing colon.
+    /// Parsing field 0 (the ifindex) instead would silently exclude every real
+    /// member from the CHV-owned guard set (fail-open under br_netfilter).
+    fn parse_ip_link_master_line(line: &str) -> Option<String> {
+        let name = line.split_whitespace().nth(1)?;
+        let name = name.split(':').next()?; // drop trailing ':'
+        let name = name.split('@').next()?; // drop veth @peer suffix
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
     /// Resolve the authoritative CHV-owned interface set for a topology bridge:
     /// the bridge itself plus any enslaved member devices (VM TAPs/veths).
     ///
@@ -335,14 +366,10 @@ impl LinuxExecutor {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let mut owned: Vec<String> = vec![bridge_name.to_string()];
         for line in stdout.lines() {
-            let dev = line
-                .split_whitespace()
-                .next()
-                .map(|s| s.trim_end_matches(':'))
-                .filter(|s| !s.is_empty() && *s != bridge_name)
-                .map(str::to_string);
-            if let Some(dev) = dev {
-                owned.push(dev);
+            if let Some(dev) = Self::parse_ip_link_master_line(line) {
+                if !dev.is_empty() && dev != bridge_name {
+                    owned.push(dev);
+                }
             }
         }
         owned.sort();
@@ -690,6 +717,7 @@ impl LinuxExecutor {
 #[async_trait]
 impl NetworkExecutor for LinuxExecutor {
     async fn ensure_topology(&self, spec: &TopologySpec) -> Result<TopologyApplyResult, ChvError> {
+        let _guard = self.nft_lock.lock().await;
         info!(
             network_id = %spec.network_id,
             bridge = %spec.bridge_name,
@@ -807,6 +835,7 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         state: &crate::state::TopologyState,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         info!(
             network_id = %network_id,
             bridge = %state.bridge_name,
@@ -956,6 +985,7 @@ impl NetworkExecutor for LinuxExecutor {
         policy_json: &[u8],
         bridge_name: &str,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
         let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
         crate::firewall::apply_firewall_rules(&table, &owned, policy_json)
@@ -973,6 +1003,7 @@ impl NetworkExecutor for LinuxExecutor {
         policy_json: &[u8],
         bridge_name: &str,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
         let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
         crate::firewall::apply_nat_rules(&table, &owned, policy_json)
@@ -1018,6 +1049,10 @@ impl NetworkExecutor for LinuxExecutor {
         target_port: u32,
         _mode: &str,
     ) -> Result<(), ChvError> {
+        // Serialize with firewall/NAT applies and topology teardown so a
+        // concurrent policy apply cannot flush this exposure's accept rule
+        // mid-install.
+        let _guard = self.nft_lock.lock().await;
         // Validate protocol to prevent command injection
         const ALLOWED_PROTOCOLS: &[&str] = &["tcp", "udp", "icmp", "sctp"];
         if !ALLOWED_PROTOCOLS.contains(&protocol) {
@@ -1109,6 +1144,7 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         exposure_id: &str,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
         Self::delete_rules_by_comment(&table, "prerouting", &safe_exposure_id).await?;
@@ -1681,5 +1717,103 @@ mod tests {
             0,
             "no VXLAN delete expected when vni is None"
         );
+    }
+
+    #[test]
+    fn parser_extracts_enslaved_member_names_not_ifindexes() {
+        // Real `ip link show master <br>` output shapes (iproute2 6.x).
+        // Field 0 is the ifindex (`355:`); the member name is field 1,
+        // with an optional veth `@peer` suffix and a trailing colon.
+        let veth_line =
+            "355: vA@vB: <BROADCAST,MULTICAST,M-DOWN> mtu 1500 qdisc noop master brnet state DOWN mode DEFAULT group default qlen 1000";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(veth_line),
+            Some("vA".to_string())
+        );
+
+        let tap_line =
+            "388: tap-12ab: <BROADCAST,MULTICAST> mtu 1500 qdisc noop master brnet state UP mode DEFAULT group default qlen 1000";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(tap_line),
+            Some("tap-12ab".to_string())
+        );
+
+        // Blank / non-member lines must not yield a member name.
+        assert_eq!(LinuxExecutor::parse_ip_link_master_line(""), None);
+        assert_eq!(LinuxExecutor::parse_ip_link_master_line("    "), None);
+    }
+
+    /// End-to-end proof that `owned_ifaces_for_bridge` returns the bridge plus
+    /// its real enslaved members (guards the B1 parser regression). Requires
+    /// root + `ip`; skipped on CI, run against a real host via:
+    ///   sudo the built lib test binary -- --ignored exec_owned_ifaces_real
+    #[tokio::test]
+    #[ignore = "requires root + iproute2"]
+    async fn owned_ifaces_resolves_bridge_and_enslaved_members() {
+        use std::process::Command as StdCommand;
+
+        fn sh(args: &[&str]) {
+            let status = StdCommand::new("ip")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("spawn ip");
+            assert!(status.success(), "ip {:?} failed with {:?}", args, status);
+        }
+
+        let br = format!("brtest{:06x}", std::process::id());
+        let veth_name = format!("vt{:06x}", std::process::id());
+        let peer_name = format!("vtx{:06x}", std::process::id());
+
+        // Best-effort cleanup on panic/success.
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = StdCommand::new("ip")
+                    .args(["link", "del", "dev", &self.0])
+                    .status();
+            }
+        }
+        let cleanup = Cleanup(br.clone());
+
+        sh(&["link", "add", &br, "type", "bridge"]);
+        sh(&[
+            "link", "add", &veth_name, "type", "veth", "peer", "name", &peer_name,
+        ]);
+        sh(&["link", "set", &veth_name, "master", &br]);
+
+        let owned = LinuxExecutor::owned_ifaces_for_bridge(&br).await.unwrap();
+        assert!(
+            owned.contains(&br),
+            "owned set must contain the bridge, got {:?}",
+            owned
+        );
+        assert!(
+            owned.contains(&veth_name),
+            "owned set must contain the enslaved veth {}, got {:?}",
+            veth_name,
+            owned
+        );
+        assert!(
+            !owned.contains(&peer_name),
+            "the veth peer (not enslaved) must NOT be in the owned set, got {:?}",
+            owned
+        );
+        drop(cleanup);
+    }
+
+    #[tokio::test]
+    async fn owned_ifaces_fails_closed_when_bridge_missing() {
+        let err = LinuxExecutor::owned_ifaces_for_bridge("definitely-not-a-bridge-xyz")
+            .await
+            .unwrap_err();
+        match err {
+            ChvError::NotFound { resource, .. } => {
+                assert_eq!(resource, "bridge");
+            }
+            other => panic!("expected NotFound, got {:?}", other),
+        }
     }
 }

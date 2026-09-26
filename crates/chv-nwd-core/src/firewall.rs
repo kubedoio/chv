@@ -164,11 +164,17 @@ pub async fn apply_firewall_rules(
     // CNI, SSH and forwarded traffic is never evaluated by a CHV drop policy.
     // (Previously these chains used `policy drop` with no interface guards,
     // which dropped all host traffic — the bug tracked by #227.)
+    //
+    // The chains are deleted and re-created on every apply (not just added
+    // idempotently) so a stale `policy drop` base chain left behind by a
+    // previous daemon version is replaced with `policy accept` on upgrade;
+    // `add chain` alone would silently keep the old drop policy (#227 S4).
     for (chain, hook) in [
         ("input", "input"),
         ("forward", "forward"),
         ("output", "output"),
     ] {
+        delete_chain_quiet(table, chain).await;
         run_nft_idempotent(&[
             "add",
             "chain",
@@ -446,6 +452,33 @@ async fn run_nft_idempotent(args: &[&str]) -> Result<(), ChvError> {
             }
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Delete a chain if it exists, tolerating a missing chain.
+///
+/// Used to replace stale base-hook chain policies (e.g. the pre-#227
+/// `policy drop`) with `policy accept` on every apply, so an in-place upgrade
+/// of a running daemon cannot leave a host-wide drop base chain active.
+async fn delete_chain_quiet(table: &str, chain: &str) {
+    match run_nft(&["delete", "chain", "inet", table, chain]).await {
+        Ok(()) => {}
+        Err(ChvError::NetworkUnavailable { reason, .. }) => {
+            if !reason.contains("No such file or directory") && !reason.contains("does not exist") {
+                tracing::warn!(
+                    table,
+                    chain,
+                    error = %reason,
+                    "failed to delete nft chain before re-adding with accept policy"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
+            table,
+            chain,
+            error = %e,
+            "failed to delete nft chain before re-adding"
+        ),
     }
 }
 

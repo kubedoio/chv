@@ -3,12 +3,24 @@
 //! Proves on a real Linux host that CHV firewall policy is confined to
 //! CHV-owned guest traffic:
 //!
-//! - unrelated host (container/CNI-style namespace-to-namespace) traffic keeps
-//!   working after a CHV policy is applied (this fails against the old
-//!   host-wide `policy drop` implementation);
-//! - CHV-owned guest traffic is default-dropped with an empty policy;
+//! - unrelated host traffic (container/CNI-style, host-stack INPUT and OUTPUT
+//!   paths: a namespace talking to a host address and the host replying into a
+//!   namespace) keeps working after a CHV policy is applied. This fails against
+//!   the old host-wide `policy drop` implementation, because the old code
+//!   created `input`/`forward`/`output` chains with `policy drop` and no
+//!   guards, dropping ALL host traffic on the host netns — including this
+//!   unrelated INPUT/OUTPUT traffic;
+//! - CHV-owned guest traffic (bridge + enslaved member) is default-dropped with
+//!   an empty policy;
 //! - an allow rule restores guest connectivity;
 //! - re-applying policy is idempotent and leaves unrelated traffic untouched.
+//!
+//! We deliberately exercise host INPUT/OUTPUT (not a forward-through-host path)
+//! for isolated "unrelated" traffic: hosts commonly run their own
+//! `hook forward policy drop` firewall (Docker/CNI/kube-proxy), which would
+//! drop any forwarded-unrelated path regardless of CHV and make the test
+//! non-isolating. Host-stack INPUT/OUTPUT hooks are precisely the paths the old
+//! CHV bug clobbered (SSH, kubelet, health checks, container<->host).
 //!
 //! Requires root and `nft`/`ip`; skipped (trivially passes) otherwise. Run from
 //! the CI-less local host with:
@@ -16,13 +28,23 @@
 //! ```text
 //! cargo test -p chv-nwd-core --no-run
 //! sudo -E $(find target/debug/deps -maxdepth 1 -name 'host_safety-*' -type f -executable |
-//!     head -1) --ignored --exact host_safety::confines_policy_to_chv_owned_traffic
+//!     head -1) --ignored --exact confines_policy_to_chv_owned_traffic
 //! ```
+//!
+//! Set `HOST_SAFETY_DUMP_PATH` to a file to persist the CHV nftables ruleset
+//! (evidence capture); the file is appended per dump section.
 
 use std::process::Command;
 
-const UNREL_A: &str = "10.200.0.1";
-const UNREL_B: &str = "10.200.0.2";
+// Unrelated host-stack paths (host is 10.200.x.1 on each veth host-end).
+const UNREL_A_SUBNET: &str = "10.200.1.0/24";
+const UNREL_A_HOST_IP: &str = "10.200.1.1"; // host-side of veth pair A (INPUT path)
+const UNREL_A_NS_IP: &str = "10.200.1.2"; // in ns us-a
+const UNREL_B_SUBNET: &str = "10.200.2.0/24";
+const UNREL_B_HOST_IP: &str = "10.200.2.1"; // host-side of veth pair B (OUTPUT path)
+const UNREL_B_NS_IP: &str = "10.200.2.2"; // in ns us-b
+
+// CHV-owned guest boundary.
 const GUEST_GW: &str = "10.201.0.1";
 const GUEST_IP: &str = "10.201.0.2";
 
@@ -56,21 +78,15 @@ fn is_root() -> bool {
 fn nft_available() -> bool {
     Command::new("nft")
         .arg("--version")
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Restores the host net.ipv4.ip_forward sysctl on drop.
-struct IpForwardGuard(i32);
-
-impl Drop for IpForwardGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", self.0.to_string());
-    }
-}
-
 /// Cleans up every resource the test created, best-effort.
+///
+/// Created BEFORE any setup command so a panic in the middle of setup still
+/// unwinds through this guard and removes partial state (#227 S6).
 struct Cleanup {
     namespaces: Vec<String>,
     links: Vec<String>,
@@ -82,11 +98,12 @@ impl Cleanup {
         Cleanup {
             namespaces: vec![format!("us-a{u}"), format!("us-b{u}"), format!("gs{u}")],
             links: vec![
-                format!("ua{u}"),
-                format!("ub{u}"),
+                // Host-side ends of the unrelated veth pairs.
+                format!("ha{u}"),
+                format!("hb{u}"),
+                // CHV-owned bridge and its host-side member end (gg lives in gs).
                 format!("brhs{u}"),
                 format!("gh{u}"),
-                format!("gg{u}"),
             ],
             nft_table: format!("chvhs-{u}"),
         }
@@ -95,48 +112,147 @@ impl Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let _nft = Command::new("nft")
+        let _ = Command::new("nft")
             .args(["delete", "table", "inet", &self.nft_table])
-            .status();
+            .output();
         for ns_name in &self.namespaces {
-            let _ = Command::new("ip").args(["netns", "del", ns_name]).status();
+            let _ = Command::new("ip").args(["netns", "del", ns_name]).output();
         }
         for link in &self.links {
-            let _ = Command::new("ip").args(["link", "del", link]).status();
+            let _ = Command::new("ip").args(["link", "del", link]).output();
         }
     }
 }
 
-/// Ping from a namespace; returns whether at least one echo reply arrived.
+/// Ping from a namespace with retries (ARP/ND resolution on first packets can
+/// lose the first probe on freshly configured veths/routes).
 fn ns_ping(ns_name: &str, dst: &str) -> bool {
-    Command::new("ip")
-        .args([
-            "netns", "exec", ns_name, "ping", "-c", "1", "-W", "1", "-q", dst,
-        ])
+    for _ in 0..3 {
+        let ok = Command::new("ip")
+            .args([
+                "netns", "exec", ns_name, "ping", "-c", "1", "-W", "1", "-q", dst,
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Ping from the host netns with retries (OUTPUT path into a namespace).
+fn host_ping(dst: &str) -> bool {
+    for _ in 0..3 {
+        let ok = Command::new("ping")
+            .args(["-c", "1", "-W", "1", "-q", dst])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Optionally persist the CHV nftables table for evidence capture, or log it.
+/// Controlled by HOST_SAFETY_DUMP_PATH (append to file) / HOST_SAFETY_DUMP
+/// (log via tracing). Not set in CI.
+fn dump_table(table: &str) {
+    let out = Command::new("nft")
+        .args(["list", "table", "inet", table])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_else(|_| "<nft list failed>".to_string());
+    let section = format!("--- nft table {table} ---\n{out}\n");
+    match std::env::var("HOST_SAFETY_DUMP_PATH") {
+        Ok(path) if !path.is_empty() => {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                let _ = f.write_all(section.as_bytes());
+            }
+        }
+        _ => tracing::info!(dump = %section, "setup host-safety nft dump"),
+    }
 }
 
 #[tokio::test]
 #[ignore = "requires root + real nftables on a Linux host; run locally via the fixture doc example"]
 async fn confines_policy_to_chv_owned_traffic() {
     if !is_root() || !nft_available() {
-        eprintln!("SKIP: host_safety needs root + nft; run via sudo outside CI");
+        tracing::info!("SKIP: host_safety needs root + nft; run via sudo outside CI");
         return;
     }
 
-    let u = format!("{:05x}", std::process::id());
+    // Collision-averse run suffix: 16-bit pid + 16-bit sub-second clock kept
+    // short so every generated interface name stays within Linux IFNAMSIZ
+    // (15 chars). The cleanup guard is created here, before any setup command,
+    // so a mid-setup panic still removes partial state.
+    let u = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        format!("{:04x}{:04x}", std::process::id() & 0xffff, nanos & 0xffff)
+    };
+    const IFNAMSIZ: usize = 15;
+    let longest_name = format!("brhs{u}");
+    assert!(
+        longest_name.len() <= IFNAMSIZ,
+        "generated interface name {longest_name} would exceed Linux IFNAMSIZ"
+    );
+    let cleanup = Cleanup::new(&u);
 
-    // Build the "unrelated" host traffic path: two isolated network namespaces
-    // bridged through the host forward path, none of whose interfaces CHV owns.
+    // --- UNRELATED host-stack traffic ---
+    // us-a talks to the host (INPUT hook, iifname=ha); the host replies into
+    // us-b (OUTPUT hook, oifname=hb). None of ha/hb/ua/ub are CHV-owned.
     sh(&["ip", "netns", "add", &format!("us-a{u}")]);
     sh(&["ip", "netns", "add", &format!("us-b{u}")]);
+
     sh(&[
         "ip",
         "link",
         "add",
+        &format!("ha{u}"),
+        "type",
+        "veth",
+        "peer",
+        "name",
         &format!("ua{u}"),
+    ]);
+    sh(&[
+        "ip",
+        "link",
+        "set",
+        &format!("ua{u}"),
+        "netns",
+        &format!("us-a{u}"),
+    ]);
+    sh(&[
+        "ip",
+        "addr",
+        "add",
+        &format!(
+            "{UNREL_A_HOST_IP}/{}",
+            UNREL_A_SUBNET.split('/').nth(1).unwrap()
+        ),
+        "dev",
+        &format!("ha{u}"),
+    ]);
+    sh(&["ip", "link", "set", &format!("ha{u}"), "up"]);
+
+    sh(&[
+        "ip",
+        "link",
+        "add",
+        &format!("hb{u}"),
         "type",
         "veth",
         "peer",
@@ -147,51 +263,62 @@ async fn confines_policy_to_chv_owned_traffic() {
         "ip",
         "link",
         "set",
-        &format!("ua{u}"),
-        "netns",
-        &format!("us-a{u}"),
-    ]);
-    sh(&[
-        "ip",
-        "link",
-        "set",
         &format!("ub{u}"),
         "netns",
         &format!("us-b{u}"),
     ]);
+    sh(&[
+        "ip",
+        "addr",
+        "add",
+        &format!(
+            "{UNREL_B_HOST_IP}/{}",
+            UNREL_B_SUBNET.split('/').nth(1).unwrap()
+        ),
+        "dev",
+        &format!("hb{u}"),
+    ]);
+    sh(&["ip", "link", "set", &format!("hb{u}"), "up"]);
+
     ns(&format!("us-a{u}"), &["link", "set", "lo", "up"]);
-    ns(&format!("us-b{u}"), &["link", "set", "lo", "up"]);
     ns(
         &format!("us-a{u}"),
         &[
             "addr",
             "add",
-            &format!("{UNREL_A}/24"),
+            &format!(
+                "{UNREL_A_NS_IP}/{}",
+                UNREL_A_SUBNET.split('/').nth(1).unwrap()
+            ),
             "dev",
             &format!("ua{u}"),
-        ],
-    );
-    ns(
-        &format!("us-b{u}"),
-        &[
-            "addr",
-            "add",
-            &format!("{UNREL_B}/24"),
-            "dev",
-            &format!("ub{u}"),
         ],
     );
     ns(
         &format!("us-a{u}"),
         &["link", "set", &format!("ua{u}"), "up"],
     );
+
+    ns(&format!("us-b{u}"), &["link", "set", "lo", "up"]);
+    ns(
+        &format!("us-b{u}"),
+        &[
+            "addr",
+            "add",
+            &format!(
+                "{UNREL_B_NS_IP}/{}",
+                UNREL_B_SUBNET.split('/').nth(1).unwrap()
+            ),
+            "dev",
+            &format!("ub{u}"),
+        ],
+    );
     ns(
         &format!("us-b{u}"),
         &["link", "set", &format!("ub{u}"), "up"],
     );
 
-    // Build the "CHV guest" path: a CHV-owned bridge in the host netns plus a
-    // guest namespace reached through a veth member enslaved to the bridge.
+    // --- CHV guest boundary (bridge + enslaved member) ---
     sh(&["ip", "link", "add", &format!("brhs{u}"), "type", "bridge"]);
     sh(&[
         "ip",
@@ -244,23 +371,15 @@ async fn confines_policy_to_chv_owned_traffic() {
     );
     ns(&format!("gs{u}"), &["link", "set", &format!("gg{u}"), "up"]);
 
-    // The forward path between the two unrelated namespaces requires host
-    // forwarding; remember and restore the sysctl later.
-    let fwd_before: i32 = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    let _fwd_guard = IpForwardGuard(fwd_before);
-    if fwd_before != 1 {
-        std::fs::write("/proc/sys/net/ipv4/ip_forward", "1").unwrap();
-    }
-
-    let cleanup = Cleanup::new(&u);
-
-    // Baseline: both paths work before any CHV policy is applied.
+    // Baseline: unrelated host-stack paths and the guest path all work before
+    // any CHV policy is applied.
     assert!(
-        ns_ping(&format!("us-a{u}"), UNREL_B),
-        "unrelated traffic must work at baseline"
+        ns_ping(&format!("us-a{u}"), UNREL_A_HOST_IP),
+        "unrelated host INPUT path (ns-a -> host) must work at baseline"
+    );
+    assert!(
+        host_ping(UNREL_B_NS_IP),
+        "unrelated host OUTPUT path (host -> ns-b) must work at baseline"
     );
     assert!(
         ns_ping(&format!("gs{u}"), GUEST_GW),
@@ -275,20 +394,16 @@ async fn confines_policy_to_chv_owned_traffic() {
     chv_nwd_core::firewall::apply_firewall_rules(&table, &owned, b"[]")
         .await
         .unwrap();
-    if std::env::var("HOST_SAFETY_DUMP").is_ok() {
-        let out = Command::new("nft")
-            .args(["list", "table", "inet", &table])
-            .output()
-            .unwrap();
-        eprintln!(
-            "--- nft table dump ---\n{}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-    }
+    dump_table(&table);
     assert!(
-        ns_ping(&format!("us-a{u}"), UNREL_B),
-        "REGRESSION (#227): unrelated host traffic must survive a CHV empty policy \
-         (old code dropped it via host-wide policy drop)"
+        ns_ping(&format!("us-a{u}"), UNREL_A_HOST_IP),
+        "REGRESSION (#227): unrelated host INPUT traffic must survive a CHV empty \
+         policy (old code dropped it via host-wide policy drop on the input hook)"
+    );
+    assert!(
+        host_ping(UNREL_B_NS_IP),
+        "REGRESSION (#227): unrelated host OUTPUT traffic must survive a CHV empty \
+         policy (old code dropped it via host-wide policy drop on the output hook)"
     );
     assert!(
         !ns_ping(&format!("gs{u}"), GUEST_GW),
@@ -300,22 +415,32 @@ async fn confines_policy_to_chv_owned_traffic() {
     chv_nwd_core::firewall::apply_firewall_rules(&table, &owned, allow)
         .await
         .unwrap();
+    dump_table(&table);
     assert!(
         ns_ping(&format!("gs{u}"), GUEST_GW),
         "guest->gateway must pass once an inbound allow rule matches"
     );
     assert!(
-        ns_ping(&format!("us-a{u}"), UNREL_B),
-        "unrelated host traffic must remain unaffected by CHV allow policy"
+        ns_ping(&format!("us-a{u}"), UNREL_A_HOST_IP),
+        "unrelated host INPUT traffic must remain unaffected by CHV allow policy"
+    );
+    assert!(
+        host_ping(UNREL_B_NS_IP),
+        "unrelated host OUTPUT traffic must remain unaffected by CHV allow policy"
     );
 
     // 3) Re-apply EMPTY policy -> idempotent, guest default-deny re-established.
     chv_nwd_core::firewall::apply_firewall_rules(&table, &owned, b"[]")
         .await
         .unwrap();
+    dump_table(&table);
     assert!(
-        ns_ping(&format!("us-a{u}"), UNREL_B),
-        "unrelated host traffic must remain unaffected after a re-apply"
+        ns_ping(&format!("us-a{u}"), UNREL_A_HOST_IP),
+        "unrelated host INPUT traffic must remain unaffected after a re-apply"
+    );
+    assert!(
+        host_ping(UNREL_B_NS_IP),
+        "unrelated host OUTPUT traffic must remain unaffected after a re-apply"
     );
     assert!(
         !ns_ping(&format!("gs{u}"), GUEST_GW),

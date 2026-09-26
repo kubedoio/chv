@@ -202,6 +202,9 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }
             self.topologies.remove(&req.network_id);
         }
+        // Drop any remembered policy so a stale firewall policy is not re-asserted
+        // if a new topology with the same network_id is created later (#227 S5).
+        self.policy_state.remove(&req.network_id);
 
         Ok(Response::new(Self::ok_result()))
     }
