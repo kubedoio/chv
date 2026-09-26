@@ -23,6 +23,8 @@ rusqlite = { workspace = true }
 crc32fast = { workspace = true }
 nix = { workspace = true, features = ["fs", "user"] }
 uuid = { workspace = true }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+x509-parser = "0.16"
 
 [dev-dependencies]
 tempfile = { workspace = true }

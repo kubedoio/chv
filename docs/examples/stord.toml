@@ -6,3 +6,26 @@ runtime_dir = "/var/lib/chv/storage/localdisk"
 log_level = "info"
 path_allowlist = ["/var/lib/chv/storage/localdisk", "/var/lib/chv/storage/lvm"]
 device_allowlist = ["/dev/dm-*", "/dev/mapper/*"]
+
+# Storage migration (disk migration between stord peers).
+#
+# Migration is DISABLED by default: the daemon starts without credentials and
+# migration actions fail as unavailable (never a plaintext fallback).
+#
+# To enable storage migration over mTLS, set enabled = true and provide the
+# node identity material issued by the CHV CA. All four fields are required
+# and validated at startup:
+#
+# [migration]
+# enabled = true
+# client_cert_path = "/etc/chv/tls/stord-client.crt"   # node client certificate (PEM)
+# client_key_path  = "/etc/chv/tls/stord-client.key"   # node private key (PEM)
+# ca_cert_path     = "/etc/chv/tls/chv-ca.crt"         # CA bundle validating the destination
+# dest_server_name = "stord-peer.internal"             # expected destination identity (DNS SAN)
+#
+# File ownership/permissions: cert and key should be owned by the chv-stord
+# service user/group with 0640 (key) / 0644 (cert, CA). PEM material is never
+# logged or returned in errors. Rotate keys by updating files and restarting
+# the daemon — startup re-validates the pair.
+[migration]
+enabled = false

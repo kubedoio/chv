@@ -3,6 +3,7 @@ use chv_observability::init_logger;
 use chv_stord_backends::{
     CephRbdBackend, IscsiBackend, LVMBackend, LocalFileBackend, StorageBackend,
 };
+use chv_stord_core::migration::tls_config::load_migration_tls;
 use chv_stord_core::store::SessionStore;
 use chv_stord_core::StorageServer;
 use std::path::PathBuf;
@@ -22,6 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+
+    // Install the rustls ring crypto provider. Required before any tonic/rustls
+    // TLS connection can be established — in particular the mTLS storage
+    // migration sender (issue #232).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls ring crypto provider");
 
     let config_path = std::env::args().nth(1).map(PathBuf::from);
     let config = load_stord_config(config_path.as_deref())?;
@@ -81,6 +89,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "storage backend initialized"
     );
 
+    // Load + validate the storage-migration mTLS identity at startup (issue #232).
+    // Fail-closed: `migration.enabled = true` with missing/unreadable material or
+    // a mismatched keypair is a startup error (never a runtime downgrade).
+    // `migration.enabled = false` (default) starts without credentials and
+    // migration actions fail as unavailable in the sender.
+    let migration_tls = load_migration_tls(
+        config.migration.enabled,
+        config.migration.client_cert_path.as_deref(),
+        config.migration.client_key_path.as_deref(),
+        config.migration.ca_cert_path.as_deref(),
+        config.migration.dest_server_name.as_deref(),
+    )?;
+    if migration_tls.is_some() {
+        info!("storage migration mTLS enabled (credentials validated at startup)");
+    } else {
+        info!("storage migration is disabled: migration actions will be unavailable");
+    }
+
     let server = StorageServer::new(
         backend,
         config.runtime_dir.clone(),
@@ -89,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.path_allowlist,
         config.device_allowlist,
         config.migration_dest_allowlist,
-        None, // TODO: wire migration TLS config from stord config
+        migration_tls,
         Some(store),
     );
 
