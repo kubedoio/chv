@@ -1,0 +1,104 @@
+--- nft table chvhs-cd7bbf13 ---
+table inet chvhs-cd7bbf13 {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-in
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-fwd
+		oifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-fwd
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-out
+	}
+
+	chain chv-policy-in {
+		ct state established,related accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain chv-policy-fwd {
+		ct state established,related accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain chv-policy-out {
+		ct state established,related accept
+		counter packets 0 bytes 0 drop
+	}
+}
+
+--- nft table chvhs-cd7bbf13 ---
+table inet chvhs-cd7bbf13 {
+	chain chv-policy-in {
+		ct state established,related accept
+		meta l4proto icmp ip saddr 10.201.0.0/24 accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain chv-policy-fwd {
+		ct state established,related accept
+		meta l4proto icmp ip saddr 10.201.0.0/24 accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain chv-policy-out {
+		ct state established,related accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-in
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-fwd
+		oifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-fwd
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-out
+	}
+}
+
+--- nft table chvhs-cd7bbf13 ---
+table inet chvhs-cd7bbf13 {
+	chain chv-policy-in {
+		ct state established,related accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain chv-policy-fwd {
+		ct state established,related accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain chv-policy-out {
+		ct state established,related accept
+		counter packets 0 bytes 0 drop
+	}
+
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-in
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-fwd
+		oifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-fwd
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname { "ghcd7bbf13", "brhscd7bbf13" } jump chv-policy-out
+	}
+}
+
