@@ -298,6 +298,7 @@ mod tests {
             _network_id: &str,
             _policy_version: &str,
             _policy_json: &[u8],
+            _bridge_name: &str,
         ) -> Result<(), ChvError> {
             unimplemented!()
         }
@@ -307,6 +308,7 @@ mod tests {
             _network_id: &str,
             _policy_version: &str,
             _policy_json: &[u8],
+            _bridge_name: &str,
         ) -> Result<(), ChvError> {
             unimplemented!()
         }

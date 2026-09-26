@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{OverlayType, TopologySpec};
+use dashmap::DashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 // Metric names for network daemon operations.
@@ -60,6 +63,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         network_id: &str,
         policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError>;
 
     async fn set_nat_policy(
@@ -67,6 +71,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         network_id: &str,
         policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError>;
 
     async fn ensure_dhcp_scope(
@@ -161,9 +166,42 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     ) -> Result<OverlayStatusInfo, ChvError>;
 }
 
+/// A service exposure tracked by the executor so the DNAT forward-accept rule
+/// can be re-asserted after every firewall apply (which rebuilds the `forward`
+/// base chain and would otherwise silently drop exposed flows into default-deny).
+#[derive(Clone)]
+struct ExposureSpec {
+    safe_exposure_id: String,
+    protocol: String,
+    external_port: u32,
+    target_ip: String,
+    target_port: u32,
+}
+
 pub struct LinuxExecutor {
     _runtime_dir: PathBuf,
     vtep_ip: Option<String>,
+    /// Serializes all nft table mutations for this executor (firewall/NAT
+    /// apply, service exposure, topology create/delete). The filter and NAT
+    /// paths flush+rebuild chains on the per-network table, so concurrent
+    /// writers could interleave and leave the table without its terminal
+    /// default-deny rules (fail-open for CHV guests). A single writer per
+    /// executor closes that race (#227).
+    ///
+    /// Note: `ensure_topology`/`delete_topology` hold the lock across slow
+    /// topology work (dnsmasq spawn, VXLAN/FDB teardown), so a firewall/NAT
+    /// apply can briefly queue behind topology operations. This is acceptable
+    /// for a control-plane daemon and avoids a finer-grained per-network lock.
+    nft_lock: Arc<Mutex<()>>,
+    /// Per-network service exposures (keyed by network_id) for re-assertion
+    /// after firewall applies.
+    ///
+    /// NOTE (documented limitation): this is in-memory only — a daemon restart
+    /// loses it. On restart, an operator must re-declare exposures (the DNAT
+    /// prerouting rule also does not survive a restart unless re-applied by the
+    /// caller). Persisting exposures across restarts is tracked separately from
+    /// #227 and out of scope for this change.
+    exposures: Arc<DashMap<String, Vec<ExposureSpec>>>,
 }
 
 impl LinuxExecutor {
@@ -171,6 +209,8 @@ impl LinuxExecutor {
         Self {
             _runtime_dir: runtime_dir,
             vtep_ip: None,
+            nft_lock: Arc::new(Mutex::new(())),
+            exposures: Arc::new(DashMap::new()),
         }
     }
 
@@ -302,6 +342,77 @@ impl LinuxExecutor {
 
     async fn namespace_exists(name: &str) -> bool {
         std::path::Path::new("/var/run/netns").join(name).exists()
+    }
+
+    /// Extract the device name from one `ip link show master <bridge>` output line.
+    ///
+    /// Real-world line shapes (verified on iproute2 6.x):
+    ///   355: vA@vB: <BROADCAST,MULTICAST,M-DOWN> ... master brsmp ...
+    ///   388: tap-12ab: <BROADCAST,...> ... master brsmp ...
+    ///
+    /// Field 0 is the ifindex (`355:`), field 1 is `NAME@PEER:` — the actual
+    /// interface name with an optional `@peer` suffix and a trailing colon.
+    /// Parsing field 0 (the ifindex) instead would silently exclude every real
+    /// member from the CHV-owned guard set (fail-open under br_netfilter).
+    fn parse_ip_link_master_line(line: &str) -> Option<String> {
+        // Only a `N:` ifindex header line introduces a device. Continuation
+        // lines inside `ip link show master <br>` output (`link/ether ...`,
+        // `altname ...`, `inet ...`) MUST be ignored: a token pulled from them
+        // (e.g. `altname enp0s18` → `enp0s18`) could otherwise widen the
+        // CHV-owned guard set to a real host interface on a later apply.
+        let header = line.split_whitespace().next()?;
+        let index_field = header.strip_suffix(':')?;
+        if index_field.is_empty() || !index_field.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let name = line.split_whitespace().nth(1)?;
+        let name = name.split(':').next()?; // drop trailing ':'
+        let name = name.split('@').next()?; // drop veth @peer suffix
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    /// Resolve the authoritative CHV-owned interface set for a topology bridge:
+    /// the bridge itself plus any enslaved member devices (VM TAPs/veths).
+    ///
+    /// Fails closed when the topology-owned bridge does not exist, so CHV never
+    /// guesses a host interface to scope firewall/NAT policy against (#227).
+    async fn owned_ifaces_for_bridge(bridge_name: &str) -> Result<Vec<String>, ChvError> {
+        if !Self::bridge_exists(bridge_name).await {
+            return Err(ChvError::NotFound {
+                resource: "bridge".to_string(),
+                id: bridge_name.to_string(),
+            });
+        }
+        let out = Command::new("ip")
+            .args(["link", "show", "master", bridge_name])
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "ip".to_string(),
+                source: e,
+            })?;
+        if !out.status.success() {
+            return Err(ChvError::NetworkUnavailable {
+                resource: "ip".to_string(),
+                reason: format!("ip link show master {} failed", bridge_name),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut owned: Vec<String> = vec![bridge_name.to_string()];
+        for line in stdout.lines() {
+            if let Some(dev) = Self::parse_ip_link_master_line(line) {
+                if !dev.is_empty() && dev != bridge_name {
+                    owned.push(dev);
+                }
+            }
+        }
+        owned.sort();
+        owned.dedup();
+        Ok(owned)
     }
 
     fn tap_name_for_nic(nic_id: &str) -> String {
@@ -639,11 +750,140 @@ impl LinuxExecutor {
 
         Self::signal_by_pid_file(&pid_path, "-HUP").await;
     }
+
+    /// Install (idempotently replace) the DNAT rules for one service exposure.
+    ///
+    /// Deletes any prior rules carrying this exposure's comment marker, then
+    /// re-adds the prerouting DNAT and the forward accept. The forward accept
+    /// must be evaluated BEFORE the CHV guarded dispatch jumps (otherwise the
+    /// flow enters `chv-policy-fwd` default-deny and is dropped), so it is
+    /// INSERTED at the head of the forward chain.
+    async fn install_exposure_rules(
+        &self,
+        network_id: &str,
+        safe_exposure_id: &str,
+        protocol: &str,
+        external_port: u32,
+        target_ip: &str,
+        target_port: u32,
+    ) -> Result<(), ChvError> {
+        let table = Self::sanitized_nft_table(network_id)?;
+        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
+        Self::run_nft_idempotent(&[
+            "add",
+            "chain",
+            "inet",
+            &table,
+            "prerouting",
+            "{ type nat hook prerouting priority 0 ; policy accept ; }",
+        ])
+        .await?;
+        Self::run_nft_idempotent(&[
+            "add",
+            "chain",
+            "inet",
+            &table,
+            "forward",
+            "{ type filter hook forward priority filter ; policy accept ; }",
+        ])
+        .await?;
+
+        // Idempotent replace: drop any prior rules carrying this marker.
+        Self::delete_rules_by_comment(&table, "prerouting", safe_exposure_id).await?;
+        Self::delete_rules_by_comment(&table, "forward", safe_exposure_id).await?;
+
+        // In an `inet` (dual-stack) table `dnat to` is ambiguous; nft requires
+        // `dnat ip to` / `dnat ip6 to` with a bracketed IPv6-address:port, and
+        // the forward-accept must use the matching `ip`/`ip6 daddr` expression.
+        let (nft_family, dnat_target, daddr_expr) = match target_ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V6(_)) => (
+                "ip6".to_string(),
+                format!("[{}]:{}", target_ip, target_port),
+                "ip6",
+            ),
+            _ => (
+                "ip".to_string(),
+                format!("{}:{}", target_ip, target_port),
+                "ip",
+            ),
+        };
+
+        // Install the forward accept BEFORE the prerouting DNAT so a failure
+        // here cannot leave a half-applied DNAT rule that redirects traffic
+        // into the still-default-deny forward path.
+        Self::run_nft(&[
+            "insert",
+            "rule",
+            "inet",
+            &table,
+            "forward",
+            protocol,
+            "dport",
+            &target_port.to_string(),
+            daddr_expr,
+            "daddr",
+            target_ip,
+            "accept",
+            "comment",
+            &format!("\"{}\"", safe_exposure_id),
+        ])
+        .await?;
+        Self::run_nft(&[
+            "add",
+            "rule",
+            "inet",
+            &table,
+            "prerouting",
+            // Never DNAT loopback. A full bind-interface source guard still
+            // requires a declared uplink in the exposure API (tracked); the
+            // filter hooks use the CHV-owned interface guards from the firewall
+            // path, and any unrelated host port collision on the same host IP is
+            // a documented residual limitation of the exposure feature.
+            "iifname",
+            "!=",
+            "lo",
+            protocol,
+            "dport",
+            &external_port.to_string(),
+            "dnat",
+            &nft_family,
+            "to",
+            &dnat_target,
+            "comment",
+            &format!("\"{}\"", safe_exposure_id),
+        ])
+        .await?;
+        Ok(())
+    }
+
+    /// Re-assert all stored service exposures after a firewall apply that
+    /// rebuilt the `forward` base chain (exposure forward-accept rules were
+    /// destroyed by that rebuild). Idempotent per exposure.
+    async fn reassert_exposures(&self, network_id: &str) -> Result<(), ChvError> {
+        let recs: Vec<ExposureSpec> = self
+            .exposures
+            .get(network_id)
+            .map(|e| e.iter().cloned().collect())
+            .unwrap_or_default();
+        for rec in &recs {
+            self.install_exposure_rules(
+                network_id,
+                &rec.safe_exposure_id,
+                &rec.protocol,
+                rec.external_port,
+                &rec.target_ip,
+                rec.target_port,
+            )
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl NetworkExecutor for LinuxExecutor {
     async fn ensure_topology(&self, spec: &TopologySpec) -> Result<TopologyApplyResult, ChvError> {
+        let _guard = self.nft_lock.lock().await;
         info!(
             network_id = %spec.network_id,
             bridge = %spec.bridge_name,
@@ -761,6 +1001,7 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         state: &crate::state::TopologyState,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         info!(
             network_id = %network_id,
             bridge = %state.bridge_name,
@@ -806,6 +1047,8 @@ impl NetworkExecutor for LinuxExecutor {
         if let Ok(table) = Self::sanitized_nft_table(network_id) {
             let _ = Self::run_nft_quiet(&["delete", "table", "inet", &table]).await;
         }
+        // Drop remembered service exposures for this network.
+        self.exposures.remove(network_id);
 
         Ok(())
     }
@@ -908,14 +1151,29 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         _policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
-        crate::firewall::apply_firewall_rules(&table, policy_json)
+        let owned = Self::owned_ifaces_for_bridge(bridge_name)
+            .await
+            .inspect_err(|_e| {
+                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "owned_ifaces_for_bridge")
+                    .increment(1);
+            })?;
+        crate::firewall::apply_firewall_rules(&table, &owned, policy_json)
             .await
             .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall")
                     .increment(1);
-            })
+            })?;
+        // The firewall apply rebuilds the `forward` base chain, destroying any
+        // service-exposure forward-accept rules; re-assert them inside the
+        // CHV boundary so exposed flows are not silently dropped (#227 S3).
+        self.reassert_exposures(network_id).await.inspect_err(|_e| {
+            metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "reassert_exposures")
+                .increment(1);
+        })
     }
 
     async fn set_nat_policy(
@@ -923,9 +1181,17 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         _policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
-        crate::firewall::apply_nat_rules(&table, policy_json)
+        let owned = Self::owned_ifaces_for_bridge(bridge_name)
+            .await
+            .inspect_err(|_e| {
+                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "owned_ifaces_for_bridge")
+                    .increment(1);
+            })?;
+        crate::firewall::apply_nat_rules(&table, &owned, policy_json)
             .await
             .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_nat").increment(1);
@@ -968,6 +1234,10 @@ impl NetworkExecutor for LinuxExecutor {
         target_port: u32,
         _mode: &str,
     ) -> Result<(), ChvError> {
+        // Serialize with firewall/NAT applies and topology teardown so a
+        // concurrent policy apply cannot flush this exposure's accept rule
+        // mid-install.
+        let _guard = self.nft_lock.lock().await;
         // Validate protocol to prevent command injection
         const ALLOWED_PROTOCOLS: &[&str] = &["tcp", "udp", "icmp", "sctp"];
         if !ALLOWED_PROTOCOLS.contains(&protocol) {
@@ -988,60 +1258,33 @@ impl NetworkExecutor for LinuxExecutor {
             });
         }
 
-        let table = Self::sanitized_nft_table(network_id)?;
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
-        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
-        Self::run_nft_idempotent(&[
-            "add",
-            "chain",
-            "inet",
-            &table,
-            "prerouting",
-            "{ type nat hook prerouting priority 0 ; policy accept ; }",
-        ])
-        .await?;
-        Self::run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            &table,
-            "prerouting",
+        self.install_exposure_rules(
+            network_id,
+            &safe_exposure_id,
             protocol,
-            "dport",
-            &external_port.to_string(),
-            "dnat",
-            "to",
-            &format!("{}:{}", target_ip, target_port),
-            "comment",
-            &format!("\"{}\"", safe_exposure_id),
-        ])
-        .await?;
-        Self::run_nft_idempotent(&[
-            "add",
-            "chain",
-            "inet",
-            &table,
-            "forward",
-            "{ type filter hook forward priority 0 ; policy accept ; }",
-        ])
-        .await?;
-        Self::run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            &table,
-            "forward",
-            protocol,
-            "dport",
-            &target_port.to_string(),
-            "ip",
-            "daddr",
+            external_port,
             target_ip,
-            "accept",
-            "comment",
-            &format!("\"{}\"", safe_exposure_id),
-        ])
+            target_port,
+        )
         .await?;
+        // Record so the exposure can be re-asserted after a firewall apply
+        // rebuilds the forward base chain. Replacing an existing exposure_id
+        // replaces its record (no unbounded growth).
+        self.exposures
+            .entry(network_id.to_string())
+            .or_default()
+            .retain(|r| r.safe_exposure_id != safe_exposure_id);
+        self.exposures
+            .entry(network_id.to_string())
+            .or_default()
+            .push(ExposureSpec {
+                safe_exposure_id: safe_exposure_id.clone(),
+                protocol: protocol.to_string(),
+                external_port,
+                target_ip: target_ip.to_string(),
+                target_port,
+            });
         info!(network_id = %network_id, exposure_id = %exposure_id, "service exposed via DNAT");
         Ok(())
     }
@@ -1051,10 +1294,24 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         exposure_id: &str,
     ) -> Result<(), ChvError> {
+        let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
         Self::delete_rules_by_comment(&table, "prerouting", &safe_exposure_id).await?;
         Self::delete_rules_by_comment(&table, "forward", &safe_exposure_id).await?;
+        {
+            let removed_all = if let Some(mut entry) = self.exposures.get_mut(network_id) {
+                let before = entry.len();
+                entry.retain(|r| r.safe_exposure_id != safe_exposure_id);
+                before > 0 && entry.is_empty()
+            } else {
+                false
+            };
+            // Drop the now-empty key so no stale empty entry lingers.
+            if removed_all {
+                self.exposures.remove(network_id);
+            }
+        }
         info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure withdrawn");
         Ok(())
     }
@@ -1409,6 +1666,7 @@ mod tests {
             _network_id: &str,
             _policy_version: &str,
             _policy_json: &[u8],
+            _bridge_name: &str,
         ) -> Result<(), ChvError> {
             unimplemented!()
         }
@@ -1418,6 +1676,7 @@ mod tests {
             _network_id: &str,
             _policy_version: &str,
             _policy_json: &[u8],
+            _bridge_name: &str,
         ) -> Result<(), ChvError> {
             unimplemented!()
         }
@@ -1621,5 +1880,133 @@ mod tests {
             0,
             "no VXLAN delete expected when vni is None"
         );
+    }
+
+    #[test]
+    fn parser_extracts_enslaved_member_names_not_ifindexes() {
+        // Real `ip link show master <br>` output shapes (iproute2 6.x).
+        // Field 0 is the ifindex (`355:`); the member name is field 1,
+        // with an optional veth `@peer` suffix and a trailing colon.
+        let veth_line =
+            "355: vA@vB: <BROADCAST,MULTICAST,M-DOWN> mtu 1500 qdisc noop master brnet state DOWN mode DEFAULT group default qlen 1000";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(veth_line),
+            Some("vA".to_string())
+        );
+
+        let tap_line =
+            "388: tap-12ab: <BROADCAST,MULTICAST> mtu 1500 qdisc noop master brnet state UP mode DEFAULT group default qlen 1000";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(tap_line),
+            Some("tap-12ab".to_string())
+        );
+
+        // Blank / non-member lines must not yield a member name.
+        assert_eq!(LinuxExecutor::parse_ip_link_master_line(""), None);
+        assert_eq!(LinuxExecutor::parse_ip_link_master_line("    "), None);
+
+        // Continuation lines inside `ip link show` output must not be parsed as
+        // members: their tokens could widen the CHV-owned guard set to a real
+        // host interface (round-4 finding).
+        let continuation_mac =
+            "    link/ether 72:6a:73:3d:a7:9f brd ff:ff:ff:ff:ff:ff permaddr 72:6a:73:3d:a7:9f";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(continuation_mac),
+            None
+        );
+        let continuation_altname = "    altname enp0s18";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(continuation_altname),
+            None
+        );
+        let continuation_inet = "    inet 10.200.1.1/24 brd 10.200.1.255 scope global br0";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(continuation_inet),
+            None
+        );
+    }
+
+    /// End-to-end proof that `owned_ifaces_for_bridge` returns the bridge plus
+    /// its real enslaved members (guards the B1 parser regression). Requires
+    /// root + `ip`; skipped on CI, run against a real host via:
+    ///   sudo the built lib test binary -- --ignored --exact \
+    ///     executor::tests::owned_ifaces_resolves_bridge_and_enslaved_members
+    #[tokio::test]
+    #[ignore = "requires root + iproute2"]
+    async fn owned_ifaces_resolves_bridge_and_enslaved_members() {
+        use std::process::Command as StdCommand;
+
+        fn sh(args: &[&str]) {
+            let status = StdCommand::new("ip")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("spawn ip");
+            assert!(status.success(), "ip {:?} failed with {:?}", args, status);
+        }
+
+        // Collision-averse, IFNAMSIZ-safe run suffix (16-bit pid + 16-bit
+        // sub-second clock), so a leaked resource from a prior crashed run
+        // cannot collide with ours.
+        let u = {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            format!("{:04x}{:04x}", std::process::id() & 0xffff, nanos & 0xffff)
+        };
+        let br = format!("brt{u}");
+        let veth_name = format!("vt{u}");
+        let peer_name = format!("vtx{u}");
+        assert!(br.len() <= 15 && veth_name.len() <= 15 && peer_name.len() <= 15);
+
+        // Best-effort cleanup of the bridge AND the veth pair on panic/success,
+        // so ensl ports do not leak. Bound here, before any setup command, so a
+        // mid-setup panic still unwinds through it.
+        struct Cleanup {
+            links: Vec<String>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for link in self.links.iter().rev() {
+                    let _ = StdCommand::new("ip")
+                        .args(["link", "del", "dev", link])
+                        .status();
+                }
+            }
+        }
+        let _cleanup = Cleanup {
+            links: vec![br.clone(), veth_name.clone()],
+        };
+
+        sh(&["link", "add", &br, "type", "bridge"]);
+        sh(&[
+            "link", "add", &veth_name, "type", "veth", "peer", "name", &peer_name,
+        ]);
+        sh(&["link", "set", &veth_name, "master", &br]);
+
+        let owned = LinuxExecutor::owned_ifaces_for_bridge(&br).await.unwrap();
+        // The owned set must be EXACTLY the bridge + the enslaved veth (sorted):
+        // any continuation-line token (e.g. `altname`, MAC octets) would make
+        // this fail on a real host, proving the parser never widens the
+        // CHV-owned guard set (round-4 finding, #227 host-safety boundary).
+        let mut expected = vec![br.clone(), veth_name.clone()];
+        expected.sort();
+        assert_eq!(owned, expected, "owned set must be exactly {{br, veth}}");
+    }
+
+    #[tokio::test]
+    async fn owned_ifaces_fails_closed_when_bridge_missing() {
+        let err = LinuxExecutor::owned_ifaces_for_bridge("definitely-not-a-bridge-xyz")
+            .await
+            .unwrap_err();
+        match err {
+            ChvError::NotFound { resource, .. } => {
+                assert_eq!(resource, "bridge");
+            }
+            other => panic!("expected NotFound, got {:?}", other),
+        }
     }
 }

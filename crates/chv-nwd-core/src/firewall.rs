@@ -84,7 +84,98 @@ fn is_valid_port_spec(port: &str) -> bool {
     }
 }
 
-pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvError> {
+/// Policy chains (plain, non-hook) that carry CHV default-deny semantics inside
+/// the CHV traffic boundary. Traffic that does not match the CHV-owned interface
+/// guards below never reaches these chains.
+const POLICY_FILTER_CHAINS: [&str; 3] = ["chv-policy-in", "chv-policy-fwd", "chv-policy-out"];
+
+/// Build nftables argv for an interface guard (`iifname`/`oifname`) matching
+/// exactly the given CHV-owned interface set.
+///
+/// The guard is the authoritative scope gate: CHV base-hook chains stay
+/// `policy accept` for the host, and only CHV-owned guest traffic (topology
+/// bridge plus enslaved TAP/veth members) is dispatched into the default-deny
+/// policy chains. Returns an error when the owned set is empty so CHV never
+/// guesses a host interface to scope policy against (fail closed).
+fn iface_guard_args(kind: &str, owned_ifaces: &[String]) -> Result<Vec<String>, ChvError> {
+    if owned_ifaces.is_empty() {
+        return Err(ChvError::InvalidArgument {
+            field: "owned_ifaces".to_string(),
+            reason: "cannot scope CHV firewall policy: no CHV-owned interface is known \
+                 (topology/interface ownership is authoritative; refusing to guess a host \
+                 interface)"
+                .to_string(),
+        });
+    }
+    let mut args = vec![kind.to_string()];
+    if owned_ifaces.len() == 1 {
+        args.push(owned_ifaces[0].clone());
+    } else {
+        args.push("{".to_string());
+        for (i, iface) in owned_ifaces.iter().enumerate() {
+            let trailing = if i + 1 < owned_ifaces.len() { "," } else { "" };
+            args.push(format!("\"{}\"{}", iface, trailing));
+        }
+        args.push("}".to_string());
+    }
+    Ok(args)
+}
+
+fn add_rule_prefix(table: &str, chain: &str) -> Vec<String> {
+    ["add", "rule", "inet", table, chain]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+async fn run_nft_strings(args: Vec<String>) -> Result<(), ChvError> {
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run_nft(&refs).await
+}
+
+/// A `(chain, rule)` plan in the exact order `apply_firewall_rules` must
+/// INSERT each user rule at the chain head.
+///
+/// The plan sorts user rules deny/reject-first then accept (so a broad accept
+/// cannot shadow a more specific deny within a chain) and maps each rule to its
+/// target chains. The apply inserts at the head of each chain — so the terminal
+/// `counter drop` installed earlier is never removed — and inserting this
+/// sequence in reverse reproduces, per chain, the same oldest-to-newest final
+/// ordering a plain `add`-based build would have produced (see the unit tests
+/// for the invariant).
+fn user_rule_insertion_plan(rules: &[FirewallRule]) -> Vec<(&'static str, &FirewallRule)> {
+    // Deny/reject rules first, then accept rules, so a broad accept cannot
+    // shadow a more specific deny within a chain. Inserting this sequence at
+    // each chain head in REVERSE reproduces, per chain, the same
+    // oldest-to-newest final ordering a plain `add`-based build would have
+    // produced (see the unit tests for the invariant).
+    rules
+        .iter()
+        .filter(|r| r.action == "drop" || r.action == "reject")
+        .chain(rules.iter().filter(|r| r.action == "accept"))
+        .rev()
+        .flat_map(|rule| {
+            // Cover the real traffic paths: host-stack (input/output) AND the
+            // guest forwarding path (forward), which the original
+            // input/output-only mapping missed (per #227).
+            let chains: &[&str] = match rule.direction.as_str() {
+                "inbound" => &["chv-policy-in", "chv-policy-fwd"],
+                "outbound" => &["chv-policy-out", "chv-policy-fwd"],
+                _ => &[],
+            };
+            chains
+                .iter()
+                .map(move |chain| (*chain, rule))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+pub async fn apply_firewall_rules(
+    table: &str,
+    owned_ifaces: &[String],
+    policy_json: &[u8],
+) -> Result<(), ChvError> {
     let rules: Vec<FirewallRule> = if policy_json.is_empty() {
         Vec::new()
     } else {
@@ -98,18 +189,36 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
         validate_rule(rule)?;
     }
 
-    // Ensure table exists
+    // The ownership guard must resolve before any rule is written; this fails
+    // closed (no guessed host interface) per the host-safety invariant.
+    let iif_guard = iface_guard_args("iifname", owned_ifaces)?;
+    let oif_guard = iface_guard_args("oifname", owned_ifaces)?;
+
+    // Ensure the CHV table exists.
     run_nft_idempotent(&["add", "table", "inet", table]).await?;
 
-    // Create chains if needed.
-    // Use priority 0 for filter hooks (standard nftables convention for filter chains).
-    // Within each chain, rule evaluation order is positional — we enforce the correct
-    // ordering below: conntrack first, then drop/reject rules, then accept rules.
+    // Base hook chains: policy accept for the host. CHV policy is confined to
+    // CHV-owned guest traffic via the guards below; unrelated host, container,
+    // CNI, SSH and forwarded traffic is never evaluated by a CHV drop policy.
+    // (Previously these chains used `policy drop` with no interface guards,
+    // which dropped all host traffic — the bug tracked by #227.)
+    //
+    // The chains are deleted and re-created on every apply (not just added
+    // idempotently) so a stale `policy drop` base chain left behind by a
+    // previous daemon version is replaced with `policy accept` on upgrade;
+    // `add chain` alone would silently keep the old drop policy (#227 S4).
+    //
+    // Transient disclosure: between deleting and re-adding each base chain
+    // (sub-millisecond, single-writer under the executor nft lock) CHV-owned
+    // guest traffic is not yet dispatched into default-deny — briefly
+    // unguarded for CHV guests only. The host is NEVER affected: the base
+    // policy is `accept` throughout, and no host interface matches the guards.
     for (chain, hook) in [
         ("input", "input"),
         ("forward", "forward"),
         ("output", "output"),
     ] {
+        delete_chain_quiet(table, chain).await?;
         run_nft_idempotent(&[
             "add",
             "chain",
@@ -117,51 +226,66 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
             table,
             chain,
             &format!(
-                "{{ type filter hook {} priority filter ; policy drop ; }}",
+                "{{ type filter hook {} priority filter ; policy accept ; }}",
                 hook
             ),
         ])
         .await?;
     }
 
-    // Flush existing rules in filter chains (atomic replace)
-    for chain in ["input", "forward", "output"] {
-        if let Err(e) = run_nft(&["flush", "chain", "inet", table, chain]).await {
-            tracing::warn!(table, chain, error = %e, "failed to flush nftables chain");
-        }
+    // Verify the base hooks really are `policy accept`. If a delete was
+    // transiently refused and the old `policy drop` chain survived the
+    // idempotent add, fail closed instead of reproducing #227 silently.
+    verify_base_chain_policies(table).await?;
+
+    // Plain (non-hook) policy chains carry default-deny inside the boundary.
+    // Created before any dispatch rule so a guard jump never targets a
+    // missing chain.
+    for pchain in POLICY_FILTER_CHAINS {
+        run_nft_idempotent(&["add", "chain", "inet", table, pchain]).await?;
     }
 
-    // Always add conntrack established/related rule first
-    run_nft(&[
-        "add",
-        "rule",
-        "inet",
-        table,
-        "input",
-        "ct",
-        "state",
-        "established,related",
-        "accept",
-    ])
-    .await?;
+    // Default-deny-FIRST: flush each policy chain and immediately re-install
+    // its terminal `counter drop`, before any dispatch rule and before any user
+    // rule exists. If the apply fails at ANY later point — notably between
+    // dispatch installs on a fresh table where the policy chains were just
+    // created empty — every policy chain still ends in drop, so CHV-owned guest
+    // traffic remains default-denied (never fail-open).
+    for pchain in POLICY_FILTER_CHAINS {
+        if let Err(e) = run_nft(&["flush", "chain", "inet", table, pchain]).await {
+            tracing::warn!(table, chain = pchain, error = %e, "failed to flush nftables policy chain");
+        }
+        run_nft(&["add", "rule", "inet", table, pchain, "counter", "drop"]).await?;
+    }
 
-    // Apply user rules in priority order: deny/reject rules first, then accept rules.
-    // This ensures that deny rules are evaluated before allows within the same chain,
-    // preventing a broad accept from shadowing a more specific deny.
-    let ordered_rules: Vec<&FirewallRule> = rules
-        .iter()
-        .filter(|r| r.action == "drop" || r.action == "reject")
-        .chain(rules.iter().filter(|r| r.action == "accept"))
-        .collect();
+    // Dispatch ONLY CHV-owned traffic into the policy chains.
+    let mut input = add_rule_prefix(table, "input");
+    input.extend(iif_guard.clone());
+    input.extend(["jump".to_string(), "chv-policy-in".to_string()]);
+    run_nft_strings(input).await?;
 
-    for rule in ordered_rules {
-        let chain = match rule.direction.as_str() {
-            "inbound" => "input",
-            "outbound" => "output",
-            _ => continue,
-        };
+    let mut fwd_in = add_rule_prefix(table, "forward");
+    fwd_in.extend(iif_guard.clone());
+    fwd_in.extend(["jump".to_string(), "chv-policy-fwd".to_string()]);
+    run_nft_strings(fwd_in).await?;
 
-        let mut args: Vec<&str> = vec!["add", "rule", "inet", table, chain];
+    let mut fwd_out = add_rule_prefix(table, "forward");
+    fwd_out.extend(oif_guard.clone());
+    fwd_out.extend(["jump".to_string(), "chv-policy-fwd".to_string()]);
+    run_nft_strings(fwd_out).await?;
+
+    let mut out = add_rule_prefix(table, "output");
+    out.extend(oif_guard.clone());
+    out.extend(["jump".to_string(), "chv-policy-out".to_string()]);
+    run_nft_strings(out).await?;
+
+    // Apply user rules via the insertion plan (deny/reject first, then accept,
+    // so a broad accept cannot shadow a more specific deny). Rules are INSERTED
+    // at each chain head, which reproduces the same oldest-to-newest final
+    // ordering as `add` while never removing the default-deny terminal that was
+    // installed above the dispatch rules.
+    for (chain, rule) in user_rule_insertion_plan(&rules) {
+        let mut args: Vec<&str> = vec!["insert", "rule", "inet", table, chain];
 
         // Protocol match (skip for "all")
         let protocol_lower = rule.protocol.to_lowercase();
@@ -198,7 +322,30 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
         run_nft(&args).await?;
     }
 
-    info!(table = %table, rule_count = rules.len(), "firewall rules applied");
+    // Conntrack established/related is inserted LAST so it lands at the head
+    // of each chain (before user rules), preserving established-flow semantics
+    // across policy replaces: existing guest flows — including host->guest
+    // replies on the output path — are not torn down by default-deny.
+    for chain in ["chv-policy-in", "chv-policy-fwd", "chv-policy-out"] {
+        run_nft(&[
+            "insert",
+            "rule",
+            "inet",
+            table,
+            chain,
+            "ct",
+            "state",
+            "established,related",
+            "accept",
+        ])
+        .await?;
+    }
+
+    info!(
+        table = %table,
+        rule_count = rules.len(),
+        "firewall rules applied (CHV-owned boundary)"
+    );
     Ok(())
 }
 
@@ -209,7 +356,11 @@ pub struct NatRule {
     pub masquerade: Option<bool>,
 }
 
-pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvError> {
+pub async fn apply_nat_rules(
+    table: &str,
+    owned_ifaces: &[String],
+    policy_json: &[u8],
+) -> Result<(), ChvError> {
     let rules: Vec<NatRule> = if policy_json.is_empty() {
         Vec::new()
     } else {
@@ -236,7 +387,9 @@ pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvE
         }
     }
 
-    // Ensure table and postrouting chain exist
+    let iif_guard = iface_guard_args("iifname", owned_ifaces)?;
+
+    // Ensure table and postrouting chain exist.
     run_nft_idempotent(&["add", "table", "inet", table]).await?;
     run_nft_idempotent(&[
         "add",
@@ -248,48 +401,51 @@ pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvE
     ])
     .await?;
 
-    // Flush existing NAT rules
+    // Flush existing NAT rules.
     if let Err(e) = run_nft(&["flush", "chain", "inet", table, "postrouting"]).await {
         tracing::warn!(table, error = %e, "failed to flush postrouting chain");
     }
 
     if rules.is_empty() {
-        // Default: masquerade all non-loopback traffic
-        run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            table,
-            "postrouting",
-            "oif",
-            "!=",
-            "lo",
-            "masquerade",
-        ])
-        .await?;
+        // Default masquerade ONLY for CHV-owned guest traffic leaving the host.
+        // (Previously any non-loopback traffic on the host was masqueraded.)
+        let mut args = add_rule_prefix(table, "postrouting");
+        args.extend(iif_guard);
+        args.extend([
+            "oif".to_string(),
+            "!=".to_string(),
+            "lo".to_string(),
+            "masquerade".to_string(),
+        ]);
+        run_nft_strings(args).await?;
     } else {
         for rule in &rules {
-            let mut args: Vec<&str> = vec!["add", "rule", "inet", table, "postrouting"];
+            let mut args = add_rule_prefix(table, "postrouting");
+            args.extend(iif_guard.clone());
 
-            args.push("ip");
-            args.push("saddr");
-            args.push(&rule.source_cidr);
+            args.push("ip".to_string());
+            args.push("saddr".to_string());
+            args.push(rule.source_cidr.clone());
 
             if let Some(ref dest) = rule.dest_cidr {
-                args.push("ip");
-                args.push("daddr");
-                args.push(dest);
+                args.push("ip".to_string());
+                args.push("daddr".to_string());
+                args.push(dest.clone());
             }
 
             if rule.masquerade.unwrap_or(true) {
-                args.push("masquerade");
+                args.push("masquerade".to_string());
             }
 
-            run_nft(&args).await?;
+            run_nft_strings(args).await?;
         }
     }
 
-    info!(table = %table, rule_count = rules.len(), "NAT rules applied");
+    info!(
+        table = %table,
+        rule_count = rules.len(),
+        "NAT rules applied (CHV-owned boundary)"
+    );
     Ok(())
 }
 
@@ -327,6 +483,76 @@ async fn run_nft_idempotent(args: &[&str]) -> Result<(), ChvError> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Delete a chain if it exists, tolerating a missing chain; any OTHER failure
+/// (e.g. a transient netlink error) is propagated so the apply aborts and the
+/// caller sees the error instead of silently keeping a stale chain policy.
+///
+/// Used to replace stale base-hook chain policies (e.g. the pre-#227
+/// `policy drop`) with `policy accept` on every apply, so an in-place upgrade
+/// of a running daemon cannot leave a host-wide drop base chain active.
+async fn delete_chain_quiet(table: &str, chain: &str) -> Result<(), ChvError> {
+    match run_nft(&["delete", "chain", "inet", table, chain]).await {
+        Ok(()) => Ok(()),
+        Err(ChvError::NetworkUnavailable { reason, .. }) => {
+            if reason.contains("No such file or directory") || reason.contains("does not exist") {
+                Ok(())
+            } else {
+                Err(ChvError::NetworkUnavailable {
+                    resource: "nft".to_string(),
+                    reason: format!(
+                        "failed to delete nft chain {chain} before re-adding with accept policy: {reason}"
+                    ),
+                })
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Post-apply verification that every base hook chain really is `policy accept`.
+///
+/// This is the fail-closed net for upgrade safety: if `delete_chain_quiet`
+/// hit a transient refusal, the stale pre-#227 `policy drop` chain would
+/// otherwise survive the idempotent `add chain` (`File exists` -> Ok) and
+/// reproduce the host-wide-drop bug without any error. Each hook name maps to
+/// exactly one chain in the CHV-owned table, so the `type filter hook X
+/// priority filter; policy accept;` substring is unique to the base chain.
+async fn verify_base_chain_policies(table: &str) -> Result<(), ChvError> {
+    let out = Command::new("nft")
+        .args(["list", "table", "inet", table])
+        .output()
+        .await
+        .map_err(|e| ChvError::Io {
+            path: "nft".to_string(),
+            source: e,
+        })?;
+    if !out.status.success() {
+        return Err(ChvError::NetworkUnavailable {
+            resource: "nft".to_string(),
+            reason: format!("nft list table inet {table} failed during post-apply verification"),
+        });
+    }
+    let dump = String::from_utf8_lossy(&out.stdout).into_owned();
+    for (chain, hook) in [
+        ("input", "input"),
+        ("forward", "forward"),
+        ("output", "output"),
+    ] {
+        let needle = format!("type filter hook {hook} priority filter; policy accept;");
+        if !dump.contains(&needle) {
+            return Err(ChvError::NetworkUnavailable {
+                resource: "nft".to_string(),
+                reason: format!(
+                    "post-apply verification failed: base chain {chain} is not \
+                     `policy accept` (stale policy-drop base chain would break #227, \
+                     refusing to proceed)"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -443,5 +669,106 @@ mod tests {
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].dest_port.as_deref(), Some("22"));
         assert!(rules[1].source_cidr.is_none());
+    }
+
+    #[test]
+    fn test_iface_guard_args_empty_fails_closed() {
+        assert!(iface_guard_args("iifname", &[]).is_err());
+        assert!(iface_guard_args("oifname", &[]).is_err());
+    }
+
+    #[test]
+    fn test_iface_guard_args_single() {
+        let args = iface_guard_args("iifname", &["br-net1".to_string()]).unwrap();
+        assert_eq!(args, vec!["iifname", "br-net1"]);
+    }
+
+    #[test]
+    fn test_iface_guard_args_multiple() {
+        let args =
+            iface_guard_args("oifname", &["br-net1".to_string(), "tap-1111".to_string()]).unwrap();
+        assert_eq!(
+            args,
+            vec!["oifname", "{", "\"br-net1\",", "\"tap-1111\"", "}"]
+        );
+    }
+
+    fn mk_rule<'a>(direction: &'a str, action: &'a str, protocol: &'a str) -> FirewallRule {
+        FirewallRule {
+            direction: direction.to_string(),
+            protocol: protocol.to_string(),
+            source_cidr: None,
+            dest_port: None,
+            action: action.to_string(),
+        }
+    }
+
+    #[test]
+    fn user_rule_plan_final_order_is_deny_before_accept_per_chain() {
+        let rules = vec![
+            mk_rule("inbound", "drop", "tcp"),
+            mk_rule("outbound", "reject", "udp"),
+            mk_rule("inbound", "accept", "icmp"),
+            mk_rule("outbound", "accept", "tcp"),
+        ];
+        let plan = user_rule_insertion_plan(&rules);
+
+        // `insert` prepends, so the final per-chain order is the REVERSE of the
+        // plan's per-chain insertion sequence.
+        let mut final_by_chain: std::collections::HashMap<&'static str, Vec<&FirewallRule>> =
+            std::collections::HashMap::new();
+        for (chain, rule) in plan.iter().rev() {
+            final_by_chain.entry(*chain).or_default().push(*rule);
+        }
+
+        // Every policy chain is populated; forward gets inbound+outbound.
+        assert_eq!(final_by_chain.get("chv-policy-in").map(Vec::len), Some(2));
+        assert_eq!(final_by_chain.get("chv-policy-out").map(Vec::len), Some(2));
+        assert_eq!(final_by_chain.get("chv-policy-fwd").map(Vec::len), Some(4));
+
+        for (chain, final_rules) in &final_by_chain {
+            for r in final_rules.iter() {
+                // Membership: inbound rules never target chv-policy-out and
+                // outbound rules never target chv-policy-in.
+                let illegal = matches!(
+                    (r.direction.as_str(), *chain),
+                    ("inbound", "chv-policy-out") | ("outbound", "chv-policy-in")
+                );
+                assert!(!illegal, "rule {} must not target {}", r.direction, chain);
+            }
+            // Deny/reject rules must all precede accept rules within a chain.
+            let first_accept = final_rules.iter().position(|r| r.action == "accept");
+            if let Some(idx) = first_accept {
+                assert!(
+                    final_rules[idx..].iter().all(|r| r.action == "accept"),
+                    "an accept rule appears before a deny/reject rule in {chain}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_rule_plan_mixed_actions_keep_relative_deny_order() {
+        let rules = vec![
+            mk_rule("inbound", "drop", "tcp"),    // deny-1
+            mk_rule("inbound", "drop", "udp"),    // deny-2
+            mk_rule("inbound", "accept", "icmp"), // accept-1
+            mk_rule("outbound", "drop", "all"),   // deny-3
+        ];
+        let plan = user_rule_insertion_plan(&rules);
+        let mut final_by_chain: std::collections::HashMap<&'static str, Vec<&FirewallRule>> =
+            std::collections::HashMap::new();
+        for (chain, rule) in plan.iter().rev() {
+            final_by_chain.entry(*chain).or_default().push(*rule);
+        }
+
+        let fwd = final_by_chain.get("chv-policy-fwd").unwrap();
+        // deny-1, deny-2, deny-3, accept-1 (denies keep their relative order).
+        assert_eq!(
+            fwd.iter().map(|r| r.protocol.as_str()).collect::<Vec<_>>(),
+            vec!["tcp", "udp", "all", "icmp",]
+        );
+        let den: Vec<&str> = fwd.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(den, vec!["drop", "drop", "drop", "accept"]);
     }
 }

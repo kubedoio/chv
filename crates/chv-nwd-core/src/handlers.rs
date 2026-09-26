@@ -11,12 +11,24 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+/// Last successfully applied CHV firewall/NAT policy for a network, used to
+/// re-scope the CHV-owned interface guard set when a VM NIC attaches so the
+/// new interface is covered by CHV default-deny.
+#[derive(Clone, Default)]
+struct AppliedPolicies {
+    firewall: Option<Vec<u8>>,
+    firewall_version: Option<String>,
+    nat: Option<Vec<u8>>,
+    nat_version: Option<String>,
+}
+
 pub struct NetworkServiceImpl<E: NetworkExecutor> {
     executor: Arc<E>,
     topologies: Arc<TopologyTable>,
     metrics: Arc<Metrics>,
     security_policies: Arc<DashMap<String, proto::SecurityPolicy>>,
     rate_limit_policies: Arc<DashMap<String, proto::RateLimitPolicy>>,
+    policy_state: Arc<DashMap<String, AppliedPolicies>>,
     ebpf: Arc<dyn EbpfManager>,
     /// Counter tracking eBPF program load failures.
     ebpf_load_failures: Arc<AtomicU32>,
@@ -30,9 +42,43 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             metrics,
             security_policies: Arc::new(DashMap::new()),
             rate_limit_policies: Arc::new(DashMap::new()),
+            policy_state: Arc::new(DashMap::new()),
             ebpf: Arc::new(ebpf::NoopEbpfManager),
             ebpf_load_failures: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Re-assert the last applied firewall/NAT policy for a topology so its
+    /// CHV-owned interface guard set includes any newly enslaved NIC. Fails
+    /// closed (returns an error) so an attached NIC is never left outside the
+    /// default-deny boundary.
+    async fn refresh_policy_scope(&self, state: &TopologyState) -> Result<(), ChvError> {
+        // Snapshot semantics: if no record exists for the network there is
+        // nothing to re-scope. Re-read the latest desired JSON/version
+        // immediately before each apply so a concurrent policy RPC that landed
+        // after an earlier snapshot is never reverted by stale desired-state.
+        if self.policy_state.get(&state.network_id).is_none() {
+            return Ok(());
+        }
+        let firewall = self
+            .policy_state
+            .get(&state.network_id)
+            .and_then(|p| p.firewall.clone().zip(p.firewall_version.clone()));
+        if let Some((json, ver)) = firewall {
+            self.executor
+                .set_firewall_policy(&state.network_id, &ver, &json, &state.bridge_name)
+                .await?;
+        }
+        let nat = self
+            .policy_state
+            .get(&state.network_id)
+            .and_then(|p| p.nat.clone().zip(p.nat_version.clone()));
+        if let Some((json, ver)) = nat {
+            self.executor
+                .set_nat_policy(&state.network_id, &ver, &json, &state.bridge_name)
+                .await?;
+        }
+        Ok(())
     }
 
     pub fn topologies(&self) -> Arc<TopologyTable> {
@@ -167,6 +213,9 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }
             self.topologies.remove(&req.network_id);
         }
+        // Drop any remembered policy so a stale firewall policy is not re-asserted
+        // if a new topology with the same network_id is created later (#227 S5).
+        self.policy_state.remove(&req.network_id);
 
         Ok(Response::new(Self::ok_result()))
     }
@@ -338,6 +387,39 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     }));
                 }
 
+                // Re-scope the CHV firewall/NAT guard sets so the newly attached
+                // NIC is covered by CHV default-deny. Fail closed: if a previously
+                // applied policy cannot be refreshed, refuse the attach rather
+                // than leave the new interface undispatched and unprotected.
+                if let Err(e) = self.refresh_policy_scope(&state).await {
+                    tracing::error!(
+                        network_id = %nic.network_id,
+                        error = %e,
+                        "policy guard refresh failed — refusing NIC attach (default-deny)"
+                    );
+                    let _ = self
+                        .executor
+                        .detach_vm_nic(
+                            &nic.nic_id,
+                            chv_common::AttachmentOwnership {
+                                vm_id: nic.vm_id.clone(),
+                                operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                                requester: None,
+                            },
+                        )
+                        .await;
+                    let err = ChvError::Internal {
+                        reason: format!(
+                            "CHV policy guard refresh failed on attach (tap {tap_handle}): {e}"
+                        ),
+                    };
+                    return Ok(Response::new(proto::AttachVmNicResponse {
+                        result: Some(Self::err_result(&err)),
+                        namespace_handle: String::new(),
+                        tap_handle: String::new(),
+                    }));
+                }
+
                 Ok(Response::new(proto::AttachVmNicResponse {
                     result: Some(Self::ok_result()),
                     namespace_handle,
@@ -431,9 +513,45 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Err(e) => return Ok(Response::new(Self::err_result(&e))),
         };
 
+        // CHV firewall policy must be scoped to a CHV-owned interface. Without a
+        // known topology owner, fail closed rather than guess a host interface.
+        let state = match self.topologies.get(&req.network_id) {
+            Some(s) => s,
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: req.network_id.clone(),
+                };
+                return Ok(Response::new(Self::err_result(&e)));
+            }
+        };
+
+        // Record the DESIRED policy state regardless of apply outcome (the
+        // topology is ensured at this point). A failed or partial apply must not
+        // leave policy_state empty, otherwise a later NIC attach would find
+        // nothing to re-scope and the new member could sit outside the CHV
+        // boundary (fail-open, #227 S3). refresh_policy_scope re-applies the
+        // desired policy, so the boundary converges on the next attach.
+        //
+        // The entry is mutated in place under the DashMap shard lock: a
+        // read-clone-modify-insert here could LOSE the concurrent NAT half of
+        // the pair (the two RPCs may overlap), leaving a newly attached NIC
+        // outside the firewall boundary. Mutating the shared value directly
+        // makes the fw+nat pair merge atomically.
+        {
+            let mut applied = self.policy_state.entry(req.network_id.clone()).or_default();
+            applied.firewall = Some(policy.policy_json.clone());
+            applied.firewall_version = Some(policy.policy_version.clone());
+        }
+
         match self
             .executor
-            .set_firewall_policy(&req.network_id, &policy.policy_version, &policy.policy_json)
+            .set_firewall_policy(
+                &req.network_id,
+                &policy.policy_version,
+                &policy.policy_json,
+                &state.bridge_name,
+            )
             .await
         {
             Ok(()) => Ok(Response::new(Self::ok_result())),
@@ -462,9 +580,37 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Err(e) => return Ok(Response::new(Self::err_result(&e))),
         };
 
+        // Same fail-closed ownership requirement as set_firewall_policy.
+        let state = match self.topologies.get(&req.network_id) {
+            Some(s) => s,
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: req.network_id.clone(),
+                };
+                return Ok(Response::new(Self::err_result(&e)));
+            }
+        };
+
+        // Record the DESIRED NAT policy state regardless of apply outcome for
+        // the same reason as set_firewall_policy (re-scope convergence, #227
+        // S3). A failed or partial NAT apply must not leave policy_state empty.
+        // Mutated in place under the shard lock (see set_firewall_policy) so a
+        // concurrent firewall RPC cannot lose either half of the pair.
+        {
+            let mut applied = self.policy_state.entry(req.network_id.clone()).or_default();
+            applied.nat = Some(policy.policy_json.clone());
+            applied.nat_version = Some(policy.policy_version.clone());
+        }
+
         match self
             .executor
-            .set_nat_policy(&req.network_id, &policy.policy_version, &policy.policy_json)
+            .set_nat_policy(
+                &req.network_id,
+                &policy.policy_version,
+                &policy.policy_json,
+                &state.bridge_name,
+            )
             .await
         {
             Ok(()) => Ok(Response::new(Self::ok_result())),
