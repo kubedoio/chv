@@ -84,7 +84,60 @@ fn is_valid_port_spec(port: &str) -> bool {
     }
 }
 
-pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvError> {
+/// Policy chains (plain, non-hook) that carry CHV default-deny semantics inside
+/// the CHV traffic boundary. Traffic that does not match the CHV-owned interface
+/// guards below never reaches these chains.
+const POLICY_FILTER_CHAINS: [&str; 3] = ["chv-policy-in", "chv-policy-fwd", "chv-policy-out"];
+
+/// Build nftables argv for an interface guard (`iifname`/`oifname`) matching
+/// exactly the given CHV-owned interface set.
+///
+/// The guard is the authoritative scope gate: CHV base-hook chains stay
+/// `policy accept` for the host, and only CHV-owned guest traffic (topology
+/// bridge plus enslaved TAP/veth members) is dispatched into the default-deny
+/// policy chains. Returns an error when the owned set is empty so CHV never
+/// guesses a host interface to scope policy against (fail closed).
+fn iface_guard_args(kind: &str, owned_ifaces: &[String]) -> Result<Vec<String>, ChvError> {
+    if owned_ifaces.is_empty() {
+        return Err(ChvError::InvalidArgument {
+            field: "owned_ifaces".to_string(),
+            reason: "cannot scope CHV firewall policy: no CHV-owned interface is known \
+                 (topology/interface ownership is authoritative; refusing to guess a host \
+                 interface)"
+                .to_string(),
+        });
+    }
+    let mut args = vec![kind.to_string()];
+    if owned_ifaces.len() == 1 {
+        args.push(owned_ifaces[0].clone());
+    } else {
+        args.push("{".to_string());
+        for (i, iface) in owned_ifaces.iter().enumerate() {
+            let trailing = if i + 1 < owned_ifaces.len() { "," } else { "" };
+            args.push(format!("\"{}\"{}", iface, trailing));
+        }
+        args.push("}".to_string());
+    }
+    Ok(args)
+}
+
+fn add_rule_prefix(table: &str, chain: &str) -> Vec<String> {
+    ["add", "rule", "inet", table, chain]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+async fn run_nft_strings(args: Vec<String>) -> Result<(), ChvError> {
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run_nft(&refs).await
+}
+
+pub async fn apply_firewall_rules(
+    table: &str,
+    owned_ifaces: &[String],
+    policy_json: &[u8],
+) -> Result<(), ChvError> {
     let rules: Vec<FirewallRule> = if policy_json.is_empty() {
         Vec::new()
     } else {
@@ -98,13 +151,19 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
         validate_rule(rule)?;
     }
 
-    // Ensure table exists
+    // The ownership guard must resolve before any rule is written; this fails
+    // closed (no guessed host interface) per the host-safety invariant.
+    let iif_guard = iface_guard_args("iifname", owned_ifaces)?;
+    let oif_guard = iface_guard_args("oifname", owned_ifaces)?;
+
+    // Ensure the CHV table exists.
     run_nft_idempotent(&["add", "table", "inet", table]).await?;
 
-    // Create chains if needed.
-    // Use priority 0 for filter hooks (standard nftables convention for filter chains).
-    // Within each chain, rule evaluation order is positional — we enforce the correct
-    // ordering below: conntrack first, then drop/reject rules, then accept rules.
+    // Base hook chains: policy accept for the host. CHV policy is confined to
+    // CHV-owned guest traffic via the guards below; unrelated host, container,
+    // CNI, SSH and forwarded traffic is never evaluated by a CHV drop policy.
+    // (Previously these chains used `policy drop` with no interface guards,
+    // which dropped all host traffic — the bug tracked by #227.)
     for (chain, hook) in [
         ("input", "input"),
         ("forward", "forward"),
@@ -117,33 +176,71 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
             table,
             chain,
             &format!(
-                "{{ type filter hook {} priority filter ; policy drop ; }}",
+                "{{ type filter hook {} priority filter ; policy accept ; }}",
                 hook
             ),
         ])
         .await?;
     }
 
-    // Flush existing rules in filter chains (atomic replace)
-    for chain in ["input", "forward", "output"] {
+    // Plain (non-hook) policy chains carry default-deny inside the boundary.
+    for pchain in POLICY_FILTER_CHAINS {
+        run_nft_idempotent(&["add", "chain", "inet", table, pchain]).await?;
+    }
+
+    // Flush existing rules in the chains CHV owns (atomic replace). Only the
+    // CHV table is touched; unrelated host nftables state is preserved.
+    for chain in [
+        "input",
+        "forward",
+        "output",
+        "chv-policy-in",
+        "chv-policy-fwd",
+        "chv-policy-out",
+    ] {
         if let Err(e) = run_nft(&["flush", "chain", "inet", table, chain]).await {
             tracing::warn!(table, chain, error = %e, "failed to flush nftables chain");
         }
     }
 
-    // Always add conntrack established/related rule first
-    run_nft(&[
-        "add",
-        "rule",
-        "inet",
-        table,
-        "input",
-        "ct",
-        "state",
-        "established,related",
-        "accept",
-    ])
-    .await?;
+    // Dispatch ONLY CHV-owned traffic into the policy chains.
+    let mut input = add_rule_prefix(table, "input");
+    input.extend(iif_guard.clone());
+    input.extend(["jump".to_string(), "chv-policy-in".to_string()]);
+    run_nft_strings(input).await?;
+
+    let mut fwd_in = add_rule_prefix(table, "forward");
+    fwd_in.extend(iif_guard.clone());
+    fwd_in.extend(["jump".to_string(), "chv-policy-fwd".to_string()]);
+    run_nft_strings(fwd_in).await?;
+
+    let mut fwd_out = add_rule_prefix(table, "forward");
+    fwd_out.extend(oif_guard.clone());
+    fwd_out.extend(["jump".to_string(), "chv-policy-fwd".to_string()]);
+    run_nft_strings(fwd_out).await?;
+
+    let mut out = add_rule_prefix(table, "output");
+    out.extend(oif_guard.clone());
+    out.extend(["jump".to_string(), "chv-policy-out".to_string()]);
+    run_nft_strings(out).await?;
+
+    // Conntrack established/related accepted inside the boundary so existing
+    // established guest flows — including host->guest replies on the output
+    // path — are not torn down by default-deny.
+    for chain in ["chv-policy-in", "chv-policy-fwd", "chv-policy-out"] {
+        run_nft(&[
+            "add",
+            "rule",
+            "inet",
+            table,
+            chain,
+            "ct",
+            "state",
+            "established,related",
+            "accept",
+        ])
+        .await?;
+    }
 
     // Apply user rules in priority order: deny/reject rules first, then accept rules.
     // This ensures that deny rules are evaluated before allows within the same chain,
@@ -155,50 +252,64 @@ pub async fn apply_firewall_rules(table: &str, policy_json: &[u8]) -> Result<(),
         .collect();
 
     for rule in ordered_rules {
-        let chain = match rule.direction.as_str() {
-            "inbound" => "input",
-            "outbound" => "output",
+        // Cover the real traffic paths: host-stack (input/output) AND the guest
+        // forwarding path (forward), which the original input/output-only
+        // mapping missed (per #227).
+        let chains: &[&str] = match rule.direction.as_str() {
+            "inbound" => &["chv-policy-in", "chv-policy-fwd"],
+            "outbound" => &["chv-policy-out", "chv-policy-fwd"],
             _ => continue,
         };
 
-        let mut args: Vec<&str> = vec!["add", "rule", "inet", table, chain];
+        for chain in chains {
+            let mut args: Vec<&str> = vec!["add", "rule", "inet", table, chain];
 
-        // Protocol match (skip for "all")
-        let protocol_lower = rule.protocol.to_lowercase();
-        if protocol_lower != "all" {
-            args.push("meta");
-            args.push("l4proto");
-            args.push(&protocol_lower);
-        }
-
-        // Source CIDR match
-        let cidr_owned;
-        if let Some(ref cidr) = rule.source_cidr {
-            args.push("ip");
-            args.push("saddr");
-            cidr_owned = cidr.clone();
-            args.push(&cidr_owned);
-        }
-
-        // Destination port match
-        let port_owned;
-        if let Some(ref port) = rule.dest_port {
-            if protocol_lower == "tcp" || protocol_lower == "udp" {
+            // Protocol match (skip for "all")
+            let protocol_lower = rule.protocol.to_lowercase();
+            if protocol_lower != "all" {
+                args.push("meta");
+                args.push("l4proto");
                 args.push(&protocol_lower);
-                args.push("dport");
-                port_owned = port.clone();
-                args.push(&port_owned);
             }
+
+            // Source CIDR match
+            let cidr_owned;
+            if let Some(ref cidr) = rule.source_cidr {
+                args.push("ip");
+                args.push("saddr");
+                cidr_owned = cidr.clone();
+                args.push(&cidr_owned);
+            }
+
+            // Destination port match
+            let port_owned;
+            if let Some(ref port) = rule.dest_port {
+                if protocol_lower == "tcp" || protocol_lower == "udp" {
+                    args.push(&protocol_lower);
+                    args.push("dport");
+                    port_owned = port.clone();
+                    args.push(&port_owned);
+                }
+            }
+
+            // Action
+            let action = rule.action.to_lowercase();
+            args.push(&action);
+
+            run_nft(&args).await?;
         }
-
-        // Action
-        let action = rule.action.to_lowercase();
-        args.push(&action);
-
-        run_nft(&args).await?;
     }
 
-    info!(table = %table, rule_count = rules.len(), "firewall rules applied");
+    // Default-deny terminates each policy chain for CHV-owned guest traffic.
+    for pchain in POLICY_FILTER_CHAINS {
+        run_nft(&["add", "rule", "inet", table, pchain, "counter", "drop"]).await?;
+    }
+
+    info!(
+        table = %table,
+        rule_count = rules.len(),
+        "firewall rules applied (CHV-owned boundary)"
+    );
     Ok(())
 }
 
@@ -209,7 +320,11 @@ pub struct NatRule {
     pub masquerade: Option<bool>,
 }
 
-pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvError> {
+pub async fn apply_nat_rules(
+    table: &str,
+    owned_ifaces: &[String],
+    policy_json: &[u8],
+) -> Result<(), ChvError> {
     let rules: Vec<NatRule> = if policy_json.is_empty() {
         Vec::new()
     } else {
@@ -236,7 +351,9 @@ pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvE
         }
     }
 
-    // Ensure table and postrouting chain exist
+    let iif_guard = iface_guard_args("iifname", owned_ifaces)?;
+
+    // Ensure table and postrouting chain exist.
     run_nft_idempotent(&["add", "table", "inet", table]).await?;
     run_nft_idempotent(&[
         "add",
@@ -248,48 +365,51 @@ pub async fn apply_nat_rules(table: &str, policy_json: &[u8]) -> Result<(), ChvE
     ])
     .await?;
 
-    // Flush existing NAT rules
+    // Flush existing NAT rules.
     if let Err(e) = run_nft(&["flush", "chain", "inet", table, "postrouting"]).await {
         tracing::warn!(table, error = %e, "failed to flush postrouting chain");
     }
 
     if rules.is_empty() {
-        // Default: masquerade all non-loopback traffic
-        run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            table,
-            "postrouting",
-            "oif",
-            "!=",
-            "lo",
-            "masquerade",
-        ])
-        .await?;
+        // Default masquerade ONLY for CHV-owned guest traffic leaving the host.
+        // (Previously any non-loopback traffic on the host was masqueraded.)
+        let mut args = add_rule_prefix(table, "postrouting");
+        args.extend(iif_guard);
+        args.extend([
+            "oif".to_string(),
+            "!=".to_string(),
+            "lo".to_string(),
+            "masquerade".to_string(),
+        ]);
+        run_nft_strings(args).await?;
     } else {
         for rule in &rules {
-            let mut args: Vec<&str> = vec!["add", "rule", "inet", table, "postrouting"];
+            let mut args = add_rule_prefix(table, "postrouting");
+            args.extend(iif_guard.clone());
 
-            args.push("ip");
-            args.push("saddr");
-            args.push(&rule.source_cidr);
+            args.push("ip".to_string());
+            args.push("saddr".to_string());
+            args.push(rule.source_cidr.clone());
 
             if let Some(ref dest) = rule.dest_cidr {
-                args.push("ip");
-                args.push("daddr");
-                args.push(dest);
+                args.push("ip".to_string());
+                args.push("daddr".to_string());
+                args.push(dest.clone());
             }
 
             if rule.masquerade.unwrap_or(true) {
-                args.push("masquerade");
+                args.push("masquerade".to_string());
             }
 
-            run_nft(&args).await?;
+            run_nft_strings(args).await?;
         }
     }
 
-    info!(table = %table, rule_count = rules.len(), "NAT rules applied");
+    info!(
+        table = %table,
+        rule_count = rules.len(),
+        "NAT rules applied (CHV-owned boundary)"
+    );
     Ok(())
 }
 
@@ -443,5 +563,27 @@ mod tests {
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].dest_port.as_deref(), Some("22"));
         assert!(rules[1].source_cidr.is_none());
+    }
+
+    #[test]
+    fn test_iface_guard_args_empty_fails_closed() {
+        assert!(iface_guard_args("iifname", &[]).is_err());
+        assert!(iface_guard_args("oifname", &[]).is_err());
+    }
+
+    #[test]
+    fn test_iface_guard_args_single() {
+        let args = iface_guard_args("iifname", &["br-net1".to_string()]).unwrap();
+        assert_eq!(args, vec!["iifname", "br-net1"]);
+    }
+
+    #[test]
+    fn test_iface_guard_args_multiple() {
+        let args =
+            iface_guard_args("oifname", &["br-net1".to_string(), "tap-1111".to_string()]).unwrap();
+        assert_eq!(
+            args,
+            vec!["oifname", "{", "\"br-net1\",", "\"tap-1111\"", "}"]
+        );
     }
 }

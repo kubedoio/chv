@@ -60,6 +60,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         network_id: &str,
         policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError>;
 
     async fn set_nat_policy(
@@ -67,6 +68,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         network_id: &str,
         policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError>;
 
     async fn ensure_dhcp_scope(
@@ -302,6 +304,50 @@ impl LinuxExecutor {
 
     async fn namespace_exists(name: &str) -> bool {
         std::path::Path::new("/var/run/netns").join(name).exists()
+    }
+
+    /// Resolve the authoritative CHV-owned interface set for a topology bridge:
+    /// the bridge itself plus any enslaved member devices (VM TAPs/veths).
+    ///
+    /// Fails closed when the topology-owned bridge does not exist, so CHV never
+    /// guesses a host interface to scope firewall/NAT policy against (#227).
+    async fn owned_ifaces_for_bridge(bridge_name: &str) -> Result<Vec<String>, ChvError> {
+        if !Self::bridge_exists(bridge_name).await {
+            return Err(ChvError::NotFound {
+                resource: "bridge".to_string(),
+                id: bridge_name.to_string(),
+            });
+        }
+        let out = Command::new("ip")
+            .args(["link", "show", "master", bridge_name])
+            .output()
+            .await
+            .map_err(|e| ChvError::Io {
+                path: "ip".to_string(),
+                source: e,
+            })?;
+        if !out.status.success() {
+            return Err(ChvError::NetworkUnavailable {
+                resource: "ip".to_string(),
+                reason: format!("ip link show master {} failed", bridge_name),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut owned: Vec<String> = vec![bridge_name.to_string()];
+        for line in stdout.lines() {
+            let dev = line
+                .split_whitespace()
+                .next()
+                .map(|s| s.trim_end_matches(':'))
+                .filter(|s| !s.is_empty() && *s != bridge_name)
+                .map(str::to_string);
+            if let Some(dev) = dev {
+                owned.push(dev);
+            }
+        }
+        owned.sort();
+        owned.dedup();
+        Ok(owned)
     }
 
     fn tap_name_for_nic(nic_id: &str) -> String {
@@ -908,9 +954,11 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         _policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
-        crate::firewall::apply_firewall_rules(&table, policy_json)
+        let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
+        crate::firewall::apply_firewall_rules(&table, &owned, policy_json)
             .await
             .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall")
@@ -923,9 +971,11 @@ impl NetworkExecutor for LinuxExecutor {
         network_id: &str,
         _policy_version: &str,
         policy_json: &[u8],
+        bridge_name: &str,
     ) -> Result<(), ChvError> {
         let table = Self::sanitized_nft_table(network_id)?;
-        crate::firewall::apply_nat_rules(&table, policy_json)
+        let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
+        crate::firewall::apply_nat_rules(&table, &owned, policy_json)
             .await
             .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_nat").increment(1);
@@ -1006,6 +1056,14 @@ impl NetworkExecutor for LinuxExecutor {
             "inet",
             &table,
             "prerouting",
+            // Never DNAT loopback. A full bind-interface source guard still
+            // requires a declared uplink in the exposure API (tracked); the
+            // filter hooks use the CHV-owned interface guards from the firewall
+            // path, and any unrelated host port collision on the same host IP is
+            // a documented residual limitation of the exposure feature.
+            "iifname",
+            "!=",
+            "lo",
             protocol,
             "dport",
             &external_port.to_string(),
@@ -1409,6 +1467,7 @@ mod tests {
             _network_id: &str,
             _policy_version: &str,
             _policy_json: &[u8],
+            _bridge_name: &str,
         ) -> Result<(), ChvError> {
             unimplemented!()
         }
@@ -1418,6 +1477,7 @@ mod tests {
             _network_id: &str,
             _policy_version: &str,
             _policy_json: &[u8],
+            _bridge_name: &str,
         ) -> Result<(), ChvError> {
             unimplemented!()
         }

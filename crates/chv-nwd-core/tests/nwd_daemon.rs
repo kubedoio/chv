@@ -11,6 +11,7 @@ use chv_nwd_core::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyRe
 use chv_nwd_core::{NetworkServer, TopologyState};
 use chv_observability::Metrics;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tonic::transport::{Endpoint, Uri};
@@ -67,6 +68,7 @@ impl NetworkExecutor for MockExecutor {
         _network_id: &str,
         _policy_version: &str,
         _policy_json: &[u8],
+        _bridge_name: &str,
     ) -> Result<(), ChvError> {
         Ok(())
     }
@@ -76,6 +78,7 @@ impl NetworkExecutor for MockExecutor {
         _network_id: &str,
         _policy_version: &str,
         _policy_json: &[u8],
+        _bridge_name: &str,
     ) -> Result<(), ChvError> {
         Ok(())
     }
@@ -193,6 +196,224 @@ impl NetworkExecutor for MockExecutor {
             vxlan_interface_up: false,
             fdb_entry_count: 0,
         })
+    }
+}
+
+/// Wraps `MockExecutor` and records `set_firewall_policy` / `set_nat_policy`
+/// invocations so tests can assert that VM-NIC attach refreshes the CHV-owned
+/// guard scope with the previously applied policy.
+#[derive(Clone)]
+struct RecordingExecutor {
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl NetworkExecutor for RecordingExecutor {
+    async fn ensure_topology(
+        &self,
+        spec: &chv_nwd_api::chv_nwd_api::TopologySpec,
+    ) -> Result<TopologyApplyResult, ChvError> {
+        MockExecutor.ensure_topology(spec).await
+    }
+
+    async fn delete_topology(
+        &self,
+        _network_id: &str,
+        _state: &TopologyState,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn health(&self, _network_id: &str, _state: &TopologyState) -> Result<String, ChvError> {
+        Ok("healthy".to_string())
+    }
+
+    async fn attach_vm_nic(
+        &self,
+        network_id: &str,
+        nic_id: &str,
+        _vm_id: &str,
+        _bridge_name: &str,
+        _mac_address: &str,
+        _ip_address: &str,
+    ) -> Result<(String, String), ChvError> {
+        Ok((format!("ns-{}", network_id), format!("tap-{}", nic_id)))
+    }
+
+    async fn detach_vm_nic(
+        &self,
+        _nic_id: &str,
+        _ownership: chv_common::AttachmentOwnership,
+    ) -> Result<(), ChvError> {
+        Ok(())
+    }
+
+    async fn set_firewall_policy(
+        &self,
+        network_id: &str,
+        _policy_version: &str,
+        _policy_json: &[u8],
+        bridge_name: &str,
+    ) -> Result<(), ChvError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("fw:{network_id}:{bridge_name}"));
+        Ok(())
+    }
+
+    async fn set_nat_policy(
+        &self,
+        network_id: &str,
+        _policy_version: &str,
+        _policy_json: &[u8],
+        bridge_name: &str,
+    ) -> Result<(), ChvError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("nat:{network_id}:{bridge_name}"));
+        Ok(())
+    }
+
+    async fn ensure_dhcp_scope(
+        &self,
+        network_id: &str,
+        cidr: &str,
+        range_start: &str,
+        range_end: &str,
+        dns_servers: &[String],
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .ensure_dhcp_scope(network_id, cidr, range_start, range_end, dns_servers)
+            .await
+    }
+
+    async fn ensure_dns_scope(
+        &self,
+        network_id: &str,
+        forwarders: &[&str],
+        static_records: &std::collections::HashMap<String, String>,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .ensure_dns_scope(network_id, forwarders, static_records)
+            .await
+    }
+
+    async fn expose_service(
+        &self,
+        network_id: &str,
+        exposure_id: &str,
+        protocol: &str,
+        external_port: u32,
+        target_ip: &str,
+        target_port: u32,
+        mode: &str,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .expose_service(
+                network_id,
+                exposure_id,
+                protocol,
+                external_port,
+                target_ip,
+                target_port,
+                mode,
+            )
+            .await
+    }
+
+    async fn withdraw_service_exposure(
+        &self,
+        network_id: &str,
+        exposure_id: &str,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .withdraw_service_exposure(network_id, exposure_id)
+            .await
+    }
+
+    async fn create_vxlan_interface(
+        &self,
+        namespace: &str,
+        bridge_name: &str,
+        vni: u32,
+        vtep_ip: &str,
+        vtep_port: u32,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .create_vxlan_interface(namespace, bridge_name, vni, vtep_ip, vtep_port)
+            .await
+    }
+
+    async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError> {
+        MockExecutor.delete_vxlan_interface(namespace, vni).await
+    }
+
+    async fn add_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .add_fdb_entry(namespace, vni, mac_address, vtep_ip)
+            .await
+    }
+
+    async fn delete_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .delete_fdb_entry(namespace, vni, mac_address, vtep_ip)
+            .await
+    }
+
+    async fn replace_fdb_entry(
+        &self,
+        namespace: &str,
+        vni: u32,
+        mac_address: &str,
+        new_vtep_ip: &str,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .replace_fdb_entry(namespace, vni, mac_address, new_vtep_ip)
+            .await
+    }
+
+    async fn send_gratuitous_arp(
+        &self,
+        namespace: &str,
+        bridge_name: &str,
+        vm_ip: &str,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .send_gratuitous_arp(namespace, bridge_name, vm_ip)
+            .await
+    }
+
+    async fn set_arp_suppression(
+        &self,
+        namespace: &str,
+        vni: u32,
+        enabled: bool,
+    ) -> Result<(), ChvError> {
+        MockExecutor
+            .set_arp_suppression(namespace, vni, enabled)
+            .await
+    }
+
+    async fn get_overlay_status(
+        &self,
+        namespace: &str,
+        vni: u32,
+    ) -> Result<OverlayStatusInfo, ChvError> {
+        MockExecutor.get_overlay_status(namespace, vni).await
     }
 }
 
@@ -610,4 +831,104 @@ async fn firewall_nat_and_exposure_smoke() {
         .unwrap()
         .into_inner();
     assert_eq!(wd.status, "OK");
+}
+
+#[tokio::test]
+async fn attach_refreshes_policy_guard_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let rec = RecordingExecutor {
+        calls: calls.clone(),
+    };
+    let server = NetworkServer::new(rec, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    // Ensure topology with the authoritative bridge "br-rec".
+    let ensure = client
+        .ensure_network_topology(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(TopologySpec {
+                network_id: "net-rec".to_string(),
+                tenant_id: "t1".to_string(),
+                bridge_name: "br-rec".to_string(),
+                namespace_name: "ns-rec".to_string(),
+                subnet_cidr: "10.0.7.0/24".to_string(),
+                gateway_ip: "10.0.7.1".to_string(),
+                options: Default::default(),
+                vni: 0,
+                vtep_endpoints: vec![],
+                overlay_type: 0,
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ensure.status, "OK");
+
+    // Apply firewall+nat once -> both are recorded (stored) exactly once.
+    let fw = client
+        .set_firewall_policy(SetFirewallPolicyRequest {
+            meta: None,
+            network_id: "net-rec".to_string(),
+            policy: Some(FirewallPolicy {
+                policy_version: "v1".to_string(),
+                policy_json: b"[]".to_vec(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(fw.status, "OK");
+
+    let nat = client
+        .set_nat_policy(chv_nwd_api::chv_nwd_api::SetNatPolicyRequest {
+            meta: None,
+            network_id: "net-rec".to_string(),
+            policy: Some(NatPolicy {
+                policy_version: "v1".to_string(),
+                policy_json: b"[]".to_vec(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(nat.status, "OK");
+    assert_eq!(calls.lock().unwrap().len(), 2);
+
+    // Attach a NIC -> the apply-time guard set can no longer see the new
+    // interface, so the handler must re-assert (refresh) the stored policy
+    // against the authoritative topology bridge. This proves a NIC attached
+    // after policy application is still inside the CHV default-deny boundary.
+    let attach = client
+        .attach_vm_nic(AttachVmNicRequest {
+            meta: None,
+            nic: Some(NicSpec {
+                nic_id: "nic-rec".to_string(),
+                vm_id: "vm-rec".to_string(),
+                network_id: "net-rec".to_string(),
+                mac_address: "02:00:00:00:00:0a".to_string(),
+                tap_name: "tap-rec".to_string(),
+                ip_address: "10.0.7.10".to_string(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(attach.result.as_ref().unwrap().status, "OK");
+
+    let recorded = calls.lock().unwrap();
+    assert_eq!(
+        recorded.len(),
+        4,
+        "attach must refresh both firewall and nat guard scopes"
+    );
+    assert_eq!(recorded[2], "fw:net-rec:br-rec");
+    assert_eq!(recorded[3], "nat:net-rec:br-rec");
 }

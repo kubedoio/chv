@@ -11,12 +11,24 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+/// Last successfully applied CHV firewall/NAT policy for a network, used to
+/// re-scope the CHV-owned interface guard set when a VM NIC attaches so the
+/// new interface is covered by CHV default-deny.
+#[derive(Clone, Default)]
+struct AppliedPolicies {
+    firewall: Option<Vec<u8>>,
+    firewall_version: Option<String>,
+    nat: Option<Vec<u8>>,
+    nat_version: Option<String>,
+}
+
 pub struct NetworkServiceImpl<E: NetworkExecutor> {
     executor: Arc<E>,
     topologies: Arc<TopologyTable>,
     metrics: Arc<Metrics>,
     security_policies: Arc<DashMap<String, proto::SecurityPolicy>>,
     rate_limit_policies: Arc<DashMap<String, proto::RateLimitPolicy>>,
+    policy_state: Arc<DashMap<String, AppliedPolicies>>,
     ebpf: Arc<dyn EbpfManager>,
     /// Counter tracking eBPF program load failures.
     ebpf_load_failures: Arc<AtomicU32>,
@@ -30,9 +42,32 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
             metrics,
             security_policies: Arc::new(DashMap::new()),
             rate_limit_policies: Arc::new(DashMap::new()),
+            policy_state: Arc::new(DashMap::new()),
             ebpf: Arc::new(ebpf::NoopEbpfManager),
             ebpf_load_failures: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Re-assert the last applied firewall/NAT policy for a topology so its
+    /// CHV-owned interface guard set includes any newly enslaved NIC. Fails
+    /// closed (returns an error) so an attached NIC is never left outside the
+    /// default-deny boundary.
+    async fn refresh_policy_scope(&self, state: &TopologyState) -> Result<(), ChvError> {
+        let applied = self.policy_state.get(&state.network_id).map(|p| p.clone());
+        let Some(applied) = applied else {
+            return Ok(());
+        };
+        if let (Some(json), Some(ver)) = (&applied.firewall, &applied.firewall_version) {
+            self.executor
+                .set_firewall_policy(&state.network_id, ver, json, &state.bridge_name)
+                .await?;
+        }
+        if let (Some(json), Some(ver)) = (&applied.nat, &applied.nat_version) {
+            self.executor
+                .set_nat_policy(&state.network_id, ver, json, &state.bridge_name)
+                .await?;
+        }
+        Ok(())
     }
 
     pub fn topologies(&self) -> Arc<TopologyTable> {
@@ -338,6 +373,39 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
                     }));
                 }
 
+                // Re-scope the CHV firewall/NAT guard sets so the newly attached
+                // NIC is covered by CHV default-deny. Fail closed: if a previously
+                // applied policy cannot be refreshed, refuse the attach rather
+                // than leave the new interface undispatched and unprotected.
+                if let Err(e) = self.refresh_policy_scope(&state).await {
+                    tracing::error!(
+                        network_id = %nic.network_id,
+                        error = %e,
+                        "policy guard refresh failed — refusing NIC attach (default-deny)"
+                    );
+                    let _ = self
+                        .executor
+                        .detach_vm_nic(
+                            &nic.nic_id,
+                            chv_common::AttachmentOwnership {
+                                vm_id: nic.vm_id.clone(),
+                                operation_id: req.meta.as_ref().map(|m| m.operation_id.clone()),
+                                requester: None,
+                            },
+                        )
+                        .await;
+                    let err = ChvError::Internal {
+                        reason: format!(
+                            "CHV policy guard refresh failed on attach (tap {tap_handle}): {e}"
+                        ),
+                    };
+                    return Ok(Response::new(proto::AttachVmNicResponse {
+                        result: Some(Self::err_result(&err)),
+                        namespace_handle: String::new(),
+                        tap_handle: String::new(),
+                    }));
+                }
+
                 Ok(Response::new(proto::AttachVmNicResponse {
                     result: Some(Self::ok_result()),
                     namespace_handle,
@@ -431,12 +499,40 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Err(e) => return Ok(Response::new(Self::err_result(&e))),
         };
 
+        // CHV firewall policy must be scoped to a CHV-owned interface. Without a
+        // known topology owner, fail closed rather than guess a host interface.
+        let state = match self.topologies.get(&req.network_id) {
+            Some(s) => s,
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: req.network_id.clone(),
+                };
+                return Ok(Response::new(Self::err_result(&e)));
+            }
+        };
+
         match self
             .executor
-            .set_firewall_policy(&req.network_id, &policy.policy_version, &policy.policy_json)
+            .set_firewall_policy(
+                &req.network_id,
+                &policy.policy_version,
+                &policy.policy_json,
+                &state.bridge_name,
+            )
             .await
         {
-            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Ok(()) => {
+                let mut applied = self
+                    .policy_state
+                    .get(&req.network_id)
+                    .map(|p| p.clone())
+                    .unwrap_or_default();
+                applied.firewall = Some(policy.policy_json.clone());
+                applied.firewall_version = Some(policy.policy_version.clone());
+                self.policy_state.insert(req.network_id.clone(), applied);
+                Ok(Response::new(Self::ok_result()))
+            }
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }
     }
@@ -462,12 +558,39 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             Err(e) => return Ok(Response::new(Self::err_result(&e))),
         };
 
+        // Same fail-closed ownership requirement as set_firewall_policy.
+        let state = match self.topologies.get(&req.network_id) {
+            Some(s) => s,
+            None => {
+                let e = ChvError::NotFound {
+                    resource: "topology".to_string(),
+                    id: req.network_id.clone(),
+                };
+                return Ok(Response::new(Self::err_result(&e)));
+            }
+        };
+
         match self
             .executor
-            .set_nat_policy(&req.network_id, &policy.policy_version, &policy.policy_json)
+            .set_nat_policy(
+                &req.network_id,
+                &policy.policy_version,
+                &policy.policy_json,
+                &state.bridge_name,
+            )
             .await
         {
-            Ok(()) => Ok(Response::new(Self::ok_result())),
+            Ok(()) => {
+                let mut applied = self
+                    .policy_state
+                    .get(&req.network_id)
+                    .map(|p| p.clone())
+                    .unwrap_or_default();
+                applied.nat = Some(policy.policy_json.clone());
+                applied.nat_version = Some(policy.policy_version.clone());
+                self.policy_state.insert(req.network_id.clone(), applied);
+                Ok(Response::new(Self::ok_result()))
+            }
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }
     }
