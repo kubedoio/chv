@@ -281,7 +281,7 @@ fn cert_parser_round_trips_node_id() {
 #[test]
 #[cfg(feature = "dev")]
 fn interceptor_insecure_mode_marks_request() {
-    let interceptor = PeerIdentityInterceptor::new(true);
+    let interceptor = PeerIdentityInterceptor::new(true).expect("dev build permits insecure mode");
     let req: Request<()> = Request::new(());
     let out = interceptor.intercept(req).expect("insecure passthrough");
     assert!(out.extensions().get::<InsecurePeer>().is_some());
@@ -293,7 +293,7 @@ fn interceptor_insecure_mode_marks_request() {
 /// production request without a pinned peer identity.
 #[test]
 fn interceptor_secure_mode_rejects_when_tls_info_absent() {
-    let interceptor = PeerIdentityInterceptor::new(false);
+    let interceptor = PeerIdentityInterceptor::new(false).expect("secure mode always valid");
     let req: Request<()> = Request::new(());
     let err = interceptor
         .intercept(req)

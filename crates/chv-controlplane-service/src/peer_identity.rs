@@ -76,29 +76,23 @@ pub struct PeerIdentityInterceptor {
 }
 
 impl PeerIdentityInterceptor {
-    /// Construct the interceptor.
+    /// Construct the interceptor after validating the requested security mode.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics at startup if `allow_insecure` is `true` and the binary was **not**
-    /// compiled with the `dev` Cargo feature. This is an intentional deployment
-    /// guard: `CHV_ALLOW_INSECURE=1` disables all mTLS peer-identity enforcement,
-    /// and must never be usable in production builds.
+    /// Returns [`ControlPlaneServiceError::InsecureModeLockedOut`] when
+    /// `allow_insecure` is `true` and the crate was **not** compiled with the
+    /// `dev` Cargo feature. This is a typed, non-panicking deployment guard:
+    /// `CHV_ALLOW_INSECURE=1` disables all mTLS peer-identity enforcement, and
+    /// must never be usable in production builds.
     ///
     /// To build for local development:
     /// ```text
     /// cargo build --features dev
     /// ```
-    pub fn new(allow_insecure: bool) -> Self {
-        if allow_insecure && !cfg!(feature = "dev") {
-            panic!(
-                "CHV_ALLOW_INSECURE=1 is set but this binary was not compiled with the 'dev' \
-                 Cargo feature. This env var disables all mTLS peer-identity enforcement and \
-                 must never be enabled in production. \
-                 To use it for local development, rebuild with: cargo build --features dev"
-            );
-        }
-        Self { allow_insecure }
+    pub fn new(allow_insecure: bool) -> Result<Self, ControlPlaneServiceError> {
+        validate_security_mode(allow_insecure)?;
+        Ok(Self { allow_insecure })
     }
 
     /// Apply the interceptor to a request, mutating its extensions in-place.
@@ -125,6 +119,31 @@ impl PeerIdentityInterceptor {
         request.extensions_mut().insert(PeerNodeId(peer_node_id));
         Ok(request)
     }
+}
+
+/// Validate the peer-identity security mode requested at startup.
+///
+/// A production build must never run with mTLS peer-identity enforcement
+/// disabled. `allow_insecure == true` is only valid when this crate was compiled
+/// with the `dev` Cargo feature.
+///
+/// This is a **typed, non-panicking** startup validation (issue #233, ADR-014):
+/// bootstrap calls it before constructing listeners/interceptors, and the error
+/// propagates as [`ControlPlaneServiceError::InsecureModeLockedOut`] so the
+/// process exits with a clean, operator-greppable message instead of a panic.
+///
+/// The message is part of the operator contract — runbooks/search tooling match
+/// on "dev feature" / "CHV_ALLOW_INSECURE".
+pub fn validate_security_mode(allow_insecure: bool) -> Result<(), ControlPlaneServiceError> {
+    if allow_insecure && !cfg!(feature = "dev") {
+        return Err(ControlPlaneServiceError::InsecureModeLockedOut(
+            "CHV_ALLOW_INSECURE=1 is set but this build does not have the 'dev' Cargo feature. \
+             This env var disables all mTLS peer-identity enforcement and must never be enabled \
+             in production. To use it for local development, rebuild with: cargo build --features dev"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Errors returned when extracting a peer's node identity from request extensions.
@@ -332,5 +351,34 @@ mod tests {
             !cfg!(feature = "dev"),
             "production builds must not have 'dev' feature enabled"
         );
+    }
+
+    #[test]
+    fn validate_security_mode_allows_secure_mode() {
+        // Never gated: production mTLS mode is always permitted.
+        assert!(validate_security_mode(false).is_ok());
+    }
+
+    #[test]
+    fn validate_security_mode_rejects_insecure_without_dev_feature() {
+        // In a non-dev build (the default test compilation), requesting
+        // insecure mode must fail with a TYPED error — never a panic.
+        #[cfg(not(feature = "dev"))]
+        match validate_security_mode(true) {
+            Err(ControlPlaneServiceError::InsecureModeLockedOut(msg)) => {
+                assert!(
+                    msg.contains("CHV_ALLOW_INSECURE") && msg.contains("Cargo feature"),
+                    "operator-greppable message expected, got: {msg}"
+                );
+            }
+            other => panic!("expected InsecureModeLockedOut, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn validate_security_mode_allows_insecure_with_dev_feature() {
+        // Only valid when the crate is compiled with the `dev` feature.
+        assert!(validate_security_mode(true).is_ok());
     }
 }

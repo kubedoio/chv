@@ -1,8 +1,9 @@
 use chv_config::{ControlPlaneConfig, ControlPlaneTlsConfig};
 use chv_controlplane_service::{
     compat::{CompatibilityMatrix, Component},
-    ControlPlaneComponents, ControlPlaneMutationService, ControlPlaneRuntime, ControlPlaneService,
-    ControlPlaneServiceError, EnrollmentServiceImplementation, InventoryServiceImplementation,
+    validate_security_mode, ControlPlaneComponents, ControlPlaneMutationService,
+    ControlPlaneRuntime, ControlPlaneService, ControlPlaneServiceError,
+    EnrollmentServiceImplementation, InventoryServiceImplementation,
     LifecycleServiceImplementation, NodeClientPool, Orchestrator, ReconcileServiceImplementation,
     TelemetryServiceImplementation,
 };
@@ -171,6 +172,11 @@ pub async fn build_service(
     let allow_insecure = std::env::var("CHV_ALLOW_INSECURE")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // Security-mode gate (issue #233): typed, non-panicking startup validation
+    // BEFORE any listener/interceptor is constructed. A build without the `dev`
+    // feature must never start with insecure peer-identity enforcement; the
+    // interceptor constructor repeats this check as defense-in-depth.
+    validate_security_mode(allow_insecure)?;
     validate_tls(&config.tls, allow_insecure)?;
 
     let store_config = ControlPlaneStoreConfig {
