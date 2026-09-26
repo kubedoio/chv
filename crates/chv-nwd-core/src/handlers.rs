@@ -53,18 +53,29 @@ impl<E: NetworkExecutor> NetworkServiceImpl<E> {
     /// closed (returns an error) so an attached NIC is never left outside the
     /// default-deny boundary.
     async fn refresh_policy_scope(&self, state: &TopologyState) -> Result<(), ChvError> {
-        let applied = self.policy_state.get(&state.network_id).map(|p| p.clone());
-        let Some(applied) = applied else {
+        // Snapshot semantics: if no record exists for the network there is
+        // nothing to re-scope. Re-read the latest desired JSON/version
+        // immediately before each apply so a concurrent policy RPC that landed
+        // after an earlier snapshot is never reverted by stale desired-state.
+        if self.policy_state.get(&state.network_id).is_none() {
             return Ok(());
-        };
-        if let (Some(json), Some(ver)) = (&applied.firewall, &applied.firewall_version) {
+        }
+        let firewall = self
+            .policy_state
+            .get(&state.network_id)
+            .and_then(|p| p.firewall.clone().zip(p.firewall_version.clone()));
+        if let Some((json, ver)) = firewall {
             self.executor
-                .set_firewall_policy(&state.network_id, ver, json, &state.bridge_name)
+                .set_firewall_policy(&state.network_id, &ver, &json, &state.bridge_name)
                 .await?;
         }
-        if let (Some(json), Some(ver)) = (&applied.nat, &applied.nat_version) {
+        let nat = self
+            .policy_state
+            .get(&state.network_id)
+            .and_then(|p| p.nat.clone().zip(p.nat_version.clone()));
+        if let Some((json, ver)) = nat {
             self.executor
-                .set_nat_policy(&state.network_id, ver, json, &state.bridge_name)
+                .set_nat_policy(&state.network_id, &ver, &json, &state.bridge_name)
                 .await?;
         }
         Ok(())
@@ -521,14 +532,17 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         // nothing to re-scope and the new member could sit outside the CHV
         // boundary (fail-open, #227 S3). refresh_policy_scope re-applies the
         // desired policy, so the boundary converges on the next attach.
-        let mut applied = self
-            .policy_state
-            .get(&req.network_id)
-            .map(|p| p.clone())
-            .unwrap_or_default();
-        applied.firewall = Some(policy.policy_json.clone());
-        applied.firewall_version = Some(policy.policy_version.clone());
-        self.policy_state.insert(req.network_id.clone(), applied);
+        //
+        // The entry is mutated in place under the DashMap shard lock: a
+        // read-clone-modify-insert here could LOSE the concurrent NAT half of
+        // the pair (the two RPCs may overlap), leaving a newly attached NIC
+        // outside the firewall boundary. Mutating the shared value directly
+        // makes the fw+nat pair merge atomically.
+        {
+            let mut applied = self.policy_state.entry(req.network_id.clone()).or_default();
+            applied.firewall = Some(policy.policy_json.clone());
+            applied.firewall_version = Some(policy.policy_version.clone());
+        }
 
         match self
             .executor
@@ -581,14 +595,13 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
         // Record the DESIRED NAT policy state regardless of apply outcome for
         // the same reason as set_firewall_policy (re-scope convergence, #227
         // S3). A failed or partial NAT apply must not leave policy_state empty.
-        let mut applied = self
-            .policy_state
-            .get(&req.network_id)
-            .map(|p| p.clone())
-            .unwrap_or_default();
-        applied.nat = Some(policy.policy_json.clone());
-        applied.nat_version = Some(policy.policy_version.clone());
-        self.policy_state.insert(req.network_id.clone(), applied);
+        // Mutated in place under the shard lock (see set_firewall_policy) so a
+        // concurrent firewall RPC cannot lose either half of the pair.
+        {
+            let mut applied = self.policy_state.entry(req.network_id.clone()).or_default();
+            applied.nat = Some(policy.policy_json.clone());
+            applied.nat_version = Some(policy.policy_version.clone());
+        }
 
         match self
             .executor

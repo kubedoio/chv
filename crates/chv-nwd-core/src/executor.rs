@@ -355,6 +355,16 @@ impl LinuxExecutor {
     /// Parsing field 0 (the ifindex) instead would silently exclude every real
     /// member from the CHV-owned guard set (fail-open under br_netfilter).
     fn parse_ip_link_master_line(line: &str) -> Option<String> {
+        // Only a `N:` ifindex header line introduces a device. Continuation
+        // lines inside `ip link show master <br>` output (`link/ether ...`,
+        // `altname ...`, `inet ...`) MUST be ignored: a token pulled from them
+        // (e.g. `altname enp0s18` → `enp0s18`) could otherwise widen the
+        // CHV-owned guard set to a real host interface on a later apply.
+        let header = line.split_whitespace().next()?;
+        let index_field = header.strip_suffix(':')?;
+        if index_field.is_empty() || !index_field.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         let name = line.split_whitespace().nth(1)?;
         let name = name.split(':').next()?; // drop trailing ':'
         let name = name.split('@').next()?; // drop veth @peer suffix
@@ -1145,7 +1155,12 @@ impl NetworkExecutor for LinuxExecutor {
     ) -> Result<(), ChvError> {
         let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
-        let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
+        let owned = Self::owned_ifaces_for_bridge(bridge_name)
+            .await
+            .inspect_err(|_e| {
+                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "owned_ifaces_for_bridge")
+                    .increment(1);
+            })?;
         crate::firewall::apply_firewall_rules(&table, &owned, policy_json)
             .await
             .inspect_err(|_e| {
@@ -1170,7 +1185,12 @@ impl NetworkExecutor for LinuxExecutor {
     ) -> Result<(), ChvError> {
         let _guard = self.nft_lock.lock().await;
         let table = Self::sanitized_nft_table(network_id)?;
-        let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
+        let owned = Self::owned_ifaces_for_bridge(bridge_name)
+            .await
+            .inspect_err(|_e| {
+                metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "owned_ifaces_for_bridge")
+                    .increment(1);
+            })?;
         crate::firewall::apply_nat_rules(&table, &owned, policy_json)
             .await
             .inspect_err(|_e| {
@@ -1884,6 +1904,26 @@ mod tests {
         // Blank / non-member lines must not yield a member name.
         assert_eq!(LinuxExecutor::parse_ip_link_master_line(""), None);
         assert_eq!(LinuxExecutor::parse_ip_link_master_line("    "), None);
+
+        // Continuation lines inside `ip link show` output must not be parsed as
+        // members: their tokens could widen the CHV-owned guard set to a real
+        // host interface (round-4 finding).
+        let continuation_mac =
+            "    link/ether 72:6a:73:3d:a7:9f brd ff:ff:ff:ff:ff:ff permaddr 72:6a:73:3d:a7:9f";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(continuation_mac),
+            None
+        );
+        let continuation_altname = "    altname enp0s18";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(continuation_altname),
+            None
+        );
+        let continuation_inet = "    inet 10.200.1.1/24 brd 10.200.1.255 scope global br0";
+        assert_eq!(
+            LinuxExecutor::parse_ip_link_master_line(continuation_inet),
+            None
+        );
     }
 
     /// End-to-end proof that `owned_ifaces_for_bridge` returns the bridge plus
@@ -1948,22 +1988,13 @@ mod tests {
         sh(&["link", "set", &veth_name, "master", &br]);
 
         let owned = LinuxExecutor::owned_ifaces_for_bridge(&br).await.unwrap();
-        assert!(
-            owned.contains(&br),
-            "owned set must contain the bridge, got {:?}",
-            owned
-        );
-        assert!(
-            owned.contains(&veth_name),
-            "owned set must contain the enslaved veth {}, got {:?}",
-            veth_name,
-            owned
-        );
-        assert!(
-            !owned.contains(&peer_name),
-            "the veth peer (not enslaved) must NOT be in the owned set, got {:?}",
-            owned
-        );
+        // The owned set must be EXACTLY the bridge + the enslaved veth (sorted):
+        // any continuation-line token (e.g. `altname`, MAC octets) would make
+        // this fail on a real host, proving the parser never widens the
+        // CHV-owned guard set (round-4 finding, #227 host-safety boundary).
+        let mut expected = vec![br.clone(), veth_name.clone()];
+        expected.sort();
+        assert_eq!(owned, expected, "owned set must be exactly {{br, veth}}");
     }
 
     #[tokio::test]
