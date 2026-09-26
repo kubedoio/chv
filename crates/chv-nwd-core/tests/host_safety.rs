@@ -157,9 +157,9 @@ fn host_ping(dst: &str) -> bool {
     false
 }
 
-/// Optionally persist the CHV nftables table for evidence capture, or log it.
-/// Controlled by HOST_SAFETY_DUMP_PATH (append to file) / HOST_SAFETY_DUMP
-/// (log via tracing). Not set in CI.
+/// Optionally persist the CHV nftables table for evidence capture.
+/// Controlled by HOST_SAFETY_DUMP_PATH (append to file); without it the dump
+/// is logged at debug level. Not set in CI.
 fn dump_table(table: &str) {
     let out = Command::new("nft")
         .args(["list", "table", "inet", table])
@@ -178,7 +178,7 @@ fn dump_table(table: &str) {
                 let _ = f.write_all(section.as_bytes());
             }
         }
-        _ => tracing::info!(dump = %section, "setup host-safety nft dump"),
+        _ => tracing::debug!(dump = %section, "host-safety nft dump"),
     }
 }
 
@@ -445,6 +445,125 @@ async fn confines_policy_to_chv_owned_traffic() {
     assert!(
         !ns_ping(&format!("gs{u}"), GUEST_GW),
         "re-applied empty policy must re-establish CHV default-deny"
+    );
+
+    drop(cleanup);
+}
+
+/// Dump a single chain's ruleset ("" if the chain/table is absent).
+fn chain_dump(table: &str, chain: &str) -> String {
+    Command::new("nft")
+        .args(["list", "chain", "inet", table, chain])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Privileged proof that a service exposure's forward-accept rule survives a
+/// firewall apply (re-asserted by the executor) and is removed on withdraw
+/// (SHOULD #3 from the #227 review).
+///
+/// Requires root + `nft`/`ip`; skipped on CI. Run against the built test
+/// binary under sudo with `--ignored --exact exposure_survives_firewall_apply`.
+#[tokio::test]
+#[ignore = "requires root + real nftables on a Linux host; run locally via the fixture doc example"]
+async fn exposure_survives_firewall_apply() {
+    use chv_nwd_core::executor::{LinuxExecutor, NetworkExecutor};
+    use std::path::PathBuf;
+
+    if !is_root() || !nft_available() {
+        tracing::info!("SKIP: exposure_survives_firewall_apply needs root + nft");
+        return;
+    }
+
+    let u = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        format!("{:04x}{:04x}", std::process::id() & 0xffff, nanos & 0xffff)
+    };
+    const IFNAMSIZ: usize = 15;
+    assert!(format!("brhs{u}").len() <= IFNAMSIZ);
+    let cleanup = Cleanup::new(&u);
+
+    // Minimal CHV-owned boundary: bridge + veth member + guest namespace.
+    sh(&["ip", "link", "add", &format!("brhs{u}"), "type", "bridge"]);
+    sh(&["ip", "link", "set", &format!("brhs{u}"), "up"]);
+    sh(&[
+        "ip",
+        "link",
+        "add",
+        &format!("gh{u}"),
+        "type",
+        "veth",
+        "peer",
+        "name",
+        &format!("gg{u}"),
+    ]);
+    sh(&[
+        "ip",
+        "link",
+        "set",
+        &format!("gh{u}"),
+        "master",
+        &format!("brhs{u}"),
+    ]);
+    sh(&["ip", "link", "set", &format!("gh{u}"), "up"]);
+    sh(&["ip", "netns", "add", &format!("gs{u}")]);
+    sh(&[
+        "ip",
+        "link",
+        "set",
+        &format!("gg{u}"),
+        "netns",
+        &format!("gs{u}"),
+    ]);
+
+    let network_id = format!("hsx{u}");
+    let table = format!("chv-{network_id}");
+    let executor = LinuxExecutor::new(PathBuf::new());
+
+    // Expose TCP 18080 -> 10.201.0.2:80.
+    executor
+        .expose_service(&network_id, "exp1", "tcp", 18080, "10.201.0.2", 80, "")
+        .await
+        .unwrap();
+    assert!(
+        chain_dump(&table, "forward").contains("exp1"),
+        "exposure forward-accept rule must exist right after expose_service"
+    );
+
+    // Apply an EMPTY firewall policy via the same path the handler uses; this
+    // rebuilds the forward base chain and re-asserts the stored exposure.
+    executor
+        .set_firewall_policy(&network_id, "v1", b"[]", &format!("brhs{u}"))
+        .await
+        .unwrap();
+    let fwd_after = chain_dump(&table, "forward");
+    assert!(
+        fwd_after.contains("exp1"),
+        "exposure forward-accept rule must be re-asserted after a firewall \
+         apply (rebuild of the forward base chain must not drop exposed flows)"
+    );
+    assert!(
+        fwd_after.contains("jump chv-policy-fwd"),
+        "firewall guarded dispatch into default-deny must still be present"
+    );
+
+    // Withdraw -> exposure rules removed everywhere.
+    executor
+        .withdraw_service_exposure(&network_id, "exp1")
+        .await
+        .unwrap();
+    assert!(
+        !chain_dump(&table, "forward").contains("exp1"),
+        "exposure forward-accept rule must be removed on withdraw"
+    );
+    assert!(
+        !chain_dump(&table, "prerouting").contains("exp1"),
+        "exposure prerouting DNAT must be removed on withdraw"
     );
 
     drop(cleanup);

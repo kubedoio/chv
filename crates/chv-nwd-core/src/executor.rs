@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
 use chv_nwd_api::chv_nwd_api::{OverlayType, TopologySpec};
+use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -165,6 +166,18 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     ) -> Result<OverlayStatusInfo, ChvError>;
 }
 
+/// A service exposure tracked by the executor so the DNAT forward-accept rule
+/// can be re-asserted after every firewall apply (which rebuilds the `forward`
+/// base chain and would otherwise silently drop exposed flows into default-deny).
+#[derive(Clone)]
+struct ExposureSpec {
+    safe_exposure_id: String,
+    protocol: String,
+    external_port: u32,
+    target_ip: String,
+    target_port: u32,
+}
+
 pub struct LinuxExecutor {
     _runtime_dir: PathBuf,
     vtep_ip: Option<String>,
@@ -174,7 +187,15 @@ pub struct LinuxExecutor {
     /// writers could interleave and leave the table without its terminal
     /// default-deny rules (fail-open for CHV guests). A single writer per
     /// executor closes that race (#227).
+    ///
+    /// Note: `ensure_topology`/`delete_topology` hold the lock across slow
+    /// topology work (dnsmasq spawn, VXLAN/FDB teardown), so a firewall/NAT
+    /// apply can briefly queue behind topology operations. This is acceptable
+    /// for a control-plane daemon and avoids a finer-grained per-network lock.
     nft_lock: Arc<Mutex<()>>,
+    /// Per-network service exposures (keyed by network_id) for re-assertion
+    /// after firewall applies.
+    exposures: Arc<DashMap<String, Vec<ExposureSpec>>>,
 }
 
 impl LinuxExecutor {
@@ -183,6 +204,7 @@ impl LinuxExecutor {
             _runtime_dir: runtime_dir,
             vtep_ip: None,
             nft_lock: Arc::new(Mutex::new(())),
+            exposures: Arc::new(DashMap::new()),
         }
     }
 
@@ -712,6 +734,124 @@ impl LinuxExecutor {
 
         Self::signal_by_pid_file(&pid_path, "-HUP").await;
     }
+
+    /// Install (idempotently replace) the DNAT rules for one service exposure.
+    ///
+    /// Deletes any prior rules carrying this exposure's comment marker, then
+    /// re-adds the prerouting DNAT and the forward accept. The forward accept
+    /// must be evaluated BEFORE the CHV guarded dispatch jumps (otherwise the
+    /// flow enters `chv-policy-fwd` default-deny and is dropped), so it is
+    /// INSERTED at the head of the forward chain.
+    async fn install_exposure_rules(
+        &self,
+        network_id: &str,
+        safe_exposure_id: &str,
+        protocol: &str,
+        external_port: u32,
+        target_ip: &str,
+        target_port: u32,
+    ) -> Result<(), ChvError> {
+        let table = Self::sanitized_nft_table(network_id)?;
+        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
+        Self::run_nft_idempotent(&[
+            "add",
+            "chain",
+            "inet",
+            &table,
+            "prerouting",
+            "{ type nat hook prerouting priority 0 ; policy accept ; }",
+        ])
+        .await?;
+        Self::run_nft_idempotent(&[
+            "add",
+            "chain",
+            "inet",
+            &table,
+            "forward",
+            "{ type filter hook forward priority filter ; policy accept ; }",
+        ])
+        .await?;
+
+        // Idempotent replace: drop any prior rules carrying this marker.
+        Self::delete_rules_by_comment(&table, "prerouting", safe_exposure_id).await?;
+        Self::delete_rules_by_comment(&table, "forward", safe_exposure_id).await?;
+
+        // In an `inet` (dual-stack) table `dnat to` is ambiguous; nft requires
+        // `dnat ip to` / `dnat ip6 to` and bracketed IPv6-address:port.
+        let (nft_family, dnat_target) = match target_ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V6(_)) => (
+                "ip6".to_string(),
+                format!("[{}]:{}", target_ip, target_port),
+            ),
+            _ => ("ip".to_string(), format!("{}:{}", target_ip, target_port)),
+        };
+        Self::run_nft(&[
+            "add",
+            "rule",
+            "inet",
+            &table,
+            "prerouting",
+            // Never DNAT loopback. A full bind-interface source guard still
+            // requires a declared uplink in the exposure API (tracked); the
+            // filter hooks use the CHV-owned interface guards from the firewall
+            // path, and any unrelated host port collision on the same host IP is
+            // a documented residual limitation of the exposure feature.
+            "iifname",
+            "!=",
+            "lo",
+            protocol,
+            "dport",
+            &external_port.to_string(),
+            "dnat",
+            &nft_family,
+            "to",
+            &dnat_target,
+            "comment",
+            &format!("\"{}\"", safe_exposure_id),
+        ])
+        .await?;
+        Self::run_nft(&[
+            "insert",
+            "rule",
+            "inet",
+            &table,
+            "forward",
+            protocol,
+            "dport",
+            &target_port.to_string(),
+            "ip",
+            "daddr",
+            target_ip,
+            "accept",
+            "comment",
+            &format!("\"{}\"", safe_exposure_id),
+        ])
+        .await?;
+        Ok(())
+    }
+
+    /// Re-assert all stored service exposures after a firewall apply that
+    /// rebuilt the `forward` base chain (exposure forward-accept rules were
+    /// destroyed by that rebuild). Idempotent per exposure.
+    async fn reassert_exposures(&self, network_id: &str) -> Result<(), ChvError> {
+        let recs: Vec<ExposureSpec> = self
+            .exposures
+            .get(network_id)
+            .map(|e| e.iter().cloned().collect())
+            .unwrap_or_default();
+        for rec in &recs {
+            self.install_exposure_rules(
+                network_id,
+                &rec.safe_exposure_id,
+                &rec.protocol,
+                rec.external_port,
+                &rec.target_ip,
+                rec.target_port,
+            )
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -881,6 +1021,8 @@ impl NetworkExecutor for LinuxExecutor {
         if let Ok(table) = Self::sanitized_nft_table(network_id) {
             let _ = Self::run_nft_quiet(&["delete", "table", "inet", &table]).await;
         }
+        // Drop remembered service exposures for this network.
+        self.exposures.remove(network_id);
 
         Ok(())
     }
@@ -993,7 +1135,11 @@ impl NetworkExecutor for LinuxExecutor {
             .inspect_err(|_e| {
                 metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "apply_firewall")
                     .increment(1);
-            })
+            })?;
+        // The firewall apply rebuilds the `forward` base chain, destroying any
+        // service-exposure forward-accept rules; re-assert them inside the
+        // CHV boundary so exposed flows are not silently dropped (#227 S3).
+        self.reassert_exposures(network_id).await
     }
 
     async fn set_nat_policy(
@@ -1073,68 +1219,28 @@ impl NetworkExecutor for LinuxExecutor {
             });
         }
 
-        let table = Self::sanitized_nft_table(network_id)?;
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
-        Self::run_nft_idempotent(&["add", "table", "inet", &table]).await?;
-        Self::run_nft_idempotent(&[
-            "add",
-            "chain",
-            "inet",
-            &table,
-            "prerouting",
-            "{ type nat hook prerouting priority 0 ; policy accept ; }",
-        ])
-        .await?;
-        Self::run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            &table,
-            "prerouting",
-            // Never DNAT loopback. A full bind-interface source guard still
-            // requires a declared uplink in the exposure API (tracked); the
-            // filter hooks use the CHV-owned interface guards from the firewall
-            // path, and any unrelated host port collision on the same host IP is
-            // a documented residual limitation of the exposure feature.
-            "iifname",
-            "!=",
-            "lo",
+        self.install_exposure_rules(
+            network_id,
+            &safe_exposure_id,
             protocol,
-            "dport",
-            &external_port.to_string(),
-            "dnat",
-            "to",
-            &format!("{}:{}", target_ip, target_port),
-            "comment",
-            &format!("\"{}\"", safe_exposure_id),
-        ])
-        .await?;
-        Self::run_nft_idempotent(&[
-            "add",
-            "chain",
-            "inet",
-            &table,
-            "forward",
-            "{ type filter hook forward priority 0 ; policy accept ; }",
-        ])
-        .await?;
-        Self::run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            &table,
-            "forward",
-            protocol,
-            "dport",
-            &target_port.to_string(),
-            "ip",
-            "daddr",
+            external_port,
             target_ip,
-            "accept",
-            "comment",
-            &format!("\"{}\"", safe_exposure_id),
-        ])
+            target_port,
+        )
         .await?;
+        // Record so the exposure can be re-asserted after a firewall apply
+        // rebuilds the forward base chain.
+        self.exposures
+            .entry(network_id.to_string())
+            .or_default()
+            .push(ExposureSpec {
+                safe_exposure_id: safe_exposure_id.clone(),
+                protocol: protocol.to_string(),
+                external_port,
+                target_ip: target_ip.to_string(),
+                target_port,
+            });
         info!(network_id = %network_id, exposure_id = %exposure_id, "service exposed via DNAT");
         Ok(())
     }
@@ -1149,6 +1255,9 @@ impl NetworkExecutor for LinuxExecutor {
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
         Self::delete_rules_by_comment(&table, "prerouting", &safe_exposure_id).await?;
         Self::delete_rules_by_comment(&table, "forward", &safe_exposure_id).await?;
+        if let Some(mut entry) = self.exposures.get_mut(network_id) {
+            entry.retain(|r| r.safe_exposure_id != safe_exposure_id);
+        }
         info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure withdrawn");
         Ok(())
     }
@@ -1746,7 +1855,8 @@ mod tests {
     /// End-to-end proof that `owned_ifaces_for_bridge` returns the bridge plus
     /// its real enslaved members (guards the B1 parser regression). Requires
     /// root + `ip`; skipped on CI, run against a real host via:
-    ///   sudo the built lib test binary -- --ignored exec_owned_ifaces_real
+    ///   sudo the built lib test binary -- --ignored --exact \
+    ///     executor::tests::owned_ifaces_resolves_bridge_and_enslaved_members
     #[tokio::test]
     #[ignore = "requires root + iproute2"]
     async fn owned_ifaces_resolves_bridge_and_enslaved_members() {

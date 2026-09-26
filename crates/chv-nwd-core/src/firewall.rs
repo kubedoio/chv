@@ -169,12 +169,18 @@ pub async fn apply_firewall_rules(
     // idempotently) so a stale `policy drop` base chain left behind by a
     // previous daemon version is replaced with `policy accept` on upgrade;
     // `add chain` alone would silently keep the old drop policy (#227 S4).
+    //
+    // Transient disclosure: between deleting and re-adding each base chain
+    // (sub-millisecond, single-writer under the executor nft lock) CHV-owned
+    // guest traffic is not yet dispatched into default-deny — briefly
+    // unguarded for CHV guests only. The host is NEVER affected: the base
+    // policy is `accept` throughout, and no host interface matches the guards.
     for (chain, hook) in [
         ("input", "input"),
         ("forward", "forward"),
         ("output", "output"),
     ] {
-        delete_chain_quiet(table, chain).await;
+        delete_chain_quiet(table, chain).await?;
         run_nft_idempotent(&[
             "add",
             "chain",
@@ -189,24 +195,16 @@ pub async fn apply_firewall_rules(
         .await?;
     }
 
+    // Verify the base hooks really are `policy accept`. If a delete was
+    // transiently refused and the old `policy drop` chain survived the
+    // idempotent add, fail closed instead of reproducing #227 silently.
+    verify_base_chain_policies(table).await?;
+
     // Plain (non-hook) policy chains carry default-deny inside the boundary.
+    // Created before any dispatch rule so a guard jump never targets a
+    // missing chain.
     for pchain in POLICY_FILTER_CHAINS {
         run_nft_idempotent(&["add", "chain", "inet", table, pchain]).await?;
-    }
-
-    // Flush existing rules in the chains CHV owns (atomic replace). Only the
-    // CHV table is touched; unrelated host nftables state is preserved.
-    for chain in [
-        "input",
-        "forward",
-        "output",
-        "chv-policy-in",
-        "chv-policy-fwd",
-        "chv-policy-out",
-    ] {
-        if let Err(e) = run_nft(&["flush", "chain", "inet", table, chain]).await {
-            tracing::warn!(table, chain, error = %e, "failed to flush nftables chain");
-        }
     }
 
     // Dispatch ONLY CHV-owned traffic into the policy chains.
@@ -230,34 +228,29 @@ pub async fn apply_firewall_rules(
     out.extend(["jump".to_string(), "chv-policy-out".to_string()]);
     run_nft_strings(out).await?;
 
-    // Conntrack established/related accepted inside the boundary so existing
-    // established guest flows — including host->guest replies on the output
-    // path — are not torn down by default-deny.
-    for chain in ["chv-policy-in", "chv-policy-fwd", "chv-policy-out"] {
-        run_nft(&[
-            "add",
-            "rule",
-            "inet",
-            table,
-            chain,
-            "ct",
-            "state",
-            "established,related",
-            "accept",
-        ])
-        .await?;
+    // Default-deny-FIRST: flush each policy chain and immediately re-install
+    // its terminal `counter drop`, before any user rule exists. If the apply
+    // fails at any later point, every policy chain still ends in drop, so
+    // CHV-owned guest traffic remains default-denied (never fail-open).
+    for pchain in POLICY_FILTER_CHAINS {
+        if let Err(e) = run_nft(&["flush", "chain", "inet", table, pchain]).await {
+            tracing::warn!(table, chain = pchain, error = %e, "failed to flush nftables policy chain");
+        }
+        run_nft(&["add", "rule", "inet", table, pchain, "counter", "drop"]).await?;
     }
 
-    // Apply user rules in priority order: deny/reject rules first, then accept rules.
-    // This ensures that deny rules are evaluated before allows within the same chain,
-    // preventing a broad accept from shadowing a more specific deny.
+    // Apply user rules in priority order: deny/reject rules first, then accept
+    // rules, so a broad accept cannot shadow a more specific deny. Rules are
+    // INSERTED at the chain head iterating in reverse, which reproduces the
+    // same oldest-to-newest final ordering as `add`, while never removing the
+    // default-deny terminal installed above.
     let ordered_rules: Vec<&FirewallRule> = rules
         .iter()
         .filter(|r| r.action == "drop" || r.action == "reject")
         .chain(rules.iter().filter(|r| r.action == "accept"))
         .collect();
 
-    for rule in ordered_rules {
+    for rule in ordered_rules.iter().rev() {
         // Cover the real traffic paths: host-stack (input/output) AND the guest
         // forwarding path (forward), which the original input/output-only
         // mapping missed (per #227).
@@ -268,7 +261,7 @@ pub async fn apply_firewall_rules(
         };
 
         for chain in chains {
-            let mut args: Vec<&str> = vec!["add", "rule", "inet", table, chain];
+            let mut args: Vec<&str> = vec!["insert", "rule", "inet", table, chain];
 
             // Protocol match (skip for "all")
             let protocol_lower = rule.protocol.to_lowercase();
@@ -306,9 +299,23 @@ pub async fn apply_firewall_rules(
         }
     }
 
-    // Default-deny terminates each policy chain for CHV-owned guest traffic.
-    for pchain in POLICY_FILTER_CHAINS {
-        run_nft(&["add", "rule", "inet", table, pchain, "counter", "drop"]).await?;
+    // Conntrack established/related is inserted LAST so it lands at the head
+    // of each chain (before user rules), preserving established-flow semantics
+    // across policy replaces: existing guest flows — including host->guest
+    // replies on the output path — are not torn down by default-deny.
+    for chain in ["chv-policy-in", "chv-policy-fwd", "chv-policy-out"] {
+        run_nft(&[
+            "insert",
+            "rule",
+            "inet",
+            table,
+            chain,
+            "ct",
+            "state",
+            "established,related",
+            "accept",
+        ])
+        .await?;
     }
 
     info!(
@@ -455,31 +462,74 @@ async fn run_nft_idempotent(args: &[&str]) -> Result<(), ChvError> {
     }
 }
 
-/// Delete a chain if it exists, tolerating a missing chain.
+/// Delete a chain if it exists, tolerating a missing chain; any OTHER failure
+/// (e.g. a transient netlink error) is propagated so the apply aborts and the
+/// caller sees the error instead of silently keeping a stale chain policy.
 ///
 /// Used to replace stale base-hook chain policies (e.g. the pre-#227
 /// `policy drop`) with `policy accept` on every apply, so an in-place upgrade
 /// of a running daemon cannot leave a host-wide drop base chain active.
-async fn delete_chain_quiet(table: &str, chain: &str) {
+async fn delete_chain_quiet(table: &str, chain: &str) -> Result<(), ChvError> {
     match run_nft(&["delete", "chain", "inet", table, chain]).await {
-        Ok(()) => {}
+        Ok(()) => Ok(()),
         Err(ChvError::NetworkUnavailable { reason, .. }) => {
-            if !reason.contains("No such file or directory") && !reason.contains("does not exist") {
-                tracing::warn!(
-                    table,
-                    chain,
-                    error = %reason,
-                    "failed to delete nft chain before re-adding with accept policy"
-                );
+            if reason.contains("No such file or directory") || reason.contains("does not exist") {
+                Ok(())
+            } else {
+                Err(ChvError::NetworkUnavailable {
+                    resource: "nft".to_string(),
+                    reason: format!(
+                        "failed to delete nft chain {chain} before re-adding with accept policy: {reason}"
+                    ),
+                })
             }
         }
-        Err(e) => tracing::warn!(
-            table,
-            chain,
-            error = %e,
-            "failed to delete nft chain before re-adding"
-        ),
+        Err(e) => Err(e),
     }
+}
+
+/// Post-apply verification that every base hook chain really is `policy accept`.
+///
+/// This is the fail-closed net for upgrade safety: if `delete_chain_quiet`
+/// hit a transient refusal, the stale pre-#227 `policy drop` chain would
+/// otherwise survive the idempotent `add chain` (`File exists` -> Ok) and
+/// reproduce the host-wide-drop bug without any error. Each hook name maps to
+/// exactly one chain in the CHV-owned table, so the `type filter hook X
+/// priority filter; policy accept;` substring is unique to the base chain.
+async fn verify_base_chain_policies(table: &str) -> Result<(), ChvError> {
+    let out = Command::new("nft")
+        .args(["list", "table", "inet", table])
+        .output()
+        .await
+        .map_err(|e| ChvError::Io {
+            path: "nft".to_string(),
+            source: e,
+        })?;
+    if !out.status.success() {
+        return Err(ChvError::NetworkUnavailable {
+            resource: "nft".to_string(),
+            reason: format!("nft list table inet {table} failed during post-apply verification"),
+        });
+    }
+    let dump = String::from_utf8_lossy(&out.stdout).into_owned();
+    for (chain, hook) in [
+        ("input", "input"),
+        ("forward", "forward"),
+        ("output", "output"),
+    ] {
+        let needle = format!("type filter hook {hook} priority filter; policy accept;");
+        if !dump.contains(&needle) {
+            return Err(ChvError::NetworkUnavailable {
+                resource: "nft".to_string(),
+                reason: format!(
+                    "post-apply verification failed: base chain {chain} is not \
+                     `policy accept` (stale policy-drop base chain would break #227, \
+                     refusing to proceed)"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
