@@ -166,6 +166,39 @@ pub struct StordConfig {
     /// The value is the volume group name.
     #[serde(default)]
     pub lvm_volume_group: Option<String>,
+    /// Storage migration configuration. `migration.enabled = true` requires
+    /// mTLS identity material and validates it at startup (fail-closed).
+    /// Disabled (default) means migration actions are unavailable rather than
+    /// downgraded. See `docs/specs` migration ADR and issue #232.
+    #[serde(default)]
+    pub migration: StordMigrationConfig,
+}
+
+/// Storage migration configuration.
+///
+/// Explicitly distinguishes "migration disabled" (daemon may start without
+/// credentials; migration actions fail unavailable) from "migration enabled but
+/// broken" (missing/invalid TLS material is a startup error).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StordMigrationConfig {
+    /// Master switch. When `true`, all identity fields below are required and
+    /// validated at startup. When `false`, the daemon starts without migration
+    /// credentials.
+    #[serde(default)]
+    pub enabled: bool,
+    /// PEM client/node certificate path (issued by the CHV CA).
+    #[serde(default)]
+    pub client_cert_path: Option<PathBuf>,
+    /// PEM client private key path.
+    #[serde(default)]
+    pub client_key_path: Option<PathBuf>,
+    /// PEM CA bundle used to validate the migration destination.
+    #[serde(default)]
+    pub ca_cert_path: Option<PathBuf>,
+    /// Expected destination server name used for certificate validation.
+    /// Must match the destination certificate's DNS SAN / identity.
+    #[serde(default)]
+    pub dest_server_name: Option<String>,
 }
 
 /// iSCSI backend configuration embedded in StordConfig.
@@ -212,6 +245,7 @@ impl Default for StordConfig {
             iscsi: None,
             ceph: None,
             lvm_volume_group: None,
+            migration: StordMigrationConfig::default(),
         }
     }
 }
