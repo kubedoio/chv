@@ -5,7 +5,7 @@ use chv_nwd_api::chv_nwd_api::{
     DetachVmNicRequest, DhcpScope, DnsScope, EnsureDhcpScopeRequest, EnsureDnsScopeRequest,
     EnsureNetworkTopologyRequest, ExposeServiceRequest, ExposureSpec, FirewallPolicy,
     ListNamespaceStateRequest, NatPolicy, NetworkHealthRequest, NicSpec, SetFirewallPolicyRequest,
-    TopologySpec, WithdrawServiceExposureRequest,
+    SetNatPolicyRequest, TopologySpec, WithdrawServiceExposureRequest,
 };
 use chv_nwd_core::executor::{NetworkExecutor, OverlayStatusInfo, TopologyApplyResult};
 use chv_nwd_core::{NetworkServer, TopologyState};
@@ -931,4 +931,119 @@ async fn attach_refreshes_policy_guard_scope() {
     );
     assert_eq!(recorded[2], "fw:net-rec:br-rec");
     assert_eq!(recorded[3], "nat:net-rec:br-rec");
+}
+
+#[tokio::test]
+async fn concurrent_fw_nat_applies_persist_both_halves() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("nwd.sock");
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let rec = RecordingExecutor {
+        calls: calls.clone(),
+    };
+    let server = NetworkServer::new(rec, Metrics::new());
+    let socket_clone = socket.clone();
+    tokio::spawn(async move {
+        server.serve(&socket_clone).await.ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut client = make_client(socket).await;
+
+    let ensure = client
+        .ensure_network_topology(EnsureNetworkTopologyRequest {
+            meta: None,
+            topology: Some(TopologySpec {
+                network_id: "net-race".to_string(),
+                tenant_id: "t-race".to_string(),
+                bridge_name: "br-race".to_string(),
+                namespace_name: "ns-race".to_string(),
+                subnet_cidr: "10.0.8.0/24".to_string(),
+                gateway_ip: "10.0.8.1".to_string(),
+                options: Default::default(),
+                vni: 0,
+                vtep_endpoints: vec![],
+                overlay_type: 0,
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ensure.status, "OK");
+
+    // Fire the firewall + NAT RPCs CONCURRENTLY (each request is handled on its
+    // own server task). Round-4 removed the read-clone-modify-insert that could
+    // LOSE one half of the fw+nat pair under overlap, which would have left a
+    // later-attached NIC outside the default-deny boundary. This test pins that
+    // invariant: after the join, BOTH records must survive and be re-asserted
+    // on attach.
+    let mut fw_client = client.clone();
+    let fw_fut = async move {
+        fw_client
+            .set_firewall_policy(SetFirewallPolicyRequest {
+                meta: None,
+                network_id: "net-race".to_string(),
+                policy: Some(FirewallPolicy {
+                    policy_version: "race-v1".to_string(),
+                    policy_json: b"[]".to_vec(),
+                }),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+    };
+    let mut nat_client = client.clone();
+    let nat_fut = async move {
+        nat_client
+            .set_nat_policy(SetNatPolicyRequest {
+                meta: None,
+                network_id: "net-race".to_string(),
+                policy: Some(NatPolicy {
+                    policy_version: "race-v1".to_string(),
+                    policy_json: b"[]".to_vec(),
+                }),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+    };
+    let (fw, nat) = tokio::join!(fw_fut, nat_fut);
+    assert_eq!(fw.status, "OK");
+    assert_eq!(nat.status, "OK");
+
+    // Attach a NIC -> refresh must re-assert BOTH halves for the network.
+    let attach = client
+        .attach_vm_nic(AttachVmNicRequest {
+            meta: None,
+            nic: Some(NicSpec {
+                nic_id: "nic-race".to_string(),
+                vm_id: "vm-race".to_string(),
+                network_id: "net-race".to_string(),
+                mac_address: "02:00:00:00:00:0b".to_string(),
+                tap_name: "tap-race".to_string(),
+                ip_address: "10.0.8.10".to_string(),
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(attach.result.as_ref().unwrap().status, "OK");
+
+    let recorded = calls.lock().unwrap();
+    let fw_calls = recorded
+        .iter()
+        .filter(|c| c.starts_with("fw:net-race:"))
+        .count();
+    let nat_calls = recorded
+        .iter()
+        .filter(|c| c.starts_with("nat:net-race:"))
+        .count();
+    assert_eq!(
+        fw_calls, 2,
+        "firewall: 1 concurrent apply + 1 attach re-scope (a lost record would leave only 1)"
+    );
+    assert_eq!(
+        nat_calls, 2,
+        "nat: 1 concurrent apply + 1 attach re-scope (a lost record would leave only 1)"
+    );
 }
