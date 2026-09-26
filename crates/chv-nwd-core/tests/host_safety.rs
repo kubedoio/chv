@@ -566,5 +566,11 @@ async fn exposure_survives_firewall_apply() {
         "exposure prerouting DNAT must be removed on withdraw"
     );
 
+    // Drop the executor-owned nft table (Cleanup only knows the chvhs-{u}
+    // table; this one is created by LinuxExecutor as chv-{network_id}).
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", &table])
+        .output();
+
     drop(cleanup);
 }

@@ -195,6 +195,12 @@ pub struct LinuxExecutor {
     nft_lock: Arc<Mutex<()>>,
     /// Per-network service exposures (keyed by network_id) for re-assertion
     /// after firewall applies.
+    ///
+    /// NOTE (documented limitation): this is in-memory only — a daemon restart
+    /// loses it. On restart, an operator must re-declare exposures (the DNAT
+    /// prerouting rule also does not survive a restart unless re-applied by the
+    /// caller). Persisting exposures across restarts is tracked separately from
+    /// #227 and out of scope for this change.
     exposures: Arc<DashMap<String, Vec<ExposureSpec>>>,
 }
 
@@ -777,14 +783,41 @@ impl LinuxExecutor {
         Self::delete_rules_by_comment(&table, "forward", safe_exposure_id).await?;
 
         // In an `inet` (dual-stack) table `dnat to` is ambiguous; nft requires
-        // `dnat ip to` / `dnat ip6 to` and bracketed IPv6-address:port.
-        let (nft_family, dnat_target) = match target_ip.parse::<std::net::IpAddr>() {
+        // `dnat ip to` / `dnat ip6 to` with a bracketed IPv6-address:port, and
+        // the forward-accept must use the matching `ip`/`ip6 daddr` expression.
+        let (nft_family, dnat_target, daddr_expr) = match target_ip.parse::<std::net::IpAddr>() {
             Ok(std::net::IpAddr::V6(_)) => (
                 "ip6".to_string(),
                 format!("[{}]:{}", target_ip, target_port),
+                "ip6",
             ),
-            _ => ("ip".to_string(), format!("{}:{}", target_ip, target_port)),
+            _ => (
+                "ip".to_string(),
+                format!("{}:{}", target_ip, target_port),
+                "ip",
+            ),
         };
+
+        // Install the forward accept BEFORE the prerouting DNAT so a failure
+        // here cannot leave a half-applied DNAT rule that redirects traffic
+        // into the still-default-deny forward path.
+        Self::run_nft(&[
+            "insert",
+            "rule",
+            "inet",
+            &table,
+            "forward",
+            protocol,
+            "dport",
+            &target_port.to_string(),
+            daddr_expr,
+            "daddr",
+            target_ip,
+            "accept",
+            "comment",
+            &format!("\"{}\"", safe_exposure_id),
+        ])
+        .await?;
         Self::run_nft(&[
             "add",
             "rule",
@@ -806,23 +839,6 @@ impl LinuxExecutor {
             &nft_family,
             "to",
             &dnat_target,
-            "comment",
-            &format!("\"{}\"", safe_exposure_id),
-        ])
-        .await?;
-        Self::run_nft(&[
-            "insert",
-            "rule",
-            "inet",
-            &table,
-            "forward",
-            protocol,
-            "dport",
-            &target_port.to_string(),
-            "ip",
-            "daddr",
-            target_ip,
-            "accept",
             "comment",
             &format!("\"{}\"", safe_exposure_id),
         ])
@@ -1139,7 +1155,10 @@ impl NetworkExecutor for LinuxExecutor {
         // The firewall apply rebuilds the `forward` base chain, destroying any
         // service-exposure forward-accept rules; re-assert them inside the
         // CHV boundary so exposed flows are not silently dropped (#227 S3).
-        self.reassert_exposures(network_id).await
+        self.reassert_exposures(network_id).await.inspect_err(|_e| {
+            metrics::counter!(NWD_NFT_ERRORS_TOTAL, "operation" => "reassert_exposures")
+                .increment(1);
+        })
     }
 
     async fn set_nat_policy(
@@ -1260,8 +1279,18 @@ impl NetworkExecutor for LinuxExecutor {
         let safe_exposure_id = Self::sanitize_id(exposure_id)?;
         Self::delete_rules_by_comment(&table, "prerouting", &safe_exposure_id).await?;
         Self::delete_rules_by_comment(&table, "forward", &safe_exposure_id).await?;
-        if let Some(mut entry) = self.exposures.get_mut(network_id) {
-            entry.retain(|r| r.safe_exposure_id != safe_exposure_id);
+        {
+            let removed_all = if let Some(mut entry) = self.exposures.get_mut(network_id) {
+                let before = entry.len();
+                entry.retain(|r| r.safe_exposure_id != safe_exposure_id);
+                before > 0 && entry.is_empty()
+            } else {
+                false
+            };
+            // Drop the now-empty key so no stale empty entry lingers.
+            if removed_all {
+                self.exposures.remove(network_id);
+            }
         }
         info!(network_id = %network_id, exposure_id = %exposure_id, "service exposure withdrawn");
         Ok(())
@@ -1878,20 +1907,39 @@ mod tests {
             assert!(status.success(), "ip {:?} failed with {:?}", args, status);
         }
 
-        let br = format!("brtest{:06x}", std::process::id());
-        let veth_name = format!("vt{:06x}", std::process::id());
-        let peer_name = format!("vtx{:06x}", std::process::id());
+        // Collision-averse, IFNAMSIZ-safe run suffix (16-bit pid + 16-bit
+        // sub-second clock), so a leaked resource from a prior crashed run
+        // cannot collide with ours.
+        let u = {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            format!("{:04x}{:04x}", std::process::id() & 0xffff, nanos & 0xffff)
+        };
+        let br = format!("brt{u}");
+        let veth_name = format!("vt{u}");
+        let peer_name = format!("vtx{u}");
+        assert!(br.len() <= 15 && veth_name.len() <= 15 && peer_name.len() <= 15);
 
-        // Best-effort cleanup on panic/success.
-        struct Cleanup(String);
+        // Best-effort cleanup of the bridge AND the veth pair on panic/success,
+        // so ensl ports do not leak. Bound here, before any setup command, so a
+        // mid-setup panic still unwinds through it.
+        struct Cleanup {
+            links: Vec<String>,
+        }
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let _ = StdCommand::new("ip")
-                    .args(["link", "del", "dev", &self.0])
-                    .status();
+                for link in self.links.iter().rev() {
+                    let _ = StdCommand::new("ip")
+                        .args(["link", "del", "dev", link])
+                        .status();
+                }
             }
         }
-        let cleanup = Cleanup(br.clone());
+        let _cleanup = Cleanup {
+            links: vec![br.clone(), veth_name.clone()],
+        };
 
         sh(&["link", "add", &br, "type", "bridge"]);
         sh(&[
@@ -1916,7 +1964,6 @@ mod tests {
             "the veth peer (not enslaved) must NOT be in the owned set, got {:?}",
             owned
         );
-        drop(cleanup);
     }
 
     #[tokio::test]

@@ -133,6 +133,44 @@ async fn run_nft_strings(args: Vec<String>) -> Result<(), ChvError> {
     run_nft(&refs).await
 }
 
+/// A `(chain, rule)` plan in the exact order `apply_firewall_rules` must
+/// INSERT each user rule at the chain head.
+///
+/// The plan sorts user rules deny/reject-first then accept (so a broad accept
+/// cannot shadow a more specific deny within a chain) and maps each rule to its
+/// target chains. The apply inserts at the head of each chain — so the terminal
+/// `counter drop` installed earlier is never removed — and inserting this
+/// sequence in reverse reproduces, per chain, the same oldest-to-newest final
+/// ordering a plain `add`-based build would have produced (see the unit tests
+/// for the invariant).
+fn user_rule_insertion_plan(rules: &[FirewallRule]) -> Vec<(&'static str, &FirewallRule)> {
+    // Deny/reject rules first, then accept rules, so a broad accept cannot
+    // shadow a more specific deny within a chain. Inserting this sequence at
+    // each chain head in REVERSE reproduces, per chain, the same
+    // oldest-to-newest final ordering a plain `add`-based build would have
+    // produced (see the unit tests for the invariant).
+    rules
+        .iter()
+        .filter(|r| r.action == "drop" || r.action == "reject")
+        .chain(rules.iter().filter(|r| r.action == "accept"))
+        .rev()
+        .flat_map(|rule| {
+            // Cover the real traffic paths: host-stack (input/output) AND the
+            // guest forwarding path (forward), which the original
+            // input/output-only mapping missed (per #227).
+            let chains: &[&str] = match rule.direction.as_str() {
+                "inbound" => &["chv-policy-in", "chv-policy-fwd"],
+                "outbound" => &["chv-policy-out", "chv-policy-fwd"],
+                _ => &[],
+            };
+            chains
+                .iter()
+                .map(move |chain| (*chain, rule))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub async fn apply_firewall_rules(
     table: &str,
     owned_ifaces: &[String],
@@ -207,6 +245,19 @@ pub async fn apply_firewall_rules(
         run_nft_idempotent(&["add", "chain", "inet", table, pchain]).await?;
     }
 
+    // Default-deny-FIRST: flush each policy chain and immediately re-install
+    // its terminal `counter drop`, before any dispatch rule and before any user
+    // rule exists. If the apply fails at ANY later point — notably between
+    // dispatch installs on a fresh table where the policy chains were just
+    // created empty — every policy chain still ends in drop, so CHV-owned guest
+    // traffic remains default-denied (never fail-open).
+    for pchain in POLICY_FILTER_CHAINS {
+        if let Err(e) = run_nft(&["flush", "chain", "inet", table, pchain]).await {
+            tracing::warn!(table, chain = pchain, error = %e, "failed to flush nftables policy chain");
+        }
+        run_nft(&["add", "rule", "inet", table, pchain, "counter", "drop"]).await?;
+    }
+
     // Dispatch ONLY CHV-owned traffic into the policy chains.
     let mut input = add_rule_prefix(table, "input");
     input.extend(iif_guard.clone());
@@ -228,75 +279,47 @@ pub async fn apply_firewall_rules(
     out.extend(["jump".to_string(), "chv-policy-out".to_string()]);
     run_nft_strings(out).await?;
 
-    // Default-deny-FIRST: flush each policy chain and immediately re-install
-    // its terminal `counter drop`, before any user rule exists. If the apply
-    // fails at any later point, every policy chain still ends in drop, so
-    // CHV-owned guest traffic remains default-denied (never fail-open).
-    for pchain in POLICY_FILTER_CHAINS {
-        if let Err(e) = run_nft(&["flush", "chain", "inet", table, pchain]).await {
-            tracing::warn!(table, chain = pchain, error = %e, "failed to flush nftables policy chain");
+    // Apply user rules via the insertion plan (deny/reject first, then accept,
+    // so a broad accept cannot shadow a more specific deny). Rules are INSERTED
+    // at each chain head, which reproduces the same oldest-to-newest final
+    // ordering as `add` while never removing the default-deny terminal that was
+    // installed above the dispatch rules.
+    for (chain, rule) in user_rule_insertion_plan(&rules) {
+        let mut args: Vec<&str> = vec!["insert", "rule", "inet", table, chain];
+
+        // Protocol match (skip for "all")
+        let protocol_lower = rule.protocol.to_lowercase();
+        if protocol_lower != "all" {
+            args.push("meta");
+            args.push("l4proto");
+            args.push(&protocol_lower);
         }
-        run_nft(&["add", "rule", "inet", table, pchain, "counter", "drop"]).await?;
-    }
 
-    // Apply user rules in priority order: deny/reject rules first, then accept
-    // rules, so a broad accept cannot shadow a more specific deny. Rules are
-    // INSERTED at the chain head iterating in reverse, which reproduces the
-    // same oldest-to-newest final ordering as `add`, while never removing the
-    // default-deny terminal installed above.
-    let ordered_rules: Vec<&FirewallRule> = rules
-        .iter()
-        .filter(|r| r.action == "drop" || r.action == "reject")
-        .chain(rules.iter().filter(|r| r.action == "accept"))
-        .collect();
+        // Source CIDR match
+        let cidr_owned;
+        if let Some(ref cidr) = rule.source_cidr {
+            args.push("ip");
+            args.push("saddr");
+            cidr_owned = cidr.clone();
+            args.push(&cidr_owned);
+        }
 
-    for rule in ordered_rules.iter().rev() {
-        // Cover the real traffic paths: host-stack (input/output) AND the guest
-        // forwarding path (forward), which the original input/output-only
-        // mapping missed (per #227).
-        let chains: &[&str] = match rule.direction.as_str() {
-            "inbound" => &["chv-policy-in", "chv-policy-fwd"],
-            "outbound" => &["chv-policy-out", "chv-policy-fwd"],
-            _ => continue,
-        };
-
-        for chain in chains {
-            let mut args: Vec<&str> = vec!["insert", "rule", "inet", table, chain];
-
-            // Protocol match (skip for "all")
-            let protocol_lower = rule.protocol.to_lowercase();
-            if protocol_lower != "all" {
-                args.push("meta");
-                args.push("l4proto");
+        // Destination port match
+        let port_owned;
+        if let Some(ref port) = rule.dest_port {
+            if protocol_lower == "tcp" || protocol_lower == "udp" {
                 args.push(&protocol_lower);
+                args.push("dport");
+                port_owned = port.clone();
+                args.push(&port_owned);
             }
-
-            // Source CIDR match
-            let cidr_owned;
-            if let Some(ref cidr) = rule.source_cidr {
-                args.push("ip");
-                args.push("saddr");
-                cidr_owned = cidr.clone();
-                args.push(&cidr_owned);
-            }
-
-            // Destination port match
-            let port_owned;
-            if let Some(ref port) = rule.dest_port {
-                if protocol_lower == "tcp" || protocol_lower == "udp" {
-                    args.push(&protocol_lower);
-                    args.push("dport");
-                    port_owned = port.clone();
-                    args.push(&port_owned);
-                }
-            }
-
-            // Action
-            let action = rule.action.to_lowercase();
-            args.push(&action);
-
-            run_nft(&args).await?;
         }
+
+        // Action
+        let action = rule.action.to_lowercase();
+        args.push(&action);
+
+        run_nft(&args).await?;
     }
 
     // Conntrack established/related is inserted LAST so it lands at the head
@@ -668,5 +691,84 @@ mod tests {
             args,
             vec!["oifname", "{", "\"br-net1\",", "\"tap-1111\"", "}"]
         );
+    }
+
+    fn mk_rule<'a>(direction: &'a str, action: &'a str, protocol: &'a str) -> FirewallRule {
+        FirewallRule {
+            direction: direction.to_string(),
+            protocol: protocol.to_string(),
+            source_cidr: None,
+            dest_port: None,
+            action: action.to_string(),
+        }
+    }
+
+    #[test]
+    fn user_rule_plan_final_order_is_deny_before_accept_per_chain() {
+        let rules = vec![
+            mk_rule("inbound", "drop", "tcp"),
+            mk_rule("outbound", "reject", "udp"),
+            mk_rule("inbound", "accept", "icmp"),
+            mk_rule("outbound", "accept", "tcp"),
+        ];
+        let plan = user_rule_insertion_plan(&rules);
+
+        // `insert` prepends, so the final per-chain order is the REVERSE of the
+        // plan's per-chain insertion sequence.
+        let mut final_by_chain: std::collections::HashMap<&'static str, Vec<&FirewallRule>> =
+            std::collections::HashMap::new();
+        for (chain, rule) in plan.iter().rev() {
+            final_by_chain.entry(*chain).or_default().push(*rule);
+        }
+
+        // Every policy chain is populated; forward gets inbound+outbound.
+        assert_eq!(final_by_chain.get("chv-policy-in").map(Vec::len), Some(2));
+        assert_eq!(final_by_chain.get("chv-policy-out").map(Vec::len), Some(2));
+        assert_eq!(final_by_chain.get("chv-policy-fwd").map(Vec::len), Some(4));
+
+        for (chain, final_rules) in &final_by_chain {
+            for r in final_rules.iter() {
+                // Membership: inbound rules never target chv-policy-out and
+                // outbound rules never target chv-policy-in.
+                let illegal = matches!(
+                    (r.direction.as_str(), *chain),
+                    ("inbound", "chv-policy-out") | ("outbound", "chv-policy-in")
+                );
+                assert!(!illegal, "rule {} must not target {}", r.direction, chain);
+            }
+            // Deny/reject rules must all precede accept rules within a chain.
+            let first_accept = final_rules.iter().position(|r| r.action == "accept");
+            if let Some(idx) = first_accept {
+                assert!(
+                    final_rules[idx..].iter().all(|r| r.action == "accept"),
+                    "an accept rule appears before a deny/reject rule in {chain}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_rule_plan_mixed_actions_keep_relative_deny_order() {
+        let rules = vec![
+            mk_rule("inbound", "drop", "tcp"),    // deny-1
+            mk_rule("inbound", "drop", "udp"),    // deny-2
+            mk_rule("inbound", "accept", "icmp"), // accept-1
+            mk_rule("outbound", "drop", "all"),   // deny-3
+        ];
+        let plan = user_rule_insertion_plan(&rules);
+        let mut final_by_chain: std::collections::HashMap<&'static str, Vec<&FirewallRule>> =
+            std::collections::HashMap::new();
+        for (chain, rule) in plan.iter().rev() {
+            final_by_chain.entry(*chain).or_default().push(*rule);
+        }
+
+        let fwd = final_by_chain.get("chv-policy-fwd").unwrap();
+        // deny-1, deny-2, deny-3, accept-1 (denies keep their relative order).
+        assert_eq!(
+            fwd.iter().map(|r| r.protocol.as_str()).collect::<Vec<_>>(),
+            vec!["tcp", "udp", "all", "icmp",]
+        );
+        let den: Vec<&str> = fwd.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(den, vec!["drop", "drop", "drop", "accept"]);
     }
 }

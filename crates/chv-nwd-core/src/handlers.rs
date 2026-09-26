@@ -515,6 +515,21 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }
         };
 
+        // Record the DESIRED policy state regardless of apply outcome (the
+        // topology is ensured at this point). A failed or partial apply must not
+        // leave policy_state empty, otherwise a later NIC attach would find
+        // nothing to re-scope and the new member could sit outside the CHV
+        // boundary (fail-open, #227 S3). refresh_policy_scope re-applies the
+        // desired policy, so the boundary converges on the next attach.
+        let mut applied = self
+            .policy_state
+            .get(&req.network_id)
+            .map(|p| p.clone())
+            .unwrap_or_default();
+        applied.firewall = Some(policy.policy_json.clone());
+        applied.firewall_version = Some(policy.policy_version.clone());
+        self.policy_state.insert(req.network_id.clone(), applied);
+
         match self
             .executor
             .set_firewall_policy(
@@ -525,17 +540,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             )
             .await
         {
-            Ok(()) => {
-                let mut applied = self
-                    .policy_state
-                    .get(&req.network_id)
-                    .map(|p| p.clone())
-                    .unwrap_or_default();
-                applied.firewall = Some(policy.policy_json.clone());
-                applied.firewall_version = Some(policy.policy_version.clone());
-                self.policy_state.insert(req.network_id.clone(), applied);
-                Ok(Response::new(Self::ok_result()))
-            }
+            Ok(()) => Ok(Response::new(Self::ok_result())),
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }
     }
@@ -573,6 +578,18 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             }
         };
 
+        // Record the DESIRED NAT policy state regardless of apply outcome for
+        // the same reason as set_firewall_policy (re-scope convergence, #227
+        // S3). A failed or partial NAT apply must not leave policy_state empty.
+        let mut applied = self
+            .policy_state
+            .get(&req.network_id)
+            .map(|p| p.clone())
+            .unwrap_or_default();
+        applied.nat = Some(policy.policy_json.clone());
+        applied.nat_version = Some(policy.policy_version.clone());
+        self.policy_state.insert(req.network_id.clone(), applied);
+
         match self
             .executor
             .set_nat_policy(
@@ -583,17 +600,7 @@ impl<E: NetworkExecutor> proto::network_service_server::NetworkService for Netwo
             )
             .await
         {
-            Ok(()) => {
-                let mut applied = self
-                    .policy_state
-                    .get(&req.network_id)
-                    .map(|p| p.clone())
-                    .unwrap_or_default();
-                applied.nat = Some(policy.policy_json.clone());
-                applied.nat_version = Some(policy.policy_version.clone());
-                self.policy_state.insert(req.network_id.clone(), applied);
-                Ok(Response::new(Self::ok_result()))
-            }
+            Ok(()) => Ok(Response::new(Self::ok_result())),
             Err(e) => Ok(Response::new(Self::err_result(&e))),
         }
     }
