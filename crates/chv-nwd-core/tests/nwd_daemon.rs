@@ -933,7 +933,7 @@ async fn attach_refreshes_policy_guard_scope() {
     assert_eq!(recorded[3], "nat:net-rec:br-rec");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_fw_nat_applies_persist_both_halves() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("nwd.sock");
@@ -971,12 +971,20 @@ async fn concurrent_fw_nat_applies_persist_both_halves() {
         .into_inner();
     assert_eq!(ensure.status, "OK");
 
-    // Fire the firewall + NAT RPCs CONCURRENTLY (each request is handled on its
-    // own server task). Round-4 removed the read-clone-modify-insert that could
-    // LOSE one half of the fw+nat pair under overlap, which would have left a
-    // later-attached NIC outside the default-deny boundary. This test pins that
-    // invariant: after the join, BOTH records must survive and be re-asserted
-    // on attach.
+    // Fire the firewall + NAT RPCs CONCURRENTLY on a multi-thread runtime so
+    // the two handler tasks can genuinely run in parallel and both records must
+    // survive: after the join, BOTH halves must still be present and re-asserted
+    // on attach. Round-4 made this atomic by mutating the policy_state entry in
+    // place under the DashMap shard lock (the pre-fix read-clone-modify-insert
+    // could lose one half of the fw+nat pair under overlap, leaving a
+    // later-attached NIC outside the default-deny boundary).
+    //
+    // NOTE: this is an invariant-under-concurrency test, not a deterministic
+    // race reproducer. The policy_state critical section has no await points,
+    // so on the default single-thread `#[tokio::test]` runtime the handlers can
+    // never interleave (the test would pass even against the buggy code); even
+    // here the pre-fix lost-update only manifests if the OS schedules the two
+    // non-yielding sections to interleave, which is probabilistic per run.
     let mut fw_client = client.clone();
     let fw_fut = async move {
         fw_client
