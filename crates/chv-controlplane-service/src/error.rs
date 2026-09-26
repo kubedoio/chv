@@ -29,6 +29,13 @@ pub enum ControlPlaneServiceError {
 
     #[error("stale generation: expected {expected}, received {received}")]
     StaleGeneration { expected: String, received: String },
+
+    /// The build requested `CHV_ALLOW_INSECURE=1` (insecure peer-identity mode)
+    /// but was not compiled with the `dev` Cargo feature. This is a typed,
+    /// non-panicking startup failure — a production build must never run with
+    /// mTLS peer-identity enforcement disabled. See ADR-014 and issue #233.
+    #[error("insecure peer-identity mode is locked out without the dev feature: {0}")]
+    InsecureModeLockedOut(String),
 }
 
 impl From<chv_controlplane_store::StoreError> for ControlPlaneServiceError {
@@ -75,6 +82,10 @@ impl From<ControlPlaneServiceError> for tonic::Status {
             ControlPlaneServiceError::Seed(ref e) => {
                 tracing::error!(error = %e, "starter seed error");
                 Status::internal("internal error")
+            }
+            ControlPlaneServiceError::InsecureModeLockedOut(ref msg) => {
+                tracing::error!(error = %msg, "insecure mode locked out");
+                Status::internal("insecure peer-identity mode is not available in this build")
             }
             ControlPlaneServiceError::Io(ref e) => {
                 tracing::error!(error = %e, "io error");

@@ -186,8 +186,10 @@ impl ControlPlaneService {
         // Peer-identity interceptor: pins the wire-asserted node_id to the
         // peer's mTLS leaf certificate (closes C1/H1 cross-node trust gap).
         // In CHV_ALLOW_INSECURE=1 mode this is a no-op; in production it
-        // rejects requests without a parseable peer cert.
-        let interceptor = PeerIdentityInterceptor::new(self.runtime.allow_insecure());
+        // rejects requests without a parseable peer cert. Constructing it is
+        // fallible: requesting insecure mode without the `dev` feature returns
+        // a typed startup error (issue #233) instead of panicking.
+        let interceptor = PeerIdentityInterceptor::new(self.runtime.allow_insecure())?;
         let make_intercept = || {
             let interceptor = interceptor.clone();
             #[allow(clippy::result_large_err)]
