@@ -33,13 +33,13 @@ This guarantees that each nightly build is uniquely identifiable and traceable t
 
 ### Option 1 — GitHub nightly release (current)
 
-Until the package repository is fully configured, nightly packages are attached to the rolling [CHV Nightly](https://github.com/chv-project/chv/releases/tag/nightly) GitHub pre-release.
+Until the package repository is fully configured, nightly packages are attached to the rolling [CHV Nightly](https://github.com/kubedoio/chv/releases/tag/nightly) GitHub pre-release.
 
 #### Debian / Ubuntu
 
 ```bash
 # Download the latest .deb files from the Nightly release page
-curl -sL "https://github.com/chv-project/chv/releases/download/nightly/chv-controlplane_0.1.0~nightly.$(date +%Y%m%d).g$(curl -s https://api.github.com/repos/chv-project/chv/releases/tags/nightly | jq -r '.target_commitish' | head -c7)_amd64.deb" -o chv-controlplane.deb
+curl -sL "https://github.com/kubedoio/chv/releases/download/nightly/chv-controlplane_0.1.0~nightly.$(date +%Y%m%d).g$(curl -s https://api.github.com/repos/kubedoio/chv/releases/tags/nightly | jq -r '.target_commitish' | head -c7)_amd64.deb" -o chv-controlplane.deb
 
 # Or download manually from the browser, then install:
 sudo dpkg -i chv-controlplane_*.deb chv-node_*.deb chvctl_*.deb
