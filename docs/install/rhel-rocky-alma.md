@@ -40,7 +40,7 @@ CHV binaries are compiled for `x86_64`. Other architectures are not yet supporte
 
 ## Option 2 — Manual `.rpm` install (current)
 
-Download the `.rpm` packages from the [GitHub Releases](https://github.com/chv-project/chv/releases) page and install them manually.
+Download the `.rpm` packages from the [GitHub Releases](https://github.com/kubedoio/chv/releases) page and install them manually.
 
 ### 1. Download packages
 
@@ -48,7 +48,7 @@ Replace `VERSION` with the release you want (e.g., `0.1.0`):
 
 ```bash
 VERSION="0.1.0"
-BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 
 curl -sLO "${BASE_URL}/chv-controlplane-${VERSION}-1.x86_64.rpm"
 curl -sLO "${BASE_URL}/chv-node-${VERSION}-1.x86_64.rpm"
@@ -133,7 +133,7 @@ To upgrade to a newer version, download the new packages and install them over t
 ```bash
 # Download new packages
 VERSION="0.1.1"
-BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 curl -sLO "${BASE_URL}/chv-controlplane-${VERSION}-1.x86_64.rpm"
 curl -sLO "${BASE_URL}/chv-node-${VERSION}-1.x86_64.rpm"
 curl -sLO "${BASE_URL}/chvctl-${VERSION}-1.x86_64.rpm"

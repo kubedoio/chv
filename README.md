@@ -120,7 +120,7 @@ Quick install (Debian/Ubuntu):
 
 ```bash
 VERSION="0.2.0"
-BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
 curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
 curl -sLO "${BASE_URL}/chvctl_${VERSION}_amd64.deb"

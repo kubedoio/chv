@@ -24,7 +24,7 @@ Stable releases are tagged with SemVer versions: `v0.1.0`, `v0.2.0`, etc.
 
 ```bash
 VERSION="0.1.0"
-BASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+BASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 curl -sLO "${BASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
 curl -sLO "${BASE_URL}/chv-node_${VERSION}_amd64.deb"
 curl -sLO "${BASE_URL}/chvctl_${VERSION}_amd64.deb"
@@ -78,7 +78,7 @@ The version includes the date and git short SHA, making every nightly build uniq
 
 ### Install nightly
 
-Download from the rolling [CHV Nightly](https://github.com/chv-project/chv/releases/tag/nightly) GitHub pre-release.
+Download from the rolling [CHV Nightly](https://github.com/kubedoio/chv/releases/tag/nightly) GitHub pre-release.
 
 > **Warning:** Do not use nightly packages in production. Use them only on disposable test hosts or VMs.
 

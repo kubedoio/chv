@@ -4,7 +4,7 @@ This guide covers installing CHV by downloading artifacts directly from GitHub R
 
 ## Choose your release
 
-Go to the [CHV Releases](https://github.com/chv-project/chv/releases) page and select a release:
+Go to the [CHV Releases](https://github.com/kubedoio/chv/releases) page and select a release:
 
 | Release type | Tag example | Who should use it |
 |--------------|-------------|-------------------|
@@ -28,7 +28,7 @@ Each release provides:
 
 ```bash
 VERSION="0.1.0"
-RELEASE_URL="https://github.com/chv-project/chv/releases/download/v${VERSION}"
+RELEASE_URL="https://github.com/kubedoio/chv/releases/download/v${VERSION}"
 
 # Download .deb packages
 curl -sLO "${RELEASE_URL}/chv-controlplane_${VERSION}_amd64.deb"
@@ -81,7 +81,7 @@ If your distribution does not support `.deb` or `.rpm`, use the release tarball:
 ```bash
 VERSION="0.1.0"
 TARBALL="chv-${VERSION}-linux-amd64.tar.gz"
-curl -sLO "https://github.com/chv-project/chv/releases/download/v${VERSION}/${TARBALL}"
+curl -sLO "https://github.com/kubedoio/chv/releases/download/v${VERSION}/${TARBALL}"
 
 # Extract
 tar -xzf "${TARBALL}"
