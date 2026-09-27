@@ -85,6 +85,12 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   them from the adapter intent / native submit. Test: accepted→claimed→executed
   →finished in-process; restart replays non-terminal ops; fenced attempt tokens
   prevent double side effects.
+
+  > **Status: COMPLETE.** M2.1a executor wiring — merged `796ca38c`
+  > (PR #257, evidence
+  > `m2.1a-executor-wiring.md`). M2.1b durable operation metadata (requester,
+  > external op ID, request timestamp, legacy generation) — merged `297cb904`
+  > (PR #258, migration 0004, evidence `m2.1b-durable-metadata.md`).
 - **M2.2 — Single effector runtime.** Extend the Core runtime to perform the
   full VM side effect (stord open/attach, nwd ensure/attach, VM dir, CH
   create/start/stop/reboot/delete) and to update the NodeCache *projection*
@@ -116,7 +122,7 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
 | Exactly one durable authority accepts lifecycle mutations | M2.1/M2.3 code + tests |
 | Production legacy handlers route through Core before provider side effects | M2.1/M2.3 (adapter already routed; Reconciler gated) |
 | Compatibility state derived or crash-consistent | M2.2 (NodeCache projection, rebuild from Core) |
-| Required audit/idempotency/version metadata durable | M2.1 schema migration + tests |
+| Required audit/idempotency/version metadata durable | M2.1b schema migration 0004 + tests (merged `297cb904`) |
 | Crash/fault-injection matrix passes | M2.4 |
 | Concurrent duplicate + conflict tests pass | M2.4 |
 | Real-KVM lifecycle/restart/replay evidence passes | M2.5 (or unproven + gap) |
