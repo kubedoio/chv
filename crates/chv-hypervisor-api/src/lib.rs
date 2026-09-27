@@ -3,6 +3,8 @@ use chv_errors::ChvError;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
+pub mod resources;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VmInfo {
     pub state: String,
@@ -192,3 +194,8 @@ pub trait HypervisorAdapter: Send + Sync + 'static {
         None
     }
 }
+
+pub use resources::{
+    bridge_name_for_network, ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_runtime_dir,
+    HostResourceController, DEFAULT_NIC_CIDR,
+};

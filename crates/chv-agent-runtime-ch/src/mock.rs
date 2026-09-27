@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chv_errors::ChvError;
+use chv_hypervisor_api::resources::HostResourceController;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -7,9 +8,162 @@ use crate::adapter::{
     AddDiskParams, AddNetParams, CloudHypervisorAdapter, VmConfig, VmCounters, VmInfo,
 };
 
+/// Deterministic host-resource controller for tests.
+///
+/// Records every controller call as a canonical log line (for example
+/// `open:<volume_id>`, `attach:<volume_id>`, `ensure:<network_id>`,
+/// `attach_nic:<nic_id>`, `detach:<volume_id>`, `close:<volume_id>`,
+/// `detach_nic:<nic_id>`) and can inject a single failure at a named step via
+/// [`MockHostResourceController::fail_next`], keyed as `"<step>:<ordinal>"` —
+/// `"open:2"` fails when opening the 2nd volume, `"attach_nic:1"` fails the
+/// 1st NIC attach, and so on. This supports asserting exact side-effect
+/// sequencing (create open/attach/ensure ordering, create-unwind
+/// close/detach pairing, delete drain ordering) without real daemons.
+///
+/// Exported `pub` (not `cfg(test)`) so OTHER crates' integration tests can
+/// drive the Core runtime, mirroring `MockCloudHypervisorAdapter`.
+#[derive(Debug, Default)]
+pub struct MockHostResourceController {
+    /// Canonical log of controller invocations in call order.
+    pub calls: Arc<Mutex<Vec<String>>>,
+    /// `Some("step:ordinal")` fails exactly one upcoming step then clears.
+    pub fail_next: Arc<Mutex<Option<String>>>,
+}
+
+impl MockHostResourceController {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Inject a failure at the named step (e.g. `"open:2"`).
+    pub fn new_with_fail(fail_on: &str) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail_next: Arc::new(Mutex::new(Some(fail_on.to_string()))),
+        }
+    }
+
+    /// Count successes already recorded for `name` and check the fail hook.
+    fn begin_step(&self, name: &str) -> Result<(), ChvError> {
+        let prefix = format!("{name}:");
+        let ordinal = {
+            let calls = self.calls.lock().unwrap();
+            calls.iter().filter(|c| c.starts_with(&prefix)).count() + 1
+        };
+        let mut fail = self.fail_next.lock().unwrap();
+        if fail.as_deref() == Some(&format!("{name}:{ordinal}")) {
+            *fail = None;
+            return Err(ChvError::Internal {
+                reason: format!("mock injected failure at {name}:{ordinal}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Record one successful step.
+    fn record(&self, name: &str, detail: &str) {
+        self.calls.lock().unwrap().push(format!("{name}:{detail}"));
+    }
+}
+
+#[async_trait]
+impl HostResourceController for MockHostResourceController {
+    async fn open_volume(
+        &self,
+        volume_id: &str,
+        _backend_class: &str,
+        _locator: &str,
+        _options: HashMap<String, String>,
+        _operation_id: Option<&str>,
+    ) -> Result<(String, String, String), ChvError> {
+        self.begin_step("open")?;
+        self.record("open", volume_id);
+        Ok((
+            volume_id.to_string(),
+            format!("handle-{volume_id}"),
+            format!("/dev/mock/{volume_id}"),
+        ))
+    }
+
+    async fn attach_volume_to_vm(
+        &self,
+        volume_id: &str,
+        _vm_id: &str,
+        _attachment_handle: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(String, String), ChvError> {
+        self.begin_step("attach")?;
+        self.record("attach", volume_id);
+        Ok(("block".to_string(), format!("/dev/mock/{volume_id}")))
+    }
+
+    async fn detach_volume_from_vm(
+        &self,
+        volume_id: &str,
+        _vm_id: &str,
+        _force: bool,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.record("detach", volume_id);
+        Ok(())
+    }
+
+    async fn close_volume(
+        &self,
+        volume_id: &str,
+        _attachment_handle: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.record("close", volume_id);
+        Ok(())
+    }
+
+    async fn ensure_network_topology(
+        &self,
+        network_id: &str,
+        _bridge_name: &str,
+        _subnet_cidr: &str,
+        _gateway_ip: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.begin_step("ensure")?;
+        self.record("ensure", network_id);
+        Ok(())
+    }
+
+    async fn attach_vm_nic(
+        &self,
+        nic_id: &str,
+        _vm_id: &str,
+        _network_id: &str,
+        _mac_address: &str,
+        _ip_address: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(String, String), ChvError> {
+        self.begin_step("attach_nic")?;
+        self.record("attach_nic", nic_id);
+        Ok((format!("ns-{nic_id}"), format!("tap-{nic_id}")))
+    }
+
+    async fn detach_vm_nic(
+        &self,
+        nic_id: &str,
+        _vm_id: &str,
+        _network_id: &str,
+        _operation_id: Option<&str>,
+    ) -> Result<(), ChvError> {
+        self.record("detach_nic", nic_id);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MockCloudHypervisorAdapter {
     pub vms: Arc<Mutex<HashMap<String, VmConfig>>>,
+    /// When true, `delete_vm` fails deterministically (as `NotFound`) without
+    /// removing the VM, letting a test pin the drain-always behavior on a
+    /// failed delete. Per-instance state; never a shared static.
+    pub fail_delete: Arc<Mutex<bool>>,
 }
 
 #[async_trait]
@@ -40,6 +194,12 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
     }
 
     async fn delete_vm(&self, vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
+        if *self.fail_delete.lock().unwrap() {
+            return Err(ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            });
+        }
         self.vms.lock().unwrap().remove(vm_id);
         Ok(())
     }

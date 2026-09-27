@@ -17,6 +17,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 async-trait.workspace = true
 cellhv-core-types = { path = "../cellhv-core-types" }
+chv-agent-runtime-ch = { path = "../chv-agent-runtime-ch" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
