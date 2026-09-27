@@ -68,8 +68,17 @@ async fn start_core_managed(
     };
     let activated =
         cellhv_core_startup::StartupTransaction::begin(&paths)?.activate(configured_seed, None)?;
-    let runtime =
-        Arc::new(chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime::new(adapter));
+    let resources = Arc::new(chv_agent_core::resources::AgentResourceController::new(
+        config.stord_socket.clone(),
+        config.nwd_socket.clone(),
+    ));
+    let runtime = Arc::new(
+        chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime::new(
+            adapter,
+            resources,
+            config.runtime_dir.clone(),
+        ),
+    );
     Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
         runtime,
         activated,
@@ -102,8 +111,17 @@ async fn start_core_native(
     let adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter> = Arc::new(
         chv_agent_runtime_ch::process::ProcessCloudHypervisorAdapter::new(&config.chv_binary_path),
     );
-    let runtime =
-        Arc::new(chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime::new(adapter));
+    let resources = Arc::new(chv_agent_core::resources::AgentResourceController::new(
+        config.stord_socket.clone(),
+        config.nwd_socket.clone(),
+    ));
+    let runtime = Arc::new(
+        chv_agent_runtime_ch::core_runtime::CloudHypervisorCoreRuntime::new(
+            adapter,
+            resources,
+            config.runtime_dir.clone(),
+        ),
+    );
     Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
         runtime,
         activated,
