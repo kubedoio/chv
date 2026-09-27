@@ -375,6 +375,10 @@ impl CoreRuntimeOwner {
             }
             Ok(PollerExit::Failed(error)) => failures.push(RuntimeStageFailure::Executor(error)),
             Ok(PollerExit::DrainTimedOut { budget }) => {
+                tracing::warn!(
+                    budget_ms = budget.as_millis(),
+                    "core executor drain exceeded budget; in-flight tasks were cancelled (ops left Running reconcile as InspectRequired on restart)"
+                );
                 failures.push(RuntimeStageFailure::ExecutorDrainTimedOut { budget })
             }
             Err(join_error) => failures.push(RuntimeStageFailure::PollerJoin(join_error)),

@@ -316,10 +316,6 @@ impl JournalExecutor {
                 return task.await.map_err(ExecutorError::Join);
             }
             if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    budget_ms = budget.as_millis(),
-                    "core executor drain exceeded budget; cancelling in-flight tasks"
-                );
                 task.abort();
                 match task.await {
                     Err(error) if error.is_cancelled() => {
