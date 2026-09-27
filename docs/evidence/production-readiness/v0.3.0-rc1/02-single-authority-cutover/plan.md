@@ -91,11 +91,22 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   > `m2.1a-executor-wiring.md`). M2.1b durable operation metadata (requester,
   > external op ID, request timestamp, legacy generation) — merged `297cb904`
   > (PR #258, migration 0004, evidence `m2.1b-durable-metadata.md`).
-- **M2.2 — Single effector runtime.** Extend the Core runtime to perform the
-  full VM side effect (stord open/attach, nwd ensure/attach, VM dir, CH
-  create/start/stop/reboot/delete) and to update the NodeCache *projection*
-  only after Core execution. `CloudHypervisorCoreRuntime` becomes the one
-  effector; legacy `prepare_vm_resources`/`cleanup_vm_resources` are folded in.
+- **M2.2 — Single effector runtime** (split: side effects first, then projection).
+  - **M2.2a — Full side-effect Core runtime.** Extend the Core runtime to perform
+    the full VM side effect (stord open/attach, nwd ensure/attach, VM dir, CH
+    create/start/stop/reboot/delete) and fix the CreateVm envelope-parse latent bug.
+    `CloudHypervisorCoreRuntime` becomes the one effector for Core lifecycle ops;
+    shared conventions (`vm_runtime_dir`, bridge/naming, `nic_id`, 0o775+chown) are
+    folded into `chv-hypervisor-api` and reused; a neutral `HostResourceController`
+    trait keeps the runtime decoupled from the stord/nwd clients.
+    > **Status: COMPLETE.** Merged `d1028097` (PR #259, evidence
+    > `m2.2a-single-effector-runtime.md`).
+  - **M2.2b — NodeCache projection after Core execution.** Update the NodeCache
+    *projection* only after Core terminal outcomes; build/rebuild NodeCache from the
+    Core store. Legacy reconcile `prepare_vm_resources`/`cleanup_vm_resources` remain
+    in place for legacy mode until M2.3's gating deletes them (capability already
+    folded into the Core runtime in M2.2a; the deliberate 2a scope boundary kept the
+    cache-coupled legacy path untouched).
 - **M2.3 — Remove the second authority.** In core modes, gate off
   `reconcile_vms/volumes/networks` provider mutation (Reconciler becomes
   observe/health only or disabled); NodeCache rebuilt from Core at startup.
@@ -121,7 +132,7 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
 |---|---|
 | Exactly one durable authority accepts lifecycle mutations | M2.1/M2.3 code + tests |
 | Production legacy handlers route through Core before provider side effects | M2.1/M2.3 (adapter already routed; Reconciler gated) |
-| Compatibility state derived or crash-consistent | M2.2 (NodeCache projection, rebuild from Core) |
+| Compatibility state derived or crash-consistent | M2.2b (NodeCache projection, rebuild from Core) |
 | Required audit/idempotency/version metadata durable | M2.1b schema migration 0004 + tests (merged `297cb904`) |
 | Crash/fault-injection matrix passes | M2.4 |
 | Concurrent duplicate + conflict tests pass | M2.4 |
