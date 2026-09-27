@@ -545,6 +545,46 @@ impl TryFrom<RawOperation> for Operation {
     }
 }
 
+/// Durable audit metadata recorded alongside an accepted operation.
+///
+/// Native submits journal the local surface as the requester; legacy submits
+/// journal the control-plane caller, its external operation ID, the request
+/// timestamp, and the legacy desired generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationRequestMetadata {
+    pub requested_by: String,
+    pub external_operation_id: String,
+    pub request_unix_ms: i64,
+    pub legacy_generation: Option<u64>,
+}
+
+impl OperationRequestMetadata {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.requested_by.trim().is_empty() {
+            return Err("operation.request_metadata.requested_by must not be empty".to_owned());
+        }
+        if self.external_operation_id.trim().is_empty() {
+            return Err(
+                "operation.request_metadata.external_operation_id must not be empty".to_owned(),
+            );
+        }
+        if self.request_unix_ms <= 0 {
+            return Err(
+                "operation.request_metadata.request_unix_ms must be greater than zero".to_owned(),
+            );
+        }
+        if let Some(generation) = self.legacy_generation {
+            if generation < 1 {
+                return Err(
+                    "operation.request_metadata.legacy_generation must be at least 1".to_owned(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "RawOperationStep")]
 pub struct OperationStep {
@@ -838,6 +878,45 @@ mod tests {
             *candidate.pointer_mut(pointer).unwrap() = invalid;
             assert!(serde_json::from_value::<Operation>(candidate).is_err());
         }
+    }
+
+    #[test]
+    fn operation_request_metadata_validation_contract() {
+        let valid = OperationRequestMetadata {
+            requested_by: "controller-a".to_owned(),
+            external_operation_id: "op-42".to_owned(),
+            request_unix_ms: 1_700_000_000_000,
+            legacy_generation: None,
+        };
+        assert_eq!(valid.clone().validate(), Ok(()));
+        let legacy = OperationRequestMetadata {
+            legacy_generation: Some(7),
+            ..valid.clone()
+        };
+        assert_eq!(legacy.validate(), Ok(()));
+        for label in [
+            "whitespace requester",
+            "empty external id",
+            "zero timestamp",
+            "zero generation",
+        ] {
+            let mut candidate = valid.clone();
+            match label {
+                "whitespace requester" => candidate.requested_by = "   ".to_owned(),
+                "empty external id" => candidate.external_operation_id = String::new(),
+                "zero timestamp" => candidate.request_unix_ms = 0,
+                "zero generation" => candidate.legacy_generation = Some(0),
+                _ => unreachable!(),
+            }
+            assert!(candidate.validate().is_err(), "accepted invalid {label}");
+        }
+        assert!(
+            serde_json::from_str::<OperationRequestMetadata>(
+                r#"{"requested_by":"a","external_operation_id":"b","request_unix_ms":1,"legacy_generation":null,"extra":1}"#
+            )
+            .is_err(),
+            "unknown request metadata fields must be rejected"
+        );
     }
 
     #[test]
