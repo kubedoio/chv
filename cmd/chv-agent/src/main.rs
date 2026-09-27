@@ -75,10 +75,10 @@ async fn start_core_managed(
     // authoritative VM list BEFORE the executor poller starts, so a
     // crash-recovery operation can never race the rebuild (a projection that
     // landed after the snapshot would otherwise be wiped and never re-added
-    // while the Reconciler is gated off). On any open/list/rebuild/save failure
-    // we warn and continue: the Reconciler and the legacy desired-state RPCs
-    // are gated off in core-managed mode, so a stale compatibility cache cannot
-    // silently launch a second authority.
+    // while the Reconciler is observe-only). On any open/list/rebuild/save
+    // failure we warn and continue: the Reconciler and the legacy desired-state
+    // RPCs have no mutation surface in core-managed mode (M2.3), so a stale
+    // compatibility cache cannot silently launch a second authority.
     match activated.service().vms() {
         Ok(rebuild_vms) => {
             let mut cache = cache.lock().await;
@@ -645,23 +645,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut reconciler = Reconciler::new(
-        cache.clone(),
-        vm_runtime.clone(),
-        config.stord_socket.clone(),
-        config.nwd_socket.clone(),
-        config.runtime_dir.clone(),
-        migration_registry,
-    )
-    .await;
-
-    if config.authority_mode == AgentAuthorityMode::CoreManaged {
-        // M2.2b: the Core runtime is the single effector; the legacy Reconciler
-        // must not open volumes, attach NICs, or create/start/stop/delete VMs
-        // as a second authority (NodeCache is rebuilt from the Core store and
-        // projected only after Core execution).
-        reconciler.set_provider_mutation_enabled(false);
-    }
+    // The Reconciler drives the node state machine (including daemon health
+    // probes) in every mode. Its provider-MUTATION surface is mode-selected at
+    // construction (M2.3): core-managed builds an observe-only Reconciler that
+    // structurally holds no mutation state and has no setter, so it can never
+    // act as a second authority — the Core runtime is the sole provider
+    // effector (NodeCache is rebuilt from the Core store and projected only
+    // after Core execution). Legacy mode keeps the full mutation surface.
+    let mut reconciler = match config.authority_mode {
+        // Core-managed: observe-only Reconciler (no mutation surface at all).
+        AgentAuthorityMode::CoreManaged => {
+            Reconciler::new_observe_only(
+                cache.clone(),
+                vm_runtime.clone(),
+                config.stord_socket.clone(),
+                config.nwd_socket.clone(),
+                migration_registry,
+            )
+            .await
+        }
+        // Legacy: the full legacy provider-mutation surface (explicit opt-in).
+        AgentAuthorityMode::Legacy => {
+            Reconciler::new_legacy(
+                cache.clone(),
+                vm_runtime.clone(),
+                config.stord_socket.clone(),
+                config.nwd_socket.clone(),
+                config.runtime_dir.clone(),
+                migration_registry,
+            )
+            .await
+        }
+        // CoreNative returns in run_core_native() well before this point; a
+        // future variant here becomes a compile error instead of silently
+        // defaulting to the mutation-capable Reconciler.
+        AgentAuthorityMode::CoreNative => {
+            unreachable!("CoreNative mode exited normally before Reconciler composition")
+        }
+    };
 
     let mut supervisor = DaemonSupervisor::new(
         config.stord_binary_path.clone(),
@@ -966,7 +987,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
 
-        for vm in reconciler.vm_runtime.list().await {
+        for vm in reconciler.vm_runtime().list().await {
             let mut counters = control_plane_node_api::control_plane_node_api::VmStateReport {
                 node_id: node_id.clone(),
                 vm_id: vm.vm_id.clone(),
@@ -985,7 +1006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if vm.runtime_status == "Running" {
-                if let Ok(c) = reconciler.vm_runtime.vm_counters(&vm.vm_id).await {
+                if let Ok(c) = reconciler.vm_runtime().vm_counters(&vm.vm_id).await {
                     counters.cpu_percent = c.cpu_percent;
                     counters.memory_bytes_used = c.memory_bytes_used as i64;
                     counters.memory_bytes_total = c.memory_bytes_total as i64;
@@ -1134,7 +1155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ms = metrics_state.lock().await;
             ms.node_id = cache.lock().await.node_id.clone();
             ms.node_state = reconciler.current_state().await.as_str().to_string();
-            ms.vm_count = reconciler.vm_runtime.list().await.len();
+            ms.vm_count = reconciler.vm_runtime().list().await.len();
             ms.tick_count = tick_count;
             ms.reconcile_failures = consecutive_reconcile_failures;
             ms.health_failures = consecutive_health_failures;
