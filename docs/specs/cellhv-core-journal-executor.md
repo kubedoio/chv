@@ -112,3 +112,42 @@ RC-lifecycle until the M2.2b/M3 projection work).
   userdata/overrides, and the shared `DEFAULT_NIC_CIDR` with an empty gateway,
   rather than inventing values. Legacy reconcile's cache-coupled
   prepare/cleanup remains active until its M2.3 deletion.
+
+## NodeCache projection (M2.2b)
+
+In core-managed mode, NodeCache (the legacy compatibility store consumed by
+`agent_server` list/get handlers, `VmSpec`, and cache helpers) is a **projection
+derived from Core execution** — never an independent authority.
+
+- **Only after a terminal Succeeded outcome.** `ProjectingCoreRuntime`
+  (`chv-agent-core/src/projection.rs`) wraps the single effector and implements
+  `CoreVmRuntime`. It forwards `execute` unchanged, and on exactly the
+  executor's Succeeded path (`Ok(None)`) projects the outcome into NodeCache:
+  `CreateVm` writes the legacy VmSpec fragment + generation + VM attachments;
+  `DeleteVm` removes the VM axis state; `StartVm`/`RebootVm` set desired state
+  `Running`; `StopVm` sets `Stopped`; `UpdateVm`/attach/detach are no-ops
+  (out-of-lifecycle, fail closed as `Unsupported`). Projection is **best-effort**:
+  any request-parse, projection, or cache-save failure warns and skips; it never
+  changes the `Result` the executor sees. The cache is persisted after each
+  projected Succeeded outcome.
+- **Rebuild-on-startup crash model.** At startup (core-managed only) the VM axis
+  of NodeCache is rebuilt from the Core store's authoritative VM list
+  (`NodeCache::rebuild_from_core`), then persisted. A crash that loses the
+  projection (or its save) is repaired by the next startup rebuild; a stale
+  compatibility cache cannot act as a second authority because the legacy
+  Reconciler's provider mutation is gated off in this mode.
+- **Single-writer precondition.** `Reconciler::set_provider_mutation_enabled`
+  (default true; disabled in core-managed) makes the legacy reconcile path skip
+  all three `reconcile_networks/volumes/vms` provider mutations in the
+  `TenantReady` arm, so the Core runtime + projection are the only NodeCache
+  writers/effectors in core modes.
+- **Power-op generation staleness residual.** `StartVm`/`StopVm`/`RebootVm`
+  project only the desired-state patch (`update_vm_desired_state`); the VM's
+  fragment `generation` and attachments are NOT re-projected by these power
+  ops — generation stays at the last create/rebuild value until the next
+  `CreateVm`/`UpdateVm` or startup rebuild. This is a deliberate residual: the
+  compatibility cache's generation faithfulness is bounded by what the
+  projection writes.
+- **CoreNative not wired; legacy unchanged.** CoreNative mode has no NodeCache
+  today (documented, not wired). Legacy mode keeps the legacy reconciler and its
+  direct NodeCache mutations exactly as before.
