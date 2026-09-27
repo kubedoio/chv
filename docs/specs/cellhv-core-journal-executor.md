@@ -74,6 +74,36 @@ RC-lifecycle until the M2.2b/M3 projection work).
   map, logs the residual, and still returns success (the delete already
   happened; a leaked handle is not an infinite-retry failure). M2.2b adds the
   NodeCache projection after Core execution.
+- **Delete drains REGARDLESS of the hypervisor delete result.** A failed
+  hypervisor delete still triggers a best-effort detach+close of every tracked
+  volume and detach of every tracked NIC, so a failed delete cannot strand open
+  handles; the tracked entry is preserved so a later successful delete retry
+  finishes the drain. This is in-process best-effort cleanup only — it is not
+  crash-safe and does not persist the handle map.
+- **Crash/restart remediation drill (manual, documented).** After a daemon
+  crash leaves volumes open on chv-stord, a running→InspectRequired operation
+  is never auto-cleaned. An operator enumerates leaked sessions via
+  `stord list_volume_sessions` and closes each leaky session with
+  `close_volume` (stord open is idempotent on `(volume, locator)`); NICs are
+  detached via the nwd equivalent. This is the documented manual path until
+  M2.2b/M3 persists handles.
+- **Response-lost-after-commit window.** If chv-stord commits an open
+  server-side but the RPC response is dropped (e.g. `RuntimeUnavailable`), the
+  runtime never learns the handle and unwinds nothing for it — only the manual
+  drill above covers that residual.
+- **Path-safety boundary.** `vm_id`, `storage_ref`, and `network_ref` reject
+  path separators (`/`, `\`), NUL, and the `.`/`..` dot components, both at the
+  Core definition-validate authority gate
+  (`VmDefinition`/`StorageAttachmentRef`/`NetworkAttachmentRef::validate` in
+  cellhv-core-types — the submit path journals nothing unsafe) and again at the
+  runtime boundary (`is_safe_resource_id`), so even a pre-journaled row with an
+  unsafe id cannot become an fs-mutation primitive. The VM runtime dir is also
+  canonicalized and required to be a strict descendant of
+  `{runtime_dir}/vms`.
+- **Network topology is not torn down on failure.** `ensure_network_topology`
+  (bridge/rules) is NOT undone on create failure or in delete cleanup — it has
+  shared per-network "ensure" semantics (matching legacy reconcile); only the
+  per-VM NIC attach is detached.
 - **Request-modeling residuals.** The Core create request does not yet carry
   disk size/seed options, cloud-init userdata, hypervisor overrides, or
   per-NIC addressing — the effector passes empty open options, `None`
