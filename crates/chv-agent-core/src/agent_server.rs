@@ -608,6 +608,9 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                 .map_err(|e| match e {
                     cellhv_core_operations::AuthorityActorError::Service(err) => {
                         match err.class() {
+                            cellhv_core_operations::ErrorClass::Invalid => {
+                                Status::invalid_argument(err.to_string())
+                            }
                             cellhv_core_operations::ErrorClass::Conflict => {
                                 Status::already_exists(err.to_string())
                             }
