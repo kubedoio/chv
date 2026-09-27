@@ -71,6 +71,26 @@ async fn start_core_managed(
     };
     let activated =
         cellhv_core_startup::StartupTransaction::begin(&paths)?.activate(configured_seed, None)?;
+    // M2.2b startup rebuild: seed NodeCache's VM axis from the Core store's
+    // authoritative VM list BEFORE the executor poller starts, so a
+    // crash-recovery operation can never race the rebuild (a projection that
+    // landed after the snapshot would otherwise be wiped and never re-added
+    // while the Reconciler is gated off). On any open/list/rebuild/save failure
+    // we warn and continue: the Reconciler and the legacy desired-state RPCs
+    // are gated off in core-managed mode, so a stale compatibility cache cannot
+    // silently launch a second authority.
+    match activated.service().vms() {
+        Ok(rebuild_vms) => {
+            let mut cache = cache.lock().await;
+            cache.rebuild_from_core(&rebuild_vms);
+            if let Err(e) = cache.save(&cache_path).await {
+                warn!(error = %e, "core startup rebuild: failed to persist rebuilt NodeCache");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "core startup rebuild: skipping NodeCache rebuild from Core");
+        }
+    }
     let resources = Arc::new(chv_agent_core::resources::AgentResourceController::new(
         config.stord_socket.clone(),
         config.nwd_socket.clone(),
@@ -561,28 +581,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let owner =
             start_core_managed(&config, adapter.clone(), &cache, config.cache_path.clone()).await?;
         core_owner = Some(owner);
-    }
-
-    // M2.2b startup rebuild: NodeCache's VM axis is a compatibility projection
-    // of the Core store's authoritative VM list. On any open/list/rebuild/save
-    // failure we warn and continue: the Reconciler is gated off in core-managed
-    // mode, so a stale compatibility cache cannot silently launch a second
-    // authority.
-    if config.authority_mode == AgentAuthorityMode::CoreManaged {
-        match cellhv_core_operations::OperationService::open_existing(&config.core_store_path)
-            .and_then(|service| service.vms())
-        {
-            Ok(rebuild_vms) => {
-                let mut cache = cache.lock().await;
-                cache.rebuild_from_core(&rebuild_vms);
-                if let Err(e) = cache.save(&config.cache_path).await {
-                    warn!(error = %e, "core startup rebuild: failed to persist rebuilt NodeCache");
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "core startup rebuild: skipping NodeCache rebuild from Core");
-            }
-        }
     }
 
     let mut agent_server = AgentServer::new(

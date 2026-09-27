@@ -1873,8 +1873,9 @@ mod tests {
         // would fail and the tick would go Degraded; with the M2.2b gate OFF,
         // the legacy path must converge nothing and stay TenantReady.
         let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
         let mut rec = Reconciler::new(
-            Arc::new(tokio::sync::Mutex::new(test_cache())),
+            cache.clone(),
             VmRuntime::new(std::sync::Arc::new(
                 chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
             )),
@@ -1890,6 +1891,13 @@ mod tests {
         // A second tick stays healthy as well (no degraded accumulation).
         assert!(rec.run_once().await.is_ok());
         assert_eq!(rec.current_state().await, NodeState::TenantReady);
+        // The gate must leave the VM axis untouched: reconcile_vms (which would
+        // otherwise act on the vm-1 fragment) never ran, so the fragment is
+        // unchanged — no removal, no rewrite.
+        let cache = cache.lock().await;
+        let frag = cache.get_fragment("vm", "vm-1");
+        assert!(frag.is_some());
+        assert_eq!(frag.unwrap().updated_by, "cp");
     }
 
     #[tokio::test]

@@ -128,19 +128,30 @@ derived from Core execution** — never an independent authority.
   `Running`; `StopVm` sets `Stopped`; `UpdateVm`/attach/detach are no-ops
   (out-of-lifecycle, fail closed as `Unsupported`). Projection is **best-effort**:
   any request-parse, projection, or cache-save failure warns and skips; it never
-  changes the `Result` the executor sees. The cache is persisted after each
-  projected Succeeded outcome.
+  changes the `Result` the executor sees. The cache is persisted only when a
+  projection actually mutated it (a no-op arm or a skipped projection leaves no
+  trace and no extra snapshot write).
 - **Rebuild-on-startup crash model.** At startup (core-managed only) the VM axis
   of NodeCache is rebuilt from the Core store's authoritative VM list
-  (`NodeCache::rebuild_from_core`), then persisted. A crash that loses the
-  projection (or its save) is repaired by the next startup rebuild; a stale
-  compatibility cache cannot act as a second authority because the legacy
-  Reconciler's provider mutation is gated off in this mode.
+  (`NodeCache::rebuild_from_core`), then persisted — **inside `start_core_managed`
+  and strictly BEFORE `CoreRuntimeOwner::start` spawns the executor poller**, so a
+  crash-recovery operation can never race (and be clobbered by) the rebuild. A
+  crash that loses the projection (or its save) is repaired by the next startup
+  rebuild; a stale compatibility cache cannot act as a second authority because
+  the legacy Reconciler's provider mutation is gated off in this mode.
 - **Single-writer precondition.** `Reconciler::set_provider_mutation_enabled`
   (default true; disabled in core-managed) makes the legacy reconcile path skip
   all three `reconcile_networks/volumes/vms` provider mutations in the
   `TenantReady` arm, so the Core runtime + projection are the only NodeCache
-  writers/effectors in core modes.
+  writers/effectors in core modes. Completing the enforcement, the legacy
+  `agent_server` gRPC mutators that would otherwise write a fragment or drive a
+  provider side effect behind the Core authority FAIL CLOSED in core-managed
+  mode with `unimplemented`: `apply_vm_desired_state` (direct VM-axis second
+  writer), `apply_volume_desired_state`, `apply_network_desired_state`,
+  `start_network`, `stop_network`, `restart_network`. The lifecycle handlers the
+  control plane needs in core-managed are already core-routed
+  (`create_vm`/`start_vm`/`stop_vm`/`reboot_vm`/`delete_vm`), and `resize_vm` /
+  attach / detach were already gated.
 - **Power-op generation staleness residual.** `StartVm`/`StopVm`/`RebootVm`
   project only the desired-state patch (`update_vm_desired_state`); the VM's
   fragment `generation` and attachments are NOT re-projected by these power
@@ -148,6 +159,14 @@ derived from Core execution** — never an independent authority.
   `CreateVm`/`UpdateVm` or startup rebuild. This is a deliberate residual: the
   compatibility cache's generation faithfulness is bounded by what the
   projection writes.
+- **Requested MAC projection.** Core M1 does not model a requested MAC (the
+  effector lets the hypervisor assign one at runtime), but the legacy `VmSpec`
+  requires a non-empty `mac_address` (`VmSpec::validate` rejects empty). A
+  `NetworkAttachmentRef` with `mac_address: None` therefore projects a
+  deterministic locally-administered unicast placeholder
+  (`02:00:00:HH:HH:HH`, FNV-1a over `{vm_id}\0{network_ref}`) so the
+  compatibility surface stays valid and stable across restarts; the actual
+  runtime NIC MAC is observable independently, not via this projected `VmSpec`.
 - **CoreNative not wired; legacy unchanged.** CoreNative mode has no NodeCache
   today (documented, not wired). Legacy mode keeps the legacy reconciler and its
   direct NodeCache mutations exactly as before.

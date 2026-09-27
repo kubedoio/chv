@@ -685,7 +685,7 @@ impl NodeCache {
             })).collect::<Vec<_>>(),
             "nics": def.networks.iter().map(|network| serde_json::json!({
                 "network_id": network.network_ref.clone(),
-                "mac_address": network.mac_address.clone().unwrap_or_default(),
+                "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref)),
                 "ip_address": "",
                 "tap_name": "",
                 "cidr": chv_hypervisor_api::resources::DEFAULT_NIC_CIDR,
@@ -743,6 +743,36 @@ impl NodeCache {
             self.project_vm(def, "core-rebuild".to_string(), "core".to_string());
         }
     }
+}
+
+/// Deterministic locally-administered unicast MAC derived from a VM + network
+/// identity, used when a Core `NetworkAttachmentRef` carries no MAC.
+///
+/// Core M1 does not model a requested MAC (M2.2a's effector lets the hypervisor
+/// assign one at runtime), but the legacy compatibility `VmSpec` requires a
+/// non-empty `mac_address` (`VmSpec::validate`). Projecting a stable placeholder
+/// keeps the compatibility surface valid; the actual runtime NIC MAC is
+/// observable independently, not via this projected `VmSpec`.
+///
+/// Format: `02:00:00:HH:HH:HH` — unicast, locally administered — where HH are
+/// the low 24 bits of an FNV-1a hash of `{vm_id}\0{network_ref}`. Deterministic
+/// across restarts (no hasher-state dependency), collision-resistant enough for
+/// a compatibility view.
+fn projected_mac(vm_id: &str, network_ref: &str) -> String {
+    let mut state: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut bytes = vm_id.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(network_ref.as_bytes());
+    for b in bytes {
+        state ^= u64::from(b);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!(
+        "02:00:00:{:02x}:{:02x}:{:02x}",
+        ((state >> 16) & 0xff) as u8,
+        ((state >> 8) & 0xff) as u8,
+        (state & 0xff) as u8
+    )
 }
 
 #[cfg(test)]
@@ -861,7 +891,17 @@ mod tests {
         // CIDR) rather than inventing values.
         assert_eq!(spec.nics.len(), 1);
         assert_eq!(spec.nics[0].network_id, "net-1");
-        assert_eq!(spec.nics[0].mac_address, "");
+        // A Core def with no requested MAC must still produce a valid legacy
+        // VmSpec: the projection emits a deterministic locally-administered MAC
+        // instead of an empty string (which `VmSpec::validate` rejects).
+        let mac = &spec.nics[0].mac_address;
+        assert!(
+            !mac.is_empty(),
+            "projected MAC must be non-empty, got {mac:?}"
+        );
+        assert!(mac.starts_with("02:00:00:"), "projected MAC: {mac}");
+        assert_eq!(mac.len(), "02:00:00:00:00:00".len());
+        assert!(spec.validate().is_ok());
         assert_eq!(spec.nics[0].ip_address, "");
         assert_eq!(spec.nics[0].tap_name, "");
         assert_eq!(spec.nics[0].gateway, "");

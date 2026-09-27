@@ -60,6 +60,10 @@ impl ProjectingCoreRuntime {
                     kind = ?entry.operation.kind,
                     "projection: operation request is not a canonical envelope; skipping compatibility projection"
                 );
+                // Defensive only: for a genuinely executed operation this branch
+                // is unreachable — the inner runtime re-parses the same envelope
+                // and fails closed as `InvalidRequest` before any side effect.
+                // It guards against a future inner that does not re-parse.
                 None
             }
         }
@@ -70,25 +74,52 @@ impl ProjectingCoreRuntime {
     /// This is best-effort by construction: every step is infallible for the
     /// executor (no error is returned to the scheduler), so the only failure
     /// surface left is the cache save, which the caller handles with warn+skip.
-    async fn project(&self, entry: &OperationJournalEntry, request: &CanonicalRequest) {
+    ///
+    /// Returns `true` when a cache mutation was applied (the caller then
+    /// persists); `false` when nothing changed — a no-op arm (Update/Attach/
+    /// Detach), or a power-op on a VM with no projected fragment — in which
+    /// case no save happens and the returned `Result` is still unchanged.
+    async fn project(&self, entry: &OperationJournalEntry, request: &CanonicalRequest) -> bool {
         let vm_id = request.command.vm_id().as_str();
         let (updated_at, updated_by) = attribution(entry);
         match &request.command {
             MutationCommand::CreateVm { definition } => {
                 let mut cache = self.cache.lock().await;
                 cache.project_vm(definition, updated_at, updated_by);
+                true
             }
             MutationCommand::DeleteVm { .. } => {
                 let mut cache = self.cache.lock().await;
                 cache.remove_vm_state(vm_id);
+                true
             }
             MutationCommand::StartVm { .. } | MutationCommand::RebootVm { .. } => {
                 let mut cache = self.cache.lock().await;
-                cache.update_vm_desired_state(vm_id, "Running");
+                if !cache.get_fragment("vm", vm_id).is_some() {
+                    warn!(
+                        vm_id,
+                        kind = ?request.command.kind(),
+                        "projection: no VM fragment to update after start/reboot — was the startup rebuild skipped?"
+                    );
+                    false
+                } else {
+                    cache.update_vm_desired_state(vm_id, "Running");
+                    true
+                }
             }
             MutationCommand::StopVm { .. } => {
                 let mut cache = self.cache.lock().await;
-                cache.update_vm_desired_state(vm_id, "Stopped");
+                if !cache.get_fragment("vm", vm_id).is_some() {
+                    warn!(
+                        vm_id,
+                        kind = ?request.command.kind(),
+                        "projection: no VM fragment to update after stop — was the startup rebuild skipped?"
+                    );
+                    false
+                } else {
+                    cache.update_vm_desired_state(vm_id, "Stopped");
+                    true
+                }
             }
             // Out-of-RC-lifecycle in M2.2a: these fail closed as Unsupported and
             // never reach a Succeeded outcome; if one somehow does, the
@@ -97,7 +128,7 @@ impl ProjectingCoreRuntime {
             | MutationCommand::AttachVolume { .. }
             | MutationCommand::DetachVolume { .. }
             | MutationCommand::AttachNetwork { .. }
-            | MutationCommand::DetachNetwork { .. } => {}
+            | MutationCommand::DetachNetwork { .. } => false,
         }
     }
 }
@@ -131,17 +162,19 @@ impl CoreVmRuntime for ProjectingCoreRuntime {
         // `Err(_)` returns early above; neither is ever rewritten.
         if outcome.is_none() {
             if let Some(request) = request {
-                self.project(&entry, &request).await;
-                // Persist the projection atomically (same lock+save convention
-                // as the established `run()` save pattern). A save failure must
-                // not change the already-validated outcome.
-                let cache = self.cache.lock().await;
-                if let Err(error) = cache.save(&self.cache_path).await {
-                    warn!(
-                        operation_id = %entry.operation.id,
-                        error = %error,
-                        "NodeCache projection save failed; cache stays stale in-memory"
-                    );
+                // Persist only when the projection actually mutated the cache
+                // (no-op arms and malformed/skipped projections leave no trace;
+                // saving them would just write a redundant snapshot). A save
+                // failure must not change the already-validated outcome.
+                if self.project(&entry, &request).await {
+                    let cache = self.cache.lock().await;
+                    if let Err(error) = cache.save(&self.cache_path).await {
+                        warn!(
+                            operation_id = %entry.operation.id,
+                            error = %error,
+                            "NodeCache projection save failed; cache stays stale in-memory"
+                        );
+                    }
                 }
             }
         }
@@ -525,5 +558,108 @@ mod tests {
         let persisted = NodeCache::load(&f.cache_path).await.unwrap();
         assert!(persisted.get_fragment("vm", "vm-e2e").is_some());
         drop(cache);
+    }
+
+    #[tokio::test]
+    async fn projection_noop_arms_leave_cache_untouched() {
+        use cellhv_core_types::StorageAttachmentRef;
+        let f = fixture();
+        let commands = [
+            (
+                OperationKind::UpdateVm,
+                MutationCommand::UpdateVm {
+                    definition: definition("vm-b"),
+                },
+            ),
+            (
+                OperationKind::AttachVolume,
+                MutationCommand::AttachVolume {
+                    vm_id: VmId::new("vm-b").unwrap(),
+                    attachment: StorageAttachmentRef {
+                        attachment_id: "vol-0".to_string(),
+                        storage_ref: "vol-0".to_string(),
+                        read_only: false,
+                    },
+                },
+            ),
+            (
+                OperationKind::DetachVolume,
+                MutationCommand::DetachVolume {
+                    vm_id: VmId::new("vm-b").unwrap(),
+                    attachment_id: "vol-0".to_string(),
+                },
+            ),
+            (
+                OperationKind::AttachNetwork,
+                MutationCommand::AttachNetwork {
+                    vm_id: VmId::new("vm-b").unwrap(),
+                    attachment: cellhv_core_types::NetworkAttachmentRef {
+                        attachment_id: "nic-0".to_string(),
+                        network_ref: "net-0".to_string(),
+                        mac_address: None,
+                    },
+                },
+            ),
+            (
+                OperationKind::DetachNetwork,
+                MutationCommand::DetachNetwork {
+                    vm_id: VmId::new("vm-b").unwrap(),
+                    attachment_id: "nic-0".to_string(),
+                },
+            ),
+        ];
+        for (kind, command) in commands {
+            let stub = Arc::new(StubRuntime::new(vec![Ok(None)]));
+            let wrapper = Arc::new(ProjectingCoreRuntime::new(
+                stub.clone(),
+                f.cache.clone(),
+                f.cache_path.clone(),
+            ));
+            let outcome = wrapper
+                .execute(entry(kind, "vm-b", envelope(command)))
+                .await
+                .unwrap();
+            assert!(
+                outcome.is_none(),
+                "no-op arm must preserve the Succeeded outcome"
+            );
+        }
+        // None of the out-of-RC-lifecycle commands may project or persist.
+        let cache = f.cache.lock().await;
+        assert!(!cache.get_fragment("vm", "vm-b").is_some());
+        assert!(!cache.get_generation("vm", "vm-b").is_some());
+        assert!(!cache.vm_attachment_state("vm-b").is_some());
+        drop(cache);
+        assert!(!f.cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn projection_persist_failure_never_changes_the_outcome() {
+        // Point the cache path at a directory that does not exist so save()
+        // fails. The wrapper must still return the Succeeded outcome unchanged
+        // and keep the projection in memory (the startup rebuild repairs the
+        // on-disk staleness on the next restart).
+        let f = fixture();
+        let bad_path = f._dir.path().join("missing").join("cache.json");
+        let stub = Arc::new(StubRuntime::new(vec![Ok(None)]));
+        let wrapper = Arc::new(ProjectingCoreRuntime::new(
+            stub.clone(),
+            f.cache.clone(),
+            bad_path,
+        ));
+        let outcome = wrapper
+            .execute(entry(
+                OperationKind::CreateVm,
+                "vm-a",
+                envelope(MutationCommand::CreateVm {
+                    definition: definition("vm-a"),
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(outcome.is_none());
+        // Projection ran in-memory despite the persist failure; the returned
+        // Result is untouched.
+        assert!(f.cache.lock().await.get_fragment("vm", "vm-a").is_some());
     }
 }

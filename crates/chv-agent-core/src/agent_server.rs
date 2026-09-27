@@ -188,6 +188,16 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         &self,
         req: Request<proto::ApplyVmDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: in core-managed mode the NodeCache VM
+        // axis is a projection of Core execution only. Accepting a legacy
+        // desired-state write here would be a second writer behind the
+        // projection, so fail closed (the control plane must route through the
+        // Core authority instead).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "apply_vm_desired_state is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         if !chv_common::is_safe_id(&inner.vm_id) {
             return Err(Status::invalid_argument("invalid vm_id"));
@@ -231,6 +241,15 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         &self,
         req: Request<proto::ApplyVolumeDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: this legacy path performs a direct
+        // stord open+attach provider side effect and writes the cache behind
+        // the Core authority's back. In core-managed mode it must fail closed
+        // so volume lifecycle is enforced solely through Core execution.
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "apply_volume_desired_state is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         if !chv_common::is_safe_id(&inner.volume_id) {
             return Err(Status::invalid_argument("invalid volume_id"));
@@ -302,6 +321,14 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         &self,
         req: Request<proto::ApplyNetworkDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: this legacy path performs nwd
+        // provider side effects and writes the network axis behind the Core
+        // authority's back. In core-managed mode it must fail closed.
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "apply_network_desired_state is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1959,6 +1986,13 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::StartNetworkRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed mode so
+        // no legacy nwd side effect runs behind the Core authority.
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "start_network is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -2013,6 +2047,13 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::StopNetworkRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed mode so
+        // no legacy nwd side effect runs behind the Core authority.
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "stop_network is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -2047,6 +2088,13 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::RestartNetworkRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed mode so
+        // no legacy nwd side effect runs behind the Core authority.
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "restart_network is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta

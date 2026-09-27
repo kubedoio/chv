@@ -744,7 +744,6 @@ name = "chv-agent"
 version = "0.2.0"
 dependencies = [
  "axum",
- "cellhv-core-operations",
  "cellhv-core-runtime-owner",
  "cellhv-core-startup",
  "chv-agent-core",

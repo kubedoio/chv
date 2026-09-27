@@ -115,7 +115,13 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
     precondition lands here too: the legacy Reconciler's provider mutation
     (`reconcile_networks/volumes/vms`) is gated off in core-managed mode via
     `Reconciler::set_provider_mutation_enabled(false)` so the Core runtime is the
-    only effector and NodeCache has exactly one writer. CoreNative mode has no
+    only effector and NodeCache has exactly one writer; completing that
+    enforcement, the legacy `agent_server` desired-state/network RPCs
+    (`apply_vm/volume/network_desired_state`, `start/stop/restart_network`) fail
+    closed (`unimplemented`) in core-managed so no fragment can be written or
+    provider side effect driven behind the Core authority. The startup rebuild
+    runs inside `start_core_managed` before the executor poller starts, so no
+    crash-recovery op can race the rebuild. CoreNative mode has no
     NodeCache (documented, not wired); legacy mode is untouched.
     Legacy reconcile `prepare_vm_resources`/`cleanup_vm_resources` remain
     in place for legacy mode until M2.3's gating deletes them (capability already
