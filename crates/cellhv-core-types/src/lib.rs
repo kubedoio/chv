@@ -545,6 +545,13 @@ impl TryFrom<RawOperation> for Operation {
     }
 }
 
+/// Prefix of operation IDs constructed by the legacy control-plane adapter.
+///
+/// Shared by the write paths (which reject `legacy:` submissions that lack a
+/// legacy generation) and the store's reopen validation (which treats rows with
+/// this prefix as legacy-provenance when they carry metadata).
+pub const LEGACY_OPERATION_ID_PREFIX: &str = "legacy:";
+
 /// Durable audit metadata recorded alongside an accepted operation.
 ///
 /// Native submits journal the local surface as the requester; legacy submits
