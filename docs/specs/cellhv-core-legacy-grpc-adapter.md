@@ -1,12 +1,15 @@
 # CellHV Core legacy gRPC adapter
 
-Status: **implemented, deliberately not wired**
+Status: **implemented, wired in core-managed authority mode**
 
 The existing `chv.controlplane.node.v1.LifecycleService` remains the production
-VM lifecycle path. `chv-agent-core::legacy_core_adapter` provides the bounded,
-transport-independent conversion needed to make that API a future compatibility
-adapter over the single `cellhv-core-operations::OperationService` authority.
-It does not create an executor, store, daemon, or provider path.
+VM lifecycle path, but in core-managed authority mode its five lifecycle
+handlers route through `chv-agent-core::legacy_core_adapter`, which provides the
+bounded, transport-independent conversion needed to make that API a
+compatibility adapter over the single `cellhv-core-operations::OperationService`
+authority. The adapter itself does not create an executor, store, daemon, or
+provider path; it only translates legacy requests into Core submission
+envelopes.
 
 ## Identity and idempotency mapping
 
@@ -15,9 +18,12 @@ generation `G`, the adapter emits:
 
 - a namespaced Core operation ID containing length-prefixed `N`, `V`, and `O`;
 - external operation ID `O`, requester, request timestamp, and numeric legacy
-  generation `G` in `LegacyMutationIntent` audit metadata;
-- an expected Core VM resource version supplied separately by a future
-  coordinator;
+  generation `G` in both `LegacyMutationIntent` audit metadata and the durable
+  `OperationRequestMetadata` carried on `SubmitMutation`; the latter is written
+  into the operation journal by `OperationService::submit` (see migration
+  `0004_operation_request_metadata.sql`);
+- an expected Core VM resource version supplied separately by the current Core
+  authority in core-managed mode;
 - idempotency scope: `control-plane-node.v1/node/<len(N)>:N/vm/<len(V)>:V`;
 - idempotency key: `operation/<len(O)>:O/generation/<len(G)>:G`.
 
@@ -51,25 +57,31 @@ creating different identities for the same legacy attachment.
 
 ## Production cutover gate
 
-No `AgentServer` handler calls this adapter. Current handlers mutate the node
-JSON cache and perform provider side effects in a sequence that is not atomic
-with Core operation acceptance. Wiring the adapter before replacing that flow
-would permit the Core journal and `NodeCache` to disagree after a crash.
-`LegacyMutationIntent` retains audit metadata in memory, but the current Core
-operation journal has no fields for requester, request timestamp, external
-operation ID, or legacy generation. A coordinator must define and durably store
-that metadata before invoking `OperationService::submit`; constructing an intent
-alone is not durable audit evidence.
+In core-managed authority mode the `AgentServer` lifecycle handlers call this
+adapter and submit its `LegacyMutationIntent.submission` through
+`OperationService::submit`. The adapter's audit metadata (requester, external
+operation ID, request timestamp, legacy desired generation) is carried as
+`OperationRequestMetadata` on the submission and durably persisted into the
+operation journal (`operations` columns `requested_by`,
+`external_operation_id`, `request_unix_ms`, `legacy_generation`, added by
+migration 0004) in the same atomic transaction as operation acceptance — it is
+never memory-only. `LegacyMutationIntent` also retains its own copy for the
+in-memory compatibility path; both always agree by construction.
 
-Production routing may be enabled only after one authoritative transaction owns
-mutation acceptance and the legacy cache is either derived from Core state or
-updated through a proven crash-consistent compatibility mechanism. Until then,
-VM launch, stop, reboot, and deletion behavior is unchanged.
+Requester/audit identity is therefore available in the durable journal even
+before a separate authorization story lands. The only remaining cutover
+condition is that the legacy NodeCache must either be derived from Core state
+or updated through a proven crash-consistent compatibility mechanism, so that
+no two partially committed views of desired state can disagree after a crash.
+Until that is proven, core-managed mode is an explicit opt-in, and the default
+authority mode is unchanged.
 
 ## Evidence
 
 Unit tests in `chv-agent-core::legacy_core_adapter::tests` cover deterministic
 identity mapping, the lossless create subset, invalid generation/target
-rejection, shared attachment identity, and rejection of unsupported legacy fields. The module has no direct
+rejection, shared attachment identity, rejection of unsupported legacy fields,
+and end-to-end surface of the submitted audit metadata in the journal entry
+`request_metadata`. The module has no direct
 dependency on `cellhv-core-store`, `chv-agent-runtime-ch`, `chv-stord`, or
 `chv-nwd`; it submits only the shared Core operation types.

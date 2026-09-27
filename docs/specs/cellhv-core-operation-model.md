@@ -26,6 +26,10 @@ The internal `SubmitMutation` envelope contains:
 - a caller-selected operation identifier;
 - a non-empty idempotency scope and non-empty idempotency key;
 - the expected VM resource version;
+- durable request metadata (`OperationRequestMetadata`): the non-empty
+  requester identity, the caller's non-empty external operation ID, a positive
+  request timestamp in Unix milliseconds, and an optional legacy desired
+  generation (required to be `>= 1` when present);
 - exactly one closed `MutationCommand`: create, update, delete, start, stop, or
   reboot.
 
@@ -35,6 +39,25 @@ canonical representation. The store retains the canonical request, fingerprint,
 operation, accepted resource version, and `(scope, key)` mapping together.
 Fingerprint identity therefore includes mutation content and concurrency
 precondition, not the transport encoding or caller-proposed operation ID.
+
+### Durable request metadata columns
+
+`OperationRequestMetadata` is persisted on every operation row in the same
+atomic transaction as acceptance (migration
+`0004_operation_request_metadata.sql`), in four `operations` columns:
+
+| Column | Nullable | Semantics |
+|---|---|---|
+| `requested_by` | nullable | Requester identity. Native submits journal the local surface (`core-native-v1`); legacy submits journal the control-plane caller. |
+| `external_operation_id` | nullable | Caller's external operation ID (the legacy `operation_id`) or the native `request_id`. |
+| `request_unix_ms` | nullable | Unix timestamp in milliseconds when Core received the request. |
+| `legacy_generation` | nullable | Legacy desired generation; non-NULL only for legacy provenance rows. |
+
+Rows written before migration 0004 carry NULL in all four columns and are
+reconstructed as `request_metadata: None`. The three non-generation columns are
+all-or-nothing: any half-present combination is an integrity failure on reopen.
+Rows whose operation ID begins with the `legacy:` prefix MUST carry metadata and
+a non-NULL `legacy_generation`; otherwise reopening the store fails closed.
 
 ## 3. Replay before state inspection
 
