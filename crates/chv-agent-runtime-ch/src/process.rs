@@ -69,6 +69,59 @@ impl Drop for AliveGuard {
     }
 }
 
+/// RAII guard closing the orphan window between spawning a CH child and
+/// registering it in the vm process map. Several awaits separate those two
+/// points; if an async cancellation (e.g. the core executor's bounded-drain
+/// abort) drops the future in between, an *armed* guard SIGKILLs the child so
+/// no unaccounted VMM survives. The guard is disarmed exactly when the child is
+/// handed to the vm process map, which owns lifecycle from then on (stop/delete
+/// call `start_kill` explicitly, and teardown deliberately leaves running VMs
+/// untouched).
+struct ChildGuard {
+    child: Option<Child>,
+    armed: bool,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self {
+            child: Some(child),
+            armed: true,
+        }
+    }
+
+    /// Hand the child to its long-lived owner. From here an ordinary drop must
+    /// NOT kill the VMM, so disarm before moving the child out of the guard.
+    fn disarm(mut self) -> Child {
+        debug_assert!(self.armed);
+        self.armed = false;
+        self.child.take().expect("child is present while armed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.start_kill();
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.child.as_ref().expect("child is present until disarm")
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child is present until disarm")
+    }
+}
+
 struct VmProcess {
     api_socket: std::path::PathBuf,
     child: Child,
@@ -487,10 +540,18 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             "spawning cloud-hypervisor"
         );
 
-        let mut child = cmd.spawn().map_err(|e| ChvError::Io {
+        let child = cmd.spawn().map_err(|e| ChvError::Io {
             path: self.chv_binary.to_string_lossy().to_string(),
             source: e,
         })?;
+        // Close the orphan window: `child` is not yet registered in the vm
+        // process map, and several awaits separate this spawn from the
+        // registration. If an async cancellation (e.g. the core executor's
+        // bounded-drain abort) drops this future mid-way, the child must not
+        // survive as an unaccounted VMM — the armed `ChildGuard` SIGKILLs it.
+        // It is disarmed immediately before the child is handed to the vm
+        // process map, which then owns lifecycle.
+        let mut child = ChildGuard::new(child);
 
         if let Err(e) =
             Self::wait_for_socket(&config.api_socket_path, std::time::Duration::from_secs(10)).await
@@ -737,7 +798,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             );
         }
 
+        // Acquire the vm-process-map lock while the guard is still armed so a
+        // cancellation landing on this await still SIGKILLs the child; then
+        // disarm and insert with no intervening await. From here the map owns
+        // lifecycle (stop/delete call start_kill explicitly) and a normal drop
+        // of a registered VmProcess (e.g. runtime teardown) does not SIGKILL a
+        // VM that is deliberately left running.
         let mut map = self.vms.write().await;
+        let child = child.disarm();
         map.insert(
             config.vm_id.clone(),
             VmProcess {
@@ -2055,5 +2123,69 @@ mod tests {
                 "state {state:?} should map to Boot"
             );
         }
+    }
+
+    /// Linux process state from /proc/<pid>/stat ('S' = sleeping, 'Z' = zombie
+    /// i.e. terminated-but-not-yet-reaped, None = fully gone).
+    fn proc_state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // Format: `pid (comm) state ...`. comm can contain spaces/parens, so
+        // the state is the token immediately after the last ')'.
+        let close = stat.rfind(')')?;
+        stat.as_bytes().get(close + 2).copied().map(char::from)
+    }
+
+    /// Empty spawn helper mirroring the CH spawn shape (null stdio, long sleep).
+    fn spawn_sleep_child() -> (tokio::process::Child, u32) {
+        let child = tokio::process::Command::new("sleep")
+            .arg("300")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        (child, pid)
+    }
+
+    /// Proves the orphan-window guard in the CH spawn path: while a CH child
+    /// is spawned but not yet registered in the vm process map, dropping an
+    /// *armed* `ChildGuard` must terminate the VMM — otherwise an aborted
+    /// create (e.g. a bounded-drain cancellation) leaves an unaccounted live
+    /// process.
+    #[tokio::test]
+    async fn child_guard_armed_drop_terminates_child() {
+        let (child, pid) = spawn_sleep_child();
+        assert!(
+            proc_state(pid).is_some(),
+            "child should be alive before drop"
+        );
+        drop(super::ChildGuard::new(child));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if matches!(proc_state(pid), None | Some('Z')) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "child was not terminated by armed ChildGuard drop"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Proves the counterpart: after registration the vm process map owns the
+    /// child, so `disarm()` must return a live child whose ordinary drop does
+    /// NOT kill the VMM (lifecycle is explicit via start_kill on stop/delete).
+    #[tokio::test]
+    async fn child_guard_disarm_keeps_child_alive() {
+        let (child, pid) = spawn_sleep_child();
+        let mut child = super::ChildGuard::new(child).disarm();
+        assert!(
+            !matches!(proc_state(pid), None | Some('Z')),
+            "child must remain running after disarm"
+        );
+        // Clean up and reap this test's child so it does not linger on the host.
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
     }
 }

@@ -627,3 +627,156 @@ async fn same_vm_is_ordered_while_different_vms_overlap() {
     assert_eq!(runtime.max_total.load(Ordering::SeqCst), 2);
     stop(f).await;
 }
+
+#[tokio::test]
+async fn shutdown_bounded_drains_in_flight_work() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    struct Inspect {
+        authority: cellhv_core_operations::AuthorityHandle,
+    }
+    #[async_trait]
+    impl CoreVmRuntime for Inspect {
+        async fn execute(
+            &self,
+            op: OperationJournalEntry,
+        ) -> std::result::Result<Option<serde_json::Value>, RuntimeFailure> {
+            assert_eq!(
+                self.authority
+                    .operation(op.operation.id)
+                    .await
+                    .unwrap()
+                    .operation
+                    .status,
+                cellhv_core_types::OperationStatus::Running
+            );
+            Ok(Some(serde_json::json!({"ok":true})))
+        }
+    }
+    let executor = JournalExecutor::start(
+        f.execution.clone(),
+        Arc::new(Inspect {
+            authority: f.authority.clone(),
+        }),
+        1,
+        1,
+    )
+    .unwrap();
+    executor.scan_ready().await.unwrap();
+    let report = executor
+        .shutdown_bounded(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(report.completed, 1);
+    assert_eq!(
+        f.authority
+            .operation(OperationId::new("one").unwrap())
+            .await
+            .unwrap()
+            .operation
+            .status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+    stop(f).await;
+}
+
+#[tokio::test]
+async fn shutdown_bounded_cancels_wedged_work_and_returns_drain_timeout() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    let runtime = Arc::new(Blocking {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 1, 1).unwrap();
+    executor.scan_ready().await.unwrap();
+    runtime.entered.notified().await; // execute() is now wedged on `release`
+    let started = std::time::Instant::now();
+    let err = executor
+        .shutdown_bounded(std::time::Duration::from_millis(150))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ExecutorError::DrainTimedOut { .. }));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "bounded drain must return promptly after the budget expires"
+    );
+    // The wedged op was cancelled and left Running -> InspectRequired on restart.
+    assert_eq!(
+        f.authority
+            .operation(OperationId::new("one").unwrap())
+            .await
+            .unwrap()
+            .operation
+            .status,
+        cellhv_core_types::OperationStatus::Running
+    );
+    stop(f).await;
+}
+
+#[tokio::test]
+async fn scheduled_bookkeeping_is_bounded_after_completion() {
+    let f = fixture();
+    // Distinct vms: repeated CreateVm mutations for one vm id conflict.
+    for (vm, op) in [("vm-a", "op-a"), ("vm-b", "op-b"), ("vm-c", "op-c")] {
+        f.authority.submit(submit(vm, op)).await.unwrap();
+    }
+    let runtime = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 1, 16).unwrap();
+    executor.scan_ready().await.unwrap();
+    {
+        let scheduled = executor.scheduled.lock().unwrap();
+        assert_eq!(
+            scheduled.len(),
+            3,
+            "all submitted Ready ops are admitted after the first scan"
+        );
+    }
+    // Drive the scheduler to terminal state for every op.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut done = true;
+        for op in ["op-a", "op-b", "op-c"] {
+            let status = f
+                .authority
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .unwrap()
+                .operation
+                .status;
+            if status != cellhv_core_types::OperationStatus::Succeeded {
+                done = false;
+            }
+        }
+        if done {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "accepted operations never reached Succeeded"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // The unbounded-growth regression guard: after the ops are terminal, a
+    // further scan must prune their ids out of `scheduled` (only still-Ready
+    // ops may be retained), so the always-on poller never accumulates every
+    // operation it has ever admitted.
+    executor.scan_ready().await.unwrap();
+    {
+        let scheduled = executor.scheduled.lock().unwrap();
+        assert_eq!(
+            scheduled.len(),
+            0,
+            "completed operations must be pruned from the scheduled set"
+        );
+    }
+    executor
+        .shutdown_bounded(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    stop(f).await;
+}

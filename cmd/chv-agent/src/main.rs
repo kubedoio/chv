@@ -26,6 +26,16 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
 const FAILED_THRESHOLD: u32 = 6; // 6 ticks * 5s = 30s
+/// How often the composition-internal journal poller drives `scan_ready`.
+const CORE_SCAN_INTERVAL: Duration = Duration::from_millis(250);
+/// Upper bound on a single `scan_ready`. A wedged authority/store can hang the
+/// scan RPC; the timeout turns a hang into a counted scan failure (health goes
+/// unhealthy, backoff engages) instead of wedging the poller and shutdown.
+const CORE_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound on the graceful journal drain at shutdown. The CH adapter bounds
+/// individual ops at ~10s internally, so 60s covers a stalled batch; beyond
+/// that the executor is explicitly cancelled (fail-closed -> InspectRequired).
+const CORE_EXECUTOR_DRAIN_BUDGET: Duration = Duration::from_secs(60);
 const CERT_ROTATION_INTERVAL_SECS: i64 = 12 * 60 * 60;
 
 /// Write `contents` to `path` with mode 0600, normalizing the permissions of
@@ -66,6 +76,11 @@ async fn start_core_managed(
         &config.core_api_socket_path,
         128,
         Duration::from_secs(2),
+        cellhv_core_runtime_owner::JournalPollerConfig {
+            scan_interval: CORE_SCAN_INTERVAL,
+            scan_timeout: CORE_SCAN_TIMEOUT,
+            drain_budget: CORE_EXECUTOR_DRAIN_BUDGET,
+        },
     )
     .await?)
 }
@@ -95,6 +110,11 @@ async fn start_core_native(
         &config.core_api_socket_path,
         128,
         Duration::from_secs(2),
+        cellhv_core_runtime_owner::JournalPollerConfig {
+            scan_interval: CORE_SCAN_INTERVAL,
+            scan_timeout: CORE_SCAN_TIMEOUT,
+            drain_budget: CORE_EXECUTOR_DRAIN_BUDGET,
+        },
     )
     .await?)
 }
@@ -747,6 +767,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut health = HealthAggregator::new();
         health.update_stord(stord_ok);
         health.update_nwd(nwd_ok);
+        if let Some(owner) = &core_owner {
+            // A wedged Core journal must not silently pass for a healthy node:
+            // accepted operations would stop executing while the API keeps
+            // acknowledging them.
+            health.update_core_journal(owner.journal_scan_healthy());
+        }
 
         let current_state = reconciler.current_state().await;
         let derived = health.derive_node_state(current_state);

@@ -65,6 +65,7 @@ pub fn check_host_resources() -> ResourcePressure {
 pub struct HealthAggregator {
     stord: Option<bool>,
     nwd: Option<bool>,
+    core_journal: Option<bool>,
     resource_pressure: Option<ResourcePressure>,
 }
 
@@ -73,6 +74,7 @@ impl HealthAggregator {
         Self {
             stord: None,
             nwd: None,
+            core_journal: None,
             resource_pressure: None,
         }
     }
@@ -83,6 +85,14 @@ impl HealthAggregator {
 
     pub fn update_nwd(&mut self, healthy: bool) {
         self.nwd = Some(healthy);
+    }
+
+    /// Update the Core journal health signal. In core-managed mode this is fed
+    /// from the runtime owner's journal poller; an unhealthy journal means
+    /// accepted operations are no longer executing, so the node must not report
+    /// fully ready. In legacy mode this is never fed and defaults to healthy.
+    pub fn update_core_journal(&mut self, healthy: bool) {
+        self.core_journal = Some(healthy);
     }
 
     /// Update the cached resource pressure state.
@@ -101,6 +111,12 @@ impl HealthAggregator {
     /// Returns the current resource pressure state, if available.
     pub fn resource_pressure(&self) -> Option<&ResourcePressure> {
         self.resource_pressure.as_ref()
+    }
+
+    /// Whether the Core journal health signal permits readiness. Unknown (not
+    /// fed, legacy mode) defaults to healthy so legacy nodes are unaffected.
+    fn journal_ok(&self) -> bool {
+        self.core_journal.unwrap_or(true)
     }
 
     pub fn derive_node_state(&self, current: NodeState) -> NodeState {
@@ -126,28 +142,28 @@ impl HealthAggregator {
                 }
             }
             NodeState::NetworkReady => {
-                if stord_ok && nwd_ok {
+                if stord_ok && nwd_ok && self.journal_ok() {
                     NodeState::TenantReady
                 } else {
                     NodeState::Degraded
                 }
             }
             NodeState::TenantReady => {
-                if stord_ok && nwd_ok && !self.has_resource_pressure() {
+                if stord_ok && nwd_ok && self.journal_ok() && !self.has_resource_pressure() {
                     NodeState::TenantReady
                 } else {
                     NodeState::Degraded
                 }
             }
             NodeState::Degraded => {
-                if stord_ok && nwd_ok && !self.has_resource_pressure() {
+                if stord_ok && nwd_ok && self.journal_ok() && !self.has_resource_pressure() {
                     NodeState::TenantReady
                 } else {
                     NodeState::Degraded
                 }
             }
             NodeState::Failed => {
-                if stord_ok && nwd_ok {
+                if stord_ok && nwd_ok && self.journal_ok() {
                     NodeState::HostReady
                 } else if stord_ok || nwd_ok {
                     NodeState::Degraded
@@ -276,5 +292,54 @@ mod tests {
         h.update_stord(false);
         h.update_nwd(false);
         assert_eq!(h.derive_node_state(NodeState::Failed), NodeState::Failed);
+    }
+
+    #[test]
+    fn health_journal_unhealthy_prevents_tenant_ready() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        h.update_core_journal(false);
+        assert_eq!(
+            h.derive_node_state(NodeState::NetworkReady),
+            NodeState::Degraded
+        );
+        assert_eq!(
+            h.derive_node_state(NodeState::TenantReady),
+            NodeState::Degraded
+        );
+    }
+
+    #[test]
+    fn health_journal_healthy_keeps_tenant_ready() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        h.update_core_journal(true);
+        assert_eq!(
+            h.derive_node_state(NodeState::TenantReady),
+            NodeState::TenantReady
+        );
+    }
+
+    #[test]
+    fn health_journal_unfed_defaults_to_healthy() {
+        // Legacy mode never feeds core_journal; it must be a no-op.
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        assert_eq!(
+            h.derive_node_state(NodeState::TenantReady),
+            NodeState::TenantReady
+        );
+    }
+
+    #[test]
+    fn health_failed_with_bad_journal_recovers_to_degraded_not_ready() {
+        let mut h = HealthAggregator::new();
+        h.update_stord(true);
+        h.update_nwd(true);
+        h.update_core_journal(false);
+        assert_eq!(h.derive_node_state(NodeState::Failed), NodeState::Degraded);
     }
 }

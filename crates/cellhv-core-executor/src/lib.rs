@@ -12,6 +12,7 @@ use cellhv_core_operations::{
 use cellhv_core_types::{canonical_json, OperationId, VmId};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinSet};
@@ -59,6 +60,8 @@ pub enum ExecutorError {
     Authority(#[from] cellhv_core_operations::AuthorityActorError),
     #[error("executor task failed: {0}")]
     Join(#[from] JoinError),
+    #[error("executor drain exceeded {budget:?}; in-flight tasks were cancelled")]
+    DrainTimedOut { budget: Duration },
 }
 
 pub type Result<T> = std::result::Result<T, ExecutorError>;
@@ -174,15 +177,32 @@ impl JournalExecutor {
         let _scan = self.scan_lock.lock().await;
         let mut report = RestartScheduleReport::default();
         let restart_snapshot = self.execution.restart_operations().await?;
+        // Bounded bookkeeping: `scheduled` must only ever hold operations the
+        // scheduler is still driving. Every scan prunes it to the set the
+        // authority reports as Ready — exactly the operations that could be
+        // (re)admitted. Operations that are Running/InspectRequired are already
+        // claimed by the scheduler (execute_one only ever reaches a terminal or
+        // quarantined state; it never reverts a claimed op to Ready — see
+        // execute_one/merge_outcome), so dropping them from `scheduled` cannot
+        // cause a duplicate admission. Without this prune, the always-on
+        // production poller would grow `scheduled` unboundedly over the
+        // lifetime of the node.
+        let mut ready_ids: HashSet<OperationId> = HashSet::new();
         for restart in &restart_snapshot {
-            if restart.disposition == RestartDisposition::InspectRequired {
-                self.quarantined_vms
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(restart.entry.operation.vm_id.clone());
-                report
-                    .inspect_required
-                    .push(restart.entry.operation.id.clone());
+            match restart.disposition {
+                RestartDisposition::Ready => {
+                    ready_ids.insert(restart.entry.operation.id.clone());
+                }
+                RestartDisposition::InspectRequired => {
+                    self.quarantined_vms
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(restart.entry.operation.vm_id.clone());
+                    report
+                        .inspect_required
+                        .push(restart.entry.operation.id.clone());
+                }
+                RestartDisposition::Terminal => {}
             }
         }
         for restart in restart_snapshot {
@@ -223,6 +243,10 @@ impl JournalExecutor {
                 RestartDisposition::Terminal => {}
             }
         }
+        self.scheduled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id| ready_ids.contains(id));
         Ok(report)
     }
 
@@ -265,6 +289,44 @@ impl JournalExecutor {
             .take()
             .expect("executor task is present before shutdown")
             .await?)
+    }
+
+    /// Graceful shutdown bounded by `budget`, as used by production
+    /// compositions. If the scheduler fails to drain within the budget (for
+    /// example a wedged runtime), the scheduler task is explicitly cancelled so
+    /// the executor stops issuing any further claim/finish RPCs — a task still
+    /// talking to a gone authority actor would be a second, unaccounted
+    /// effector. Note the boundary of this guarantee: cancellation stops the
+    /// executor *task*; a runtime effect that was already initiated is not
+    /// rolled back by the executor and is reconciled through the operation's
+    /// `InspectRequired` disposition on restart (see
+    /// `chv-agent-runtime-ch` for the process-lifecycle counterpart).
+    /// Acquired-but-unfinished operations remain `Running` and therefore
+    /// `InspectRequired` after restart (the documented crash semantics).
+    /// Returns [`ExecutorError::DrainTimedOut`] when the budget expires.
+    pub async fn shutdown_bounded(mut self, budget: Duration) -> Result<ExecutionReport> {
+        self.close_ingress();
+        let task = self
+            .task
+            .take()
+            .expect("executor task is present before shutdown");
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            if task.is_finished() {
+                return task.await.map_err(ExecutorError::Join);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                task.abort();
+                match task.await {
+                    Err(error) if error.is_cancelled() => {
+                        return Err(ExecutorError::DrainTimedOut { budget });
+                    }
+                    Err(error) => return Err(ExecutorError::Join(error)),
+                    Ok(_) => return Err(ExecutorError::DrainTimedOut { budget }),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     pub fn close_ingress(&mut self) {
