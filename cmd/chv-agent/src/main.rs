@@ -10,6 +10,7 @@ use chv_agent_core::{
     health::HealthAggregator,
     inventory::InventoryReporter,
     metrics_server::{metrics_router, MetricsState},
+    projection::ProjectingCoreRuntime,
     reconcile::Reconciler,
     state_machine::NodeState,
     supervisor::DaemonSupervisor,
@@ -56,6 +57,8 @@ async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()>
 async fn start_core_managed(
     config: &AgentConfig,
     adapter: Arc<dyn chv_agent_runtime_ch::adapter::CloudHypervisorAdapter>,
+    cache: &Arc<tokio::sync::Mutex<NodeCache>>,
+    cache_path: PathBuf,
 ) -> Result<cellhv_core_runtime_owner::CoreRuntimeOwner, Box<dyn std::error::Error>> {
     let paths = cellhv_core_startup::StartupPaths {
         node_cache: config.cache_path.clone(),
@@ -79,8 +82,16 @@ async fn start_core_managed(
             config.runtime_dir.clone(),
         ),
     );
-    Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
+    // M2.2b: wrap the single effector with the NodeCache compatibility
+    // projection — Succeeded Core outcomes are projected into NodeCache and
+    // persisted before the executor finishes the operation.
+    let projecting = Arc::new(ProjectingCoreRuntime::new(
         runtime,
+        cache.clone(),
+        cache_path,
+    ));
+    Ok(cellhv_core_runtime_owner::CoreRuntimeOwner::start(
+        projecting,
         activated,
         &config.core_api_socket_path,
         128,
@@ -547,8 +558,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut core_owner = None;
     if config.authority_mode == AgentAuthorityMode::CoreManaged {
-        let owner = start_core_managed(&config, adapter.clone()).await?;
+        let owner =
+            start_core_managed(&config, adapter.clone(), &cache, config.cache_path.clone()).await?;
         core_owner = Some(owner);
+    }
+
+    // M2.2b startup rebuild: NodeCache's VM axis is a compatibility projection
+    // of the Core store's authoritative VM list. On any open/list/rebuild/save
+    // failure we warn and continue: the Reconciler is gated off in core-managed
+    // mode, so a stale compatibility cache cannot silently launch a second
+    // authority.
+    if config.authority_mode == AgentAuthorityMode::CoreManaged {
+        match cellhv_core_operations::OperationService::open_existing(&config.core_store_path)
+            .and_then(|service| service.vms())
+        {
+            Ok(rebuild_vms) => {
+                let mut cache = cache.lock().await;
+                cache.rebuild_from_core(&rebuild_vms);
+                if let Err(e) = cache.save(&config.cache_path).await {
+                    warn!(error = %e, "core startup rebuild: failed to persist rebuilt NodeCache");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "core startup rebuild: skipping NodeCache rebuild from Core");
+            }
+        }
     }
 
     let mut agent_server = AgentServer::new(
@@ -622,6 +656,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         migration_registry,
     )
     .await;
+
+    if config.authority_mode == AgentAuthorityMode::CoreManaged {
+        // M2.2b: the Core runtime is the single effector; the legacy Reconciler
+        // must not open volumes, attach NICs, or create/start/stop/delete VMs
+        // as a second authority (NodeCache is rebuilt from the Core store and
+        // projected only after Core execution).
+        reconciler.set_provider_mutation_enabled(false);
+    }
 
     let mut supervisor = DaemonSupervisor::new(
         config.stord_binary_path.clone(),

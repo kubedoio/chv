@@ -18,6 +18,7 @@ chv-agent-runtime-ch = { path = "../../crates/chv-agent-runtime-ch" }
 chv-errors = { path = "../../crates/chv-errors" }
 cellhv-core-startup = { path = "../../crates/cellhv-core-startup" }
 cellhv-core-runtime-owner = { path = "../../crates/cellhv-core-runtime-owner" }
+cellhv-core-operations = { path = "../../crates/cellhv-core-operations" }
 control-plane-node-api = { path = "../../gen/rust/control-plane-node-api" }
 tokio = { workspace = true }
 tracing = { workspace = true }
