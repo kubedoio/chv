@@ -17,7 +17,7 @@ pub use cellhv_core_store::{
 use cellhv_core_types::{
     canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
     OperationId, OperationKind, OperationRequestMetadata, OperationStatus, RequestedPowerState,
-    ResourceVersion, VmDefinition, VmId,
+    ResourceVersion, VmDefinition, VmId, LEGACY_OPERATION_ID_PREFIX,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -275,6 +275,16 @@ impl OperationService {
             .metadata
             .validate()
             .map_err(OperationServiceError::Invalid)?;
+        if submission
+            .operation_id
+            .as_str()
+            .starts_with(LEGACY_OPERATION_ID_PREFIX)
+            && submission.metadata.legacy_generation.is_none()
+        {
+            return Err(OperationServiceError::Invalid(
+                "legacy-provenance operation requires a legacy generation".to_owned(),
+            ));
+        }
         let request = canonical_request(&submission.command, submission.expected_vm_version);
         let fingerprint = canonical_request_fingerprint(&request)?;
         if let Some(replay) = self.store.resolve_idempotency(
@@ -702,6 +712,60 @@ mod tests {
     }
 
     #[test]
+    fn legacy_submit_requires_a_legacy_generation() {
+        let (_dir, _path, mut service) = service();
+        let without_generation = SubmitMutation {
+            operation_id: OperationId::new(
+                "legacy:control-plane-node.v1:node:6:node-a:vm:4:vm-a:operation:5:op-42",
+            )
+            .unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "legacy-requester".to_owned(),
+                external_operation_id: "op-42".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
+            ..submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "legacy:ignore",
+                "legacy-no-generation",
+                1,
+            )
+        };
+        let error = service.submit(without_generation).unwrap_err();
+        assert!(matches!(error, OperationServiceError::Invalid(_)));
+
+        let with_generation = SubmitMutation {
+            operation_id: OperationId::new(
+                "legacy:control-plane-node.v1:node:6:node-a:vm:4:vm-a:operation:5:op-42",
+            )
+            .unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "legacy-requester".to_owned(),
+                external_operation_id: "op-42".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: Some(1),
+            },
+            ..submission(
+                MutationCommand::CreateVm {
+                    definition: vm("a"),
+                },
+                "legacy:overwritten",
+                "legacy-with-generation",
+                1,
+            )
+        };
+        let accepted = service.submit(with_generation).unwrap();
+        assert_eq!(accepted.disposition, Acceptance::Accepted);
+        assert_eq!(
+            accepted.operation.id.as_str(),
+            "legacy:control-plane-node.v1:node:6:node-a:vm:4:vm-a:operation:5:op-42"
+        );
+    }
+
+    #[test]
     fn replay_returns_original_and_changed_request_conflicts() {
         let (_dir, _path, mut service) = service();
         let first = submission(
@@ -713,18 +777,42 @@ mod tests {
             1,
         );
         service.submit(first).unwrap();
+        // A retry of the same scope/key with DIFFERENT metadata must replay the
+        // original operation and must not overwrite its journaled metadata.
         let replay = service
-            .submit(submission(
-                MutationCommand::CreateVm {
-                    definition: vm("a"),
+            .submit(SubmitMutation {
+                metadata: OperationRequestMetadata {
+                    requested_by: "changed-requester".to_owned(),
+                    external_operation_id: "changed-external".to_owned(),
+                    request_unix_ms: 1_800_000_000_000,
+                    legacy_generation: None,
                 },
-                "op-2",
-                "key",
-                1,
-            ))
+                ..submission(
+                    MutationCommand::CreateVm {
+                        definition: vm("a"),
+                    },
+                    "op-2",
+                    "key",
+                    1,
+                )
+            })
             .unwrap();
         assert_eq!(replay.disposition, Acceptance::Replay);
         assert_eq!(replay.operation.id.as_str(), "op-1");
+        let original = service
+            .operation(&OperationId::new("op-1").unwrap())
+            .unwrap();
+        assert_eq!(
+            original.request_metadata,
+            Some(OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            })
+        );
+        let replayed = service.operation(&replay.operation.id).unwrap();
+        assert_eq!(replayed.request_metadata, original.request_metadata);
         let error = service
             .submit(submission(
                 MutationCommand::CreateVm {
