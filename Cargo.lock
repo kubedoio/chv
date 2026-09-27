@@ -629,6 +629,7 @@ dependencies = [
  "cellhv-core-operations",
  "cellhv-core-startup",
  "cellhv-core-types",
+ "chv-agent-runtime-ch",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
