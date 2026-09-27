@@ -64,6 +64,21 @@ operation ID begins with the `legacy:` prefix MUST also carry a non-NULL
 (`OperationService::submit` and the store's `accept_operation`) reject any
 `legacy:` submission whose metadata lacks a legacy generation up front.
 
+There is currently **no invariant forbidding a non-legacy row from carrying a
+`legacy_generation`**. The native producer always journals `null` and the legacy
+adapter always journals `Some`, but that pairing is a convention (already
+encoded in the table's "non-NULL only for legacy provenance rows" semantics
+above), not an enforced rule. A non-legacy row carrying a generation is not
+rejected.
+
+The all-NULL exemption also has a residual risk: a post-0004 row whose metadata
+columns are set to NULL by external tooling reads back identically to a
+pre-0004 row (`request_metadata: None`). No current write path can produce such
+a row (migrations 0004+ and all submit paths write the columns atomically
+together), and SQLite `PRAGMA integrity_check` detects only physical
+corruption, never logical NULLing of a column, so this ambiguity is accepted and
+documented here rather than hidden.
+
 ## 3. Replay before state inspection
 
 Submission computes the canonical request and resolves `(scope, key)` before
