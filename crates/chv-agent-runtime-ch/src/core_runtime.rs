@@ -17,8 +17,11 @@
 //!
 //! # In-memory side-effect state
 //! Successful creates record the stord/nwd handle state in an in-memory map so
-//! a later delete can drain (detach+close volumes, detach NICs). The map is
-//! in-memory only: a daemon restart loses it, and a delete then logs a
+//! a later delete can drain (detach+close volumes, detach NICs). Delete always
+//! attempts the drain best-effort, EVEN when the hypervisor delete itself
+//! failed, so a failed delete cannot strand open stord/nwd handles; the tracked
+//! entry is preserved for a later retry when the delete did not succeed. The
+//! map is in-memory only: a daemon restart loses it, and a delete then logs a
 //! "no durable handle persistence" residual and still returns Ok (the delete
 //! already succeeded; a leaking handle is a logged residual, not an
 //! infinite-retry failure). M2.2a deliberately adds no durable handle
@@ -53,14 +56,53 @@ struct CanonicalEnvelope {
     expected_vm_version: serde_json::Value,
 }
 
+/// Runtime-side mirror of the `cellhv-core-types` path-safety rule.
+///
+/// The authority-side gate lives in `VmDefinition::validate`, `StorageAttachmentRef::validate`
+/// and `NetworkAttachmentRef::validate` (`crates/cellhv-core-types`); that is what keeps a
+/// traversal from ever being journaled. cellhv-core-types must stay free of a
+/// `chv-hypervisor-api` dependency, so this tiny rule is duplicated here
+/// DELIBERATELY: even a pre-journaled row that never passed the authority gate
+/// must not become an fs-mutation primitive through this runtime.
+fn is_safe_resource_id(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('\0')
+        && value != "."
+        && value != ".."
+}
+
+/// Belt-and-braces canonicalization: require the VM runtime dir to be a strict
+/// descendant of `{runtime_dir}/vms`, even against symlinks/`..` in the
+/// containing tree. A VM dir that is not a strict descendant is refused as an
+/// invalid (path-unsafe) request; a canonicalize failure is an internal error.
+fn verify_vm_dir_within_base(vm_dir: &Path, base: &Path) -> Result<(), RuntimeFailure> {
+    let base_canonical = std::fs::canonicalize(base).map_err(|_| RuntimeFailure::Internal)?;
+    let vm_dir_canonical = std::fs::canonicalize(vm_dir).map_err(|_| RuntimeFailure::Internal)?;
+    if watched_path_is_strict_descendant(&vm_dir_canonical, &base_canonical) {
+        Ok(())
+    } else {
+        Err(RuntimeFailure::InvalidRequest)
+    }
+}
+
+/// True when `candidate` is a strict (component-wise) descendant of `base`.
+fn watched_path_is_strict_descendant(candidate: &Path, base: &Path) -> bool {
+    candidate.starts_with(base) && candidate != base
+}
+
 /// In-memory record of the stord/nwd handle state created for a VM.
 ///
 /// Only lifetimes in process memory: a daemon restart loses this and delete
 /// degrades to the logged crash residual (see module docs).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct VmSideEffects {
-    /// `(volume_id, attachment_handle)` pairs, in open order.
-    volumes: Vec<(String, String)>,
+    /// `(volume_id, attachment_handle, attached)` tuples, in open order. Only
+    /// fully-successful creates are recorded, so every stored volume is
+    /// attached; the flag is kept so the drain follows the same
+    /// HostResourceController contract as the create-unwind path.
+    volumes: Vec<(String, String, bool)>,
     /// `nic_id`s, in attach order.
     nics: Vec<String>,
 }
@@ -122,13 +164,32 @@ impl CloudHypervisorCoreRuntime {
             // journal-integrity failure, not a user mistake.
             return Err(RuntimeFailure::InvalidRequest);
         };
+        // Layer-B path-safety guard: even a pre-journaled row that bypassed the
+        // authority-side `VmDefinition::validate` must never become an
+        // fs-mutation primitive (see `is_safe_resource_id`).
+        if !is_safe_resource_id(definition.id.as_str()) {
+            return Err(RuntimeFailure::InvalidRequest);
+        }
+        for storage in &definition.storage {
+            if !is_safe_resource_id(storage.storage_ref.as_str()) {
+                return Err(RuntimeFailure::InvalidRequest);
+            }
+        }
+        for network in &definition.networks {
+            if !is_safe_resource_id(network.network_ref.as_str()) {
+                return Err(RuntimeFailure::InvalidRequest);
+            }
+        }
         let vm_id = definition.id.as_str();
         let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
         ensure_vm_runtime_dir(&vm_dir)
             .await
             .map_err(Self::map_err)?;
+        // Canonicalize and confirm the VM dir is a strict descendant of
+        // `{runtime_dir}/vms` (belt-and-braces on top of the id guard).
+        verify_vm_dir_within_base(&vm_dir, &self.runtime_dir.join("vms"))?;
 
-        let mut opened_volumes: Vec<(String, String)> = Vec::new();
+        let mut opened_volumes: Vec<(String, String, bool)> = Vec::new();
         let mut attached_nic_ids: Vec<String> = Vec::new();
         let mut disks: Vec<VmDiskConfig> = Vec::new();
         let mut nics: Vec<VmNicConfig> = Vec::new();
@@ -207,8 +268,11 @@ impl CloudHypervisorCoreRuntime {
             );
             return Err(RuntimeFailure::Internal);
         };
+        // Key by the operation's authoritative `vm_id` (equal to definition.id
+        // by authority construction, but keeping the map keyed on the operation
+        // makes the runtime robust to an inconsistent journal).
         map.insert(
-            vm_id.to_string(),
+            operation.operation.vm_id.as_str().to_string(),
             VmSideEffects {
                 volumes: opened_volumes,
                 nics: attached_nic_ids,
@@ -225,7 +289,7 @@ impl CloudHypervisorCoreRuntime {
         vm_id: &str,
         op_id: &str,
         disks: &mut Vec<VmDiskConfig>,
-        opened: &mut Vec<(String, String)>,
+        opened: &mut Vec<(String, String, bool)>,
     ) -> Result<(), ChvError> {
         let volume_id = storage.storage_ref.as_str();
         let locator = vm_dir.join(format!("{volume_id}.img"));
@@ -244,12 +308,19 @@ impl CloudHypervisorCoreRuntime {
             )
             .await?;
         // Track the handle as soon as it exists so any later failure still
-        // closes it (no leaked handle even when this attach fails).
-        opened.push((volume_id.to_string(), handle.clone()));
+        // closes it (no leaked handle even when this attach fails). The
+        // attach flag starts false (NOT yet attached), so teardown only closes
+        // if the attach below never succeeds.
+        opened.push((volume_id.to_string(), handle.clone(), false));
         let (_export_kind, export_path) = self
             .resources
             .attach_volume_to_vm(volume_id, vm_id, &handle, Some(op_id))
             .await?;
+        // A successful attach marks this volume attached (its entry is the
+        // last one pushed).
+        if let Some(entry) = opened.last_mut() {
+            entry.2 = true;
+        }
         disks.push(VmDiskConfig {
             path: PathBuf::from(export_path),
             read_only: storage.read_only,
@@ -294,7 +365,9 @@ impl CloudHypervisorCoreRuntime {
     }
 
     /// Best-effort unwind of a partially-created VM: detach attached NICs in
-    /// reverse, detach+close opened volumes in reverse, then remove the VM
+    /// reverse, close opened volumes in reverse (attach+close only those that
+    /// were actually attached, per the HostResourceController contract that a
+    /// never-attached volume is closed without a detach), then remove the VM
     /// directory. Every step logs and continues; errors never escalate the
     /// original create failure.
     async fn teardown_partial_create(
@@ -302,7 +375,7 @@ impl CloudHypervisorCoreRuntime {
         vm_id: &str,
         vm_dir: &Path,
         nics: &[String],
-        volumes: &[(String, String)],
+        volumes: &[(String, String, bool)],
         op_id: &str,
     ) {
         for nic_id in nics.iter().rev() {
@@ -314,13 +387,15 @@ impl CloudHypervisorCoreRuntime {
                 warn!(vm_id, nic_id, error = %e, "create unwind: detach_vm_nic failed, continuing");
             }
         }
-        for (volume_id, handle) in volumes.iter().rev() {
-            if let Err(e) = self
-                .resources
-                .detach_volume_from_vm(volume_id, vm_id, false, Some(op_id))
-                .await
-            {
-                warn!(vm_id, volume_id, error = %e, "create unwind: detach_volume_from_vm failed, continuing");
+        for (volume_id, handle, attached) in volumes.iter().rev() {
+            if *attached {
+                if let Err(e) = self
+                    .resources
+                    .detach_volume_from_vm(volume_id, vm_id, false, Some(op_id))
+                    .await
+                {
+                    warn!(vm_id, volume_id, error = %e, "create unwind: detach_volume_from_vm failed, continuing");
+                }
             }
             if let Err(e) = self
                 .resources
@@ -335,19 +410,25 @@ impl CloudHypervisorCoreRuntime {
         }
     }
 
-    async fn delete_vm(
-        &self,
-        operation: &OperationJournalEntry,
-        op_id: &str,
-    ) -> Result<Option<serde_json::Value>, RuntimeFailure> {
-        let vm_id = operation.operation.vm_id.as_str().to_string();
-        if let Err(e) = self.adapter.delete_vm(&vm_id, Some(op_id)).await {
-            return Err(Self::map_err(e));
-        }
-        // Drain the in-memory handle map if present. Delete already succeeded,
-        // so any cleanup failure here is a logged residual, never an op failure.
+    /// Best-effort drain of a VM's tracked side effects, on any delete path.
+    ///
+    /// The drain always attempts cleanup once a delete is in flight so a failed
+    /// hypervisor delete cannot strand open stord/nwd resources. When
+    /// `keep_entry` is true (the delete did NOT succeed), the tracked entry is
+    /// preserved so a later retry can finish the drain; when false (delete
+    /// succeeded) the entry is removed. Every cleanup step is best-effort and
+    /// logs-and-continues; no drain failure ever escalates the delete outcome.
+    async fn drain_side_effects(&self, vm_id: &str, op_id: &str, keep_entry: bool) {
         let effects = match self.side_effects.lock() {
-            Ok(mut map) => map.remove(&vm_id),
+            Ok(mut map) => {
+                let entry = map.remove(vm_id);
+                if keep_entry {
+                    if let Some(entry) = entry.as_ref() {
+                        map.insert(vm_id.to_string(), entry.clone());
+                    }
+                }
+                entry
+            }
             Err(_poisoned) => {
                 warn!(
                     vm_id,
@@ -357,46 +438,80 @@ impl CloudHypervisorCoreRuntime {
                 None
             }
         };
-        match effects {
-            Some(effects) => {
-                for (volume_id, handle) in effects.volumes.iter().rev() {
-                    if let Err(e) = self
-                        .resources
-                        .detach_volume_from_vm(volume_id, &vm_id, false, Some(op_id))
-                        .await
-                    {
-                        warn!(vm_id, volume_id, error = %e, "delete cleanup: detach_volume failed, continuing");
-                    }
-                    if let Err(e) = self
-                        .resources
-                        .close_volume(volume_id, handle, Some(op_id))
-                        .await
-                    {
-                        warn!(vm_id, volume_id, error = %e, "delete cleanup: close_volume failed, continuing");
-                    }
-                }
-                for nic_id in effects.nics.iter().rev() {
-                    if let Err(e) = self
-                        .resources
-                        .detach_vm_nic(nic_id, &vm_id, "", Some(op_id))
-                        .await
-                    {
-                        warn!(vm_id, nic_id, error = %e, "delete cleanup: detach_nic failed, continuing");
-                    }
+        let Some(effects) = effects else {
+            // Documented crash residual: after a daemon restart the in-memory
+            // handle map is gone and stord/nwd handles may leak (M2.2a adds no
+            // durable handle persistence).
+            warn!(
+                vm_id,
+                operation_id = op_id,
+                "no in-memory side-effect state available for delete; leaking stord/nwd handles is a documented crash residual (no durable handle persistence in M2.2a)"
+            );
+            return;
+        };
+        for (volume_id, handle, attached) in effects.volumes.iter().rev() {
+            if *attached {
+                if let Err(e) = self
+                    .resources
+                    .detach_volume_from_vm(volume_id, vm_id, false, Some(op_id))
+                    .await
+                {
+                    warn!(vm_id, volume_id, error = %e, "delete cleanup: detach_volume failed, continuing");
                 }
             }
-            None => {
-                // Documented crash residual: after a daemon restart the
-                // in-memory handle map is gone and stord/nwd handles may leak
-                // (M2.2a adds no durable handle persistence).
-                warn!(
-                    vm_id,
-                    operation_id = op_id,
-                    "no in-memory side-effect state available for delete; leaking stord/nwd handles is a documented crash residual (no durable handle persistence in M2.2a)"
-                );
+            if let Err(e) = self
+                .resources
+                .close_volume(volume_id, handle, Some(op_id))
+                .await
+            {
+                warn!(vm_id, volume_id, error = %e, "delete cleanup: close_volume failed, continuing");
             }
         }
+        for nic_id in effects.nics.iter().rev() {
+            if let Err(e) = self
+                .resources
+                .detach_vm_nic(nic_id, vm_id, "", Some(op_id))
+                .await
+            {
+                warn!(vm_id, nic_id, error = %e, "delete cleanup: detach_nic failed, continuing");
+            }
+        }
+    }
+
+    async fn delete_vm(
+        &self,
+        operation: &OperationJournalEntry,
+        op_id: &str,
+    ) -> Result<Option<serde_json::Value>, RuntimeFailure> {
+        // Key the drain by the operation's authoritative `vm_id` (the same key
+        // the CreateVm arm inserts under).
+        let vm_id = operation.operation.vm_id.as_str();
+        let delete_result = self.adapter.delete_vm(vm_id, Some(op_id)).await;
+        if delete_result.is_err() {
+            tracing::warn!(
+                vm_id,
+                operation_id = op_id,
+                "hypervisor delete failed; draining tracked side effects best-effort"
+            );
+        }
+        // Best-effort drain REGARDLESS of the delete result so a failed delete
+        // cannot strand open stord/nwd resources. Keep the tracked entry when
+        // the delete did NOT succeed so a later retry can finish the drain.
+        self.drain_side_effects(vm_id, op_id, delete_result.is_err())
+            .await;
+        delete_result.map_err(Self::map_err)?;
         Ok(None)
+    }
+}
+
+/// Test-only visibility into the tracked side-effects map (doc-hidden so
+/// integration tests in the external `tests/` crate can assert no entry is
+/// stranded after a successful delete). NOT `cfg(test)`: it must compile into
+/// normal builds so the cross-crate test can call it.
+#[doc(hidden)]
+impl CloudHypervisorCoreRuntime {
+    pub fn debug_side_effects_len(&self) -> usize {
+        self.side_effects.lock().map(|map| map.len()).unwrap_or(0)
     }
 }
 
@@ -443,5 +558,66 @@ impl CoreVmRuntime for CloudHypervisorCoreRuntime {
             | OperationKind::AttachNetwork
             | OperationKind::DetachNetwork => Err(RuntimeFailure::Unsupported),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_safe_resource_id_rejects_path_components_and_dots() {
+        for safe in ["vm-1", "a.b", "default", "net-0"] {
+            assert!(is_safe_resource_id(safe), "{safe} must be safe");
+        }
+        for unsafe_value in [
+            "a/b",
+            "a\\b",
+            "/etc/passwd",
+            "a/../b",
+            ".",
+            "..",
+            "a\0b",
+            "",
+        ] {
+            assert!(
+                !is_safe_resource_id(unsafe_value),
+                "{unsafe_value:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_vm_dir_within_base_accepts_descendants_and_rejects_escapes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("vms");
+        std::fs::create_dir_all(&base).expect("create base");
+        std::fs::create_dir_all(&base).expect("create base again");
+
+        // A normal strict descendant is accepted.
+        let vm_dir = base.join("vm-1");
+        std::fs::create_dir_all(&vm_dir).expect("create vm dir");
+        assert!(verify_vm_dir_within_base(&vm_dir, &base).is_ok());
+
+        // The base itself is NOT a strict descendant.
+        assert!(matches!(
+            verify_vm_dir_within_base(&base, &base),
+            Err(RuntimeFailure::InvalidRequest)
+        ));
+
+        // A sibling outside the base escapes.
+        let sibling = tmp.path().join("other");
+        std::fs::create_dir_all(&sibling).expect("create sibling");
+        assert!(matches!(
+            verify_vm_dir_within_base(&sibling, &base),
+            Err(RuntimeFailure::InvalidRequest)
+        ));
+
+        // Missing VM dir is an internal error (creation already happened, so a
+        // missing canonical target is a real internal inconsistency).
+        assert!(matches!(
+            verify_vm_dir_within_base(&base.join("ghost"), &base),
+            Err(RuntimeFailure::Internal)
+        ));
     }
 }
