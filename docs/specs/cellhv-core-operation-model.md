@@ -79,6 +79,17 @@ together), and SQLite `PRAGMA integrity_check` detects only physical
 corruption, never logical NULLing of a column, so this ambiguity is accepted and
 documented here rather than hidden.
 
+Replay is fail-closed with respect to metadata: `OperationRequestMetadata` is
+validated before idempotency resolution, so a semantically-idempotent retry
+carrying malformed metadata (empty requester, non-positive timestamp, or a
+value over one of the input caps below) is rejected with `invalid_argument`
+rather than replayed. `OperationRequestMetadata::validate()` enforces defensive
+input caps: `requested_by` and `external_operation_id` are at most 1024
+characters, `request_unix_ms` must not exceed the year-9999 millisecond ceiling
+(`MAX_REQUEST_UNIX_MS`, the maximum representable `SystemTime` in most
+runtimes), and a present `legacy_generation` must fit SQLite's signed 64-bit
+storage range.
+
 ## 3. Replay before state inspection
 
 Submission computes the canonical request and resolves `(scope, key)` before
