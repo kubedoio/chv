@@ -254,6 +254,44 @@ async fn lifecycle_validates_complete_request_before_unsupported_and_never_journ
 }
 
 #[tokio::test]
+async fn native_create_journals_durable_request_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, owner) = app(&dir);
+    let create = Request::post("/v1/vms")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "meta-create")
+        .body(Body::from(
+            serde_json::to_vec(&vm_request("meta-request", 1)).unwrap(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(create).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let entry = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/operations/native:v1:meta-request")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_json(entry).await;
+    assert_eq!(body["request_metadata"]["requested_by"], "core-native-v1");
+    assert_eq!(
+        body["request_metadata"]["external_operation_id"],
+        "meta-request"
+    );
+    assert!(body["request_metadata"]["legacy_generation"].is_null());
+    assert!(
+        body["request_metadata"]["request_unix_ms"]
+            .as_i64()
+            .is_some_and(|millis| millis > 0),
+        "request_unix_ms must be positive"
+    );
+    join_app(app, owner).await;
+}
+
+#[tokio::test]
 async fn malformed_inputs_and_internal_failures_are_structured_and_redacted() {
     let dir = tempfile::tempdir().unwrap();
     let (app, owner) = app(&dir);
