@@ -1,53 +1,402 @@
+//! Single full-side-effect Core runtime: stord/nwd volume+NIC setup, VM
+//! runtime directory, and Cloud Hypervisor create/start/stop/reboot/delete.
+//!
+//! `CloudHypervisorCoreRuntime` is the Core executor's effector (M2.2a). It
+//! receives a journal [`OperationJournalEntry`] whose `request` is the
+//! canonical envelope `{"command": {...}, "expected_vm_version": N}` (see
+//! `canonical_request` in cellhv-core-operations) and performs every side
+//! effect itself — it does NOT delegate volume/NIC preparation to the legacy
+//! reconcile path.
+//!
+//! # Envelope parsing (latent-bug fix)
+//! The old adapter-only runtime deserialized `operation.request` straight into
+//! `VmDefinition`, which ALWAYS failed because the envelope wraps the
+//! internally-tagged `MutationCommand` and `VmDefinition` denies unknown
+//! fields. The runtime now strips the envelope through [`CanonicalEnvelope`]
+//! and dispatches on the real `MutationCommand`.
+//!
+//! # In-memory side-effect state
+//! Successful creates record the stord/nwd handle state in an in-memory map so
+//! a later delete can drain (detach+close volumes, detach NICs). The map is
+//! in-memory only: a daemon restart loses it, and a delete then logs a
+//! "no durable handle persistence" residual and still returns Ok (the delete
+//! already succeeded; a leaking handle is a logged residual, not an
+//! infinite-retry failure). M2.2a deliberately adds no durable handle
+//! persistence; that is a documented crash residual.
+
 use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig, VmNicConfig};
 use cellhv_core_executor::{CoreVmRuntime, RuntimeFailure};
-use cellhv_core_operations::OperationJournalEntry;
-use cellhv_core_types::{OperationKind, VmDefinition};
-use std::sync::Arc;
+use cellhv_core_operations::{MutationCommand, OperationJournalEntry};
+use cellhv_core_types::{OperationKind, StorageAttachmentRef};
+use chv_errors::ChvError;
+use chv_hypervisor_api::resources::{
+    bridge_name_for_network, ensure_vm_runtime_dir, nic_id, vm_api_socket, vm_runtime_dir,
+    HostResourceController, DEFAULT_NIC_CIDR,
+};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use tracing::warn;
 
+/// Canonical journal envelope: `{"command": {...}, "expected_vm_version": N}`.
+///
+/// `expected_vm_version` is deliberately left an untyped [`serde_json::Value`]:
+/// the M2.2a effector performs no generation checks on the request itself (the
+/// executor/authority already gated the operation); typing it deeper here would
+/// only couple us to evolved version encodings.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalEnvelope {
+    command: MutationCommand,
+    // Intentionally shallow: see struct doc.
+    #[allow(dead_code)]
+    expected_vm_version: serde_json::Value,
+}
+
+/// In-memory record of the stord/nwd handle state created for a VM.
+///
+/// Only lifetimes in process memory: a daemon restart loses this and delete
+/// degrades to the logged crash residual (see module docs).
+#[derive(Default)]
+struct VmSideEffects {
+    /// `(volume_id, attachment_handle)` pairs, in open order.
+    volumes: Vec<(String, String)>,
+    /// `nic_id`s, in attach order.
+    nics: Vec<String>,
+}
+
+/// The production Cloud Hypervisor effector runtime.
 pub struct CloudHypervisorCoreRuntime {
     adapter: Arc<dyn CloudHypervisorAdapter>,
+    resources: Arc<dyn HostResourceController>,
+    runtime_dir: PathBuf,
+    /// Per-VM in-memory handle map (see module docs for lifetime).
+    side_effects: Mutex<HashMap<String, VmSideEffects>>,
 }
 
 impl CloudHypervisorCoreRuntime {
-    pub fn new(adapter: Arc<dyn CloudHypervisorAdapter>) -> Self {
-        Self { adapter }
+    pub fn new(
+        adapter: Arc<dyn CloudHypervisorAdapter>,
+        resources: Arc<dyn HostResourceController>,
+        runtime_dir: PathBuf,
+    ) -> Self {
+        Self {
+            adapter,
+            resources,
+            runtime_dir,
+            side_effects: Mutex::new(HashMap::new()),
+        }
     }
 
-    fn translate(&self, def: &VmDefinition) -> VmConfig {
-        VmConfig {
-            vm_id: def.id.as_str().to_string(),
-            cpus: def.compute.vcpus,
-            memory_bytes: def.compute.memory_bytes,
-            kernel_path: std::path::PathBuf::from(&def.boot.kernel),
-            firmware_path: def.boot.firmware.as_ref().map(std::path::PathBuf::from),
-            disks: def
-                .storage
-                .iter()
-                .map(|s| VmDiskConfig {
-                    path: std::path::PathBuf::from(&s.storage_ref),
-                    read_only: s.read_only,
-                    id: Some(s.attachment_id.clone()),
-                })
-                .collect(),
-            nics: def
-                .networks
-                .iter()
-                .map(|n| VmNicConfig {
-                    network_id: n.network_ref.clone(),
-                    mac_address: n.mac_address.clone().unwrap_or_default(),
-                    ip_address: "".to_string(),
-                    tap_name: n.attachment_id.clone(),
-                    cidr: "".to_string(),
-                    gateway: "".to_string(),
-                })
-                .collect(),
-            api_socket_path: std::path::PathBuf::from(format!(
-                "/var/run/chv/{}.sock",
-                def.id.as_str()
-            )),
+    /// De-envelope the canonical request into its command. A value that is not
+    /// the canonical envelope shape is a malformed request.
+    fn request_command(request: &serde_json::Value) -> Result<MutationCommand, RuntimeFailure> {
+        serde_json::from_value::<CanonicalEnvelope>(request.clone())
+            .map(|envelope| envelope.command)
+            .map_err(|_| RuntimeFailure::InvalidRequest)
+    }
+
+    /// Map an effector error to the closed public-safe [`RuntimeFailure`] set.
+    fn map_err(e: ChvError) -> RuntimeFailure {
+        match e {
+            ChvError::NotFound { .. } => RuntimeFailure::NotFound,
+            ChvError::AlreadyExists { .. } | ChvError::Conflict { .. } => RuntimeFailure::Conflict,
+            ChvError::InvalidArgument { .. } | ChvError::BadRequest { .. } => {
+                RuntimeFailure::InvalidRequest
+            }
+            ChvError::BackendUnavailable { .. } | ChvError::NetworkUnavailable { .. } => {
+                RuntimeFailure::RuntimeUnavailable
+            }
+            _ => RuntimeFailure::Internal,
+        }
+    }
+
+    async fn create_vm(
+        &self,
+        operation: &OperationJournalEntry,
+        op_id: &str,
+    ) -> Result<Option<serde_json::Value>, RuntimeFailure> {
+        let MutationCommand::CreateVm { definition } = Self::request_command(&operation.request)?
+        else {
+            // A CreateVm-kind operation carrying a different command is a
+            // journal-integrity failure, not a user mistake.
+            return Err(RuntimeFailure::InvalidRequest);
+        };
+        let vm_id = definition.id.as_str();
+        let vm_dir = vm_runtime_dir(&self.runtime_dir, vm_id);
+        ensure_vm_runtime_dir(&vm_dir)
+            .await
+            .map_err(Self::map_err)?;
+
+        let mut opened_volumes: Vec<(String, String)> = Vec::new();
+        let mut attached_nic_ids: Vec<String> = Vec::new();
+        let mut disks: Vec<VmDiskConfig> = Vec::new();
+        let mut nics: Vec<VmNicConfig> = Vec::new();
+
+        for storage in &definition.storage {
+            if let Err(e) = self
+                .open_and_attach_volume(
+                    storage,
+                    &vm_dir,
+                    vm_id,
+                    op_id,
+                    &mut disks,
+                    &mut opened_volumes,
+                )
+                .await
+            {
+                self.teardown_partial_create(
+                    vm_id,
+                    &vm_dir,
+                    &attached_nic_ids,
+                    &opened_volumes,
+                    op_id,
+                )
+                .await;
+                return Err(Self::map_err(e));
+            }
+        }
+        for network in &definition.networks {
+            if let Err(e) = self
+                .ensure_and_attach_nic(network, vm_id, op_id, &mut nics, &mut attached_nic_ids)
+                .await
+            {
+                self.teardown_partial_create(
+                    vm_id,
+                    &vm_dir,
+                    &attached_nic_ids,
+                    &opened_volumes,
+                    op_id,
+                )
+                .await;
+                return Err(Self::map_err(e));
+            }
+        }
+
+        let config = VmConfig {
+            vm_id: vm_id.to_string(),
+            cpus: definition.compute.vcpus,
+            memory_bytes: definition.compute.memory_bytes,
+            kernel_path: PathBuf::from(&definition.boot.kernel),
+            firmware_path: definition.boot.firmware.as_ref().map(PathBuf::from),
+            disks,
+            nics,
+            api_socket_path: vm_api_socket(&vm_dir),
+            // M2.2a residual: the Core create request does not yet carry
+            // cloud-init userdata or hypervisor overrides (VmDefinition has no
+            // such fields). We leave them None rather than inventing values;
+            // the legacy map path refuses them too (legacy_core_adapter.rs).
             cloud_init_userdata: None,
             hypervisor_overrides: None,
+        };
+
+        if let Err(e) = self.adapter.create_vm(&config, Some(op_id)).await {
+            self.teardown_partial_create(vm_id, &vm_dir, &attached_nic_ids, &opened_volumes, op_id)
+                .await;
+            return Err(Self::map_err(e));
         }
+
+        // Record the in-memory handle map so a later delete can drain it. A
+        // poisoned mutex here is an internal bug; fail the op rather than drop
+        // the create's side-effect bookkeeping silently.
+        let Ok(mut map) = self.side_effects.lock() else {
+            warn!(
+                vm_id,
+                operation_id = op_id,
+                "side-effects mutex poisoned; refusing to record handles"
+            );
+            return Err(RuntimeFailure::Internal);
+        };
+        map.insert(
+            vm_id.to_string(),
+            VmSideEffects {
+                volumes: opened_volumes,
+                nics: attached_nic_ids,
+            },
+        );
+        Ok(None)
+    }
+
+    /// Open+attach one storage attachment and record its disk config + handle.
+    async fn open_and_attach_volume(
+        &self,
+        storage: &StorageAttachmentRef,
+        vm_dir: &Path,
+        vm_id: &str,
+        op_id: &str,
+        disks: &mut Vec<VmDiskConfig>,
+        opened: &mut Vec<(String, String)>,
+    ) -> Result<(), ChvError> {
+        let volume_id = storage.storage_ref.as_str();
+        let locator = vm_dir.join(format!("{volume_id}.img"));
+        // M2.2a residual: disk sizing/seed options (size_bytes/seed_from) live
+        // in the legacy VmSpec and are not yet modeled in the Core
+        // StorageAttachmentRef, so we pass no open options here. Do NOT
+        // fabricate options.
+        let (_volume_id, handle, _export_path) = self
+            .resources
+            .open_volume(
+                volume_id,
+                "local",
+                &locator.to_string_lossy(),
+                HashMap::new(),
+                Some(op_id),
+            )
+            .await?;
+        // Track the handle as soon as it exists so any later failure still
+        // closes it (no leaked handle even when this attach fails).
+        opened.push((volume_id.to_string(), handle.clone()));
+        let (_export_kind, export_path) = self
+            .resources
+            .attach_volume_to_vm(volume_id, vm_id, &handle, Some(op_id))
+            .await?;
+        disks.push(VmDiskConfig {
+            path: PathBuf::from(export_path),
+            read_only: storage.read_only,
+            id: Some(storage.attachment_id.clone()),
+        });
+        Ok(())
+    }
+
+    /// Ensure topology + attach one NIC and record its config + nic_id.
+    async fn ensure_and_attach_nic(
+        &self,
+        network: &cellhv_core_types::NetworkAttachmentRef,
+        vm_id: &str,
+        op_id: &str,
+        nics: &mut Vec<VmNicConfig>,
+        attached: &mut Vec<String>,
+    ) -> Result<(), ChvError> {
+        let network_id = network.network_ref.as_str();
+        let nid = nic_id(vm_id, network_id);
+        let bridge = bridge_name_for_network(network_id);
+        // M2.2a residual: the Core create request has no per-NIC cidr/gateway/
+        // ip, so topology always uses the shared default CIDR and an empty
+        // gateway, and the NIC is created with an empty IP address.
+        self.resources
+            .ensure_network_topology(network_id, &bridge, DEFAULT_NIC_CIDR, "", Some(op_id))
+            .await?;
+        let mac_address = network.mac_address.clone().unwrap_or_default();
+        let (_namespace_handle, tap_handle) = self
+            .resources
+            .attach_vm_nic(&nid, vm_id, network_id, &mac_address, "", Some(op_id))
+            .await?;
+        nics.push(VmNicConfig {
+            network_id: network_id.to_string(),
+            mac_address,
+            ip_address: String::new(),
+            tap_name: tap_handle,
+            cidr: DEFAULT_NIC_CIDR.to_string(),
+            gateway: String::new(),
+        });
+        attached.push(nid);
+        Ok(())
+    }
+
+    /// Best-effort unwind of a partially-created VM: detach attached NICs in
+    /// reverse, detach+close opened volumes in reverse, then remove the VM
+    /// directory. Every step logs and continues; errors never escalate the
+    /// original create failure.
+    async fn teardown_partial_create(
+        &self,
+        vm_id: &str,
+        vm_dir: &Path,
+        nics: &[String],
+        volumes: &[(String, String)],
+        op_id: &str,
+    ) {
+        for nic_id in nics.iter().rev() {
+            if let Err(e) = self
+                .resources
+                .detach_vm_nic(nic_id, vm_id, "", Some(op_id))
+                .await
+            {
+                warn!(vm_id, nic_id, error = %e, "create unwind: detach_vm_nic failed, continuing");
+            }
+        }
+        for (volume_id, handle) in volumes.iter().rev() {
+            if let Err(e) = self
+                .resources
+                .detach_volume_from_vm(volume_id, vm_id, false, Some(op_id))
+                .await
+            {
+                warn!(vm_id, volume_id, error = %e, "create unwind: detach_volume_from_vm failed, continuing");
+            }
+            if let Err(e) = self
+                .resources
+                .close_volume(volume_id, handle, Some(op_id))
+                .await
+            {
+                warn!(vm_id, volume_id, error = %e, "create unwind: close_volume failed, continuing");
+            }
+        }
+        if let Err(e) = tokio::fs::remove_dir_all(vm_dir).await {
+            warn!(vm_id, path = %vm_dir.display(), error = %e, "create unwind: failed to remove vm dir (best-effort)");
+        }
+    }
+
+    async fn delete_vm(
+        &self,
+        operation: &OperationJournalEntry,
+        op_id: &str,
+    ) -> Result<Option<serde_json::Value>, RuntimeFailure> {
+        let vm_id = operation.operation.vm_id.as_str().to_string();
+        if let Err(e) = self.adapter.delete_vm(&vm_id, Some(op_id)).await {
+            return Err(Self::map_err(e));
+        }
+        // Drain the in-memory handle map if present. Delete already succeeded,
+        // so any cleanup failure here is a logged residual, never an op failure.
+        let effects = match self.side_effects.lock() {
+            Ok(mut map) => map.remove(&vm_id),
+            Err(_poisoned) => {
+                warn!(
+                    vm_id,
+                    operation_id = op_id,
+                    "side-effects mutex poisoned during delete; handle state lost"
+                );
+                None
+            }
+        };
+        match effects {
+            Some(effects) => {
+                for (volume_id, handle) in effects.volumes.iter().rev() {
+                    if let Err(e) = self
+                        .resources
+                        .detach_volume_from_vm(volume_id, &vm_id, false, Some(op_id))
+                        .await
+                    {
+                        warn!(vm_id, volume_id, error = %e, "delete cleanup: detach_volume failed, continuing");
+                    }
+                    if let Err(e) = self
+                        .resources
+                        .close_volume(volume_id, handle, Some(op_id))
+                        .await
+                    {
+                        warn!(vm_id, volume_id, error = %e, "delete cleanup: close_volume failed, continuing");
+                    }
+                }
+                for nic_id in effects.nics.iter().rev() {
+                    if let Err(e) = self
+                        .resources
+                        .detach_vm_nic(nic_id, &vm_id, "", Some(op_id))
+                        .await
+                    {
+                        warn!(vm_id, nic_id, error = %e, "delete cleanup: detach_nic failed, continuing");
+                    }
+                }
+            }
+            None => {
+                // Documented crash residual: after a daemon restart the
+                // in-memory handle map is gone and stord/nwd handles may leak
+                // (M2.2a adds no durable handle persistence).
+                warn!(
+                    vm_id,
+                    operation_id = op_id,
+                    "no in-memory side-effect state available for delete; leaking stord/nwd handles is a documented crash residual (no durable handle persistence in M2.2a)"
+                );
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -59,55 +408,40 @@ impl CoreVmRuntime for CloudHypervisorCoreRuntime {
     ) -> std::result::Result<Option<serde_json::Value>, RuntimeFailure> {
         let op_id = operation.operation.id.as_str();
         match operation.operation.kind {
-            OperationKind::CreateVm => {
-                let def: VmDefinition = serde_json::from_value(operation.request.clone())
-                    .map_err(|_| RuntimeFailure::InvalidRequest)?;
-                let config = self.translate(&def);
-                self.adapter
-                    .create_vm(&config, Some(op_id))
-                    .await
-                    .map_err(|_| RuntimeFailure::Internal)?;
-                Ok(None)
-            }
+            OperationKind::CreateVm => self.create_vm(&operation, op_id).await,
+            OperationKind::DeleteVm => self.delete_vm(&operation, op_id).await,
             OperationKind::StartVm => {
                 self.adapter
                     .start_vm(operation.operation.vm_id.as_str(), Some(op_id))
                     .await
-                    .map_err(|_| RuntimeFailure::Internal)?;
+                    .map_err(Self::map_err)?;
                 Ok(None)
             }
             OperationKind::StopVm => {
-                // Determine if force from request? For now just force=false
+                // Stop without force (matches the legacy lifecycle contract).
                 self.adapter
                     .stop_vm(operation.operation.vm_id.as_str(), false, Some(op_id))
                     .await
-                    .map_err(|_| RuntimeFailure::Internal)?;
+                    .map_err(Self::map_err)?;
                 Ok(None)
             }
             OperationKind::RebootVm => {
                 self.adapter
                     .reboot_vm(operation.operation.vm_id.as_str(), Some(op_id))
                     .await
-                    .map_err(|_| RuntimeFailure::Internal)?;
+                    .map_err(Self::map_err)?;
                 Ok(None)
             }
-            OperationKind::DeleteVm => {
-                self.adapter
-                    .delete_vm(operation.operation.vm_id.as_str(), Some(op_id))
-                    .await
-                    .map_err(|_| RuntimeFailure::Internal)?;
-                Ok(None)
-            }
+            // Out-of-RC-lifecycle in M2.2a: these mutate a running VM's
+            // attachment set, which needs the M2.2b/M3 projection work and
+            // durable handle bookkeeping. Fail closed and honest (Unsupported)
+            // rather than falsely reporting Succeeded — and never the old
+            // broken InvalidRequest path.
             OperationKind::UpdateVm
             | OperationKind::AttachVolume
             | OperationKind::DetachVolume
             | OperationKind::AttachNetwork
-            | OperationKind::DetachNetwork => {
-                let _def: VmDefinition = serde_json::from_value(operation.request.clone())
-                    .map_err(|_| RuntimeFailure::InvalidRequest)?;
-
-                Ok(None)
-            }
+            | OperationKind::DetachNetwork => Err(RuntimeFailure::Unsupported),
         }
     }
 }
