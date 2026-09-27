@@ -519,3 +519,315 @@ async fn malformed_envelope_is_invalid_request() {
         "malformed request must be InvalidRequest, got {result:?}"
     );
 }
+
+#[tokio::test]
+async fn create_vm_kind_with_non_create_command_is_invalid() {
+    let h = harness(None);
+    // A CreateVm-kind operation whose envelope carries a DeleteVm command is a
+    // journal-integrity failure, not a user mistake.
+    let command = MutationCommand::DeleteVm {
+        vm_id: VmId::new("vm-x").expect("vm id"),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            "vm-kind",
+            "op-kind",
+            envelope(command),
+        ))
+        .await;
+    assert!(
+        matches!(result, Err(RuntimeFailure::InvalidRequest)),
+        "CreateVm-kind with a non-create command must be InvalidRequest, got {result:?}"
+    );
+    assert!(
+        calls(&h.controller).is_empty(),
+        "no side effects may run for a mismatched command"
+    );
+}
+
+#[tokio::test]
+async fn create_unwind_never_attached_volume_is_close_only() {
+    // Fail attaching the 2nd volume. Volume 1 is opened+attached and must be
+    // detached+closed; volume 2 is opened but NEVER attached, so its unwind
+    // must be close-only (HostResourceController contract: a never-attached
+    // volume is closed without a detach).
+    let h = harness(Some("attach:2"));
+    let vm_id = "vm-closeonly";
+    let command = MutationCommand::CreateVm {
+        definition: definition(vm_id, 2, 0),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-closeonly",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_err(), "create must fail: {result:?}");
+
+    let log = calls(&h.controller);
+    // First volume attached: detach+close.
+    assert!(
+        is_subsequence(
+            &log,
+            &["open:vol-0", "attach:vol-0", "detach:vol-0", "close:vol-0"]
+        ),
+        "attached volume must detach+close: {log:?}"
+    );
+    // Second volume's attach never happened -> close only, NEVER detach.
+    assert!(
+        log.iter().any(|c| c == "close:vol-1"),
+        "never-attached volume must still be closed: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|c| c == "detach:vol-1"),
+        "never-attached volume must NOT be detached (contract violation): {log:?}"
+    );
+    assert!(
+        !log.iter().any(|c| c == "attach:vol-1"),
+        "second attach must not have succeeded: {log:?}"
+    );
+    assert!(
+        !h.adapter.vms.lock().expect("vms lock").contains_key(vm_id),
+        "adapter must not contain the failed VM"
+    );
+    assert!(
+        !vm_dir_path(&h, vm_id).exists(),
+        "vm dir should be removed after failed create"
+    );
+}
+
+#[tokio::test]
+async fn delete_drains_side_effects_when_adapter_delete_fails() {
+    let h = harness(None);
+    let vm_id = "vm-drainfail";
+    let create = MutationCommand::CreateVm {
+        definition: definition(vm_id, 2, 1),
+    };
+    h.runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create",
+            envelope(create),
+        ))
+        .await
+        .expect("create succeeds");
+    assert_eq!(
+        h.runtime.debug_side_effects_len(),
+        1,
+        "create tracks one entry"
+    );
+
+    // Make the hypervisor delete fail deterministically.
+    *h.adapter.fail_delete.lock().unwrap() = true;
+    let delete = MutationCommand::DeleteVm {
+        vm_id: VmId::new(vm_id).expect("vm id"),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del-fail",
+            envelope(delete.clone()),
+        ))
+        .await;
+    assert!(
+        matches!(result, Err(RuntimeFailure::NotFound)),
+        "failed hypervisor delete must surface NotFound (mapped from ChvError::NotFound), got {result:?}"
+    );
+    // The VM was NOT removed by the mock (delete failed).
+    assert!(
+        h.adapter.vms.lock().expect("vms lock").contains_key(vm_id),
+        "adapter VM must survive a failed delete for retry"
+    );
+
+    // Drain ran DESPITE the delete failure: every volume detach+close, every
+    // nic detached, and the tracked entry is kept for a later retry.
+    let log = calls(&h.controller);
+    assert!(
+        is_subsequence(
+            &log,
+            &[
+                "detach:vol-1",
+                "close:vol-1",
+                "detach:vol-0",
+                "close:vol-0",
+                "detach_nic:vm-drainfail-net-0",
+            ]
+        ),
+        "failed delete must still drain side effects: {log:?}"
+    );
+    assert_eq!(
+        h.runtime.debug_side_effects_len(),
+        1,
+        "tracked entry must survive a failed delete for retry"
+    );
+
+    // A SECOND delete (failure cleared) succeeds and finishes the drain.
+    *h.adapter.fail_delete.lock().unwrap() = false;
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del-retry",
+            envelope(delete),
+        ))
+        .await;
+    assert!(result.is_ok(), "retry delete must succeed: {result:?}");
+    assert!(
+        !h.adapter.vms.lock().expect("vms lock").contains_key(vm_id),
+        "adapter VM must be gone after the retry delete"
+    );
+    assert_eq!(
+        h.runtime.debug_side_effects_len(),
+        0,
+        "no entry may remain after a successful delete"
+    );
+    let log = calls(&h.controller);
+    let detaches: Vec<&str> = log
+        .iter()
+        .filter_map(|c| c.strip_prefix("detach:"))
+        .collect();
+    assert!(
+        detaches.iter().filter(|v| v == &&"vol-0").count() >= 2
+            && detaches.iter().filter(|v| v == &&"vol-1").count() >= 2,
+        "retry delete must drain the retained entry again: {log:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_removes_side_effects_entry_after_success() {
+    let h = harness(None);
+    let vm_id = "vm-entries";
+    let create = MutationCommand::CreateVm {
+        definition: definition(vm_id, 1, 1),
+    };
+    h.runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create",
+            envelope(create),
+        ))
+        .await
+        .expect("create succeeds");
+    assert_eq!(h.runtime.debug_side_effects_len(), 1);
+
+    let delete = MutationCommand::DeleteVm {
+        vm_id: VmId::new(vm_id).expect("vm id"),
+    };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::DeleteVm,
+            vm_id,
+            "op-del",
+            envelope(delete),
+        ))
+        .await;
+    assert!(result.is_ok(), "delete must succeed: {result:?}");
+    assert_eq!(
+        h.runtime.debug_side_effects_len(),
+        0,
+        "successful delete must remove the tracked entry"
+    );
+}
+
+/// Build a CreateVm envelope whose `request` carries the given raw definition
+/// JSON, simulating a PRE-JOURNALED row that never passed the authority-side
+/// `VmDefinition::validate` (the runtime Layer-B guard must reject it).
+fn create_envelope_with_raw_definition(definition: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "command": {
+            "command": "create_vm",
+            "definition": definition,
+        },
+        "expected_vm_version": 1,
+    })
+}
+
+fn raw_definition(id: &str, storage: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "name": "evil",
+        "boot": {"kernel": "/kernel", "firmware": null, "initial_disk": null},
+        "compute": {"vcpus": 2, "memory_bytes": 1024},
+        "storage": storage,
+        "networks": [],
+        "requested_power_state": "stopped",
+        "observed_power_state": "unknown",
+        "resource_version": 1,
+    })
+}
+
+#[tokio::test]
+async fn create_rejects_path_unsafe_vm_id() {
+    let h = harness(None);
+    let request = create_envelope_with_raw_definition(raw_definition(
+        "../../../etc/evil",
+        serde_json::json!([]),
+    ));
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            "vm-safe-op",
+            "op-evil-id",
+            request,
+        ))
+        .await;
+    assert!(
+        matches!(result, Err(RuntimeFailure::InvalidRequest)),
+        "path-unsafe vm id must be InvalidRequest, got {result:?}"
+    );
+    assert!(
+        calls(&h.controller).is_empty(),
+        "no side effects may run for a path-unsafe vm id"
+    );
+    // No fs mutation: the runtime never created `{runtime_dir}/vms`.
+    assert!(
+        !h.runtime_dir.join("vms").exists(),
+        "no vms tree may be created for a path-unsafe vm id"
+    );
+}
+
+#[tokio::test]
+async fn create_rejects_path_unsafe_storage_ref() {
+    let h = harness(None);
+    let request = create_envelope_with_raw_definition(raw_definition(
+        "vm-safe",
+        serde_json::json!([{
+            "attachment_id": "disk-0",
+            "storage_ref": "../vol-0",
+            "read_only": false,
+        }]),
+    ));
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            "vm-safe",
+            "op-evil-storage",
+            request,
+        ))
+        .await;
+    assert!(
+        matches!(result, Err(RuntimeFailure::InvalidRequest)),
+        "path-unsafe storage_ref must be InvalidRequest, got {result:?}"
+    );
+    assert!(
+        calls(&h.controller).is_empty(),
+        "no side effects may run for a path-unsafe storage_ref"
+    );
+    assert!(
+        !h.runtime_dir.join("vms").exists(),
+        "no vms tree may be created for a path-unsafe storage_ref"
+    );
+}

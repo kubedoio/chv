@@ -160,6 +160,10 @@ impl HostResourceController for MockHostResourceController {
 #[derive(Debug, Clone, Default)]
 pub struct MockCloudHypervisorAdapter {
     pub vms: Arc<Mutex<HashMap<String, VmConfig>>>,
+    /// When true, `delete_vm` fails deterministically (as `NotFound`) without
+    /// removing the VM, letting a test pin the drain-always behavior on a
+    /// failed delete. Per-instance state; never a shared static.
+    pub fail_delete: Arc<Mutex<bool>>,
 }
 
 #[async_trait]
@@ -190,6 +194,12 @@ impl CloudHypervisorAdapter for MockCloudHypervisorAdapter {
     }
 
     async fn delete_vm(&self, vm_id: &str, _operation_id: Option<&str>) -> Result<(), ChvError> {
+        if *self.fail_delete.lock().unwrap() {
+            return Err(ChvError::NotFound {
+                resource: "vm".to_string(),
+                id: vm_id.to_string(),
+            });
+        }
         self.vms.lock().unwrap().remove(vm_id);
         Ok(())
     }
