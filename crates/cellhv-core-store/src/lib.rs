@@ -2302,9 +2302,17 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
 ///    prefix; a stray `legacy_generation` with no other metadata is corruption.
 /// 3. Present metadata must pass `OperationRequestMetadata::validate()`.
 /// 4. Legacy-origin enforcement applies only when metadata is present: a
-///    `legacy:` operation must carry a legacy generation, and the stored
-///    legacy generation must agree with the reconstructed entry.
+///    `legacy:` operation must carry a legacy generation.
 /// 5. A stored legacy generation must be at least one.
+///
+/// The stored-vs-entry `legacy_generation` cross-check (agreement between the
+/// reconstructed entry and the stored column) is deliberately defensive: both
+/// sides are reconstructed from the same SQLite column, so it cannot detect a
+/// divergence no external writer produced. The meaningful guards are rule 4
+/// (a `legacy:` operation with metadata must still carry a generation) and
+/// rule 2's stray-generation rejection (a generation with no metadata is
+/// corruption); the remaining cross-checks only catch local reconstruction
+/// bugs.
 fn enforce_request_metadata_invariants(
     entry: &OperationJournalEntry,
     stored: &StoredOperationColumns,
