@@ -120,6 +120,44 @@ impl MutationCommand {
     }
 }
 
+/// Canonical journal envelope: `{"command": {...}, "expected_vm_version": N}`.
+///
+/// This is the envelope `OperationService::submit` journals as
+/// `operation.request` (`canonical_request`), and the de-envelope boundary that
+/// runtime/projection consumers share — no consumer deserializes the request
+/// straight into `VmDefinition` (which denies unknown fields).
+///
+/// `expected_vm_version` is deliberately left an untyped [`serde_json::Value`]:
+/// the executor/authority already gated version checks before execution, and
+/// projection consumers perform no generation checks on the request itself.
+/// Typing it deeper here would only couple consumers to evolved version
+/// encodings.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalRequest {
+    pub command: MutationCommand,
+    pub expected_vm_version: serde_json::Value,
+}
+
+impl CanonicalRequest {
+    /// Parse a journaled `operation.request` into the canonical envelope.
+    ///
+    /// Returns `Ok(None)` when `value` is not an object, and `Err(_)` when it
+    /// is an object but not a parseable canonical envelope (unknown field,
+    /// missing `command`/`expected_vm_version`, or a command that does not
+    /// deserialize into [`MutationCommand`]). Projection consumers treat both
+    /// `Ok(None)` and `Err(_)` as "not a recognizable canonical request" and
+    /// skip — a projection decision must never change an executor outcome.
+    pub fn try_from_value(
+        value: &serde_json::Value,
+    ) -> std::result::Result<Option<Self>, serde_json::Error> {
+        if !value.is_object() {
+            return Ok(None);
+        }
+        serde_json::from_value::<CanonicalRequest>(value.clone()).map(Some)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitMutation {
     pub operation_id: OperationId,
@@ -621,6 +659,47 @@ mod tests {
 
     fn version(value: u64) -> ResourceVersion {
         ResourceVersion::new(value).unwrap()
+    }
+
+    #[test]
+    fn canonical_request_round_trips_through_try_from_value() {
+        let command = MutationCommand::CreateVm {
+            definition: vm("roundtrip"),
+        };
+        let request = canonical_request(&command, version(7));
+        let parsed = CanonicalRequest::try_from_value(&request).unwrap().unwrap();
+        assert_eq!(parsed.command, command);
+        assert_eq!(parsed.expected_vm_version, serde_json::json!(7));
+    }
+
+    #[test]
+    fn canonical_request_rejects_non_envelope_shapes_without_panicking() {
+        // Non-object values are not a canonical envelope at all.
+        assert!(matches!(
+            CanonicalRequest::try_from_value(&serde_json::json!("not-an-object")),
+            Ok(None)
+        ));
+        assert!(matches!(
+            CanonicalRequest::try_from_value(&serde_json::json!(null)),
+            Ok(None)
+        ));
+        assert!(matches!(
+            CanonicalRequest::try_from_value(&serde_json::json!([1, 2, 3])),
+            Ok(None)
+        ));
+        // Object but not an envelope: an unknown field trips deny_unknown_fields.
+        assert!(CanonicalRequest::try_from_value(&serde_json::json!({"bogus": 1})).is_err());
+        // Envelope with a command that is not a parseable MutationCommand.
+        assert!(CanonicalRequest::try_from_value(&serde_json::json!({
+            "command": {"not_a_command": {}},
+            "expected_vm_version": 1,
+        }))
+        .is_err());
+        // Envelope missing expected_vm_version (required, no default).
+        assert!(CanonicalRequest::try_from_value(&serde_json::json!({
+            "command": {"create_vm": {"definition": {}}},
+        }))
+        .is_err());
     }
 
     #[test]
