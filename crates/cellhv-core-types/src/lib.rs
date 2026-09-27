@@ -545,6 +545,84 @@ impl TryFrom<RawOperation> for Operation {
     }
 }
 
+/// Prefix of operation IDs constructed by the legacy control-plane adapter.
+///
+/// Shared by the write paths (which reject `legacy:` submissions that lack a
+/// legacy generation) and the store's reopen validation (which treats rows with
+/// this prefix as legacy-provenance when they carry metadata).
+pub const LEGACY_OPERATION_ID_PREFIX: &str = "legacy:";
+
+/// Durable audit metadata recorded alongside an accepted operation.
+///
+/// Native submits journal the local surface as the requester; legacy submits
+/// journal the control-plane caller, its external operation ID, the request
+/// timestamp, and the legacy desired generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationRequestMetadata {
+    pub requested_by: String,
+    pub external_operation_id: String,
+    pub request_unix_ms: i64,
+    pub legacy_generation: Option<u64>,
+}
+
+/// Maximum supported `OperationRequestMetadata::request_unix_ms`.
+///
+/// Equal to 9999-12-31T23:59:59.999Z, the largest `SystemTime` representable
+/// in milliseconds on most runtimes, so any in-range value maps to a valid
+/// timestamp rather than an overflow-resolved instant.
+pub const MAX_REQUEST_UNIX_MS: i64 = 253_402_300_799_999;
+
+impl OperationRequestMetadata {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.requested_by.trim().is_empty() {
+            return Err("operation.request_metadata.requested_by must not be empty".to_owned());
+        }
+        if self.requested_by.chars().count() > 1024 {
+            return Err(
+                "operation.request_metadata.requested_by must be at most 1024 characters"
+                    .to_owned(),
+            );
+        }
+        if self.external_operation_id.trim().is_empty() {
+            return Err(
+                "operation.request_metadata.external_operation_id must not be empty".to_owned(),
+            );
+        }
+        if self.external_operation_id.chars().count() > 1024 {
+            return Err(
+                "operation.request_metadata.external_operation_id must be at most 1024 characters"
+                    .to_owned(),
+            );
+        }
+        if self.request_unix_ms <= 0 {
+            return Err(
+                "operation.request_metadata.request_unix_ms must be greater than zero".to_owned(),
+            );
+        }
+        if self.request_unix_ms > MAX_REQUEST_UNIX_MS {
+            return Err(
+                "operation.request_metadata.request_unix_ms exceeds the maximum supported timestamp"
+                    .to_owned(),
+            );
+        }
+        if let Some(generation) = self.legacy_generation {
+            if generation < 1 {
+                return Err(
+                    "operation.request_metadata.legacy_generation must be at least 1".to_owned(),
+                );
+            }
+            if generation > i64::MAX as u64 {
+                return Err(
+                    "operation.request_metadata.legacy_generation exceeds SQLite storage range"
+                        .to_owned(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "RawOperationStep")]
 pub struct OperationStep {
@@ -838,6 +916,70 @@ mod tests {
             *candidate.pointer_mut(pointer).unwrap() = invalid;
             assert!(serde_json::from_value::<Operation>(candidate).is_err());
         }
+    }
+
+    #[test]
+    fn operation_request_metadata_validation_contract() {
+        let valid = OperationRequestMetadata {
+            requested_by: "controller-a".to_owned(),
+            external_operation_id: "op-42".to_owned(),
+            request_unix_ms: 1_700_000_000_000,
+            legacy_generation: None,
+        };
+        assert_eq!(valid.clone().validate(), Ok(()));
+        let legacy = OperationRequestMetadata {
+            legacy_generation: Some(7),
+            ..valid.clone()
+        };
+        assert_eq!(legacy.validate(), Ok(()));
+        // Values exactly at each input cap are still accepted.
+        assert_eq!(
+            OperationRequestMetadata {
+                request_unix_ms: MAX_REQUEST_UNIX_MS,
+                ..valid.clone()
+            }
+            .validate(),
+            Ok(())
+        );
+        assert_eq!(
+            OperationRequestMetadata {
+                legacy_generation: Some(i64::MAX as u64),
+                ..valid.clone()
+            }
+            .validate(),
+            Ok(())
+        );
+        for label in [
+            "whitespace requester",
+            "over-long requester",
+            "empty external id",
+            "over-long external id",
+            "zero timestamp",
+            "over-max timestamp",
+            "zero generation",
+            "over-range generation",
+        ] {
+            let mut candidate = valid.clone();
+            match label {
+                "whitespace requester" => candidate.requested_by = "   ".to_owned(),
+                "over-long requester" => candidate.requested_by = "x".repeat(1025),
+                "empty external id" => candidate.external_operation_id = String::new(),
+                "over-long external id" => candidate.external_operation_id = "x".repeat(1025),
+                "zero timestamp" => candidate.request_unix_ms = 0,
+                "over-max timestamp" => candidate.request_unix_ms = MAX_REQUEST_UNIX_MS + 1,
+                "zero generation" => candidate.legacy_generation = Some(0),
+                "over-range generation" => candidate.legacy_generation = Some(i64::MAX as u64 + 1),
+                _ => unreachable!(),
+            }
+            assert!(candidate.validate().is_err(), "accepted invalid {label}");
+        }
+        assert!(
+            serde_json::from_str::<OperationRequestMetadata>(
+                r#"{"requested_by":"a","external_operation_id":"b","request_unix_ms":1,"legacy_generation":null,"extra":1}"#
+            )
+            .is_err(),
+            "unknown request metadata fields must be rejected"
+        );
     }
 
     #[test]

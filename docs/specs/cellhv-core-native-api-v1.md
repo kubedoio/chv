@@ -42,6 +42,22 @@ The schema rejects unknown fields through the Core domain and request types.
 It contains no tenant, project, quota, scheduler, Neutron, Cinder, Kubernetes,
 libvirt XML, or other cloud-platform fields.
 
+## Durable request audit metadata
+
+Every native submit journals durable request metadata on the accepted operation
+(`OperationJournalEntry.request_metadata`, persisted in the four `operations`
+columns added by migration 0004):
+
+- `requested_by` = `core-native-v1`;
+- `external_operation_id` = the caller's `request_id`;
+- `request_unix_ms` = the time Core received the request (positive Unix
+  milliseconds);
+- `legacy_generation` = `null` (native submits are never legacy provenance).
+
+The journal entry is therefore self-contained audit evidence for who requested a
+mutation, when, and under which `request_id`, without consulting any in-memory
+state.
+
 ## Local security
 
 `bind_private` fails closed unless the socket parent already exists, is a real

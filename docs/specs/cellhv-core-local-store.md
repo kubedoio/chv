@@ -60,7 +60,7 @@ The first migration creates these platform-neutral records:
 | `host_identity` | singleton host identifier and creation timestamp |
 | `vms` | VM identifier, stable name, accepted specification, requested and observed power state, resource version, timestamps |
 | `attachments` | stable attachment identifier, VM identifier, kind, provider/reference identity, requested and observed state |
-| `operations` | operation identifier, kind, VM identifier, fingerprint, canonical durable request intent, state, result/error, timestamps |
+| `operations` | operation identifier, kind, VM identifier, fingerprint, canonical durable request intent, state, result/error, timestamps. Durable request metadata (`requested_by`, `external_operation_id`, `request_unix_ms`, `legacy_generation`) is retained per operation — `cellhv-core-operation-model.md` is authoritative for its semantics and validation |
 | `operation_steps` | schema reserved for ordered durable steps aligned with the domain step state machine |
 | `idempotency_keys` | caller scope and key mapped to one request fingerprint and operation identifier |
 | `events` | ordered operation/VM-correlated event record |

@@ -354,8 +354,9 @@ mod tests {
     use crate::{Acceptance, MutationCommand, RestartDisposition};
     use cellhv_core_store::{CoreStore, StoreError};
     use cellhv_core_types::{
-        BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, OperationId, OperationStatus,
-        RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+        BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, OperationId,
+        OperationRequestMetadata, OperationStatus, RequestedPowerState, ResourceVersion,
+        VmDefinition, VmId,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -391,6 +392,12 @@ mod tests {
             idempotency_scope: "actor-test".to_owned(),
             idempotency_key: IdempotencyKey::new(key).unwrap(),
             expected_vm_version: version(expected),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command,
         }
     }

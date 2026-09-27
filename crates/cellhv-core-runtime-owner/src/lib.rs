@@ -784,13 +784,19 @@ mod tests {
         use cellhv_core_operations::{MutationCommand, SubmitMutation};
         use cellhv_core_types::{
             BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, OperationId,
-            RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+            OperationRequestMetadata, RequestedPowerState, ResourceVersion, VmDefinition, VmId,
         };
         SubmitMutation {
             operation_id: OperationId::new(op).unwrap(),
             idempotency_scope: "test".into(),
             idempotency_key: IdempotencyKey::new(op).unwrap(),
             expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command: MutationCommand::CreateVm {
                 definition: VmDefinition {
                     id: VmId::new(vm).unwrap(),

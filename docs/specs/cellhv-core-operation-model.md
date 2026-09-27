@@ -26,6 +26,10 @@ The internal `SubmitMutation` envelope contains:
 - a caller-selected operation identifier;
 - a non-empty idempotency scope and non-empty idempotency key;
 - the expected VM resource version;
+- durable request metadata (`OperationRequestMetadata`): the non-empty
+  requester identity, the caller's non-empty external operation ID, a positive
+  request timestamp in Unix milliseconds, and an optional legacy desired
+  generation (required to be `>= 1` when present);
 - exactly one closed `MutationCommand`: create, update, delete, start, stop, or
   reboot.
 
@@ -35,6 +39,56 @@ canonical representation. The store retains the canonical request, fingerprint,
 operation, accepted resource version, and `(scope, key)` mapping together.
 Fingerprint identity therefore includes mutation content and concurrency
 precondition, not the transport encoding or caller-proposed operation ID.
+
+### Durable request metadata columns
+
+`OperationRequestMetadata` is persisted on every operation row in the same
+atomic transaction as acceptance (migration
+`0004_operation_request_metadata.sql`), in four `operations` columns:
+
+| Column | Nullable | Semantics |
+|---|---|---|
+| `requested_by` | nullable | Requester identity. Native submits journal the local surface (`core-native-v1`); legacy submits journal the control-plane caller. |
+| `external_operation_id` | nullable | Caller's external operation ID (the legacy `operation_id`) or the native `request_id`. |
+| `request_unix_ms` | nullable | Unix timestamp in milliseconds when Core received the request. |
+| `legacy_generation` | nullable | Legacy desired generation; non-NULL only for legacy provenance rows. |
+
+Rows written before migration 0004 carry NULL in all four columns and are
+reconstructed as `request_metadata: None`; these all-NULL (pre-0004) rows are
+always accepted, regardless of operation ID prefix. The three non-generation
+columns are all-or-nothing: any half-present combination is an integrity failure
+on reopen, and a stored `legacy_generation` with none of those columns is a
+stray-generation integrity failure. When metadata is present, a row whose
+operation ID begins with the `legacy:` prefix MUST also carry a non-NULL
+`legacy_generation`; otherwise reopening the store fails closed. Write paths
+(`OperationService::submit` and the store's `accept_operation`) reject any
+`legacy:` submission whose metadata lacks a legacy generation up front.
+
+There is currently **no invariant forbidding a non-legacy row from carrying a
+`legacy_generation`**. The native producer always journals `null` and the legacy
+adapter always journals `Some`, but that pairing is a convention (already
+encoded in the table's "non-NULL only for legacy provenance rows" semantics
+above), not an enforced rule. A non-legacy row carrying a generation is not
+rejected.
+
+The all-NULL exemption also has a residual risk: a post-0004 row whose metadata
+columns are set to NULL by external tooling reads back identically to a
+pre-0004 row (`request_metadata: None`). No current write path can produce such
+a row (migrations 0004+ and all submit paths write the columns atomically
+together), and SQLite `PRAGMA integrity_check` detects only physical
+corruption, never logical NULLing of a column, so this ambiguity is accepted and
+documented here rather than hidden.
+
+Replay is fail-closed with respect to metadata: `OperationRequestMetadata` is
+validated before idempotency resolution, so a semantically-idempotent retry
+carrying malformed metadata (empty requester, non-positive timestamp, or a
+value over one of the input caps below) is rejected with `invalid_argument`
+rather than replayed. `OperationRequestMetadata::validate()` enforces defensive
+input caps: `requested_by` and `external_operation_id` are at most 1024
+characters, `request_unix_ms` must not exceed the year-9999 millisecond ceiling
+(`MAX_REQUEST_UNIX_MS`, the maximum representable `SystemTime` in most
+runtimes), and a present `legacy_generation` must fit SQLite's signed 64-bit
+storage range.
 
 ## 3. Replay before state inspection
 

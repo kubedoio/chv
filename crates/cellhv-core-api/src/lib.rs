@@ -19,8 +19,8 @@ use cellhv_core_operations::{
     MutationCommand, OperationJournalEntry, OperationServiceError, SubmitMutation,
 };
 use cellhv_core_types::{
-    HostCapabilities, HostIdentity, IdempotencyKey, OperationEvent, OperationId, ResourceVersion,
-    VmDefinition, VmId,
+    HostCapabilities, HostIdentity, IdempotencyKey, OperationEvent, OperationId,
+    OperationRequestMetadata, ResourceVersion, VmDefinition, VmId,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path as FsPath;
@@ -29,7 +29,16 @@ use thiserror::Error;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 const IF_MATCH_HEADER: &str = "if-match";
 const LOCAL_SCOPE: &str = "core-api-v1";
+// Durable requester identity journaled for every native submit.
+const NATIVE_REQUESTER: &str = "core-native-v1";
 pub const CONTRACT_V1: &str = include_str!("../contract/cellhv-core-api-v1.json");
+
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
 
 /// Builds the native transport over the process-wide Core authority.
 ///
@@ -334,6 +343,12 @@ async fn submit(
             idempotency_scope: LOCAL_SCOPE.to_owned(),
             idempotency_key: key,
             expected_vm_version,
+            metadata: OperationRequestMetadata {
+                requested_by: NATIVE_REQUESTER.to_owned(),
+                external_operation_id: request_id.clone(),
+                request_unix_ms: unix_now_ms(),
+                legacy_generation: None,
+            },
             command,
         })
         .await?)

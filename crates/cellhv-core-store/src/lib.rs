@@ -7,8 +7,9 @@
 use cellhv_core_types::{
     canonical_json as domain_canonical_json, canonical_request_fingerprint, HostCapabilities,
     HostId, HostIdentity, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
-    OperationId, OperationKind, OperationStatus, OperationStep, OwnershipMarker,
-    RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+    OperationId, OperationKind, OperationRequestMetadata, OperationStatus, OperationStep,
+    OwnershipMarker, RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+    LEGACY_OPERATION_ID_PREFIX,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -27,6 +28,8 @@ const EXECUTION_FENCING_MIGRATION_SQL: &str =
     include_str!("../migrations/0002_operation_execution_fencing.sql");
 const RECOVERY_ASSESSMENT_MIGRATION_SQL: &str =
     include_str!("../migrations/0003_operation_recovery_assessments.sql");
+const OPERATION_REQUEST_METADATA_MIGRATION_SQL: &str =
+    include_str!("../migrations/0004_operation_request_metadata.sql");
 const MAX_RECOVERY_EVIDENCE_BYTES: usize = 16 * 1024;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -97,6 +100,8 @@ pub struct AcceptOperation<'a> {
     /// Complete desired VM state at the accepted resource version. Required
     /// for create/update/power mutations and absent for delete.
     pub desired_vm: Option<&'a VmDefinition>,
+    /// Durable requester / external operation / timestamp audit metadata.
+    pub metadata: &'a OperationRequestMetadata,
     pub idempotency_scope: &'a str,
     pub idempotency_key: &'a IdempotencyKey,
     pub expected_vm_version: ResourceVersion,
@@ -108,6 +113,7 @@ pub struct OperationJournalEntry {
     pub request: serde_json::Value,
     pub result: Option<serde_json::Value>,
     pub error: Option<serde_json::Value>,
+    pub request_metadata: Option<OperationRequestMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +195,10 @@ struct StoredOperationColumns {
     active_attempt_token: Option<String>,
     completed_attempt_token: Option<String>,
     completed_at: Option<String>,
+    requested_by: Option<String>,
+    external_operation_id: Option<String>,
+    request_unix_ms: Option<i64>,
+    legacy_generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +229,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "operation_recovery_assessments",
         sql: RECOVERY_ASSESSMENT_MIGRATION_SQL,
+    },
+    Migration {
+        version: 4,
+        name: "operation_request_metadata",
+        sql: OPERATION_REQUEST_METADATA_MIGRATION_SQL,
     },
 ];
 
@@ -660,6 +675,21 @@ impl CoreStore {
                 "idempotency scope must not be empty".to_owned(),
             ));
         }
+        request
+            .metadata
+            .validate()
+            .map_err(StoreError::InvalidDomain)?;
+        if request
+            .operation
+            .id
+            .as_str()
+            .starts_with(LEGACY_OPERATION_ID_PREFIX)
+            && request.metadata.legacy_generation.is_none()
+        {
+            return Err(StoreError::InvalidDomain(
+                "legacy-provenance operation requires a legacy generation".to_owned(),
+            ));
+        }
         let operation = request.operation;
         let computed_fingerprint = canonical_request_fingerprint(request.request)?;
         if operation.request_fingerprint != computed_fingerprint {
@@ -702,8 +732,8 @@ impl CoreStore {
         validate_operation_for_acceptance(operation)?;
         let accepted_version = persist_accepted_desired_state(&tx, request)?;
         tx.execute(
-            "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![operation.id.as_str(), operation_kind_text(operation.kind), operation.vm_id.as_str(), operation.request_fingerprint, request_json, operation_status_text(operation.status), i64::from(operation.attempt_count), i64::from(operation.max_attempts)],
+            "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,requested_by,external_operation_id,request_unix_ms,legacy_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![operation.id.as_str(), operation_kind_text(operation.kind), operation.vm_id.as_str(), operation.request_fingerprint, request_json, operation_status_text(operation.status), i64::from(operation.attempt_count), i64::from(operation.max_attempts), request.metadata.requested_by, request.metadata.external_operation_id, request.metadata.request_unix_ms, legacy_generation_i64(request.metadata.legacy_generation)?],
         ).map_err(|error| map_constraint(error, "operation", operation.id.as_str()))?;
         tx.execute(
             "INSERT INTO idempotency_keys (scope,idempotency_key,request_fingerprint,operation_id,accepted_resource_version) VALUES (?1,?2,?3,?4,?5)",
@@ -2113,7 +2143,7 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
     for id in operations.query_map([], |row| row.get::<_, String>(0))? {
         let entry = read_operation_entry(conn, &id?)?;
         let stored = conn.query_row(
-            "SELECT request_json,result_json,error_json,active_attempt_token,completed_attempt_token,completed_at FROM operations WHERE operation_id=?1",
+            "SELECT request_json,result_json,error_json,active_attempt_token,completed_attempt_token,completed_at,requested_by,external_operation_id,request_unix_ms,legacy_generation FROM operations WHERE operation_id=?1",
             [entry.operation.id.as_str()],
             |row| Ok(StoredOperationColumns {
                 request: row.get(0)?,
@@ -2122,6 +2152,10 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
                 active_attempt_token: row.get(3)?,
                 completed_attempt_token: row.get(4)?,
                 completed_at: row.get(5)?,
+                requested_by: row.get(6)?,
+                external_operation_id: row.get(7)?,
+                request_unix_ms: row.get(8)?,
+                legacy_generation: row.get(9)?,
             }),
         )?;
         let canonical_result = entry.result.as_ref().map(canonical_json).transpose()?;
@@ -2179,6 +2213,7 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
                 entry.operation.id
             )));
         }
+        enforce_request_metadata_invariants(&entry, &stored)?;
     }
 
     let mut mappings = conn.prepare("SELECT scope,idempotency_key,request_fingerprint,operation_id FROM idempotency_keys ORDER BY scope,idempotency_key")?;
@@ -2256,6 +2291,99 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
     })? {
         serde_json::from_value::<OwnershipMarker>(row?)
             .map_err(|error| StoreError::Integrity(format!("invalid ownership marker: {error}")))?;
+    }
+    Ok(())
+}
+
+/// Enforces the durable request-metadata invariants for one operation row.
+///
+/// 1. `requested_by`/`external_operation_id`/`request_unix_ms` are all-or-nothing.
+/// 2. All-NULL rows are pre-0004 rows and always allowed regardless of id
+///    prefix; a stray `legacy_generation` with no other metadata is corruption.
+/// 3. Present metadata must pass `OperationRequestMetadata::validate()`.
+/// 4. Legacy-origin enforcement applies only when metadata is present: a
+///    `legacy:` operation must carry a legacy generation.
+/// 5. A stored legacy generation must be at least one.
+///
+/// The stored-vs-entry `legacy_generation` cross-check (agreement between the
+/// reconstructed entry and the stored column) is deliberately defensive: both
+/// sides are reconstructed from the same SQLite column, so it cannot detect a
+/// divergence no external writer produced. The meaningful guards are rule 4
+/// (a `legacy:` operation with metadata must still carry a generation) and
+/// rule 2's stray-generation rejection (a generation with no metadata is
+/// corruption); the remaining cross-checks only catch local reconstruction
+/// bugs.
+fn enforce_request_metadata_invariants(
+    entry: &OperationJournalEntry,
+    stored: &StoredOperationColumns,
+) -> Result<()> {
+    let core_any_present = stored.requested_by.is_some()
+        | stored.external_operation_id.is_some()
+        | stored.request_unix_ms.is_some();
+    let core_all_present = stored.requested_by.is_some()
+        && stored.external_operation_id.is_some()
+        && stored.request_unix_ms.is_some();
+    if core_any_present != core_all_present {
+        return Err(StoreError::Integrity(format!(
+            "operation {} has partial request metadata",
+            entry.operation.id
+        )));
+    }
+    if let Some(generation) = stored.legacy_generation {
+        if generation < 1 {
+            return Err(StoreError::Integrity(format!(
+                "operation {} has a stored legacy generation below one",
+                entry.operation.id
+            )));
+        }
+    }
+    if !core_all_present {
+        // All-NULL rows are pre-0004 rows (the only state they can have). They
+        // carry no metadata and are always legitimate; a legacy generation
+        // without any other metadata column is stray corruption.
+        if entry.request_metadata.is_some() {
+            return Err(StoreError::Integrity(format!(
+                "operation {} request metadata columns disagree with reconstructed entry",
+                entry.operation.id
+            )));
+        }
+        if stored.legacy_generation.is_some() {
+            return Err(StoreError::Integrity(format!(
+                "operation {} has a stray legacy generation without request metadata",
+                entry.operation.id
+            )));
+        }
+        return Ok(());
+    }
+    let metadata = entry.request_metadata.as_ref().ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "operation {} request metadata columns disagree with reconstructed entry",
+            entry.operation.id
+        ))
+    })?;
+    metadata.validate().map_err(|error| {
+        StoreError::Integrity(format!(
+            "operation {} has invalid request metadata: {error}",
+            entry.operation.id
+        ))
+    })?;
+    if entry
+        .operation
+        .id
+        .as_str()
+        .starts_with(LEGACY_OPERATION_ID_PREFIX)
+        && metadata.legacy_generation.is_none()
+    {
+        return Err(StoreError::Integrity(format!(
+            "operation {} is legacy-provenance but lacks a legacy generation",
+            entry.operation.id
+        )));
+    }
+    if stored.legacy_generation.is_some() != metadata.legacy_generation.is_some() {
+        return Err(StoreError::Integrity(format!(
+            "operation {} legacy generation columns disagree with reconstructed entry",
+            entry.operation.id
+        )));
     }
     Ok(())
 }
@@ -2460,15 +2588,33 @@ fn read_operation_entry(conn: &Connection, id: &str) -> Result<OperationJournalE
         i64,
         Option<String>,
         Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
     );
     let raw: Option<RawOperationRow> = conn
-        .query_row("SELECT operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,result_json,error_json FROM operations WHERE operation_id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)))
+        .query_row("SELECT operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,result_json,error_json,requested_by,external_operation_id,request_unix_ms,legacy_generation FROM operations WHERE operation_id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,row.get(10)?,row.get(11)?,row.get(12)?,row.get(13)?)))
         .optional()?;
-    let (id, kind, vm_id, fingerprint, request, status, attempts, max_attempts, result, error) =
-        raw.ok_or_else(|| StoreError::NotFound {
-            kind: "operation",
-            id: id.to_owned(),
-        })?;
+    let (
+        id,
+        kind,
+        vm_id,
+        fingerprint,
+        request,
+        status,
+        attempts,
+        max_attempts,
+        result,
+        error,
+        requested_by,
+        external_operation_id,
+        request_unix_ms,
+        legacy_generation,
+    ) = raw.ok_or_else(|| StoreError::NotFound {
+        kind: "operation",
+        id: id.to_owned(),
+    })?;
     let operation = Operation {
         id: operation_id(id.clone())?,
         kind: parse_operation_kind(&kind)?,
@@ -2481,6 +2627,35 @@ fn read_operation_entry(conn: &Connection, id: &str) -> Result<OperationJournalE
     operation
         .validate()
         .map_err(|error| StoreError::Integrity(format!("operation {id} is invalid: {error}")))?;
+    let request_metadata = match (requested_by, external_operation_id, request_unix_ms) {
+        (Some(requested_by), Some(external_operation_id), Some(request_unix_ms)) => {
+            let legacy_generation = legacy_generation
+                .map(|value| {
+                    u64::try_from(value).map_err(|_| {
+                        StoreError::Integrity(format!(
+                            "operation {id} has a negative stored legacy generation"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let metadata = OperationRequestMetadata {
+                requested_by,
+                external_operation_id,
+                request_unix_ms,
+                legacy_generation,
+            };
+            metadata
+                .validate()
+                .map_err(|error| StoreError::Integrity(format!("operation {id}: {error}")))?;
+            Some(metadata)
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(StoreError::Integrity(format!(
+                "operation {id} has partial request metadata"
+            )))
+        }
+    };
     let entry = OperationJournalEntry {
         operation,
         request: serde_json::from_str(&request)?,
@@ -2490,6 +2665,7 @@ fn read_operation_entry(conn: &Connection, id: &str) -> Result<OperationJournalE
         error: error
             .map(|value| serde_json::from_str(&value))
             .transpose()?,
+        request_metadata,
     };
     let outcome_valid = match entry.operation.status {
         OperationStatus::Accepted | OperationStatus::Running => {
@@ -2576,6 +2752,15 @@ fn resource_version(value: i64) -> Result<ResourceVersion> {
 fn version_i64(value: ResourceVersion) -> Result<i64> {
     i64::try_from(value.get())
         .map_err(|_| StoreError::InvalidDomain("resource version exceeds SQLite range".to_owned()))
+}
+fn legacy_generation_i64(value: Option<u64>) -> Result<Option<i64>> {
+    value
+        .map(|generation| {
+            i64::try_from(generation).map_err(|_| {
+                StoreError::InvalidDomain("legacy generation exceeds SQLite range".to_owned())
+            })
+        })
+        .transpose()
 }
 fn u32_value(value: i64, field: &str) -> Result<u32> {
     u32::try_from(value).map_err(|_| StoreError::Schema(format!("invalid {field}")))
@@ -2705,6 +2890,14 @@ mod tests {
             max_attempts: 3,
         }
     }
+    fn test_metadata() -> OperationRequestMetadata {
+        OperationRequestMetadata {
+            requested_by: "test-requester".to_owned(),
+            external_operation_id: "external-test".to_owned(),
+            request_unix_ms: 1_700_000_000_000,
+            legacy_generation: None,
+        }
+    }
     fn new_store() -> (tempfile::TempDir, PathBuf, CoreStore) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("core.db");
@@ -2729,6 +2922,7 @@ mod tests {
                 operation: &operation,
                 request: &request,
                 desired_vm: Some(&desired),
+                metadata: &test_metadata(),
                 idempotency_scope: "recovery-tests",
                 idempotency_key: &IdempotencyKey::new(operation_id).unwrap(),
                 expected_vm_version: version(1),
@@ -2800,7 +2994,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_v1_authority_upgrades_transactionally_to_execution_fencing() {
+    fn exact_v1_legacy_authority_upgrades_transactionally_to_latest() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("core.db");
         create_v1_store(&path);
@@ -2834,7 +3028,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 3);
+        assert_eq!(user_version, 4);
         let recovery_table: i64 = store
             .conn
             .query_row(
@@ -2853,6 +3047,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fencing_column, 1);
+        let metadata_columns: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('operations') WHERE name IN ('requested_by','external_operation_id','request_unix_ms','legacy_generation')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata_columns, 4);
         let running_token: String = store
             .conn
             .query_row(
@@ -2873,8 +3076,279 @@ mod tests {
         assert_eq!(terminal_token, "legacy-completed-v1");
         let incomplete = store.list_incomplete_execution_operations().unwrap();
         assert_eq!(incomplete.len(), 2);
+        // Pre-0004 rows carry no request metadata and must remain openable.
+        for (id, expected_status) in [
+            ("accepted-v1", OperationStatus::Accepted),
+            ("running-v1", OperationStatus::Running),
+            ("succeeded-v1", OperationStatus::Succeeded),
+        ] {
+            let entry = store
+                .operation_entry(&OperationId::new(id).unwrap())
+                .unwrap();
+            assert_eq!(entry.operation.id.as_str(), id);
+            assert_eq!(entry.operation.status, expected_status);
+            assert_eq!(entry.request_metadata, None);
+        }
         drop(store);
         CoreStore::open_existing(&path).unwrap();
+    }
+
+    #[test]
+    fn v1_store_with_legacy_and_native_rows_upgrades_and_preserves_pre_0004_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        create_v1_store(&path);
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let definition = vm("vm-1", 1);
+        conn.execute(
+            "INSERT INTO vms (vm_id,definition_json,requested_power_state,observed_power_state,resource_version) VALUES (?1,?2,'stopped','unknown',1)",
+            params![definition.id.as_str(), serde_json::to_string(&definition).unwrap()],
+        )
+        .unwrap();
+        insert_attachments(&conn, &definition).unwrap();
+        // A genuine 0003-era store: one legacy-provenance row written by the
+        // M2.1a core-managed authority and one plain row, both with NULL
+        // metadata columns (the only state a pre-0004 row can have).
+        let mixed = [
+            "legacy:control-plane-node.v1:node:6:node-a:vm:4:vm-a:operation:5:op-42",
+            "non-legacy-v1",
+        ];
+        for id in mixed {
+            let request = serde_json::json!({"legacy": id});
+            conn.execute(
+                "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES (?1,'start_vm','vm-1',?2,?3,'accepted',0,3)",
+                params![id, canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        let store = CoreStore::open_existing(&path).unwrap();
+        let user_version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 4);
+        for id in mixed {
+            let entry = store
+                .operation_entry(&OperationId::new(id).unwrap())
+                .unwrap();
+            assert_eq!(entry.operation.id.as_str(), id);
+            assert_eq!(entry.request_metadata, None);
+        }
+        drop(store);
+        drop(directory);
+    }
+
+    #[test]
+    fn accepted_request_metadata_is_persisted_and_survives_reopen() {
+        let (directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let mut desired = vm("vm-1", 2);
+        desired.requested_power_state = RequestedPowerState::Running;
+        let request = serde_json::json!({"command":"start"});
+        let op = operation("op-meta", &canonical_request_fingerprint(&request).unwrap());
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &op,
+                request: &request,
+                desired_vm: Some(&desired),
+                metadata: &test_metadata(),
+                idempotency_scope: "meta-test",
+                idempotency_key: &IdempotencyKey::new("meta-key").unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        let (requested_by, external_operation_id, request_unix_ms, legacy_generation): (
+            String,
+            String,
+            i64,
+            Option<i64>,
+        ) = store
+            .conn
+            .query_row(
+                "SELECT requested_by,external_operation_id,request_unix_ms,legacy_generation FROM operations WHERE operation_id='op-meta'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(requested_by, "test-requester");
+        assert_eq!(external_operation_id, "external-test");
+        assert_eq!(request_unix_ms, 1_700_000_000_000);
+        assert_eq!(legacy_generation, None);
+        let entry = store.operation_entry(&op.id).unwrap();
+        assert_eq!(entry.request_metadata, Some(test_metadata()));
+        drop(store);
+        let reopened = CoreStore::open_existing(&path).unwrap();
+        assert_eq!(
+            reopened.operation_entry(&op.id).unwrap().request_metadata,
+            Some(test_metadata())
+        );
+        drop(reopened);
+        drop(directory);
+    }
+
+    #[test]
+    fn legacy_operation_metadata_and_generation_survive_reopen() {
+        let (directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let mut desired = vm("vm-1", 2);
+        desired.requested_power_state = RequestedPowerState::Running;
+        let request = serde_json::json!({"command":"legacy-start"});
+        let op = operation(
+            "legacy:test:op",
+            &canonical_request_fingerprint(&request).unwrap(),
+        );
+        let metadata = OperationRequestMetadata {
+            requested_by: "legacy-requester".to_owned(),
+            external_operation_id: "external-legacy".to_owned(),
+            request_unix_ms: 1_700_000_000_000,
+            legacy_generation: Some(7),
+        };
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &op,
+                request: &request,
+                desired_vm: Some(&desired),
+                metadata: &metadata,
+                idempotency_scope: "legacy-roundtrip",
+                idempotency_key: &IdempotencyKey::new("legacy-key").unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        // Positive round-trip: the full metadata (including the legacy
+        // generation) must be readable before and after a store reopen. This is
+        // independent of the legacy-origin invariant's failure modes — it pins
+        // that the read path never drops or corrupts the journaled generation.
+        assert_eq!(
+            store.operation_entry(&op.id).unwrap().request_metadata,
+            Some(metadata.clone())
+        );
+        drop(store);
+        let reopened = CoreStore::open_existing(&path).unwrap();
+        let returned = reopened
+            .operation_entry(&op.id)
+            .unwrap()
+            .request_metadata
+            .unwrap();
+        assert_eq!(returned.requested_by, "legacy-requester");
+        assert_eq!(returned.external_operation_id, "external-legacy");
+        assert_eq!(returned.request_unix_ms, 1_700_000_000_000);
+        assert_eq!(returned.legacy_generation, Some(7));
+        drop(reopened);
+        drop(directory);
+    }
+
+    #[test]
+    fn partial_request_metadata_columns_are_rejected_on_reopen() {
+        let (directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let mut desired = vm("vm-1", 2);
+        desired.requested_power_state = RequestedPowerState::Running;
+        let request = serde_json::json!({"command":"start"});
+        let op = operation(
+            "op-partial",
+            &canonical_request_fingerprint(&request).unwrap(),
+        );
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &op,
+                request: &request,
+                desired_vm: Some(&desired),
+                metadata: &test_metadata(),
+                idempotency_scope: "partial-test",
+                idempotency_key: &IdempotencyKey::new("partial-key").unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        // Null out two of the three core columns, leaving a half-present row.
+        store
+            .conn
+            .execute(
+                "UPDATE operations SET external_operation_id=NULL, request_unix_ms=NULL WHERE operation_id=?1",
+                [op.id.as_str()],
+            )
+            .unwrap();
+        drop(store);
+        assert!(matches!(
+            CoreStore::open_existing(&path),
+            Err(StoreError::Integrity(_))
+        ));
+        drop(directory);
+    }
+
+    #[test]
+    fn legacy_provenance_operations_require_generation_when_metadata_is_present() {
+        // Variant A: all-NULL `legacy:` row (a genuine pre-0004 row) opens
+        // normally and reads back with `request_metadata: None`.
+        {
+            let (directory, path, mut store) = new_store();
+            store.create_vm(&vm("vm-1", 1)).unwrap();
+            let request = serde_json::json!({"legacy":"no-metadata"});
+            let count = store
+                .conn
+                .execute(
+                    "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES ('legacy:no-metadata','start_vm','vm-1',?1,?2,'accepted',0,3)",
+                    params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            drop(store);
+            let reopened = CoreStore::open_existing(&path).unwrap();
+            let entry = reopened
+                .operation_entry(&OperationId::new("legacy:no-metadata").unwrap())
+                .unwrap();
+            assert_eq!(entry.request_metadata, None);
+            drop(directory);
+        }
+        // Variant B: `legacy:` id with the three metadata columns but a NULL
+        // legacy generation (and no other column changes) fails reopen. The
+        // write path now rejects this up front, so seed the row directly.
+        {
+            let (directory, path, mut store) = new_store();
+            store.create_vm(&vm("vm-1", 1)).unwrap();
+            let request = serde_json::json!({"command":"start"});
+            let count = store
+                .conn
+                .execute(
+                    "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,requested_by,external_operation_id,request_unix_ms,legacy_generation) VALUES ('legacy:missing-generation','start_vm','vm-1',?1,?2,'accepted',0,3,'legacy-requester','external-legacy',1700000000000,NULL)",
+                    params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            drop(store);
+            assert!(matches!(
+                CoreStore::open_existing(&path),
+                Err(StoreError::Integrity(_))
+            ));
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn stray_legacy_generation_without_metadata_columns_is_rejected_on_reopen() {
+        let (directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let request = serde_json::json!({"command":"start"});
+        // A `legacy_generation` with none of the three core metadata columns is
+        // an orphan; no pre-0004 writer could have produced it, so reopen fails.
+        let count = store
+            .conn
+            .execute(
+                "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,legacy_generation) VALUES ('orphan-generation','start_vm','vm-1',?1,?2,'accepted',0,3,1)",
+                params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(store);
+        assert!(matches!(
+            CoreStore::open_existing(&path),
+            Err(StoreError::Integrity(_))
+        ));
+        drop(directory);
     }
 
     #[test]
@@ -2918,6 +3392,76 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fencing_columns, 0);
+    }
+
+    #[test]
+    fn failed_upgrade_reopens_at_prior_version_and_repairs_then_upgrades() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        create_v1_store(&path);
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let definition = vm("vm-1", 1);
+        conn.execute(
+            "INSERT INTO vms (vm_id,definition_json,requested_power_state,observed_power_state,resource_version) VALUES (?1,?2,'stopped','unknown',1)",
+            params![definition.id.as_str(), serde_json::to_string(&definition).unwrap()],
+        )
+        .unwrap();
+        insert_attachments(&conn, &definition).unwrap();
+        let request = serde_json::json!({"legacy":"invalid-running-repair"});
+        conn.execute(
+            "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES ('invalid-running-repair','start_vm','vm-1',?1,?2,'running',0,3)",
+            params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        // Migration to v4 leaves this `running`/`retry_count=0` row invalid, so
+        // the whole upgrade transaction rolls back and the DB stays at v1.
+        let first = match CoreStore::open_existing(&path).err().unwrap() {
+            StoreError::Integrity(message) => message,
+            other => panic!("expected integrity error on first open, got {other:?}"),
+        };
+        // The store is not bricked or locked: re-opening at the prior version
+        // fails with the identical error, proving user_version stayed put.
+        let reopened = match CoreStore::open_existing(&path).err().unwrap() {
+            StoreError::Integrity(message) => message,
+            other => panic!("expected integrity error on reopen, got {other:?}"),
+        };
+        assert_eq!(
+            reopened, first,
+            "reopen must fail with the SAME error at the prior version"
+        );
+
+        // Repair the offending row directly against the prior (v1) schema; a
+        // fresh open must then migrate cleanly to the latest version.
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let fixed = conn
+            .execute(
+                "UPDATE operations SET status='accepted',retry_count=0 WHERE operation_id='invalid-running-repair'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(fixed, 1, "the offending row must be repaired");
+        let user_version_before: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version_before, 1);
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        let store = CoreStore::open_existing(&path)
+            .expect("repaired store must reopen after the upgrade is unblocked");
+        let user_version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 4, "repaired store must upgrade cleanly to v4");
+        drop(directory);
     }
 
     #[test]
@@ -3107,10 +3651,12 @@ mod tests {
         );
         let mut desired = vm("vm-1", 2);
         desired.requested_power_state = RequestedPowerState::Running;
+        let metadata = test_metadata();
         let request = AcceptOperation {
             operation: &first,
             request: &request_json,
             desired_vm: Some(&desired),
+            metadata: &metadata,
             idempotency_scope: "caller-a",
             idempotency_key: &key,
             expected_vm_version: version(1),
@@ -3181,10 +3727,12 @@ mod tests {
         );
         let mut desired = vm("vm-1", 3);
         desired.requested_power_state = RequestedPowerState::Running;
+        let stale_metadata = test_metadata();
         let stale = AcceptOperation {
             operation: &op,
             request: &request_json,
             desired_vm: Some(&desired),
+            metadata: &stale_metadata,
             idempotency_scope: "caller",
             idempotency_key: &key,
             expected_vm_version: version(2),
@@ -3238,6 +3786,7 @@ mod tests {
                 operation: &operation,
                 request: &serde_json::json!({"action":"start"}),
                 desired_vm: Some(&desired),
+                metadata: &test_metadata(),
                 idempotency_scope: "caller",
                 idempotency_key: &IdempotencyKey::new("key-mismatch").unwrap(),
                 expected_vm_version: version(1),
@@ -3326,10 +3875,12 @@ mod tests {
         );
         let mut desired = vm("vm-1", 2);
         desired.requested_power_state = RequestedPowerState::Running;
+        let first_metadata = test_metadata();
         let first = AcceptOperation {
             operation: &first_operation,
             request: &request_json,
             desired_vm: Some(&desired),
+            metadata: &first_metadata,
             idempotency_scope: "caller",
             idempotency_key: &first_key,
             expected_vm_version: version(1),
@@ -3379,6 +3930,7 @@ mod tests {
                 operation: &op,
                 request: &request_json,
                 desired_vm: Some(&desired),
+                metadata: &test_metadata(),
                 idempotency_scope: "caller",
                 idempotency_key: &key,
                 expected_vm_version: version(1),
@@ -3453,6 +4005,7 @@ mod tests {
                     operation: &operation,
                     request: &request,
                     desired_vm: Some(&desired),
+                    metadata: &test_metadata(),
                     idempotency_scope: "caller",
                     idempotency_key: &IdempotencyKey::new("key").unwrap(),
                     expected_vm_version: version(1),
@@ -3505,6 +4058,7 @@ mod tests {
                 operation: &op,
                 request: &request_json,
                 desired_vm: Some(&definition),
+                metadata: &test_metadata(),
                 idempotency_scope: "caller",
                 idempotency_key: &key,
                 expected_vm_version: version(1),
@@ -3540,6 +4094,7 @@ mod tests {
                 operation: &start,
                 request: &request_json,
                 desired_vm: Some(&desired),
+                metadata: &test_metadata(),
                 idempotency_scope: "caller",
                 idempotency_key: &key,
                 expected_vm_version: version(1),
@@ -3557,6 +4112,7 @@ mod tests {
                 operation: &delete,
                 request: &delete_json,
                 desired_vm: None,
+                metadata: &test_metadata(),
                 idempotency_scope: "caller",
                 idempotency_key: &delete_key,
                 expected_vm_version: version(2),
@@ -3604,6 +4160,7 @@ mod tests {
                 operation: &op,
                 request: &request_json,
                 desired_vm: Some(&desired),
+                metadata: &test_metadata(),
                 idempotency_scope: "caller",
                 idempotency_key: &key,
                 expected_vm_version: version(1),
@@ -3959,6 +4516,7 @@ mod tests {
                     operation: &op,
                     request: &request,
                     desired_vm: Some(&desired),
+                    metadata: &test_metadata(),
                     idempotency_scope: "recovery-corruption",
                     idempotency_key: &IdempotencyKey::new("start").unwrap(),
                     expected_vm_version: version(1),
@@ -4045,6 +4603,7 @@ mod tests {
                 operation: &op,
                 request: &request,
                 desired_vm: Some(&desired),
+                metadata: &test_metadata(),
                 idempotency_scope: "token-test",
                 idempotency_key: &IdempotencyKey::new("token-test").unwrap(),
                 expected_vm_version: version(1),

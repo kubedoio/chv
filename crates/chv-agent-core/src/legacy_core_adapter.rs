@@ -1,15 +1,18 @@
 //! Lossless translation from the legacy lifecycle RPC vocabulary to Core mutations.
 //!
-//! This module is deliberately not called by [`crate::AgentServer`]. Until the
-//! Core journal and the legacy [`crate::NodeCache`] can be updated atomically,
-//! routing production requests through it would create two partially committed
-//! views of desired state.
+//! This adapter is wired in core-managed authority mode: the five legacy
+//! lifecycle handlers call [`crate::AgentServer`]'s core-managed mutation path,
+//! which routes through [`adapt_legacy_vm_mutation`]. The caller's audit
+//! metadata (requester, external operation ID, request timestamp, legacy
+//! desired generation) is carried into the `SubmitMutation` envelope and
+//! durably journaled by `OperationService::submit`, never kept memory-only.
 
 use crate::VmSpec;
 use cellhv_core_operations::{MutationCommand, SubmitMutation};
 use cellhv_core_types::{
     BootSpec, ComputeSpec, IdempotencyKey, NetworkAttachmentRef, ObservedPowerState, OperationId,
-    RequestedPowerState, ResourceVersion, StorageAttachmentRef, VmDefinition, VmId,
+    OperationRequestMetadata, RequestedPowerState, ResourceVersion, StorageAttachmentRef,
+    VmDefinition, VmId, LEGACY_OPERATION_ID_PREFIX,
 };
 use cellhv_nodecache_migration::{legacy_network_attachment_id, legacy_storage_attachment_id};
 use chv_errors::ChvError;
@@ -102,7 +105,7 @@ pub fn adapt_legacy_vm_mutation(
 
     let submission = SubmitMutation {
         operation_id: OperationId::new(format!(
-            "legacy:{SCOPE_PREFIX}:node:{}:{node_id}:vm:{}:{vm_id}:operation:{}:{}",
+            "{LEGACY_OPERATION_ID_PREFIX}{SCOPE_PREFIX}:node:{}:{node_id}:vm:{}:{vm_id}:operation:{}:{}",
             node_id.len(),
             vm_id.as_str().len(),
             meta.operation_id.len(),
@@ -121,6 +124,12 @@ pub fn adapt_legacy_vm_mutation(
             meta.desired_state_version
         ))?,
         expected_vm_version: expected_core_version,
+        metadata: OperationRequestMetadata {
+            requested_by: meta.requested_by.clone(),
+            external_operation_id: meta.operation_id.clone(),
+            request_unix_ms: meta.request_unix_ms,
+            legacy_generation: Some(desired_generation),
+        },
         command,
     };
     Ok(LegacyMutationIntent {
@@ -309,6 +318,15 @@ mod tests {
             first.submission.idempotency_key.as_str(),
             "operation/5:op-42/generation/1:7"
         );
+        assert_eq!(
+            first.submission.metadata,
+            OperationRequestMetadata {
+                requested_by: "controller-a".to_owned(),
+                external_operation_id: "op-42".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: Some(7),
+            }
+        );
     }
 
     #[test]
@@ -481,11 +499,33 @@ mod tests {
             version(1),
         )
         .unwrap();
+        // The intent's own audit fields must agree with the submission's
+        // durable metadata by construction.
+        assert_eq!(
+            intent.submission.metadata,
+            OperationRequestMetadata {
+                requested_by: intent.requested_by.clone(),
+                external_operation_id: intent.external_operation_id.clone(),
+                request_unix_ms: intent.request_unix_ms,
+                legacy_generation: Some(intent.version.desired_generation),
+            }
+        );
 
+        let expected_metadata = intent.submission.metadata.clone();
         let accepted = authority.submit(intent.submission).await.unwrap();
         assert_eq!(accepted.disposition, Acceptance::Accepted);
         assert_eq!(authority.operations().await.unwrap().len(), 1);
         assert_eq!(authority.vms().await.unwrap().len(), 1);
+        let journaled = authority
+            .operation(
+                OperationId::new(
+                    "legacy:control-plane-node.v1:node:6:node-a:vm:4:vm-a:operation:5:op-42",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(journaled.request_metadata, Some(expected_metadata));
         authority.shutdown().await.unwrap();
         join.join().await.unwrap();
     }
@@ -557,7 +597,9 @@ mod tests {
         assert!(operations[1]["operation"]["id"]
             .as_str()
             .unwrap()
-            .starts_with("legacy:control-plane-node.v1:"));
+            .starts_with(&format!(
+                "{LEGACY_OPERATION_ID_PREFIX}control-plane-node.v1:"
+            )));
 
         drop(app);
         authority.shutdown().await.unwrap();

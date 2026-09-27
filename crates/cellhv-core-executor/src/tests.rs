@@ -2,8 +2,8 @@ use super::*;
 use cellhv_core_operations::{AuthorityActor, MutationCommand, OperationService, SubmitMutation};
 use cellhv_core_store::CoreStore;
 use cellhv_core_types::{
-    BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, RequestedPowerState,
-    ResourceVersion, VmDefinition,
+    BootSpec, ComputeSpec, IdempotencyKey, ObservedPowerState, OperationRequestMetadata,
+    RequestedPowerState, ResourceVersion, VmDefinition,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -31,6 +31,12 @@ fn submit(vm: &str, op: &str) -> SubmitMutation {
         idempotency_scope: "test".into(),
         idempotency_key: IdempotencyKey::new(op).unwrap(),
         expected_vm_version: ResourceVersion::new(1).unwrap(),
+        metadata: OperationRequestMetadata {
+            requested_by: "test-requester".to_owned(),
+            external_operation_id: "external-test".to_owned(),
+            request_unix_ms: 1_700_000_000_000,
+            legacy_generation: None,
+        },
         command: MutationCommand::CreateVm {
             definition: VmDefinition {
                 id: VmId::new(vm).unwrap(),
@@ -79,6 +85,12 @@ async fn replay_quarantines_later_same_vm_work() {
             idempotency_scope: "test".into(),
             idempotency_key: IdempotencyKey::new("two").unwrap(),
             expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command: MutationCommand::StartVm {
                 vm_id: VmId::new("a").unwrap(),
             },
@@ -125,6 +137,12 @@ async fn claim_ambiguity_quarantines_queued_successor() {
             idempotency_scope: "test".into(),
             idempotency_key: IdempotencyKey::new("two").unwrap(),
             expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command: MutationCommand::StartVm {
                 vm_id: VmId::new("a").unwrap(),
             },
@@ -329,6 +347,12 @@ async fn finish_ambiguity_does_not_launch_same_vm_successor() {
             idempotency_scope: "test".into(),
             idempotency_key: IdempotencyKey::new("two").unwrap(),
             expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command: MutationCommand::StartVm {
                 vm_id: VmId::new("a").unwrap(),
             },
@@ -451,6 +475,12 @@ async fn complete_snapshot_quarantines_before_capacity_admission() {
             idempotency_scope: "test".into(),
             idempotency_key: IdempotencyKey::new("running-a").unwrap(),
             expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command: MutationCommand::StartVm {
                 vm_id: VmId::new("a").unwrap(),
             },
@@ -582,6 +612,12 @@ async fn same_vm_is_ordered_while_different_vms_overlap() {
             idempotency_scope: "test".into(),
             idempotency_key: IdempotencyKey::new("a2").unwrap(),
             expected_vm_version: ResourceVersion::new(1).unwrap(),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command: MutationCommand::StartVm {
                 vm_id: VmId::new("a").unwrap(),
             },
