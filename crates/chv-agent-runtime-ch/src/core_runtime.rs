@@ -12,8 +12,9 @@
 //! The old adapter-only runtime deserialized `operation.request` straight into
 //! `VmDefinition`, which ALWAYS failed because the envelope wraps the
 //! internally-tagged `MutationCommand` and `VmDefinition` denies unknown
-//! fields. The runtime now strips the envelope through [`CanonicalEnvelope`]
-//! and dispatches on the real `MutationCommand`.
+//! fields. The runtime now strips the envelope through the shared
+//! [`CanonicalRequest`] (`cellhv-core-operations`) and dispatches on the real
+//! `MutationCommand`.
 //!
 //! # In-memory side-effect state
 //! Successful creates record the stord/nwd handle state in an in-memory map so
@@ -29,7 +30,7 @@
 
 use crate::adapter::{CloudHypervisorAdapter, VmConfig, VmDiskConfig, VmNicConfig};
 use cellhv_core_executor::{CoreVmRuntime, RuntimeFailure};
-use cellhv_core_operations::{MutationCommand, OperationJournalEntry};
+use cellhv_core_operations::{CanonicalRequest, MutationCommand, OperationJournalEntry};
 use cellhv_core_types::{OperationKind, StorageAttachmentRef};
 use chv_errors::ChvError;
 use chv_hypervisor_api::resources::{
@@ -40,21 +41,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
-
-/// Canonical journal envelope: `{"command": {...}, "expected_vm_version": N}`.
-///
-/// `expected_vm_version` is deliberately left an untyped [`serde_json::Value`]:
-/// the M2.2a effector performs no generation checks on the request itself (the
-/// executor/authority already gated the operation); typing it deeper here would
-/// only couple us to evolved version encodings.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CanonicalEnvelope {
-    command: MutationCommand,
-    // Intentionally shallow: see struct doc.
-    #[allow(dead_code)]
-    expected_vm_version: serde_json::Value,
-}
 
 /// Runtime-side mirror of the `cellhv-core-types` path-safety rule.
 ///
@@ -133,9 +119,11 @@ impl CloudHypervisorCoreRuntime {
     /// De-envelope the canonical request into its command. A value that is not
     /// the canonical envelope shape is a malformed request.
     fn request_command(request: &serde_json::Value) -> Result<MutationCommand, RuntimeFailure> {
-        serde_json::from_value::<CanonicalEnvelope>(request.clone())
-            .map(|envelope| envelope.command)
-            .map_err(|_| RuntimeFailure::InvalidRequest)
+        let envelope = match CanonicalRequest::try_from_value(request) {
+            Ok(Some(envelope)) => envelope,
+            Ok(None) | Err(_) => return Err(RuntimeFailure::InvalidRequest),
+        };
+        Ok(envelope.command)
     }
 
     /// Map an effector error to the closed public-safe [`RuntimeFailure`] set.

@@ -651,6 +651,130 @@ impl NodeCache {
         }
         out
     }
+
+    /// Project a single Core `VmDefinition` into the legacy compatibility VM
+    /// axis of the cache (fragment + generation + attachments + desired state).
+    ///
+    /// M2.2b: this is a *projection* derived from one authoritative Core
+    /// terminal outcome — it is never the authority for desired state. The
+    /// legacy `VmSpec` shape carries exactly what the legacy readers (`VmSpec`,
+    /// `vm_network_ids`, `vm_volume_handles`) can consume; fields Core M1 does
+    /// not model (cloud-init userdata, hypervisor overrides, per-NIC addressing)
+    /// are projected as the values the single effector used (None / shared
+    /// default CIDR / empty addressing) — identical to the M2.2a residuals.
+    pub fn project_vm(
+        &mut self,
+        def: &cellhv_core_types::VmDefinition,
+        updated_at: String,
+        updated_by: String,
+    ) {
+        let vm_id = def.id.as_str();
+        let desired_state = match def.requested_power_state {
+            cellhv_core_types::RequestedPowerState::Running => "Running",
+            cellhv_core_types::RequestedPowerState::Stopped => "Stopped",
+        };
+        let spec = serde_json::json!({
+            "name": def.name.clone(),
+            "cpus": def.compute.vcpus,
+            "memory_bytes": def.compute.memory_bytes,
+            "kernel_path": def.boot.kernel.clone(),
+            "firmware_path": def.boot.firmware.clone(),
+            "disks": def.storage.iter().map(|storage| serde_json::json!({
+                "volume_id": storage.storage_ref.clone(),
+                "read_only": storage.read_only,
+            })).collect::<Vec<_>>(),
+            "nics": def.networks.iter().map(|network| serde_json::json!({
+                "network_id": network.network_ref.clone(),
+                "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref, &network.attachment_id)),
+                "ip_address": "",
+                "tap_name": "",
+                "cidr": chv_hypervisor_api::resources::DEFAULT_NIC_CIDR,
+                "gateway": "",
+            })).collect::<Vec<_>>(),
+            "desired_state": desired_state,
+            "cloud_init_userdata": None::<String>,
+            "hypervisor_overrides": None::<String>,
+        });
+        let generation = def.resource_version.get().to_string();
+        self.store_fragment(
+            "vm",
+            vm_id,
+            DesiredStateFragment {
+                id: vm_id.to_string(),
+                kind: "vm".to_string(),
+                generation: generation.clone(),
+                spec_json: serde_json::to_vec(&spec).unwrap_or_default(),
+                policy_json: Vec::new(),
+                updated_at,
+                updated_by,
+            },
+        );
+        self.observe_generation("vm", vm_id, generation);
+        let volume_ids = def
+            .storage
+            .iter()
+            .map(|storage| storage.storage_ref.clone())
+            .collect::<Vec<_>>();
+        let nics = def
+            .networks
+            .iter()
+            .map(|network| VmNicAttachment {
+                nic_id: network.attachment_id.clone(),
+                network_id: network.network_ref.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.observe_vm_attachment(vm_id, &volume_ids, &nics);
+    }
+
+    /// Rebuild the compatibility VM axis of the cache from the Core store's
+    /// authoritative VM list (startup rebuild in core-managed mode).
+    ///
+    /// Only the VM axis is replaced — `vm_fragments`, `vm_generations`,
+    /// `vm_attachments` — so a rebuild never discards volume/network axis state
+    /// (Core M1's lifecycle does not yet model arbitrary volume/network desired
+    /// state, and those axes belong to the legacy compatibility surface). Every
+    /// entry is projected with `"core-rebuild"` attribution so a rebuilt entry
+    /// is distinguishable from a live projection.
+    pub fn rebuild_from_core(&mut self, vms: &[cellhv_core_types::VmDefinition]) {
+        self.vm_fragments.clear();
+        self.vm_generations.clear();
+        self.vm_attachments.clear();
+        for def in vms {
+            self.project_vm(def, "core-rebuild".to_string(), "core".to_string());
+        }
+    }
+}
+
+/// Deterministic locally-administered unicast MAC derived from a VM + network
+/// identity, used when a Core `NetworkAttachmentRef` carries no MAC.
+///
+/// Core M1 does not model a requested MAC (M2.2a's effector lets the hypervisor
+/// assign one at runtime), but the legacy compatibility `VmSpec` requires a
+/// non-empty `mac_address` (`VmSpec::validate`). Projecting a stable placeholder
+/// keeps the compatibility surface valid; the actual runtime NIC MAC is
+/// observable independently, not via this projected `VmSpec`.
+///
+/// Format: `02:00:00:HH:HH:HH` — unicast, locally administered — where HH are
+/// the low 24 bits of an FNV-1a hash of `{vm_id}\0{network_ref}\0{attachment_id}`.
+/// Deterministic across restarts (no hasher-state dependency), collision-resistant
+/// enough for a compatibility view.
+fn projected_mac(vm_id: &str, network_ref: &str, attachment_id: &str) -> String {
+    let mut state: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut bytes = vm_id.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(network_ref.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(attachment_id.as_bytes());
+    for b in bytes {
+        state ^= u64::from(b);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!(
+        "02:00:00:{:02x}:{:02x}:{:02x}",
+        ((state >> 16) & 0xff) as u8,
+        ((state >> 8) & 0xff) as u8,
+        (state & 0xff) as u8
+    )
 }
 
 #[cfg(test)]
@@ -673,6 +797,199 @@ mod tests {
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             CACHE_FILE_MODE
+        );
+    }
+
+    fn projected_definition(vm_id: &str) -> cellhv_core_types::VmDefinition {
+        use cellhv_core_types::{
+            BootSpec, ComputeSpec, NetworkAttachmentRef, ObservedPowerState, RequestedPowerState,
+            ResourceVersion, StorageAttachmentRef, VmDefinition, VmId,
+        };
+        VmDefinition {
+            id: VmId::new(vm_id).unwrap(),
+            name: format!("{vm_id}-guest"),
+            boot: BootSpec::new("/kernel").unwrap(),
+            compute: ComputeSpec::new(2, 1024).unwrap(),
+            storage: vec![StorageAttachmentRef {
+                attachment_id: "vol-0".to_string(),
+                storage_ref: "vol-0".to_string(),
+                read_only: false,
+            }],
+            networks: vec![NetworkAttachmentRef {
+                attachment_id: "nic-0".to_string(),
+                network_ref: "net-0".to_string(),
+                mac_address: Some("02:00:00:00:00:01".to_string()),
+            }],
+            requested_power_state: RequestedPowerState::Running,
+            observed_power_state: ObservedPowerState::Unknown,
+            resource_version: ResourceVersion::new(3).unwrap(),
+        }
+    }
+
+    #[test]
+    fn project_vm_writes_the_legacy_vm_axis() {
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(
+            &projected_definition("vm-a"),
+            "1700000000000".to_string(),
+            "requester".to_string(),
+        );
+
+        let frag = cache.get_fragment("vm", "vm-a").unwrap();
+        assert_eq!(frag.kind, "vm");
+        assert_eq!(frag.generation, "3");
+        assert_eq!(frag.updated_at, "1700000000000");
+        assert_eq!(frag.updated_by, "requester");
+        assert_eq!(cache.get_generation("vm", "vm-a"), Some(&"3".to_string()));
+
+        let spec_json = std::str::from_utf8(&frag.spec_json).unwrap();
+        let spec = crate::spec::VmSpec::from_json(spec_json).unwrap();
+        assert_eq!(spec.name, "vm-a-guest");
+        assert_eq!(spec.cpus, 2);
+        assert_eq!(spec.memory_bytes, 1024);
+        assert_eq!(spec.kernel_path, "/kernel");
+        assert_eq!(spec.firmware_path, None);
+        assert_eq!(spec.desired_state, "Running");
+        assert_eq!(spec.cloud_init_userdata, None);
+        assert_eq!(spec.hypervisor_overrides, None);
+        assert_eq!(spec.disks.len(), 1);
+        assert_eq!(spec.disks[0].volume_id, "vol-0");
+        assert!(!spec.disks[0].read_only);
+        assert_eq!(spec.nics.len(), 1);
+        assert_eq!(spec.nics[0].network_id, "net-0");
+        assert_eq!(spec.nics[0].mac_address, "02:00:00:00:00:01");
+        assert_eq!(
+            spec.nics[0].cidr,
+            chv_hypervisor_api::resources::DEFAULT_NIC_CIDR
+        );
+        assert!(spec.validate().is_ok());
+
+        let attachment = cache.vm_attachment_state("vm-a").unwrap();
+        assert_eq!(attachment.volume_ids, vec!["vol-0".to_string()]);
+        assert_eq!(attachment.nics.len(), 1);
+        assert_eq!(attachment.nics[0].nic_id, "nic-0");
+        assert_eq!(attachment.nics[0].network_id, "net-0");
+    }
+
+    #[test]
+    fn project_vm_projects_distinct_macs_for_duplicate_network_refs() {
+        use cellhv_core_types::NetworkAttachmentRef;
+        // Two NICs on one VM sharing a network_ref (neither requesting a MAC)
+        // must still get DISTINCT deterministic placeholder MACs — the
+        // derivation hashes vm_id + network_ref + attachment_id, so a shared
+        // network_ref cannot collapse both NICs onto one MAC.
+        let mut def = projected_definition("vm-dup");
+        def.networks = vec![
+            NetworkAttachmentRef {
+                attachment_id: "nic-0".to_string(),
+                network_ref: "net-0".to_string(),
+                mac_address: None,
+            },
+            NetworkAttachmentRef {
+                attachment_id: "nic-1".to_string(),
+                network_ref: "net-0".to_string(),
+                mac_address: None,
+            },
+        ];
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(&def, "1700000000000".to_string(), "requester".to_string());
+        let frag = cache.get_fragment("vm", "vm-dup").unwrap();
+        let spec =
+            crate::spec::VmSpec::from_json(std::str::from_utf8(&frag.spec_json).unwrap()).unwrap();
+        assert_eq!(spec.nics.len(), 2);
+        let mac0 = &spec.nics[0].mac_address;
+        let mac1 = &spec.nics[1].mac_address;
+        assert!(mac0.starts_with("02:00:00:") && mac1.starts_with("02:00:00:"));
+        assert_ne!(
+            mac0, mac1,
+            "duplicate network_ref NICs must not share a placeholder MAC"
+        );
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn project_vm_maps_power_state_and_defaults_unmodeled_fields() {
+        use cellhv_core_types::{NetworkAttachmentRef, RequestedPowerState};
+        let mut def = projected_definition("vm-stop");
+        def.requested_power_state = RequestedPowerState::Stopped;
+        def.networks = vec![NetworkAttachmentRef {
+            attachment_id: "nic-1".to_string(),
+            network_ref: "net-1".to_string(),
+            mac_address: None,
+        }];
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(&def, "core-rebuild".to_string(), "core".to_string());
+
+        let frag = cache.get_fragment("vm", "vm-stop").unwrap();
+        let spec =
+            crate::spec::VmSpec::from_json(std::str::from_utf8(&frag.spec_json).unwrap()).unwrap();
+        assert_eq!(spec.desired_state, "Stopped");
+        // Core M1 does not model per-NIC addressing or a MAC; the projection
+        // mirrors the single effector's residual (empty addressing, default
+        // CIDR) rather than inventing values.
+        assert_eq!(spec.nics.len(), 1);
+        assert_eq!(spec.nics[0].network_id, "net-1");
+        // A Core def with no requested MAC must still produce a valid legacy
+        // VmSpec: the projection emits a deterministic locally-administered MAC
+        // instead of an empty string (which `VmSpec::validate` rejects).
+        let mac = &spec.nics[0].mac_address;
+        assert!(
+            !mac.is_empty(),
+            "projected MAC must be non-empty, got {mac:?}"
+        );
+        assert!(mac.starts_with("02:00:00:"), "projected MAC: {mac}");
+        assert_eq!(mac.len(), "02:00:00:00:00:00".len());
+        assert!(spec.validate().is_ok());
+        assert_eq!(spec.nics[0].ip_address, "");
+        assert_eq!(spec.nics[0].tap_name, "");
+        assert_eq!(spec.nics[0].gateway, "");
+    }
+
+    #[test]
+    fn rebuild_from_core_replaces_only_the_vm_axis() {
+        let mut cache = NodeCache::new("node-1");
+        // Pre-existing VM axis state the rebuild must discard...
+        cache.project_vm(
+            &projected_definition("vm-stale"),
+            "old".to_string(),
+            "legacy".to_string(),
+        );
+        // ...and volume/network axis state the rebuild must preserve.
+        cache.store_fragment(
+            "volume",
+            "vol-keep",
+            DesiredStateFragment {
+                id: "vol-keep".to_string(),
+                kind: "volume".to_string(),
+                generation: "1".to_string(),
+                spec_json: vec![],
+                policy_json: vec![],
+                updated_at: "keep".to_string(),
+                updated_by: "cp".to_string(),
+            },
+        );
+        cache.observe_generation("volume", "vol-keep", "1");
+        cache.observe_generation("network", "net-keep", "2");
+
+        let fresh = vec![projected_definition("vm-new")];
+        cache.rebuild_from_core(&fresh);
+
+        assert!(cache.get_fragment("vm", "vm-stale").is_none());
+        assert!(cache.vm_attachment_state("vm-stale").is_none());
+        assert!(cache.get_generation("vm", "vm-stale").is_none());
+        let projected = cache.get_fragment("vm", "vm-new").unwrap();
+        assert_eq!(projected.updated_by, "core");
+        assert_eq!(projected.updated_at, "core-rebuild");
+        assert_eq!(cache.get_generation("vm", "vm-new"), Some(&"3".to_string()));
+        // Volume/network axes untouched.
+        assert!(cache.get_fragment("volume", "vol-keep").is_some());
+        assert_eq!(
+            cache.get_generation("volume", "vol-keep"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            cache.get_generation("network", "net-keep"),
+            Some(&"2".to_string())
         );
     }
 

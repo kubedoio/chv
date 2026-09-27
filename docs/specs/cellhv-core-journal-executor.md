@@ -112,3 +112,78 @@ RC-lifecycle until the M2.2b/M3 projection work).
   userdata/overrides, and the shared `DEFAULT_NIC_CIDR` with an empty gateway,
   rather than inventing values. Legacy reconcile's cache-coupled
   prepare/cleanup remains active until its M2.3 deletion.
+
+## NodeCache projection (M2.2b)
+
+In core-managed mode, NodeCache (the legacy compatibility store consumed by
+`agent_server` list/get handlers, `VmSpec`, and cache helpers) is a **projection
+derived from Core execution** — never an independent authority.
+
+- **Only after a terminal Succeeded outcome.** `ProjectingCoreRuntime`
+  (`chv-agent-core/src/projection.rs`) wraps the single effector and implements
+  `CoreVmRuntime`. It forwards `execute` unchanged, and on exactly the
+  executor's Succeeded path (`Ok(None)`) projects the outcome into NodeCache:
+  `CreateVm` writes the legacy VmSpec fragment + generation + VM attachments;
+  `DeleteVm` removes the VM axis state; `StartVm`/`RebootVm` set desired state
+  `Running`; `StopVm` sets `Stopped`; `UpdateVm`/attach/detach are no-ops
+  (out-of-lifecycle, fail closed as `Unsupported`). Projection is **best-effort**:
+  any request-parse, projection, or cache-save failure warns and skips; it never
+  changes the `Result` the executor sees. The cache is persisted only when a
+  projection actually mutated it (a no-op arm or a skipped projection leaves no
+  trace and no extra snapshot write).
+- **Rebuild-on-startup crash model.** At startup (core-managed only) the VM axis
+  of NodeCache is rebuilt from the Core store's authoritative VM list
+  (`NodeCache::rebuild_from_core`), then persisted — **inside `start_core_managed`
+  and strictly BEFORE `CoreRuntimeOwner::start` spawns the executor poller**, so a
+  crash-recovery operation can never race (and be clobbered by) the rebuild. A
+  crash that loses the projection (or its save) is repaired by the next startup
+  rebuild; a stale compatibility cache cannot act as a second authority because
+  the legacy Reconciler's provider mutation is gated off in this mode.
+- **Single-writer precondition.** `Reconciler::set_provider_mutation_enabled`
+  (default true; disabled in core-managed) makes the legacy reconcile path skip
+  all three `reconcile_networks/volumes/vms` provider mutations in the
+  `TenantReady` arm, so the Core runtime + projection are the only NodeCache
+  writers/effectors in core modes. Completing the enforcement, every legacy
+  `agent_server` gRPC handler that would otherwise write a fragment or drive a
+  provider (CH/stord/nwd) side effect FAILS CLOSED in core-managed mode with
+  `unimplemented` — 28 gated legacy effector/desired-state mutators
+  (25 from the M2.2b enforcement below, plus the pre-existing
+  `resize_vm`/`attach_volume`/`detach_volume`):
+  the four `apply_*_desired_state` handlers (node/vm/volume/network — direct
+  second writers incl. `observed_generation`), `resize_volume` /
+  `snapshot_volume` / `restore_volume` / `delete_volume_snapshot` /
+  `clone_volume` (stord), `pause_vm` / `resume_vm` / `power_button_vm` /
+  `add_disk` / `remove_device` / `add_net` / `resize_disk` / `snapshot_vm` /
+  `restore_snapshot` / `coredump_vm` / `migrate_vm` (CH live-VM), and
+  `start_network` / `stop_network` / `restart_network` / `update_overlay` /
+  `send_gratuitous_arp` (nwd). **Deliberate boundaries:** the lifecycle handlers
+  the control plane needs in core-managed remain core-routed (`create_vm`/`start_vm`/`stop_vm`/`reboot_vm`/`delete_vm`); `resize_vm` /
+  `attach_volume` / `detach_volume` were already gated; read-only/handshake
+  handlers (`acknowledge_desired_state_version`, `ping_vmm`) remain; and the
+  operator node-state transitions (`pause/resume_node_scheduling`,
+  `drain_node`, `enter/exit_maintenance`) remain available because they manage
+  node-level operational state, not VM/volume/network lifecycle — they do not
+  drive any provider side effect. Consequences (honest): snapshot/restore,
+  migration, live device hot-plug, and storage snapshot/clone are NOT available
+  in core-managed until Core M1+ models them; a call fails loudly
+  (`unimplemented`) instead of running behind the single authority.
+- **Power-op generation staleness residual.** `StartVm`/`StopVm`/`RebootVm`
+  project only the desired-state patch (`update_vm_desired_state`); the VM's
+  fragment `generation` and attachments are NOT re-projected by these power
+  ops — generation stays at the last create/rebuild value until the next
+  `CreateVm`/`UpdateVm` or startup rebuild. This is a deliberate residual: the
+  compatibility cache's generation faithfulness is bounded by what the
+  projection writes.
+- **Requested MAC projection.** Core M1 does not model a requested MAC (the
+  effector lets the hypervisor assign one at runtime), but the legacy `VmSpec`
+  requires a non-empty `mac_address` (`VmSpec::validate` rejects empty). A
+  `NetworkAttachmentRef` with `mac_address: None` therefore projects a
+  deterministic locally-administered unicast placeholder
+  (`02:00:00:HH:HH:HH`, FNV-1a over
+  `{vm_id}\0{network_ref}\0{attachment_id}`) so the
+  compatibility surface stays valid and stable across restarts (and distinct
+  even for two NICs sharing a network_ref); the actual
+  runtime NIC MAC is observable independently, not via this projected `VmSpec`.
+- **CoreNative not wired; legacy unchanged.** CoreNative mode has no NodeCache
+  today (documented, not wired). Legacy mode keeps the legacy reconciler and its
+  direct NodeCache mutations exactly as before.

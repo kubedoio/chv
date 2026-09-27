@@ -101,16 +101,52 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
     trait keeps the runtime decoupled from the stord/nwd clients.
     > **Status: COMPLETE.** Merged `d1028097` (PR #259, evidence
     > `m2.2a-single-effector-runtime.md`).
-  - **M2.2b — NodeCache projection after Core execution.** Update the NodeCache
-    *projection* only after Core terminal outcomes; build/rebuild NodeCache from the
-    Core store. Legacy reconcile `prepare_vm_resources`/`cleanup_vm_resources` remain
+  - **M2.2b — NodeCache projection after Core execution.** NodeCache becomes a
+    *projection* derived from Core execution: in core-managed mode it is mutated
+    ONLY after a terminal Succeeded Core outcome (`Ok(None)` from the executor's
+    runtime path) by the `ProjectingCoreRuntime` composition wrapper
+    (`chv-agent-core/src/projection.rs`), and it is REBUILT from the Core store
+    at startup (`NodeCache::rebuild_from_core`, crash-consistency). Projection is
+    best-effort (warn + skip; rebuild repairs on restart) and never changes the
+    executor Result. The canonical request envelope
+    (`{"command": …, "expected_vm_version": N}`) is now a shared public
+    `CanonicalRequest` in `cellhv-core-operations` (single source of truth,
+    replacing runtime-ch's private `CanonicalEnvelope`). A necessary single-writer
+    precondition lands here too: the legacy Reconciler's provider mutation
+    (`reconcile_networks/volumes/vms`) is gated off in core-managed mode via
+    `Reconciler::set_provider_mutation_enabled(false)` so the Core runtime is the
+    only effector and NodeCache has exactly one writer; completing that
+    enforcement, EVERY legacy `agent_server` fragment-writing / provider-
+    effecting RPC fails closed (`unimplemented`) in core-managed — the four
+    `apply_*_desired_state` handlers, the stord plane (`resize/snapshot/
+    restore_volume`, `delete_volume_snapshot`, `clone_volume`), the live-VM CH
+    plane (`pause/resume_vm`, `power_button_vm`, `add_disk`, `remove_device`,
+    `add_net`, `resize_disk`, `snapshot_vm`, `restore_snapshot`, `coredump_vm`,
+    `migrate_vm`), and the nwd plane (`start/stop/restart_network`,
+    `update_overlay`, `send_gratuitous_arp`) — so no second writer or provider
+    side effect can run behind the Core authority. Deliberate boundaries: the
+    lifecycle handlers the control plane needs stay core-routed
+    (`create_vm`/`start_vm`/`stop_vm`/`reboot_vm`/`delete_vm`); `resize_vm` /
+    `attach_volume` / `detach_volume` were already gated; read-only/handshake
+    handlers remain; and operator node-state transitions
+    (`pause/resume_node_scheduling`, `drain_node`, `enter/exit_maintenance`)
+    remain available (node-level operational state, no provider side effect).
+    Net effect: features Core M1 does not model (snapshot/restore, migration,
+    live device hot-plug, storage snapshot/clone) are unavailable in
+    core-managed and fail loudly rather than acting behind the authority. The
+    startup rebuild
+    runs inside `start_core_managed` before the executor poller starts, so no
+    crash-recovery op can race the rebuild. CoreNative mode has no
+    NodeCache (documented, not wired); legacy mode is untouched.
+    Legacy reconcile `prepare_vm_resources`/`cleanup_vm_resources` remain
     in place for legacy mode until M2.3's gating deletes them (capability already
     folded into the Core runtime in M2.2a; the deliberate 2a scope boundary kept the
     cache-coupled legacy path untouched).
-- **M2.3 — Remove the second authority.** In core modes, gate off
-  `reconcile_vms/volumes/networks` provider mutation (Reconciler becomes
-  observe/health only or disabled); NodeCache rebuilt from Core at startup.
-  Legacy mode remains available for migration but is not the campaign target.
+- **M2.3 — Remove the second authority.** Delete the now-dead legacy provider-
+  mutation code paths (prepare/cleanup resources, reconcile_vms/volumes/networks
+  mutation) that M2.2b gated off in core modes; the Reconciler becomes
+  observe/health only for core-managed. Legacy mode remains available for
+  migration but is not the campaign target.
 - **M2.4 — Fault-injection + concurrency/replay matrix.** Deterministic fault
   points: (1) before durable acceptance; (2) after acceptance, before provider
   effect; (3) during/after provider effect; (4) before compatibility projection
@@ -131,7 +167,7 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
 | Criterion | Evidence |
 |---|---|
 | Exactly one durable authority accepts lifecycle mutations | M2.1/M2.3 code + tests |
-| Production legacy handlers route through Core before provider side effects | M2.1/M2.3 (adapter already routed; Reconciler gated) |
+| Production legacy handlers route through Core before provider side effects | M2.1/M2.3 (adapter routed in M2.2a; Reconciler gated in M2.2b) |
 | Compatibility state derived or crash-consistent | M2.2b (NodeCache projection, rebuild from Core) |
 | Required audit/idempotency/version metadata durable | M2.1b schema migration 0004 + tests (merged `297cb904`) |
 | Crash/fault-injection matrix passes | M2.4 |

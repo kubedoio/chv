@@ -767,6 +767,7 @@ dependencies = [
  "async-trait",
  "axum",
  "cellhv-core-api",
+ "cellhv-core-executor",
  "cellhv-core-fs",
  "cellhv-core-operations",
  "cellhv-core-startup",

@@ -13,6 +13,7 @@ chv-config = { path = "../chv-config" }
 chv-hypervisor-api = { path = "../chv-hypervisor-api" }
 cellhv-core-types = { path = "../cellhv-core-types" }
 cellhv-core-operations = { path = "../cellhv-core-operations" }
+cellhv-core-executor = { path = "../cellhv-core-executor" }
 cellhv-nodecache-migration = { path = "../cellhv-nodecache-migration" }
 cellhv-core-fs = { path = "../cellhv-core-fs" }
 cellhv-core-startup = { path = "../cellhv-core-startup" }
