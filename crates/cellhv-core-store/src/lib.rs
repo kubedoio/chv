@@ -3184,6 +3184,57 @@ mod tests {
     }
 
     #[test]
+    fn legacy_operation_metadata_and_generation_survive_reopen() {
+        let (directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let mut desired = vm("vm-1", 2);
+        desired.requested_power_state = RequestedPowerState::Running;
+        let request = serde_json::json!({"command":"legacy-start"});
+        let op = operation(
+            "legacy:test:op",
+            &canonical_request_fingerprint(&request).unwrap(),
+        );
+        let metadata = OperationRequestMetadata {
+            requested_by: "legacy-requester".to_owned(),
+            external_operation_id: "external-legacy".to_owned(),
+            request_unix_ms: 1_700_000_000_000,
+            legacy_generation: Some(7),
+        };
+        store
+            .accept_operation(&AcceptOperation {
+                operation: &op,
+                request: &request,
+                desired_vm: Some(&desired),
+                metadata: &metadata,
+                idempotency_scope: "legacy-roundtrip",
+                idempotency_key: &IdempotencyKey::new("legacy-key").unwrap(),
+                expected_vm_version: version(1),
+            })
+            .unwrap();
+        // Positive round-trip: the full metadata (including the legacy
+        // generation) must be readable before and after a store reopen. This is
+        // independent of the legacy-origin invariant's failure modes — it pins
+        // that the read path never drops or corrupts the journaled generation.
+        assert_eq!(
+            store.operation_entry(&op.id).unwrap().request_metadata,
+            Some(metadata.clone())
+        );
+        drop(store);
+        let reopened = CoreStore::open_existing(&path).unwrap();
+        let returned = reopened
+            .operation_entry(&op.id)
+            .unwrap()
+            .request_metadata
+            .unwrap();
+        assert_eq!(returned.requested_by, "legacy-requester");
+        assert_eq!(returned.external_operation_id, "external-legacy");
+        assert_eq!(returned.request_unix_ms, 1_700_000_000_000);
+        assert_eq!(returned.legacy_generation, Some(7));
+        drop(reopened);
+        drop(directory);
+    }
+
+    #[test]
     fn partial_request_metadata_columns_are_rejected_on_reopen() {
         let (directory, path, mut store) = new_store();
         store.create_vm(&vm("vm-1", 1)).unwrap();
