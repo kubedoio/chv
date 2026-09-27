@@ -45,12 +45,13 @@ const VM_RECONCILE_CONCURRENCY: usize = 8;
 
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
-    /// Hypervisor handle used for node-state/observation (`list`, `vm_counters`)
-    /// and by the legacy `reconcile_*` mutation methods. Private: exposed only
-    /// through the read-only `vm_runtime()` accessor, so an observe-only
-    /// (core-managed) Reconciler does not leak a mutation-capable handle on its
-    /// public surface (the mutation methods themselves additionally fail closed
-    /// at their first statement).
+    /// Hypervisor handle used for node-state/observation (`list`, `get`,
+    /// `vm_counters`) and by the legacy `reconcile_*` mutation methods. Private:
+    /// exposed only through the read-only `vm_runtime()` accessor (all
+    /// `VmRuntime` methods take `&self`). The single-authority guarantee never
+    /// rests on hiding this handle — it rests on the mutation `Option` being
+    /// `None` for observe-only construction, the first-statement fail-closed
+    /// gates, and the 28 fail-closed `agent_server` handlers.
     vm_runtime: VmRuntime,
     /// stord socket — used by the node-state health probes (all modes) and by
     /// the legacy `reconcile_*` mutation methods (legacy mode only). Private:
@@ -2852,7 +2853,7 @@ mod tests {
         rec.reconcile_vms().await.unwrap();
 
         assert_eq!(
-            rec.vm_runtime.get("vm-1").await.unwrap().runtime_status,
+            rec.vm_runtime().get("vm-1").await.unwrap().runtime_status,
             "Running"
         );
     }
@@ -3558,7 +3559,7 @@ mod tests {
 
         // No phantom record should have been created — record_failure on a
         // non-existent VM must only bump the counter map.
-        assert!(rec.vm_runtime.get("vm-junk").await.is_none());
+        assert!(rec.vm_runtime().get("vm-junk").await.is_none());
         let count = rec
             .vm_runtime
             .consecutive_failures_for_generation("vm-junk", "1")
