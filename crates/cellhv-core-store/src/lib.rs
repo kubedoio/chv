@@ -9,6 +9,7 @@ use cellhv_core_types::{
     HostId, HostIdentity, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
     OperationId, OperationKind, OperationRequestMetadata, OperationStatus, OperationStep,
     OwnershipMarker, RequestedPowerState, ResourceVersion, VmDefinition, VmId,
+    LEGACY_OPERATION_ID_PREFIX,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -678,6 +679,17 @@ impl CoreStore {
             .metadata
             .validate()
             .map_err(StoreError::InvalidDomain)?;
+        if request
+            .operation
+            .id
+            .as_str()
+            .starts_with(LEGACY_OPERATION_ID_PREFIX)
+            && request.metadata.legacy_generation.is_none()
+        {
+            return Err(StoreError::InvalidDomain(
+                "legacy-provenance operation requires a legacy generation".to_owned(),
+            ));
+        }
         let operation = request.operation;
         let computed_fingerprint = canonical_request_fingerprint(request.request)?;
         if operation.request_fingerprint != computed_fingerprint {
@@ -2286,9 +2298,13 @@ fn validate_journal_rows(conn: &Connection) -> Result<()> {
 /// Enforces the durable request-metadata invariants for one operation row.
 ///
 /// 1. `requested_by`/`external_operation_id`/`request_unix_ms` are all-or-nothing.
-/// 2. A `legacy:` operation must carry metadata and a legacy generation.
+/// 2. All-NULL rows are pre-0004 rows and always allowed regardless of id
+///    prefix; a stray `legacy_generation` with no other metadata is corruption.
 /// 3. Present metadata must pass `OperationRequestMetadata::validate()`.
-/// 4. A stored legacy generation must be at least one.
+/// 4. Legacy-origin enforcement applies only when metadata is present: a
+///    `legacy:` operation must carry a legacy generation, and the stored
+///    legacy generation must agree with the reconstructed entry.
+/// 5. A stored legacy generation must be at least one.
 fn enforce_request_metadata_invariants(
     entry: &OperationJournalEntry,
     stored: &StoredOperationColumns,
@@ -2313,30 +2329,51 @@ fn enforce_request_metadata_invariants(
             )));
         }
     }
-    if core_all_present {
-        let metadata = entry.request_metadata.as_ref().ok_or_else(|| {
-            StoreError::Integrity(format!(
+    if !core_all_present {
+        // All-NULL rows are pre-0004 rows (the only state they can have). They
+        // carry no metadata and are always legitimate; a legacy generation
+        // without any other metadata column is stray corruption.
+        if entry.request_metadata.is_some() {
+            return Err(StoreError::Integrity(format!(
                 "operation {} request metadata columns disagree with reconstructed entry",
                 entry.operation.id
-            ))
-        })?;
-        metadata.validate().map_err(|error| {
-            StoreError::Integrity(format!(
-                "operation {} has invalid request metadata: {error}",
+            )));
+        }
+        if stored.legacy_generation.is_some() {
+            return Err(StoreError::Integrity(format!(
+                "operation {} has a stray legacy generation without request metadata",
                 entry.operation.id
-            ))
-        })?;
-    } else if entry.request_metadata.is_some() {
-        return Err(StoreError::Integrity(format!(
+            )));
+        }
+        return Ok(());
+    }
+    let metadata = entry.request_metadata.as_ref().ok_or_else(|| {
+        StoreError::Integrity(format!(
             "operation {} request metadata columns disagree with reconstructed entry",
+            entry.operation.id
+        ))
+    })?;
+    metadata.validate().map_err(|error| {
+        StoreError::Integrity(format!(
+            "operation {} has invalid request metadata: {error}",
+            entry.operation.id
+        ))
+    })?;
+    if entry
+        .operation
+        .id
+        .as_str()
+        .starts_with(LEGACY_OPERATION_ID_PREFIX)
+        && metadata.legacy_generation.is_none()
+    {
+        return Err(StoreError::Integrity(format!(
+            "operation {} is legacy-provenance but lacks a legacy generation",
             entry.operation.id
         )));
     }
-    if entry.operation.id.as_str().starts_with("legacy:")
-        && (entry.request_metadata.is_none() || stored.legacy_generation.is_none())
-    {
+    if stored.legacy_generation.is_some() != metadata.legacy_generation.is_some() {
         return Err(StoreError::Integrity(format!(
-            "operation {} is legacy-provenance but lacks request metadata or a legacy generation",
+            "operation {} legacy generation columns disagree with reconstructed entry",
             entry.operation.id
         )));
     }
@@ -3049,6 +3086,56 @@ mod tests {
     }
 
     #[test]
+    fn v1_store_with_legacy_and_native_rows_upgrades_and_preserves_pre_0004_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        create_v1_store(&path);
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let definition = vm("vm-1", 1);
+        conn.execute(
+            "INSERT INTO vms (vm_id,definition_json,requested_power_state,observed_power_state,resource_version) VALUES (?1,?2,'stopped','unknown',1)",
+            params![definition.id.as_str(), serde_json::to_string(&definition).unwrap()],
+        )
+        .unwrap();
+        insert_attachments(&conn, &definition).unwrap();
+        // A genuine 0003-era store: one legacy-provenance row written by the
+        // M2.1a core-managed authority and one plain row, both with NULL
+        // metadata columns (the only state a pre-0004 row can have).
+        let mixed = [
+            "legacy:control-plane-node.v1:node:6:node-a:vm:4:vm-a:operation:5:op-42",
+            "non-legacy-v1",
+        ];
+        for id in mixed {
+            let request = serde_json::json!({"legacy": id});
+            conn.execute(
+                "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES (?1,'start_vm','vm-1',?2,?3,'accepted',0,3)",
+                params![id, canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        let store = CoreStore::open_existing(&path).unwrap();
+        let user_version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 4);
+        for id in mixed {
+            let entry = store
+                .operation_entry(&OperationId::new(id).unwrap())
+                .unwrap();
+            assert_eq!(entry.operation.id.as_str(), id);
+            assert_eq!(entry.request_metadata, None);
+        }
+        drop(store);
+        drop(directory);
+    }
+
+    #[test]
     fn accepted_request_metadata_is_persisted_and_survives_reopen() {
         let (directory, path, mut store) = new_store();
         store.create_vm(&vm("vm-1", 1)).unwrap();
@@ -3135,8 +3222,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_provenance_operations_require_metadata_and_generation_on_reopen() {
-        // Variant A: legacy id with entirely absent metadata (0003-era style).
+    fn legacy_provenance_operations_require_generation_when_metadata_is_present() {
+        // Variant A: all-NULL `legacy:` row (a genuine pre-0004 row) opens
+        // normally and reads back with `request_metadata: None`.
         {
             let (directory, path, mut store) = new_store();
             store.create_vm(&vm("vm-1", 1)).unwrap();
@@ -3150,41 +3238,28 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1);
             drop(store);
-            assert!(matches!(
-                CoreStore::open_existing(&path),
-                Err(StoreError::Integrity(_))
-            ));
+            let reopened = CoreStore::open_existing(&path).unwrap();
+            let entry = reopened
+                .operation_entry(&OperationId::new("legacy:no-metadata").unwrap())
+                .unwrap();
+            assert_eq!(entry.request_metadata, None);
             drop(directory);
         }
-        // Variant B: legacy id with metadata but a NULL legacy generation.
+        // Variant B: `legacy:` id with the three metadata columns but a NULL
+        // legacy generation (and no other column changes) fails reopen. The
+        // write path now rejects this up front, so seed the row directly.
         {
             let (directory, path, mut store) = new_store();
             store.create_vm(&vm("vm-1", 1)).unwrap();
-            let mut desired = vm("vm-1", 2);
-            desired.requested_power_state = RequestedPowerState::Running;
             let request = serde_json::json!({"command":"start"});
-            let op = operation(
-                "legacy:missing-generation",
-                &canonical_request_fingerprint(&request).unwrap(),
-            );
-            store
-                .accept_operation(&AcceptOperation {
-                    operation: &op,
-                    request: &request,
-                    desired_vm: Some(&desired),
-                    metadata: &test_metadata(),
-                    idempotency_scope: "legacy-gen",
-                    idempotency_key: &IdempotencyKey::new("legacy-gen").unwrap(),
-                    expected_vm_version: version(1),
-                })
-                .unwrap();
-            store
+            let count = store
                 .conn
                 .execute(
-                    "UPDATE operations SET legacy_generation=NULL WHERE operation_id=?1",
-                    [op.id.as_str()],
+                    "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,requested_by,external_operation_id,request_unix_ms,legacy_generation) VALUES ('legacy:missing-generation','start_vm','vm-1',?1,?2,'accepted',0,3,'legacy-requester','external-legacy',1700000000000,NULL)",
+                    params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
                 )
                 .unwrap();
+            assert_eq!(count, 1);
             drop(store);
             assert!(matches!(
                 CoreStore::open_existing(&path),
@@ -3192,6 +3267,29 @@ mod tests {
             ));
             drop(directory);
         }
+    }
+
+    #[test]
+    fn stray_legacy_generation_without_metadata_columns_is_rejected_on_reopen() {
+        let (directory, path, mut store) = new_store();
+        store.create_vm(&vm("vm-1", 1)).unwrap();
+        let request = serde_json::json!({"command":"start"});
+        // A `legacy_generation` with none of the three core metadata columns is
+        // an orphan; no pre-0004 writer could have produced it, so reopen fails.
+        let count = store
+            .conn
+            .execute(
+                "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries,legacy_generation) VALUES ('orphan-generation','start_vm','vm-1',?1,?2,'accepted',0,3,1)",
+                params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(store);
+        assert!(matches!(
+            CoreStore::open_existing(&path),
+            Err(StoreError::Integrity(_))
+        ));
+        drop(directory);
     }
 
     #[test]
