@@ -566,14 +566,33 @@ pub struct OperationRequestMetadata {
     pub legacy_generation: Option<u64>,
 }
 
+/// Maximum supported `OperationRequestMetadata::request_unix_ms`.
+///
+/// Equal to 9999-12-31T23:59:59.999Z, the largest `SystemTime` representable
+/// in milliseconds on most runtimes, so any in-range value maps to a valid
+/// timestamp rather than an overflow-resolved instant.
+pub const MAX_REQUEST_UNIX_MS: i64 = 253_402_300_799_999;
+
 impl OperationRequestMetadata {
     pub fn validate(&self) -> Result<(), String> {
         if self.requested_by.trim().is_empty() {
             return Err("operation.request_metadata.requested_by must not be empty".to_owned());
         }
+        if self.requested_by.chars().count() > 1024 {
+            return Err(
+                "operation.request_metadata.requested_by must be at most 1024 characters"
+                    .to_owned(),
+            );
+        }
         if self.external_operation_id.trim().is_empty() {
             return Err(
                 "operation.request_metadata.external_operation_id must not be empty".to_owned(),
+            );
+        }
+        if self.external_operation_id.chars().count() > 1024 {
+            return Err(
+                "operation.request_metadata.external_operation_id must be at most 1024 characters"
+                    .to_owned(),
             );
         }
         if self.request_unix_ms <= 0 {
@@ -581,10 +600,22 @@ impl OperationRequestMetadata {
                 "operation.request_metadata.request_unix_ms must be greater than zero".to_owned(),
             );
         }
+        if self.request_unix_ms > MAX_REQUEST_UNIX_MS {
+            return Err(
+                "operation.request_metadata.request_unix_ms exceeds the maximum supported timestamp"
+                    .to_owned(),
+            );
+        }
         if let Some(generation) = self.legacy_generation {
             if generation < 1 {
                 return Err(
                     "operation.request_metadata.legacy_generation must be at least 1".to_owned(),
+                );
+            }
+            if generation > i64::MAX as u64 {
+                return Err(
+                    "operation.request_metadata.legacy_generation exceeds SQLite storage range"
+                        .to_owned(),
                 );
             }
         }
@@ -901,18 +932,43 @@ mod tests {
             ..valid.clone()
         };
         assert_eq!(legacy.validate(), Ok(()));
+        // Values exactly at each input cap are still accepted.
+        assert_eq!(
+            OperationRequestMetadata {
+                request_unix_ms: MAX_REQUEST_UNIX_MS,
+                ..valid.clone()
+            }
+            .validate(),
+            Ok(())
+        );
+        assert_eq!(
+            OperationRequestMetadata {
+                legacy_generation: Some(i64::MAX as u64),
+                ..valid.clone()
+            }
+            .validate(),
+            Ok(())
+        );
         for label in [
             "whitespace requester",
+            "over-long requester",
             "empty external id",
+            "over-long external id",
             "zero timestamp",
+            "over-max timestamp",
             "zero generation",
+            "over-range generation",
         ] {
             let mut candidate = valid.clone();
             match label {
                 "whitespace requester" => candidate.requested_by = "   ".to_owned(),
+                "over-long requester" => candidate.requested_by = "x".repeat(1025),
                 "empty external id" => candidate.external_operation_id = String::new(),
+                "over-long external id" => candidate.external_operation_id = "x".repeat(1025),
                 "zero timestamp" => candidate.request_unix_ms = 0,
+                "over-max timestamp" => candidate.request_unix_ms = MAX_REQUEST_UNIX_MS + 1,
                 "zero generation" => candidate.legacy_generation = Some(0),
+                "over-range generation" => candidate.legacy_generation = Some(i64::MAX as u64 + 1),
                 _ => unreachable!(),
             }
             assert!(candidate.validate().is_err(), "accepted invalid {label}");
