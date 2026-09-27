@@ -564,6 +564,32 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
     }
 }
 
+/// Maps a core-operation submit error into a gRPC [`Status`] for the legacy
+/// lifecycle handlers.
+///
+/// Every legacy lifecycle handler (create_vm, start_vm, stop_vm, reboot_vm,
+/// delete_vm) submits through [`cellhv_core_operations::AuthorityHandle`].
+/// M2.1b metadata validation (empty `requested_by`, `request_unix_ms <= 0`)
+/// surfaces as [`cellhv_core_operations::ErrorClass::Invalid`] here, so this
+/// helper guarantees such validation errors are reported to legacy clients as
+/// `invalid_argument` instead of a 500 for *every* lifecycle handler — not
+/// just the ones that happen to carry the `Invalid` arm inline.
+fn map_submit_error(e: cellhv_core_operations::AuthorityActorError) -> Status {
+    match e {
+        cellhv_core_operations::AuthorityActorError::Service(err) => match err.class() {
+            cellhv_core_operations::ErrorClass::Invalid => {
+                Status::invalid_argument(err.to_string())
+            }
+            cellhv_core_operations::ErrorClass::Conflict => Status::already_exists(err.to_string()),
+            cellhv_core_operations::ErrorClass::Precondition => {
+                Status::failed_precondition(err.to_string())
+            }
+            _ => Status::internal(err.to_string()),
+        },
+        _ => Status::internal(e.to_string()),
+    }
+}
+
 #[tonic::async_trait]
 impl proto::lifecycle_service_server::LifecycleService for AgentServer {
     async fn create_vm(
@@ -605,23 +631,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(|e| match e {
-                    cellhv_core_operations::AuthorityActorError::Service(err) => {
-                        match err.class() {
-                            cellhv_core_operations::ErrorClass::Invalid => {
-                                Status::invalid_argument(err.to_string())
-                            }
-                            cellhv_core_operations::ErrorClass::Conflict => {
-                                Status::already_exists(err.to_string())
-                            }
-                            cellhv_core_operations::ErrorClass::Precondition => {
-                                Status::failed_precondition(err.to_string())
-                            }
-                            _ => Status::internal(err.to_string()),
-                        }
-                    }
-                    _ => Status::internal(e.to_string()),
-                })?;
+                .map_err(map_submit_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -833,20 +843,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(|e| match e {
-                    cellhv_core_operations::AuthorityActorError::Service(err) => {
-                        match err.class() {
-                            cellhv_core_operations::ErrorClass::Conflict => {
-                                Status::already_exists(err.to_string())
-                            }
-                            cellhv_core_operations::ErrorClass::Precondition => {
-                                Status::failed_precondition(err.to_string())
-                            }
-                            _ => Status::internal(err.to_string()),
-                        }
-                    }
-                    _ => Status::internal(e.to_string()),
-                })?;
+                .map_err(map_submit_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -932,20 +929,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(|e| match e {
-                    cellhv_core_operations::AuthorityActorError::Service(err) => {
-                        match err.class() {
-                            cellhv_core_operations::ErrorClass::Conflict => {
-                                Status::already_exists(err.to_string())
-                            }
-                            cellhv_core_operations::ErrorClass::Precondition => {
-                                Status::failed_precondition(err.to_string())
-                            }
-                            _ => Status::internal(err.to_string()),
-                        }
-                    }
-                    _ => Status::internal(e.to_string()),
-                })?;
+                .map_err(map_submit_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -1021,20 +1005,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(|e| match e {
-                    cellhv_core_operations::AuthorityActorError::Service(err) => {
-                        match err.class() {
-                            cellhv_core_operations::ErrorClass::Conflict => {
-                                Status::already_exists(err.to_string())
-                            }
-                            cellhv_core_operations::ErrorClass::Precondition => {
-                                Status::failed_precondition(err.to_string())
-                            }
-                            _ => Status::internal(err.to_string()),
-                        }
-                    }
-                    _ => Status::internal(e.to_string()),
-                })?;
+                .map_err(map_submit_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
@@ -1106,20 +1077,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
             let accepted = authority
                 .submit(intent.submission)
                 .await
-                .map_err(|e| match e {
-                    cellhv_core_operations::AuthorityActorError::Service(err) => {
-                        match err.class() {
-                            cellhv_core_operations::ErrorClass::Conflict => {
-                                Status::already_exists(err.to_string())
-                            }
-                            cellhv_core_operations::ErrorClass::Precondition => {
-                                Status::failed_precondition(err.to_string())
-                            }
-                            _ => Status::internal(err.to_string()),
-                        }
-                    }
-                    _ => Status::internal(e.to_string()),
-                })?;
+                .map_err(map_submit_error)?;
             return Ok(Response::new(proto::AckResponse {
                 result: Some(proto::ResultMeta {
                     operation_id: meta.operation_id.clone(),
