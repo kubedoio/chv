@@ -142,11 +142,16 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
     in place for legacy mode until M2.3's gating deletes them (capability already
     folded into the Core runtime in M2.2a; the deliberate 2a scope boundary kept the
     cache-coupled legacy path untouched).
+    > **Status: COMPLETE.** Merged `befa5129` (PR #260, evidence
+    > `m2.2b-nodecache-projection.md`). M2.2 is now **COMPLETE**; M2.3
+    > (delete the now-gated legacy mutation paths) is next.
 - **M2.3 — Remove the second authority.** Delete the now-dead legacy provider-
   mutation code paths (prepare/cleanup resources, reconcile_vms/volumes/networks
   mutation) that M2.2b gated off in core modes; the Reconciler becomes
   observe/health only for core-managed. Legacy mode remains available for
   migration but is not the campaign target.
+  > **Status: NEXT (active).** All deferred deletions are now gated off
+  > (M2.2b) and are safe to remove; legacy-mode behavior must be preserved.
 - **M2.4 — Fault-injection + concurrency/replay matrix.** Deterministic fault
   points: (1) before durable acceptance; (2) after acceptance, before provider
   effect; (3) during/after provider effect; (4) before compatibility projection
