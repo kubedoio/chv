@@ -292,6 +292,70 @@ async fn native_create_journals_durable_request_metadata() {
 }
 
 #[tokio::test]
+async fn native_update_and_delete_journal_durable_request_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, owner) = app(&dir);
+    let create = Request::post("/v1/vms")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "meta-create")
+        .body(Body::from(
+            serde_json::to_vec(&vm_request("meta-create", 1)).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(create).await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    let update = Request::patch("/v1/vms/vm-1")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "meta-update")
+        .header("if-match", "\"1\"")
+        .body(Body::from(
+            serde_json::to_vec(&vm_request("meta-update", 2)).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(update).await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    let delete = Request::delete("/v1/vms/vm-1")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "meta-delete")
+        .header("if-match", "\"2\"")
+        .body(Body::from(r#"{"request_id":"meta-delete"}"#.to_owned()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(delete).await.unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    for request_id in ["meta-create", "meta-update", "meta-delete"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/operations/native:v1:{request_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_json(response).await;
+        assert_eq!(body["request_metadata"]["requested_by"], "core-native-v1");
+        assert_eq!(
+            body["request_metadata"]["external_operation_id"],
+            request_id
+        );
+        assert!(body["request_metadata"]["legacy_generation"].is_null());
+        assert!(
+            body["request_metadata"]["request_unix_ms"]
+                .as_i64()
+                .is_some_and(|millis| millis > 0),
+            "request_unix_ms must be positive"
+        );
+    }
+    join_app(app, owner).await;
+}
+
+#[tokio::test]
 async fn malformed_inputs_and_internal_failures_are_structured_and_redacted() {
     let dir = tempfile::tempdir().unwrap();
     let (app, owner) = app(&dir);
