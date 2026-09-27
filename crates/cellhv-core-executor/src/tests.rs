@@ -714,3 +714,69 @@ async fn shutdown_bounded_cancels_wedged_work_and_returns_drain_timeout() {
     );
     stop(f).await;
 }
+
+#[tokio::test]
+async fn scheduled_bookkeeping_is_bounded_after_completion() {
+    let f = fixture();
+    // Distinct vms: repeated CreateVm mutations for one vm id conflict.
+    for (vm, op) in [("vm-a", "op-a"), ("vm-b", "op-b"), ("vm-c", "op-c")] {
+        f.authority.submit(submit(vm, op)).await.unwrap();
+    }
+    let runtime = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 1, 16).unwrap();
+    executor.scan_ready().await.unwrap();
+    {
+        let scheduled = executor.scheduled.lock().unwrap();
+        assert_eq!(
+            scheduled.len(),
+            3,
+            "all submitted Ready ops are admitted after the first scan"
+        );
+    }
+    // Drive the scheduler to terminal state for every op.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut done = true;
+        for op in ["op-a", "op-b", "op-c"] {
+            let status = f
+                .authority
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .unwrap()
+                .operation
+                .status;
+            if status != cellhv_core_types::OperationStatus::Succeeded {
+                done = false;
+            }
+        }
+        if done {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "accepted operations never reached Succeeded"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // The unbounded-growth regression guard: after the ops are terminal, a
+    // further scan must prune their ids out of `scheduled` (only still-Ready
+    // ops may be retained), so the always-on poller never accumulates every
+    // operation it has ever admitted.
+    executor.scan_ready().await.unwrap();
+    {
+        let scheduled = executor.scheduled.lock().unwrap();
+        assert_eq!(
+            scheduled.len(),
+            0,
+            "completed operations must be pruned from the scheduled set"
+        );
+    }
+    executor
+        .shutdown_bounded(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    stop(f).await;
+}

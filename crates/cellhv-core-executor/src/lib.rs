@@ -177,15 +177,32 @@ impl JournalExecutor {
         let _scan = self.scan_lock.lock().await;
         let mut report = RestartScheduleReport::default();
         let restart_snapshot = self.execution.restart_operations().await?;
+        // Bounded bookkeeping: `scheduled` must only ever hold operations the
+        // scheduler is still driving. Every scan prunes it to the set the
+        // authority reports as Ready — exactly the operations that could be
+        // (re)admitted. Operations that are Running/InspectRequired are already
+        // claimed by the scheduler (execute_one only ever reaches a terminal or
+        // quarantined state; it never reverts a claimed op to Ready — see
+        // execute_one/merge_outcome), so dropping them from `scheduled` cannot
+        // cause a duplicate admission. Without this prune, the always-on
+        // production poller would grow `scheduled` unboundedly over the
+        // lifetime of the node.
+        let mut ready_ids: HashSet<OperationId> = HashSet::new();
         for restart in &restart_snapshot {
-            if restart.disposition == RestartDisposition::InspectRequired {
-                self.quarantined_vms
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(restart.entry.operation.vm_id.clone());
-                report
-                    .inspect_required
-                    .push(restart.entry.operation.id.clone());
+            match restart.disposition {
+                RestartDisposition::Ready => {
+                    ready_ids.insert(restart.entry.operation.id.clone());
+                }
+                RestartDisposition::InspectRequired => {
+                    self.quarantined_vms
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(restart.entry.operation.vm_id.clone());
+                    report
+                        .inspect_required
+                        .push(restart.entry.operation.id.clone());
+                }
+                RestartDisposition::Terminal => {}
             }
         }
         for restart in restart_snapshot {
@@ -226,6 +243,10 @@ impl JournalExecutor {
                 RestartDisposition::Terminal => {}
             }
         }
+        self.scheduled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id| ready_ids.contains(id));
         Ok(report)
     }
 
