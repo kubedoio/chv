@@ -43,6 +43,26 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), ChvError> {
     Ok(())
 }
 
+/// Rejects resource ids that could escape the runtime's path derivations.
+///
+/// Path-safe ids keep the runtime's `{runtime_dir}/vms/<id>` and
+/// `{vm_dir}/<id>.img` derives inside the intended tree.
+fn require_safe_id(value: &str, field: &str) -> Result<(), ChvError> {
+    require_non_empty(field, value)?;
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains('\0')
+        || value == "."
+        || value == ".."
+    {
+        return Err(ChvError::InvalidArgument {
+            field: field.to_string(),
+            reason: "must not contain path separators or dot components".to_string(),
+        });
+    }
+    Ok(())
+}
+
 macro_rules! identifier {
     ($name:ident, $field:literal) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -339,8 +359,8 @@ pub struct StorageAttachmentRef {
 
 impl StorageAttachmentRef {
     pub fn validate(&self) -> Result<(), ChvError> {
-        require_non_empty("storage.attachment_id", &self.attachment_id)?;
-        require_non_empty("storage.storage_ref", &self.storage_ref)
+        require_safe_id(&self.attachment_id, "storage.attachment_id")?;
+        require_safe_id(&self.storage_ref, "storage.storage_ref")
     }
 }
 
@@ -376,8 +396,8 @@ pub struct NetworkAttachmentRef {
 
 impl NetworkAttachmentRef {
     pub fn validate(&self) -> Result<(), ChvError> {
-        require_non_empty("network.attachment_id", &self.attachment_id)?;
-        require_non_empty("network.network_ref", &self.network_ref)?;
+        require_safe_id(&self.attachment_id, "network.attachment_id")?;
+        require_safe_id(&self.network_ref, "network.network_ref")?;
         if let Some(mac_address) = &self.mac_address {
             require_non_empty("network.mac_address", mac_address)?;
         }
@@ -457,6 +477,7 @@ impl TryFrom<RawVmDefinition> for VmDefinition {
 
 impl VmDefinition {
     pub fn validate(&self) -> Result<(), ChvError> {
+        require_safe_id(self.id.as_str(), "vm.id")?;
         require_non_empty("vm.name", &self.name)?;
         self.boot.validate()?;
         self.compute.validate()?;
@@ -898,6 +919,86 @@ mod tests {
             serde_json::from_value::<VmDefinition>(serde_json::to_value(definition).unwrap())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn vm_definition_rejects_path_unsafe_id() {
+        for unsafe_id in ["a/b", "a\\b", "a\0b", ".", ".."] {
+            let mut definition = serde_json::from_value::<VmDefinition>(serde_json::json!({
+                "id":"vm-1", "name":"test",
+                "boot":{"kernel":"kernel","firmware":null,"initial_disk":null},
+                "compute":{"vcpus":1,"memory_bytes":1},
+                "storage":[], "networks":[], "requested_power_state":"stopped",
+                "observed_power_state":"unknown", "resource_version":1
+            }))
+            .unwrap();
+            definition.id = VmId::new(unsafe_id).unwrap();
+            assert!(
+                definition.validate().is_err(),
+                "accepted path-unsafe vm id {unsafe_id:?}"
+            );
+            let encoded = serde_json::to_value(&definition).unwrap();
+            assert!(
+                serde_json::from_value::<VmDefinition>(encoded).is_err(),
+                "deserialization accepted path-unsafe vm id {unsafe_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn storage_attachment_ref_rejects_path_unsafe() {
+        for (pointer, invalid) in [
+            ("/storage/0/attachment_id", serde_json::json!("a/../../b")),
+            ("/storage/0/storage_ref", serde_json::json!("a/../b")),
+            ("/storage/0/storage_ref", serde_json::json!("a\\b")),
+            ("/storage/0/storage_ref", serde_json::json!("\0bad")),
+            ("/storage/0/storage_ref", serde_json::json!(".")),
+            ("/storage/0/storage_ref", serde_json::json!("..")),
+        ] {
+            let base = serde_json::json!({
+                "id": "vm-1", "name": "test",
+                "boot": {"kernel": "kernel-ref", "firmware": null, "initial_disk": null},
+                "compute": {"vcpus": 2, "memory_bytes": 1024},
+                "storage": [{"attachment_id": "disk-0", "storage_ref": "volume-1", "read_only": false}],
+                "networks": [], "requested_power_state": "stopped",
+                "observed_power_state": "unknown", "resource_version": 1
+            });
+            let mut candidate = base.clone();
+            *candidate.pointer_mut(pointer).unwrap() = invalid.clone();
+            let parsed = serde_json::from_value::<VmDefinition>(candidate);
+            assert!(
+                parsed.is_err() || parsed.unwrap().validate().is_err(),
+                "accepted path-unsafe storage value at {pointer}: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn network_attachment_ref_rejects_path_unsafe() {
+        for (pointer, invalid) in [
+            ("/networks/0/attachment_id", serde_json::json!("nic/../x")),
+            ("/networks/0/network_ref", serde_json::json!("../evil")),
+            ("/networks/0/network_ref", serde_json::json!("a\\b")),
+            ("/networks/0/network_ref", serde_json::json!("\0bad")),
+            ("/networks/0/network_ref", serde_json::json!(".")),
+            ("/networks/0/network_ref", serde_json::json!("..")),
+        ] {
+            let base = serde_json::json!({
+                "id": "vm-1", "name": "test",
+                "boot": {"kernel": "kernel-ref", "firmware": null, "initial_disk": null},
+                "compute": {"vcpus": 2, "memory_bytes": 1024},
+                "storage": [], "requested_power_state": "stopped",
+                "observed_power_state": "unknown", "resource_version": 1,
+                "networks": [{"attachment_id": "nic-0", "network_ref": "network-1", "mac_address": null}]
+            });
+            let mut candidate = base.clone();
+            *candidate.pointer_mut(pointer).unwrap() = invalid.clone();
+            let parsed = serde_json::from_value::<VmDefinition>(candidate);
+            assert!(
+                parsed.is_err() || parsed.unwrap().validate().is_err(),
+                "accepted path-unsafe network value at {pointer}: {invalid}"
+            );
+        }
     }
 
     #[test]
