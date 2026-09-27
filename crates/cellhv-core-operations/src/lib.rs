@@ -16,8 +16,8 @@ pub use cellhv_core_store::{
 };
 use cellhv_core_types::{
     canonical_request_fingerprint, IdempotencyKey, ObservedPowerState, Operation, OperationEvent,
-    OperationId, OperationKind, OperationStatus, RequestedPowerState, ResourceVersion,
-    VmDefinition, VmId,
+    OperationId, OperationKind, OperationRequestMetadata, OperationStatus, RequestedPowerState,
+    ResourceVersion, VmDefinition, VmId,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -126,6 +126,7 @@ pub struct SubmitMutation {
     pub idempotency_scope: String,
     pub idempotency_key: IdempotencyKey,
     pub expected_vm_version: ResourceVersion,
+    pub metadata: OperationRequestMetadata,
     pub command: MutationCommand,
 }
 
@@ -270,6 +271,10 @@ impl OperationService {
                 "idempotency scope must not be empty".to_owned(),
             ));
         }
+        submission
+            .metadata
+            .validate()
+            .map_err(OperationServiceError::Invalid)?;
         let request = canonical_request(&submission.command, submission.expected_vm_version);
         let fingerprint = canonical_request_fingerprint(&request)?;
         if let Some(replay) = self.store.resolve_idempotency(
@@ -294,6 +299,7 @@ impl OperationService {
             operation: &operation,
             request: &request,
             desired_vm: desired.as_ref(),
+            metadata: &submission.metadata,
             idempotency_scope: &submission.idempotency_scope,
             idempotency_key: &submission.idempotency_key,
             expected_vm_version: submission.expected_vm_version,
@@ -646,6 +652,12 @@ mod tests {
             idempotency_scope: "local-api".to_owned(),
             idempotency_key: IdempotencyKey::new(key).unwrap(),
             expected_vm_version: version(expected),
+            metadata: OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            },
             command,
         }
     }
@@ -674,12 +686,18 @@ mod tests {
         drop(service);
         let reopened = CoreStore::open_existing(&path).unwrap();
         assert_eq!(reopened.get_vm(&VmId::new("a").unwrap()).unwrap(), vm("a"));
+        let entry = reopened
+            .operation_entry(&OperationId::new("op-1").unwrap())
+            .unwrap();
+        assert_eq!(entry.operation.status, OperationStatus::Accepted);
         assert_eq!(
-            reopened
-                .operation(&OperationId::new("op-1").unwrap())
-                .unwrap()
-                .status,
-            OperationStatus::Accepted
+            entry.request_metadata,
+            Some(OperationRequestMetadata {
+                requested_by: "test-requester".to_owned(),
+                external_operation_id: "external-test".to_owned(),
+                request_unix_ms: 1_700_000_000_000,
+                legacy_generation: None,
+            })
         );
     }
 
