@@ -48,6 +48,12 @@ pub struct Reconciler {
     /// a VM handed off to chv-stord leaves vm_runtime.list() but the transfer
     /// is ongoing.
     migration_registry: Arc<MigrationTaskRegistry>,
+    /// When false, the legacy reconcile path performs no provider mutation
+    /// (M2.2b): in core modes the Core runtime is the only effector, so
+    /// `reconcile_networks/volumes/vms` must not open volumes, attach NICs, or
+    /// create/start/stop/delete VMs as a second authority. NodeCache is rebuilt
+    /// from the Core store at startup and projected only after Core execution.
+    provider_mutation: bool,
 }
 
 /// Backoff predicate: should we skip this VM on this tick?
@@ -95,7 +101,17 @@ impl Reconciler {
             degraded_ticks: 0,
             drain_requested_vms: HashSet::new(),
             migration_registry,
+            provider_mutation: true,
         }
+    }
+
+    /// Disable/enable the legacy reconcile path's provider mutation. In core
+    /// modes the Core runtime is the only effector; `reconcile_networks/volumes/
+    /// vms` must not mutate providers as a second authority (NodeCache is
+    /// rebuilt from the Core store at startup and projected after Core
+    /// execution instead). Defaults to enabled (legacy/observe modes unchanged).
+    pub fn set_provider_mutation_enabled(&mut self, enabled: bool) {
+        self.provider_mutation = enabled;
     }
 
     pub async fn current_state(&self) -> NodeState {
@@ -196,9 +212,19 @@ impl Reconciler {
                 }
             }
             NodeState::TenantReady => {
-                let net_ok = self.reconcile_networks().await.is_ok();
-                let vol_ok = self.reconcile_volumes().await.is_ok();
-                let vm_ok = self.reconcile_vms().await.is_ok();
+                let (net_ok, vol_ok, vm_ok) = if self.provider_mutation {
+                    (
+                        self.reconcile_networks().await.is_ok(),
+                        self.reconcile_volumes().await.is_ok(),
+                        self.reconcile_vms().await.is_ok(),
+                    )
+                } else {
+                    // M2.2b: in core modes the Core runtime is the only
+                    // effector. Provider mutation is gated off, so the legacy
+                    // reconcile path converges nothing (NodeCache is rebuilt
+                    // from the Core store and projected after Core execution).
+                    (true, true, true)
+                };
                 if net_ok && vol_ok && vm_ok {
                     self.degraded_ticks = 0;
                 } else {
@@ -1838,6 +1864,32 @@ mod tests {
         )
         .await;
         assert!(rec.run_once().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn tenant_ready_with_provider_mutation_disabled_skips_provider_reconcile() {
+        // test_cache() carries a VM fragment while both daemons are pointed at
+        // unreachable sockets. With provider mutation ENABLED, reconcile_vms
+        // would fail and the tick would go Degraded; with the M2.2b gate OFF,
+        // the legacy path must converge nothing and stay TenantReady.
+        let dir = tempfile::tempdir().unwrap();
+        let mut rec = Reconciler::new(
+            Arc::new(tokio::sync::Mutex::new(test_cache())),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            dir.path().to_path_buf(),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        rec.set_provider_mutation_enabled(false);
+        assert!(rec.run_once().await.is_ok());
+        assert_eq!(rec.current_state().await, NodeState::TenantReady);
+        // A second tick stays healthy as well (no degraded accumulation).
+        assert!(rec.run_once().await.is_ok());
+        assert_eq!(rec.current_state().await, NodeState::TenantReady);
     }
 
     #[tokio::test]
