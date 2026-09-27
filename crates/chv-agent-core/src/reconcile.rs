@@ -112,7 +112,12 @@ fn log_backoff_skip(vm_id: &str, failures: u32) {
 }
 
 impl Reconciler {
-    pub async fn new(
+    /// Construct a legacy-mode Reconciler with the FULL legacy provider-mutation
+    /// surface. This is the ONLY mutation-capable public constructor, and it is
+    /// named `new_legacy` deliberately: composing a mutation-capable Reconciler
+    /// requires an explicit opt-in. Core-managed must use
+    /// `Reconciler::new_observe_only` instead.
+    pub async fn new_legacy(
         cache: Arc<tokio::sync::Mutex<NodeCache>>,
         vm_runtime: VmRuntime,
         stord_socket: PathBuf,
@@ -138,7 +143,8 @@ impl Reconciler {
     /// sockets it needs for node-state **health observation**; it holds no
     /// mutation-specific state and its `reconcile_networks/volumes/vms` methods
     /// fail closed at their first statement. There is no setter to re-enable
-    /// them. Use `Reconciler::new` for legacy mode.
+    /// them, and the only mutation-capable constructor is the explicit
+    /// `Reconciler::new_legacy` (legacy mode only).
     pub async fn new_observe_only(
         cache: Arc<tokio::sync::Mutex<NodeCache>>,
         vm_runtime: VmRuntime,
@@ -1918,7 +1924,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = test_cache();
         cache.node_state = "Bootstrapping".to_string();
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(std::sync::Arc::new(
                 chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
@@ -1972,8 +1978,17 @@ mod tests {
     async fn observe_only_reconciler_rejects_direct_provider_mutation_calls() {
         // M2.3 defense in depth: even a direct call to a legacy mutation method
         // on an observe-only (core-managed) Reconciler must fail closed at its
-        // first statement — it must never open a stord/nwd connection (the
-        // sockets are unreachable) nor touch the cache VM axis.
+        // FIRST STATEMENT — before it can open any stord/nwd connection or
+        // touch the cache VM axis. We assert the exact fail-closed error for
+        // every method so the test proves the gate itself, not merely that a
+        // dead socket produced an error.
+        let gate_got: fn(chv_errors::ChvError) -> () = |err| {
+            assert!(
+                matches!(err, chv_errors::ChvError::Internal { ref reason, .. }
+                    if reason.contains("observe-only Reconciler")),
+                "expected the observe-only fail-closed gate, got: {err:?}"
+            );
+        };
         let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
         let mut rec = Reconciler::new_observe_only(
             cache.clone(),
@@ -1985,9 +2000,9 @@ mod tests {
             Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
-        assert!(rec.reconcile_vms().await.is_err());
-        assert!(rec.reconcile_networks().await.is_err());
-        assert!(rec.reconcile_volumes().await.is_err());
+        gate_got(rec.reconcile_vms().await.unwrap_err());
+        gate_got(rec.reconcile_networks().await.unwrap_err());
+        gate_got(rec.reconcile_volumes().await.unwrap_err());
         // Nothing was touched: reconcile_vms on LEGACY would (equivalently
         // given a reachable stord/nwd) act on the vm-1 fragment; observe-only
         // must leave it byte-identical.
@@ -2003,7 +2018,7 @@ mod tests {
             node_state: "Discovered".to_string(),
             ..Default::default()
         };
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(std::sync::Arc::new(
                 chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
@@ -2024,7 +2039,7 @@ mod tests {
         let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
         let mock =
             std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             cache.clone(),
             VmRuntime::new(mock.clone()),
             PathBuf::from("/tmp/fake-stord.sock"),
@@ -2549,7 +2564,7 @@ mod tests {
 
         let mock =
             std::sync::Arc::new(chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default());
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(test_cache())),
             VmRuntime::new(mock.clone()),
             stord_socket,
@@ -2595,7 +2610,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(empty_cache())),
             runtime,
             stord_socket,
@@ -2662,7 +2677,7 @@ mod tests {
         cache.node_state = NodeState::Draining.as_str().to_string();
 
         let cache = Arc::new(tokio::sync::Mutex::new(cache));
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             cache.clone(),
             runtime,
             PathBuf::from("/tmp/fake-stord.sock"),
@@ -2704,7 +2719,7 @@ mod tests {
         };
 
         let cache = Arc::new(tokio::sync::Mutex::new(cache));
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             cache.clone(),
             runtime,
             PathBuf::from("/tmp/fake-stord.sock"),
@@ -2755,7 +2770,7 @@ mod tests {
         };
 
         let cache = Arc::new(tokio::sync::Mutex::new(cache));
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             cache.clone(),
             runtime,
             PathBuf::from("/tmp/fake-stord.sock"),
@@ -2811,7 +2826,7 @@ mod tests {
         runtime.stop_vm("vm-1", false, None).await.unwrap();
         assert_eq!(runtime.get("vm-1").await.unwrap().runtime_status, "Stopped");
 
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(test_cache())),
             runtime,
             stord_socket,
@@ -3079,7 +3094,7 @@ mod tests {
             );
         }
 
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(adapter.clone()),
             stord_socket,
@@ -3349,7 +3364,7 @@ mod tests {
             "Running"
         );
 
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(test_cache())),
             runtime,
             stord_socket,
@@ -3389,7 +3404,7 @@ mod tests {
         let mut cache = test_cache();
         cache.node_state = NodeState::Bootstrapping.as_str().to_string();
 
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(cache)),
             VmRuntime::new(mock.clone()),
             // Use bogus sockets — we expect reconcile_vms NOT to be called,
@@ -3460,7 +3475,7 @@ mod tests {
             },
         );
 
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(cache)),
             runtime,
             stord_socket,
@@ -3515,7 +3530,7 @@ mod tests {
         );
 
         let runtime = VmRuntime::new(mock.clone());
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_legacy(
             Arc::new(tokio::sync::Mutex::new(cache)),
             runtime,
             stord_socket,

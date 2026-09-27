@@ -139,11 +139,17 @@ derived from Core execution** — never an independent authority.
   crash that loses the projection (or its save) is repaired by the next startup
   rebuild; a stale compatibility cache cannot act as a second authority because
   the legacy Reconciler's provider mutation is gated off in this mode.
-- **Single-writer precondition.** `Reconciler::set_provider_mutation_enabled`
-  (default true; disabled in core-managed) makes the legacy reconcile path skip
-  all three `reconcile_networks/volumes/vms` provider mutations in the
-  `TenantReady` arm, so the Core runtime + projection are the only NodeCache
-  writers/effectors in core modes. Completing the enforcement, every legacy
+- **Single-writer precondition (structural, M2.3).** The Reconciler's provider
+  mutation is impossible in core-managed: the mutation-only state (the VM
+  `runtime_dir`) lives in `Reconciler::mutation: Option<LegacyMutation>`, set by
+  the explicit `Reconciler::new_legacy` (legacy mode only) and left `None` by
+  `Reconciler::new_observe_only` (core-managed). There is **no setter** — legacy
+  vs observe-only is fixed at construction — and the observe-only Reconciler's
+  `reconcile_networks/volumes/vms` methods fail closed at their first
+  statement. The core-managed composition (`cmd/chv-agent::main`) selects
+  `new_observe_only` via an exhaustive `AgentAuthorityMode` match, so a future
+  mode variant is a compile error rather than a silent fallback to mutation.
+  Completing the enforcement, every legacy
   `agent_server` gRPC handler that would otherwise write a fragment or drive a
   provider (CH/stord/nwd) side effect FAILS CLOSED in core-managed mode with
   `unimplemented` — 28 gated legacy effector/desired-state mutators

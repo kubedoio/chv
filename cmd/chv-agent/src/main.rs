@@ -653,6 +653,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // effector (NodeCache is rebuilt from the Core store and projected only
     // after Core execution). Legacy mode keeps the full mutation surface.
     let mut reconciler = match config.authority_mode {
+        // Core-managed: observe-only Reconciler (no mutation surface at all).
         AgentAuthorityMode::CoreManaged => {
             Reconciler::new_observe_only(
                 cache.clone(),
@@ -663,8 +664,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
         }
-        _ => {
-            Reconciler::new(
+        // Legacy: the full legacy provider-mutation surface (explicit opt-in).
+        AgentAuthorityMode::Legacy => {
+            Reconciler::new_legacy(
                 cache.clone(),
                 vm_runtime.clone(),
                 config.stord_socket.clone(),
@@ -673,6 +675,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 migration_registry,
             )
             .await
+        }
+        // CoreNative returns in run_core_native() well before this point; a
+        // future variant here becomes a compile error instead of silently
+        // defaulting to the mutation-capable Reconciler.
+        AgentAuthorityMode::CoreNative => {
+            unreachable!("CoreNative mode exited normally before Reconciler composition")
         }
     };
 
