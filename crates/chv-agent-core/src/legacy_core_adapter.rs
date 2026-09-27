@@ -499,6 +499,17 @@ mod tests {
             version(1),
         )
         .unwrap();
+        // The intent's own audit fields must agree with the submission's
+        // durable metadata by construction.
+        assert_eq!(
+            intent.submission.metadata,
+            OperationRequestMetadata {
+                requested_by: intent.requested_by.clone(),
+                external_operation_id: intent.external_operation_id.clone(),
+                request_unix_ms: intent.request_unix_ms,
+                legacy_generation: Some(intent.version.desired_generation),
+            }
+        );
 
         let expected_metadata = intent.submission.metadata.clone();
         let accepted = authority.submit(intent.submission).await.unwrap();
