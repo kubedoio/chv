@@ -3395,6 +3395,76 @@ mod tests {
     }
 
     #[test]
+    fn failed_upgrade_reopens_at_prior_version_and_repairs_then_upgrades() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.db");
+        create_v1_store(&path);
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let definition = vm("vm-1", 1);
+        conn.execute(
+            "INSERT INTO vms (vm_id,definition_json,requested_power_state,observed_power_state,resource_version) VALUES (?1,?2,'stopped','unknown',1)",
+            params![definition.id.as_str(), serde_json::to_string(&definition).unwrap()],
+        )
+        .unwrap();
+        insert_attachments(&conn, &definition).unwrap();
+        let request = serde_json::json!({"legacy":"invalid-running-repair"});
+        conn.execute(
+            "INSERT INTO operations (operation_id,kind,vm_id,request_fingerprint,request_json,status,retry_count,max_retries) VALUES ('invalid-running-repair','start_vm','vm-1',?1,?2,'running',0,3)",
+            params![canonical_request_fingerprint(&request).unwrap(), canonical_json(&request).unwrap()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        // Migration to v4 leaves this `running`/`retry_count=0` row invalid, so
+        // the whole upgrade transaction rolls back and the DB stays at v1.
+        let first = match CoreStore::open_existing(&path).err().unwrap() {
+            StoreError::Integrity(message) => message,
+            other => panic!("expected integrity error on first open, got {other:?}"),
+        };
+        // The store is not bricked or locked: re-opening at the prior version
+        // fails with the identical error, proving user_version stayed put.
+        let reopened = match CoreStore::open_existing(&path).err().unwrap() {
+            StoreError::Integrity(message) => message,
+            other => panic!("expected integrity error on reopen, got {other:?}"),
+        };
+        assert_eq!(
+            reopened, first,
+            "reopen must fail with the SAME error at the prior version"
+        );
+
+        // Repair the offending row directly against the prior (v1) schema; a
+        // fresh open must then migrate cleanly to the latest version.
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        let fixed = conn
+            .execute(
+                "UPDATE operations SET status='accepted',retry_count=0 WHERE operation_id='invalid-running-repair'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(fixed, 1, "the offending row must be repaired");
+        let user_version_before: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version_before, 1);
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+
+        let store = CoreStore::open_existing(&path)
+            .expect("repaired store must reopen after the upgrade is unblocked");
+        let user_version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 4, "repaired store must upgrade cleanly to v4");
+        drop(directory);
+    }
+
+    #[test]
     fn host_insert_failure_leaves_no_authority_or_staging_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("core.db");
