@@ -14,6 +14,7 @@ pub mod legacy_core_adapter;
 pub mod metrics_server;
 pub mod migration;
 pub mod migration_registry;
+pub mod projection;
 pub mod reconcile;
 pub mod resources;
 pub mod spec;
