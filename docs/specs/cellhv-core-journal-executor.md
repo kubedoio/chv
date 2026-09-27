@@ -179,8 +179,10 @@ derived from Core execution** — never an independent authority.
   requires a non-empty `mac_address` (`VmSpec::validate` rejects empty). A
   `NetworkAttachmentRef` with `mac_address: None` therefore projects a
   deterministic locally-administered unicast placeholder
-  (`02:00:00:HH:HH:HH`, FNV-1a over `{vm_id}\0{network_ref}`) so the
-  compatibility surface stays valid and stable across restarts; the actual
+  (`02:00:00:HH:HH:HH`, FNV-1a over
+  `{vm_id}\0{network_ref}\0{attachment_id}`) so the
+  compatibility surface stays valid and stable across restarts (and distinct
+  even for two NICs sharing a network_ref); the actual
   runtime NIC MAC is observable independently, not via this projected `VmSpec`.
 - **CoreNative not wired; legacy unchanged.** CoreNative mode has no NodeCache
   today (documented, not wired). Legacy mode keeps the legacy reconciler and its
