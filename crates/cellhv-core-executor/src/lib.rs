@@ -12,6 +12,7 @@ use cellhv_core_operations::{
 use cellhv_core_types::{canonical_json, OperationId, VmId};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinSet};
@@ -59,6 +60,8 @@ pub enum ExecutorError {
     Authority(#[from] cellhv_core_operations::AuthorityActorError),
     #[error("executor task failed: {0}")]
     Join(#[from] JoinError),
+    #[error("executor drain exceeded {budget:?}; in-flight tasks were cancelled")]
+    DrainTimedOut { budget: Duration },
 }
 
 pub type Result<T> = std::result::Result<T, ExecutorError>;
@@ -265,6 +268,48 @@ impl JournalExecutor {
             .take()
             .expect("executor task is present before shutdown")
             .await?)
+    }
+
+    /// Graceful shutdown bounded by `budget`, as used by production
+    /// compositions. If the scheduler fails to drain within the budget (for
+    /// example a wedged runtime), the scheduler task is explicitly cancelled so
+    /// the executor stops issuing any further claim/finish RPCs — a task still
+    /// talking to a gone authority actor would be a second, unaccounted
+    /// effector. Note the boundary of this guarantee: cancellation stops the
+    /// executor *task*; a runtime effect that was already initiated is not
+    /// rolled back by the executor and is reconciled through the operation's
+    /// `InspectRequired` disposition on restart (see
+    /// `chv-agent-runtime-ch` for the process-lifecycle counterpart).
+    /// Acquired-but-unfinished operations remain `Running` and therefore
+    /// `InspectRequired` after restart (the documented crash semantics).
+    /// Returns [`ExecutorError::DrainTimedOut`] when the budget expires.
+    pub async fn shutdown_bounded(mut self, budget: Duration) -> Result<ExecutionReport> {
+        self.close_ingress();
+        let task = self
+            .task
+            .take()
+            .expect("executor task is present before shutdown");
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            if task.is_finished() {
+                return task.await.map_err(ExecutorError::Join);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    budget_ms = budget.as_millis(),
+                    "core executor drain exceeded budget; cancelling in-flight tasks"
+                );
+                task.abort();
+                match task.await {
+                    Err(error) if error.is_cancelled() => {
+                        return Err(ExecutorError::DrainTimedOut { budget });
+                    }
+                    Err(error) => return Err(ExecutorError::Join(error)),
+                    Ok(_) => return Err(ExecutorError::DrainTimedOut { budget }),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     pub fn close_ingress(&mut self) {

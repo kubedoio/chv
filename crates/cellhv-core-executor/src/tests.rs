@@ -627,3 +627,90 @@ async fn same_vm_is_ordered_while_different_vms_overlap() {
     assert_eq!(runtime.max_total.load(Ordering::SeqCst), 2);
     stop(f).await;
 }
+
+#[tokio::test]
+async fn shutdown_bounded_drains_in_flight_work() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    struct Inspect {
+        authority: cellhv_core_operations::AuthorityHandle,
+    }
+    #[async_trait]
+    impl CoreVmRuntime for Inspect {
+        async fn execute(
+            &self,
+            op: OperationJournalEntry,
+        ) -> std::result::Result<Option<serde_json::Value>, RuntimeFailure> {
+            assert_eq!(
+                self.authority
+                    .operation(op.operation.id)
+                    .await
+                    .unwrap()
+                    .operation
+                    .status,
+                cellhv_core_types::OperationStatus::Running
+            );
+            Ok(Some(serde_json::json!({"ok":true})))
+        }
+    }
+    let executor = JournalExecutor::start(
+        f.execution.clone(),
+        Arc::new(Inspect {
+            authority: f.authority.clone(),
+        }),
+        1,
+        1,
+    )
+    .unwrap();
+    executor.scan_ready().await.unwrap();
+    let report = executor
+        .shutdown_bounded(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(report.completed, 1);
+    assert_eq!(
+        f.authority
+            .operation(OperationId::new("one").unwrap())
+            .await
+            .unwrap()
+            .operation
+            .status,
+        cellhv_core_types::OperationStatus::Succeeded
+    );
+    stop(f).await;
+}
+
+#[tokio::test]
+async fn shutdown_bounded_cancels_wedged_work_and_returns_drain_timeout() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    let runtime = Arc::new(Blocking {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let executor = JournalExecutor::start(f.execution.clone(), runtime.clone(), 1, 1).unwrap();
+    executor.scan_ready().await.unwrap();
+    runtime.entered.notified().await; // execute() is now wedged on `release`
+    let started = std::time::Instant::now();
+    let err = executor
+        .shutdown_bounded(std::time::Duration::from_millis(150))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ExecutorError::DrainTimedOut { .. }));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "bounded drain must return promptly after the budget expires"
+    );
+    // The wedged op was cancelled and left Running -> InspectRequired on restart.
+    assert_eq!(
+        f.authority
+            .operation(OperationId::new("one").unwrap())
+            .await
+            .unwrap()
+            .operation
+            .status,
+        cellhv_core_types::OperationStatus::Running
+    );
+    stop(f).await;
+}

@@ -12,6 +12,7 @@ use cellhv_core_startup::{
     ActivatedStore, ActivationKind, ActivationProvenance, RuntimeAuthorityGuard,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -54,31 +55,105 @@ pub enum RuntimeStageFailure {
     ActorJoin(AuthorityActorError),
     #[error("executor scheduler task failed: {0}")]
     PollerJoin(tokio::task::JoinError),
+    #[error("core executor drain exceeded {budget:?}; in-flight tasks were cancelled")]
+    ExecutorDrainTimedOut { budget: Duration },
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeOwnerError>;
+
+/// Monotonic journal-poller failure telemetry. The cumulative counter is for
+/// diagnostics; the consecutive counter is the current health signal (zero
+/// means the journal scanner is working right now).
+#[derive(Debug, Default)]
+struct JournalScanStats {
+    consecutive_failures: AtomicU64,
+    total_failures: AtomicU64,
+}
+
+/// How the journal poller exited, surfaced through [`CoreRuntimeOwner::shutdown`].
+enum PollerExit {
+    Drained(cellhv_core_executor::ExecutionReport),
+    Failed(cellhv_core_executor::ExecutorError),
+    DrainTimedOut { budget: Duration },
+}
+
+/// Bounded exponential backoff for the journal poller: the base interval is
+/// doubled per consecutive failure and capped, so a persistently failing store
+/// is not re-scanned at maximum rate (which would both hammer the store and
+/// spam the log).
+const MAX_JOURNAL_SCAN_BACKOFF: Duration = Duration::from_secs(2);
+
+fn backoff_delay(base: Duration, consecutive_failures: u32) -> Duration {
+    let shift = consecutive_failures.min(3);
+    base.saturating_mul(1u32 << shift)
+        .min(MAX_JOURNAL_SCAN_BACKOFF)
+}
+
+/// Record one failed journal scan (either a returned error or a per-scan
+/// timeout) and back off. Keeping this in one place ensures every failure path
+/// bumps the health counters identically — a wedge must never masquerade as a
+/// healthy journal.
+fn record_scan_failure(
+    stats: &JournalScanStats,
+    consecutive_failures: &mut u32,
+    delay: Duration,
+    scan_timeout: Duration,
+    error: Option<&cellhv_core_executor::ExecutorError>,
+) {
+    *consecutive_failures = consecutive_failures.saturating_add(1);
+    stats
+        .consecutive_failures
+        .store(*consecutive_failures as u64, Ordering::Relaxed);
+    stats.total_failures.fetch_add(1, Ordering::Relaxed);
+    match error {
+        Some(error) => tracing::warn!(
+            consecutive_failures = *consecutive_failures,
+            backoff_ms = delay.as_millis(),
+            %error,
+            "core journal scan failed; retrying with backoff"
+        ),
+        None => tracing::warn!(
+            consecutive_failures = *consecutive_failures,
+            backoff_ms = delay.as_millis(),
+            scan_timeout_ms = scan_timeout.as_millis(),
+            "core journal scan exceeded its timeout; treating as failure and retrying with backoff"
+        ),
+    }
+}
+
+/// Timing knobs for the journal polling loop that drives the executor.
+#[derive(Clone, Copy, Debug)]
+pub struct JournalPollerConfig {
+    /// Base interval between journal scans (doubled per consecutive failure,
+    /// capped at [`MAX_JOURNAL_SCAN_BACKOFF`]).
+    pub scan_interval: Duration,
+    /// Upper bound on a single `scan_ready`. A wedged authority/store hanging
+    /// the scan RPC becomes a counted failure with backoff instead of wedging
+    /// the poller (and shutdown).
+    pub scan_timeout: Duration,
+    /// Graceful drain budget at shutdown; on expiry the executor is explicitly
+    /// cancelled (fail-closed -> InspectRequired).
+    pub drain_budget: Duration,
+}
 
 /// Sole owner of the bounded native-only Core runtime composition.
 ///
 /// The journal executor lives inside a background poller task that drives
 /// `JournalExecutor::scan_ready` — the only ingress into the scheduler — at a
 /// bounded interval. Without it, accepted operations are durable but never
-/// claimed, executed, or finished. The poller owns the executor's lifecycle and
-/// calls `executor.shutdown()` before exiting, preserving the
-/// executor-before-authority shutdown ordering contract.
+/// claimed, executed, or finished. The poller owns the executor's lifecycle,
+/// drains it with a bounded budget before exit (falling back to explicit
+/// cancellation of the executor *task*; any runtime effect already in flight is
+/// reconciled through the operation's `InspectRequired` disposition on
+/// restart), and thereby preserves the executor-before-authority shutdown
+/// ordering contract.
 pub struct CoreRuntimeOwner {
     listener: Option<CoreApiListener>,
     authority: Option<AuthorityHandle>,
     actor_join: Option<AuthorityActorJoin>,
-    poller: Option<
-        tokio::task::JoinHandle<
-            std::result::Result<
-                cellhv_core_executor::ExecutionReport,
-                cellhv_core_executor::ExecutorError,
-            >,
-        >,
-    >,
+    poller: Option<tokio::task::JoinHandle<PollerExit>>,
     stop_tx: Option<tokio::sync::watch::Sender<()>>,
+    journal_scan: std::sync::Arc<JournalScanStats>,
     kind: ActivationKind,
     provenance: ActivationProvenance,
     runtime_guard: Option<RuntimeAuthorityGuard>,
@@ -91,9 +166,12 @@ impl CoreRuntimeOwner {
         socket: &Path,
         queue_capacity: usize,
         drain_timeout: Duration,
-        scan_interval: Duration,
+        poller: JournalPollerConfig,
     ) -> Result<Self> {
         let (service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
+        debug_assert!(poller.scan_interval > Duration::ZERO);
+        debug_assert!(poller.scan_timeout > Duration::ZERO);
+        debug_assert!(poller.drain_budget > Duration::ZERO);
         validate_native_only(kind, &provenance)?;
         let (authority, actor_join) = AuthorityActor::spawn(service, queue_capacity)?;
         let execution = authority.execution_handle();
@@ -146,21 +224,64 @@ impl CoreRuntimeOwner {
         // Drive the journal: `scan_ready` is the only ingress into the executor
         // scheduler, so without this poller accepted operations remain durable
         // but are never claimed, executed, or finished. The poller owns the
-        // executor and runs `executor.shutdown()` (a graceful drain) when told
-        // to stop, preserving the executor-before-authority shutdown ordering.
+        // executor and uses a bounded graceful drain at shutdown so no executor
+        // *task* survives the authority (single-effector invariant); any runtime
+        // effect already in flight is reconciled through the operation's
+        // `InspectRequired` disposition on restart. Each scan is itself bounded
+        // by `scan_timeout` so a wedged authority/store cannot hang the loop or
+        // masquerade as a healthy journal: it becomes a counted scan failure
+        // with backoff, and shutdown stays bounded. Repeated failures back off
+        // exponentially and are surfaced as a persistent health signal instead
+        // of per-tick log spam.
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(());
-        let poller = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = stop_rx.changed() => break,
-                    _ = tokio::time::sleep(scan_interval) => {
-                        if let Err(error) = executor.scan_ready().await {
-                            tracing::warn!(%error, "core journal scan failed; will retry");
+        let journal_scan = std::sync::Arc::new(JournalScanStats::default());
+        let poller = tokio::spawn({
+            let journal_scan = std::sync::Arc::clone(&journal_scan);
+            async move {
+                let JournalPollerConfig {
+                    scan_interval,
+                    scan_timeout,
+                    drain_budget,
+                } = poller;
+                let mut consecutive_failures: u32 = 0;
+                loop {
+                    let delay = backoff_delay(scan_interval, consecutive_failures);
+                    tokio::select! {
+                        _ = stop_rx.changed() => break,
+                        _ = tokio::time::sleep(delay) => {
+                            match tokio::time::timeout(scan_timeout, executor.scan_ready()).await {
+                                Ok(Ok(_report)) => {
+                                    consecutive_failures = 0;
+                                    journal_scan
+                                        .consecutive_failures
+                                        .store(0, Ordering::Relaxed);
+                                }
+                                Ok(Err(error)) => record_scan_failure(
+                                    &journal_scan,
+                                    &mut consecutive_failures,
+                                    delay,
+                                    scan_timeout,
+                                    Some(&error),
+                                ),
+                                Err(_elapsed) => record_scan_failure(
+                                    &journal_scan,
+                                    &mut consecutive_failures,
+                                    delay,
+                                    scan_timeout,
+                                    None,
+                                ),
+                            }
                         }
                     }
                 }
+                match executor.shutdown_bounded(drain_budget).await {
+                    Ok(report) => PollerExit::Drained(report),
+                    Err(cellhv_core_executor::ExecutorError::DrainTimedOut { budget }) => {
+                        PollerExit::DrainTimedOut { budget }
+                    }
+                    Err(error) => PollerExit::Failed(error),
+                }
             }
-            executor.shutdown().await
         });
         Ok(Self {
             listener: Some(listener),
@@ -168,6 +289,7 @@ impl CoreRuntimeOwner {
             actor_join: Some(actor_join),
             poller: Some(poller),
             stop_tx: Some(stop_tx),
+            journal_scan,
             kind,
             provenance,
             runtime_guard: Some(runtime_guard),
@@ -196,6 +318,23 @@ impl CoreRuntimeOwner {
         &self.provenance
     }
 
+    /// Cumulative number of failed journal scans since this owner started
+    /// (diagnostics / observability).
+    pub fn journal_scan_failures(&self) -> u64 {
+        self.journal_scan.total_failures.load(Ordering::Relaxed)
+    }
+
+    /// Whether the journal scanner is currently healthy: the most recent scan
+    /// did not fail. This is the health signal a production composition feeds
+    /// into the agent's health aggregation so a silently wedged journal becomes
+    /// visible instead of returning 200/202 forever.
+    pub fn journal_scan_healthy(&self) -> bool {
+        self.journal_scan
+            .consecutive_failures
+            .load(Ordering::Relaxed)
+            == 0
+    }
+
     /// Stops the listener first, then the actor, and releases the runtime lease
     /// only after the actor thread has joined.
     pub async fn shutdown(mut self) -> Result<()> {
@@ -221,10 +360,13 @@ impl CoreRuntimeOwner {
             .take()
             .expect("poller is present before shutdown");
         match poller.await {
-            Ok(Ok(report)) => {
+            Ok(PollerExit::Drained(report)) => {
                 tracing::debug!(completed = report.completed, "core executor drained")
             }
-            Ok(Err(error)) => failures.push(RuntimeStageFailure::Executor(error)),
+            Ok(PollerExit::Failed(error)) => failures.push(RuntimeStageFailure::Executor(error)),
+            Ok(PollerExit::DrainTimedOut { budget }) => {
+                failures.push(RuntimeStageFailure::ExecutorDrainTimedOut { budget })
+            }
             Err(join_error) => failures.push(RuntimeStageFailure::PollerJoin(join_error)),
         }
 
@@ -361,7 +503,11 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
-            Duration::from_millis(40),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
         )
         .await
         .unwrap();
@@ -382,7 +528,11 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
-            Duration::from_millis(40),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
         )
         .await
         .unwrap();
@@ -402,7 +552,11 @@ mod tests {
                 &socket,
                 0,
                 Duration::from_secs(1),
-                Duration::from_millis(40)
+                JournalPollerConfig {
+                    scan_interval: Duration::from_millis(40),
+                    scan_timeout: Duration::from_secs(1),
+                    drain_budget: Duration::from_secs(1),
+                },
             )
             .await,
             Err(RuntimeOwnerError::ActorStartup(
@@ -426,7 +580,11 @@ mod tests {
                 &socket,
                 16,
                 Duration::from_secs(1),
-                Duration::from_millis(40)
+                JournalPollerConfig {
+                    scan_interval: Duration::from_millis(40),
+                    scan_timeout: Duration::from_secs(1),
+                    drain_budget: Duration::from_secs(1),
+                },
             )
             .await,
             Err(RuntimeOwnerError::ListenerStartup { .. })
@@ -449,7 +607,11 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
-            Duration::from_millis(40),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
         )
         .await
         .unwrap();
@@ -493,7 +655,11 @@ mod tests {
                 &socket,
                 16,
                 Duration::from_secs(1),
-                Duration::from_millis(40)
+                JournalPollerConfig {
+                    scan_interval: Duration::from_millis(40),
+                    scan_timeout: Duration::from_secs(1),
+                    drain_budget: Duration::from_secs(1),
+                },
             )
             .await,
             Err(RuntimeOwnerError::Ineligible(_))
@@ -532,7 +698,11 @@ mod tests {
                 &socket,
                 16,
                 Duration::from_secs(1),
-                Duration::from_millis(40)
+                JournalPollerConfig {
+                    scan_interval: Duration::from_millis(40),
+                    scan_timeout: Duration::from_secs(1),
+                    drain_budget: Duration::from_secs(1),
+                },
             )
             .await,
             Err(RuntimeOwnerError::Ineligible(
@@ -553,7 +723,11 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
-            Duration::from_millis(40),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
         )
         .await
         .unwrap();
@@ -638,7 +812,11 @@ mod tests {
             &socket,
             16,
             Duration::from_secs(1),
-            Duration::from_millis(40),
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
         )
         .await
         .unwrap();
@@ -676,6 +854,9 @@ mod tests {
                 "the runtime must execute each accepted operation exactly once"
             );
         }
+        // A working journal must report itself healthy with zero failures.
+        assert!(owner.journal_scan_healthy());
+        assert_eq!(owner.journal_scan_failures(), 0);
         owner.shutdown().await.unwrap();
     }
 }
