@@ -54,10 +54,15 @@ atomic transaction as acceptance (migration
 | `legacy_generation` | nullable | Legacy desired generation; non-NULL only for legacy provenance rows. |
 
 Rows written before migration 0004 carry NULL in all four columns and are
-reconstructed as `request_metadata: None`. The three non-generation columns are
-all-or-nothing: any half-present combination is an integrity failure on reopen.
-Rows whose operation ID begins with the `legacy:` prefix MUST carry metadata and
-a non-NULL `legacy_generation`; otherwise reopening the store fails closed.
+reconstructed as `request_metadata: None`; these all-NULL (pre-0004) rows are
+always accepted, regardless of operation ID prefix. The three non-generation
+columns are all-or-nothing: any half-present combination is an integrity failure
+on reopen, and a stored `legacy_generation` with none of those columns is a
+stray-generation integrity failure. When metadata is present, a row whose
+operation ID begins with the `legacy:` prefix MUST also carry a non-NULL
+`legacy_generation`; otherwise reopening the store fails closed. Write paths
+(`OperationService::submit` and the store's `accept_operation`) reject any
+`legacy:` submission whose metadata lacks a legacy generation up front.
 
 ## 3. Replay before state inspection
 

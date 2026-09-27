@@ -36,6 +36,13 @@ and any generation that is not canonical positive decimal syntax (`7` is valid;
 The Core operation service fingerprints the command and expected version, so a
 reused scope/key with different content remains an idempotency conflict.
 
+The control plane MUST send a non-empty `requested_by` and a positive
+`request_unix_ms`. Because this metadata is durable audit evidence journaled in
+the same atomic transaction as operation acceptance, the adapter makes no silent
+placeholder synthesis: an empty requester or a non-positive request timestamp is
+rejected (in core-managed mode via the `OperationService::submit` metadata
+validation surfaced as an `invalid_argument` gRPC status) rather than invented.
+
 ## Lossless supported subset
 
 `StartVm`, non-forced `StopVm`, non-forced `RebootVm`, and non-forced `DeleteVm`
