@@ -3,9 +3,9 @@
 //! `ProjectingCoreRuntime` wraps the single Core effector (M2.2a) and, after a
 //! Succeeded (`Ok(None)`) outcome, projects the authoritative desired state
 //! into NodeCache so the legacy compatibility surface stays readable **without**
-//! the Reconciler acting as a second authority (it mutates NodeCache + provider
-//! directly, which is why it is gated off in core-managed mode — see
-//! `Reconciler::set_provider_mutation_enabled`).
+//! the Reconciler acting as a second authority (in core-managed mode the
+//! Reconciler is constructed observe-only — `Reconciler::new_observe_only`,
+//! M2.3 — so it cannot mutate NodeCache or the provider at all).
 //!
 //! Projection is strictly downstream of Core execution and must never change an
 //! executor outcome:

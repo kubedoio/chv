@@ -16,11 +16,22 @@ use tracing::{debug, error, info, warn};
 // helpers moved verbatim into `chv_hypervisor_api::resources` so the legacy
 // reconcile path and the Core runtime share one definition. They are re-exported
 // here so every existing internal caller (including agent_server.rs) keeps
-// compiling without touching their call sites. The legacy reconcile
-// `prepare_vm_resources`/`cleanup_vm_resources` bodies and call sites are
-// deliberately untouched — that cache-coupled code is scheduled for deletion at
-// M2.3 (reconciler provider-mutation gating), so rewiring it now would be
-// high-risk churn for code being removed.
+// compiling without touching their call sites.
+//
+// M2.3 (Decision): the legacy `prepare_vm_resources`/`cleanup_vm_resources`
+// bodies and their `reconcile_*` mutation arms are NOT deleted. They are the
+// provider mutation surface of *legacy mode*, which remains fully functional
+// (a supported migration path, out of campaign scope). Single-authority for
+// core-managed is instead enforced *structurally*: the mutation-only state (the
+// VM `runtime_dir`) lives in `Reconciler::mutation: Option<LegacyMutation>`,
+// which the legacy constructor populates and the observe-only constructor
+// (`Reconciler::new_observe_only`, used by core-managed) leaves as `None`. An
+// observe-only Reconciler therefore holds no mutation-specific state and has no
+// setter to flip; the `reconcile_*` mutation methods fail closed at their first
+// statement (the shared stord/nwd sockets remain on the struct purely for the
+// node-state health observation the state machine needs in every mode). There
+// is no way to construct a core-managed Reconciler that can express provider
+// mutation.
 pub use chv_hypervisor_api::resources::{bridge_name_for_network, vm_runtime_dir};
 
 /// Maximum number of VMs to reconcile concurrently within a single tick.
@@ -35,9 +46,13 @@ const VM_RECONCILE_CONCURRENCY: usize = 8;
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
     pub vm_runtime: VmRuntime,
-    pub stord_socket: PathBuf,
-    pub nwd_socket: PathBuf,
-    pub runtime_dir: PathBuf,
+    /// stord socket — used by the node-state health probes (all modes) and by
+    /// the legacy `reconcile_*` mutation methods (legacy mode only). Private:
+    /// accessors are not exposed; mutation is additionally gated by `mutation`.
+    stord_socket: PathBuf,
+    /// nwd socket — used by the node-state health probes (all modes) and by
+    /// the legacy `reconcile_*` mutation methods (legacy mode only). Private.
+    nwd_socket: PathBuf,
     reconcile_tick: u64,
     degraded_ticks: u32,
     /// Tracks VMs that have already been requested for drain migration
@@ -48,12 +63,26 @@ pub struct Reconciler {
     /// a VM handed off to chv-stord leaves vm_runtime.list() but the transfer
     /// is ongoing.
     migration_registry: Arc<MigrationTaskRegistry>,
-    /// When false, the legacy reconcile path performs no provider mutation
-    /// (M2.2b): in core modes the Core runtime is the only effector, so
-    /// `reconcile_networks/volumes/vms` must not open volumes, attach NICs, or
-    /// create/start/stop/delete VMs as a second authority. NodeCache is rebuilt
-    /// from the Core store at startup and projected only after Core execution.
-    provider_mutation: bool,
+    /// The legacy provider-mutation surface, present ONLY in legacy mode.
+    /// Core-managed constructs the Reconciler with
+    /// `Reconciler::new_observe_only`, where this is `None`: the Reconciler
+    /// then holds no mutation-specific state (VM `runtime_dir`) and every
+    /// `reconcile_*` mutation method fails closed at its first statement.
+    /// There is **no setter**: legacy vs observe-only is fixed at construction,
+    /// so a core-managed composition cannot flip mutation on at runtime. The
+    /// Core runtime is the only effector; NodeCache is rebuilt from the Core
+    /// store at startup and projected only after Core execution.
+    mutation: Option<LegacyMutation>,
+}
+
+/// Mutation-only state for the legacy reconcile path: the VM runtime dir used
+/// to place per-VM dirs (`{runtime_dir}/vms/{vm_id}`) during provider side
+/// effects. Held only by a legacy-mode `Reconciler`; an observe-only
+/// (core-managed) Reconciler never constructs this, so it has no runtime dir
+/// and cannot stage provider side effects.
+#[derive(Debug)]
+struct LegacyMutation {
+    runtime_dir: PathBuf,
 }
 
 /// Backoff predicate: should we skip this VM on this tick?
@@ -96,22 +125,49 @@ impl Reconciler {
             vm_runtime,
             stord_socket,
             nwd_socket,
-            runtime_dir,
             reconcile_tick: 0,
             degraded_ticks: 0,
             drain_requested_vms: HashSet::new(),
             migration_registry,
-            provider_mutation: true,
+            mutation: Some(LegacyMutation { runtime_dir }),
         }
     }
 
-    /// Disable/enable the legacy reconcile path's provider mutation. In core
-    /// modes the Core runtime is the only effector; `reconcile_networks/volumes/
-    /// vms` must not mutate providers as a second authority (NodeCache is
-    /// rebuilt from the Core store at startup and projected after Core
-    /// execution instead). Defaults to enabled (legacy/observe modes unchanged).
-    pub fn set_provider_mutation_enabled(&mut self, enabled: bool) {
-        self.provider_mutation = enabled;
+    /// Construct a Reconciler with NO provider-mutation surface, for
+    /// core-managed mode (M2.3). The Reconciler keeps only the shared stord/nwd
+    /// sockets it needs for node-state **health observation**; it holds no
+    /// mutation-specific state and its `reconcile_networks/volumes/vms` methods
+    /// fail closed at their first statement. There is no setter to re-enable
+    /// them. Use `Reconciler::new` for legacy mode.
+    pub async fn new_observe_only(
+        cache: Arc<tokio::sync::Mutex<NodeCache>>,
+        vm_runtime: VmRuntime,
+        stord_socket: PathBuf,
+        nwd_socket: PathBuf,
+        migration_registry: Arc<MigrationTaskRegistry>,
+    ) -> Self {
+        Self {
+            cache,
+            vm_runtime,
+            stord_socket,
+            nwd_socket,
+            reconcile_tick: 0,
+            degraded_ticks: 0,
+            drain_requested_vms: HashSet::new(),
+            migration_registry,
+            mutation: None,
+        }
+    }
+
+    /// Fail closed on an observe-only (core-managed) Reconciler: the legacy
+    /// `reconcile_*` provider-mutation methods must never run there — the Core
+    /// runtime is the sole effector and no second authority may mutate stord/
+    /// nwd/the hypervisor. Returns the mutation surface when present.
+    fn require_mutation(&self) -> Result<&LegacyMutation, ChvError> {
+        self.mutation.as_ref().ok_or_else(|| ChvError::Internal {
+            reason: "provider mutation attempted on an observe-only Reconciler (core-managed); the Core runtime is the sole effector"
+                .to_string(),
+        })
     }
 
     pub async fn current_state(&self) -> NodeState {
@@ -212,18 +268,19 @@ impl Reconciler {
                 }
             }
             NodeState::TenantReady => {
-                let (net_ok, vol_ok, vm_ok) = if self.provider_mutation {
-                    (
+                // In legacy mode (`mutation: Some`) the Reconciler is the
+                // provider effector and reconciles networks/volumes/VMs. In
+                // observe-only (core-managed) mode (`mutation: None`) the Core
+                // runtime is the only effector, so this arm converges nothing
+                // (NodeCache is rebuilt from the Core store and projected after
+                // Core execution) and never counts provider drift as degraded.
+                let (net_ok, vol_ok, vm_ok) = match &self.mutation {
+                    Some(_) => (
                         self.reconcile_networks().await.is_ok(),
                         self.reconcile_volumes().await.is_ok(),
                         self.reconcile_vms().await.is_ok(),
-                    )
-                } else {
-                    // M2.2b: in core modes the Core runtime is the only
-                    // effector. Provider mutation is gated off, so the legacy
-                    // reconcile path converges nothing (NodeCache is rebuilt
-                    // from the Core store and projected after Core execution).
-                    (true, true, true)
+                    ),
+                    None => (true, true, true),
                 };
                 if net_ok && vol_ok && vm_ok {
                     self.degraded_ticks = 0;
@@ -368,6 +425,9 @@ impl Reconciler {
     }
 
     async fn reconcile_networks(&mut self) -> Result<(), ChvError> {
+        // M2.3 fail-closed: never run on an observe-only (core-managed)
+        // Reconciler — the Core runtime is the sole provider effector.
+        self.require_mutation()?;
         // Build a map of network_id -> cidr from network fragments (spec_json).
         // Falls back to the hardcoded default if the fragment has no cidr.
         const DEFAULT_CIDR: &str = "10.0.0.0/24";
@@ -663,6 +723,9 @@ impl Reconciler {
     }
 
     async fn reconcile_volumes(&mut self) -> Result<(), ChvError> {
+        // M2.3 fail-closed: never run on an observe-only (core-managed)
+        // Reconciler — the Core runtime is the sole provider effector.
+        self.require_mutation()?;
         let (pairs, cached_handles, volume_fragments) = {
             let cache = self.cache.lock().await;
             let pairs: HashSet<(String, String)> = cache.vm_volume_handles().into_iter().collect();
@@ -1015,6 +1078,9 @@ async fn prepare_vm_resources(
 
 impl Reconciler {
     async fn reconcile_vms(&mut self) -> Result<(), ChvError> {
+        // M2.3 fail-closed: never run on an observe-only (core-managed)
+        // Reconciler — the Core runtime is the sole provider effector.
+        let mutation = self.require_mutation()?;
         let (desired, actual) = {
             let cache = self.cache.lock().await;
             let desired: BTreeSet<String> = cache.vm_fragments.keys().cloned().collect();
@@ -1072,7 +1138,7 @@ impl Reconciler {
             let vm_runtime = self.vm_runtime.clone();
             let stord_socket: Arc<PathBuf> = Arc::new(self.stord_socket.clone());
             let nwd_socket: Arc<PathBuf> = Arc::new(self.nwd_socket.clone());
-            let runtime_dir: Arc<PathBuf> = Arc::new(self.runtime_dir.clone());
+            let runtime_dir: Arc<PathBuf> = Arc::new(mutation.runtime_dir.clone());
 
             let _: Vec<()> = stream::iter(create_inputs)
                 .map(|input| {
@@ -1107,7 +1173,7 @@ impl Reconciler {
             let vm_runtime = self.vm_runtime.clone();
             let stord_socket: Arc<PathBuf> = Arc::new(self.stord_socket.clone());
             let nwd_socket: Arc<PathBuf> = Arc::new(self.nwd_socket.clone());
-            let runtime_dir: Arc<PathBuf> = Arc::new(self.runtime_dir.clone());
+            let runtime_dir: Arc<PathBuf> = Arc::new(mutation.runtime_dir.clone());
 
             delete_results = stream::iter(delete_ids)
                 .map(|vm_id| {
@@ -1165,7 +1231,7 @@ impl Reconciler {
             let vm_runtime = self.vm_runtime.clone();
             let stord_socket: Arc<PathBuf> = Arc::new(self.stord_socket.clone());
             let nwd_socket: Arc<PathBuf> = Arc::new(self.nwd_socket.clone());
-            let runtime_dir: Arc<PathBuf> = Arc::new(self.runtime_dir.clone());
+            let runtime_dir: Arc<PathBuf> = Arc::new(mutation.runtime_dir.clone());
 
             reconcile_results = stream::iter(reconcile_inputs)
                 .map(|input| {
@@ -1867,41 +1933,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_ready_with_provider_mutation_disabled_skips_provider_reconcile() {
+    async fn observe_only_reconciler_converges_nothing_and_stays_tenant_ready() {
         // test_cache() carries a VM fragment while both daemons are pointed at
-        // unreachable sockets. With provider mutation ENABLED, reconcile_vms
-        // would fail and the tick would go Degraded; with the M2.2b gate OFF,
-        // the legacy path must converge nothing and stay TenantReady.
-        let dir = tempfile::tempdir().unwrap();
+        // unreachable sockets. A LEGACY reconciler would fail reconcile_vms and
+        // the tick would go Degraded; an OBSERVE-ONLY (core-managed, M2.3)
+        // Reconciler has no provider-mutation surface and its TenantReady arm
+        // converges nothing — it must stay healthy TenantReady forever.
         let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
-        let mut rec = Reconciler::new(
+        let mut rec = Reconciler::new_observe_only(
             cache.clone(),
             VmRuntime::new(std::sync::Arc::new(
                 chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
             )),
             PathBuf::from("/tmp/fake-stord.sock"),
             PathBuf::from("/tmp/fake-nwd.sock"),
-            dir.path().to_path_buf(),
             Arc::new(MigrationTaskRegistry::new()),
         )
         .await;
-        rec.set_provider_mutation_enabled(false);
-        // Four ticks with unreachable daemon sockets: an UNGATED reconciler
-        // fails each tick and hits the >=3-tick degraded threshold to flip to
-        // Degraded; with the M2.2b gate off (skip provider mutation), every tick
-        // must stay healthy TenantReady. This makes the test discriminate the
-        // gate instead of passing vacuously.
+        // Four ticks with unreachable daemon sockets: a mutation-capable
+        // reconciler fails each tick and hits the >=3-tick degraded threshold to
+        // flip to Degraded; the observe-only Reconciler has no mutation paths,
+        // so every tick must stay healthy TenantReady. This discriminates the
+        // structural gate instead of passing vacuously.
         for _ in 0..4 {
             assert!(rec.run_once().await.is_ok());
             assert_eq!(rec.current_state().await, NodeState::TenantReady);
         }
-        // The gate must leave the VM axis untouched: reconcile_vms (which would
-        // otherwise act on the vm-1 fragment) never ran, so the fragment is
-        // unchanged — no removal, no rewrite.
+        // The observe-only Reconciler must leave the VM axis untouched:
+        // reconcile_vms (which would otherwise act on the vm-1 fragment) can
+        // never run, so the fragment is unchanged — no removal, no rewrite.
         let cache = cache.lock().await;
         let frag = cache.get_fragment("vm", "vm-1");
         assert!(frag.is_some());
         assert_eq!(frag.unwrap().updated_by, "cp");
+    }
+
+    #[tokio::test]
+    async fn observe_only_reconciler_rejects_direct_provider_mutation_calls() {
+        // M2.3 defense in depth: even a direct call to a legacy mutation method
+        // on an observe-only (core-managed) Reconciler must fail closed at its
+        // first statement — it must never open a stord/nwd connection (the
+        // sockets are unreachable) nor touch the cache VM axis.
+        let cache = Arc::new(tokio::sync::Mutex::new(test_cache()));
+        let mut rec = Reconciler::new_observe_only(
+            cache.clone(),
+            VmRuntime::new(std::sync::Arc::new(
+                chv_agent_runtime_ch::mock::MockCloudHypervisorAdapter::default(),
+            )),
+            PathBuf::from("/tmp/fake-stord.sock"),
+            PathBuf::from("/tmp/fake-nwd.sock"),
+            Arc::new(MigrationTaskRegistry::new()),
+        )
+        .await;
+        assert!(rec.reconcile_vms().await.is_err());
+        assert!(rec.reconcile_networks().await.is_err());
+        assert!(rec.reconcile_volumes().await.is_err());
+        // Nothing was touched: reconcile_vms on LEGACY would (equivalently
+        // given a reachable stord/nwd) act on the vm-1 fragment; observe-only
+        // must leave it byte-identical.
+        let cache = cache.lock().await;
+        let frag = cache.get_fragment("vm", "vm-1").unwrap();
+        assert_eq!(frag.updated_by, "cp");
     }
 
     #[tokio::test]

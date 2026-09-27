@@ -645,23 +645,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut reconciler = Reconciler::new(
-        cache.clone(),
-        vm_runtime.clone(),
-        config.stord_socket.clone(),
-        config.nwd_socket.clone(),
-        config.runtime_dir.clone(),
-        migration_registry,
-    )
-    .await;
-
-    if config.authority_mode == AgentAuthorityMode::CoreManaged {
-        // M2.2b: the Core runtime is the single effector; the legacy Reconciler
-        // must not open volumes, attach NICs, or create/start/stop/delete VMs
-        // as a second authority (NodeCache is rebuilt from the Core store and
-        // projected only after Core execution).
-        reconciler.set_provider_mutation_enabled(false);
-    }
+    // The Reconciler drives the node state machine (including daemon health
+    // probes) in every mode. Its provider-MUTATION surface is mode-selected at
+    // construction (M2.3): core-managed builds an observe-only Reconciler that
+    // structurally holds no mutation state and has no setter, so it can never
+    // act as a second authority — the Core runtime is the sole provider
+    // effector (NodeCache is rebuilt from the Core store and projected only
+    // after Core execution). Legacy mode keeps the full mutation surface.
+    let mut reconciler = match config.authority_mode {
+        AgentAuthorityMode::CoreManaged => {
+            Reconciler::new_observe_only(
+                cache.clone(),
+                vm_runtime.clone(),
+                config.stord_socket.clone(),
+                config.nwd_socket.clone(),
+                migration_registry,
+            )
+            .await
+        }
+        _ => {
+            Reconciler::new(
+                cache.clone(),
+                vm_runtime.clone(),
+                config.stord_socket.clone(),
+                config.nwd_socket.clone(),
+                config.runtime_dir.clone(),
+                migration_registry,
+            )
+            .await
+        }
+    };
 
     let mut supervisor = DaemonSupervisor::new(
         config.stord_binary_path.clone(),
