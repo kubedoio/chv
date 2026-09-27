@@ -672,6 +672,26 @@ mod tests {
         assert_eq!(parsed.expected_vm_version, serde_json::json!(7));
     }
 
+    #[tokio::test]
+    async fn disconnected_authority_handle_fails_promptly_without_blocking() {
+        // The test-support handle is never connected (receiver dropped), so
+        // every call must fail immediately with Unavailable — never block or
+        // panic. Routing branches that only inspect `is_some()` (the M2.2b
+        // core-managed fail-closed gates) rely on this in dependent crates.
+        let handle = AuthorityHandle::disconnected();
+        let err = handle.vms().await.unwrap_err();
+        assert!(
+            matches!(err, AuthorityActorError::Unavailable),
+            "got: {err:?}"
+        );
+        let id = cellhv_core_types::OperationId::new("op-disconnected").unwrap();
+        let err2 = handle.operation(id).await.unwrap_err();
+        assert!(
+            matches!(err2, AuthorityActorError::Unavailable),
+            "got: {err2:?}"
+        );
+    }
+
     #[test]
     fn canonical_request_rejects_non_envelope_shapes_without_panicking() {
         // Non-object values are not a canonical envelope at all.

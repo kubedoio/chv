@@ -162,7 +162,7 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         req: Request<proto::ApplyNodeDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         // M2.2b single-writer enforcement: fail closed in core-managed
-        // mode so this legacy legacy node desired-state write side effect can never run behind the
+        // mode so this legacy node desired-state write side effect can never run behind the
         // Core authority (Core M1 does not model it).
         if self.core_authority.is_some() {
             return Err(Status::unimplemented(
@@ -2294,7 +2294,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         req: Request<proto::MigrateVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
         // M2.2b single-writer enforcement: fail closed in core-managed
-        // mode so this legacy legacy live migration side effect can never run behind the
+        // mode so this legacy live migration side effect can never run behind the
         // Core authority (Core M1 does not model it).
         if self.core_authority.is_some() {
             return Err(Status::unimplemented(

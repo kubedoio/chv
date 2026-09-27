@@ -146,7 +146,9 @@ derived from Core execution** — never an independent authority.
   writers/effectors in core modes. Completing the enforcement, every legacy
   `agent_server` gRPC handler that would otherwise write a fragment or drive a
   provider (CH/stord/nwd) side effect FAILS CLOSED in core-managed mode with
-  `unimplemented` — the full set of ~24 legacy effector/desired-state mutators:
+  `unimplemented` — 28 gated legacy effector/desired-state mutators
+  (25 from the M2.2b enforcement below, plus the pre-existing
+  `resize_vm`/`attach_volume`/`detach_volume`):
   the four `apply_*_desired_state` handlers (node/vm/volume/network — direct
   second writers incl. `observed_generation`), `resize_volume` /
   `snapshot_volume` / `restore_volume` / `delete_volume_snapshot` /

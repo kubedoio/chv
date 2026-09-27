@@ -872,6 +872,42 @@ mod tests {
     }
 
     #[test]
+    fn project_vm_projects_distinct_macs_for_duplicate_network_refs() {
+        use cellhv_core_types::NetworkAttachmentRef;
+        // Two NICs on one VM sharing a network_ref (neither requesting a MAC)
+        // must still get DISTINCT deterministic placeholder MACs — the
+        // derivation hashes vm_id + network_ref + attachment_id, so a shared
+        // network_ref cannot collapse both NICs onto one MAC.
+        let mut def = projected_definition("vm-dup");
+        def.networks = vec![
+            NetworkAttachmentRef {
+                attachment_id: "nic-0".to_string(),
+                network_ref: "net-0".to_string(),
+                mac_address: None,
+            },
+            NetworkAttachmentRef {
+                attachment_id: "nic-1".to_string(),
+                network_ref: "net-0".to_string(),
+                mac_address: None,
+            },
+        ];
+        let mut cache = NodeCache::new("node-1");
+        cache.project_vm(&def, "1700000000000".to_string(), "requester".to_string());
+        let frag = cache.get_fragment("vm", "vm-dup").unwrap();
+        let spec =
+            crate::spec::VmSpec::from_json(std::str::from_utf8(&frag.spec_json).unwrap()).unwrap();
+        assert_eq!(spec.nics.len(), 2);
+        let mac0 = &spec.nics[0].mac_address;
+        let mac1 = &spec.nics[1].mac_address;
+        assert!(mac0.starts_with("02:00:00:") && mac1.starts_with("02:00:00:"));
+        assert_ne!(
+            mac0, mac1,
+            "duplicate network_ref NICs must not share a placeholder MAC"
+        );
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
     fn project_vm_maps_power_state_and_defaults_unmodeled_fields() {
         use cellhv_core_types::{NetworkAttachmentRef, RequestedPowerState};
         let mut def = projected_definition("vm-stop");

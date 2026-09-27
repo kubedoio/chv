@@ -77,8 +77,9 @@ impl ProjectingCoreRuntime {
     ///
     /// Returns `true` when a cache mutation was applied (the caller then
     /// persists); `false` when nothing changed — a no-op arm (Update/Attach/
-    /// Detach), or a power-op on a VM with no projected fragment — in which
-    /// case no save happens and the returned `Result` is still unchanged.
+    /// Detach), a power-op on a VM with no projected fragment, or an envelope
+    /// whose VM id disagrees with the durable operation id — in which case no
+    /// save happens and the returned `Result` is still unchanged.
     async fn project(&self, entry: &OperationJournalEntry, request: &CanonicalRequest) -> bool {
         // The durable journal's operation VM id is authoritative for which VM the
         // effector acted on (the executor keys every side effect on it). The
