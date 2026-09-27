@@ -685,7 +685,7 @@ impl NodeCache {
             })).collect::<Vec<_>>(),
             "nics": def.networks.iter().map(|network| serde_json::json!({
                 "network_id": network.network_ref.clone(),
-                "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref)),
+                "mac_address": network.mac_address.clone().unwrap_or_else(|| projected_mac(vm_id, &network.network_ref, &network.attachment_id)),
                 "ip_address": "",
                 "tap_name": "",
                 "cidr": chv_hypervisor_api::resources::DEFAULT_NIC_CIDR,
@@ -755,14 +755,16 @@ impl NodeCache {
 /// observable independently, not via this projected `VmSpec`.
 ///
 /// Format: `02:00:00:HH:HH:HH` — unicast, locally administered — where HH are
-/// the low 24 bits of an FNV-1a hash of `{vm_id}\0{network_ref}`. Deterministic
-/// across restarts (no hasher-state dependency), collision-resistant enough for
-/// a compatibility view.
-fn projected_mac(vm_id: &str, network_ref: &str) -> String {
+/// the low 24 bits of an FNV-1a hash of `{vm_id}\0{network_ref}\0{attachment_id}`.
+/// Deterministic across restarts (no hasher-state dependency), collision-resistant
+/// enough for a compatibility view.
+fn projected_mac(vm_id: &str, network_ref: &str, attachment_id: &str) -> String {
     let mut state: u64 = 0xcbf2_9ce4_8422_2325;
     let mut bytes = vm_id.as_bytes().to_vec();
     bytes.push(0);
     bytes.extend_from_slice(network_ref.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(attachment_id.as_bytes());
     for b in bytes {
         state ^= u64::from(b);
         state = state.wrapping_mul(0x0000_0100_0000_01b3);

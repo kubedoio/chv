@@ -143,15 +143,28 @@ derived from Core execution** — never an independent authority.
   (default true; disabled in core-managed) makes the legacy reconcile path skip
   all three `reconcile_networks/volumes/vms` provider mutations in the
   `TenantReady` arm, so the Core runtime + projection are the only NodeCache
-  writers/effectors in core modes. Completing the enforcement, the legacy
-  `agent_server` gRPC mutators that would otherwise write a fragment or drive a
-  provider side effect behind the Core authority FAIL CLOSED in core-managed
-  mode with `unimplemented`: `apply_vm_desired_state` (direct VM-axis second
-  writer), `apply_volume_desired_state`, `apply_network_desired_state`,
-  `start_network`, `stop_network`, `restart_network`. The lifecycle handlers the
-  control plane needs in core-managed are already core-routed
-  (`create_vm`/`start_vm`/`stop_vm`/`reboot_vm`/`delete_vm`), and `resize_vm` /
-  attach / detach were already gated.
+  writers/effectors in core modes. Completing the enforcement, every legacy
+  `agent_server` gRPC handler that would otherwise write a fragment or drive a
+  provider (CH/stord/nwd) side effect FAILS CLOSED in core-managed mode with
+  `unimplemented` — the full set of ~24 legacy effector/desired-state mutators:
+  the four `apply_*_desired_state` handlers (node/vm/volume/network — direct
+  second writers incl. `observed_generation`), `resize_volume` /
+  `snapshot_volume` / `restore_volume` / `delete_volume_snapshot` /
+  `clone_volume` (stord), `pause_vm` / `resume_vm` / `power_button_vm` /
+  `add_disk` / `remove_device` / `add_net` / `resize_disk` / `snapshot_vm` /
+  `restore_snapshot` / `coredump_vm` / `migrate_vm` (CH live-VM), and
+  `start_network` / `stop_network` / `restart_network` / `update_overlay` /
+  `send_gratuitous_arp` (nwd). **Deliberate boundaries:** the lifecycle handlers
+  the control plane needs in core-managed remain core-routed (`create_vm`/`start_vm`/`stop_vm`/`reboot_vm`/`delete_vm`); `resize_vm` /
+  `attach_volume` / `detach_volume` were already gated; read-only/handshake
+  handlers (`acknowledge_desired_state_version`, `ping_vmm`) remain; and the
+  operator node-state transitions (`pause/resume_node_scheduling`,
+  `drain_node`, `enter/exit_maintenance`) remain available because they manage
+  node-level operational state, not VM/volume/network lifecycle — they do not
+  drive any provider side effect. Consequences (honest): snapshot/restore,
+  migration, live device hot-plug, and storage snapshot/clone are NOT available
+  in core-managed until Core M1+ models them; a call fails loudly
+  (`unimplemented`) instead of running behind the single authority.
 - **Power-op generation staleness residual.** `StartVm`/`StopVm`/`RebootVm`
   project only the desired-state patch (`update_vm_desired_state`); the VM's
   fragment `generation` and attachments are NOT re-projected by these power

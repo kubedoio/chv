@@ -116,10 +116,25 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
     (`reconcile_networks/volumes/vms`) is gated off in core-managed mode via
     `Reconciler::set_provider_mutation_enabled(false)` so the Core runtime is the
     only effector and NodeCache has exactly one writer; completing that
-    enforcement, the legacy `agent_server` desired-state/network RPCs
-    (`apply_vm/volume/network_desired_state`, `start/stop/restart_network`) fail
-    closed (`unimplemented`) in core-managed so no fragment can be written or
-    provider side effect driven behind the Core authority. The startup rebuild
+    enforcement, EVERY legacy `agent_server` fragment-writing / provider-
+    effecting RPC fails closed (`unimplemented`) in core-managed — the four
+    `apply_*_desired_state` handlers, the stord plane (`resize/snapshot/
+    restore_volume`, `delete_volume_snapshot`, `clone_volume`), the live-VM CH
+    plane (`pause/resume_vm`, `power_button_vm`, `add_disk`, `remove_device`,
+    `add_net`, `resize_disk`, `snapshot_vm`, `restore_snapshot`, `coredump_vm`,
+    `migrate_vm`), and the nwd plane (`start/stop/restart_network`,
+    `update_overlay`, `send_gratuitous_arp`) — so no second writer or provider
+    side effect can run behind the Core authority. Deliberate boundaries: the
+    lifecycle handlers the control plane needs stay core-routed
+    (`create_vm`/`start_vm`/`stop_vm`/`reboot_vm`/`delete_vm`); `resize_vm` /
+    `attach_volume` / `detach_volume` were already gated; read-only/handshake
+    handlers remain; and operator node-state transitions
+    (`pause/resume_node_scheduling`, `drain_node`, `enter/exit_maintenance`)
+    remain available (node-level operational state, no provider side effect).
+    Net effect: features Core M1 does not model (snapshot/restore, migration,
+    live device hot-plug, storage snapshot/clone) are unavailable in
+    core-managed and fail loudly rather than acting behind the authority. The
+    startup rebuild
     runs inside `start_core_managed` before the executor poller starts, so no
     crash-recovery op can race the rebuild. CoreNative mode has no
     NodeCache (documented, not wired); legacy mode is untouched.

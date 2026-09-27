@@ -161,6 +161,14 @@ impl proto::reconcile_service_server::ReconcileService for AgentServer {
         &self,
         req: Request<proto::ApplyNodeDesiredStateRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy legacy node desired-state write side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "apply_node_desired_state is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1323,6 +1331,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::ResizeVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy stord volume resize (+ hypervisor disk resize) side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "resize_volume is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1392,6 +1408,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::SnapshotVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy stord volume snapshot side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "snapshot_volume is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1431,6 +1455,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::RestoreVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy stord volume restore side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "restore_volume is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1470,6 +1502,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::DeleteVolumeSnapshotRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy stord volume snapshot delete side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "delete_volume_snapshot is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1509,6 +1549,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::CloneVolumeRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy stord volume clone side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "clone_volume is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1673,6 +1721,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::PauseVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy hypervisor pause side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "pause_vm is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1702,6 +1758,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::ResumeVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy hypervisor resume side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "resume_vm is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1731,6 +1795,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::PowerButtonVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy hypervisor power-button side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "power_button_vm is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1760,6 +1832,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::AddDiskRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy live device topology side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "add_disk is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1798,6 +1878,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::RemoveDeviceRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy live device topology side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "remove_device is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1827,6 +1915,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::AddNetRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy live device topology side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "add_net is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1865,6 +1961,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::ResizeDiskRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy live device topology side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "resize_disk is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1899,6 +2003,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::SnapshotVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy hypervisor snapshot side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "snapshot_vm is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1928,6 +2040,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::RestoreSnapshotRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy hypervisor snapshot restore side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "restore_snapshot is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -1957,6 +2077,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::CoredumpVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy hypervisor coredump side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "coredump_vm is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -2165,6 +2293,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::MigrateVmRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy legacy live migration side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "migrate_vm is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -2384,6 +2520,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::UpdateOverlayRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy nwd overlay update side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "update_overlay is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -2436,6 +2580,14 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
         &self,
         req: Request<proto::SendGratuitousArpRequest>,
     ) -> Result<Response<proto::AckResponse>, Status> {
+        // M2.2b single-writer enforcement: fail closed in core-managed
+        // mode so this legacy nwd gratuitous ARP side effect can never run behind the
+        // Core authority (Core M1 does not model it).
+        if self.core_authority.is_some() {
+            return Err(Status::unimplemented(
+                "send_gratuitous_arp is unsupported in core-managed mode",
+            ));
+        }
         let inner = req.into_inner();
         let meta = inner
             .meta
@@ -3457,5 +3609,163 @@ mod tests {
         .await;
         assert!(resp.is_ok());
         assert_eq!(server.cache.lock().await.node_state, "Bootstrapping");
+    }
+
+    /// Core-managed single-writer enforcement: every legacy VM/storage/network
+    /// effector and desired-state write fails closed with `Unimplemented` when a
+    /// Core authority is attached. The gate runs before the request body is
+    /// inspected, so a degenerate request is sufficient to prove it.
+    #[tokio::test]
+    async fn core_managed_legacy_effectors_fail_closed() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+
+        // ReconcileService desired-state / network-lifecycle surface.
+        let node = proto::reconcile_service_server::ReconcileService::apply_node_desired_state(
+            &server,
+            Request::new(proto::ApplyNodeDesiredStateRequest::default()),
+        )
+        .await;
+        let vm = proto::reconcile_service_server::ReconcileService::apply_vm_desired_state(
+            &server,
+            Request::new(proto::ApplyVmDesiredStateRequest::default()),
+        )
+        .await;
+        let net = proto::lifecycle_service_server::LifecycleService::start_network(
+            &server,
+            Request::new(proto::StartNetworkRequest::default()),
+        )
+        .await;
+        for (name, result) in [
+            ("apply_node_desired_state", node),
+            ("apply_vm_desired_state", vm),
+            ("start_network", net),
+        ] {
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::Unimplemented,
+                "{name} must fail closed in core-managed mode"
+            );
+        }
+
+        // Storage-plane effectors.
+        let resize = proto::lifecycle_service_server::LifecycleService::resize_volume(
+            &server,
+            Request::new(proto::ResizeVolumeRequest::default()),
+        )
+        .await;
+        let snap_vol = proto::lifecycle_service_server::LifecycleService::snapshot_volume(
+            &server,
+            Request::new(proto::SnapshotVolumeRequest::default()),
+        )
+        .await;
+        for (name, result) in [("resize_volume", resize), ("snapshot_volume", snap_vol)] {
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::Unimplemented,
+                "{name} must fail closed in core-managed mode"
+            );
+        }
+
+        // VM/hypervisor effectors.
+        let pause = proto::lifecycle_service_server::LifecycleService::pause_vm(
+            &server,
+            Request::new(proto::PauseVmRequest::default()),
+        )
+        .await;
+        let add_disk = proto::lifecycle_service_server::LifecycleService::add_disk(
+            &server,
+            Request::new(proto::AddDiskRequest::default()),
+        )
+        .await;
+        let migrate = proto::lifecycle_service_server::LifecycleService::migrate_vm(
+            &server,
+            Request::new(proto::MigrateVmRequest::default()),
+        )
+        .await;
+        let coredump = proto::lifecycle_service_server::LifecycleService::coredump_vm(
+            &server,
+            Request::new(proto::CoredumpVmRequest::default()),
+        )
+        .await;
+        for (name, result) in [
+            ("pause_vm", pause),
+            ("add_disk", add_disk),
+            ("migrate_vm", migrate),
+            ("coredump_vm", coredump),
+        ] {
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::Unimplemented,
+                "{name} must fail closed in core-managed mode"
+            );
+        }
+
+        // NWD data-plane effectors.
+        let overlay = proto::lifecycle_service_server::LifecycleService::update_overlay(
+            &server,
+            Request::new(proto::UpdateOverlayRequest::default()),
+        )
+        .await;
+        let arp = proto::lifecycle_service_server::LifecycleService::send_gratuitous_arp(
+            &server,
+            Request::new(proto::SendGratuitousArpRequest::default()),
+        )
+        .await;
+        for (name, result) in [("update_overlay", overlay), ("send_gratuitous_arp", arp)] {
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::Unimplemented,
+                "{name} must fail closed in core-managed mode"
+            );
+        }
+    }
+
+    /// The five Core-routed lifecycle handlers must NOT be gated: with an
+    /// authority attached they enter the Core-routing branch and fail with a
+    /// transport/operation error (here, the disconnected handle), never
+    /// `Unimplemented`. This guards against an over-broad gate breaking the
+    /// control plane's core-managed lifecycle path.
+    #[tokio::test]
+    async fn core_managed_routed_lifecycle_is_not_unimplemented() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        let create = proto::lifecycle_service_server::LifecycleService::create_vm(
+            &server,
+            Request::new(proto::CreateVmRequest::default()),
+        )
+        .await;
+        let start = proto::lifecycle_service_server::LifecycleService::start_vm(
+            &server,
+            Request::new(proto::StartVmRequest::default()),
+        )
+        .await;
+        for (name, result) in [("create_vm", create), ("start_vm", start)] {
+            let err = result.unwrap_err();
+            assert_ne!(
+                err.code(),
+                tonic::Code::Unimplemented,
+                "{name} must stay core-routed (not gated) in core-managed mode"
+            );
+        }
+    }
+
+    /// Node-operator state transitions (drain/maintenance/scheduling) are not
+    /// lifecycle effectors: they must keep working in core-managed mode so
+    /// operators can still drain or maintain a node.
+    #[tokio::test]
+    async fn core_managed_operator_node_state_remains_available() {
+        let mut server = test_server();
+        server.core_authority = Some(cellhv_core_operations::AuthorityHandle::disconnected());
+        let resp = proto::lifecycle_service_server::LifecycleService::drain_node(
+            &server,
+            Request::new(proto::DrainNodeRequest {
+                meta: Some(test_meta("5")),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert!(resp.is_ok());
+        assert_eq!(server.cache.lock().await.node_state, "Draining");
     }
 }

@@ -68,6 +68,19 @@ pub struct AuthorityHandle {
 }
 
 impl AuthorityHandle {
+    /// Creates a handle that is never connected to an authority actor.
+    ///
+    /// Test-only support: the receiver end is dropped immediately, so every
+    /// `submit`/`operation`/`vm`/`vms` call on the returned handle fails
+    /// without blocking. This lets dependent crates unit-test routing branches
+    /// that only inspect `core_authority.is_some()` — e.g. the core-managed
+    /// fail-closed RPC gates — without spinning up the authority runtime.
+    #[doc(hidden)]
+    pub fn disconnected() -> Self {
+        let (sender, _receiver) = async_channel::unbounded();
+        Self { sender }
+    }
+
     pub async fn submit(&self, submission: SubmitMutation) -> Result<AcceptedOperation> {
         let (reply, receive) = oneshot::channel();
         Self::send(

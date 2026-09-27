@@ -1886,11 +1886,15 @@ mod tests {
         )
         .await;
         rec.set_provider_mutation_enabled(false);
-        assert!(rec.run_once().await.is_ok());
-        assert_eq!(rec.current_state().await, NodeState::TenantReady);
-        // A second tick stays healthy as well (no degraded accumulation).
-        assert!(rec.run_once().await.is_ok());
-        assert_eq!(rec.current_state().await, NodeState::TenantReady);
+        // Four ticks with unreachable daemon sockets: an UNGATED reconciler
+        // fails each tick and hits the >=3-tick degraded threshold to flip to
+        // Degraded; with the M2.2b gate off (skip provider mutation), every tick
+        // must stay healthy TenantReady. This makes the test discriminate the
+        // gate instead of passing vacuously.
+        for _ in 0..4 {
+            assert!(rec.run_once().await.is_ok());
+            assert_eq!(rec.current_state().await, NodeState::TenantReady);
+        }
         // The gate must leave the VM axis untouched: reconcile_vms (which would
         // otherwise act on the vm-1 fragment) never ran, so the fragment is
         // unchanged — no removal, no rewrite.

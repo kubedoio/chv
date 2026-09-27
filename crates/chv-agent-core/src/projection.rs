@@ -80,7 +80,23 @@ impl ProjectingCoreRuntime {
     /// Detach), or a power-op on a VM with no projected fragment — in which
     /// case no save happens and the returned `Result` is still unchanged.
     async fn project(&self, entry: &OperationJournalEntry, request: &CanonicalRequest) -> bool {
-        let vm_id = request.command.vm_id().as_str();
+        // The durable journal's operation VM id is authoritative for which VM the
+        // effector acted on (the executor keys every side effect on it). The
+        // envelope command must agree; if it does not, the request row is
+        // internally inconsistent and projecting to either id could hit the
+        // wrong VM — so warn and skip rather than write a wrong-axis entry.
+        let envelope_id = request.command.vm_id();
+        let authoritative_id = &entry.operation.vm_id;
+        if envelope_id != authoritative_id {
+            warn!(
+                operation_id = %entry.operation.id,
+                envelope_vm_id = ?envelope_id,
+                operation_vm_id = ?authoritative_id,
+                "projection: canonical envelope VM id disagrees with the durable operation; skipping projection"
+            );
+            return false;
+        }
+        let vm_id = authoritative_id.as_str();
         let (updated_at, updated_by) = attribution(entry);
         match &request.command {
             MutationCommand::CreateVm { definition } => {
