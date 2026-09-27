@@ -741,8 +741,11 @@ async fn delete_removes_side_effects_entry_after_success() {
 }
 
 /// Build a CreateVm envelope whose `request` carries the given raw definition
-/// JSON, simulating a PRE-JOURNALED row that never passed the authority-side
-/// `VmDefinition::validate` (the runtime Layer-B guard must reject it).
+/// JSON for public-path tests that verify end-to-end rejection of path-unsafe
+/// ids (no side effects, no fs mutation). Layer A (`VmDefinition` serde
+/// try_from → validate) already rejects these inputs at deserialization, so the
+/// Layer-B `is_safe_resource_id`/`verify_vm_dir_within_base` guards are
+/// defense-in-depth, covered only by the dedicated in-crate unit tests.
 fn create_envelope_with_raw_definition(definition: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "command": {

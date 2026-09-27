@@ -82,11 +82,13 @@ RC-lifecycle until the M2.2b/M3 projection work).
   crash-safe and does not persist the handle map.
 - **Crash/restart remediation drill (manual, documented).** After a daemon
   crash leaves volumes open on chv-stord, a running→InspectRequired operation
-  is never auto-cleaned. An operator enumerates leaked sessions via
-  `stord list_volume_sessions` and closes each leaky session with
-  `close_volume` (stord open is idempotent on `(volume, locator)`); NICs are
-  detached via the nwd equivalent. This is the documented manual path until
-  M2.2b/M3 persists handles.
+  is never auto-cleaned. An operator enumerates leaked sessions and closes each
+  leaky session via the chv-stord gRPC RPCs `ListVolumeSessions`/`CloseVolume`
+  (invoked through the storage/service client surface — e.g. a helper script or
+  control-plane admin tooling on the chv-stord socket, not a shell CLI; stord
+  open is idempotent on `(volume, locator)`); NICs are detached via the nwd
+  equivalent. This is the documented manual path until M2.2b/M3 persists
+  handles.
 - **Response-lost-after-commit window.** If chv-stord commits an open
   server-side but the RPC response is dropped (e.g. `RuntimeUnavailable`), the
   runtime never learns the handle and unwinds nothing for it — only the manual

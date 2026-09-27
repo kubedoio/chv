@@ -187,7 +187,19 @@ impl CloudHypervisorCoreRuntime {
             .map_err(Self::map_err)?;
         // Canonicalize and confirm the VM dir is a strict descendant of
         // `{runtime_dir}/vms` (belt-and-braces on top of the id guard).
-        verify_vm_dir_within_base(&vm_dir, &self.runtime_dir.join("vms"))?;
+        if let Err(e) = verify_vm_dir_within_base(&vm_dir, &self.runtime_dir.join("vms")) {
+            // The create never reached any attached resource, so the freshly
+            // created `vm_dir` is stray: remove it best-effort (log-only so a
+            // cleanup failure can never mask the verify failure).
+            if let Err(cleanup_err) = tokio::fs::remove_dir_all(&vm_dir).await {
+                tracing::warn!(
+                    vm_id,
+                    error = %cleanup_err,
+                    "failed to remove stray vm dir after verify failure"
+                );
+            }
+            return Err(e);
+        }
 
         let mut opened_volumes: Vec<(String, String, bool)> = Vec::new();
         let mut attached_nic_ids: Vec<String> = Vec::new();
@@ -511,7 +523,13 @@ impl CloudHypervisorCoreRuntime {
 #[doc(hidden)]
 impl CloudHypervisorCoreRuntime {
     pub fn debug_side_effects_len(&self) -> usize {
-        self.side_effects.lock().map(|map| map.len()).unwrap_or(0)
+        // A poisoned lock is unreachable in production (no panic is taken
+        // while holding the guard); 0 is only the deterministic fallback this
+        // doc-hidden test observer exposes to integration tests.
+        match self.side_effects.lock() {
+            Ok(guard) => guard.len(),
+            Err(_) => 0,
+        }
     }
 }
 
@@ -592,7 +610,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = tmp.path().join("vms");
         std::fs::create_dir_all(&base).expect("create base");
-        std::fs::create_dir_all(&base).expect("create base again");
 
         // A normal strict descendant is accepted.
         let vm_dir = base.join("vm-1");
