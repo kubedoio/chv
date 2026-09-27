@@ -1005,8 +1005,10 @@ dependencies = [
  "async-trait",
  "chv-common",
  "chv-errors",
+ "nix",
  "serde",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

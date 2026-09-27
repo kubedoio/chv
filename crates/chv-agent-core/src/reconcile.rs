@@ -12,6 +12,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+// M2.2a (Decision 1): the pure `bridge_name_for_network` and `vm_runtime_dir`
+// helpers moved verbatim into `chv_hypervisor_api::resources` so the legacy
+// reconcile path and the Core runtime share one definition. They are re-exported
+// here so every existing internal caller (including agent_server.rs) keeps
+// compiling without touching their call sites. The legacy reconcile
+// `prepare_vm_resources`/`cleanup_vm_resources` bodies and call sites are
+// deliberately untouched — that cache-coupled code is scheduled for deletion at
+// M2.3 (reconciler provider-mutation gating), so rewiring it now would be
+// high-risk churn for code being removed.
+pub use chv_hypervisor_api::resources::{bridge_name_for_network, vm_runtime_dir};
+
 /// Maximum number of VMs to reconcile concurrently within a single tick.
 ///
 /// Each parallel slot performs full per-VM work — opening volumes via stord,
@@ -20,31 +31,6 @@ use tracing::{debug, error, info, warn};
 /// nwd connections, so this constant doubles as a bound on per-tick socket
 /// pressure on those daemons.
 const VM_RECONCILE_CONCURRENCY: usize = 8;
-
-/// Construct a bridge name for a network, guaranteed to be <= 15 chars (IFNAMSIZ limit).
-///
-/// For the "default" network, returns "chvbr0". For other networks, returns
-/// "br-{net_id}" if it fits in 15 chars, otherwise truncates net_id and appends
-/// a 4-hex-char hash suffix to avoid collisions: "br-{prefix}{hash}".
-pub(crate) fn bridge_name_for_network(net_id: &str) -> String {
-    if net_id == "default" {
-        return "chvbr0".to_string();
-    }
-    let candidate = format!("br-{}", net_id);
-    if candidate.len() <= 15 {
-        return candidate;
-    }
-    // "br-" (3) + up to 8 chars of net_id + 4-char hash = 15 chars total
-    let prefix: String = net_id.chars().take(8).collect();
-    let hash = {
-        let mut h: u32 = 0x811c9dc5;
-        for b in net_id.as_bytes() {
-            h = h.wrapping_mul(0x01000193) ^ (*b as u32);
-        }
-        format!("{:04x}", h & 0xffff)
-    };
-    format!("br-{}{}", prefix, hash)
-}
 
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
@@ -62,12 +48,6 @@ pub struct Reconciler {
     /// a VM handed off to chv-stord leaves vm_runtime.list() but the transfer
     /// is ongoing.
     migration_registry: Arc<MigrationTaskRegistry>,
-}
-
-/// Returns the per-VM runtime directory for the given VM.
-/// This directory holds the VM's socket, logs, PID file, and other runtime artifacts.
-pub fn vm_runtime_dir(base: &Path, vm_id: &str) -> PathBuf {
-    base.join("vms").join(vm_id)
 }
 
 /// Backoff predicate: should we skip this VM on this tick?
