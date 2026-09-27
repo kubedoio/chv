@@ -111,7 +111,9 @@ RC-lifecycle until the M2.2b/M3 projection work).
   per-NIC addressing — the effector passes empty open options, `None`
   userdata/overrides, and the shared `DEFAULT_NIC_CIDR` with an empty gateway,
   rather than inventing values. Legacy reconcile's cache-coupled
-  prepare/cleanup remains active until its M2.3 deletion.
+  prepare/cleanup remains active as **legacy mode's provider-mutation surface**
+  (kept fully functional under M2.3 — not deleted; core-managed is structurally
+  observe-only, so these bodies cannot run there).
 
 ## NodeCache projection (M2.2b)
 
@@ -138,7 +140,8 @@ derived from Core execution** — never an independent authority.
   crash-recovery operation can never race (and be clobbered by) the rebuild. A
   crash that loses the projection (or its save) is repaired by the next startup
   rebuild; a stale compatibility cache cannot act as a second authority because
-  the legacy Reconciler's provider mutation is gated off in this mode.
+  the legacy Reconciler's provider mutation is impossible in this mode
+  (observe-only construction, below).
 - **Single-writer precondition (structural, M2.3).** The Reconciler's provider
   mutation is impossible in core-managed: the mutation-only state (the VM
   `runtime_dir`) lives in `Reconciler::mutation: Option<LegacyMutation>`, set by

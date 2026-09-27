@@ -75,10 +75,10 @@ async fn start_core_managed(
     // authoritative VM list BEFORE the executor poller starts, so a
     // crash-recovery operation can never race the rebuild (a projection that
     // landed after the snapshot would otherwise be wiped and never re-added
-    // while the Reconciler is gated off). On any open/list/rebuild/save failure
-    // we warn and continue: the Reconciler and the legacy desired-state RPCs
-    // are gated off in core-managed mode, so a stale compatibility cache cannot
-    // silently launch a second authority.
+    // while the Reconciler is observe-only). On any open/list/rebuild/save
+    // failure we warn and continue: the Reconciler and the legacy desired-state
+    // RPCs have no mutation surface in core-managed mode (M2.3), so a stale
+    // compatibility cache cannot silently launch a second authority.
     match activated.service().vms() {
         Ok(rebuild_vms) => {
             let mut cache = cache.lock().await;
@@ -987,7 +987,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
 
-        for vm in reconciler.vm_runtime.list().await {
+        for vm in reconciler.vm_runtime().list().await {
             let mut counters = control_plane_node_api::control_plane_node_api::VmStateReport {
                 node_id: node_id.clone(),
                 vm_id: vm.vm_id.clone(),
@@ -1006,7 +1006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if vm.runtime_status == "Running" {
-                if let Ok(c) = reconciler.vm_runtime.vm_counters(&vm.vm_id).await {
+                if let Ok(c) = reconciler.vm_runtime().vm_counters(&vm.vm_id).await {
                     counters.cpu_percent = c.cpu_percent;
                     counters.memory_bytes_used = c.memory_bytes_used as i64;
                     counters.memory_bytes_total = c.memory_bytes_total as i64;
@@ -1155,7 +1155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ms = metrics_state.lock().await;
             ms.node_id = cache.lock().await.node_id.clone();
             ms.node_state = reconciler.current_state().await.as_str().to_string();
-            ms.vm_count = reconciler.vm_runtime.list().await.len();
+            ms.vm_count = reconciler.vm_runtime().list().await.len();
             ms.tick_count = tick_count;
             ms.reconcile_failures = consecutive_reconcile_failures;
             ms.health_failures = consecutive_health_failures;

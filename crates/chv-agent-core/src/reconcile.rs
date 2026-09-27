@@ -45,7 +45,13 @@ const VM_RECONCILE_CONCURRENCY: usize = 8;
 
 pub struct Reconciler {
     pub cache: Arc<tokio::sync::Mutex<NodeCache>>,
-    pub vm_runtime: VmRuntime,
+    /// Hypervisor handle used for node-state/observation (`list`, `vm_counters`)
+    /// and by the legacy `reconcile_*` mutation methods. Private: exposed only
+    /// through the read-only `vm_runtime()` accessor, so an observe-only
+    /// (core-managed) Reconciler does not leak a mutation-capable handle on its
+    /// public surface (the mutation methods themselves additionally fail closed
+    /// at their first statement).
+    vm_runtime: VmRuntime,
     /// stord socket — used by the node-state health probes (all modes) and by
     /// the legacy `reconcile_*` mutation methods (legacy mode only). Private:
     /// accessors are not exposed; mutation is additionally gated by `mutation`.
@@ -178,6 +184,14 @@ impl Reconciler {
 
     pub async fn current_state(&self) -> NodeState {
         self.cache.lock().await.current_node_state()
+    }
+
+    /// Read-only access to the hypervisor handle, for observation (node-state
+    /// metrics/reporting: `list`, `vm_counters`). Mutation flows exclusively
+    /// through the Core runtime in core-managed and through the legacy
+    /// `reconcile_*` methods (first-statement gated) in legacy mode.
+    pub fn vm_runtime(&self) -> &VmRuntime {
+        &self.vm_runtime
     }
 
     pub async fn transition_state(&self, to: NodeState) -> Result<NodeState, ChvError> {
