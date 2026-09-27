@@ -798,14 +798,14 @@ impl CloudHypervisorAdapter for ProcessCloudHypervisorAdapter {
             );
         }
 
-        // The child is now being handed to the vm process map, which owns the
-        // rest of its lifecycle (stop/delete call start_kill explicitly). Disarm
-        // the ChildGuard so a normal drop of a registered VmProcess (e.g.
-        // runtime teardown) does not SIGKILL a VM that is deliberately left
-        // running.
-        let child = child.disarm();
-
+        // Acquire the vm-process-map lock while the guard is still armed so a
+        // cancellation landing on this await still SIGKILLs the child; then
+        // disarm and insert with no intervening await. From here the map owns
+        // lifecycle (stop/delete call start_kill explicitly) and a normal drop
+        // of a registered VmProcess (e.g. runtime teardown) does not SIGKILL a
+        // VM that is deliberately left running.
         let mut map = self.vms.write().await;
+        let child = child.disarm();
         map.insert(
             config.vm_id.clone(),
             VmProcess {

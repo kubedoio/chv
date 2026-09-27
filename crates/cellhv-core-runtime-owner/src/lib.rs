@@ -39,6 +39,8 @@ pub enum RuntimeOwnerError {
     },
     #[error("Core runtime shutdown failures: {0:?}")]
     Shutdown(Vec<RuntimeStageFailure>),
+    #[error("invalid journal poller configuration: {:?}", .0)]
+    InvalidPollerConfig(JournalPollerConfig),
 }
 
 #[derive(Debug, Error)]
@@ -169,9 +171,17 @@ impl CoreRuntimeOwner {
         poller: JournalPollerConfig,
     ) -> Result<Self> {
         let (service, kind, runtime_guard, provenance) = activated.into_runtime_parts();
-        debug_assert!(poller.scan_interval > Duration::ZERO);
-        debug_assert!(poller.scan_timeout > Duration::ZERO);
-        debug_assert!(poller.drain_budget > Duration::ZERO);
+        // Fail-closed on nonsensical timings: in release builds a zero
+        // scan_interval would spin at max rate, a zero scan_timeout would mark
+        // the journal permanently unhealthy, and a zero drain budget would
+        // force-abort every shutdown. None of the production defaults (or test
+        // knobs) are zero, so this only fires on hard misconfiguration.
+        if poller.scan_interval == Duration::ZERO
+            || poller.scan_timeout == Duration::ZERO
+            || poller.drain_budget == Duration::ZERO
+        {
+            return Err(RuntimeOwnerError::InvalidPollerConfig(poller));
+        }
         validate_native_only(kind, &provenance)?;
         let (authority, actor_join) = AuthorityActor::spawn(service, queue_capacity)?;
         let execution = authority.execution_handle();
@@ -858,5 +868,50 @@ mod tests {
         assert!(owner.journal_scan_healthy());
         assert_eq!(owner.journal_scan_failures(), 0);
         owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_rejects_zero_duration_poller_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = paths(&directory);
+        let socket = directory.path().join("core.sock");
+        let invalid = [
+            JournalPollerConfig {
+                scan_interval: Duration::ZERO,
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::from_secs(1),
+            },
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::ZERO,
+                drain_budget: Duration::from_secs(1),
+            },
+            JournalPollerConfig {
+                scan_interval: Duration::from_millis(40),
+                scan_timeout: Duration::from_secs(1),
+                drain_budget: Duration::ZERO,
+            },
+        ];
+        for cfg in invalid {
+            let result = CoreRuntimeOwner::start(
+                std::sync::Arc::new(DummyRuntime),
+                fresh(&paths, "native-host"),
+                &socket,
+                16,
+                Duration::from_secs(1),
+                cfg,
+            )
+            .await;
+            // Fail-closed: a zero timing must be rejected up front, not behave
+            // divergently in a release build (spin, always-unhealthy, or
+            // force-abort on shutdown).
+            match result {
+                Ok(_owner) => panic!("zero-duration config must be rejected: {cfg:?}"),
+                Err(error) => assert!(
+                    matches!(error, RuntimeOwnerError::InvalidPollerConfig(_)),
+                    "expected InvalidPollerConfig for {cfg:?}, got {error:?}"
+                ),
+            }
+        }
     }
 }
