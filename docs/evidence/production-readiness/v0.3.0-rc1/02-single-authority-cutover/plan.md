@@ -143,15 +143,27 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
     folded into the Core runtime in M2.2a; the deliberate 2a scope boundary kept the
     cache-coupled legacy path untouched).
     > **Status: COMPLETE.** Merged `befa5129` (PR #260, evidence
-    > `m2.2b-nodecache-projection.md`). M2.2 is now **COMPLETE**; M2.3
-    > (delete the now-gated legacy mutation paths) is next.
-- **M2.3 — Remove the second authority.** Delete the now-dead legacy provider-
-  mutation code paths (prepare/cleanup resources, reconcile_vms/volumes/networks
-  mutation) that M2.2b gated off in core modes; the Reconciler becomes
-  observe/health only for core-managed. Legacy mode remains available for
-  migration but is not the campaign target.
-  > **Status: NEXT (active).** All deferred deletions are now gated off
-  > (M2.2b) and are safe to remove; legacy-mode behavior must be preserved.
+    > `m2.2b-nodecache-projection.md`). M2.2 is now **COMPLETE**.
+- **M2.3 — Remove the second authority (structural; legacy preserved).** Replaces
+  the runtime `provider_mutation` flag/setter with an **immutable construction-time
+  mutation surface**: `Reconciler::mutation: Option<LegacyMutation>` (mutation-only
+  VM `runtime_dir`), `Reconciler::new_legacy` as the *only* mutation-capable
+  constructor (explicit opt-in, renamed from the neutral `new`), and
+  `Reconciler::new_observe_only` for core-managed (no mutation state, no setter).
+  `reconcile_networks/volumes/vms` fail closed at their first statement
+  (`require_mutation`), so the Reconciler is observe/health-only for core-managed.
+  At the 28 M2.2b `agent_server` fail-closed gates: unchanged. `cmd/chv-agent`
+  composes via an **exhaustive `AgentAuthorityMode` match**
+  (`CoreManaged → observe-only`, `Legacy → legacy`, `CoreNative → unreachable!`),
+  making a future mode variant a compile error rather than a silent mutation
+  default. The plan's original "delete the now-dead legacy mutation paths"
+  framing was superseded by the campaign decision **not to break legacy mode**:
+  the legacy mutation bodies (`prepare_vm_resources`/`cleanup_vm_resources`,
+  `reconcile_vms/volumes/networks`) are **retained** as legacy mode's mutation
+  surface (a supported migration path, out of campaign scope) and are
+  structurally unreachable in core-managed.
+  > **Status: COMPLETE.** Merged `ef1f9330` (PR #261, evidence
+  > `m2.3-observe-only-reconciler.md`). M2.3 done; M2.4 is next.
 - **M2.4 — Fault-injection + concurrency/replay matrix.** Deterministic fault
   points: (1) before durable acceptance; (2) after acceptance, before provider
   effect; (3) during/after provider effect; (4) before compatibility projection
@@ -161,6 +173,7 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   generation cannot override newer accepted state; ambiguous ownership fails
   closed for destructive recovery; control-plane restart is not VM identity
   authority.
+  > **Status: NEXT (active).**
 - **M2.5 — Real-KVM qualification.** Install pinned cloud-hypervisor (v43.0) +
   a minimal guest on this box (`/dev/kvm` present). Run
   Create/Start/Stop/Reboot/Delete plus a crash/restart replay scenario through
@@ -172,19 +185,20 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
 | Criterion | Evidence |
 |---|---|
 | Exactly one durable authority accepts lifecycle mutations | M2.1/M2.3 code + tests |
-| Production legacy handlers route through Core before provider side effects | M2.1/M2.3 (adapter routed in M2.2a; Reconciler gated in M2.2b) |
+| Production legacy handlers route through Core before provider side effects | M2.1/M2.3 (adapter routed in M2.2a; 28 legacy RPC gates M2.2b; Reconciler observe-only in M2.3) |
 | Compatibility state derived or crash-consistent | M2.2b (NodeCache projection, rebuild from Core) |
 | Required audit/idempotency/version metadata durable | M2.1b schema migration 0004 + tests (merged `297cb904`) |
 | Crash/fault-injection matrix passes | M2.4 |
 | Concurrent duplicate + conflict tests pass | M2.4 |
 | Real-KVM lifecycle/restart/replay evidence passes | M2.5 (or unproven + gap) |
 | Architecture/spec/guards describe the production path | this plan + spec updates (adapter/journal/owner docs un-staled) |
-| Dead mutation paths removed only after compat no longer needs them | M2.3 |
+| Second authority structurally impossible in production config | M2.3 (observe-only construction; exhaustive mode match; first-statement fail-closed mutation methods) |
 
 ## 5. Scope & non-scope
 
 - **In scope:** Core acceptance+execution authority; executor wiring; adapter-
-  bound legacy; NodeCache projection; Reconciler gating; durable metadata;
+  bound legacy; NodeCache projection; Reconciler observe-only single-authority
+  (M2.3); durable metadata;
   fault-injection and concurrency/replay tests; real-KVM attempt.
 - **Deferred / non-scope (unchanged):** `resize/attach/detach` Core support
   (currently `unimplemented!`) stays out unless required by the supported
