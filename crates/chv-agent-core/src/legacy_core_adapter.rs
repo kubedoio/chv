@@ -12,7 +12,7 @@ use cellhv_core_operations::{MutationCommand, SubmitMutation};
 use cellhv_core_types::{
     BootSpec, ComputeSpec, IdempotencyKey, NetworkAttachmentRef, ObservedPowerState, OperationId,
     OperationRequestMetadata, RequestedPowerState, ResourceVersion, StorageAttachmentRef,
-    VmDefinition, VmId,
+    VmDefinition, VmId, LEGACY_OPERATION_ID_PREFIX,
 };
 use cellhv_nodecache_migration::{legacy_network_attachment_id, legacy_storage_attachment_id};
 use chv_errors::ChvError;
@@ -105,7 +105,7 @@ pub fn adapt_legacy_vm_mutation(
 
     let submission = SubmitMutation {
         operation_id: OperationId::new(format!(
-            "legacy:{SCOPE_PREFIX}:node:{}:{node_id}:vm:{}:{vm_id}:operation:{}:{}",
+            "{LEGACY_OPERATION_ID_PREFIX}{SCOPE_PREFIX}:node:{}:{node_id}:vm:{}:{vm_id}:operation:{}:{}",
             node_id.len(),
             vm_id.as_str().len(),
             meta.operation_id.len(),
@@ -597,7 +597,9 @@ mod tests {
         assert!(operations[1]["operation"]["id"]
             .as_str()
             .unwrap()
-            .starts_with("legacy:control-plane-node.v1:"));
+            .starts_with(&format!(
+                "{LEGACY_OPERATION_ID_PREFIX}control-plane-node.v1:"
+            )));
 
         drop(app);
         authority.shutdown().await.unwrap();
