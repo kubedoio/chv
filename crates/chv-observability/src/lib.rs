@@ -43,6 +43,17 @@ pub const CHV_MIGRATION_DIRTY_BLOCKS: &str = "chv_migration_dirty_blocks";
 // Overlay metrics
 pub const CHV_VXLAN_FDB_ENTRIES: &str = "chv_vxlan_fdb_entries";
 
+// ---------------------------------------------------------------------------
+// nwd fabric datapath observability (ADR-021)
+// ---------------------------------------------------------------------------
+// Counters incremented by the chv-nwd handlers wherever a fabric overlay is
+// applied or removed (ensure path, UpdateOverlay path, teardown paths).
+// Labels:
+//   * `result` — one of: `success`, `failure`
+// ---------------------------------------------------------------------------
+pub const NWD_FABRIC_APPLY_TOTAL: &str = "nwd_fabric_apply_total";
+pub const NWD_FABRIC_REMOVE_TOTAL: &str = "nwd_fabric_remove_total";
+
 // eBPF metrics
 pub const CHV_EBPF_PACKETS_TOTAL: &str = "chv_ebpf_packets_total";
 pub const CHV_EBPF_BYTES_TOTAL: &str = "chv_ebpf_bytes_total";
@@ -167,6 +178,18 @@ impl Metrics {
     /// are implemented in chv-stord (see docs/production-readiness-report.md P0 #7).
     pub fn set_migration_dirty_blocks(&self, blocks: f64) {
         metrics::gauge!(CHV_MIGRATION_DIRTY_BLOCKS).set(blocks);
+    }
+
+    /// Increment the fabric overlay apply counter (`nwd_fabric_apply_total`).
+    /// `result` must be `"success"` or `"failure"`.
+    pub fn increment_nwd_fabric_apply(&self, result: &'static str) {
+        metrics::counter!(NWD_FABRIC_APPLY_TOTAL, "result" => result).increment(1);
+    }
+
+    /// Increment the fabric overlay remove counter (`nwd_fabric_remove_total`).
+    /// `result` must be `"success"` or `"failure"`.
+    pub fn increment_nwd_fabric_remove(&self, result: &'static str) {
+        metrics::counter!(NWD_FABRIC_REMOVE_TOTAL, "result" => result).increment(1);
     }
 
     /// Set current FDB entry count for a VXLAN network.

@@ -4,6 +4,7 @@ use chv_nwd_api::chv_nwd_api::{FabricPlan, OverlayType, TopologySpec};
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -12,9 +13,26 @@ use tracing::{info, warn};
 use crate::fabric::{AppliedFabric, FabricHandle, FabricIdentity};
 
 // Metric names for network daemon operations.
-const NWD_FDB_ERRORS_TOTAL: &str = "chv_nwd_fdb_errors_total";
 const NWD_NFT_ERRORS_TOTAL: &str = "chv_nwd_nft_errors_total";
 const NWD_DHCP_ERRORS_TOTAL: &str = "chv_nwd_dhcp_errors_total";
+
+/// MTU a bridge-only topology runs at: a fresh bridge-only ensure never
+/// sets an MTU, so the kernel default for a new bridge (1500) is the
+/// authoritative value. Used to reset a previously fabric-backed bridge
+/// when it is re-ensured bridge-only (m7 residue).
+const BRIDGE_ONLY_DEFAULT_MTU: u32 = 1500;
+
+/// Poll interval of the bounded dnsmasq exit wait (m8 race).
+const DNSMASQ_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Budget for the bounded dnsmasq exit wait after SIGTERM (m8 race):
+/// dnsmasq runs with `bind-interfaces`, so a replacement started while
+/// the old process still holds the listen address fails with
+/// NetworkUnavailable ("address already in use") — after the fabric
+/// re-apply already succeeded.
+const DNSMASQ_EXIT_TERM_BUDGET: Duration = Duration::from_secs(2);
+/// Brief final wait after SIGKILL, so a fast re-ensure still finds the
+/// listen address free in the common case.
+const DNSMASQ_EXIT_KILL_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct TopologyApplyResult {
@@ -26,12 +44,58 @@ pub struct TopologyApplyResult {
     /// Fabric plan generation applied by the fabric path, for stale-plan
     /// fencing on later updates. `None` for bridge-only topologies.
     pub fabric_plan_generation: Option<u64>,
+    /// VNI binding generation applied by the fabric path (ADR-021 §8), for
+    /// stale-binding fencing on later updates. `None` for bridge-only
+    /// topologies.
+    pub binding_generation: Option<u64>,
 }
 
+/// Overlay status as observed by the stretched-L2 fabric path (ADR-021).
+/// `fdb_entry_count` reports the network's head-end-replication flood
+/// peers; the legacy per-VTEP FDB datapath was retired by ADR-021.
 #[derive(Debug, Clone)]
 pub struct OverlayStatusInfo {
     pub vxlan_interface_up: bool,
     pub fdb_entry_count: u32,
+}
+
+/// Outcome of a topology delete (n11): the overall `Result` of
+/// `NetworkExecutor::delete_topology` reports the LOCAL teardown, while
+/// the fabric-half teardown is fail-open inside the executor and its
+/// outcome is reported separately — so the handler can count
+/// `nwd_fabric_remove_total` truthfully instead of proxying it from the
+/// aggregate result (the old approximation counted a fabric success even
+/// when the fail-open fabric removal had failed, and counted a fabric
+/// failure on a purely local teardown error).
+///
+/// `fabric_removed` is:
+/// - `None` — no fabric teardown was attempted: the topology had no
+///   applied fabric plan, or the fabric provider is disabled in nwd
+///   configuration (the executor already warns; there is no removal
+///   whose outcome could be counted);
+/// - `Some(Ok(()))` — the fabric overlay was removed;
+/// - `Some(Err(e))` — removal was attempted and failed; local teardown
+///   continued (fail-open for teardown only — apply stays fail-closed)
+///   and the residue stays visible via the provider ownership journal.
+#[derive(Debug)]
+pub struct DeleteOutcome {
+    pub fabric_removed: Option<Result<(), ChvError>>,
+}
+
+/// Result of a fabric ownership probe (used by the no-state-row delete
+/// path, M3): distinguishes "the enabled provider holds no entry" from
+/// "the provider is disabled in configuration", so the residue case
+/// (fabric applied, nwd restarted with the fabric provider disabled,
+/// delete) is loudly visible instead of a silent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FabricOwnership {
+    /// The provider's durable ownership journal holds the network.
+    Owned,
+    /// The provider is enabled and holds no entry for the network.
+    NotOwned,
+    /// The fabric provider is disabled in nwd configuration: ownership
+    /// cannot be observed in this process.
+    ProviderDisabled,
 }
 
 #[async_trait]
@@ -42,7 +106,7 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         &self,
         network_id: &str,
         state: &crate::state::TopologyState,
-    ) -> Result<(), ChvError>;
+    ) -> Result<DeleteOutcome, ChvError>;
 
     async fn health(
         &self,
@@ -118,42 +182,8 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         exposure_id: &str,
     ) -> Result<(), ChvError>;
 
-    // --- VXLAN overlay methods ---
-
-    async fn create_vxlan_interface(
-        &self,
-        namespace: &str,
-        bridge_name: &str,
-        vni: u32,
-        vtep_ip: &str,
-        vtep_port: u32,
-    ) -> Result<(), ChvError>;
-
-    async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError>;
-
-    async fn add_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        vtep_ip: &str,
-    ) -> Result<(), ChvError>;
-
-    async fn delete_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        vtep_ip: &str,
-    ) -> Result<(), ChvError>;
-
-    async fn replace_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        new_vtep_ip: &str,
-    ) -> Result<(), ChvError>;
+    // --- Gratuitous ARP (ADR-021: flushes stale MAC/ARP caches after a
+    // migration; the fabric's kernel MAC learning repopulates them) ---
 
     async fn send_gratuitous_arp(
         &self,
@@ -161,19 +191,6 @@ pub trait NetworkExecutor: Send + Sync + 'static {
         bridge_name: &str,
         vm_ip: &str,
     ) -> Result<(), ChvError>;
-
-    async fn set_arp_suppression(
-        &self,
-        namespace: &str,
-        vni: u32,
-        enabled: bool,
-    ) -> Result<(), ChvError>;
-
-    async fn get_overlay_status(
-        &self,
-        namespace: &str,
-        vni: u32,
-    ) -> Result<OverlayStatusInfo, ChvError>;
 
     // --- Stretched-L2 fabric methods (ADR-021) ---
 
@@ -192,12 +209,40 @@ pub trait NetworkExecutor: Send + Sync + 'static {
     /// preserves the WireGuard key). Called before local topology teardown.
     async fn remove_fabric_overlay(&self, network_id: &str) -> Result<(), ChvError>;
 
+    /// Whether the fabric provider's durable ownership journal holds an
+    /// entry for this network — used by the delete path to clean fabric
+    /// residue after an nwd restart wiped the topology table. Returns
+    /// [`FabricOwnership::ProviderDisabled`] when the provider is
+    /// disabled in configuration, so the caller can warn about the
+    /// unobservable residue instead of silently no-op'ing.
+    async fn fabric_owned(&self, network_id: &str) -> Result<FabricOwnership, ChvError>;
+
     /// The node's public fabric identity (WireGuard public key + measured
     /// underlay MTU). Fails closed when the fabric provider is disabled.
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError>;
 
     /// Observed fabric overlay status for a network.
     async fn fabric_overlay_status(&self, network_id: &str) -> Result<OverlayStatusInfo, ChvError>;
+
+    /// Re-assert the tenant MTU of a running topology on the bridge and
+    /// every currently enslaved port, then restart the network's dnsmasq
+    /// so DHCP option 26 advertises the new value (m8). Only invoked on
+    /// an MTU change.
+    ///
+    /// `None` resets a previously fabric-backed topology to the
+    /// bridge-only defaults (m7 residue): the bridge and ports are set
+    /// to [`BRIDGE_ONLY_DEFAULT_MTU`] and dnsmasq is restarted WITHOUT
+    /// DHCP option 26, matching what a fresh bridge-only ensure leaves
+    /// behind.
+    #[allow(clippy::too_many_arguments)]
+    async fn reassert_tenant_mtu(
+        &self,
+        network_id: &str,
+        bridge_name: &str,
+        subnet_cidr: &str,
+        gateway_ip: &str,
+        tenant_mtu: Option<u32>,
+    ) -> Result<(), ChvError>;
 }
 
 /// A service exposure tracked by the executor so the DNAT forward-accept rule
@@ -288,6 +333,20 @@ impl LinuxExecutor {
         ]
     }
 
+    /// Host-namespace command sequence re-asserting the tenant MTU on the
+    /// bridge and every currently enslaved port (m8). `owned` is the
+    /// bridge plus its members as resolved by
+    /// [`LinuxExecutor::owned_ifaces_for_bridge`]; the fabric consumer
+    /// veth is a bridge member, so it is covered by the enumeration (the
+    /// provider also re-asserts it on apply).
+    fn port_mtu_commands(owned_ifaces: &[String], tenant_mtu: u32) -> Vec<Vec<String>> {
+        let mtu = tenant_mtu.to_string();
+        owned_ifaces
+            .iter()
+            .map(|dev| string_args(&["link", "set", "dev", dev, "mtu", mtu.as_str()]))
+            .collect()
+    }
+
     async fn run_ip(args: &[&str]) -> Result<(), ChvError> {
         let out = Command::new("ip")
             .args(args)
@@ -311,35 +370,6 @@ impl LinuxExecutor {
         Ok(())
     }
 
-    async fn run_ip_netns(namespace: &str, args: &[&str]) -> Result<(), ChvError> {
-        let mut full_args = vec!["netns", "exec", namespace, "ip"];
-        full_args.extend_from_slice(args);
-        Self::run_ip(&full_args).await
-    }
-
-    async fn run_bridge_netns(namespace: &str, args: &[&str]) -> Result<(), ChvError> {
-        let out = Command::new("ip")
-            .args(["netns", "exec", namespace, "bridge"])
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| ChvError::Io {
-                path: "bridge".to_string(),
-                source: e,
-            })?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if stderr.contains("File exists") || stderr.contains("already exists") {
-                return Ok(());
-            }
-            return Err(ChvError::NetworkUnavailable {
-                resource: "bridge".to_string(),
-                reason: format!("bridge {} failed: {}", args.join(" "), stderr),
-            });
-        }
-        Ok(())
-    }
-
     async fn run_cmd_netns_output(
         namespace: &str,
         cmd: &str,
@@ -354,55 +384,6 @@ impl LinuxExecutor {
                 path: cmd.to_string(),
                 source: e,
             })
-    }
-
-    fn vxlan_interface_name(vni: u32) -> String {
-        format!("vxlan{}", vni)
-    }
-
-    /// Detect the correct inner MTU for VXLAN tunnels.
-    /// VXLAN overhead is 50 bytes (14 outer Ethernet + 20 IP + 8 UDP + 8 VXLAN).
-    /// Reads the default route interface MTU and subtracts overhead.
-    async fn detect_inner_mtu() -> u32 {
-        const VXLAN_OVERHEAD: u32 = 50;
-        const DEFAULT_MTU: u32 = 1450;
-
-        let output = match Command::new("ip")
-            .args(["route", "show", "default"])
-            .output()
-            .await
-        {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-            _ => return DEFAULT_MTU,
-        };
-
-        // Parse "default via X.X.X.X dev eth0" to get the device name
-        let dev = output.split_whitespace().skip_while(|w| *w != "dev").nth(1);
-
-        let dev = match dev {
-            Some(d) => d.to_string(),
-            None => return DEFAULT_MTU,
-        };
-
-        // Get the outer interface MTU
-        let mtu_output = match Command::new("ip")
-            .args(["link", "show", "dev", &dev])
-            .output()
-            .await
-        {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-            _ => return DEFAULT_MTU,
-        };
-
-        // Parse "mtu NNNN" from output
-        let outer_mtu = mtu_output
-            .split_whitespace()
-            .skip_while(|w| *w != "mtu")
-            .nth(1)
-            .and_then(|m| m.parse::<u32>().ok())
-            .unwrap_or(1500);
-
-        outer_mtu.saturating_sub(VXLAN_OVERHEAD)
     }
 
     async fn bridge_exists(name: &str) -> bool {
@@ -699,19 +680,52 @@ impl LinuxExecutor {
         Ok((range_start, range_end, netmask))
     }
 
-    async fn is_dnsmasq_running(pid_path: &std::path::Path) -> bool {
-        let Ok(pid_str) = tokio::fs::read_to_string(pid_path).await else {
-            return false;
-        };
-        let Ok(pid) = pid_str.trim().parse::<i32>() else {
-            return false;
-        };
+    async fn read_pid_file(pid_path: &std::path::Path) -> Option<i32> {
+        let pid_str = tokio::fs::read_to_string(pid_path).await.ok()?;
+        pid_str.trim().parse::<i32>().ok()
+    }
+
+    /// Whether the process with `pid` is alive (`kill -0` semantics).
+    async fn process_alive(pid: i32) -> bool {
         Command::new("kill")
             .args(["-0", &pid.to_string()])
             .output()
             .await
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// Bounded wait for a signalled process to actually exit (m8 race):
+    /// dnsmasq runs with `bind-interfaces`, so a replacement started
+    /// while the old process still holds the listen address fails with
+    /// NetworkUnavailable ("address already in use") — after the fabric
+    /// re-apply already succeeded. Polls `is_alive` every
+    /// [`DNSMASQ_EXIT_POLL_INTERVAL`] until it reports the process gone
+    /// or `budget` elapses. Returns `true` when the process exited within
+    /// the budget. The closure indirection keeps the wait logic
+    /// unit-testable without a real process.
+    async fn wait_for_process_exit<F, Fut>(mut is_alive: F, budget: Duration) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            if !is_alive().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(DNSMASQ_EXIT_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn is_dnsmasq_running(pid_path: &std::path::Path) -> bool {
+        match Self::read_pid_file(pid_path).await {
+            Some(pid) => Self::process_alive(pid).await,
+            None => false,
+        }
     }
 
     async fn start_dnsmasq(
@@ -806,7 +820,42 @@ impl LinuxExecutor {
         let conf_path = runtime_dir.join(format!("dnsmasq-{}.conf", network_id));
         let hosts_path = runtime_dir.join(format!("dnsmasq-{}.hosts", network_id));
 
+        // SIGTERM, then a bounded wait for the process to actually exit
+        // before the pid file is removed (m8 race): dnsmasq uses
+        // bind-interfaces, so an immediate restart (the MTU re-assert
+        // path) or a fast re-ensure after this delete would fail to bind
+        // the listen address while the old process is still tearing down.
+        let pid = Self::read_pid_file(&pid_path).await;
         Self::signal_by_pid_file(&pid_path, "-TERM").await;
+        if let Some(pid) = pid {
+            let exited =
+                Self::wait_for_process_exit(|| Self::process_alive(pid), DNSMASQ_EXIT_TERM_BUDGET)
+                    .await;
+            if !exited {
+                warn!(
+                    network_id = %network_id,
+                    pid,
+                    "dnsmasq did not exit within the bounded wait after SIGTERM; sending SIGKILL"
+                );
+                // Accepted-risk: the pid is not re-validated against the
+                // pid file (or via pidfd) before SIGKILL, so a pid reused
+                // by an unrelated process inside the <=2s+250ms window
+                // could take the kill. The window is bounded and the pid
+                // was ours when read; harden with pidfd if this ever
+                // bites in practice.
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .output()
+                    .await;
+                // One final brief wait so a fast re-ensure still finds
+                // the listen address free in the common case.
+                let _ = Self::wait_for_process_exit(
+                    || Self::process_alive(pid),
+                    DNSMASQ_EXIT_KILL_BUDGET,
+                )
+                .await;
+            }
+        }
 
         let _ = tokio::fs::remove_file(&pid_path).await;
         let _ = tokio::fs::remove_file(&conf_path).await;
@@ -975,6 +1024,38 @@ impl NetworkExecutor for LinuxExecutor {
             "ensuring topology"
         );
 
+        // Fail closed on a fabric plan that cannot be realized (m6):
+        // symmetric with the missing-plan error below — a plan with
+        // vni == 0 or a non-VXLAN overlay type is never silently skipped,
+        // which would desynchronize the datapath from the desired state.
+        if spec.fabric.is_some() {
+            if spec.vni == 0 {
+                return Err(ChvError::InvalidArgument {
+                    field: "vni".to_string(),
+                    reason: format!(
+                        "fabric plan present for network {} but vni is 0; \
+                         a fabric overlay requires a nonzero VNI",
+                        spec.network_id
+                    ),
+                });
+            }
+            if spec.overlay_type != OverlayType::OverlayVxlan as i32 {
+                return Err(ChvError::InvalidArgument {
+                    field: "overlay_type".to_string(),
+                    reason: format!(
+                        "fabric plan present for network {} but overlay_type is {} \
+                         ({}), not OVERLAY_VXLAN ({})",
+                        spec.network_id,
+                        spec.overlay_type,
+                        OverlayType::try_from(spec.overlay_type)
+                            .map(|t| t.as_str_name())
+                            .unwrap_or("unknown"),
+                        OverlayType::OverlayVxlan as i32
+                    ),
+                });
+            }
+        }
+
         // Bridge
         if !Self::bridge_exists(&spec.bridge_name).await {
             Self::run_ip(&["link", "add", &spec.bridge_name, "type", "bridge"]).await?;
@@ -1014,6 +1095,7 @@ impl NetworkExecutor for LinuxExecutor {
         // never configured and the executor failed closed).
         let mut tenant_mtu = None;
         let mut fabric_plan_generation = None;
+        let mut binding_generation = None;
         if spec.vni > 0 && spec.overlay_type == OverlayType::OverlayVxlan as i32 {
             let fabric_plan = spec
                 .fabric
@@ -1036,6 +1118,7 @@ impl NetworkExecutor for LinuxExecutor {
             );
             tenant_mtu = Some(applied.tenant_mtu);
             fabric_plan_generation = Some(applied.plan_generation);
+            binding_generation = Some(applied.binding_generation);
         }
 
         // Start dnsmasq for DHCP
@@ -1066,6 +1149,7 @@ impl NetworkExecutor for LinuxExecutor {
             bridge_handle: spec.bridge_name.clone(),
             tenant_mtu,
             fabric_plan_generation,
+            binding_generation,
         })
     }
 
@@ -1073,7 +1157,7 @@ impl NetworkExecutor for LinuxExecutor {
         &self,
         network_id: &str,
         state: &crate::state::TopologyState,
-    ) -> Result<(), ChvError> {
+    ) -> Result<DeleteOutcome, ChvError> {
         let _guard = self.nft_lock.lock().await;
         info!(
             network_id = %network_id,
@@ -1086,32 +1170,42 @@ impl NetworkExecutor for LinuxExecutor {
         // tenant bridge enslaves the fabric's consumer veth, so the fabric
         // network objects must be removed before local teardown. The shared
         // fabric and the WireGuard key survive (ADR-021 §4).
+        //
+        // Teardown is fail-open for the fabric half only (m5): a persistent
+        // fabric error — or a fabric provider disabled in configuration
+        // after the overlay was applied — must not block dnsmasq/netns/
+        // bridge/nft cleanup forever. The residue stays visible via the
+        // provider's durable ownership journal, and the apply path remains
+        // fail-closed. The fabric-half outcome is reported through
+        // `DeleteOutcome` so the handler can count the remove metric
+        // truthfully (n11) instead of proxying it from this aggregate
+        // result.
+        let mut fabric_removed = None;
         if state.fabric_plan_generation.is_some() {
-            self.remove_fabric_overlay(network_id).await?;
+            match self.fabric.as_ref() {
+                None => {
+                    warn!(
+                        network_id = %network_id,
+                        "fabric provider disabled in nwd configuration; skipping fabric \
+                         teardown (residue remains visible via the provider ownership journal)"
+                    );
+                }
+                Some(fabric) => match fabric.remove_network(network_id).await {
+                    Ok(()) => fabric_removed = Some(Ok(())),
+                    Err(e) => {
+                        warn!(
+                            network_id = %network_id,
+                            error = %e,
+                            "fabric overlay removal failed; continuing local topology \
+                             teardown (fail-open for teardown only — apply stays fail-closed)"
+                        );
+                        fabric_removed = Some(Err(e));
+                    }
+                },
+            }
         }
 
         Self::stop_dnsmasq(network_id).await;
-
-        // Tear down VXLAN interface and FDB entries before removing namespace
-        if let Some(vni) = state.vni {
-            // Delete FDB entries for all peer VTEPs
-            for vtep_ip in &state.peer_vteps {
-                if let Err(e) = self
-                    .delete_fdb_entry(&state.namespace_name, vni, "00:00:00:00:00:00", vtep_ip)
-                    .await
-                {
-                    warn!(vtep_ip = %vtep_ip, error = %e, "failed to delete FDB entry during topology teardown");
-                }
-            }
-
-            // Delete the VXLAN interface
-            if let Err(e) = self
-                .delete_vxlan_interface(&state.namespace_name, vni)
-                .await
-            {
-                warn!(vni = vni, error = %e, "failed to delete VXLAN interface during topology teardown");
-            }
-        }
 
         if Self::namespace_exists(&state.namespace_name).await {
             if let Err(e) = Self::run_ip(&["netns", "del", &state.namespace_name]).await {
@@ -1131,7 +1225,7 @@ impl NetworkExecutor for LinuxExecutor {
         // Drop remembered service exposures for this network.
         self.exposures.remove(network_id);
 
-        Ok(())
+        Ok(DeleteOutcome { fabric_removed })
     }
 
     async fn health(
@@ -1407,134 +1501,8 @@ impl NetworkExecutor for LinuxExecutor {
         Ok(())
     }
 
-    // --- VXLAN overlay implementations ---
-
-    async fn create_vxlan_interface(
-        &self,
-        namespace: &str,
-        bridge_name: &str,
-        vni: u32,
-        vtep_ip: &str,
-        vtep_port: u32,
-    ) -> Result<(), ChvError> {
-        // Defense-in-depth: VNI is a 24-bit field
-        if vni > 16_777_215 {
-            return Err(ChvError::InvalidArgument {
-                field: "vni".to_string(),
-                reason: format!("VNI {} exceeds maximum 16777215", vni),
-            });
-        }
-
-        let iface = Self::vxlan_interface_name(vni);
-        let vni_str = vni.to_string();
-        let port_str = vtep_port.to_string();
-
-        // Create VXLAN interface in the default namespace first
-        Self::run_ip(&[
-            "link",
-            "add",
-            &iface,
-            "type",
-            "vxlan",
-            "id",
-            &vni_str,
-            "local",
-            vtep_ip,
-            "dstport",
-            &port_str,
-            "nolearning",
-        ])
-        .await?;
-
-        // Move interface to the namespace
-        Self::run_ip(&["link", "set", &iface, "netns", namespace]).await?;
-
-        // Set MTU (VXLAN overhead = 50 bytes: 8 VXLAN + 8 UDP + 20 IP + 14 Ethernet)
-        let mtu = Self::detect_inner_mtu().await;
-        let mtu_str = mtu.to_string();
-        Self::run_ip_netns(namespace, &["link", "set", &iface, "mtu", &mtu_str]).await?;
-
-        // Attach to bridge inside the namespace
-        Self::run_ip_netns(namespace, &["link", "set", &iface, "master", bridge_name]).await?;
-
-        // Set bridge MTU to match
-        Self::run_ip_netns(namespace, &["link", "set", bridge_name, "mtu", &mtu_str]).await?;
-
-        // Bring up the interface
-        Self::run_ip_netns(namespace, &["link", "set", &iface, "up"]).await?;
-
-        info!(namespace = %namespace, vni = vni, vtep_ip = %vtep_ip, mtu = mtu, "VXLAN interface created");
-        Ok(())
-    }
-
-    async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError> {
-        let iface = Self::vxlan_interface_name(vni);
-        Self::run_ip_netns(namespace, &["link", "del", &iface]).await?;
-        info!(namespace = %namespace, vni = vni, "VXLAN interface deleted");
-        Ok(())
-    }
-
-    async fn add_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        let iface = Self::vxlan_interface_name(vni);
-        Self::run_bridge_netns(
-            namespace,
-            &["fdb", "append", mac_address, "dev", &iface, "dst", vtep_ip],
-        )
-        .await
-        .inspect_err(|_e| {
-            metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "add").increment(1);
-        })
-    }
-
-    async fn delete_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        let iface = Self::vxlan_interface_name(vni);
-        Self::run_bridge_netns(
-            namespace,
-            &["fdb", "del", mac_address, "dev", &iface, "dst", vtep_ip],
-        )
-        .await
-        .inspect_err(|_e| {
-            metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "delete").increment(1);
-        })
-    }
-
-    async fn replace_fdb_entry(
-        &self,
-        namespace: &str,
-        vni: u32,
-        mac_address: &str,
-        new_vtep_ip: &str,
-    ) -> Result<(), ChvError> {
-        let iface = Self::vxlan_interface_name(vni);
-        Self::run_bridge_netns(
-            namespace,
-            &[
-                "fdb",
-                "replace",
-                mac_address,
-                "dev",
-                &iface,
-                "dst",
-                new_vtep_ip,
-            ],
-        )
-        .await
-        .inspect_err(|_e| {
-            metrics::counter!(NWD_FDB_ERRORS_TOTAL, "operation" => "replace").increment(1);
-        })
-    }
+    // --- Gratuitous ARP (ADR-021: flushes stale MAC/ARP caches after a
+    // migration; the fabric's kernel MAC learning repopulates them) ---
 
     async fn send_gratuitous_arp(
         &self,
@@ -1553,53 +1521,6 @@ impl NetworkExecutor for LinuxExecutor {
             warn!(namespace = %namespace, vm_ip = %vm_ip, error = %stderr, "gratuitous ARP failed");
         }
         Ok(())
-    }
-
-    async fn set_arp_suppression(
-        &self,
-        namespace: &str,
-        vni: u32,
-        enabled: bool,
-    ) -> Result<(), ChvError> {
-        let iface = Self::vxlan_interface_name(vni);
-        let value = if enabled { "on" } else { "off" };
-        Self::run_bridge_netns(
-            namespace,
-            &["link", "set", "dev", &iface, "neigh_suppress", value],
-        )
-        .await?;
-        info!(namespace = %namespace, vni = vni, enabled = enabled, "ARP suppression set");
-        Ok(())
-    }
-
-    async fn get_overlay_status(
-        &self,
-        namespace: &str,
-        vni: u32,
-    ) -> Result<OverlayStatusInfo, ChvError> {
-        let iface = Self::vxlan_interface_name(vni);
-
-        // Check if VXLAN interface exists and is up
-        let link_out =
-            Self::run_cmd_netns_output(namespace, "ip", &["link", "show", &iface]).await?;
-        let link_stdout = String::from_utf8_lossy(&link_out.stdout);
-        let vxlan_interface_up = link_out.status.success() && link_stdout.contains("UP");
-
-        // Count FDB entries
-        let fdb_out =
-            Self::run_cmd_netns_output(namespace, "bridge", &["fdb", "show", "dev", &iface])
-                .await?;
-        let fdb_entry_count = if fdb_out.status.success() {
-            let stdout = String::from_utf8_lossy(&fdb_out.stdout);
-            stdout.lines().count() as u32
-        } else {
-            0
-        };
-
-        Ok(OverlayStatusInfo {
-            vxlan_interface_up,
-            fdb_entry_count,
-        })
     }
 
     // --- Stretched-L2 fabric implementations (ADR-021) ---
@@ -1630,6 +1551,22 @@ impl NetworkExecutor for LinuxExecutor {
         fabric.remove_network(network_id).await
     }
 
+    async fn fabric_owned(&self, network_id: &str) -> Result<FabricOwnership, ChvError> {
+        match self.fabric.as_ref() {
+            // Provider disabled in configuration: this process holds (and
+            // can observe) no fabric state — the caller must warn instead
+            // of treating this as "not owned" (silent no-op).
+            None => Ok(FabricOwnership::ProviderDisabled),
+            Some(fabric) => {
+                if fabric.fabric_owned(network_id).await? {
+                    Ok(FabricOwnership::Owned)
+                } else {
+                    Ok(FabricOwnership::NotOwned)
+                }
+            }
+        }
+    }
+
     async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
         let fabric = self.fabric_handle()?;
         fabric.identity().await
@@ -1639,12 +1576,65 @@ impl NetworkExecutor for LinuxExecutor {
         let fabric = self.fabric_handle()?;
         fabric.overlay_status(network_id).await
     }
+
+    async fn reassert_tenant_mtu(
+        &self,
+        network_id: &str,
+        bridge_name: &str,
+        subnet_cidr: &str,
+        gateway_ip: &str,
+        tenant_mtu: Option<u32>,
+    ) -> Result<(), ChvError> {
+        // Serialize with topology create/delete so the port enumeration
+        // cannot race a concurrent enslavement.
+        let _guard = self.nft_lock.lock().await;
+        // `None` resets a previously fabric-backed bridge to the
+        // bridge-only default (m7 residue): a fresh bridge-only ensure
+        // never sets an MTU, so the kernel default for a new bridge is
+        // the authoritative value.
+        let effective_mtu = tenant_mtu.unwrap_or(BRIDGE_ONLY_DEFAULT_MTU);
+        match tenant_mtu {
+            Some(tenant_mtu) => info!(
+                network_id = %network_id,
+                bridge = %bridge_name,
+                tenant_mtu,
+                "tenant MTU changed; re-asserting bridge/port MTUs and restarting dnsmasq"
+            ),
+            None => info!(
+                network_id = %network_id,
+                bridge = %bridge_name,
+                default_mtu = effective_mtu,
+                "fabric overlay removed; resetting bridge/port MTUs to the bridge-only \
+                 default and restarting dnsmasq without DHCP option 26"
+            ),
+        }
+
+        // (a) Re-assert the bridge MTU and the MTU of every port currently
+        // enslaved to it (TAPs and the fabric consumer veth alike).
+        let owned = Self::owned_ifaces_for_bridge(bridge_name).await?;
+        for args in Self::port_mtu_commands(&owned, effective_mtu) {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            Self::run_ip(&refs).await?;
+        }
+
+        // (b) Restart dnsmasq so the rewritten config takes effect: with
+        // `Some(mtu)` the new DHCP option 26 advertises it, with `None`
+        // the option is dropped entirely (bridge-only default).
+        // start_dnsmasq early-returns while the old instance is still
+        // running; stop_dnsmasq bounded-waits for the old process to exit
+        // so the restart cannot fail on "address already in use" (m8).
+        if !subnet_cidr.is_empty() && !gateway_ip.is_empty() {
+            Self::stop_dnsmasq(network_id).await;
+            Self::start_dnsmasq(network_id, bridge_name, subnet_cidr, gateway_ip, tenant_mtu)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     #[test]
     fn linux_executor_implements_network_executor() {
@@ -1765,6 +1755,48 @@ mod tests {
     }
 
     #[test]
+    fn port_mtu_commands_cover_bridge_and_every_enslaved_port() {
+        let commands = LinuxExecutor::port_mtu_commands(
+            &[
+                "br-net-1".to_string(),
+                "chv-c-0123abcd".to_string(),
+                "tap-12ab".to_string(),
+            ],
+            1400,
+        );
+        assert_eq!(
+            commands,
+            vec![
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "dev".to_string(),
+                    "br-net-1".to_string(),
+                    "mtu".to_string(),
+                    "1400".to_string(),
+                ],
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "dev".to_string(),
+                    "chv-c-0123abcd".to_string(),
+                    "mtu".to_string(),
+                    "1400".to_string(),
+                ],
+                vec![
+                    "link".to_string(),
+                    "set".to_string(),
+                    "dev".to_string(),
+                    "tap-12ab".to_string(),
+                    "mtu".to_string(),
+                    "1400".to_string(),
+                ],
+            ],
+            "the MTU must be re-asserted on the bridge and every enslaved port"
+        );
+    }
+
+    #[test]
     fn tap_name_is_stable_and_linux_safe_length() {
         let nic_id = "95f4f899-58b9-44b6-95f5-0f35a2e590a6-default-network";
         let a = LinuxExecutor::tap_name_for_nic(nic_id);
@@ -1772,6 +1804,215 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.len() <= 15, "tap name exceeds Linux IFNAMSIZ: {}", a);
         assert!(a.starts_with("tap-"));
+    }
+
+    // ---- fabric plan present but unrealizable (m6) -------------------------
+
+    fn vxlan_spec_with_fabric(vni: u32, overlay_type: i32) -> TopologySpec {
+        TopologySpec {
+            network_id: "net-m6".to_string(),
+            tenant_id: "t1".to_string(),
+            bridge_name: "br-m6".to_string(),
+            namespace_name: "ns-m6".to_string(),
+            subnet_cidr: "10.0.60.0/24".to_string(),
+            gateway_ip: "10.0.60.1".to_string(),
+            options: Default::default(),
+            vni,
+            vtep_endpoints: vec![],
+            overlay_type,
+            fabric: Some(FabricPlan::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_plan_with_zero_vni_is_rejected_fail_closed() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        // Validation happens before any host command, so this is safe to
+        // run unprivileged.
+        let err = executor
+            .ensure_topology(&vxlan_spec_with_fabric(0, OverlayType::OverlayVxlan as i32))
+            .await
+            .expect_err("fabric plan with vni 0 must be rejected");
+        match err {
+            ChvError::InvalidArgument { field, reason } => {
+                assert_eq!(field, "vni");
+                assert!(reason.contains("vni is 0"), "got: {reason}");
+            }
+            other => panic!("expected InvalidArgument, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_plan_with_non_vxlan_overlay_type_is_rejected_fail_closed() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        let err = executor
+            .ensure_topology(&vxlan_spec_with_fabric(
+                100,
+                OverlayType::OverlayNone as i32,
+            ))
+            .await
+            .expect_err("fabric plan with a non-VXLAN overlay type must be rejected");
+        match err {
+            ChvError::InvalidArgument { field, reason } => {
+                assert_eq!(field, "overlay_type");
+                assert!(reason.contains("OVERLAY_VXLAN"), "got: {reason}");
+            }
+            other => panic!("expected InvalidArgument, got {:?}", other),
+        }
+    }
+
+    // ---- fabric teardown is fail-open in the delete path (m5) --------------
+
+    /// Fabric handle whose every operation fails; used to prove the delete
+    /// path completes local teardown despite persistent fabric errors.
+    struct FailingFabricHandle;
+
+    #[async_trait]
+    impl crate::fabric::FabricHandle for FailingFabricHandle {
+        async fn apply(
+            &self,
+            _network_id: &str,
+            _vni: u32,
+            _plan: &FabricPlan,
+        ) -> Result<AppliedFabric, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric apply deliberately failing".to_string(),
+            })
+        }
+
+        async fn remove_network(&self, _network_id: &str) -> Result<(), ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric remove deliberately failing".to_string(),
+            })
+        }
+
+        async fn identity(&self) -> Result<FabricIdentity, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric identity deliberately failing".to_string(),
+            })
+        }
+
+        async fn consumer_veth(&self, _network_id: &str) -> Result<String, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric consumer veth deliberately failing".to_string(),
+            })
+        }
+
+        async fn fabric_owned(&self, _network_id: &str) -> Result<bool, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric ownership deliberately failing".to_string(),
+            })
+        }
+
+        async fn overlay_status(&self, _network_id: &str) -> Result<OverlayStatusInfo, ChvError> {
+            Err(ChvError::Internal {
+                reason: "fabric status deliberately failing".to_string(),
+            })
+        }
+    }
+
+    fn fabric_backed_state() -> crate::state::TopologyState {
+        crate::state::TopologyState {
+            network_id: "net-m5".to_string(),
+            tenant_id: "t1".to_string(),
+            bridge_name: "br-m5-nonexistent".to_string(),
+            namespace_name: "ns-m5-nonexistent".to_string(),
+            subnet_cidr: "10.0.61.0/24".to_string(),
+            gateway_ip: "10.0.61.1".to_string(),
+            runtime_status: "ensured".to_string(),
+            vni: Some(100),
+            tenant_mtu: Some(1380),
+            fabric_plan_generation: Some(1),
+            binding_generation: Some(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_topology_continues_local_teardown_when_fabric_removal_fails() {
+        let executor =
+            LinuxExecutor::new(std::env::temp_dir()).with_fabric(Arc::new(FailingFabricHandle));
+        // Local teardown targets objects that do not exist on this host, so
+        // every local step is a no-op — the assertion is that the fabric
+        // failure does NOT abort the delete (previously it failed forever).
+        let outcome = executor
+            .delete_topology("net-m5", &fabric_backed_state())
+            .await
+            .expect("delete must succeed despite persistent fabric errors");
+        // The fabric-half failure must be reported truthfully (n11) so the
+        // handler can count the remove metric as a failure.
+        assert!(
+            matches!(outcome.fabric_removed, Some(Err(_))),
+            "a failed fabric removal must surface in the DeleteOutcome, got {:?}",
+            outcome.fabric_removed
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_topology_skips_fabric_removal_when_provider_disabled() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        let outcome = executor
+            .delete_topology("net-m5", &fabric_backed_state())
+            .await
+            .expect("delete must succeed when the fabric provider is disabled");
+        // No teardown was attempted (the provider cannot even be asked), so
+        // there is no removal outcome to count.
+        assert!(outcome.fabric_removed.is_none());
+    }
+
+    #[tokio::test]
+    async fn fabric_owned_reports_provider_disabled_when_disabled() {
+        let executor = LinuxExecutor::new(std::env::temp_dir());
+        assert_eq!(
+            executor
+                .fabric_owned("net-1")
+                .await
+                .expect("ownership lookup must not fail when disabled"),
+            FabricOwnership::ProviderDisabled,
+            "a disabled provider cannot observe ownership — the caller must warn, \
+             not treat it as not-owned"
+        );
+    }
+
+    // ---- bounded dnsmasq exit wait (m8 race) --------------------------------
+
+    #[tokio::test]
+    async fn wait_for_process_exit_returns_true_once_the_checker_reports_gone() {
+        // The "process" reports alive for the first 3 probes, then exits.
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = probes.clone();
+        let exited = LinuxExecutor::wait_for_process_exit(
+            move || {
+                let p = seen.clone();
+                async move { p.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 }
+            },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(
+            exited,
+            "the wait must succeed once the checker reports gone"
+        );
+        assert!(
+            probes.load(std::sync::atomic::Ordering::Relaxed) >= 4,
+            "the checker must have been polled past the last alive report"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_process_exit_gives_up_at_the_budget_when_never_exiting() {
+        let started = std::time::Instant::now();
+        let exited =
+            LinuxExecutor::wait_for_process_exit(|| async { true }, Duration::from_millis(50))
+                .await;
+        assert!(
+            !exited,
+            "a process that never exits must exhaust the budget, not hang"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wait must give up at (not far past) the budget, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1787,326 +2028,6 @@ mod tests {
                 "--conf-file=/run/chv/nwd/dnsmasq-net.conf".to_string(),
                 "--pid-file=/run/chv/nwd/dnsmasq-net.pid".to_string(),
             ]
-        );
-    }
-
-    /// Mock executor that tracks VXLAN-related calls for verifying delete_topology behavior.
-    struct VxlanTrackingExecutor {
-        delete_vxlan_calls: Mutex<Vec<(String, u32)>>,
-        delete_fdb_calls: Mutex<Vec<(String, u32, String, String)>>,
-    }
-
-    impl VxlanTrackingExecutor {
-        fn new() -> Self {
-            Self {
-                delete_vxlan_calls: Mutex::new(Vec::new()),
-                delete_fdb_calls: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl NetworkExecutor for VxlanTrackingExecutor {
-        async fn ensure_topology(
-            &self,
-            _spec: &TopologySpec,
-        ) -> Result<TopologyApplyResult, ChvError> {
-            unimplemented!()
-        }
-
-        async fn delete_topology(
-            &self,
-            _network_id: &str,
-            state: &crate::state::TopologyState,
-        ) -> Result<(), ChvError> {
-            // Replicate the VXLAN teardown logic from LinuxExecutor
-            if let Some(vni) = state.vni {
-                for vtep_ip in &state.peer_vteps {
-                    self.delete_fdb_entry(&state.namespace_name, vni, "00:00:00:00:00:00", vtep_ip)
-                        .await?;
-                }
-                self.delete_vxlan_interface(&state.namespace_name, vni)
-                    .await?;
-            }
-            Ok(())
-        }
-
-        async fn health(
-            &self,
-            _network_id: &str,
-            _state: &crate::state::TopologyState,
-        ) -> Result<String, ChvError> {
-            unimplemented!()
-        }
-
-        async fn attach_vm_nic(
-            &self,
-            _network_id: &str,
-            _nic_id: &str,
-            _vm_id: &str,
-            _bridge_name: &str,
-            _tenant_mtu: Option<u32>,
-            _mac_address: &str,
-            _ip_address: &str,
-        ) -> Result<(String, String), ChvError> {
-            unimplemented!()
-        }
-
-        async fn detach_vm_nic(
-            &self,
-            _nic_id: &str,
-            _ownership: chv_common::AttachmentOwnership,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn set_firewall_policy(
-            &self,
-            _network_id: &str,
-            _policy_version: &str,
-            _policy_json: &[u8],
-            _bridge_name: &str,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn set_nat_policy(
-            &self,
-            _network_id: &str,
-            _policy_version: &str,
-            _policy_json: &[u8],
-            _bridge_name: &str,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn ensure_dhcp_scope(
-            &self,
-            _network_id: &str,
-            _cidr: &str,
-            _range_start: &str,
-            _range_end: &str,
-            _dns_servers: &[String],
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn ensure_dns_scope(
-            &self,
-            _network_id: &str,
-            _forwarders: &[&str],
-            _static_records: &std::collections::HashMap<String, String>,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn expose_service(
-            &self,
-            _network_id: &str,
-            _exposure_id: &str,
-            _protocol: &str,
-            _external_port: u32,
-            _target_ip: &str,
-            _target_port: u32,
-            _mode: &str,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn withdraw_service_exposure(
-            &self,
-            _network_id: &str,
-            _exposure_id: &str,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn create_vxlan_interface(
-            &self,
-            _namespace: &str,
-            _bridge_name: &str,
-            _vni: u32,
-            _vtep_ip: &str,
-            _vtep_port: u32,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn delete_vxlan_interface(&self, namespace: &str, vni: u32) -> Result<(), ChvError> {
-            self.delete_vxlan_calls
-                .lock()
-                .unwrap()
-                .push((namespace.to_string(), vni));
-            Ok(())
-        }
-
-        async fn add_fdb_entry(
-            &self,
-            _namespace: &str,
-            _vni: u32,
-            _mac_address: &str,
-            _vtep_ip: &str,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn delete_fdb_entry(
-            &self,
-            namespace: &str,
-            vni: u32,
-            mac_address: &str,
-            vtep_ip: &str,
-        ) -> Result<(), ChvError> {
-            self.delete_fdb_calls.lock().unwrap().push((
-                namespace.to_string(),
-                vni,
-                mac_address.to_string(),
-                vtep_ip.to_string(),
-            ));
-            Ok(())
-        }
-
-        async fn replace_fdb_entry(
-            &self,
-            _namespace: &str,
-            _vni: u32,
-            _mac_address: &str,
-            _new_vtep_ip: &str,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn send_gratuitous_arp(
-            &self,
-            _namespace: &str,
-            _bridge_name: &str,
-            _vm_ip: &str,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn set_arp_suppression(
-            &self,
-            _namespace: &str,
-            _vni: u32,
-            _enabled: bool,
-        ) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn get_overlay_status(
-            &self,
-            _namespace: &str,
-            _vni: u32,
-        ) -> Result<OverlayStatusInfo, ChvError> {
-            unimplemented!()
-        }
-
-        async fn apply_fabric_overlay(
-            &self,
-            _network_id: &str,
-            _vni: u32,
-            _plan: &FabricPlan,
-            _bridge_name: &str,
-        ) -> Result<AppliedFabric, ChvError> {
-            unimplemented!()
-        }
-
-        async fn remove_fabric_overlay(&self, _network_id: &str) -> Result<(), ChvError> {
-            unimplemented!()
-        }
-
-        async fn fabric_identity(&self) -> Result<FabricIdentity, ChvError> {
-            unimplemented!()
-        }
-
-        async fn fabric_overlay_status(
-            &self,
-            _network_id: &str,
-        ) -> Result<OverlayStatusInfo, ChvError> {
-            unimplemented!()
-        }
-    }
-
-    #[tokio::test]
-    async fn delete_topology_with_vni_cleans_up_vxlan() {
-        let executor = VxlanTrackingExecutor::new();
-        let state = crate::state::TopologyState {
-            network_id: "net-vxlan".to_string(),
-            tenant_id: "t1".to_string(),
-            bridge_name: "br-net-vxlan".to_string(),
-            namespace_name: "ns-net-vxlan".to_string(),
-            subnet_cidr: "10.0.0.0/24".to_string(),
-            gateway_ip: "10.0.0.1".to_string(),
-            runtime_status: "ensured".to_string(),
-            vni: Some(100),
-            peer_vteps: vec!["192.168.1.10".to_string(), "192.168.1.11".to_string()],
-            tenant_mtu: None,
-            fabric_plan_generation: None,
-        };
-
-        executor.delete_topology("net-vxlan", &state).await.unwrap();
-
-        // Should have deleted FDB entries for each peer VTEP
-        let fdb_deletes = executor.delete_fdb_calls.lock().unwrap();
-        assert_eq!(fdb_deletes.len(), 2);
-        assert_eq!(
-            fdb_deletes[0],
-            (
-                "ns-net-vxlan".to_string(),
-                100,
-                "00:00:00:00:00:00".to_string(),
-                "192.168.1.10".to_string()
-            )
-        );
-        assert_eq!(
-            fdb_deletes[1],
-            (
-                "ns-net-vxlan".to_string(),
-                100,
-                "00:00:00:00:00:00".to_string(),
-                "192.168.1.11".to_string()
-            )
-        );
-
-        // Should have deleted the VXLAN interface
-        let vxlan_deletes = executor.delete_vxlan_calls.lock().unwrap();
-        assert_eq!(vxlan_deletes.len(), 1);
-        assert_eq!(vxlan_deletes[0], ("ns-net-vxlan".to_string(), 100));
-    }
-
-    #[tokio::test]
-    async fn delete_topology_without_vni_skips_vxlan() {
-        let executor = VxlanTrackingExecutor::new();
-        let state = crate::state::TopologyState {
-            network_id: "net-plain".to_string(),
-            tenant_id: "t1".to_string(),
-            bridge_name: "br-net-plain".to_string(),
-            namespace_name: "ns-net-plain".to_string(),
-            subnet_cidr: "10.0.0.0/24".to_string(),
-            gateway_ip: "10.0.0.1".to_string(),
-            runtime_status: "ensured".to_string(),
-            vni: None,
-            peer_vteps: Vec::new(),
-            tenant_mtu: None,
-            fabric_plan_generation: None,
-        };
-
-        executor.delete_topology("net-plain", &state).await.unwrap();
-
-        // No VXLAN cleanup should occur
-        let fdb_deletes = executor.delete_fdb_calls.lock().unwrap();
-        assert_eq!(
-            fdb_deletes.len(),
-            0,
-            "no FDB deletes expected when vni is None"
-        );
-
-        let vxlan_deletes = executor.delete_vxlan_calls.lock().unwrap();
-        assert_eq!(
-            vxlan_deletes.len(),
-            0,
-            "no VXLAN delete expected when vni is None"
         );
     }
 

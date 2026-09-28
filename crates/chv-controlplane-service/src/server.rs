@@ -58,9 +58,14 @@ impl proto::enrollment_service_server::EnrollmentService for EnrollmentServer {
     ) -> Result<Response<proto::EnrollmentResponse>, Status> {
         let op_id = extract_op_id(&request).unwrap_or_default();
         let _span = tracing::info_span!("enroll_node", %op_id);
+        // Transport-level peer address: the enrollment path derives the
+        // node's fabric underlay endpoint from it (see
+        // EnrollmentService::enroll_node). Must be read before
+        // `into_inner()` consumes the request.
+        let peer_addr = request.remote_addr();
         let resp = self
             .service
-            .enroll_node(request.into_inner())
+            .enroll_node(request.into_inner(), peer_addr)
             .instrument(_span)
             .await
             .map_err(tonic::Status::from)?;
@@ -133,9 +138,13 @@ impl proto::inventory_service_server::InventoryService for InventoryServer {
             .unwrap_or_default();
         enforce_peer_node_id(&request, asserted, "report_node_inventory")?;
         let _span = tracing::info_span!("report_node_inventory", %op_id);
+        // Transport-level peer address: used to derive the node's fabric
+        // underlay endpoint (see InventoryService::report_node_inventory).
+        // Must be read before `into_inner()` consumes the request.
+        let peer_addr = request.remote_addr();
         let resp = self
             .service
-            .report_node_inventory(request.into_inner())
+            .report_node_inventory(request.into_inner(), peer_addr)
             .instrument(_span)
             .await
             .map_err(|e| {

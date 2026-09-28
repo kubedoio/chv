@@ -11,14 +11,19 @@ pub struct TopologyState {
     pub gateway_ip: String,
     pub runtime_status: String,
     pub vni: Option<u32>,
-    /// Tracked peer VTEP IPs for FDB reconciliation on topology updates.
-    pub peer_vteps: Vec<String>,
     /// Tenant MTU applied by the fabric path (DHCP option 26, bridge/TAP
     /// MTU). `None` for bridge-only topologies.
     pub tenant_mtu: Option<u32>,
     /// Last applied fabric plan generation for stale-plan fencing
     /// (ADR-021 §4). `None` for bridge-only topologies.
     pub fabric_plan_generation: Option<u64>,
+    /// VNI binding generation of the last applied fabric plan (from
+    /// `vni_allocations.binding_generation`, ADR-021 §8). A VNI re-bind
+    /// bumps this while `desired_generation` (and therefore
+    /// `fabric_plan_generation`) stays put, so it fences stale bindings
+    /// that the plan generation alone cannot detect. `None` for
+    /// bridge-only topologies.
+    pub binding_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,9 +69,9 @@ mod tests {
             gateway_ip: "10.0.0.1".to_string(),
             runtime_status: "ensured".to_string(),
             vni: None,
-            peer_vteps: Vec::new(),
             tenant_mtu: None,
             fabric_plan_generation: None,
+            binding_generation: None,
         }
     }
 

@@ -44,6 +44,25 @@ const FABRIC_IP_NETWORK_BASE: u32 = (100 << 24) | (100 << 16);
 const FABRIC_IP_FIRST: u32 = FABRIC_IP_NETWORK_BASE + 1;
 const FABRIC_IP_LAST: u32 = FABRIC_IP_NETWORK_BASE + 65_534;
 
+/// Bounded retry budget when two concurrent registrations race for the
+/// same fabric transport IP and one loses on the unique index
+/// (migration 0054). Each attempt re-reads the used-address set, so a
+/// loser's next attempt skips the address the winner committed.
+const FABRIC_IP_ALLOCATION_ATTEMPTS: usize = 5;
+
+/// True when a store error is a unique-index violation on
+/// `vtep_registry.fabric_ip` (migration 0054). SQLite surfaces unique
+/// violations as database errors whose message names the constraint.
+fn is_fabric_ip_unique_violation(err: &StoreError) -> bool {
+    match err {
+        StoreError::Database(sqlx::Error::Database(db)) => {
+            let msg = db.message();
+            msg.contains("UNIQUE constraint failed") && msg.contains("vtep_registry.fabric_ip")
+        }
+        _ => false,
+    }
+}
+
 impl VtepRepository {
     pub fn new(pool: StorePool) -> Self {
         Self { pool }
@@ -157,10 +176,73 @@ impl VtepRepository {
     /// fabric transport IP from 100.100.0.0/16.
     ///
     /// `underlay_mtu == 0` (the proto default for "not measured") is stored
-    /// as NULL. `underlay_endpoint` is only overwritten when `Some`, so a
-    /// later identity re-report without an endpoint never erases one
-    /// registered by a more specific path.
+    /// as NULL.
+    ///
+    /// `underlay_endpoint` follows FIRST-REGISTRATION-WINS: the stored
+    /// value is only written when the node does not have one yet (insert,
+    /// or previously NULL). The control-plane callers derive it from the
+    /// observed gRPC peer address, which can change between connections
+    /// when the node is reached through an LB/proxy/VPN — a transient
+    /// proxy address on a re-report must not silently replace a
+    /// previously-good endpoint (all nodes behind one shared proxy would
+    /// otherwise converge on the proxy's address). A node whose stored
+    /// endpoint is wrong needs an operator-initiated store correction
+    /// (no in-tree tooling for that yet); the fabric plan compiler only
+    /// fails closed on a NULL or unparseable endpoint — a plausible but
+    /// stale one still compiles, and the overlay simply stays
+    /// unreachable until the store is corrected.
+    ///
+    /// FORWARD-COMPAT: first-wins is a stopgap for peer-derived
+    /// endpoints. When agents begin self-reporting their underlay
+    /// addressing (see `FABRIC_WIREGUARD_PORT` and the fabric plan's
+    /// Phase-4 list), an explicit node-reported endpoint MUST win over
+    /// the earlier peer-derived pin — routing that path through this
+    /// COALESCE would silently keep the stale value. Revisit this
+    /// upsert then.
     pub async fn register_fabric_identity(
+        &self,
+        node_id: &str,
+        public_key: &str,
+        underlay_mtu: u32,
+        underlay_endpoint: Option<&str>,
+    ) -> Result<(), StoreError> {
+        // Two registrations may race on the same free fabric IP; the loser
+        // trips the unique index (migration 0054) and retries with a
+        // freshly observed used-address set. Bounded so a pathological
+        // race degrades to a Conflict error instead of looping.
+        let mut attempt = 1;
+        loop {
+            match self
+                .register_fabric_identity_once(node_id, public_key, underlay_mtu, underlay_endpoint)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err)
+                    if is_fabric_ip_unique_violation(&err)
+                        && attempt < FABRIC_IP_ALLOCATION_ATTEMPTS =>
+                {
+                    tracing::debug!(
+                        node_id,
+                        attempt,
+                        "fabric transport IP allocation raced with a concurrent registration, retrying"
+                    );
+                    attempt += 1;
+                }
+                Err(err) if is_fabric_ip_unique_violation(&err) => {
+                    return Err(StoreError::Conflict {
+                        entity: "vtep_registry",
+                        id: node_id.to_string(),
+                        reason:
+                            "fabric transport IP allocation lost repeated races in 100.100.0.0/16",
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Single attempt of [`VtepRepository::register_fabric_identity`].
+    async fn register_fabric_identity_once(
         &self,
         node_id: &str,
         public_key: &str,
@@ -179,13 +261,17 @@ impl VtepRepository {
         // identity is durable; vtep_ip keeps the empty-string sentinel the
         // legacy column requires (NOT NULL) until the fabric path populates
         // fabric_ip below.
+        // First-registration-wins for the underlay endpoint: an existing
+        // stored value is never replaced by a later (peer-derived, so
+        // possibly proxy-shaped) one. The public key and underlay MTU
+        // keep their normal upsert semantics.
         sqlx::query(
             r#"INSERT INTO vtep_registry (node_id, vtep_ip, vtep_port, public_key, underlay_mtu, underlay_endpoint, updated_at)
                VALUES (?, '', 4789, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
                ON CONFLICT(node_id) DO UPDATE SET
                    public_key = excluded.public_key,
                    underlay_mtu = excluded.underlay_mtu,
-                   underlay_endpoint = COALESCE(excluded.underlay_endpoint, vtep_registry.underlay_endpoint),
+                   underlay_endpoint = COALESCE(vtep_registry.underlay_endpoint, excluded.underlay_endpoint),
                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"#,
         )
         .bind(node_id)
@@ -216,7 +302,11 @@ impl VtepRepository {
 
     /// Pick the lowest free fabric transport address in 100.100.0.0/16.
     /// Must run inside the caller's transaction so concurrent registrations
-    /// cannot observe the same free address.
+    /// have the best chance of observing the same free address; the unique
+    /// index on `vtep_registry.fabric_ip` (migration 0054) is the final
+    /// arbiter — a loser aborts and the retry wrapper in
+    /// [`VtepRepository::register_fabric_identity`] re-runs with a fresh
+    /// view of the used set.
     async fn next_free_fabric_ip(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     ) -> Result<String, StoreError> {

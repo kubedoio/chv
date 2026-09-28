@@ -6,8 +6,30 @@ use chv_controlplane_store::{
 };
 use chv_controlplane_types::domain::NodeId;
 use control_plane_node_api::control_plane_node_api as proto;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// WireGuard listener port of chv-nwd's fabric transport (ADR-021 §6).
+/// This matches the `fabric.wireguard_port` DEFAULT in chv-config, but
+/// the port is node-config-overridable and the control plane cannot see
+/// node configuration: a node that overrides `fabric.wireguard_port`
+/// must not rely on control-plane-derived underlay endpoints (they pin
+/// this default port). There is deliberately no CP-side knob for this
+/// value — it exists only to derive endpoints from observed gRPC peer
+/// addresses until agents report their own underlay addressing.
+pub(crate) const FABRIC_WIREGUARD_PORT: u16 = 65001;
+
+/// Derive a node's fabric underlay endpoint from the transport-level
+/// peer address the control plane actually observed, pinned to the
+/// fabric WireGuard port. IPv6 peer addresses are bracketed so the
+/// endpoint parses as `host:port`.
+pub(crate) fn derive_underlay_endpoint(addr: SocketAddr) -> String {
+    match addr.ip() {
+        std::net::IpAddr::V4(ip) => format!("{ip}:{FABRIC_WIREGUARD_PORT}"),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]:{FABRIC_WIREGUARD_PORT}"),
+    }
+}
 
 #[async_trait]
 pub trait CertificateIssuer: Send + Sync {
@@ -26,9 +48,14 @@ pub struct IssuedCertificate {
 
 #[async_trait]
 pub trait EnrollmentService: Send + Sync {
+    /// `peer_addr` is the transport-level remote address of the gRPC call
+    /// (from `tonic::Request::remote_addr`). It is used to derive the
+    /// node's fabric underlay endpoint when the request does not carry
+    /// one explicitly.
     async fn enroll_node(
         &self,
         request: proto::EnrollmentRequest,
+        peer_addr: Option<SocketAddr>,
     ) -> Result<proto::EnrollmentResponse, ControlPlaneServiceError>;
 
     async fn rotate_node_certificate(
@@ -83,6 +110,7 @@ impl EnrollmentService for EnrollmentServiceImplementation {
     async fn enroll_node(
         &self,
         request: proto::EnrollmentRequest,
+        peer_addr: Option<SocketAddr>,
     ) -> Result<proto::EnrollmentResponse, ControlPlaneServiceError> {
         match self
             .token_repo
@@ -248,10 +276,24 @@ impl EnrollmentService for EnrollmentServiceImplementation {
                     node_id.as_str(),
                     &inventory.wireguard_public_key,
                     inventory.underlay_mtu,
-                    // The node underlay endpoint is not reported yet; it is
-                    // populated by a follow-up once node underlay addressing
-                    // is wired (the planner fails closed while it is NULL).
-                    None,
+                    // The enrollment request carries no explicit underlay
+                    // endpoint, so derive one from the transport-level peer
+                    // address the control plane actually observed, pinned to
+                    // the fabric WireGuard port. First registration wins at
+                    // the store layer, so a re-enrollment through a
+                    // different address does not rotate the endpoint. NAT /
+                    // LB / proxy caveat: behind NAT this is the NAT's
+                    // mapped address — usually exactly what remote peers
+                    // must dial — but a NAT, load balancer, or proxy that
+                    // maps the gRPC connection differently from the node's
+                    // WireGuard listener yields an unreachable endpoint; in
+                    // particular, nodes enrolled through one shared
+                    // LB/proxy all appear behind the proxy's address, which
+                    // then gets pinned at first registration (every node
+                    // behind it would dial the proxy). The fabric plan
+                    // compiler surfaces unreachable peers (fail closed)
+                    // instead of guessing.
+                    peer_addr.map(derive_underlay_endpoint).as_deref(),
                 )
                 .await?;
         }

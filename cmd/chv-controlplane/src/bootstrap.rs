@@ -397,7 +397,6 @@ pub async fn build_service(
     );
 
     let overlay_manager = chv_controlplane_service::OverlayManager::new(
-        vtep_repo.clone(),
         node_client_pool.clone(),
         config.agent_socket_pattern.clone(),
     );

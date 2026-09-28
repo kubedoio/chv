@@ -22,7 +22,9 @@ message TopologySpec {
   string gateway_ip = 6;
   map<string, string> options = 7;
   uint32 vni = 8;                           // 0 = no overlay (bridge-only)
-  repeated VtepEndpoint vtep_endpoints = 9; // peer VTEPs for this network
+  // Deprecated: legacy pre-ADR-021 datapath, ignored by nwd. Peer identity
+  // now travels in the FabricPlan (field 11).
+  repeated VtepEndpoint vtep_endpoints = 9;
   OverlayType overlay_type = 10;
   FabricPlan fabric = 11;                   // stretched-L2 fabric plan (ADR-021)
 }
@@ -256,7 +258,10 @@ message FdbEntry {
 message UpdateOverlayRequest {
   string network_id = 1;
   uint32 vni = 2;
+  // Deprecated: legacy pre-ADR-021 datapath, ignored by nwd.
   repeated VtepEndpoint vtep_endpoints = 3;
+  // Deprecated: legacy pre-ADR-021 datapath, ignored by nwd. nwd rejects a
+  // fabric-less UpdateOverlay in-band (ADR-021 retired the FDB datapath).
   repeated FdbEntry fdb_entries = 4;
   FabricPlan fabric = 5; // stretched-L2 fabric plan (ADR-021); takes the fabric path when set
 }

@@ -830,7 +830,6 @@ impl Orchestrator {
                     &self.node_client_pool,
                     &self.agent_socket_pattern,
                     &mut state,
-                    self.overlay_manager.as_ref(),
                 )
                 .await;
 

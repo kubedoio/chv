@@ -1736,8 +1736,8 @@ dependencies = [
 
 [[package]]
 name = "fabric-conformance"
-version = "0.1.0"
-source = "git+https://github.com/o3kio/fabric?tag=v0.1.0#3ce1ab3fbef901016b66de99d90f4d734865dc91"
+version = "0.1.2"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.2#9082ff9b1e53387c2d692bdef65be731c1da2aa4"
 dependencies = [
  "fabric-linux",
  "fabric-plan",
@@ -1745,8 +1745,8 @@ dependencies = [
 
 [[package]]
 name = "fabric-linux"
-version = "0.1.0"
-source = "git+https://github.com/o3kio/fabric?tag=v0.1.0#3ce1ab3fbef901016b66de99d90f4d734865dc91"
+version = "0.1.2"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.2#9082ff9b1e53387c2d692bdef65be731c1da2aa4"
 dependencies = [
  "fabric-plan",
  "serde",
@@ -1756,8 +1756,8 @@ dependencies = [
 
 [[package]]
 name = "fabric-plan"
-version = "0.1.0"
-source = "git+https://github.com/o3kio/fabric?tag=v0.1.0#3ce1ab3fbef901016b66de99d90f4d734865dc91"
+version = "0.1.2"
+source = "git+https://github.com/o3kio/fabric?tag=v0.1.2#9082ff9b1e53387c2d692bdef65be731c1da2aa4"
 dependencies = [
  "serde",
  "serde_json",

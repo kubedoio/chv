@@ -1245,11 +1245,8 @@ async fn test_overlay_manager_construction() {
     cluster.setup_two_nodes().await;
 
     let node_pool = NodeClientPool::new();
-    let overlay_manager = OverlayManager::new(
-        cluster.vtep_repo.clone(),
-        node_pool,
-        "/tmp/chv/agent/{node_id}/agent.sock".to_string(),
-    );
+    let overlay_manager =
+        OverlayManager::new(node_pool, "/tmp/chv/agent/{node_id}/agent.sock".to_string());
 
     // Verify overlay manager can be cloned (required for concurrent usage)
     let _cloned = overlay_manager.clone();
@@ -1939,11 +1936,7 @@ mod fabric_dispatch {
 
         // Dispatch through the orchestrator (claim → compile → fan-out).
         let node_pool = NodeClientPool::new();
-        let overlay_manager = OverlayManager::new(
-            cluster.vtep_repo.clone(),
-            node_pool.clone(),
-            pattern.clone(),
-        );
+        let overlay_manager = OverlayManager::new(node_pool.clone(), pattern.clone());
         let orchestrator = crate::orchestrator::Orchestrator::new(
             cluster.pool.clone(),
             cluster.operation_repo.clone(),

@@ -574,7 +574,10 @@ message UpdateOverlayRequest {
   string node_id = 2;
   string network_id = 3;
   uint32 vni = 4;
+  // Deprecated: legacy pre-ADR-021 datapath, ignored by nwd.
   repeated VtepEndpoint vtep_endpoints = 5;
+  // Deprecated: legacy pre-ADR-021 datapath, ignored by nwd. nwd rejects a
+  // fabric-less UpdateOverlay in-band (ADR-021 retired the FDB datapath).
   repeated FdbEntry fdb_entries = 6;
   // Stretched-L2 fabric plan (ADR-021); takes the fabric path in nwd when set.
   FabricPlan fabric = 7;
