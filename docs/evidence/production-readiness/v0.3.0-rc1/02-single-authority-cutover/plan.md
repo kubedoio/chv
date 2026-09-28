@@ -203,6 +203,31 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   > 2-round adversarial loop (R1: 4 MINOR + 8 INFO, all fixed; R2: wording +
   > coverage notes, closed). CI-VERIFIED only — mock adapter/controller, no
   > real cloud-hypervisor. M2.5 is next.
+- **Inter-milestone: hardening sweep R2.** A comprehensive five-lens review of
+  post-M2.4 main triaged 3 MAJOR + ~18 MINOR + ~10 INFO findings and landed:
+  the executor failure-quarantine lifecycle with permit-preserving release
+  and reconcile (replacing permanent post-restart quarantine), the
+  LifecycleService mTLS interceptor (last node-facing service without peer
+  certificates), the CP resolve relay with fail-closed egress and full
+  validation, systemd `TimeoutStopSec=75` above the 60 s drain budget, the
+  staged atomic bootstrap (migration target published via
+  `rename_noreplace` — an interrupted bootstrap can no longer brick the
+  node), the bounded failure-event ring (architecture-clean executor
+  failure surfacing), durable TLS material writes, journal metrics, the
+  path-traversal cluster closed at every join (`image_ref`,
+  `volume_id`, agent-socket `{node_id}` substitution gated at the single
+  join point plus request/enrollment boundaries), bounded listing with
+  serving indexes, and OPERATIONS.md/spec alignment. Reviewed through a
+  3-round adversarial loop (R1: 1 code MAJOR — `write_file_durable` never
+  wrote — + 1 doc MAJOR + a dozen MINOR/INFO, all fixed; R2: 1 MAJOR —
+  scrap self-healing unreachable in the production startup path — + MINORs,
+  all fixed; R3: clean, converged). +17 tests vs baseline; legacy mode
+  untouched (M2.3 decision preserved).
+  > **Status: COMPLETE.** Merged `62db8bf6` (PR #272, evidence
+  > `hardening-r2-sweep.md`). CI green on the merge; the separate Nightly
+  > Packages workflow fails on this and every prior main SHA (glibc 2.38
+  > toolchain drift vs the oldest Debian smoke target — pre-existing,
+  > reported). M2.5 remains next.
 - **M2.5 — Real-KVM qualification.** Install pinned cloud-hypervisor (v43.0) +
   a minimal guest on this box (`/dev/kvm` present). Run
   Create/Start/Stop/Reboot/Delete plus a crash/restart replay scenario through
