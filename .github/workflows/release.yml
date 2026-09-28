@@ -222,6 +222,21 @@ jobs:
           name: ui-build
           path: ui/build/
 
+      - name: Restore binary executable permissions
+        # actions/upload-artifact does not preserve file permission bits:
+        # the downloaded binaries arrive 0644, get packaged non-executable,
+        # and the smoke tests catch it as "Permission denied" (exit 126) —
+        # the failure every prior Release run died on (June 2 run included).
+        # Restore +x before packaging. The PR/nightly packaging workflows
+        # build and package in the same job (no artifact round-trip) and are
+        # unaffected.
+        run: |
+          chmod +x target/release/chvctl \
+                  target/release/chv-agent \
+                  target/release/chv-controlplane \
+                  target/release/chv-nwd \
+                  target/release/chv-stord
+
       - name: Install packaging tools
         run: |
           sudo apt-get update && sudo apt-get install -y gettext-base
