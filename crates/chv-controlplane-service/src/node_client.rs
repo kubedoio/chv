@@ -1299,6 +1299,7 @@ impl NodeClient {
             vni,
             vtep_endpoints,
             fdb_entries,
+            fabric: None,
         };
         let method = "update_overlay";
         let span = tracing::info_span!("update_overlay", operation_id, network_id);

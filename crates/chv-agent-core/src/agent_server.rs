@@ -632,6 +632,31 @@ fn map_authority_error(e: cellhv_core_operations::AuthorityActorError) -> Status
     }
 }
 
+/// Maps a control-plane `FabricPlan` (chv.controlplane.node.v1) to the nwd
+/// `FabricPlan` (chv.node.nwd.v1) for the update_overlay relay, field by
+/// field including every peer (ADR-021 plan carriage).
+fn fabric_plan_to_nwd(plan: &proto::FabricPlan) -> chv_nwd_api::chv_nwd_api::FabricPlan {
+    chv_nwd_api::chv_nwd_api::FabricPlan {
+        fabric_domain_id: plan.fabric_domain_id.clone(),
+        local_host_id: plan.local_host_id.clone(),
+        local_fabric_ip: plan.local_fabric_ip.clone(),
+        tenant_mtu: plan.tenant_mtu,
+        fabric_mtu: plan.fabric_mtu,
+        binding_generation: plan.binding_generation,
+        plan_generation: plan.plan_generation,
+        peers: plan
+            .peers
+            .iter()
+            .map(|peer| chv_nwd_api::chv_nwd_api::FabricPeer {
+                node_id: peer.node_id.clone(),
+                public_key: peer.public_key.clone(),
+                underlay_endpoint: peer.underlay_endpoint.clone(),
+                fabric_ip: peer.fabric_ip.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// Resolves the current core-journal version of a VM for an expected-version
 /// CAS. The authority error is mapped by class: a VM unknown to the core
 /// journal is a `not_found`, an authority outage is `unavailable`, and
@@ -2566,6 +2591,7 @@ impl proto::lifecycle_service_server::LifecycleService for AgentServer {
                     vtep_ip: fdb.vtep_ip.clone(),
                 })
                 .collect(),
+            inner.fabric.as_ref().map(fabric_plan_to_nwd),
             Some(&operation_id),
         )
         .await
@@ -3845,6 +3871,229 @@ mod tests {
                 "{name} must fail closed in core-managed mode"
             );
         }
+    }
+
+    /// The CP→nwd fabric plan mapping is the update_overlay relay's core:
+    /// every field of a two-peer sample plan must survive the translation
+    /// from `chv.controlplane.node.v1` to `chv.node.nwd.v1` (ADR-021 plan
+    /// carriage).
+    #[test]
+    fn fabric_plan_mapping_preserves_all_fields() {
+        let plan = proto::FabricPlan {
+            fabric_domain_id: "fabric-domain-1".to_string(),
+            local_host_id: "node-1".to_string(),
+            local_fabric_ip: "100.100.0.1".to_string(),
+            tenant_mtu: 1380,
+            fabric_mtu: 1440,
+            binding_generation: 3,
+            plan_generation: 7,
+            peers: vec![
+                proto::FabricPeer {
+                    node_id: "node-2".to_string(),
+                    public_key: "wg-pub-node-2".to_string(),
+                    underlay_endpoint: "10.0.0.2:65001".to_string(),
+                    fabric_ip: "100.100.0.2".to_string(),
+                },
+                proto::FabricPeer {
+                    node_id: "node-3".to_string(),
+                    public_key: "wg-pub-node-3".to_string(),
+                    underlay_endpoint: "10.0.0.3:65001".to_string(),
+                    fabric_ip: "100.100.0.3".to_string(),
+                },
+            ],
+        };
+        let mapped = fabric_plan_to_nwd(&plan);
+        assert_eq!(mapped.fabric_domain_id, "fabric-domain-1");
+        assert_eq!(mapped.local_host_id, "node-1");
+        assert_eq!(mapped.local_fabric_ip, "100.100.0.1");
+        assert_eq!(mapped.tenant_mtu, 1380);
+        assert_eq!(mapped.fabric_mtu, 1440);
+        assert_eq!(mapped.binding_generation, 3);
+        assert_eq!(mapped.plan_generation, 7);
+        assert_eq!(mapped.peers.len(), 2);
+        assert_eq!(mapped.peers[0].node_id, "node-2");
+        assert_eq!(mapped.peers[0].public_key, "wg-pub-node-2");
+        assert_eq!(mapped.peers[0].underlay_endpoint, "10.0.0.2:65001");
+        assert_eq!(mapped.peers[0].fabric_ip, "100.100.0.2");
+        assert_eq!(mapped.peers[1].node_id, "node-3");
+        assert_eq!(mapped.peers[1].public_key, "wg-pub-node-3");
+        assert_eq!(mapped.peers[1].underlay_endpoint, "10.0.0.3:65001");
+        assert_eq!(mapped.peers[1].fabric_ip, "100.100.0.3");
+    }
+
+    /// Positive-path update_overlay relay (legacy mode): the CP fabric plan
+    /// must reach nwd field-by-field, including the full peer set, and the
+    /// agent must acknowledge the operation.
+    #[tokio::test]
+    async fn update_overlay_relays_fabric_plan_to_nwd() {
+        use crate::daemon_clients::fabric_test_support::{FabricNwdCalls, MockFabricNwd};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nwd.sock");
+
+        let calls = std::sync::Arc::new(FabricNwdCalls::default());
+        {
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            let service = MockFabricNwd {
+                calls: calls.clone(),
+                public_key: String::new(),
+                underlay_mtu: 0,
+                identity_error: false,
+            };
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                            service,
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            std::path::PathBuf::from("/run/chv/stord/api.sock"),
+            socket,
+            None,
+            dir.path().to_path_buf(),
+        );
+
+        let req = proto::UpdateOverlayRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            network_id: "net-1".to_string(),
+            vni: 42,
+            vtep_endpoints: vec![],
+            fdb_entries: vec![],
+            fabric: Some(proto::FabricPlan {
+                fabric_domain_id: "fabric-domain-1".to_string(),
+                local_host_id: "node-1".to_string(),
+                local_fabric_ip: "100.100.0.1".to_string(),
+                tenant_mtu: 1380,
+                fabric_mtu: 1440,
+                binding_generation: 3,
+                plan_generation: 7,
+                peers: vec![
+                    proto::FabricPeer {
+                        node_id: "node-2".to_string(),
+                        public_key: "wg-pub-node-2".to_string(),
+                        underlay_endpoint: "10.0.0.2:65001".to_string(),
+                        fabric_ip: "100.100.0.2".to_string(),
+                    },
+                    proto::FabricPeer {
+                        node_id: "node-3".to_string(),
+                        public_key: "wg-pub-node-3".to_string(),
+                        underlay_endpoint: "10.0.0.3:65001".to_string(),
+                        fabric_ip: "100.100.0.3".to_string(),
+                    },
+                ],
+            }),
+        };
+        let resp = proto::lifecycle_service_server::LifecycleService::update_overlay(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok());
+
+        let recorded = calls.overlay_fabrics.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "nwd must receive exactly one plan");
+        let plan = &recorded[0];
+        assert_eq!(plan.fabric_domain_id, "fabric-domain-1");
+        assert_eq!(plan.local_host_id, "node-1");
+        assert_eq!(plan.local_fabric_ip, "100.100.0.1");
+        assert_eq!(plan.tenant_mtu, 1380);
+        assert_eq!(plan.fabric_mtu, 1440);
+        assert_eq!(plan.binding_generation, 3);
+        assert_eq!(plan.plan_generation, 7);
+        assert_eq!(plan.peers.len(), 2);
+        assert_eq!(plan.peers[0].node_id, "node-2");
+        assert_eq!(plan.peers[0].public_key, "wg-pub-node-2");
+        assert_eq!(plan.peers[0].underlay_endpoint, "10.0.0.2:65001");
+        assert_eq!(plan.peers[0].fabric_ip, "100.100.0.2");
+        assert_eq!(plan.peers[1].node_id, "node-3");
+        assert_eq!(plan.peers[1].public_key, "wg-pub-node-3");
+        assert_eq!(plan.peers[1].underlay_endpoint, "10.0.0.3:65001");
+        assert_eq!(plan.peers[1].fabric_ip, "100.100.0.3");
+    }
+
+    /// An overlay update without a fabric plan relays `fabric: None` —
+    /// legacy VXLAN-only updates keep taking the non-fabric nwd path.
+    #[tokio::test]
+    async fn update_overlay_without_fabric_relays_none() {
+        use crate::daemon_clients::fabric_test_support::{FabricNwdCalls, MockFabricNwd};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nwd.sock");
+
+        let calls = std::sync::Arc::new(FabricNwdCalls::default());
+        {
+            let uds = tokio::net::UnixListener::bind(&socket).unwrap();
+            let service = MockFabricNwd {
+                calls: calls.clone(),
+                public_key: String::new(),
+                underlay_mtu: 0,
+                identity_error: false,
+            };
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        chv_nwd_api::chv_nwd_api::network_service_server::NetworkServiceServer::new(
+                            service,
+                        ),
+                    )
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await
+                    .ok();
+            });
+        }
+
+        let mut cache = NodeCache::new("node-1");
+        cache.node_state = crate::state_machine::NodeState::TenantReady
+            .as_str()
+            .to_string();
+        cache.connectivity_state = crate::connectivity::ConnectivityState::Connected;
+        let server = AgentServer::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            VmRuntime::new(Arc::new(MockCloudHypervisorAdapter::default())),
+            std::path::PathBuf::from("/run/chv/stord/api.sock"),
+            socket,
+            None,
+            dir.path().to_path_buf(),
+        );
+
+        let req = proto::UpdateOverlayRequest {
+            meta: Some(test_meta("1")),
+            node_id: "node-1".to_string(),
+            network_id: "net-1".to_string(),
+            vni: 42,
+            vtep_endpoints: vec![proto::VtepEndpoint {
+                node_id: "node-2".to_string(),
+                vtep_ip: "10.0.0.2".to_string(),
+                vtep_port: 4789,
+            }],
+            fdb_entries: vec![],
+            fabric: None,
+        };
+        let resp = proto::lifecycle_service_server::LifecycleService::update_overlay(
+            &server,
+            Request::new(req),
+        )
+        .await;
+        assert!(resp.is_ok());
+
+        let recorded = calls.overlay_fabrics.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0], chv_nwd_api::chv_nwd_api::FabricPlan::default());
     }
 
     /// The five Core-routed lifecycle handlers must NOT be gated: with an

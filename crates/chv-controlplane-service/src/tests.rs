@@ -431,6 +431,8 @@ async fn test_enrollment_extended_inventory_persistence() {
             hypervisor_capabilities: vec![],
             labels,
             vtep_ip: String::new(),
+            wireguard_public_key: String::new(),
+            underlay_mtu: 0,
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-new-1".into(),
@@ -633,6 +635,8 @@ async fn test_enrollment_rejects_invalid_bootstrap_token() {
             hypervisor_capabilities: vec![],
             labels: Default::default(),
             vtep_ip: String::new(),
+            wireguard_public_key: String::new(),
+            underlay_mtu: 0,
         }),
         versions: Some(proto::ServiceVersions {
             node_id: "node-invalid".into(),
