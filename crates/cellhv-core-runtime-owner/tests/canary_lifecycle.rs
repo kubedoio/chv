@@ -446,9 +446,10 @@ async fn canary_control_plane_restart_is_not_vm_identity_authority() {
 /// effects complete (volumes opened+attached) and the process dies before
 /// the cloud-hypervisor create runs. The restarted composition must not
 /// repeat ANY provider effect for the stuck operation; the operator
-/// resolution records the honest outcome (the VM was never created); and
-/// the desired-state reservation is cleaned up by a successor delete so a
-/// fresh create converges end-to-end.
+/// resolution records the honest outcome (the VM was never created); a
+/// successor delete tombstones the stuck create's desired-state
+/// reservation; and, independently, a fresh create with a new identity
+/// converges end-to-end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn canary_crash_mid_effect_never_repeats_partial_effects() {
     use cellhv_core_runtime_owner::{RuntimeOwnerError, RuntimeStageFailure};
@@ -556,10 +557,12 @@ async fn canary_crash_mid_effect_never_repeats_partial_effects() {
         .await
         .unwrap();
 
-    // The successor delete cleans up the desired-state reservation (the
-    // hypervisor never had the VM; the restarted runtime's side-effect
-    // handle map is empty — documented restart residual), and a fresh
-    // create with a new idempotency key converges end-to-end.
+    // The successor delete tombstones the stuck create's desired-state
+    // reservation (the hypervisor never had the VM; the restarted
+    // runtime's side-effect handle map is empty — documented restart
+    // residual). Independently — the fresh create uses a new VM identity,
+    // so the delete is not what unblocks it — a fresh create with a new
+    // idempotency key converges end-to-end.
     owner
         .authority()
         .submit(delete_submission("vm-mid", "op-del"))

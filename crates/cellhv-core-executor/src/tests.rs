@@ -1237,3 +1237,84 @@ async fn disarmed_fault_runtime_is_a_passthrough() {
     );
     stop(f).await;
 }
+
+/// The single-park contract: after the first armed park, a second
+/// operation flowing through the SAME armed wrapper passes through and
+/// executes — later armed executes are deterministic pass-throughs, never
+/// unawaitable second parks.
+#[tokio::test]
+async fn armed_fault_runtime_parks_once_then_passes_through() {
+    let f = fixture();
+    f.authority.submit(submit("a", "one")).await.unwrap();
+    f.authority.submit(submit("b", "two")).await.unwrap();
+    let counting = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+        result: None,
+    });
+    let fault = FaultRuntime::park_at(FaultPoint::BeforeEffect, counting.clone());
+    let executor = JournalExecutor::start(f.execution.clone(), fault.clone(), 2, 4).unwrap();
+    executor.scan_ready().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), fault.reached.notified())
+        .await
+        .expect("the first operation through the wrapper must park");
+    // Whichever operation parked first, the other (different VM, so not
+    // serialized behind the parked one) executes through the same armed
+    // wrapper and finishes. Its terminal status is the authoritative
+    // signal that the pass-through ran to completion.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let one = f
+            .authority
+            .operation(OperationId::new("one").unwrap())
+            .await
+            .unwrap();
+        let two = f
+            .authority
+            .operation(OperationId::new("two").unwrap())
+            .await
+            .unwrap();
+        let one_done = one.operation.status == cellhv_core_types::OperationStatus::Succeeded;
+        let two_done = two.operation.status == cellhv_core_types::OperationStatus::Succeeded;
+        if one_done || two_done {
+            assert_ne!(one_done, two_done, "only one operation may pass through");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pass-through operation never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // The parked task never completes: only the abort path tears down.
+    executor.abort().await.unwrap();
+    assert_eq!(counting.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fault.inner_completions.load(Ordering::SeqCst), 1);
+    let one = f
+        .authority
+        .operation(OperationId::new("one").unwrap())
+        .await
+        .unwrap();
+    let two = f
+        .authority
+        .operation(OperationId::new("two").unwrap())
+        .await
+        .unwrap();
+    let statuses = [one.operation.status, two.operation.status];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == cellhv_core_types::OperationStatus::Succeeded)
+            .count(),
+        1,
+        "exactly one operation passed through and finished"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == cellhv_core_types::OperationStatus::Running)
+            .count(),
+        1,
+        "exactly one operation stayed parked (running with its claim fence)"
+    );
+    stop(f).await;
+}
