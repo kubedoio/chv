@@ -1031,7 +1031,10 @@ ExecStart=/usr/bin/chv-agent /etc/chv/agent.toml
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
-TimeoutStopSec=5
+# Must exceed the core executor's 60s drain budget: SIGKILL before the
+# drain completes strands in-flight operations (InspectRequired) on
+# `systemctl restart`.
+TimeoutStopSec=75
 RuntimeDirectory=chv
 RuntimeDirectoryMode=0775
 StateDirectory=chv/agent
