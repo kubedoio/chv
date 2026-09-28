@@ -363,6 +363,23 @@ binaries require `GLIBC_2.38` while the oldest Debian smoke target ships
 2.36): a pre-existing toolchain/runner drift in the nightly packaging
 job, orthogonal to and untouched by this sweep, reported to the operator.
 
+> **Follow-up (same day, post-sweep): fixed in PR #273 (`d8e8e2e0`).**
+> The root cause was not live toolchain drift but a fix that was never
+> applied here: `package-pr.yml` has been pinned to `ubuntu-22.04`
+> (glibc 2.35) since August, while the nightly and release build jobs
+> stayed on `ubuntu-latest` (24.04, glibc 2.39) — the Nightly Packages
+> workflow had never had a single green run. PR #273 pins both build
+> jobs to `ubuntu-22.04` (+ `arduino/setup-protoc`, since apt protoc on
+> 22.04 is too old for the workspace's proto3 optional fields), and its
+> `workflow_dispatch` dry-run verification exposed and fixed two further
+> latent release-pipeline defects no run had ever reached: artifact
+> round-trips stripping the executable bit in `release.yml` (binaries
+> packaged non-executable), and the shared package lifecycle test
+> asserting dpkg conffile semantics on rpm (where `rpm -e` legitimately
+> moves a modified `%config(noreplace)` file to `.rpmsave`). CI,
+> Security, and Nightly Packages are all green on `d8e8e2e0` — the
+> nightly's first green push-triggered run in its history.
+
 ## 9. Remaining risks
 
 - The quarantine redesign changes the executor's most safety-critical

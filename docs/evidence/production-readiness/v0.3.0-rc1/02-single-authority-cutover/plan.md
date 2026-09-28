@@ -225,9 +225,14 @@ terminal result persisted          (succeeded/failed/unsupported, replay+audit)
   untouched (M2.3 decision preserved).
   > **Status: COMPLETE.** Merged `62db8bf6` (PR #272, evidence
   > `hardening-r2-sweep.md`). CI green on the merge; the separate Nightly
-  > Packages workflow fails on this and every prior main SHA (glibc 2.38
+  > Packages workflow failed on this and every prior main SHA (glibc 2.38
   > toolchain drift vs the oldest Debian smoke target — pre-existing,
-  > reported). M2.5 remains next.
+  > reported). Fixed post-sweep the same day in PR #273 (`d8e8e2e0`:
+  > nightly+release build runners pinned to ubuntu-22.04, plus two
+  > further latent release-pipeline defects the fix's dry-run
+  > verification exposed and fixed). CI, Security, and Nightly Packages
+  > all green on `d8e8e2e0` — the nightly's first green push-triggered
+  > run in its history. M2.5 remains next.
 - **M2.5 — Real-KVM qualification.** Install pinned cloud-hypervisor (v43.0) +
   a minimal guest on this box (`/dev/kvm` present). Run
   Create/Start/Stop/Reboot/Delete plus a crash/restart replay scenario through
