@@ -379,10 +379,18 @@ impl CloudHypervisorCoreRuntime {
         let bridge = bridge_name_for_network(network_id);
         // Addressing assigned by the control plane (internal IPAM) is carried
         // on the attachment; absent fields fall back to the topology default.
+        // An empty CIDR (a network row without one — the BFF's
+        // build_agent_vm_spec emits `unwrap_or_default()`) defaults exactly
+        // like the legacy reconcile path, so the two authorities cannot
+        // diverge on the same data.
         let (ip_address, cidr, gateway) = match &network.addressing {
             Some(addressing) => (
                 addressing.ip_address.clone(),
-                addressing.cidr.clone(),
+                if addressing.cidr.is_empty() {
+                    DEFAULT_NIC_CIDR.to_string()
+                } else {
+                    addressing.cidr.clone()
+                },
                 addressing.gateway.clone(),
             ),
             None => (String::new(), DEFAULT_NIC_CIDR.to_string(), String::new()),
@@ -624,44 +632,34 @@ mod tests {
     #[test]
     fn tuning_to_legacy_pins_field_parity_with_core_mirror() {
         // Fully populated on BOTH sides so the compiler forces this fixture
-        // to grow whenever either struct gains a field; every assertion then
-        // fails until the converter mirrors it. Distinctive non-default
-        // values make a dropped or swapped field visible.
+        // to grow whenever either struct gains a field. The total check is
+        // the JSON-equality assertion below: both structs share field names
+        // and 1:1 types, so a faithful translation reproduces the input
+        // object exactly — any dropped, added, or swapped field breaks it.
         let tuning = cellhv_core_types::HypervisorTuning {
             cpu_nested: Some(true),
-            cpu_amx: Some(true),
+            cpu_amx: Some(false),
             cpu_kvm_hyperv: Some(true),
-            memory_mergeable: Some(true),
+            memory_mergeable: Some(false),
             memory_hugepages: Some(true),
-            memory_shared: Some(true),
+            memory_shared: Some(false),
             memory_prefault: Some(true),
-            iommu: Some(true),
+            iommu: Some(false),
             rng_src: Some("/dev/hwrng".to_string()),
             watchdog: Some(true),
-            landlock_enable: Some(true),
-            serial_mode: Some("File".to_string()),
+            landlock_enable: Some(false),
+            serial_mode: Some("Null".to_string()),
             console_mode: Some("Pty".to_string()),
             pvpanic: Some(true),
             tpm_type: Some("swtpm".to_string()),
             tpm_socket_path: Some("/run/tpm.sock".to_string()),
         };
         let overrides = tuning_to_legacy(&tuning);
-        assert_eq!(overrides.cpu_nested, Some(true));
-        assert_eq!(overrides.cpu_amx, Some(true));
-        assert_eq!(overrides.cpu_kvm_hyperv, Some(true));
-        assert_eq!(overrides.memory_mergeable, Some(true));
-        assert_eq!(overrides.memory_hugepages, Some(true));
-        assert_eq!(overrides.memory_shared, Some(true));
-        assert_eq!(overrides.memory_prefault, Some(true));
-        assert_eq!(overrides.iommu, Some(true));
-        assert_eq!(overrides.rng_src.as_deref(), Some("/dev/hwrng"));
-        assert_eq!(overrides.watchdog, Some(true));
-        assert_eq!(overrides.landlock_enable, Some(true));
-        assert_eq!(overrides.serial_mode.as_deref(), Some("File"));
-        assert_eq!(overrides.console_mode.as_deref(), Some("Pty"));
-        assert_eq!(overrides.pvpanic, Some(true));
-        assert_eq!(overrides.tpm_type.as_deref(), Some("swtpm"));
-        assert_eq!(overrides.tpm_socket_path.as_deref(), Some("/run/tpm.sock"));
+        assert_eq!(
+            serde_json::to_value(&overrides).unwrap(),
+            serde_json::to_value(&tuning).unwrap(),
+            "tuning_to_legacy must reproduce the Core object field for field"
+        );
         // And the empty mirror stays empty.
         let empty = tuning_to_legacy(&cellhv_core_types::HypervisorTuning::default());
         assert_eq!(

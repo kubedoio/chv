@@ -423,9 +423,11 @@ pub struct NetworkAttachmentRef {
 }
 
 /// Addressing assigned by the control plane for one NIC: the VM's address in
-/// the network, the network's CIDR, and its gateway. Empty strings mean
-/// "unassigned" and are preserved verbatim — executors treat them as the
-/// legacy specs do.
+/// the network, the network's CIDR, and its gateway. When addressing is
+/// present `ip_address` must be non-empty (validation rejects an assigned
+/// NIC without an address); `cidr` and `gateway` may be empty, and the
+/// executor defaults an empty CIDR to the topology default exactly like
+/// the legacy reconcile path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NicAddressing {
@@ -488,8 +490,12 @@ pub struct VmDefinition {
     /// Cloud-init userdata for first boot, carried verbatim for the runtime.
     pub cloud_init_userdata: Option<String>,
     /// Hypervisor tuning flags carried verbatim for the runtime (the Core
-    /// mirror of the legacy `HypervisorOverrides`; validation lives at the
-    /// legacy boundary that produces it).
+    /// mirror of the legacy `HypervisorOverrides`). Semantics are enforced
+    /// by [`VmDefinition::validate`] via [`HypervisorTuning::validate`] at
+    /// every Core boundary (direct submissions, journal replays, and the
+    /// legacy-cache migration), mirroring the checks the legacy spec
+    /// boundary applies (pinned by a cross-boundary rule-parity test in
+    /// chv-agent-core).
     pub hypervisor_tuning: Option<HypervisorTuning>,
 }
 
@@ -517,6 +523,92 @@ pub struct HypervisorTuning {
     pub pvpanic: Option<bool>,
     pub tpm_type: Option<String>,
     pub tpm_socket_path: Option<String>,
+}
+
+impl HypervisorTuning {
+    /// Every field of the tuning surface, in declaration order. Callers at
+    /// legacy boundaries use it to distinguish "a field Core does not model"
+    /// (unsupported, fail closed) from malformed values, without duplicating
+    /// the field list. Pinned by
+    /// `hypervisor_tuning_known_fields_match_serialization`: adding a field
+    /// without extending this list fails that test.
+    pub const KNOWN_FIELDS: &'static [&'static str] = &[
+        "cpu_nested",
+        "cpu_amx",
+        "cpu_kvm_hyperv",
+        "memory_mergeable",
+        "memory_hugepages",
+        "memory_shared",
+        "memory_prefault",
+        "iommu",
+        "rng_src",
+        "watchdog",
+        "landlock_enable",
+        "serial_mode",
+        "console_mode",
+        "pvpanic",
+        "tpm_type",
+        "tpm_socket_path",
+    ];
+
+    /// Semantic rules for the tuning surface, mirroring the checks the
+    /// legacy spec boundary (`chv-common`'s validators, applied by
+    /// `chv-agent-core`'s `VmSpec::validate`) applies to
+    /// `HypervisorOverrides`: `rng_src` must be a non-empty absolute path,
+    /// `serial_mode`/`console_mode`/`tpm_type` must be cloud-hypervisor
+    /// values, and `tpm_socket_path` requires `tpm_type`. chv-agent-core
+    /// pins the two rule sets together (it can see both crates; this crate
+    /// must stay independent of the legacy surface).
+    pub fn validate(&self) -> Result<(), ChvError> {
+        const VALID_SERIAL_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
+        const VALID_CONSOLE_MODES: &[&str] = &["Pty", "File", "Off", "Null"];
+        const VALID_TPM_TYPES: &[&str] = &["swtpm"];
+        if let Some(rng_src) = &self.rng_src {
+            if rng_src.is_empty() {
+                return Err(ChvError::InvalidArgument {
+                    field: "hypervisor_tuning.rng_src".to_string(),
+                    reason: "rng_src must be non-empty".to_string(),
+                });
+            }
+            if !rng_src.starts_with('/') {
+                return Err(ChvError::InvalidArgument {
+                    field: "hypervisor_tuning.rng_src".to_string(),
+                    reason: "rng_src must be an absolute path".to_string(),
+                });
+            }
+        }
+        if let Some(mode) = &self.serial_mode {
+            if !VALID_SERIAL_MODES.contains(&mode.as_str()) {
+                return Err(ChvError::InvalidArgument {
+                    field: "hypervisor_tuning.serial_mode".to_string(),
+                    reason: format!("serial_mode must be one of {VALID_SERIAL_MODES:?}"),
+                });
+            }
+        }
+        if let Some(mode) = &self.console_mode {
+            if !VALID_CONSOLE_MODES.contains(&mode.as_str()) {
+                return Err(ChvError::InvalidArgument {
+                    field: "hypervisor_tuning.console_mode".to_string(),
+                    reason: format!("console_mode must be one of {VALID_CONSOLE_MODES:?}"),
+                });
+            }
+        }
+        if let Some(tpm_type) = &self.tpm_type {
+            if !VALID_TPM_TYPES.contains(&tpm_type.as_str()) {
+                return Err(ChvError::InvalidArgument {
+                    field: "hypervisor_tuning.tpm_type".to_string(),
+                    reason: format!("tpm_type must be one of {VALID_TPM_TYPES:?}"),
+                });
+            }
+        }
+        if self.tpm_type.is_none() && self.tpm_socket_path.is_some() {
+            return Err(ChvError::InvalidArgument {
+                field: "hypervisor_tuning.tpm_socket_path".to_string(),
+                reason: "tpm_socket_path cannot be set without tpm_type".to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -584,6 +676,9 @@ impl VmDefinition {
                     reason: format!("duplicate attachment_id {attachment_id}"),
                 });
             }
+        }
+        if let Some(tuning) = &self.hypervisor_tuning {
+            tuning.validate()?;
         }
         Ok(())
     }
@@ -1006,6 +1101,133 @@ mod tests {
             gateway: "10.200.0.1".to_string(),
         });
         assert!(empty_ip.validate().is_err());
+    }
+
+    #[test]
+    fn hypervisor_tuning_known_fields_match_serialization() {
+        // KNOWN_FIELDS is the classification surface legacy boundaries use to
+        // tell "unsupported field" from "malformed value"; it must track the
+        // struct exactly, in order.
+        let tuning = HypervisorTuning {
+            cpu_nested: Some(true),
+            cpu_amx: Some(false),
+            cpu_kvm_hyperv: Some(true),
+            memory_mergeable: Some(false),
+            memory_hugepages: Some(true),
+            memory_shared: Some(false),
+            memory_prefault: Some(true),
+            iommu: Some(false),
+            rng_src: Some("/dev/hwrng".to_string()),
+            watchdog: Some(true),
+            landlock_enable: Some(false),
+            serial_mode: Some("Null".to_string()),
+            console_mode: Some("Pty".to_string()),
+            pvpanic: Some(true),
+            tpm_type: Some("swtpm".to_string()),
+            tpm_socket_path: Some("/run/tpm.sock".to_string()),
+        };
+        let value = serde_json::to_value(&tuning).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // serde_json objects are key-sorted (BTreeMap); compare as sets. The
+        // pin is set equality — a field added to the struct (or to the list
+        // alone) breaks it.
+        assert_eq!(
+            keys,
+            HypervisorTuning::KNOWN_FIELDS.iter().copied().collect()
+        );
+    }
+
+    #[test]
+    fn hypervisor_tuning_validation_rejects_invalid_semantics() {
+        // A fully valid tuning passes.
+        let valid = HypervisorTuning {
+            rng_src: Some("/dev/hwrng".to_string()),
+            serial_mode: Some("Null".to_string()),
+            console_mode: Some("Pty".to_string()),
+            tpm_type: Some("swtpm".to_string()),
+            tpm_socket_path: Some("/run/tpm.sock".to_string()),
+            ..Default::default()
+        };
+        assert!(valid.validate().is_ok());
+        assert!(HypervisorTuning::default().validate().is_ok());
+        // Each rule rejects exactly its own violation.
+        for (tuning, field) in [
+            (
+                HypervisorTuning {
+                    rng_src: Some(String::new()),
+                    ..Default::default()
+                },
+                "rng_src",
+            ),
+            (
+                HypervisorTuning {
+                    rng_src: Some("relative/path".to_string()),
+                    ..Default::default()
+                },
+                "rng_src",
+            ),
+            (
+                HypervisorTuning {
+                    serial_mode: Some("Hero".to_string()),
+                    ..Default::default()
+                },
+                "serial_mode",
+            ),
+            (
+                HypervisorTuning {
+                    console_mode: Some("Hero".to_string()),
+                    ..Default::default()
+                },
+                "console_mode",
+            ),
+            (
+                HypervisorTuning {
+                    tpm_type: Some("tpm2".to_string()),
+                    ..Default::default()
+                },
+                "tpm_type",
+            ),
+            (
+                HypervisorTuning {
+                    tpm_socket_path: Some("/run/tpm.sock".to_string()),
+                    ..Default::default()
+                },
+                "tpm_socket_path",
+            ),
+        ] {
+            let error = tuning.validate().unwrap_err();
+            assert!(
+                error.to_string().contains(field),
+                "{field} violation must name the field: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_definition_validation_rejects_invalid_tuning() {
+        let mut definition = VmDefinition {
+            id: VmId::new("vm-1").unwrap(),
+            name: "test".to_string(),
+            boot: BootSpec::new("kernel-ref").unwrap(),
+            compute: ComputeSpec::new(2, 1_073_741_824).unwrap(),
+            storage: vec![],
+            networks: vec![],
+            requested_power_state: RequestedPowerState::Stopped,
+            observed_power_state: ObservedPowerState::Unknown,
+            resource_version: ResourceVersion::new(1).unwrap(),
+            cloud_init_userdata: None,
+            hypervisor_tuning: None,
+        };
+        definition.hypervisor_tuning = Some(HypervisorTuning {
+            serial_mode: Some("Hero".to_string()),
+            ..Default::default()
+        });
+        assert!(definition.validate().is_err());
     }
 
     #[test]

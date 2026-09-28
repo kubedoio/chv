@@ -287,6 +287,40 @@ async fn create_vm_carries_provisioning_hints_addressing_and_tuning() {
 }
 
 #[tokio::test]
+async fn create_vm_defaults_empty_nic_cidr_like_the_legacy_path() {
+    // A network row without a CIDR makes the BFF emit an empty cidr next to
+    // an assigned ip (build_agent_vm_spec uses unwrap_or_default); the Core
+    // executor must default it to the topology default exactly like the
+    // legacy reconcile path instead of routing an empty CIDR to nwd.
+    let h = harness(None);
+    let vm_id = "vm-nocidr";
+    let mut def = definition(vm_id, 1, 1);
+    def.networks[0].addressing = Some(cellhv_core_types::NicAddressing {
+        ip_address: "10.200.0.47".to_string(),
+        cidr: String::new(),
+        gateway: String::new(),
+    });
+    let command = MutationCommand::CreateVm { definition: def };
+    let result = h
+        .runtime
+        .execute(entry(
+            OperationKind::CreateVm,
+            vm_id,
+            "op-create-nocidr",
+            envelope(command),
+        ))
+        .await;
+    assert!(result.is_ok(), "create must succeed: {result:?}");
+    let vms = h.adapter.vms.lock().expect("vms lock");
+    let config = vms
+        .get(vm_id)
+        .expect("vm must be present in the adapter map");
+    assert_eq!(config.nics[0].cidr, "10.0.0.0/24");
+    assert_eq!(config.nics[0].ip_address, "10.200.0.47");
+    assert_eq!(config.nics[0].gateway, "");
+}
+
+#[tokio::test]
 async fn create_vm_failure_midway_unwinds() {
     // Fail when opening the 2nd volume: volume 1 is opened+attached and must be
     // detached+closed, volume 2's open fails so nothing to clean, and the VM
